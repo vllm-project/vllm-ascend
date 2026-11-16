@@ -59,7 +59,7 @@ def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
         dummy_sampler_run=lambda *args, **kwargs: False,
     )
     runner.kvpp = MagicMock()
-    runner.ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace(profiling_chunk_config=None))
+    runner.ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace())
     runner.model = MagicMock()
     runner.model.compute_logits.side_effect = lambda x: torch.zeros(x.shape[0], vocab)
     runner.sampler = create_autospec(Sampler, instance=True)
@@ -295,8 +295,6 @@ def _run_execute_model(runner, hidden_states, dummy_run=True, is_profile=False):
         return "upstream-output"
 
     with (
-        patch("vllm_ascend.worker.v2.model_runner._start_profiling_chunk_timing", return_value=None),
-        patch("vllm_ascend.worker.v2.model_runner._finish_profiling_chunk_timing", return_value=None),
         patch("vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group", return_value=False),
         patch.object(GPUModelRunner, "execute_model", side_effect=super_execute),
     ):
@@ -384,18 +382,18 @@ def test_sample_draft_alignment_and_guards(max_num_reqs, num_rows, lmhead_enable
 @pytest.mark.parametrize(
     "draft_method, bypass, argmax, adaptive, match",
     [
-        ("probabilistic", False, False, False, "probabilistic"),
+        ("probabilistic", False, False, False, None),
         ("greedy", False, False, False, None),  # default stays supported
-        ("greedy", True, False, False, "sample_draft"),  # DSpark/DFlash2 style
+        ("greedy", True, False, False, "sample_draft"),  # DFlash2/LiLiCorr opt-out
         ("greedy", False, True, False, "use_local_argmax_reduction"),
         ("greedy", False, False, True, "enable_adaptive_verification"),
     ],
 )
 def test_speculator_init_validates(draft_method, bypass, argmax, adaptive, match):
     """Unsupported combinations must fail at construction, not at the first
-    sampling step in a running engine (probabilistic gumbel buffers, paths
-    that bypass sample_draft, local argmax under pure DP, adaptive
-    verification's row-count-indexed estimator buffers)."""
+    sampling step in a running engine. Probabilistic sampling is now
+    supported; bypassing paths, local argmax and adaptive verification retain
+    their independent restrictions."""
     spec = _make_speculator()
     spec.speculative_config = SimpleNamespace(draft_sample_method=draft_method)
     spec._lmhead_tp_sample_draft_supported = not bypass

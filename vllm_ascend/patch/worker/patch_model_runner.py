@@ -91,8 +91,8 @@ def initialize_kv_cache(
         )
     additional_attn_cg_support = self.model_state.get_additional_cg_support()
     attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)
-    # The speculator clears the flag at load time when the checkpoint has
-    # no confidence head, so it holds the effective value.
+    # Read the effective value from the loaded speculator. Without a confidence
+    # head, upstream can provide confidence through its online estimator.
     self.adaptive_verification = upstream.maybe_create_adaptive_verification_manager(
         enable_adaptive_verification=getattr(self.speculator, "enable_adaptive_verification", False),
         attn_groups=self.attn_groups,

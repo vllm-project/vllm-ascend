@@ -159,7 +159,6 @@ def test_decode_sharding_does_not_add_a_parallel_config_field():
     ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
             dyntra_lb_config=SimpleNamespace(enabled=False),
-            profiling_chunk_config=SimpleNamespace(enabled=False),
             batch_job_sched_config=SimpleNamespace(enabled=False),
         )
     )
@@ -630,7 +629,10 @@ def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefillin
     num_blocks = np.arange(16, dtype=np.int32).reshape(2, 8)
     manager._global_batch = input_batch
     manager._local_batch = SimpleNamespace(
-        num_reqs=3, num_tokens=input_batch.num_tokens, idx_mapping_np=np.array([3, 3, 7], dtype=np.int32)
+        num_reqs=3,
+        num_tokens=input_batch.num_tokens,
+        num_tokens_after_padding=input_batch.num_tokens_after_padding,
+        idx_mapping_np=np.array([3, 3, 7], dtype=np.int32),
     )
     manager._local_gather_idx = torch.arange(input_batch.num_tokens + 3, dtype=torch.int64)
     manager._block_tables = SimpleNamespace(
@@ -931,6 +933,31 @@ def test_pcp_manager_preserves_unpadded_restored_hidden_states() -> None:
     assert result is restored_hidden_states
 
 
+@pytest.mark.parametrize("strided", [False, True])
+def test_pcp_hidden_restore_preserves_values_and_collective_layout(strided):
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager._global_batch = SimpleNamespace(num_tokens=6, num_tokens_after_padding=6)
+    manager._hidden_restore_idx = torch.tensor([0, 3, 1, 4, 2, 5])
+    hidden_states = torch.arange(24).reshape(3, 8)[:, ::2]
+    if not strided:
+        hidden_states = hidden_states.contiguous()
+
+    def all_gather(value, dim):
+        assert value.is_contiguous(), "HCCL requires contiguous inputs"
+        torch.testing.assert_close(value, hidden_states)
+        if not strided:
+            assert value.data_ptr() == hidden_states.data_ptr()
+        return torch.cat([value, value + 100], dim=dim)
+
+    with (
+        patch("vllm_ascend.worker.v2.pcp_manager.get_pp_group", return_value=SimpleNamespace(is_last_rank=True)),
+        patch("vllm.v1.worker.gpu.pcp_manager.get_pcp_group", return_value=SimpleNamespace(all_gather=all_gather)),
+    ):
+        restored = manager.restore_hidden_states(hidden_states)
+    expected = torch.cat([hidden_states, hidden_states + 100])[manager._hidden_restore_idx]
+    torch.testing.assert_close(restored, expected)
+
+
 def test_pcp_manager_skips_hidden_restore_before_last_pp_rank() -> None:
     manager = AscendPCPManager.__new__(AscendPCPManager)
     hidden_states = torch.randn(2, 4)
@@ -948,7 +975,7 @@ def test_pcp_manager_skips_hidden_restore_before_last_pp_rank() -> None:
     parent_restore.assert_not_called()
 
 
-@pytest.mark.parametrize("method", ["mtp", "eagle3", "dspark"])
+@pytest.mark.parametrize("method", ["mtp", "eagle3", "dspark", "dflash"])
 @pytest.mark.parametrize("draft_sample_method", ["greedy", "probabilistic"])
 @pytest.mark.parametrize(
     ("cudagraph_mode", "sparse_mla"),
@@ -1180,34 +1207,9 @@ def test_dummy_attention_context_uses_current_batch(pcp_rank, has_stale_batch):
     manager._block_tables.gather_block_tables.assert_not_called()
 
 
-def test_cpp_dummy_is_partitioned_instead_of_staged():
+def test_capture_input_uses_upstream_staging_path():
     manager = AscendPCPManager(2, 0, torch.device("cpu"))
-    dummy = _make_global_pcp_batch()
-    dummy.is_dummy = True
-    dummy.is_cpp_profile = True
-    local_batch = _make_local_pcp_batch()
-
-    # vLLM main renamed the upstream staging hook; patch and call the live name.
-    stage_name = "prepare_inputs_for_capture_or_profile"
-    with (
-        patch.object(PCPManager, stage_name) as stage,
-        patch.object(manager, "partition_batch", return_value=local_batch) as partition,
-    ):
-        result = getattr(manager, stage_name)(dummy)
-
-    assert result is local_batch
-    stage.assert_not_called()
-    partition.assert_called_once()
-    args = partition.call_args.args
-    assert len(args) == 2
-    assert args[0] is dummy
-    assert args[1].cg_mode == CUDAGraphMode.NONE
-    assert args[1].num_tokens == dummy.num_tokens
-
-
-def test_capture_input_without_cpp_marker_uses_staging_path():
-    manager = AscendPCPManager(2, 0, torch.device("cpu"))
-    legacy_batch = SimpleNamespace()
+    input_batch = SimpleNamespace()
     staged_batch = _make_local_pcp_batch()
 
     stage_name = "prepare_inputs_for_capture_or_profile"
@@ -1215,10 +1217,10 @@ def test_capture_input_without_cpp_marker_uses_staging_path():
         patch.object(PCPManager, stage_name, return_value=staged_batch) as stage,
         patch.object(manager, "partition_batch") as partition,
     ):
-        result = getattr(manager, stage_name)(legacy_batch)
+        result = getattr(manager, stage_name)(input_batch)
 
     assert result is staged_batch
-    stage.assert_called_once_with(legacy_batch)
+    stage.assert_called_once_with(input_batch)
     partition.assert_not_called()
 
 

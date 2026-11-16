@@ -28,12 +28,14 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+import regex as re
 import tomllib
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 from tools.bisect import git_ops
+from tools.bisect.build_recipe import BuildRecipe, recipe_at_commit
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,8 @@ ALL_PACKAGES = (VLLM_PACKAGE, TORCH_NPU_PACKAGE)
 VLLM_TAG_FILE = ".github/vllm-release-tag.commit"
 TORCH_NPU_REQUIREMENTS_FILE = "requirements.txt"
 TORCH_NPU_PYPROJECT_FILE = "pyproject.toml"
+TORCH_NPU_PIP_INDEX_URL = "https://mirrors.huaweicloud.com/repository/pypi/simple"
+VLLM_PIP_EXTRA_INDEX_URL = "https://download.pytorch.org/whl/cpu/"
 
 
 @dataclass(frozen=True)
@@ -146,9 +150,11 @@ def _file_content(repo: Path, commit: str | None, relative_path: str) -> str | N
     return git_ops.file_at_commit(repo, commit, relative_path)
 
 
-def expected_versions(repo: Path, commit: str | None = None) -> PackageVersions:
+def expected_versions(repo: Path, commit: str | None = None, soc: str | None = None) -> PackageVersions:
     """Versions declared by the working tree, or by ``commit`` when given."""
     vllm_tag = (_file_content(repo, commit, VLLM_TAG_FILE) or "").strip() or None
+    if soc is not None and commit is not None:
+        vllm_tag = recipe_at_commit(repo, commit, soc).vllm_ref
     torch_npu = _read_torch_npu_requirement(
         _file_content(repo, commit, TORCH_NPU_REQUIREMENTS_FILE),
     ) or _read_torch_npu_from_pyproject(
@@ -187,7 +193,7 @@ def installed_versions() -> PackageVersions:
     )
 
 
-def environment_drift(expected: PackageVersions) -> tuple[str, ...]:
+def environment_drift(expected: PackageVersions, vllm_dir: Path | None = None) -> tuple[str, ...]:
     """Packages whose installed version differs from the ``expected`` pin.
 
     The adaptation gate compares only the good/bad endpoint pins; when they
@@ -206,10 +212,18 @@ def environment_drift(expected: PackageVersions) -> tuple[str, ...]:
             continue  # nothing declared -> adaptation has no target anyway
         if not _matches_expected(package, pin, installed.get(package)):
             drift.append(package)
+    if expected.vllm and vllm_dir is not None and (vllm_dir / ".git").exists() and VLLM_PACKAGE not in drift:
+        try:
+            if git_ops.current_commit(vllm_dir) != git_ops.resolve_commit(vllm_dir, expected.vllm):
+                drift.append(VLLM_PACKAGE)
+        except Exception:
+            drift.append(VLLM_PACKAGE)
     return tuple(drift)
 
 
-def policy_with_environment_drift(good: PackageVersions, bad: PackageVersions) -> tuple[VersionPolicy, tuple[str, ...]]:
+def policy_with_environment_drift(
+    good: PackageVersions, bad: PackageVersions, vllm_dir: Path | None = None
+) -> tuple[VersionPolicy, tuple[str, ...]]:
     """Build a version policy that covers endpoint changes and image drift.
 
     An endpoint change already requires adapting that package for every trial.
@@ -219,7 +233,9 @@ def policy_with_environment_drift(good: PackageVersions, bad: PackageVersions) -
     unchanged, torch-npu pin.
     """
     endpoint_policy = VersionPolicy.between(good, bad)
-    drift = tuple(package for package in environment_drift(good) if versions_equal(good.get(package), bad.get(package)))
+    drift = tuple(
+        package for package in environment_drift(good, vllm_dir) if versions_equal(good.get(package), bad.get(package))
+    )
     checked = tuple(package for package in ALL_PACKAGES if endpoint_policy.checks(package) or package in drift)
     return VersionPolicy(checked_packages=checked, good=good, bad=bad), drift
 
@@ -231,9 +247,30 @@ class VersionAdapter:
         self.opt = options
         self.vllm_dir = Path(options.vllm_dir)
         self._overrides: dict[str, str] = {}
+        self._active_recipe: BuildRecipe | None = None
 
     def targets_at(self, repo: Path, commit: str, policy: VersionPolicy) -> dict[str, str]:
-        return expected_versions(repo, commit).as_dict(policy.checked_packages)
+        return expected_versions(repo, commit, self.opt.soc).as_dict(policy.checked_packages)
+
+    def verify_targets(
+        self,
+        targets: dict[str, str],
+        checked_packages: tuple[str, ...] | list[str],
+    ) -> None:
+        """Check the versions installed by the build-chain transition."""
+        for package in checked_packages:
+            expected = targets.get(package)
+            if not expected:
+                continue
+            installed = self._installed_version(package)
+            source_matches = package != VLLM_PACKAGE or self._vllm_source_matches(expected)
+            version_matches = _matches_expected(package, expected, installed)
+            if package == VLLM_PACKAGE and re.fullmatch(r"[0-9a-f]{40}", expected):
+                version_matches = source_matches
+            if not version_matches or not source_matches:
+                raise VersionAdaptationError(
+                    f"build-chain transition did not install {package}: expected={expected}, installed={installed}"
+                )
 
     def ensure_at_commit(
         self,
@@ -242,21 +279,28 @@ class VersionAdapter:
         policy: VersionPolicy,
         log_file: Path | None = None,
     ) -> dict[str, str]:
-        return self.ensure_targets(self.targets_at(repo, commit, policy), policy.checked_packages, log_file)
+        return self.ensure_targets(self.targets_at(repo, commit, policy), policy.checked_packages, log_file, commit)
 
     def ensure_targets(
         self,
         targets: dict[str, str],
         checked_packages: tuple[str, ...] | list[str] = ALL_PACKAGES,
         log_file: Path | None = None,
+        commit: str | None = None,
     ) -> dict[str, str]:
+        if commit is not None and self.opt.soc:
+            self._active_recipe = recipe_at_commit(self.opt.repo_dir, commit, self.opt.soc)
         for package in checked_packages:
             expected = targets.get(package)
             if not expected:
                 logger.info("[version] no declared %s version; skipping adaptation", package)
                 continue
             installed = self._installed_version(package)
-            if _matches_expected(package, expected, installed):
+            source_matches = package != VLLM_PACKAGE or self._vllm_source_matches(expected)
+            version_matches = _matches_expected(package, expected, installed)
+            if package == VLLM_PACKAGE and re.fullmatch(r"[0-9a-f]{40}", expected):
+                version_matches = source_matches
+            if version_matches and source_matches:
                 logger.info("[version] %s matches (installed=%s expected=%s)", package, installed, expected)
                 continue
             logger.info("[version] switching %s from %s to %s", package, installed, expected)
@@ -267,6 +311,14 @@ class VersionAdapter:
             else:
                 raise VersionAdaptationError(f"version switching is not supported for {package}")
         return targets
+
+    def _vllm_source_matches(self, expected: str) -> bool:
+        if not (self.vllm_dir / ".git").exists():
+            return True
+        try:
+            return git_ops.current_commit(self.vllm_dir) == git_ops.resolve_commit(self.vllm_dir, expected)
+        except Exception:
+            return False
 
     def _installed_version(self, package: str) -> str | None:
         if package in self._overrides:
@@ -288,8 +340,7 @@ class VersionAdapter:
                 "pip",
                 "install",
                 "-e",
-                str(self.vllm_dir),
-                "--no-deps",
+                f"{self.vllm_dir}[audio]",
                 "--no-input",
                 "--disable-pip-version-check",
             ]
@@ -303,9 +354,17 @@ class VersionAdapter:
                 "--disable-pip-version-check",
             ]
             install_env = None
+        install_env = dict(os.environ if install_env is None else install_env)
+        # pip's isolated build subprocess inherits this primary index. The
+        # Dockerfile's PyTorch CPU index remains available as an extra index.
+        install_env.setdefault("PIP_INDEX_URL", TORCH_NPU_PIP_INDEX_URL)
+        index_url = self._active_recipe.pytorch_index_url if self._active_recipe else VLLM_PIP_EXTRA_INDEX_URL
+        if index_url:
+            install_env.setdefault("PIP_EXTRA_INDEX_URL", index_url)
         self._run(command, log_file, f"install vllm {expected}", env=install_env)
         self._overrides[VLLM_PACKAGE] = expected
-        os.environ["VLLM_VERSION"] = expected.lstrip("v")
+        if not re.fullmatch(r"[0-9a-f]{40}", expected):
+            os.environ["VLLM_VERSION"] = expected.lstrip("v")
 
     def _switch_torch_npu(self, expected: str, log_file: Path | None) -> None:
         requirement = expected if expected[:1] in "<>!=" else f"=={expected}"
@@ -318,7 +377,9 @@ class VersionAdapter:
             "--no-input",
             "--disable-pip-version-check",
         ]
-        self._run(command, log_file, f"install torch-npu {expected}")
+        install_env = dict(os.environ)
+        install_env.setdefault("PIP_INDEX_URL", TORCH_NPU_PIP_INDEX_URL)
+        self._run(command, log_file, f"install torch-npu {expected}", env=install_env)
         self._overrides[TORCH_NPU_PACKAGE] = expected
 
     @staticmethod

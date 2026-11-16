@@ -248,16 +248,22 @@ def test_communicator_factory_creates_ascend_gloo_communicator(monkeypatch):
     gloo_cls = MagicMock(return_value=communicator)
     monkeypatch.setattr(patch_eplb, "AscendGlooEplbCommunicator", gloo_cls)
     coordinator = MagicMock()
+    weights = [[object()]]
+    buffer = [object()]
 
     result = patch_eplb._eplb_communicator.create_eplb_communicator(
         coordinator,
         "torch_gloo",
-        [[object()]],
-        [object()],
+        weights,
+        buffer,
     )
 
     assert result is communicator
-    gloo_cls.assert_called_once_with(cpu_group=coordinator.cpu_group)
+    gloo_cls.assert_called_once_with(
+        cpu_group=coordinator.cpu_group,
+        expert_buffer=buffer,
+        all_expert_weights=weights,
+    )
 
 
 def test_communicator_factory_creates_ascend_hixl_communicator(monkeypatch):
@@ -300,16 +306,22 @@ def test_communicator_factory_accepts_additive_parameters(monkeypatch):
 
     wrapped_factory = patch_eplb._wrap_communicator_factory(original_factory)
     coordinator = MagicMock()
+    weights = [[object()]]
+    buffer = [object()]
     result = wrapped_factory(
         group_coordinator=coordinator,
         backend="torch_gloo",
-        expert_weights=[[object()]],
-        expert_buffer=[object()],
+        expert_weights=weights,
+        expert_buffer=buffer,
         transport_options={"mode": "future"},
     )
 
     assert result is communicator
-    gloo_cls.assert_called_once_with(cpu_group=coordinator.cpu_group)
+    gloo_cls.assert_called_once_with(
+        cpu_group=coordinator.cpu_group,
+        expert_buffer=buffer,
+        all_expert_weights=weights,
+    )
 
 
 def test_communicator_factory_requires_group_coordinator_parameter():

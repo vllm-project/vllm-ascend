@@ -29,6 +29,15 @@ from vllm_ascend.models.deepseek_v41.engram.hash_state import DEAD_ID, AscendNgr
 from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
 
 
+def test_remote_host_offload_close_retires_reader():
+    table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    reader = Mock()
+    table._remote_reader = reader
+    table.close_host_offload()
+    reader.close.assert_called_once_with()
+
+
 @pytest.mark.parametrize("tp", [1, 2, 4])
 @pytest.mark.parametrize("dp", [1, 2])
 @pytest.mark.parametrize("tokens", [0, 3])
@@ -150,6 +159,37 @@ def test_shared_memory_needs_a_local_dp_peer(monkeypatch):
     monkeypatch.setattr(parallel, "get_engram_dp_size", lambda: 2)
     assert resolve_dp_shared_memory(True)
     assert not resolve_dp_shared_memory(False)
+
+
+@pytest.mark.parametrize("dtype,scale_dtype", [(torch.int8, torch.float32), (torch.float8_e4m3fn, torch.uint8)])
+def test_remote_embedding_accepts_quantized_rows_without_allocating_table(monkeypatch, dtype, scale_dtype):
+    group = SimpleNamespace(world_size=2, cpu_group=object())
+    monkeypatch.setattr(embedding_mod, "in_the_same_node_as", lambda group: [True, True])
+    monkeypatch.setattr(embedding_mod, "get_tp_group", lambda: SimpleNamespace(cpu_group=object()))
+    monkeypatch.setattr(embedding_mod, "get_engram_dp_group", lambda: group)
+    monkeypatch.setattr(embedding_mod, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(embedding_mod, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(upstream_engram, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(current_device=lambda: 0), raising=False)
+    device = torch.device
+    monkeypatch.setattr(torch, "device", lambda *args, **kwargs: device("cpu"))
+    table = embedding_mod.AscendParallelEngramEmbedding(
+        8, 64, (4, 4), 0, cpu_offload=True, dp_shared_memory=True, storage_dtype=dtype, remote_reader=object()
+    )
+    assert table.weight.device.type == table.weight_scale_inv.device.type == "meta"
+    assert table.weight.dtype == dtype and table.weight_scale_inv.dtype == scale_dtype
+
+    with pytest.raises(ValueError, match="Remote Engram requires"):
+        embedding_mod.AscendParallelEngramEmbedding(
+            8,
+            64,
+            (4, 4),
+            0,
+            cpu_offload=True,
+            dp_shared_memory=True,
+            storage_dtype=torch.bfloat16,
+            remote_reader=object(),
+        )
 
 
 @pytest.mark.parametrize("quantized", [False, True])
@@ -511,3 +551,53 @@ def test_native_mxfp8_requires_e8m0_scales_before_allocation(tmp_path):
     )
     with pytest.raises(ValueError, match="requires E8M0 scales"):
         embedding_mod.preflight_engram_checkpoint(tmp_path, [1])
+
+
+@pytest.mark.parametrize("quantized", [False, True])
+def test_embed_gathered_walks_strided_hashes_without_a_copy(monkeypatch, quantized):
+    """Strided per-layer hash slices must reach the lookup uncopied.
+
+    The lookup kernels walk ids with an explicit token stride and only need a
+    unit inner stride, which the per-layer slice of the
+    ``[tokens, layers, columns]`` hash buffer already has -- forcing it through
+    ``contiguous()`` is a dead copy on the preparation hot path.
+    """
+    source = torch.linspace(-12, 12, 36 * 64).reshape(36, 64).bfloat16()
+    codes, scales = npu.quantize_engram_rows(source)
+    table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    table._shared_group = None
+    table._codes_uva = None
+    table._scales_uva = None
+    table.vocab_start_idx, table.vocab_end_idx = 5, 17
+    table.block_size, table.dim = 32, 64
+    table.head_start, table.part_n_hash_cols = 1, 2
+    table.n_hash_cols, table.dp_size, table.tp_size = 2, 1, 1
+    table.weight = torch.nn.Parameter((codes if quantized else source)[5:17], requires_grad=False)
+    table.weight_scale_inv = torch.nn.Parameter(scales[5:17], requires_grad=False) if quantized else None
+
+    hashes = torch.zeros(4, 3, 3, dtype=torch.int64)
+    hashes[:, :, 1:] = torch.randint(5, 17, (4, 3, 2))
+    hashes[1, :, 1:] = DEAD_ID
+    gathered = hashes[:, 1]  # the per-layer slice keeps the outer layer stride
+    assert not gathered.is_contiguous()
+
+    def refuse(unit, *args, **kwargs):
+        raise AssertionError("strided hash slices must reach lookup without a contiguity copy")
+
+    monkeypatch.setattr(torch.Tensor, "contiguous", refuse)
+    out = table.embed_gathered(gathered, 4)
+    monkeypatch.undo()
+
+    if quantized:
+        reference = (codes.float().unflatten(-1, (-1, 32)) * scales.float().unsqueeze(-1)).flatten(-2).bfloat16()
+    else:
+        reference = source
+    columns = gathered[:, table.head_start : table.head_start + table.part_n_hash_cols].long()
+    owned = (columns >= table.vocab_start_idx) & (columns < table.vocab_end_idx)
+    # The lookup gathers rows of the *shard* by local index; mirror that on the
+    # matching slice of the reference table (global id = start + local index).
+    shard = reference[table.vocab_start_idx : table.vocab_end_idx]
+    rows = shard[torch.where(owned, columns - table.vocab_start_idx, 0)]
+    expected = torch.where(owned.unsqueeze(-1), rows, torch.zeros(1, dtype=reference.dtype))
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)

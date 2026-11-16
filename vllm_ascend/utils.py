@@ -193,6 +193,13 @@ def normalize_deepseek_v41_config(hf_config: Any) -> Any:
     return hf_config
 
 
+def model_uses_kimi_kda(model_config: Any | None) -> bool:
+    text = getattr(model_config, "hf_text_config", None)
+    return getattr(text, "model_type", None) in ("kimi_linear", "kimi_k31") and bool(
+        getattr(text, "linear_attn_config", None)
+    )
+
+
 def model_uses_kpool_indexer(model_config: Any | None) -> bool:
     """Return True for GLM-5.3-Flash style kpool indexer models.
 
@@ -235,6 +242,19 @@ def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> 
 
     parallel_config = vllm_config.parallel_config
     return model_uses_sfa_sparse(vllm_config.model_config) and parallel_config.decode_context_parallel_size > 1
+
+
+def enable_sfa_dcp_sharded_indexer(vllm_config: VllmConfig | None = None) -> bool:
+    """Kimi's uncompressed indexer uses the same token owners as MLA."""
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+    text = vllm_config.model_config.hf_text_config
+    return enable_sfa_dcp_replicated_indexer(vllm_config) and getattr(text, "model_type", None) in (
+        "kimi_linear",
+        "kimi_k31",
+    )
 
 
 def clear_enable_sp():
@@ -382,6 +402,18 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 
     # Quantized or other supported dtypes convert by default.
     return True
+
+
+def is_internal_npu_format(tensor: torch.Tensor) -> bool:
+    """Whether a tensor's storage uses a device-internal layout rather than ND.
+
+    FRACTAL_NZ is not a single format: a weight cast with
+    ``customize_dtype``/``input_dtype`` reports a C0 variant such as
+    FRACTAL_NZ_C0_16, so checking against FRACTAL_NZ alone misses it.
+    """
+    if tensor.device.type != "npu":
+        return False
+    return int(torch_npu.get_npu_format(tensor)) not in (0, ACL_FORMAT_FRACTAL_ND)
 
 
 # NZ conversion policy:
@@ -1027,7 +1059,25 @@ def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         return False
 
-    return bool(vllm_config.parallel_config.use_sequence_parallel_moe)
+    if bool(vllm_config.parallel_config.use_sequence_parallel_moe):
+        return True
+
+    # Dense-family sequence parallelism: the predicate is owned by the
+    # Qwen3.5 patch (vllm_ascend.patch.worker.patch_qwen3_5). The lazy import
+    # keeps this module free of the patch module's import-time monkey
+    # patches. Mirror the STANDARD_WORKER_PATCHES gate from
+    # patch/worker/__init__.py: patch_qwen3_5 imports vllm_ascend.ops.gdn
+    # (fla_npu) at module level, which 310P runners do not install, so
+    # devices excluded from the standard worker patch bundle must not
+    # import it from here either.
+    from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
+    if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
+        return False
+
+    from vllm_ascend.patch.worker.patch_qwen3_5 import enable_dense_sp
+
+    return enable_dense_sp(vllm_config)
 
 
 def pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:

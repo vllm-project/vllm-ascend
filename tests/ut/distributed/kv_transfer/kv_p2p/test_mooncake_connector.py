@@ -40,6 +40,7 @@ from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     MAX_REQUESTS_PER_PEER_HANDLER,
     GroupPull,
+    GroupTransferInfo,
     KVCacheRecvingThread,
     KVCacheSendingThread,
     KVCacheTaskTracker,
@@ -2992,7 +2993,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_transfer_block_ids_trims_attention_mtp_blocks(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(  # type: ignore[list-item]
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=0,
                 is_state_group=False,
@@ -3006,7 +3007,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
     def test_get_transfer_block_ids_selects_aligned_prompt_state_block(self):
         self.scheduler.vllm_config.cache_config.mamba_cache_mode = "align"
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(  # type: ignore[list-item]
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=0,
                 is_state_group=True,
@@ -3020,7 +3021,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
     def test_get_transfer_block_ids_keeps_non_aligned_state_group(self):
         self.scheduler.vllm_config.cache_config.mamba_cache_mode = "none"
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(  # type: ignore[list-item]
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=0,
                 is_state_group=True,
@@ -3034,7 +3035,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
     def test_get_transfer_block_ids_rejects_short_aligned_state_metadata(self):
         self.scheduler.vllm_config.cache_config.mamba_cache_mode = "align"
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(  # type: ignore[list-item]
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=0,
                 is_state_group=True,
@@ -3046,7 +3047,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_transfer_block_ids_uses_compressed_prompt_len(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(  # type: ignore[list-item]
+            GroupTransferInfo(
                 tokens_per_block=32,
                 blocks_per_window=0,
                 is_state_group=False,
@@ -3059,7 +3060,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_transfer_block_ids_trims_sliding_window_mtp_blocks(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(  # type: ignore[list-item]
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=3,
                 is_state_group=False,
@@ -3072,7 +3073,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_swa_transfer_block_ids_clips_sliding_window_group(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(  # type: ignore[list-item]
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=3,
                 is_state_group=False,
@@ -3085,7 +3086,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_swa_transfer_block_ids_drops_zero_from_sliding_window_tail(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(  # type: ignore[list-item]
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=2,
                 is_state_group=False,
@@ -3098,7 +3099,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_transfer_block_ids_trims_mtp_before_swa_zero_filter(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(  # type: ignore[list-item]
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=3,
                 is_state_group=False,
@@ -3112,7 +3113,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_request_finished_trims_mtp_blocks_in_params(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=0,
                 is_state_group=False,
@@ -3131,7 +3132,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_request_finished_clips_sliding_window_blocks_in_params(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=3,
                 is_state_group=False,
@@ -3150,7 +3151,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_request_finished_trims_mtp_before_swa_tail_clip(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=3,
                 is_state_group=False,
@@ -3170,10 +3171,10 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
     def test_request_finished_respects_kv_group_layout(self):
         self.scheduler.vllm_config.cache_config.mamba_cache_mode = "align"
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(tokens_per_block=16, blocks_per_window=0, is_state_group=False),
-            types.SimpleNamespace(tokens_per_block=32, blocks_per_window=0, is_state_group=False),
-            types.SimpleNamespace(tokens_per_block=16, blocks_per_window=3, is_state_group=False),
-            types.SimpleNamespace(tokens_per_block=16, blocks_per_window=0, is_state_group=True),
+            GroupTransferInfo(tokens_per_block=16, blocks_per_window=0, is_state_group=False),
+            GroupTransferInfo(tokens_per_block=32, blocks_per_window=0, is_state_group=False),
+            GroupTransferInfo(tokens_per_block=16, blocks_per_window=3, is_state_group=False),
+            GroupTransferInfo(tokens_per_block=16, blocks_per_window=0, is_state_group=True),
         ]
         blocks = (
             [100, 101, 102, 103, 104, 105],
