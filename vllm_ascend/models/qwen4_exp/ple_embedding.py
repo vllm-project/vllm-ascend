@@ -123,13 +123,19 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
     def forward(self, ngram_ids: torch.Tensor) -> torch.Tensor:
         return self.sync_lookup(ngram_ids)
 
-    def _lookup(self, ngram_ids: torch.Tensor) -> torch.Tensor:
+    def _lookup(self, input_ids: torch.Tensor, output: torch.Tensor | None = None) -> torch.Tensor:
         if self._host_table is None or self.weight is None:
             raise RuntimeError("PLE host table has been closed")
-        output = torch.empty((*ngram_ids.shape, self.embedding_dim), dtype=torch.bfloat16, device=ngram_ids.device)
+        expected_shape = (*input_ids.shape, self.embedding_dim)
+        if output is None:
+            output = torch.empty(expected_shape, dtype=torch.bfloat16, device=input_ids.device)
+        elif (
+            tuple(output.shape) != expected_shape or output.dtype != torch.bfloat16 or output.device != input_ids.device
+        ):
+            raise ValueError("PLE prefetch output must match the input shape, lookup dtype, and input device")
         ple_lookup.lookup(
             self._host_table.ptrs,
-            ngram_ids,
+            input_ids,
             output,
             self.shard_indices.org_vocab_start_index,
             self.shard_indices.org_vocab_end_index,

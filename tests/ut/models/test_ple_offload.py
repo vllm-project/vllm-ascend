@@ -447,3 +447,42 @@ def test_load_scope_retains_successful_and_failed_constructors(monkeypatch):
             owner.close_host_offload()
     for buffer in buffers:
         buffer.close.assert_called_once()
+
+
+@pytest.mark.parametrize("preallocated", [False, True])
+def test_lookup_accepts_keyword_ids_and_reuses_output(monkeypatch, preallocated):
+    from vllm_ascend.ops.triton.qwen4_exp import ple_lookup
+
+    obj = embedding()
+    obj.embedding_dim = 160
+    obj._host_table = SimpleNamespace(ptrs=None)
+    ids = torch.zeros((3, 16), dtype=torch.int64)
+    output = torch.empty((3, 16, 160), dtype=torch.bfloat16) if preallocated else None
+    lookup = Mock(side_effect=lambda ptrs, ids, out, *args: out.fill_(2))
+    monkeypatch.setattr(ple_lookup, "lookup", lookup)
+    result = obj._lookup(input_ids=ids, output=output)
+    assert result.shape == (3, 16, 160) and result.dtype == torch.bfloat16
+    assert torch.all(result == 2)
+    if preallocated:
+        assert result is output
+    lookup.assert_called_once()
+
+
+@pytest.mark.parametrize("mismatch", ["shape", "dtype", "device"])
+def test_lookup_rejects_incompatible_output(monkeypatch, mismatch):
+    from vllm_ascend.ops.triton.qwen4_exp import ple_lookup
+
+    obj = embedding()
+    obj.embedding_dim = 160
+    obj._host_table = SimpleNamespace(ptrs=None)
+    ids = torch.zeros((3, 16), dtype=torch.int64)
+    output = torch.empty(
+        (3, 16, 159) if mismatch == "shape" else (3, 16, 160),
+        dtype=torch.float32 if mismatch == "dtype" else torch.bfloat16,
+        device="meta" if mismatch == "device" else "cpu",
+    )
+    lookup = Mock()
+    monkeypatch.setattr(ple_lookup, "lookup", lookup)
+    with pytest.raises(ValueError, match="input shape, lookup dtype, and input device"):
+        obj._lookup(input_ids=ids, output=output)
+    lookup.assert_not_called()
