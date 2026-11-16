@@ -79,15 +79,18 @@ have empty tasks; source KV, index caches, SWA, and registered draft caches
 retain their existing cache-group addressing. For bounded replay, the cut
 layer loads before its cache-only write and saves after its normal forward's
 last write, while later layers can continue computing. Registered draft caches
-follow the existing per-layer GVA load/save hooks. The existing final-layer save
-fence waits for all copies before source memory can be reused.
+follow the existing per-layer GVA load/save hooks. By default, the existing
+final-layer save fence waits for all copies before source memory can be reused.
+The existing `VLLM_ASCEND_LW_DEFER_LAST_SAVE` option remains off by default;
+enabling it has not been validated for this model.
 
 With `AscendMultiConnector`, Mooncake V2 push uses the composite attention
 boundary to mark all caches owned by a layer ready. Draft caches remain deferred
 until the post-forward save fence. Unsupported sibling connectors do not receive
-these composite layer callbacks. Transfer failures abort the step instead of
-publishing incomplete KV. Use the same cache layout on all pool readers and
-writers; existing entries from a different layout must use a separate namespace.
+these composite layer callbacks. Transfer failures use existing GVA error
+reporting; failed saves do not publish incomplete KV. Use the same cache layout
+on all pool readers and writers; existing entries from a different layout must
+use a separate namespace.
 
 ### Prefix Cache Retention
 

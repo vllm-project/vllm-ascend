@@ -585,8 +585,7 @@ def _kv_layer_transfer_connectors(
         if connector.has_connector_metadata():
             yield connector
         return
-    children = getattr(connector, "composite_save_children", ()) if for_save else ()
-    for child in children or getattr(connector, "sub_connectors", ()):
+    for child in getattr(connector, "sub_connectors", ()):
         yield from _kv_layer_transfer_connectors(child, layer, for_save=for_save)
 
 

@@ -144,10 +144,6 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
     def finish_mamba_state_copy(self) -> None:
         self._mamba_state = None
 
-    @property
-    def composite_save_children(self):
-        return (*self._layerwise_slot_release_providers, *self._non_slot_release_connectors)
-
     def save_kv_layer(
         self,
         layer_name: str,

@@ -122,8 +122,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._masked_runs_cache: dict[tuple[str, str, int, int, int], list[tuple[int, int]]] = {}
         self._dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_prefix_cache: DSparkPrefixCache | None = None
-        if getattr(self, "has_shared_kv", False):
-            self.load_async = False
         self._init_layerwise_config()
 
     def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise, kv_cache_config) -> None:
@@ -535,7 +533,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 put_started_keys=self._put_started_keys,
                 put_started_keys_lock=self._put_started_keys_lock,
                 session_tracker=self._layerwise_session_tracker if self.use_block_key_layerwise else None,
-                raise_on_transfer_failure=self.layerwise_offload or getattr(self, "has_shared_kv", False),
+                raise_on_transfer_failure=self.layerwise_offload,
                 invalid_block_ids=self._invalid_block_ids,
                 invalid_block_ids_lock=self._invalid_block_ids_lock,
             )
@@ -695,8 +693,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
     def prepare_layerwise_step(self, metadata: AscendConnectorMetadata) -> None:
         """Prepare per-step hook state when the runner binds metadata."""
         assert self.use_layerwise
-        if getattr(self, "has_shared_kv", False):
-            self._check_hybrid_load_errors()
         self._drain_deferred_last_save()
         # The final-layer fence drains this rank only. Readers of replicated
         # KV must also wait for the writer before querying the previous step.
@@ -722,8 +718,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 ]
                 request.block_ids_np = request.block_ids_by_group_np[0]
         self.process_layer_data(metadata.requests)
-        if getattr(self, "has_shared_kv", False):
-            self._check_hybrid_load_errors()
 
     def _is_layerwise_save_leader(self) -> bool:
         """Exactly one rank per (pcp, dcp, head_or_tp) group saves/allocates.
@@ -2086,13 +2080,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
     def _check_hybrid_load_errors(self) -> None:
         # Memcache reports invalid blocks through the existing scheduler policy.
         if self.use_layerwise_transfer:
-            if getattr(self, "has_shared_kv", False) and (
-                self._layer_load_aborted.is_set()
-                or self._save_disabled.is_set()
-                or (self.kv_recv_thread is not None and self.kv_recv_thread.load_disabled.is_set())
-            ):
-                self._layer_load_aborted.set()
-                raise RuntimeError("Shared-source GVA transfer failed; refusing incomplete KV")
             return
         # A hybrid block ID can belong to SWA, compressed KV or compressor
         # state. Do not feed partially restored state to the attention kernel.
@@ -2388,7 +2375,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 self.kv_recv_thread.raise_if_failed()
             elif self.external_slot_release_waiter is not None:
                 self.external_slot_release_waiter(self.current_layer)
-            if getattr(self, "block_key_hybrid", False) or getattr(self, "has_shared_kv", False):
+            if getattr(self, "block_key_hybrid", False):
                 self._check_hybrid_load_errors()
         except Exception:
             if hasattr(self, "_layer_load_aborted"):
@@ -2431,8 +2418,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         assert self.kv_send_thread is not None
         send_thread = cast(KVCacheStoreLayerSendingThreadBase, self.kv_send_thread)
         send_thread.raise_if_failed()
-        if getattr(self, "has_shared_kv", False):
-            self._check_hybrid_load_errors()
         if self.current_layer not in self._attention_saved_layers:
             self.sync_save_events[self.current_layer].record()
             if self.layer_save_tasks[self.current_layer]:
@@ -2446,7 +2431,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             # Recurrent and record-only paths do not exit an attention window.
             self._finish_attention_window()
         if self.current_layer == num_local - 1:
-            if _LW_DEFER_LAST_SAVE and not getattr(self, "has_shared_kv", False):
+            if _LW_DEFER_LAST_SAVE:
                 # PERF-TUNE(2): move the last layer's save drain off the forward
                 # critical path. The drain (host wait + event reset) runs at the
                 # start of the NEXT step's start_load_kv, absorbing the send
@@ -2475,8 +2460,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             send_thread.raise_if_failed()
             logger.info("Layerwise %d save not done, keep waiting", num_local - 1)
         send_thread.raise_if_failed()
-        if getattr(self, "has_shared_kv", False):
-            self._check_hybrid_load_errors()
         if self.block_key_hybrid:
             # An empty final layer signals completion without waiting for PUTs
             # from earlier layers. Drain those before the next step reuses KV.

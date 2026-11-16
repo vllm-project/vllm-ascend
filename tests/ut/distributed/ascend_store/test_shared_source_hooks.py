@@ -147,13 +147,12 @@ class TestStandardConnectorHooks(unittest.TestCase):
         self.assertTrue(store.published)
         self.assertFalse(store.leases)
 
-    def test_composite_save_preserves_provider_before_pd_order(self):
+    def test_composite_save_preserves_configured_order(self):
         events = []
         provider, pd = connector(shared=True), connector(shared=True)
         provider.save_kv_layer.side_effect = lambda *args: events.append("pool")
         pd.save_kv_layer.side_effect = lambda *args: events.append("pd")
         root = connector(children=[pd, provider])
-        root.composite_save_children = (provider, pd)
         scope, _, _ = hook_scope(root)
         scope["maybe_save_kv_layer_to_connector"]("layer", [])
-        self.assertEqual(events, ["pool", "pd"])
+        self.assertEqual(events, ["pd", "pool"])

@@ -286,16 +286,19 @@ class TestSharedSourceLayerwise(unittest.TestCase):
             conn.save_kv_layer(name, [], None)
         self.assertTrue(store.published)
 
-    def test_failed_load_reaches_consumer_and_never_publishes(self):
+    def test_failed_load_reports_request_and_disables_saves(self):
         worker, store, _ = make_shared_worker(self, bounded=True)
         save_prefix(worker)
         meta = metadata(worker, load=True, save=False)
         worker.prepare_layerwise_step(meta)
         store.fail_copy = True
         worker.start_load_kv(meta)
-        with self.assertRaises(RuntimeError):
-            for layer in range(12):
-                forward_layer(worker, meta)
+        for layer in range(12):
+            forward_layer(worker, meta)
+        self.assertEqual(worker.get_failed_requests(), {"r"})
+        self.assertTrue(worker.kv_recv_thread.load_disabled.is_set())
+        self.assertTrue(worker._save_disabled.is_set())
+        self.assertFalse(meta.requests[0].can_save)
 
     def test_load_uses_adopted_hit_not_unrecomputed_tail(self):
         worker, store, _ = make_shared_worker(self, bounded=True)
@@ -305,18 +308,6 @@ class TestSharedSourceLayerwise(unittest.TestCase):
         worker.prepare_layerwise_step(meta)
         self.assertEqual(meta.requests[0].load_spec.kvpool_store_skip_tokens, 32)
         self.assertEqual(worker.layer_load_tasks[2][0].block_ranges[0].end_block, 1)
-
-    def test_transfer_failure_cannot_be_reset_by_next_bind(self):
-        worker, store, _ = make_shared_worker(self, bounded=True)
-        save_prefix(worker)
-        meta = metadata(worker, load=True, save=False)
-        worker.prepare_layerwise_step(meta)
-        store.fail_copy = True
-        with self.assertRaises(RuntimeError):
-            for layer in range(12):
-                forward_layer(worker, meta)
-        with self.assertRaises(RuntimeError):
-            worker.prepare_layerwise_step(metadata(worker))
 
     def test_shared_prefix_acquires_one_lease_per_step(self):
         worker, store, _ = make_shared_worker(self, bounded=True)
@@ -393,6 +384,6 @@ class TestSharedSourceLayerwise(unittest.TestCase):
         for layer in range(12):
             forward_layer(worker, meta)
         store.fail_copy = True
-        with self.assertRaises(RuntimeError):
-            forward_layer(worker, meta)
+        forward_layer(worker, meta)
+        self.assertTrue(worker._save_disabled.is_set())
         self.assertFalse(store.published)
