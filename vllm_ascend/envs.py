@@ -92,6 +92,23 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Route PrefillNoCache attention through the A2/A3 QFA INT8-GQA operator
+    # (cann_ops_transformer quant_flash_attn, quant_mode=12). Prefill steps
+    # with chunked/prefix-hit histories and all decode steps keep the stock
+    # FIA path. Valid values: "0" (default, disabled) or "1" (enabled).
+    "VLLM_ASCEND_QFA_A3_PREFILL": lambda: bool(int(os.getenv("VLLM_ASCEND_QFA_A3_PREFILL", "0"))),
+    # Route DecodeOnly attention of C8-quantized layers through the A3 QFA
+    # INT8-GQA paged operator (quant_mode=12, PA_BNBD). Requires the C8 KV
+    # cache scheme (fa_v.scale weights); other attention states keep the
+    # inherited C8 FIA path. Valid values: "0" (default) or "1".
+    "VLLM_ASCEND_QFA_A3_DECODE": lambda: bool(int(os.getenv("VLLM_ASCEND_QFA_A3_DECODE", "0"))),
+    # Output directory for per-head V amax calibration (QFA INT8 static
+    # fa_v.scale weight generation). When set to a writable directory, each
+    # worker wraps Attention.forward and dumps per-layer per-head value amax
+    # to <dir>/fa_v_stats_rank{rank}.pt once per forward step. Intended for
+    # eager-mode offline calibration only (fa_v_calib module); default ""
+    # keeps it fully inert. Not sensitive.
+    "VLLM_ASCEND_CALIB_FA_V": lambda: os.getenv("VLLM_ASCEND_CALIB_FA_V", ""),
 }
 
 # end-env-vars-definition
