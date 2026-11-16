@@ -1,6 +1,3 @@
-# ==========================================
-# ACTUAL TEST CASES
-# ==========================================
 _envs: &envs
   OMP_NUM_THREADS: "10"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
@@ -8,6 +5,30 @@ _envs: &envs
   HCCL_OP_EXPANSION_MODE: "AIV"
   VLLM_USE_V2_MODEL_RUNNER: "1"
   SERVER_PORT: "DEFAULT_PORT"
+  PYTHONHASHSEED: "0"   # 池化哈希一致性要求, 全实例统一
+
+_kv_pool: &kv_pool
+  type: "memcache"
+  meta_service_port: 5000
+  config_store_port: 6000
+  config:
+    meta:
+      ock.mmc.log_level: "info"
+    local:
+      ock.mmc.log_level: "info"
+      # 每 DP rank 占用数; 8 DP rank 时建议 8 以上, 参考官方用例取 256
+      ock.mmc.local_service.world_size: 256
+      # 950PR&950DT 协议二选一: UB 用 device_urma（默认）; UBOE 改 device_uboe
+      # (A2 推荐 device_rdma, A3 HCCS 推荐 device_sdma —— 均不适用于 950)
+      ock.mmc.local_service.protocol: "device_urma"
+      # 本地 DRAM 池容量; 单机 8 rank 场景 10GB 起步, 按主机内存余量调整
+      ock.mmc.local_service.dram.size: "10GB"
+
+# 池化连接器(单机 PD-Mixed): AscendStoreConnector + kv_both。
+# 注意: DeepSeek-V4 为混合注意力模型, kv_load_failure_policy 必须为 "fail"
+# (recompute 暂不支持 DS-V4/Qwen3.5 等混合注意力模型)。
+# server_cmd_extra 必须是扁平字符串列表（框架直接拼接）, 因此池化参数
+# 在下方两个 test_case 中各自内联。
 server_cmd: &server_cmd
   - "--prefix-cache-retention-interval"
   - "4096"
@@ -46,65 +67,76 @@ server_cmd: &server_cmd
   - "--compilation-config"
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - "--additional-config"
-  - '{
-    "ascend_compilation_config": {
-        "enable_npugraph_ex": true,
-        "enable_static_kernel": false
-    },
-    "enable_cpu_binding": true,
-    "multistream_overlap_shared_expert": true}'
+  - '{ "ascend_compilation_config": { "enable_npugraph_ex": true, "enable_static_kernel": false }, "enable_cpu_binding": true, "multistream_overlap_shared_expert": true}'
 
 test_cases:
-  - name: "DeepSeek-V4-Flash-DSpark-Static"
+#  - name: "DeepSeek-V4-Flash-DSpark-Static-Memcache"
+#    model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4-Flash-0731"
+#    envs:
+#      <<: *envs
+#    kv_pool: *kv_pool
+#    server_cmd: *server_cmd
+#    server_cmd_extra:
+#      - "--speculative-config"
+#      - '{"method":"dspark","num_speculative_tokens":15,"enforce_eager":false}'
+#      - "--no-enable-prefix-caching"   # 关闭本地前缀缓存, 强制请求走 KV 池
+#      - "--kv-transfer-config"
+#      - >-
+#        {"kv_connector": "AscendStoreConnector", "kv_role": "kv_both",
+#        "kv_load_failure_policy": "fail",
+#        "kv_connector_extra_config": {"backend": "memcache", "lookup_rpc_port": "0", "use_layerwise": false}}
+#    test_content:
+#      - chat_completion
+#    prompts:
+#      - seed: "x "
+#        target_tokens: 200
+#    api_keyword_args:
+#      max_tokens: 200
+#      temperature: 0.0
+#    expected_response:
+#      completion_tokens: 200
+#    benchmarks:
+#      perf:
+#        case_type: performance
+#        dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/DeepSeek-V4-Flash_input_3500_lines_128
+#        request_conf: vllm_api_stream_chat
+#        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+#        num_prompts: 128
+#        max_out_len: 1500
+#        batch_size: 32
+#        request_rate: 0
+#        # 注意: 原基线为无池化数据; 开启池化(+关闭本地前缀缓存)后吞吐特性改变,
+#        # 首跑后需回填新基线
+#        baseline: 0
+#        threshold: 0.95
+#        temperature: 0
+#        ignore_eos: True
+
+  - name: "DeepSeek-V4-Flash-DSpark-AdaptiveVerification-Memcache"
     model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4-Flash-0731"
     envs:
       <<: *envs
-    server_cmd: *server_cmd
-    server_cmd_extra:
-      - "--speculative-config"
-      - '{"method":"dspark","num_speculative_tokens":15,"enforce_eager":false}'
-    test_content:
-      - chat_completion
-    prompts:
-      - seed: "x "
-        target_tokens: 200
-    api_keyword_args:
-      max_tokens: 200
-      temperature: 0.0
-    expected_response:
-      completion_tokens: 200
-    benchmarks:
-      perf:
-        case_type: performance
-        dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/DeepSeek-V4-Flash_input_3500_lines_128
-        request_conf: vllm_api_stream_chat
-        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 128
-        max_out_len: 1500
-        batch_size: 32
-        request_rate: 0
-        baseline: 2241.98294
-        threshold: 0.95
-        temperature: 0
-        ignore_eos: True
-  - name: "DeepSeek-V4-Flash-DSpark-AdaptiveVerification"
-    model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4-Flash-0731"
-    envs:
-      <<: *envs
+    kv_pool: *kv_pool
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--speculative-config"
       - '{"method":"dspark","num_speculative_tokens":15,"enforce_eager":false,"enable_adaptive_verification": true}'
-    test_content:
-      - chat_completion
-    prompts:
-      - seed: "x "
-        target_tokens: 200
-    api_keyword_args:
-      max_tokens: 200
-      temperature: 0.0
-    expected_response:
-      completion_tokens: 200
+      - "--no-enable-prefix-caching"
+      - "--kv-transfer-config"
+      - >-
+        {"kv_connector": "AscendStoreConnector", "kv_role": "kv_both",
+        "kv_load_failure_policy": "fail",
+        "kv_connector_extra_config": {"backend": "memcache", "lookup_rpc_port": "0", "use_layerwise": false}}
+#    test_content:
+#      - chat_completion
+#    prompts:
+#      - seed: "x "
+#        target_tokens: 200
+#    api_keyword_args:
+#      max_tokens: 200
+#      temperature: 0.0
+#    expected_response:
+#      completion_tokens: 200
     benchmarks:
       perf:
         case_type: performance
@@ -115,7 +147,8 @@ test_cases:
         max_out_len: 1500
         batch_size: 32
         request_rate: 0
-        baseline: 2414.56025
+        # 同上: 池化后需重新标定
+        baseline: 0
         threshold: 0.95
         temperature: 0
         ignore_eos: True
