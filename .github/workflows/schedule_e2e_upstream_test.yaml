@@ -222,8 +222,7 @@ jobs:
                 --continue-on-error
 
     e2e-upstream_multicard:
-        runs-on: linux-aarch64-a2b3-0
-        #runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
+        runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
         needs: [resolve-tag, ensure-csrc-cache]
         strategy:
           fail-fast: false
@@ -357,8 +356,7 @@ jobs:
                 --continue-on-error
               
     e2e-upstream_online:
-        runs-on: linux-aarch64-a2b3-0
-        #runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
+        runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
         needs: [resolve-tag, ensure-csrc-cache]
         strategy:
           fail-fast: false

@@ -2,15 +2,33 @@ e2e-upstream_pr:
   - name: tests/v1/worker/test_mamba_utils.py
     estimated_time: 20
 e2e-upstream_singlecard:
-  - name: tests/models/multimodal/generation/test_deepseek_vl2.py
+  - name: tests/kernels/fla/test_fused_sigmoid_gating_delta_rule.py
     estimated_time: 20
-  - name: tests/models/multimodal/generation/test_nemotron_parse_35.py
+  - name: tests/models/multimodal/processing/test_alpamayo2_super.py
     estimated_time: 20
-  - name: tests/models/multimodal/pooling/test_d3.py
+  - name: tests/models/multimodal/processing/test_unlimited_ocr.py
     estimated_time: 20
-  - name: tests/models/multimodal/generation/test_deepseek_vl2.py
+  - name: tests/renderers/chat_utils/test_vision_chunk.py
     estimated_time: 20
-  - name: tests/models/multimodal/generation/test_nemotron_parse_35.py
+  - name: tests/v1/core/test_kv_cache_config_builder.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/decisions/test_decisions_e2e.py
+    estimated_time: 20
+  - name: tests/models/kimi_k3/test_amd_kda_adaptive_verification.py
+    estimated_time: 20
+  - name: tests/renderers/chat_utils/test_audio.py
+    estimated_time: 20
+  - name: tests/renderers/chat_utils/test_text_only.py
+    estimated_time: 20
+  - name: tests/entrypoints/rl/state_transitions/test_pause_multi_frontend.py
+    estimated_time: 20
+  - name: tests/models/multimodal/pooling/test_colultravbert.py
+    estimated_time: 20
+  - name: tests/models/multimodal/processing/test_nemotron_parse_35.py
+    estimated_time: 20
+  - name: tests/renderers/chat_utils/test_image.py
+    estimated_time: 20
+  - name: tests/renderers/chat_utils/test_video.py
     estimated_time: 20
   - name: tests/models/multimodal/pooling/test_d3.py
     estimated_time: 20
@@ -18,7 +36,7 @@ e2e-upstream_online_1:
   - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_s3.py
     estimated_time: 20
 e2e-upstream_a2_2:
-  - name: tests/v1/distributed/test_async_llm_dp.py
+  - name: tests/models/multimodal/pooling/test_d3.py
     estimated_time: 20
 e2e-upstream_a2_4:
   - name: tests/v1/distributed/test_hybrid_lb_dp.py

@@ -54,8 +54,6 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/models/multimodal/pooling/test_colultravbert.py
     estimated_time: 20
-  - name: tests/models/multimodal/pooling/test_d3.py
-    estimated_time: 20
   - name: tests/models/multimodal/processing/test_alpamayo2_super.py
     estimated_time: 20
   - name: tests/models/multimodal/processing/test_deepseek_vl2.py
@@ -166,11 +164,13 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/v1/worker/test_worker_base.py
     estimated_time: 20
+  - name: tests/kernels/fla/test_fused_sigmoid_gating_delta_rule.py
+    estimated_time: 20
 e2e-upstream_online_1:
   - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_s3.py
     estimated_time: 20
 e2e-upstream_a2_2:
-  - name: tests/v1/distributed/test_async_llm_dp.py
+  - name: tests/models/multimodal/pooling/test_d3.py
     estimated_time: 20
 e2e-upstream_a2_4:
   - name: tests/v1/distributed/test_hybrid_lb_dp.py
