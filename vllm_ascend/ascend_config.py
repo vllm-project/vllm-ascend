@@ -420,9 +420,13 @@ class QuantizedAllReduceConfig:
     value overrides the hardware default. Both select calls by group size,
     dtype, shape and payload rather than forward phase.
     A collective takes the selected path only when its payload reaches
-    ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data. The
-    default is 16,777,216 elements (32 MiB), retained from the INT8 crossover
-    measurements. Benchmark MXFP8 independently on the intended A5 workload.
+    ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data. Left at
+    ``None`` (the default) the int8 gate is picked per tensor-parallel degree
+    from the A2 measurements: 8,388,608 (16 MiB) at TP=2, 16,777,216 (32 MiB)
+    at TP=4 and 26,214,400 (50 MiB) at TP=8. The first two are 1.5x above their
+    measured break-even; the last one sits on a curve that flattens right after
+    the crossing. MXFP8 has no per-TP calibration yet and keeps 16,777,216
+    (32 MiB); benchmark it on the intended A5 workload before lowering it.
 
     The wrapper is built for every parallel group; unsupported group sizes
     keep bf16. MXFP8 supports groups of 2/4/8 ranks, while INT8 supports up to
@@ -430,13 +434,15 @@ class QuantizedAllReduceConfig:
     """
 
     enable: bool = False
-    min_numel: int = 16777216
+    # None selects the per-TP int8 default measured on A2; MXFP8 falls back to
+    # its own 32 MiB default. See vllm_ascend.distributed.device_communicators.
+    min_numel: int | None = None
     quant_dtype: Literal["int8", "mxfp8"] = dataclasses.field(default_factory=lambda: "mxfp8" if is_950() else "int8")
 
     @field_validator("min_numel")
     @classmethod
-    def _check_min_numel(cls, value: int) -> int:
-        if value < 1:
+    def _check_min_numel(cls, value: int | None) -> int | None:
+        if value is not None and value < 1:
             raise ValueError("additional_config.quantized_all_reduce_config.min_numel must be >= 1")
         return value
 
@@ -615,7 +621,7 @@ class AscendConfig:
             },
             "quantized_all_reduce_config": {
                 "enable": false,
-                "min_numel": 16777216
+                "min_numel": null
             },
             "xlite_graph_config": {
                 "enabled": false,

@@ -51,7 +51,7 @@ from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
 
 def _make(
     world_size: int = 4,
-    min_numel: int = 8,
+    min_numel: int | None = 8,
     device_type: AscendDeviceType = AscendDeviceType.A2,
     group_name: str = "",
 ) -> QuantizedAllReduce:
@@ -75,6 +75,25 @@ class TestQuantizedAllReduce(unittest.TestCase):
     def test_min_numel_from_config(self):
         wrapper = _make(min_numel=12345)
         self.assertEqual(wrapper.min_numel, 12345)
+
+    def test_min_numel_defaults_per_tp(self):
+        # Measured break-even on A2 is ~10 / ~20 / ~49 MiB; the defaults are
+        # 16 / 32 / 50 MiB, i.e. rounded up so int8 is a clear win.
+        cases = ((2, 8_388_608), (4, 16_777_216), (8, 26_214_400))
+        for world_size, expected in cases:
+            with self.subTest(world_size=world_size):
+                self.assertEqual(_make(world_size=world_size, min_numel=None).min_numel, expected)
+
+    def test_min_numel_default_never_undercuts_measured_tp(self):
+        # Unmeasured degrees take the next larger default: TP=3 -> TP=4,
+        # TP=5/6/7 -> TP=8.
+        self.assertEqual(_make(world_size=3, min_numel=None).min_numel, 16_777_216)
+        for world_size in (5, 6, 7):
+            with self.subTest(world_size=world_size):
+                self.assertEqual(_make(world_size=world_size, min_numel=None).min_numel, 26_214_400)
+
+    def test_explicit_min_numel_wins_over_default(self):
+        self.assertEqual(_make(world_size=8, min_numel=1024).min_numel, 1024)
 
     def test_accepted_on_validated_device_families(self):
         for dt in (AscendDeviceType.A2, AscendDeviceType.A5):
