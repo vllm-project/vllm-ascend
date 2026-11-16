@@ -1,3 +1,4 @@
+import ctypes
 import queue
 import sys
 import threading
@@ -394,7 +395,7 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
             worker = MooncakeConnectorWorker(config, engine_id, cache_config)
             worker.use_sparse = False
             if role == "kv_producer":
-                metadata = MooncakeAgentMetadata(engine_id, 7777, 128, [], 0, [], (0, 0), local_ip=host)
+                metadata = MooncakeAgentMetadata(engine_id, 7777, 128, [], 0, [], (0, 0), [], local_ip=host)
                 worker.kv_send_thread = KVCacheSendingThread(
                     config,
                     tp_rank,
@@ -522,6 +523,228 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
 
 
 class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
+    def test_dense_registration_preserves_logical_views_and_registers_storage_once(self):
+        alignment = 2 * 1024 * 1024
+        num_blocks = 4
+        block_width = 16
+        module = "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector"
+
+        for layout in ("aligned_interleaved", "short_config_interleaved", "interleaved", "independent"):
+            with self.subTest(layout=layout):
+                backing_size = num_blocks * 2 * block_width * 2
+                if layout in ("aligned_interleaved", "short_config_interleaved"):
+                    raw = torch.empty(backing_size + alignment, dtype=torch.uint8)
+                    offset = (-raw.data_ptr()) % alignment
+                    backing = raw[offset : offset + backing_size].view(torch.float16)
+                else:
+                    backing = torch.empty(backing_size // 2, dtype=torch.float16)
+                if layout == "independent":
+                    caches = tuple(torch.empty((num_blocks, block_width), dtype=torch.float16) for _ in range(2))
+                else:
+                    interleaved = backing.view(num_blocks, 2, block_width)
+                    caches = (interleaved[:, 0], interleaved[:, 1])
+                    self.assertFalse(caches[0].is_contiguous())
+
+                def register_nonoverlapping(ptrs, lengths):
+                    ranges = sorted(zip(ptrs, lengths))
+                    for (start, length), (next_start, _) in zip(ranges, ranges[1:]):
+                        if start + length > next_start:
+                            raise ValueError("overlapping consumer registration")
+
+                # The old dense path registered logical payload lengths at
+                # interleaved view pointers, overlapping and missing tail bytes.
+                if layout != "independent":
+                    with self.assertRaisesRegex(ValueError, "overlapping consumer registration"):
+                        register_nonoverlapping(
+                            [cache.data_ptr() for cache in caches], [cache.nbytes for cache in caches]
+                        )
+
+                worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+                worker.vllm_config = types.SimpleNamespace(
+                    model_config=types.SimpleNamespace(is_deepseek_mla=False, hf_text_config=types.SimpleNamespace())
+                )
+                worker.kv_cache_config = types.SimpleNamespace(
+                    num_blocks=num_blocks,
+                    kv_cache_tensors=[
+                        types.SimpleNamespace(
+                            size=backing_size // 2 if layout == "short_config_interleaved" else backing_size,
+                            layers=["attn"],
+                            shared_by=["attn"],
+                        )
+                    ],
+                )
+                worker.use_hybrid = worker.use_mamba = worker.use_compress = False
+                worker.kv_role = "kv_consumer"
+                worker.engine_id = "decode"
+                worker.engine = "engine"
+                worker.te_rpc_port = worker.handshake_port = worker.side_channel_port = 32000
+                worker.block_size = block_width
+                worker.tp_rank = 0
+                worker.tp_size = worker._prefill_pp_size = worker.hma_group_size = 1
+                worker._mamba_ssm_size = (0, 0)
+                worker._prefill_pp_layer_partition = None
+                logical_ptrs = [cache.data_ptr() for cache in caches]
+                logical_strides = [cache.stride() for cache in caches]
+
+                def ready_receiver(*args):
+                    args[15].set()
+                    return MagicMock()
+
+                with (
+                    patch(f"{module}.global_te.register_buffer", side_effect=register_nonoverlapping) as register_buffer,
+                    patch(f"{module}.KVCacheRecvingThread", side_effect=ready_receiver) as receiver,
+                    patch(f"{module}.get_ip", return_value="127.0.0.1"),
+                ):
+                    worker.register_kv_caches({"attn": caches})
+
+                ptrs, lengths = register_buffer.call_args.args
+                expected_ranges = (
+                    [(cache.data_ptr(), cache.nbytes) for cache in caches]
+                    if layout == "independent"
+                    else [(backing.data_ptr(), backing_size)]
+                )
+                if layout == "short_config_interleaved":
+                    # A config smaller than the physical strided span must
+                    # fall back to the actual allocation, never truncate it.
+                    expected_ranges = [(backing.data_ptr(), raw.data_ptr() + raw.nbytes - backing.data_ptr())]
+                self.assertEqual(list(zip(ptrs, lengths)), expected_ranges)
+                if layout == "aligned_interleaved":
+                    self.assertEqual(ptrs[0] % alignment, 0)
+                    self.assertEqual(lengths, [backing_size])
+                for cache in caches:
+                    span = cache.element_size() * (
+                        1 + sum((size - 1) * stride for size, stride in zip(cache.shape, cache.stride()))
+                    )
+                    self.assertTrue(
+                        any(
+                            start <= cache.data_ptr() and cache.data_ptr() + span <= start + length
+                            for start, length in zip(ptrs, lengths)
+                        )
+                    )
+                self.assertEqual(worker.kv_caches_base_addr, logical_ptrs)
+                self.assertEqual(worker.xfer_handshake_metadata.kv_caches_base_addr, logical_ptrs)
+                self.assertEqual(worker.xfer_handshake_metadata.block_lens, [block_width * 2] * 2)
+                expected_strides = [cache.stride(0) * cache.element_size() for cache in caches]
+                self.assertEqual(worker.xfer_handshake_metadata.block_strides, expected_strides)
+                self.assertEqual(receiver.call_args.args[7:10], (logical_ptrs, [block_width * 2] * 2, expected_strides))
+                self.assertEqual([cache.stride() for cache in caches], logical_strides)
+
+    def test_dense_pull_copies_payload_without_crossing_block_gaps(self):
+        module = "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector"
+        for local_gap, remote_gap, pulls, offset in ((1, 1, 1, 0), (2, 1, 1, 0), (0, 0, 1, 0), (2, 1, 2, 1)):
+            with self.subTest(local_gap=local_gap, remote_gap=remote_gap, pulls=pulls):
+                num_blocks, width = 6, 8
+                local = torch.full((num_blocks, 1 + local_gap, 2, 2, 2 * pulls), -1, dtype=torch.int32)
+                remote = torch.full((num_blocks, 1 + remote_gap, 2, 2, 2), -2, dtype=torch.int32)
+                if local_gap:
+                    local_caches = (local[:, 0], local[:, 1])
+                else:
+                    local_caches = tuple(
+                        torch.full((num_blocks, 2, 2, 2 * pulls), -1, dtype=torch.int32) for _ in range(2)
+                    )
+                if remote_gap:
+                    remote_caches = (remote[:, 0], remote[:, 1])
+                else:
+                    remote_caches = tuple(torch.empty((num_blocks, 2, 2, 2), dtype=torch.int32) for _ in range(2))
+                for component, cache in enumerate(remote_caches):
+                    for block in range(num_blocks):
+                        cache[block].view(-1)[:] = torch.arange(width) + 1000 * component + 100 * block
+                expected = [cache.clone() for cache in local_caches]
+                for remote_block, local_block in zip((1, 2, 4), (2, 3, 5)):
+                    for component in range(2):
+                        expected[component][local_block].view(-1)[offset * width : (offset + 1) * width] = (
+                            remote_caches[component][remote_block].view(-1)
+                        )
+                remote_before = remote.clone()
+
+                thread = object.__new__(KVCacheRecvingThread)
+                thread.remote_metadata_lock = threading.Lock()
+                thread.local_engine_id = "decode"
+                thread.local_handshake_port = 32000
+                thread.tp_rank = 0
+                thread._prefill_pp_size = 1
+                thread.pp_layer_indices = [(0, 1)]
+                thread.kv_caches = {"attn": local_caches}
+                thread.kv_caches_base_addr = {
+                    "decode": {32000: [cache.data_ptr() for cache in local_caches]},
+                    "prefill": {31000: [cache.data_ptr() for cache in remote_caches]},
+                }
+                thread.block_len_per_addr = [cache[0].nbytes for cache in local_caches]
+                thread.block_stride_per_addr = [cache.stride(0) * cache.element_size() for cache in local_caches]
+                thread.remote_block_lens = {"prefill": {31000: [cache[0].nbytes for cache in remote_caches]}}
+                thread.remote_block_strides = {
+                    "prefill": {31000: [cache.stride(0) * cache.element_size() for cache in remote_caches]}
+                }
+                thread.remote_te_port = {"prefill": {31000: 7777}}
+                thread.vllm_config = types.SimpleNamespace(speculative_config=None)
+                thread.reformat_kv_cache = MagicMock()
+
+                def native_read(_session, local_addrs, remote_addrs, lengths):
+                    for local_addr, remote_addr, length in zip(local_addrs, remote_addrs, lengths):
+                        for address, caches in ((local_addr, local_caches), (remote_addr, remote_caches)):
+                            self.assertTrue(
+                                any(
+                                    cache.untyped_storage().data_ptr() <= address
+                                    and address + length <= cache.untyped_storage().data_ptr() + cache.untyped_storage().nbytes()
+                                    for cache in caches
+                                )
+                            )
+                        ctypes.memmove(local_addr, remote_addr, length)
+                    return 0
+
+                thread.engine = types.SimpleNamespace(batch_transfer_sync_read=MagicMock(side_effect=native_read))
+                request = dict(
+                    request_id="decode-request",
+                    remote_request_id="prefill-request",
+                    remote_block_ids=[[1, 2, 4]],
+                    local_block_ids=[[2, 3, 5]],
+                    remote_engine_id="prefill",
+                    remote_host="127.0.0.1",
+                    remote_handshake_port=31000,
+                    offset=offset,
+                    tp_num_need_pulls=pulls,
+                )
+                with patch(
+                    f"{module}.get_ascend_config",
+                    return_value=types.SimpleNamespace(enable_kv_nz=False, enable_transpose_kv_cache_by_block=False),
+                ):
+                    thread._transfer_kv_cache(request)
+                for actual, wanted in zip(local_caches, expected):
+                    self.assertTrue(torch.equal(actual, wanted))
+                if local_gap:
+                    self.assertTrue(torch.all(local[:, 2:] == -1))
+                self.assertTrue(torch.equal(remote, remote_before))
+                lengths = thread.engine.batch_transfer_sync_read.call_args.args[3]
+                self.assertEqual(len(lengths), 4 if local_gap == remote_gap == 0 else 6)
+                if pulls > 1:
+                    thread.reformat_kv_cache.assert_called_once()
+                thread.engine.batch_transfer_sync_read.reset_mock()
+                thread.remote_block_lens["prefill"][31000][0] += 1
+                with self.assertRaisesRegex(ValueError, "geometry is incompatible"):
+                    thread._transfer_kv_cache(request)
+                thread.engine.batch_transfer_sync_read.assert_not_called()
+
+    def test_dense_remote_metadata_retains_producer_geometry(self):
+        module = "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector"
+        metadata = MooncakeAgentMetadata("prefill", 7777, 128, [100, 200], 8, [64, 64], (0, 0), [256, 256])
+        thread = object.__new__(KVCacheRecvingThread)
+        thread.local_engine_id = "decode"
+        thread.remote_metadata_lock = threading.Lock()
+        thread.kv_caches_base_addr = {"prefill": {}}
+        thread.remote_te_port = {"prefill": {}}
+        thread.remote_block_lens = {"prefill": {}}
+        thread.remote_block_strides = {"prefill": {}}
+        thread.encoder = MagicMock()
+        thread.decoder = MagicMock()
+        thread.decoder.decode.return_value = metadata
+        thread._get_remote_socket = MagicMock()
+        thread._return_remote_socket = MagicMock()
+        with patch(f"{module}.ensure_zmq_send"), patch(f"{module}.ensure_zmq_recv"):
+            thread._get_remote_metadata("127.0.0.1", 31000)
+        self.assertEqual(thread.kv_caches_base_addr["prefill"][31000], [100, 200])
+        self.assertEqual(thread.remote_block_lens["prefill"][31000], [64, 64])
+        self.assertEqual(thread.remote_block_strides["prefill"][31000], [256, 256])
+
     def test_zero_layer_stride_uses_descriptor_layers_as_shared_by(self):
         num_blocks = 2
         block_stride = 80
