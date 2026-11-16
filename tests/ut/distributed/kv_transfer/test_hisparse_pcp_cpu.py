@@ -28,12 +28,13 @@ def test_cache_layout_install_is_idempotent():
 
 
 @pytest.mark.parametrize("initial_capacity", [4, 32])
-def test_pcp_host_staging_is_sized_before_capture(monkeypatch, initial_capacity):
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+def test_pcp_host_staging_is_sized_before_capture(monkeypatch, initial_capacity, dtype):
     from vllm_ascend.patch.worker import patch_hisparse
 
     cache = handle()
     cache.num_write_tokens = 6
-    staging = NS(slots=torch.empty(initial_capacity, dtype=torch.int64))
+    staging = NS(slots=torch.empty(initial_capacity, dtype=dtype))
     original = staging.slots
     worker = NS(
         vllm_config=NS(
@@ -55,11 +56,12 @@ def test_pcp_host_staging_is_sized_before_capture(monkeypatch, initial_capacity)
     monkeypatch.setattr(patch_hisparse.torch, "empty", pinned_empty)
     patch_hisparse.prepare_pcp_mirror_staging(worker)
     assert staging.slots.numel() >= 24
+    assert staging.slots.dtype == dtype
     assert cache.num_write_tokens == 0
     assert cache.write_req_id_per_token is None
     assert cache.write_has_prefill is False
     if initial_capacity < 24:
-        assert allocations == [(24, {"dtype": torch.int64, "pin_memory": True})]
+        assert allocations == [(24, {"dtype": dtype, "pin_memory": True})]
     else:
         assert staging.slots is original and not allocations
 
