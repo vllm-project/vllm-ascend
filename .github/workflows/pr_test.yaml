@@ -858,7 +858,12 @@ jobs:
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
     needs: [pre-commit, cpu-ut, select-tests, run-selected-tests, run-selected-tests-a5, codeowner-approval]
-    if: ${{ !cancelled() }}
+    # Skip bot-review-triggered runs too: bot reviews carry no approval state,
+    # so they cannot change the gate verdict, and a skipped required check
+    # still satisfies branch protection. This avoids spawning a review run
+    # that would otherwise idle on a runner while polling the in-flight
+    # pull_request CI.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request_review' || github.event.review.user.type != 'Bot') }}
     runs-on: linux-amd64-cpu-2-hk
     # On review events this job may wait for an in-flight pull_request CI run to
     # finish before carrying its verdict forward (see the Check step).
@@ -902,7 +907,6 @@ jobs:
           }
 
           OWNER_RESULT="${{ needs.codeowner-approval.result }}"
-          REVIEWER_TYPE="${{ github.event.review.user.type }}"
 
           # On review events the heavy jobs above are skipped, so this gate
           # carries forward the verdict of the latest `pull_request` E2E run on
@@ -913,10 +917,7 @@ jobs:
           # or cancelled result, so approving mid-CI (or right after an infra
           # flake is retried) resolves automatically without a manual re-run.
           if [ "${EVENT_NAME}" = "pull_request_review" ]; then
-            # Bot reviews (e.g. gemini-code-assist COMMENTED) carry no approval
-            # state, so the owner check is waived for them; the code-CI verdict
-            # is still carried forward below.
-            if [ "${REVIEWER_TYPE}" != "Bot" ] && [ "${OWNER_RESULT}" != "success" ]; then
+            if [ "${OWNER_RESULT}" != "success" ]; then
               fail "CODEOWNERS approval gate failed: every changed file needs an approval from one of its owners. Approvals survive pushes; an owner can withdraw one by submitting a review that requests changes."
             fi
             export GATE_VERDICT_FILE="${RUNNER_TEMP}/gate_verdict.txt"
