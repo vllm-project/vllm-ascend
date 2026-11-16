@@ -5,8 +5,10 @@
 import __future__
 
 import ast
+import copy
 import dataclasses
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -15,7 +17,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-from pydantic import ValidationError, model_validator
+from pydantic import TypeAdapter, ValidationError, model_validator
 from pydantic.dataclasses import dataclass as validated_dataclass
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -73,7 +75,13 @@ def validate(cfg, **kw):
 def test_defaults_and_strict_schema():
     assert not policy.A2MegaMoEPrefillConfig().enabled
     assert policy.A2MegaMoEPrefillConfig(enabled=True).scope == "prefill"
-    for kw in ({"enabled": 1}, {"scope": "all"}, {"scope": "prefill_mixed"}, {"min_tokens": 1}):
+    for kw in (
+        {"enabled": 1},
+        {"scope": "all"},
+        {"scope": "prefill_mixed"},
+        {"min_tokens": 1},
+        {"_replicated_pcp_draft": True},
+    ):
         with pytest.raises(ValidationError):
             policy.A2MegaMoEPrefillConfig(**kw)
 
@@ -115,7 +123,7 @@ def replicated_pcp_harness():
         parallel_config: Any
         kv_transfer_config: Any
         engram_config: Any
-        additional_config: Any
+        additional_config: dict
         use_v2_model_runner: bool = True
         lora_config: Any = None
 
@@ -160,6 +168,34 @@ def test_dspark_pcp_reconstruction_keeps_target_enabled_and_draft_ordinary():
     validate(draft)
 
 
+def test_dspark_load_model_reconstruction_retains_draft_identity():
+    target, prepare = replicated_pcp_harness()
+    draft, _ = prepare(target)
+    # DFlash first copies the config; load_dspark_model then replaces it while
+    # retaining the target model_config for target-layer metadata.
+    copied = copy.copy(draft)
+    loaded = dataclasses.replace(copied, parallel_config=dataclasses.replace(copied.parallel_config))
+    reloaded = dataclasses.replace(loaded)
+    deepcopied = copy.deepcopy(reloaded)
+    for stage in (copied, loaded, reloaded, deepcopied):
+        validate(stage)
+        assert policy.is_draft_model(stage)
+        assert stage.model_config.runner_type == "generate"
+    assert not policy.is_draft_model(target)
+    assert target.parallel_config.prefill_context_parallel_size == 8
+
+
+def test_draft_marker_uses_declared_fields_and_preserves_config_hash_input():
+    target, prepare = replicated_pcp_harness()
+    draft, _ = prepare(target)
+    # vLLM replace rejects __dict__ attributes absent from dataclass fields.
+    assert set(vars(draft)) <= {field.name for field in dataclasses.fields(draft)}
+    # VllmConfig.compute_hash uses json.dumps(additional_config).
+    assert json.dumps(draft.additional_config, sort_keys=True) == json.dumps(target.additional_config, sort_keys=True)
+    parsed = TypeAdapter(policy.A2MegaMoEPrefillConfig).validate_python(draft.additional_config["a2_mega_moe_prefill"])
+    assert parsed.enabled and parsed.scope == "prefill"
+
+
 def test_real_pcp1_target_still_fails_after_dspark_reconstruction():
     target, prepare = replicated_pcp_harness()
     prepare(target)
@@ -168,12 +204,16 @@ def test_real_pcp1_target_still_fails_after_dspark_reconstruction():
         dataclasses.replace(target, parallel_config=wrong_parallel)
 
 
-def test_replicated_pcp_scope_is_reset_after_failure():
+def test_replicated_pcp_failure_does_not_change_target():
     target, _ = replicated_pcp_harness()
     draft_parallel = dataclasses.replace(target.parallel_config, prefill_context_parallel_size=1)
 
     def fail(source, **changes):
-        candidate = NS(model_config=source.model_config, parallel_config=draft_parallel)
+        candidate = NS(
+            model_config=source.model_config,
+            parallel_config=draft_parallel,
+            additional_config=changes["additional_config"],
+        )
         assert policy.is_draft_model(candidate)
         assert not policy.is_draft_model(source)
         raise RuntimeError("failed reconstruction")
@@ -184,19 +224,23 @@ def test_replicated_pcp_scope_is_reset_after_failure():
         dataclasses.replace(target, parallel_config=draft_parallel)
 
 
-def test_nested_replicated_pcp_scopes_restore_outer_source():
+def test_nested_replicated_pcp_rebuilds_keep_target_identity():
     target, _ = replicated_pcp_harness()
     other, prepare_other = replicated_pcp_harness()
     draft_parallel = dataclasses.replace(target.parallel_config, prefill_context_parallel_size=1)
 
     def rebuild(source, **changes):
-        candidate = NS(model_config=source.model_config, parallel_config=draft_parallel)
+        candidate = NS(
+            model_config=source.model_config,
+            parallel_config=draft_parallel,
+            additional_config=changes["additional_config"],
+        )
         assert policy.is_draft_model(candidate)
         other_draft, _ = prepare_other(other)
         assert policy.is_draft_model(other_draft)
         assert policy.is_draft_model(candidate)
         assert not policy.is_draft_model(other)
-        return dataclasses.replace(source, parallel_config=draft_parallel)
+        return dataclasses.replace(source, parallel_config=draft_parallel, **changes)
 
     draft = policy.rebuild_replicated_pcp_draft(target, rebuild)
     assert policy.is_draft_model(draft)

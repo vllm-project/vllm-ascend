@@ -3,16 +3,12 @@
 """CPU policy for the opt-in DeepSeek V4.1 A2 prefill backend."""
 
 from collections.abc import Callable
-from contextvars import ContextVar
 from typing import Any, Literal
 
 from pydantic import ConfigDict, Field
 from pydantic.dataclasses import dataclass
 
 DEEPSEEK_V41_ROUTED_EXPERTS = 384
-# Only active during synchronous VllmConfig reconstruction. Context-local state
-# keeps concurrent/nested draft construction isolated and is reset on failure.
-_REPLICATED_PCP_SOURCE: ContextVar[Any] = ContextVar("a2_replicated_pcp_source", default=None)
 
 
 @dataclass(config=ConfigDict(extra="forbid", frozen=True))
@@ -21,21 +17,21 @@ class A2MegaMoEPrefillConfig:
     scope: Literal["prefill"] = "prefill"
 
 
+class _ReplicatedPCPDraftSettings(dict[str, Any]):
+    """Internal draft identity carried by an otherwise ordinary settings dict.
+
+    Nested dict values survive VllmConfig validation, copy and replace. Keeping
+    the original keys also preserves JSON hashing and AscendConfig validation.
+    """
+
+
 def a2_prefill_enabled(ascend_config: Any) -> bool:
     return getattr(getattr(ascend_config, "a2_mega_moe_prefill", None), "enabled", False) is True
 
 
 def is_draft_model(config: Any) -> bool:
-    if getattr(config, "_ascend_a2_replicated_pcp_draft", False) is True:
-        return True
-    source = _REPLICATED_PCP_SOURCE.get()
-    if (
-        source is not None
-        and config is not source
-        and config.model_config is source.model_config
-        and source.parallel_config.prefill_context_parallel_size > 1
-        and config.parallel_config.prefill_context_parallel_size == 1
-    ):
+    additional = getattr(config, "additional_config", None)
+    if isinstance(additional, dict) and isinstance(additional.get("a2_mega_moe_prefill"), _ReplicatedPCPDraftSettings):
         return True
     model = config.model_config
     architectures = getattr(model, "architectures", None) or [getattr(model, "architecture", None)]
@@ -53,13 +49,12 @@ def rebuild_replicated_pcp_draft(source: Any, rebuild: Callable[..., Any], **cha
     enabled = settings.get("enabled", False) if isinstance(settings, dict) else getattr(settings, "enabled", False)
     if enabled is not True:
         return rebuild(source, **changes)
-    token = _REPLICATED_PCP_SOURCE.set(source)
-    try:
-        draft = rebuild(source, **changes)
-    finally:
-        _REPLICATED_PCP_SOURCE.reset(token)
-    draft._ascend_a2_replicated_pcp_draft = True
-    return draft
+    draft_settings = _ReplicatedPCPDraftSettings(
+        settings if isinstance(settings, dict) else {"enabled": settings.enabled, "scope": settings.scope}
+    )
+    # Copy only draft input; the target and its public opt-in remain untouched.
+    draft_additional = {**additional, "a2_mega_moe_prefill": draft_settings}
+    return rebuild(source, additional_config=draft_additional, **changes)
 
 
 def validate_a2_mega_moe_prefill(config: Any, *, dynamic_eplb: bool, redundant_experts: int, mix_placement: bool):

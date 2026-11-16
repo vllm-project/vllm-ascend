@@ -5,6 +5,6 @@ entries:
     model: DeepSeek-V4.1-Flash
     hardware: [A2]
   - category: bugfix
-    text: Fixed A2 MegaMoE prefill startup with DSpark replicated PCP draft configuration, preserving the target topology checks and ordinary draft execution.
+    text: Fixed A2 MegaMoE prefill startup with DSpark replicated PCP draft configuration, including subsequent draft-model loading and configuration copies, preserving the target topology checks and ordinary draft execution.
     model: DeepSeek-V4.1-Flash
     hardware: [A2]
