@@ -1,3 +1,5 @@
+# Temporary nightly rerun for the startup timeout in Actions run 43724679824.
+# Keep runtime settings unchanged while checking whether the timeout recurs.
 test_cases:
   - name: "DeepSeek-V4.1-Flash-W8A8-DSpark-PCP"
     model: "Eco-Tech/DeepSeek-V4.1-Flash-w8a8"
