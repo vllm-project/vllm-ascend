@@ -78,6 +78,7 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
         fa_quant_layer=False,
         dtype=torch.bfloat16,
         enable_kv_nz=False,
+        sliding_window=None,
         use_pcp=False,
     )
     monkeypatch.setattr(
@@ -90,6 +91,18 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
     monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (lambda: None, lambda: None))
 
     assert AscendMLAImpl._can_use_flashmla(impl)
+
+    monkeypatch.setattr(mla_v1, "enable_sfa", lambda _config: True)
+    assert not AscendMLAImpl._can_use_flashmla(impl)
+    config.speculative_config = SimpleNamespace(method="dspark")
+    assert AscendMLAImpl._can_use_flashmla(impl)
+    impl.sliding_window = 2048
+    config.parallel_config.decode_context_parallel_size = 8
+    assert not AscendMLAImpl._can_use_flashmla(impl)
+    config.parallel_config.decode_context_parallel_size = 1
+    impl.sliding_window = None
+    config.speculative_config = None
+    monkeypatch.setattr(mla_v1, "enable_sfa", lambda _config: False)
 
     monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: None)
     assert not AscendMLAImpl._can_use_flashmla(impl)

@@ -72,6 +72,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Opt-in Mistral Large 4 decode fusions. Set each to 1 to enable it.
+    # Defaults to 0 and does not contain sensitive information.
+    "VLLM_ASCEND_MISTRAL_MLA_Q_FUSION": lambda: os.getenv("VLLM_ASCEND_MISTRAL_MLA_Q_FUSION", "0") == "1",
+    "VLLM_ASCEND_MISTRAL_MLA_K_ROPE_FUSION": lambda: os.getenv("VLLM_ASCEND_MISTRAL_MLA_K_ROPE_FUSION", "0") == "1",
+    "VLLM_ASCEND_MISTRAL_SHARED_SWIGLU_MX": lambda: os.getenv("VLLM_ASCEND_MISTRAL_SHARED_SWIGLU_MX", "0") == "1",
 }
 
 # end-env-vars-definition

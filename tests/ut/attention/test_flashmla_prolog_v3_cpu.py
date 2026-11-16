@@ -64,6 +64,7 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
     attention_output[:, -1, :4] = torch.tensor([7.0, torch.nan, torch.inf, -torch.inf])
     flash = SimpleNamespace(
         slots=slots,
+        draft_window=None,
         current=object() if split else None,
         query=torch.empty(tokens, heads, 576),
         adapter=SimpleNamespace(attention=Mock(return_value=(attention_output, None))),

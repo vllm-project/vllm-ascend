@@ -161,7 +161,11 @@ def runtime(monkeypatch):
         values = positions[:, None, None, None].expand(-1, 1, 1, 64).to(torch.bfloat16)
         return values, -values
 
-    install("vllm_ascend.ops.rotary_embedding", get_cos_and_sin_mla=rope)
+    def gather_rope(cache, positions):
+        cos, sin = cache.index_select(0, positions).chunk(2, dim=-1)
+        return cos.repeat(1, 2)[:, None, None, :], sin.repeat(1, 2)[:, None, None, :]
+
+    install("vllm_ascend.ops.rotary_embedding", get_cos_and_sin_mla=rope, gather_mla_rope=gather_rope)
     api = load("vllm_ascend.attention.flashmla", "vllm_ascend/attention/flashmla.py")
 
     def schedule(lengths, *, cu_seqlens_q, seqused_q, **kwargs):
@@ -181,12 +185,25 @@ def runtime(monkeypatch):
         classmethod(lambda cls, config: cls(config, attention_op, metadata_op)),
     )
 
-    def builder(*, size=8, rank=0, interleave=1, heads=8, dtype=torch.float16, use_rope=False, speculative=True):
+    def builder(
+        *,
+        size=8,
+        rank=0,
+        interleave=1,
+        heads=8,
+        dtype=torch.float16,
+        use_rope=False,
+        speculative=True,
+        window=None,
+        rope_source=None,
+    ):
         impl = SimpleNamespace(
             num_heads=heads,
             scale=0.125,
             dtype=dtype,
             use_mla_rope=use_rope,
+            sliding_window=window,
+            rope_metadata_source=rope_source,
             dcp_size=size,
             dcp_rank=rank,
             vllm_config=SimpleNamespace(
@@ -645,3 +662,28 @@ def test_causal_target_and_noncausal_draft_do_not_share_schedules(runtime):
     assert target.schedule.data_ptr() != draft.schedule.data_ptr()
     assert target.current is not None and draft.current is None
     assert target.cache_lens[0] == 1 and draft.cache_lens[0] == 2
+
+
+def test_draft_window_and_local_rope_refresh_reuse_graph_buffers(runtime):
+    cache = torch.arange(32 * 64, dtype=torch.float32).reshape(32, 64)
+    builder = runtime.builder(
+        size=1, window=135, use_rope=True, dtype=torch.float32, rope_source=SimpleNamespace(cos_sin_cache=cache)
+    )
+    batch = common([277, 17], [4, 2], tokens=8, causal=False)
+    flash = builder.build(batch, 2, 6, False, retain_for_graph=True)
+    window = flash.draft_window
+    assert flash.adapter.config.mask_mode == 4
+    assert flash.adapter.config.window_args() == {"win_left": 134, "win_right": 0}
+    assert window.cu.tolist() == list(range(9))
+    assert window.used_q.tolist() == [1] * 6 + [0, 0]
+    assert window.cache_lens.tolist() == [149] * 4 + [17, 17, 0, 0]
+    assert window.block_table[0].tolist() == [1, 2, 2]
+    assert flash.cos[3, 0, 0, 0] == cache[3, 0]
+    assert flash.sin[3, 0, 0, 0] == cache[3, 32]
+
+    batch.seq_lens[0] = 273
+    batch.positions += 7
+    replay = builder.build(batch, 2, 6, False)
+    assert replay is flash and replay.draft_window is window
+    assert window.cache_lens[:4].tolist() == [145] * 4
+    assert flash.cos[3, 0, 0, 0] == cache[10, 0]

@@ -21,6 +21,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -1288,6 +1289,12 @@ class AscendSFAImpl(MLAAttentionImpl):
                 epsilon=self.kv_a_layernorm.variance_epsilon,
                 dst_type=self.c8_cache_dtype,
                 tile_size=self.sfa_qsfa_tile_size,
+                try_fused_k_rope=(
+                    envs.VLLM_ASCEND_MISTRAL_MLA_K_ROPE_FUSION
+                    and getattr(self, "mistral_use_rope", False)
+                    and attn_metadata.num_prefills == 0
+                    and attn_metadata.num_decode_tokens > 0
+                ),
             )
 
         torch_npu.npu_kv_rmsnorm_rope_cache(
@@ -1336,7 +1343,14 @@ class AscendSFAImpl(MLAAttentionImpl):
             ql_nope = ql_nope.transpose(0, 1)
         return ql_nope, q_pe
 
-    def _mistral_q_proj_and_k_up_proj(self, hidden_states: torch.Tensor):
+    def _mistral_q_proj_and_k_up_proj(
+        self,
+        hidden_states: torch.Tensor,
+        cos: torch.Tensor | None = None,
+        sin: torch.Tensor | None = None,
+        *,
+        try_fused: bool = False,
+    ):
         """Mistral Large 4 query path for the no-q-LoRA SFA contract.
 
         Mistral projects Q directly from hidden states and applies SSMax before
@@ -1350,18 +1364,27 @@ class AscendSFAImpl(MLAAttentionImpl):
         q = self.q_proj(hidden_states)[0].view(-1, self.local_num_heads, projected_head_dim)
 
         ssmax = getattr(self, "mistral_ssmax", None)
+        fused = None
         if ssmax is not None:
             log_positions = getattr(self, "mistral_log_positions", None)
             if log_positions is None:
                 raise RuntimeError("Mistral Large 4 SFA query is missing log positions for SSMax.")
-            if use_rope:
-                q = ssmax(q, log_positions)
-            else:
-                q = ssmax(q, log_positions, out_head_dim=self.qk_head_dim)
+            if try_fused and use_rope and self.qk_nope_head_dim == self.qk_rope_head_dim == 64:
+                from vllm_ascend.ops.triton.mistral_mla_q import try_ssmax_split_rope
+
+                fused = try_ssmax_split_rope(q, log_positions, ssmax.s, ssmax.b, cos, sin)
+            if fused is None:
+                if use_rope:
+                    q = ssmax(q, log_positions)
+                else:
+                    q = ssmax(q, log_positions, out_head_dim=self.qk_head_dim)
         elif not use_rope:
             q = torch.nn.functional.pad(q, (0, self.qk_rope_head_dim))
 
-        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        if fused is None:
+            q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        else:
+            q_nope, q_pe = fused
         if (
             q_nope.dtype in [torch.float16, torch.bfloat16]
             and hasattr(torch_npu, "npu_transpose_batchmatmul")
@@ -1376,6 +1399,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
         else:
             ql_nope = torch.bmm(q_nope.transpose(0, 1), self.W_UK_T).transpose(0, 1)
+        if fused is None and use_rope and cos is not None and sin is not None:
+            q_pe = self.rope_single(q_pe, cos, sin)
         return ql_nope, q_pe
 
     def _v_up_proj(self, x):
@@ -2015,9 +2040,16 @@ class AscendSFAImpl(MLAAttentionImpl):
                 knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
 
             if mistral_no_q_lora:
-                ql_nope, q_pe = self._mistral_q_proj_and_k_up_proj(hidden_states)
-                if self.mistral_use_rope:
-                    q_pe = self.rope_single(q_pe, cos, sin)
+                ql_nope, q_pe = self._mistral_q_proj_and_k_up_proj(
+                    hidden_states,
+                    cos,
+                    sin,
+                    try_fused=(
+                        envs.VLLM_ASCEND_MISTRAL_MLA_Q_FUSION
+                        and attn_metadata.num_prefills == 0
+                        and attn_metadata.num_decode_tokens > 0
+                    ),
+                )
             else:
                 ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
                 if self.qk_rope_head_dim:
@@ -2161,10 +2193,17 @@ def custom_kv_rmsnorm_rope(
     epsilon: float = 1e-5,
     dst_type: torch.dtype | int = torch.float8_e4m3fn,
     tile_size: int = SFA_QSFA_TILE_SIZE,
+    try_fused_k_rope: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     rms_in, rope_in = kv.split([kv_lora_rank, qk_rope_head_dim], dim=-1)
     k_nope, _ = torch_npu.npu_rms_norm(rms_in, gamma, epsilon=epsilon)
-    k_rope = torch_npu.npu_interleave_rope(rope_in, cos, sin) if qk_rope_head_dim else rope_in
+    k_rope = None
+    if try_fused_k_rope and kv_lora_rank == 512 and qk_rope_head_dim == 64 and dst_type == torch.float8_e4m3fn:
+        from vllm_ascend.ops.triton.mistral_mla_k_rope import try_slice_k_rope
+
+        k_rope = try_slice_k_rope(kv, cos, sin)
+    if k_rope is None:
+        k_rope = torch_npu.npu_interleave_rope(rope_in, cos, sin) if qk_rope_head_dim else rope_in
 
     prefix_shape = k_nope.shape[:-1]
     # npu_rms_norm returns a contiguous tensor, so the explicit

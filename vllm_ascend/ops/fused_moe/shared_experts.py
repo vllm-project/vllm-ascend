@@ -27,6 +27,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.activation import SituAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoEMethodBase
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -46,6 +47,7 @@ SITU_MX_DST_TYPE_E4M3FN = 36
 MXFP8_ACTIVATION_GROUP_SIZE = 32
 # SwiGLU halves the input width; MX scales are stored in pairs of groups.
 SWIGLU_MX_INPUT_ALIGNMENT = 4 * MXFP8_ACTIVATION_GROUP_SIZE
+BLOCK_FP8_SWIGLU_MX_MAX_TOKENS = 8
 SWIGLU_MX_QUANT_MODE = 2
 
 
@@ -619,8 +621,19 @@ class AscendSharedExperts:
         )
         return self.part2(submitted_gate_up.hidden_states, (quantized_x, swiglu_out_scale))
 
+    def _block_fp8_down_mx_scheme(self):
+        if not envs.VLLM_ASCEND_MISTRAL_SHARED_SWIGLU_MX:
+            return None
+        # FP8 block quantization imports the MoE implementation.
+        from vllm_ascend.quantization.methods.w8a8.fp8_block import AscendFp8BlockLinearMethod
+
+        scheme = getattr(getattr(self.layer.down_proj, "quant_method", None), "quant_method", None)
+        return scheme.mxfp8_method if type(scheme) is AscendFp8BlockLinearMethod else None
+
     def _can_fuse_w8a8_mxfp_activation(self, gate_up: torch.Tensor) -> bool:
-        if self.quant_type != QuantType.W8A8MXFP or has_lora(self.lora_context):
+        if has_lora(self.lora_context) or (
+            self.quant_type != QuantType.W8A8MXFP and self._block_fp8_down_mx_scheme() is None
+        ):
             return False
 
         # Lazy import: the quantization module imports routed/shared MoE code.
@@ -628,6 +641,15 @@ class AscendSharedExperts:
 
         down_proj = self.layer.down_proj
         scheme = getattr(getattr(down_proj, "quant_method", None), "quant_method", None)
+        block_mx = self._block_fp8_down_mx_scheme()
+        if block_mx is not None:
+            if (
+                gate_up.ndim != 2
+                or not 0 < gate_up.shape[0] <= BLOCK_FP8_SWIGLU_MX_MAX_TOKENS
+                or not hasattr(torch_npu, "npu_swiglu_mx_quant")
+            ):
+                return False
+            scheme = block_mx
         # Prepared input bypasses the scheme's input padding and quantization.
         # Limit fusion to the existing kernel's BF16/default-MX contract.
         return (
@@ -642,12 +664,23 @@ class AscendSharedExperts:
             and gate_up.ndim == 2
             and gate_up.shape[-1] > 0
             and gate_up.shape[-1] % SWIGLU_MX_INPUT_ALIGNMENT == 0
-            and hasattr(torch.ops._C_ascend, "npu_swiglu_group_quant")
+            and (block_mx is not None or hasattr(torch.ops._C_ascend, "npu_swiglu_group_quant"))
         )
 
     def _prepare_w8a8_mxfp_down_input(self, gate_up: torch.Tensor) -> LinearInput:
         """Try fused SwiGLU/MX quant, otherwise use the scheme's preparation."""
         if self._can_fuse_w8a8_mxfp_activation(gate_up):
+            block_mx = self._block_fp8_down_mx_scheme()
+            if block_mx is not None:
+                quantized_x, scale = torch_npu.npu_swiglu_mx_quant(
+                    gate_up,
+                    activate_left=True,
+                    swiglu_mode=0,
+                    dst_type=torch.float8_e4m3fn,
+                    scale_alg=block_mx.dynamic_mx_quant_scale_alg,
+                )
+                logger.info_once("Block-FP8 shared expert SwiGLU MX fusion active")
+                return PreparedLinearInput(quantized_x, scale, gate_up.dtype)
             quantized_x, scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
                 gate_up,
                 topk_weight=None,
@@ -720,7 +753,9 @@ class AscendSharedExperts:
             return SharedExpertMLPPath.A8_MXFP_FUSED
         # Selecting this path does not guarantee fusion: tensor metadata and
         # the Down scheme are checked after the registered Gate-Up linear.
-        if not has_lora(self.lora_context) and self.quant_type == QuantType.W8A8MXFP:
+        if not has_lora(self.lora_context) and (
+            self.quant_type == QuantType.W8A8MXFP or self._block_fp8_down_mx_scheme() is not None
+        ):
             return SharedExpertMLPPath.W8A8_MXFP_LINEAR
         return SharedExpertMLPPath.LINEAR_WRAPPER
 

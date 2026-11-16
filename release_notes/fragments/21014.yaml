@@ -28,3 +28,10 @@ entries:
       MoE layer no longer holds a dense model-dtype copy of each expert. For a Mistral Large 4
       expert that staging buffer drops from 151 MB to 13 MB.
     hardware: [Ascend 950]
+  - category: performance
+    text: >-
+      Mistral Large 4 on Ascend 950 can opt in to fused MLA query preparation,
+      fused key RoPE, and shared expert SwiGLU with MXFP8 activation quantization
+      for small decode batches.
+    model: mistral-large-4
+    hardware: [Ascend 950]

@@ -1110,10 +1110,15 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self.fa_quant_layer or self.dtype not in (torch.bfloat16, torch.float16) or self.enable_kv_nz:
             return False
         dcp_size = config.parallel_config.decode_context_parallel_size
+        if dcp_size > 1 and self.sliding_window is not None and config.speculative_config is not None:
+            return False
         # History sees all Q heads in the DCP group; current uses local heads.
         if self.use_pcp or self.num_heads * dcp_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
             return False
-        if not supports_component_major_mla_pd(config) or enable_sfa(config):
+        if not supports_component_major_mla_pd(config):
+            return False
+        # A DSpark draft can use MLA alongside an SFA target.
+        if enable_sfa(config) and config.speculative_config is None:
             return False
         return get_flashmla_ops() is not None
 
@@ -1434,7 +1439,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if not isinstance(get_offloader(), NoopOffloader) or not self.supports_prolog_v3_writer():
             return
         config = self.vllm_config
-        if enable_sfa(config):
+        # Avoid preparing unused PROLOG weights for FIA drafts under SFA targets.
+        if enable_sfa(config) and not self.use_flashmla:
             return
         if not config.use_v2_model_runner and (
             hasattr(config.model_config.hf_config, "compress_ratios")
@@ -3073,13 +3079,14 @@ class AscendMLAImpl(MLAAttentionImpl):
         flash.query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
         flash.query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
         record_attention_compute_start()
+        inputs = flash.draft_window or flash
         latent, _ = flash.adapter.attention(
             flash.query,
             fused_cache,
-            block_table=flash.block_table,
-            cache_seqlens=flash.cache_lens,
-            cu_seqlens_q=flash.cu,
-            seqused_q=flash.used_q,
+            block_table=inputs.block_table,
+            cache_seqlens=inputs.cache_lens,
+            cu_seqlens_q=inputs.cu,
+            seqused_q=inputs.used_q,
             metadata=flash.schedule,
             attn_mask=flash.attn_mask,
         )
