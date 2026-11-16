@@ -31,6 +31,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase, ReqMeta
 
+from .layerwise_cache_layout import reuse_sources
+
 _KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
 
 
@@ -928,6 +930,8 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
             if failed_keys:
                 self._revoke_range_keys(failed_keys)
                 self._active_put_keys.difference_update(failed_keys)
+                if self.raise_on_transfer_failure:
+                    raise RuntimeError("Mooncake offload range PUT failed before buffer reuse")
 
         if not (layer_id == self.final_layer_id if final_group_layer is None else final_group_layer):
             return
@@ -944,6 +948,8 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
             failed_keys = [key for key, result in zip(active_keys, commit_results, strict=True) if result != 0]
             if failed_keys:
                 self._revoke_range_keys(failed_keys)
+                if self.raise_on_transfer_failure:
+                    raise RuntimeError("Mooncake offload commit failed")
             committed_keys = [key for key, result in zip(active_keys, commit_results, strict=True) if result == 0]
             if self._session_tracker is not None:
                 self._session_tracker.commit_put_keys(committed_keys)
@@ -1236,13 +1242,14 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         layer_id = data.layer_id
         try:
             wait_for_save = data.wait_for_save_layer
-            if wait_for_save is not None:
-                if not self._wait_for_event(self.layer_save_finished_events[wait_for_save], self.save_failure_checker):
+            for source_layer in reuse_sources(wait_for_save):
+                if not self._wait_for_event(self.layer_save_finished_events[source_layer], self.save_failure_checker):
                     return
                 if self.save_failure_checker is not None:
                     self.save_failure_checker()
-                self.sync_save_events[wait_for_save].synchronize()
-                self.layer_save_finished_events[wait_for_save].clear()
+                self.sync_save_events[source_layer].synchronize()
+                if isinstance(data.wait_for_save_layer, int):
+                    self.layer_save_finished_events[source_layer].clear()
 
             if data.attention_start_gate is not None:
                 if not self._wait_for_event(data.attention_start_gate):
@@ -1314,17 +1321,18 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         layer_id = data.layer_id
         attention_start_gate = data.attention_start_gate
 
-        if wait_for_save is not None:
-            if not self._wait_for_event(self.layer_save_finished_events[wait_for_save], self.save_failure_checker):
+        for source_layer in reuse_sources(wait_for_save):
+            if not self._wait_for_event(self.layer_save_finished_events[source_layer], self.save_failure_checker):
                 return False
             if self.save_failure_checker is not None:
                 self.save_failure_checker()
             # Non-saving TP ranks have no D2H task to synchronize the event.
             # Their CPU save-finished signal only means the event was recorded;
             # wait for the NPU work before reusing the local HBM buffer.
-            self.sync_save_events[wait_for_save].synchronize()
+            self.sync_save_events[source_layer].synchronize()
             logger.debug("Layer save event cleared: layer %d", wait_for_save)
-            self.layer_save_finished_events[wait_for_save].clear()
+            if isinstance(data.wait_for_save_layer, int):
+                self.layer_save_finished_events[source_layer].clear()
 
         if self.load_disabled.is_set():
             if self.external_slot_release_waiter is not None:

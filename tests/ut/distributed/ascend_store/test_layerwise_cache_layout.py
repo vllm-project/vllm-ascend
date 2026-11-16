@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    LayerwiseCacheTopology,
     apply_layerwise_kv_cache_plan,
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
@@ -21,6 +22,58 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     get_physical_layer_index,
 )
 from vllm_ascend.utils import get_kv_cache_tensor_layers
+
+
+@pytest.mark.parametrize("backend", ["mooncake", "memcache"])
+def test_hybrid_main_packs_keep_auxiliary_storage_and_reuse_plan(backend):
+    names = [f"model.layers.{layer}.attn" for layer in range(6)]
+    attention = _make_full_attention_spec()
+    recurrent = MambaSpec(block_size=2, shapes=((32,),), dtypes=(torch.int8,), mamba_cache_mode="align")
+    auxiliary = [f"model.layers.{layer}.indexer.k_cache" for layer in (0, 2, 4)]
+    groups = [
+        SimpleNamespace(layer_names=names[::2], kv_cache_spec=attention),
+        SimpleNamespace(layer_names=names[1::2], kv_cache_spec=recurrent),
+        SimpleNamespace(layer_names=auxiliary, kv_cache_spec=attention),
+    ]
+    packs = tuple(tuple(names[layer : layer + 2]) for layer in (0, 2, 4))
+    tensors = [
+        KVCacheTensor(size=128, layers=list(pack), block_stride=32, layer_stride=0, offset=0)
+        for pack in packs + tuple((name,) for name in auxiliary)
+    ]
+    cache = SimpleNamespace(
+        num_blocks=4,
+        kv_cache_groups=groups,
+        kv_cache_tensors=tensors,
+        layerwise_cache_topology=LayerwiseCacheTopology(
+            main_packs=packs,
+            group_ids=tuple((name, gid) for gid, group in enumerate(groups) for name in group.layer_names),
+        ),
+    )
+    config = _make_vllm_config(6, 1)
+    config.kv_transfer_config.kv_role = "kv_producer"
+    config.kv_transfer_config.kv_connector_extra_config.update(backend=backend, layerwise_independent_layers=[])
+    apply_layerwise_kv_cache_plan(cache, config)
+    assert cache.layerwise_reuse_layout.prefetch_layer_map == {2: 0, 4: 2, 3: 1, 5: 3}
+    assert sum(tensor.size for tensor in cache.kv_cache_tensors) == 4 * 128
+    for tensor in tensors[3:]:
+        assert tensor in cache.kv_cache_tensors
+    plan = cache.layerwise_reuse_layout
+    descriptors = cache.kv_cache_tensors
+    apply_layerwise_kv_cache_plan(cache, config)
+    assert cache.layerwise_reuse_layout is plan
+    assert cache.kv_cache_tensors is descriptors
+
+
+def test_mooncake_reuse_requires_explicit_producer_configuration():
+    config = _make_vllm_config(6, 1).kv_transfer_config
+    config.kv_connector_extra_config["backend"] = "mooncake"
+    config.kv_role = "kv_consumer"
+    with pytest.raises(ValueError, match="kv_producer"):
+        get_layerwise_reuse_config(config)
+    config.kv_connector_extra_config.pop("layerwise_num_shared_buffers")
+    assert get_layerwise_reuse_config(config) is None
+    config.kv_role = "kv_producer"
+    assert get_layerwise_reuse_config(config) is None
 
 
 def _make_kv_cache_tensor(size: int, layer_names: list[str]) -> KVCacheTensor:
@@ -797,3 +850,45 @@ def test_reuse_rejects_out_of_bounds_generic_indexer_descriptor():
     config.kv_cache_tensors[-1].offset = config.kv_cache_tensors[-1].size - 1
     with pytest.raises(ValueError, match="exceeds its backing allocation"):
         apply_layerwise_kv_cache_plan(config, _make_vllm_config(5, 1))
+
+
+def test_generic_mooncake_mtp_cache_is_not_folded_into_target_ring():
+    names = [f"model.layers.{i}.attn" for i in range(5)]
+    spec = _make_full_attention_spec()
+    cache = SimpleNamespace(
+        num_blocks=4,
+        kv_cache_groups=[SimpleNamespace(layer_names=names, kv_cache_spec=spec)],
+        kv_cache_tensors=[
+            KVCacheTensor(size=128, layers=[name], block_stride=32, layer_stride=0, offset=0) for name in names
+        ],
+    )
+    config = _make_vllm_config(4, 1)
+    config.parallel_config = SimpleNamespace(pipeline_parallel_size=1)
+    config.speculative_config = SimpleNamespace(method="deepseek_mtp", num_speculative_tokens=3)
+    config.kv_transfer_config.kv_role = "kv_producer"
+    config.kv_transfer_config.kv_connector_extra_config.update(backend="mooncake", layerwise_independent_layers=[])
+    apply_layerwise_kv_cache_plan(cache, config)
+    assert cache.layerwise_draft_layer_names == (names[4],)
+    assert len(cache.kv_cache_tensors) == 2
+    assert sorted(len(tensor.layers) for tensor in cache.kv_cache_tensors) == [1, 4]
+    assert all(not (names[4] in tensor.layers and len(tensor.layers) > 1) for tensor in cache.kv_cache_tensors)
+    assert 4 not in cache.layerwise_reuse_layout.layer_cache_specs
+
+
+def test_mooncake_shared_buffers_reject_a_sibling_connector():
+    store = _make_vllm_config(8, 1).kv_transfer_config.kv_connector_extra_config
+    store["backend"] = "mooncake"
+    config = SimpleNamespace(
+        kv_connector="MultiConnector",
+        kv_role="kv_producer",
+        kv_connector_extra_config={
+            "connectors": [
+                {"kv_connector": "MooncakeConnectorV2"},
+                {"kv_connector": "AscendStoreConnector", "kv_connector_extra_config": store},
+            ]
+        },
+    )
+    with pytest.raises(ValueError, match="standalone Store connector"):
+        get_layerwise_reuse_config(config)
+    store.pop("layerwise_num_shared_buffers")
+    assert get_layerwise_reuse_config(config) is None

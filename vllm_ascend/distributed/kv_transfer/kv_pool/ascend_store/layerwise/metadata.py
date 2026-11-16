@@ -174,7 +174,7 @@ class LayerTransferTask:
 
 @dataclass
 class LayerLoadTask:
-    wait_for_save_layer: int | None
+    wait_for_save_layer: int | tuple[int, ...] | None
     transfer_tasks: list[LayerTransferTask]
     layer_id: int
     attention_start_gate: AttentionComputeStartGate | None = None
