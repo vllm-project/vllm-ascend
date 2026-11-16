@@ -46,6 +46,11 @@ LCM of these kernel-page sizes and the state dtypes' alignment. A PP-local row
 is computed after layer projection; global specs still identify the layout on
 a stage containing only recurrent or draft layers.
 
+The worker selects packed allocation from the planned `block_outermost` specs,
+without another model-name check. These specs survive PP projection, so packed
+stages share one backing even when their local layers are not a hybrid mix.
+Per-layer attention metadata needs only that layer's `block_outermost` flag.
+
 Descriptors use a layer's own page size as `layer_stride`, the common row size
 as `block_stride`, and its position inside the row as `offset`. All descriptors
 alias one allocation. KDA pages retain their raw Conv and recurrent state sizes.

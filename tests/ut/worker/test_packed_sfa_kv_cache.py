@@ -330,10 +330,15 @@ def test_generic_sfa_mixed_group_keeps_private_caches(monkeypatch, vllm_config, 
 @pytest.mark.parametrize("scale_dtype", [torch.float16, torch.float32])
 @pytest.mark.parametrize("local_layers", [None, (3, 7), (0, 1, 2), (8, 9), (0, 1, 2, 3)])
 @pytest.mark.parametrize("kv_transfer", [False, True])
-def test_packed_cache_allocates_one_backing(monkeypatch, vllm_config, scale_dtype, local_layers, kv_transfer):
+@pytest.mark.parametrize("model_type_present", [True, False], ids=["model-type", "layout-only"])
+def test_packed_cache_allocates_one_backing(
+    monkeypatch, vllm_config, scale_dtype, local_layers, kv_transfer, model_type_present
+):
     if kv_transfer:
         vllm_config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2")
     plan, specs = make_packed_cache(vllm_config, scale_dtype, local_layers=local_layers)
+    if not model_type_present:
+        del vllm_config.model_config.hf_config.model_type
     allocate = Mock(wraps=torch.zeros)
     monkeypatch.setattr(attn_utils.torch, "zeros", allocate)
     raw = attn_utils._allocate_kv_cache(plan, shared_layers={}, device=torch.device("cpu"))

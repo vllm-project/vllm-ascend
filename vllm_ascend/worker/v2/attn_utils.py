@@ -551,7 +551,6 @@ def build_attn_metadata(
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
     common_v41_batch_metadata: dict[str, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
-    packed_sfa = is_packed_sfa_groups(kv_cache_groups)
     batch_tq_slots = uses_turboquant_groups(kv_cache_groups)
     formatted_slot_mappings = None
     if batch_tq_slots:
@@ -651,7 +650,7 @@ def build_attn_metadata(
                     query_start_loc_cpu=common_attn_metadata.query_start_loc_cpu[: num_actual_reqs + 1],
                 )
             group_common_metadata = common_attn_metadata
-            if packed_sfa and getattr(attn_group.kv_cache_spec, "block_outermost", False):
+            if getattr(attn_group.kv_cache_spec, "block_outermost", False):
                 group_common_metadata = map_packed_sfa_metadata(
                     attn_metadata_builder,
                     common_attn_metadata,
@@ -1252,6 +1251,7 @@ def _allocate_kv_cache(
             for name in get_kv_cache_tensor_layers(descriptor):
                 kv_cache_raw_tensors[name] = backing
         return kv_cache_raw_tensors
+    packed_sfa = is_packed_sfa_groups(kv_cache_config.kv_cache_groups)
     has_mamba = any(isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values())
     has_attention = any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
     use_hybrid_layout = has_mamba and has_attention
@@ -1336,13 +1336,8 @@ def _allocate_kv_cache(
     # Hybrid groups share one backing; descriptors carry per-layer offsets.
     hybrid_backing: torch.Tensor | None = None
     step_backing: torch.Tensor | None = None
-    # Match the packed planner's model scope. Generic DeepSeek/GLM SFA groups
-    # also contain MLA and indexer specs, but retain independent allocations.
-    # K3.1 PP ranks with only recurrent or draft layers still share one backing.
-    hf_config = getattr(getattr(vllm_config, "model_config", None), "hf_config", None)
-    is_kimi_k31 = getattr(hf_config, "model_type", None) == "kimi_k31"
-    packed_sfa = is_kimi_k31 and is_packed_sfa_groups(kv_cache_config.kv_cache_groups)
-    if (use_hybrid_layout or is_kimi_k31) and not is_dsv4_model:
+    # Packed specs also retain shared storage on recurrent/draft-only PP stages.
+    if (packed_sfa or use_hybrid_layout) and not is_dsv4_model:
         hybrid_backing = _allocate_int8_cache_tensor(kv_cache_config.kv_cache_tensors[0].size, alignment, device)
 
     layerwise_reuse = get_layerwise_reuse_config(vllm_config.kv_transfer_config) is not None
