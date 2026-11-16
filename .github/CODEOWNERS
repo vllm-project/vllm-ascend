@@ -84,9 +84,11 @@
 /vllm_ascend/device_allocator @weijinqian0 @Ronald1995
 
 # distributed
-/vllm_ascend/distributed @LCAIZJ
+/vllm_ascend/distributed @LCAIZJ @zzzzwwjj @weijinqian0
+/vllm_ascend/distributed/ec_transfer @weijinqian0
 /vllm_ascend/distributed/eplb @freyfwt
 /vllm_ascend/distributed/weight_transfer @Ronald1995 @Annarine
+/vllm_ascend/distributed/kv_transfer @weijinqian0
 /vllm_ascend/distributed/kv_transfer/kv_pool @weijinqian0 @HF-001
 /vllm_ascend/distributed/kv_transfer/kv_p2p @wangxiaoteng888 @nwpu-zxr
 /vllm_ascend/distributed/kv_transfer/sparse_kv_offload @weiguihua2 @zhangsicheng5 @zhenwenqi2024 @pisceskkk @weijinqian0
