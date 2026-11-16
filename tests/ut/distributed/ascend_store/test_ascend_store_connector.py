@@ -18,12 +18,18 @@
 import types
 import unittest
 from itertools import product
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 # isort: off
 from zmq.error import ZMQError
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyClient
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 import torch
+from tests.ut.distributed.ascend_store import test_request_lifecycle as lifecycle
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
@@ -35,6 +41,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata
 
 # isort: on
+
+
+# Reuse the byte-copy lifecycle fixtures for connector-level integration.
+byte_pooling_session = lifecycle.byte_pooling_session
+devices_and_store = lifecycle.devices_and_store
 
 
 class TestKVPoolWorkerConstruction(unittest.TestCase):
@@ -93,6 +104,75 @@ class TestAscendStoreKVEvents(unittest.TestCase):
         ev._aggregator.clear_events.assert_called_once()
         ev._aggregator.add_events.assert_called_once_with(common)
         ev._aggregator.reset_workers.assert_called_once()
+
+
+# Exercise actual IPC, message codecs, the server thread, and resource cleanup.
+@pytest.mark.parametrize("scenario", ["lookup", "empty-hashes", "reset", "reset-error", "unknown", "malformed"])
+def test_lookup_server_protocol_results_and_cleanup(scenario, monkeypatch):
+    queries, resets = [], []
+
+    def lookup(token_len, hashes, groups, *, use_layerwise, hbm_hit_tokens):
+        queries.append((token_len, hashes, groups, use_layerwise, hbm_hit_tokens))
+        return 32
+
+    def reset():
+        resets.append(True)
+        if scenario == "reset-error":
+            raise RuntimeError("reset failed")
+
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(data_parallel_index=0),
+        kv_transfer_config=SimpleNamespace(kv_connector_extra_config={}),
+    )
+    # Keep IPC paths short; pytest's tmp_path can exceed the Unix path limit.
+    with TemporaryDirectory(dir="/tmp") as rpc_dir:
+        monkeypatch.setenv("VLLM_RPC_BASE_PATH", rpc_dir)
+        server = LookupKeyServer(SimpleNamespace(lookup_scheduler=lookup, reset_store=reset), config)
+        client = LookupKeyClient(config)
+        try:
+            if scenario in ("lookup", "empty-hashes"):
+                hashes = [] if scenario == "empty-hashes" else [bytes.fromhex("00ff")]
+                assert client.lookup(64, hashes, [0, 2], hbm_hit_tokens=16) == 32
+                assert queries == [(64, [h.hex() for h in hashes], [0, 2], False, 16)]
+                assert resets == []
+            elif scenario.startswith("reset"):
+                assert client.reset() is (scenario == "reset")
+                assert resets == [True]
+                assert queries == []
+            else:
+                client.socket.send_multipart([b"lookup"] if scenario == "malformed" else [b"unknown"])
+                assert client.socket.recv() == b"\x00"
+                assert queries == [] and resets == []
+        finally:
+            client.close()
+            server.close()
+        assert not server.thread.is_alive()
+        assert server.socket.closed and server.ctx.closed
+        assert client.socket.closed and client.ctx.closed
+
+
+@pytest.mark.parametrize("layout", ["contiguous", "strided", "segmented"])
+@pytest.mark.parametrize("prefix_blocks", [1, 2])
+def test_layerwise_kv_both_roundtrip_preserves_bytes(byte_pooling_session, layout, prefix_blocks):
+    session = byte_pooling_session(layout=layout, use_layerwise=True)
+    prefix_tokens = prefix_blocks * 128
+    producer = session.new_request("layer-producer", list(range(prefix_tokens)))
+    session.run(producer)
+    assert session.backend.payloads
+    session.clear_local_cache()
+    consumer = session.new_request("layer-consumer", list(range(prefix_tokens + 1)))
+    restored_chunks = set()
+
+    def verify_loaded(output):
+        for meta in output.kv_connector_metadata.requests:
+            if meta.load_spec is not None and meta.load_spec.can_load:
+                session.assert_loaded(consumer, prefix_tokens)
+                restored_chunks.update(range(meta.load_spec.kvpool_cached_tokens // 128))
+
+    session.run(consumer, verify_loaded)
+    assert restored_chunks == set(range(prefix_blocks))
+    assert session.backend.loads
+    assert [start for req_id, start, _ in session.computed if req_id == consumer.request_id] == [prefix_tokens]
 
 
 class TestLookupKeyServer(unittest.TestCase):
