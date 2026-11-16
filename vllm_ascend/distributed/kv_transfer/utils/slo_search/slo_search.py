@@ -9,6 +9,8 @@ Example:
 Requires the regex package. No project modules are imported.
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import json
@@ -51,7 +53,7 @@ def parse_cache_summary(text, required=False):
     External KV cache retains its original name. Zero queries means an
     undefined rate, even when the dependency formats it as 0.00%.
     """
-    result = {}
+    result: dict[str, float | int | str | None] = {}
     for cache in ("hbm", "external"):
         result.update(
             {
@@ -129,7 +131,7 @@ def parse_metrics(text, percentile, latency_unit, stage="total", require_cache=F
     text = text.rsplit("[\u5f00\u59cb] \u5168\u91cf\u6570\u636e\u96c6\u6d4b\u8bd5", 1)[-1]
     header = None
     result = {}
-    counters = {}
+    counters: dict[str, float] = {}
     labels = {
         "Output Token Throughput": ("output_tokens_per_s", "token/s"),
         "Total Token Throughput": ("total_tokens_per_s", "token/s"),
@@ -163,6 +165,8 @@ def parse_metrics(text, percentile, latency_unit, stage="total", require_cache=F
             header = normalized
             continue
         metric = re.fullmatch(r"(.*?)\s*(?:\(([^()]*)\))?", cells[0])
+        if metric is None:
+            raise TrialError(f"invalid metric label: {cells[0]!r}")
         name, row_unit = metric[1].strip(), metric[2]
         if name == "TPOT" and not tpot_applicable:
             continue
