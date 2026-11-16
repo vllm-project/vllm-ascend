@@ -102,3 +102,6 @@ owner and restore the original order. A worker uses one HIXL receive buffer
 and transport for the ordered owners. The capacity limit still applies to each
 request. Stop consumers before owners. All owners are required for the life of
 the deployment; there is no automatic failover.
+
+For a single owner, use the `endpoint` string configuration. The `endpoints`
+list requires at least two owners.
