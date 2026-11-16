@@ -1116,13 +1116,17 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec1(const QLIV2Common::RunIn
             LocalTensor<float> sortScoreUb = sortBuff;
             LocalTensor<float> sortIndiceUb = sortBuff[cuS2LenVecAlign];
             PipeBarrier<PIPE_V>();
-            Duplicate(sortScoreUb.template ReinterpretCast<int32_t>(), QLIV2ServiceVec::NEG_INF, cuS2LenVecAlign);
-            PipeBarrier<PIPE_V>();
+            // 满块时有效前缀由 Adds 全覆盖，整段 Duplicate 可省；尾块保持原全量初始化，
+            // 避免从非 32B 对齐偏移做 Duplicate（会触发 aicore 异常）。
+            if (cuS2LenVecAlign != cuS2Len) {
+                Duplicate(sortScoreUb.template ReinterpretCast<int32_t>(), QLIV2ServiceVec::NEG_INF, cuS2LenVecAlign);
+                PipeBarrier<PIPE_V>();
+            }
             Adds(sortScoreUb, mmInUb, 0.0f, cuS2Len);
             PipeBarrier<PIPE_V>();
             inQueue_.FreeTensor(mmInUb);
             LocalTensor<int32_t> sortIndiceUbInt = sortIndiceUb.template ReinterpretCast<int32_t>();
-            // 无效数据索引填充为-1
+            // 无效数据索引填充为-1（满块时同样可省）
             if (cuS2LenVecAlign != cuS2Len) {
                 Duplicate(sortIndiceUbInt, -1, cuS2LenVecAlign);
                 PipeBarrier<PIPE_V>();
@@ -1140,7 +1144,12 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec1(const QLIV2Common::RunIn
             LocalTensor<float> tmpSortBuf = sortBuff[2 * cuS2LenVecAlign];
             QLIV2ServiceVec::SortAll(sortBuff, tmpSortBuf, cuS2LenVecAlign);
             PipeBarrier<PIPE_V>();
-            if (constInfo_.useLocalVisibleLengths) {
+            // 首个 S2 块（本核该行的 S2 起点）且为满块：running TopK 初始全 -inf，
+            // 首次 MergeSort 等价于把 sortBuff 直接搬过去，省一次 MrgSort（opt1，移植自 kim3.1）。
+            if (info.isFirstS2InnerLoop && cuS2LenVecAlign == static_cast<int32_t>(topkWidth_)) {
+                AscendC::DataCopy(globalTopkUb_[innerS1Idx * topkPairWidth_], sortBuff,
+                                  static_cast<int64_t>(topkPairWidth_));
+            } else if (constInfo_.useLocalVisibleLengths) {
                 QLIV2ServiceVec::MergeSortVecCopy(globalTopkUb_[innerS1Idx * topkPairWidth_], topkWidth_,
                                                   sortBuff, cuS2LenVecAlign, tmpSortBuf, true);
             } else {
