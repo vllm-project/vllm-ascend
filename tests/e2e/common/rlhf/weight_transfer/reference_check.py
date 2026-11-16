@@ -321,7 +321,7 @@ def draft_serve_args(checkpoint: Path, speculative_case, port: int, *, enforce_e
     args = [
         "--tokenizer",
         case.model,
-        *case.extra_server_args,
+        *case.server_args(),
         "--served-model-name",
         case.id,
         "--dtype",
@@ -337,8 +337,6 @@ def draft_serve_args(checkpoint: Path, speculative_case, port: int, *, enforce_e
         "0.2",
         "--kv-cache-memory-bytes",
         str(128 * 2**20),
-        "--distributed-executor-backend",
-        "mp",
         "--port",
         str(port),
         "--additional-config",

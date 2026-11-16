@@ -343,7 +343,7 @@ def test_hccl_send_does_not_resume_after_a_trainer_failure():
 
 
 @pytest.mark.parametrize("layers", [1, 2])
-def test_reduced_checkpoint_is_independently_loadable(random_weight_cases, tmp_path, layers):
+def test_draft_checkpoint_applies_its_case_overrides(random_weight_cases, tmp_path, layers):
     """A draft reads its own reduced config without target CLI overrides."""
     from dataclasses import replace
 
@@ -354,12 +354,13 @@ def test_reduced_checkpoint_is_independently_loadable(random_weight_cases, tmp_p
     case = replace(
         original_case,
         hf_overrides={"num_hidden_layers": layers, "layer_types": ["full_attention"] * layers},
-        write_config_overrides=True,
     )
-    source = FixedRandomWeightSource(case, torch.device("cpu"))
+    source = FixedRandomWeightSource(original_case, torch.device("cpu"), draft_case=case)
     destination = tmp_path / "reduced-checkpoint"
     with patch("huggingface_hub.hf_hub_download", return_value=str(Path(case.model) / "config.json")):
         source.write_checkpoint(destination)
+    assert (destination / "config.json").read_bytes() == original_config
+    destination = destination / "draft"
     config = AutoConfig.from_pretrained(destination)
     assert config.num_hidden_layers == layers
     assert config.layer_types == ["full_attention"] * layers
@@ -448,6 +449,7 @@ def test_four_draft_cases_select_the_actual_speculative_method(speculative_case,
         lane = _flag_map(draft_serve_args(tmp_path, speculative_case, PORT, enforce_eager=eager, live=True))
         assert lane.pop("--weight-transfer-config") == '{"backend": "hccl"}'
         assert lane == reference
+        assert json.loads(lane["--hf-overrides"]) == speculative_case.target.hf_overrides
         spec = json.loads(lane["--speculative-config"])
         assert spec["method"] == speculative_case.method
         assert spec["method"] != "draft_model"

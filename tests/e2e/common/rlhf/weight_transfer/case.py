@@ -47,8 +47,6 @@ class WeightUpdateModelCase:
         expand_fused_expert_params
     )
     checkpoint_parameter_adapter: Callable | None = None
-    # Independent draft configs cannot inherit target CLI overrides.
-    write_config_overrides: bool = False
     expert_intermediate_size: int | None = None
     trust_remote_code: bool = True
     extra_server_args: tuple[str, ...] = ()
@@ -109,22 +107,6 @@ QWEN35_CASE = WeightUpdateModelCase(
 
 
 QWEN_CASES = (QWEN35_CASE,)
-
-# A separate draft_model uses the same Qwen3 schema and tokenizer as its
-# target. Reduce depth while retaining the published parameter dimensions.
-QWEN3_DRAFT_TARGET_CASE = WeightUpdateModelCase(
-    id="qwen3-draft-target",
-    model="Qwen/Qwen3-8B",
-    hf_overrides={"num_hidden_layers": 2, "layer_types": ["full_attention"] * 2},
-    write_config_overrides=True,
-)
-QWEN3_DRAFT_CASE = WeightUpdateModelCase(
-    id="qwen3-draft",
-    model="Qwen/Qwen3-8B",
-    hf_overrides={"num_hidden_layers": 1, "layer_types": ["full_attention"]},
-    write_config_overrides=True,
-)
-
 
 DEEPSEEK_V4_CASE = WeightUpdateModelCase(
     id="deepseek-v4-flash-bf16-derived-gate",
@@ -337,18 +319,15 @@ class DraftWeightUpdateCase:
 
 # Keep the published hidden/MLP/head dimensions, vocabulary and tokenizer.
 # Like the target cases above, reduce depth rather than inventing a tiny width.
-_QWEN3_REDUCED = {"num_hidden_layers": 4, "layer_types": ["full_attention"] * 4}
 QWEN3_DRAFT_TARGET = WeightUpdateModelCase(
     id="qwen3-reduced",
     model="Qwen/Qwen3-8B",
-    hf_overrides=_QWEN3_REDUCED,
-    write_config_overrides=True,
+    hf_overrides={"num_hidden_layers": 4, "layer_types": ["full_attention"] * 4},
 )
 
 
 def _qwen3_draft_case(method: str, architecture: str) -> DraftWeightUpdateCase:
     overrides = {
-        **_QWEN3_REDUCED,
         "num_hidden_layers": 1,
         "layer_types": ["full_attention"],
         "architectures": [architecture],
@@ -373,7 +352,6 @@ def _qwen3_draft_case(method: str, architecture: str) -> DraftWeightUpdateCase:
             model="Qwen/Qwen3-8B",
             hf_overrides=overrides,
             checkpoint_parameter_adapter=qwen3_draft_parameters,
-            write_config_overrides=True,
         ),
     )
 
@@ -389,14 +367,12 @@ DEEPSEEK_V4_DSPARK_CASE = DraftWeightUpdateCase(
         DEEPSEEK_V4_CASE,
         id="deepseek-v4-flash-dspark-target",
         skip_reason=None,
-        write_config_overrides=True,
         hf_overrides={"num_hidden_layers": 4, "n_routed_experts": 8, "compress_ratios": [0, 0, 4, 128]},
     ),
     draft=replace(
         DEEPSEEK_V4_CASE,
         id="deepseek-v4-flash-dspark-draft",
         skip_reason=None,
-        write_config_overrides=True,
         checkpoint_parameter_adapter=deepseek_v4_dspark_parameters,
         hf_overrides={
             "num_hidden_layers": 4,
@@ -415,13 +391,6 @@ DEEPSEEK_V4_DSPARK_CASE = DraftWeightUpdateCase(
     ),
 )
 
-_QWEN3_NEXT_REDUCED = {
-    "num_hidden_layers": 4,
-    "layer_types": ["linear_attention"] * 3 + ["full_attention"],
-    "num_experts": 8,
-    "num_experts_per_tok": 2,
-    "num_nextn_predict_layers": 1,
-}
 QWEN3_NEXT_MTP_CASE = DraftWeightUpdateCase(
     id="qwen3-next-mtp",
     method="qwen3_next_mtp",
@@ -429,17 +398,28 @@ QWEN3_NEXT_MTP_CASE = DraftWeightUpdateCase(
     target=WeightUpdateModelCase(
         id="qwen3-next-reduced",
         model="Qwen/Qwen3-Next-80B-A3B-Instruct",
-        hf_overrides=_QWEN3_NEXT_REDUCED,
-        write_config_overrides=True,
+        hf_overrides={
+            "num_hidden_layers": 4,
+            "layer_types": ["linear_attention"] * 3 + ["full_attention"],
+            "num_experts": 8,
+            "num_experts_per_tok": 2,
+            "num_nextn_predict_layers": 1,
+        },
     ),
     draft=WeightUpdateModelCase(
         id="qwen3-next-mtp-draft",
         model="Qwen/Qwen3-Next-80B-A3B-Instruct",
-        hf_overrides={**_QWEN3_NEXT_REDUCED, "layer_types": ["full_attention"] * 4},
+        hf_overrides={
+            "num_hidden_layers": 4,
+            "layer_types": ["full_attention"] * 4,
+            "num_experts": 8,
+            "num_experts_per_tok": 2,
+            "num_nextn_predict_layers": 1,
+        },
         checkpoint_parameter_adapter=qwen3_next_mtp_parameters,
-        write_config_overrides=True,
     ),
 )
+
 DRAFT_MODEL_CASES = (QWEN3_EAGLE3_CASE, QWEN3_DFLASH_CASE, DEEPSEEK_V4_DSPARK_CASE, QWEN3_NEXT_MTP_CASE)
 
 
