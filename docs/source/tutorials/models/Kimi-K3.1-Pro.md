@@ -309,7 +309,6 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --enable-prefix-caching \
@@ -414,7 +413,6 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
@@ -554,7 +552,6 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
             --tokenizer-mode kimi_k3 \
             --mm-processor-cache-gb 0 \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --enforce-eager \
             --additional-config '{"enable_mlapo":false,"enable_flashcomm1":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":false,"enable_fused_mc2":0,"enable_force_eplb":false}' \
             --profiler-config '{"profiler":"torch","torch_profiler_dir":"<PROFILER_OUTPUT_DIR>","torch_profiler_with_stack":false}' \
@@ -650,7 +647,6 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
             --tokenizer-mode kimi_k3 \
             --mm-processor-cache-gb 0 \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --additional-config '{"enable_mlapo":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true}}' \
             --profiler-config '{"profiler":"torch","torch_profiler_dir":"<PROFILER_OUTPUT_DIR>","torch_profiler_with_stack":false}' \
@@ -957,7 +953,6 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --enable-prefix-caching \
@@ -1054,7 +1049,6 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
@@ -1182,7 +1176,6 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
             --tokenizer-mode kimi_k3 \
             --mm-processor-cache-gb 0 \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --enforce-eager \
             --additional-config '{"enable_mlapo":false,"enable_flashcomm1":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":false,"enable_fused_mc2":0,"enable_force_eplb":false}' \
             --profiler-config '{"profiler":"torch","torch_profiler_dir":"<PROFILER_OUTPUT_DIR>","torch_profiler_with_stack":false}' \
@@ -1278,7 +1271,6 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
             --tokenizer-mode kimi_k3 \
             --mm-processor-cache-gb 0 \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --additional-config '{"enable_mlapo":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true}}' \
             --profiler-config '{"profiler":"torch","torch_profiler_dir":"<PROFILER_OUTPUT_DIR>","torch_profiler_with_stack":false}' \
@@ -1581,7 +1573,6 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
             --attention_config.indexer_kv_dtype int8 \
             --speculative-config '{"method":"dspark","model":"<YOUR_DRAFT_MODEL_PATH>","num_speculative_tokens":3,"draft_tensor_parallel_size":4,"draft_sample_method":"greedy","kv_cache_dtype":"bfloat16","enforce_eager":true}' \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --enable-prefix-caching \
@@ -1687,7 +1678,6 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
             --speculative-config '{"method":"dspark","model":"<YOUR_DRAFT_MODEL_PATH>","num_speculative_tokens":3,"draft_tensor_parallel_size":16,"draft_sample_method":"greedy","kv_cache_dtype":"bfloat16","enforce_eager":false}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --enable-prefix-caching \
@@ -1835,7 +1825,6 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
             --tokenizer-mode kimi_k3 \
             --mm-processor-cache-gb 0 \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --enforce-eager \
             --additional-config '{"enable_mlapo":false,"enable_flashcomm1":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":false,"enable_fused_mc2":0,"enable_force_eplb":false}' \
             --profiler-config '{"profiler":"torch","torch_profiler_dir":"<PROFILER_OUTPUT_DIR>","torch_profiler_with_stack":false}' \
@@ -1953,7 +1942,6 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
             --tokenizer-mode kimi_k3 \
             --mm-processor-cache-gb 0 \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --additional-config '{"enable_mlapo":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true}}' \
             --profiler-config '{"profiler":"torch","torch_profiler_dir":"<PROFILER_OUTPUT_DIR>","torch_profiler_with_stack":false}' \
@@ -2222,5 +2210,3 @@ For common environment, installation, and parameter questions, refer to the [pub
 - **Q: How should TP size be selected?** A: The attention-head count in the checkpoint must be divisible by TP size. TP also changes the KDA state layout and expert placement; check memory requirements and communication performance together.
 
 - **Q: How is DSpark enabled in PD separation?** A: Prepare a DSpark draft checkpoint compatible with the target model on this platform and replace `<YOUR_DRAFT_MODEL_PATH>` in both templates with its local directory. Apply the role-specific `--speculative-config` from Section [5.1](#51-pd-deployment), [5.2](#52-long-context), or [5.3](#53-pooled-pd). Keep the draft checkpoint and `num_speculative_tokens` identical on both sides, and retain `--enforce-eager` for the Prefill target model.
-
-- **Q: Which option is required for multimodal image input?** A: Add `--no-mm-device-do-normalize` to every engine startup command, including Prefill, Decode, and headless workers. This keeps image pixel rescaling and normalization on the CPU, because the current Ascend Kimi vision wrapper does not apply device-side normalization. Omitting this option can degrade image accuracy.

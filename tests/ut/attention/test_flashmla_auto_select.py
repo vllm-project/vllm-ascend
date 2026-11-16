@@ -118,7 +118,7 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
 @pytest.mark.parametrize(
     "model_type, expected_flashmla",
     [
-        ("kimi_k31", False),
+        ("kimi_k31", True),
         ("glm4_moe", True),
         ("glm4_moe_lite", True),
         ("deepseek_v3", True),
@@ -150,7 +150,15 @@ def test_flashmla_dspark_target_model_gate(monkeypatch, dcp_size, model_type, ex
     monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
     monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _: True)
     monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (object(), object()))
+    if model_type == "kimi_k31":
+        # K3.1 has 96 global Q heads: TP8 yields 12 local heads, and
+        # DCP8 consumes all 96 for history attention.
+        impl.num_heads = 12
     assert AscendMLAImpl._can_use_flashmla(impl) is expected_flashmla
+    if model_type == "kimi_k31":
+        monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: False))
+        assert not AscendMLAImpl._can_use_flashmla(impl)
+        monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
     config.speculative_config.method = "eagle"
     assert not AscendMLAImpl._can_use_flashmla(impl)
 

@@ -85,7 +85,7 @@ Please use the following recommended versions to get started quickly:
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
 | v0.30.0 | Latest stable version | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.30.0/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.30.0/installation.html) for more details |
-| v0.23.0 | stable version | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.23.0/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/installation.html) for more details |
+| v0.23.0 | Stable version | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.23.0/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/installation.html) for more details |
 
 ## Branch
 

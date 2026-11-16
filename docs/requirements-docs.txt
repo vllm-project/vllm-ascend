@@ -1,9 +1,9 @@
-mkdocs
+# Website build dependencies. Keep translation-service dependencies separate.
+babel
+jinja2
+mkdocs>=1.6
 mkdocs-material
-mkdocs-material-extensions
-mkdocs-exclude
 mkdocs-macros-plugin
 polib
+pymdown-multimd-table
 regex
-openai
-zhconv

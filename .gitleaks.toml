@@ -88,6 +88,15 @@ paths = ['^vllm_ascend/attention/indexer\.py$']
 regexTarget = "line"
 regexes = ['^\s*key\.dtype == torch\.float8_e4m3fn\s*$']
 
+# Historical dtype assertion in PR #21549, identified as a false positive.
+[[allowlists]]
+targetRules = ["generic-api-key"]
+condition = "AND"
+commits = ["1907d7f3d3933d271cdf129bfc71e58cd186bde8"]
+paths = ['^tests/ut/models/test_glm5next_kda_pcp\.py$']
+regexTarget = "line"
+regexes = ['^\s*assert layer\.recoverssm_records\.key_gate\.dtype == torch\.bfloat16\s*$']
+
 # Placeholder allowlist for syntax validation; does not permit any files
 [[allowlists]]
 paths = ["^$"]

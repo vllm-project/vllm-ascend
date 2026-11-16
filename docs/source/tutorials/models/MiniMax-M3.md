@@ -227,7 +227,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --data-parallel-size 2 \
       --enable-expert-parallel \
       --max-num-seqs 16 \
-      --distributed_executor_backend "mp" \
+      --distributed-executor-backend "mp" \
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
@@ -270,7 +270,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --long-prefill-token-threshold 4096 \
       --enable-expert-parallel \
       --max-num-seqs 32 \
-      --distributed_executor_backend "mp" \
+      --distributed-executor-backend "mp" \
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
@@ -365,7 +365,7 @@ Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi
       --data-parallel-size-local 2 \
       --data-parallel-start-rank 0 \
       --data-parallel-address $node0_ip \
-      --distributed_executor_backend "mp" \
+      --distributed-executor-backend "mp" \
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
@@ -403,7 +403,7 @@ Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi
       --data-parallel-size-local 2 \
       --data-parallel-start-rank 2 \
       --data-parallel-address $node0_ip \
-      --distributed_executor_backend "mp" \
+      --distributed-executor-backend "mp" \
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
@@ -443,7 +443,7 @@ Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi
       --data-parallel-size-local 4 \
       --data-parallel-start-rank 0 \
       --data-parallel-address $node0_ip \
-      --distributed_executor_backend "mp" \
+      --distributed-executor-backend "mp" \
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
@@ -482,7 +482,7 @@ Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi
       --data-parallel-size-local 4 \
       --data-parallel-start-rank 4 \
       --data-parallel-address $node0_ip \
-      --distributed_executor_backend "mp" \
+      --distributed-executor-backend "mp" \
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \

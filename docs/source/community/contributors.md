@@ -22,6 +22,7 @@
 | Tian Zeng | [@ZT-AIA](https://github.com/ZT-AIA) | 2026/07 |
 | Guihua Wei | [@weiguihua2](https://github.com/weiguihua2) | 2026/07 |
 | Kai Xiong | [@HF-001](https://github.com/HF-001) | 2026/07 |
+| XiaoShuang Wang | [@wxsIcey](https://github.com/wxsIcey) | 2026/11 |
 
 ## Emeritus Committers
 

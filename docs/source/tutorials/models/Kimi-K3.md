@@ -335,7 +335,6 @@ The A2 capabilities have not changed in this release and remain consistent with 
             --mm-processor-cache-gb 0 \
             --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --limit-mm-per-prompt '{"vision_chunk": 2}' \
             --enable-auto-tool-choice \
             --reasoning-parser kimi_k3 \
@@ -395,7 +394,6 @@ The A2 capabilities have not changed in this release and remain consistent with 
             --mm-processor-cache-gb 0 \
             --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --limit-mm-per-prompt '{"vision_chunk": 2}' \
             --enable-auto-tool-choice \
             --reasoning-parser kimi_k3 \
@@ -528,7 +526,6 @@ The A2 capabilities have not changed in this release and remain consistent with 
             --mm-processor-cache-gb 0 \
             --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --limit-mm-per-prompt '{"vision_chunk": 2}' \
             --enable-auto-tool-choice \
             --reasoning-parser kimi_k3 \
@@ -588,7 +585,6 @@ The A2 capabilities have not changed in this release and remain consistent with 
             --mm-processor-cache-gb 0 \
             --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --limit-mm-per-prompt '{"vision_chunk": 2}' \
             --enable-auto-tool-choice \
             --reasoning-parser kimi_k3 \
@@ -893,7 +889,6 @@ The basic templates leave DCP disabled (its default size is `1`).
             --gpu-memory-utilization 0.80 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --enable-prefix-caching \
@@ -971,7 +966,6 @@ The basic templates leave DCP disabled (its default size is `1`).
             --gpu-memory-utilization 0.90 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -1064,7 +1058,6 @@ The basic templates leave DCP disabled (its default size is `1`).
             --gpu-memory-utilization 0.80 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --enable-prefix-caching \
@@ -1143,7 +1136,6 @@ The basic templates leave DCP disabled (its default size is `1`).
             --gpu-memory-utilization 0.80 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -1306,7 +1298,6 @@ Use the platform-specific DSpark weights from [Section 3.1](#31-model-weight). T
             --gpu-memory-utilization 0.80 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --enable-prefix-caching \
@@ -1385,7 +1376,6 @@ Use the platform-specific DSpark weights from [Section 3.1](#31-model-weight). T
             --gpu-memory-utilization 0.90 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -1478,7 +1468,6 @@ Use the platform-specific DSpark weights from [Section 3.1](#31-model-weight). T
             --gpu-memory-utilization 0.80 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --enable-prefix-caching \
@@ -1558,7 +1547,6 @@ Use the platform-specific DSpark weights from [Section 3.1](#31-model-weight). T
             --gpu-memory-utilization 0.80 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -1836,7 +1824,6 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
             --gpu-memory-utilization 0.80 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --enable-prefix-caching \
@@ -1934,7 +1921,6 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
             --gpu-memory-utilization 0.90 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -2045,7 +2031,6 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
             --gpu-memory-utilization 0.80 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --enable-prefix-caching \
@@ -2144,7 +2129,6 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
             --gpu-memory-utilization 0.80 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -2401,6 +2385,3 @@ A: Configure `--tokenizer-mode kimi_k3`, `--enable-auto-tool-choice`, `--reasoni
 A: TP size must divide the checkpoint's attention-head count. It also affects KDA state layout and expert placement, so validate memory capacity and communication performance together.
 - **Q: How is DSpark enabled in PD separation?**
 A: Download the platform-specific DSpark checkpoint listed in [Section 3.1](#31-model-weight), and set `DRAFT_MODEL_PATH` on both Prefill and Decode nodes to its local directory. Use the role-specific `--speculative-config` shown in Sections 5.2, 5.3, or 5.4, keeping the same draft checkpoint and `num_speculative_tokens` on both sides. Prefill must retain `--enforce-eager`.
-
-- **Q: Which option is required for multimodal image input?**
-A: Add `--no-mm-device-do-normalize` to every engine startup command, including Prefill, Decode, and headless workers. This keeps image pixel rescaling and normalization on the CPU, because the current Ascend Kimi vision wrapper does not apply device-side normalization. Omitting this option can degrade image accuracy.

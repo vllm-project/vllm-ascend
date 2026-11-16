@@ -247,7 +247,7 @@ class _FakeKVCacheSpec:
 
 
 class _FakeAttentionSpec(_FakeKVCacheSpec):
-    pass
+    dcp_sharded = True
 
 
 class _FakeFullAttentionSpec(_FakeAttentionSpec):

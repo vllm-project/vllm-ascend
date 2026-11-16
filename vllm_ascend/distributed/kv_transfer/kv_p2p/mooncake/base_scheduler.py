@@ -19,7 +19,6 @@ from vllm.utils.network_utils import get_ip, make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
-    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -224,6 +223,7 @@ class MooncakeMetadataThread(threading.Thread):
                     for local_layer_index, layer_name in enumerate(worker_metadata.layer_names):
                         layer_signature = (
                             worker_metadata.group_indices[local_layer_index],
+                            worker_metadata.dcp_sharded[local_layer_index],
                             worker_metadata.layer_block_sizes[local_layer_index],
                             worker_metadata.block_strides[local_layer_index],
                             worker_metadata.block_lens[local_layer_index],
@@ -235,6 +235,7 @@ class MooncakeMetadataThread(threading.Thread):
                         if previous_signature is not None and previous_signature != layer_signature:
                             layer_field_names = (
                                 "group_indices",
+                                "dcp_sharded",
                                 "layer_block_sizes",
                                 "block_strides",
                                 "block_lens",
@@ -259,6 +260,7 @@ class MooncakeMetadataThread(threading.Thread):
             layer_names = sorted(layer_source_by_name)
             layer_block_sizes: list[int] = []
             group_indices: list[int] = []
+            dcp_sharded: list[bool] = []
             block_strides: list[list[int]] = []
             block_lens: list[list[int]] = []
             block_shapes: list[list[tuple[int, ...]]] = []
@@ -268,6 +270,7 @@ class MooncakeMetadataThread(threading.Thread):
                 worker_metadata, local_layer_index = layer_source_by_name[layer_name]
                 layer_block_sizes.append(worker_metadata.layer_block_sizes[local_layer_index])
                 group_indices.append(worker_metadata.group_indices[local_layer_index])
+                dcp_sharded.append(worker_metadata.dcp_sharded[local_layer_index])
                 block_strides.append(worker_metadata.block_strides[local_layer_index])
                 block_lens.append(worker_metadata.block_lens[local_layer_index])
                 block_shapes.append(worker_metadata.block_shapes[local_layer_index])
@@ -304,6 +307,7 @@ class MooncakeMetadataThread(threading.Thread):
                 layer_names=layer_names,
                 layer_block_sizes=layer_block_sizes,
                 group_indices=group_indices,
+                dcp_sharded=dcp_sharded,
                 block_strides=block_strides,
                 block_lens=block_lens,
                 block_shapes=block_shapes,
@@ -492,11 +496,7 @@ class MooncakeBaseConnectorScheduler:
                 )
                 transfer_block_ids.append(blocks[:-num_speculative_blocks] if num_speculative_blocks else blocks)
             else:
-                # SWA remains TP-sharded/replicated and keeps its original
-                # logical block size even when FullAttention uses DCP.
-                cp_size = (
-                    1 if all(isinstance(spec, SlidingWindowSpec) for spec in group_specs) else max(1, self.dcp_size)
-                )
+                cp_size = max(1, self.dcp_size) if any(spec.dcp_sharded for spec in group_specs) else 1
                 num_prompt_blocks = cdiv(prompt_len, block_size * cp_size)
                 transfer_block_ids.append(blocks[:num_prompt_blocks])
         return tuple(transfer_block_ids)
