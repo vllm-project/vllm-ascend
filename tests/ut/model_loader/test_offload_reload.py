@@ -2,15 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Regression cover for the host-offload aware layerwise reload.
 
-The reload's own materialization helper is replaced by a recording stand-in, so
-"the offloaded table was materialized on the device" becomes an assertion a
-CPU-only runner can make.  Without the patch that assertion holds for an offloaded
-parameter - on hardware it is the allocation of 22.89 GiB per rank for a
-384M x 256 BF16 table over 8 ranks.
-
-The patch module is loaded from its file: importing ``vllm_ascend.patch.worker``
-would apply every worker patch in the process, which this test neither needs nor
-should depend on.
+The reload's materialization helper is replaced by a recording stand-in, so "an
+offloaded parameter got a device allocation" is an assertion a CPU-only runner can
+make.  The patch is loaded from its file: importing ``vllm_ascend.patch.worker``
+would apply every worker patch in the process.
 """
 
 import importlib.util
@@ -125,7 +120,6 @@ def _layer(*, host: torch.Tensor | None = None, with_plain: bool = True, shape: 
 
 
 def test_without_the_patch_an_offloaded_parameter_is_materialized_on_the_device(reload_env):
-    """The behaviour the patch removes: the OOM, expressed as an allocation."""
     layer = _layer(host=torch.zeros(4, 8))
 
     reload_env.meta.materialize_layer(layer, _info())

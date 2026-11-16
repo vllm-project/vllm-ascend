@@ -357,12 +357,8 @@ class SharedUvaBuffer:
                 dtype=torch.int64,
                 device=device,
             )
-            # Own the address table on the owning module: it is a device tensor
-            # built while the sleep-mode weights mem-pool is active, and
-            # level-2 sleep backs up nothing while restoring only
-            # ``named_buffers()``, so an unregistered table comes back empty and
-            # the gather kernel then dereferences garbage.  Registering here
-            # rather than at the call site keeps every construction covered.
+            # Registered here for the same reason as in HostUvaBuffer.__init__:
+            # a level-2 wake restores ``named_buffers()`` only.
             module.register_buffer(f"{buffer_name}_ptrs", self.ptrs, persistent=False)
         except Exception as exc:  # noqa: BLE001 - aggregated below
             error = f"{type(exc).__name__}: {exc}"

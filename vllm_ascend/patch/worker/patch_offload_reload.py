@@ -15,30 +15,11 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""Keep host-offloaded parameters off the device during a layerwise reload.
+"""Rebuild host-offloaded (Engram ``cpu_offload``) parameters on their host storage.
 
-vLLM's layerwise reload moves a layer's tensors to the meta device and
-materializes them again when the update arrives -- on the default device, and
-because of that with ``torch.empty_strided``.  For a parameter that never lives
-on the device (an Engram table allocated in registered host memory and read
-through UVA) that materialization is pure overhead and it is a full per-rank
-allocation: 22.89 GiB for a 384M x 256 BF16 table over 8 ranks.  It does not fit
-next to the weights a level-2 sleep keeps resident, so both checkpoint reload
-and the RL weight update (HCCL / NPU IPC, which finish through the same
-``finalize_layerwise_reload``) die with ``torch.OutOfMemoryError``.
-
-A host-offloaded parameter carries the host range it aliases as a tensor
-attribute (see ``AscendParallelEngramEmbedding``), which survives the meta round
-trip.  The reload is patched to rebuild such a parameter on that range and to
-leave the range in place instead of copying it back out of a device copy, so an
-update written into the table is the update the lookup kernel reads.
-
-The reload calls the materialization helper through the ``layerwise`` module
-namespace, so that relay is rebound together with the ``meta`` definition.
-
-Both hooks are optional upstream internals: builds whose vLLM has no
-``model_loader.reload`` package, or a release without these functions, keep the
-upstream behaviour instead of failing worker startup.
+Where this patch hooks, why it is needed, how it works and when it can be removed are
+documented with the patch registry entry, ``worker/patch_offload_reload.py`` in
+``vllm_ascend/patch/__init__.py``.
 """
 
 from importlib import import_module

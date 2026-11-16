@@ -52,11 +52,6 @@ if TYPE_CHECKING:
     from .shared_host import HostTableSlice
     from .shared_pool import SharedPoolClient
 
-# Offloaded parameters carry the host range they alias as a parameter attribute.
-# The tensor attribute travels through the layerwise reload's meta round trip
-# (``to_meta_tensor`` / ``materialize_meta_tensor`` copy ``tensor.__dict__``),
-# which is what lets the reload rebuild the parameter on its host storage
-# instead of allocating a full device copy of an offloaded table.
 HOST_OFFLOAD_STORAGE_ATTR = "_host_offload_storage"
 
 _HOST_OFFLOAD_PARAMS = (
@@ -68,18 +63,13 @@ _HOST_OFFLOAD_PARAMS = (
 def register_host_offload_storage(module: nn.Module) -> None:
     """Expose a host-offloaded table's storage to reload and weight updates.
 
-    ``cpu_offload`` builds the table in registered host memory and aliases it
-    through ``weight``/``weight_scale_inv``, whose data is never read from the
-    device.  The aliases alone are not enough for a reload: the layerwise path
-    moves the parameters to the meta device, materializes them again on the
-    default (device) device when the update arrives, and only then copies the
-    result back.  For a table this large that materialization is a full per-rank
-    device allocation (22.89 GiB for a 384M x 256 BF16 table over 8 ranks) which
-    does not fit next to the weights a level-2 sleep keeps resident.
-
-    Attaching the host range to the parameter gives the reload the tensor to
-    rebuild the parameter on, so an update lands in the storage the lookup
-    kernel already reads.
+    ``cpu_offload`` aliases ``weight``/``weight_scale_inv`` onto registered host
+    memory.  A layerwise reload moves the parameters to the meta device and would
+    materialize them again on the device - a full per-rank allocation for a table
+    this large (see ``worker/patch_offload_reload.py`` in
+    ``vllm_ascend/patch/__init__.py``).  Attaching the host range here gives the
+    reload the tensor to rebuild the parameter on, so an update lands in the
+    storage the lookup kernel already reads.
     """
     for param_name, holder_attr in _HOST_OFFLOAD_PARAMS:
         param = getattr(module, param_name, None)
