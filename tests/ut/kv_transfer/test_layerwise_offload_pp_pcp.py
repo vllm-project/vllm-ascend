@@ -21,16 +21,20 @@ def test_offload_uses_cache_stage_not_global_rank(pp_rank, start, end, pcp_rank)
     spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
     worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
     worker.kv_cache_config = KVCacheConfig(
-        num_blocks=2, kv_cache_tensors=[],
+        num_blocks=2,
+        kv_cache_tensors=[],
         kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)],
     )
     worker._layerwise_reuse_layout = LayerwiseReuseLayout(
         layers=tuple(range(start, end)),
         cache_layer_indices=dict(zip(names, range(start, end))),
-        kv_cache_tensors=(), cache_view_sizes={},
+        kv_cache_tensors=(),
+        cache_view_sizes={},
         prefetch_layer_map={start + 4: (start + 1,)},
-        independent_layers=[start], num_prefetch_layers=3,
-        reused_cache_names=frozenset(names[1:]), draft_entry_names=frozenset(),
+        independent_layers=[start],
+        num_prefetch_layers=3,
+        reused_cache_names=frozenset(names[1:]),
+        draft_entry_names=frozenset(),
     )
     worker.pp_size = 2
     worker.pp_rank = pp_rank
