@@ -1130,6 +1130,7 @@ def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=Fal
 def test_init_selects_prefetch_offloader(enforce_eager, offload_backend, use_ascend_offloader):
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(enable_eplb=False, pipeline_parallel_size=1),
+        speculative_config=None,
         offload_config=OffloadConfig(
             offload_backend=offload_backend,
             prefetch=PrefetchOffloadConfig(offload_group_size=2, offload_num_in_group=1),
@@ -1159,13 +1160,11 @@ def test_init_selects_prefetch_offloader(enforce_eager, offload_backend, use_asc
         with (
             patch.object(torch.cuda, "Stream"),
             patch("vllm_ascend.worker.v2.model_runner.get_ascend_config", return_value=ascend_config),
-            patch("vllm_ascend.worker.v2.model_runner.resolve_spec_pp_support", return_value=None),
             patch("vllm_ascend.worker.v2.model_runner.torch_cuda_wrapper", side_effect=cuda_wrapper),
             patch.object(GPUModelRunner, "__init__", parent_init),
             patch("vllm_ascend.worker.v2.model_runner.set_potential_max_tokens"),
             patch("vllm_ascend.worker.v2.model_runner.AscendEPLBController"),
             patch("vllm_ascend.worker.v2.model_runner.AscendRequestState"),
-            patch("vllm_ascend.worker.v2.model_runner.AscendInputBuffers"),
             patch("vllm_ascend.worker.v2.model_runner.set_cos_and_sin"),
             patch("vllm_ascend.worker.v2.model_runner.set_mc2_tokens_capacity"),
             patch("vllm_ascend.worker.v2.model_runner.set_mc2_mask"),
