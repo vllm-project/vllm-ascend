@@ -7,25 +7,35 @@ from unittest.mock import MagicMock, patch
 import pytest
 from vllm.config.compilation import CUDAGraphMode
 
+_installed_stub_names: tuple[str, ...] = ()
 try:
     from npugraph_ex._acl_concrete_graph.static_kernel import _set_static_kernel_blacklist  # noqa: F401
 except ImportError:
-    # CPU CI has no npugraph_ex (vendored in torch_npu). Stub the single
-    # symbol compiler_interface imports at module level so the sym_range
-    # logic stays testable on CPU runners.
+    # CPU CI has no npugraph_ex (vendored in torch_npu). Temporarily stub
+    # the single symbol compiler_interface imports at module level so the
+    # sym_range logic stays testable on CPU runners.
 
     class _StaticKernelStub(ModuleType):
         _set_static_kernel_blacklist = MagicMock()
 
-    _static_kernel_stub = _StaticKernelStub("npugraph_ex._acl_concrete_graph.static_kernel")
-    for _name, _mod in [
-        ("npugraph_ex", ModuleType("npugraph_ex")),
-        ("npugraph_ex._acl_concrete_graph", ModuleType("npugraph_ex._acl_concrete_graph")),
-        ("npugraph_ex._acl_concrete_graph.static_kernel", _static_kernel_stub),
-    ]:
-        sys.modules.setdefault(_name, _mod)
+    _installed_stub_names = (
+        "npugraph_ex",
+        "npugraph_ex._acl_concrete_graph",
+        "npugraph_ex._acl_concrete_graph.static_kernel",
+    )
+    sys.modules.setdefault("npugraph_ex", ModuleType("npugraph_ex"))
+    sys.modules.setdefault("npugraph_ex._acl_concrete_graph", ModuleType("npugraph_ex._acl_concrete_graph"))
+    sys.modules["npugraph_ex._acl_concrete_graph.static_kernel"] = _StaticKernelStub(
+        "npugraph_ex._acl_concrete_graph.static_kernel"
+    )
 
-from vllm_ascend.compilation.compiler_interface import _configure_backend
+from vllm_ascend.compilation.compiler_interface import _configure_backend  # noqa: E402
+
+for _name in _installed_stub_names:
+    # Drop the temporary stubs again so importlib.util.find_spec() keeps
+    # reporting npugraph_ex as absent for later collectors (a spec-less
+    # sys.modules entry makes find_spec raise ValueError).
+    sys.modules.pop(_name, None)
 
 
 def _run_configure_backend(mode, capture_sizes, enable_super_kernel=False):
