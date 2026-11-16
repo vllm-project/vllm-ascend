@@ -967,3 +967,6 @@ msgstr ""
 "    - MRv2：临时启用 `--eplb-config.log_balancedness true`，以按窗口样本记录 `EPLB step: ... balancedness=...`，并检查 `Ascend async EPLB cycle committed` 行以获取每个周期的迁移摘要（`mean ... -> ...`、发生变化的层、传输次数）。\n"
 "    - 使用 vLLM monitor 在运行时检测不均衡。\n"
 "    - 加载前务必验证专家映射 JSON 结构（使用 jq 或类似工具进行校验）。"
+
+msgid "| | Model Runner V2 | Model Runner V1 |"
+msgstr "| | 模型运行器 V2 | 模型运行器 V1 |"

@@ -1263,3 +1263,6 @@ msgid ""
 msgstr ""
 "| `DeepSeek-V4.1-Flash-W8A8-DSpark-PCP` | DeepSeek-V4.1-Flash W8A8 + DSpark "
 "+ PCP |"
+
+msgid "| | Scheduled / Manual Dispatch | PR-triggered |"
+msgstr "| | 定时 / 手动调度 | PR 触发 |"
