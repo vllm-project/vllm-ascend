@@ -56,6 +56,8 @@ class RuntimeGuardBusMixin:
     _pending_merged_bus_dump_jobs: list[dict[str, Any]]
     _pending_merged_bus_can_dump: bool
     _pending_merged_bus_is_first: bool
+    # Captured at wave-head submit, before TP0 bus-worker reload flips gates.
+    _pending_prev_needs_sample_hooks: bool | None
     _bus_wave_seq: int
     _merged_bus_warn_ts: float
 
@@ -207,6 +209,9 @@ class RuntimeGuardBusMixin:
         self._pending_merged_bus_dump_jobs = list(dump_jobs)
         self._pending_merged_bus_can_dump = can_dump
         self._pending_merged_bus_is_first = is_first
+        # Snapshot before submit: TP0 ``build_config_sync_payload`` reloads on the
+        # bus worker and can flip ``needs_sample_phase_hooks`` before drain.
+        self._pending_prev_needs_sample_hooks = bool(self.needs_sample_phase_hooks())
         self._bus_wave_seq = int(self._bus_wave_seq) + 1
         wave_seq = self._bus_wave_seq
         try:
@@ -227,6 +232,7 @@ class RuntimeGuardBusMixin:
             self._pending_merged_bus_dump_jobs = []
             self._pending_merged_bus_can_dump = False
             self._pending_merged_bus_is_first = False
+            self._pending_prev_needs_sample_hooks = None
             raise
         self._merged_bus_inflight = True
         logger.debug(
@@ -264,6 +270,7 @@ class RuntimeGuardBusMixin:
             self._pending_merged_bus_dump_jobs = []
             self._pending_merged_bus_can_dump = False
             self._pending_merged_bus_is_first = False
+            self._pending_prev_needs_sample_hooks = None
             self._merged_bus_inflight = False
             self._refund_dropped_dump_arms(jobs)
             raise
@@ -272,9 +279,11 @@ class RuntimeGuardBusMixin:
         pending_jobs = list(self._pending_merged_bus_dump_jobs)
         can_dump = bool(self._pending_merged_bus_can_dump)
         is_first = bool(self._pending_merged_bus_is_first)
+        prev_hooks = self._pending_prev_needs_sample_hooks
         self._pending_merged_bus_dump_jobs = []
         self._pending_merged_bus_can_dump = False
         self._pending_merged_bus_is_first = False
+        self._pending_prev_needs_sample_hooks = None
 
         if result is None:
             return False
@@ -284,6 +293,7 @@ class RuntimeGuardBusMixin:
             pending_dump_jobs=pending_jobs,
             can_dump=can_dump,
             is_first_rank=is_first,
+            prev_needs_sample_hooks=prev_hooks,
         )
 
     def _apply_merged_bus_result(
@@ -293,6 +303,7 @@ class RuntimeGuardBusMixin:
         pending_dump_jobs: list[dict[str, Any]],
         can_dump: bool,
         is_first_rank: bool,
+        prev_needs_sample_hooks: bool | None = None,
     ) -> bool:
         if result.error is not None:
             self._refund_dropped_dump_arms(pending_dump_jobs)
@@ -301,7 +312,11 @@ class RuntimeGuardBusMixin:
         cfg = self.runtime_config
         changed = False
         if result.config_due and isinstance(result.config_payload, dict):
-            prev_hooks = bool(self.needs_sample_phase_hooks())
+            # Prefer the wave-head snapshot; fall back only for direct UT calls.
+            if prev_needs_sample_hooks is None:
+                prev_hooks = bool(self.needs_sample_phase_hooks())
+            else:
+                prev_hooks = bool(prev_needs_sample_hooks)
             try:
                 changed = cfg.apply_config_sync_payload(
                     result.config_payload,
