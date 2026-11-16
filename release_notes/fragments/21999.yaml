@@ -1,0 +1,10 @@
+pr: 21999
+entries:
+  - category: performance
+    # One or two English sentences from the user's point of view.
+    # Do not append the PR link; the release tooling adds it automatically.
+    text: >-
+      Added `enable_moe_tail_plain_add` to merge the shared and routed MoE
+      outputs with a plain tensor add instead of a single-element
+      `torch._foreach_add`, removing one kernel launch per MoE layer on Ascend
+      and saving about 0.66ms per decode step on a 45-layer MoE model.
