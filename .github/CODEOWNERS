@@ -148,6 +148,8 @@
 
 # Patch
 /vllm_ascend/patch @wxsIcey
+/vllm_ascend/patch/platform/patch_replayssm_config.py @drslark
+/vllm_ascend/patch/worker/patch_kda_recoverssm.py @drslark
 /vllm_ascend/patch/platform/patch_eplb.py @freyfwt
 /vllm_ascend/patch/worker/patch_kimi_k25.py @Dawn952
 /vllm_ascend/patch/worker/patch_minimax_m2.py @CXY-Katrina
@@ -189,6 +191,8 @@
 /vllm_ascend/models/deepseek_mtp.py @lcfenglinwan @GDzhu01 @linfeng-yuan
 /vllm_ascend/models/glm5next @lijiahang226
 /vllm_ascend/models/glm5next/kda.py @drslark
+/vllm_ascend/models/glm5next/recoverssm_config.py @drslark
+/vllm_ascend/models/glm5next/recoverssm_metadata.py @drslark
 /vllm_ascend/models/glm5_dspark.py @lijiahang226
 /vllm_ascend/models/kimi_k3 @Dawn952
 /vllm_ascend/models/kimi_k3/recoverssm_metadata.py @drslark
