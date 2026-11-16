@@ -139,7 +139,10 @@ class WorkerSentinel(GPUWorkerSentinel):
         num_local_experts = eplb_model_state.physical_to_logical_map.shape[1] // get_ep_group().world_size
         get_ep_all2all_manager().set_num_local_physical_experts(num_local_experts)
         # The MC2 capacity exists only now; surface a config scale_down will reject.
-        self._warn_if_scale_down_exceeds_mc2_capacity()
+        try:
+            self._validate_mc2_only_execution()
+        except ValueError as exc:
+            logger.warning("[FT] scale_down will be rejected at recovery time: %s", exc)
 
     def scale_down(self, ft_request: FaultToleranceRequest):
         """Scale down over the surviving DP ranks, reusing the upstream flow.
@@ -190,20 +193,6 @@ class WorkerSentinel(GPUWorkerSentinel):
                 "(aclnn V3+); please upgrade the CANN/torch_npu version."
             )
 
-    def _warn_if_scale_down_exceeds_mc2_capacity(self) -> None:
-        """Warn post-load if a reachable batch would leave the MC2-only path."""
-        capacity = get_mc2_tokens_capacity()
-        if capacity is None:
-            return
-        max_tokens = self._max_reachable_num_tokens()
-        if select_moe_comm_method(max_tokens, self.worker.vllm_config) is not MoECommType.MC2:
-            logger.warning(
-                "[FT] scale_down requires every reachable batch on MC2, but a %d-token batch "
-                "does not (MC2 capacity: %d); scale_down will be rejected at recovery time.",
-                max_tokens,
-                capacity,
-            )
-
     def _max_reachable_num_tokens(self) -> int:
         """Largest batch in tokens: max_num_batched_tokens or the largest graph capture size."""
         capture_sizes = self.worker.vllm_config.compilation_config.cudagraph_capture_sizes or [0]
@@ -219,10 +208,11 @@ class WorkerSentinel(GPUWorkerSentinel):
         if capacity is None:
             raise ValueError("[FT] scale_down requires the MC2 token capacity to be initialized.")
         max_tokens = self._max_reachable_num_tokens()
-        if select_moe_comm_method(max_tokens, self.worker.vllm_config) is not MoECommType.MC2:
+        comm_type = select_moe_comm_method(max_tokens, self.worker.vllm_config)
+        if comm_type is not MoECommType.MC2:
             raise ValueError(
                 f"[FT] scale_down requires MC2 for every reachable batch, but a "
-                f"{max_tokens}-token batch does not (MC2 capacity: {capacity}); "
+                f"{max_tokens}-token batch selects {comm_type} (MC2 capacity: {capacity}); "
                 f"lower --max-num-batched-tokens."
             )
 
