@@ -1,7 +1,7 @@
 name: 💻 Usage
 description: Raise an issue here if you don't know how to use vllm on Ascend.
 title: "[Usage]: "
-labels: ["Usage"]
+labels: ["usage"]
 
 body:
 - type: markdown
