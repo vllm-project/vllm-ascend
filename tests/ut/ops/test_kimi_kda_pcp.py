@@ -33,9 +33,10 @@ def parallel_groups(tp, pcp):
     ],
 )
 def test_kda_state_shapes_delegate_to_upstream_without_mutating_config(pcp, model, upstream):
+    text_config = object()
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(tensor_parallel_size=2, prefill_context_parallel_size=pcp),
-        model_config=object(),
+        model_config=SimpleNamespace(hf_config=text_config, hf_text_config=text_config),
         speculative_config=SimpleNamespace(num_speculative_tokens=3),
         cache_config=SimpleNamespace(use_kda_recoverssm=True),
     )
@@ -50,6 +51,24 @@ def test_kda_state_shapes_delegate_to_upstream_without_mutating_config(pcp, mode
     assert effective.cache_config is config.cache_config
     assert config.parallel_config.tensor_parallel_size == 2
     assert (effective is config) == (pcp == 1)
+
+
+@pytest.mark.parametrize("pcp", [1, 2])
+def test_text_only_kimi_state_shape_uses_nested_text_config(pcp):
+    text = SimpleNamespace(linear_attn_config={"num_heads": 96, "head_dim": 128, "short_conv_kernel_size": 4})
+    multimodal = SimpleNamespace(text_config=text)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=multimodal, hf_text_config=text),
+        parallel_config=SimpleNamespace(tensor_parallel_size=2, prefill_context_parallel_size=pcp),
+        speculative_config=None,
+    )
+    conv, recurrent = kimi_k3.AscendKimiLinearForCausalLM.get_mamba_state_shape_from_config(config)
+    assert recurrent == (48 // pcp, 128, 128)
+    # The installed backend owns the orientation of the short-convolution state.
+    assert sorted(conv) == [3, 18432 // pcp]
+    assert config.model_config.hf_config is multimodal
+    assert config.model_config.hf_text_config is text
+    assert config.parallel_config.tensor_parallel_size == 2
 
 
 @pytest.mark.parametrize(("tp", "pcp"), [(1, 2), (2, 2), (2, 4)])

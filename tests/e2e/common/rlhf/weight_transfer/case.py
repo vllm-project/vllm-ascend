@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import deepseek_v4_checkpoint_name
+from tests.e2e.common.rlhf.weight_transfer.kimi_k3 import kimi_k3_meta_model
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,8 @@ class WeightUpdateModelCase:
     instead of being reported as a transfer regression; the reason is attached to
     the case so the report says which prerequisite is missing.
     """
+    # Shape-only adapters avoid importing a model's training kernels on trainers.
+    meta_model_factory: Callable[[Any], Any] | None = None
 
     def server_args(self) -> list[str]:
         # Run the worker out-of-process. With a single-process executor the
@@ -116,6 +119,40 @@ GLM51_CASE = WeightUpdateModelCase(
 GLM_CASES = (GLM51_CASE,)
 
 
+KIMI_K3_CASE = WeightUpdateModelCase(
+    id="kimi-k3-kda-mla-moe",
+    model="moonshotai/Kimi-K3",
+    hf_overrides={
+        "architectures": ["KimiLinearForCausalLM"],
+        "quantization_config": None,
+        "text_config": {
+            "num_hidden_layers": 4,
+            "num_experts": 8,
+            "num_experts_per_token": 4,
+            "num_nextn_predict_layers": 0,
+            "quantization_config": None,
+            # Exercise a residual-block boundary in the four-layer text tower.
+            "attn_res_block_size": 2,
+            "linear_attn_config": {
+                "full_attn_layers": [4],
+                "kda_layers": [1, 2, 3],
+                "head_dim": 128,
+                "num_heads": 96,
+                "short_conv_kernel_size": 4,
+                "use_full_rank_gate": True,
+                "gate_lower_bound": -5.0,
+            },
+        },
+    },
+    meta_config_attribute="text_config",
+    meta_model_factory=kimi_k3_meta_model,
+    extra_server_args=("--no-enable-prefix-caching", "--max-num-seqs", "1"),
+)
+
+
+KIMI_CASES = (KIMI_K3_CASE,)
+
+
 # Keep packed lanes skipped until #18763 fixes cross-stream chunk loading.
 # HCCL's second update diverged in #18726 (38570793020, attempts 1/2) and
 # main daily runs 38186343470, 38325024027, 38657430708 and 38679145716;
@@ -128,7 +165,7 @@ PACKED_LANE_SKIP_REASON = (
 )
 
 
-MODEL_CASES = (*QWEN_CASES, *DEEPSEEK_CASES, *GLM_CASES)
+MODEL_CASES = (*QWEN_CASES, *DEEPSEEK_CASES, *GLM_CASES, *KIMI_CASES)
 
 
 def pytest_model_cases(backend: str, *, model_cases: tuple[WeightUpdateModelCase, ...] = MODEL_CASES) -> list[Any]:

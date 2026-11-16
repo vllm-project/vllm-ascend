@@ -1325,6 +1325,14 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfEx
 
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config):
+        # Text-only serving can retain the published multimodal config wrapper.
+        # Upstream's causal-LM shape helper reads hf_config directly, while the
+        # Ascend model constructor already uses hf_text_config.
+        text_config = vllm_config.model_config.hf_text_config
+        if vllm_config.model_config.hf_config is not text_config:
+            vllm_config = copy(vllm_config)
+            vllm_config.model_config = copy(vllm_config.model_config)
+            vllm_config.model_config.hf_config = text_config
         return get_kda_state_shape(vllm_config, super().get_mamba_state_shape_from_config)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
