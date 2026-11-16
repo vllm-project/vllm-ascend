@@ -109,6 +109,16 @@ class RuntimeGuardBusMixin:
             len(ids),
         )
 
+    def _drain_merged_bus_before_sample_tp_gloo(self) -> bool:
+        """Drain wave-head bus before sample-phase TP Gloo (SFA ``get_finished``).
+
+        Keeps DueBitsBusWorker overlap with forward, then joins on the
+        inference thread so every last-PP TP rank finishes bus collectives
+        before ``kv_connector.post_forward`` may ``all_gather_object`` on the
+        same ``cpu_group``. No-op when nothing is inflight.
+        """
+        return self._drain_merged_bus(warn_if_pending=True)
+
     def _wave_head_task_bus(self) -> bool:
         """Wave-head config+dump gate. Returns whether config content changed.
 
