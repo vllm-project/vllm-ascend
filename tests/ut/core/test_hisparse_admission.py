@@ -23,7 +23,6 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.request import Request
 
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
-from vllm_ascend.hisparse.admission import AscendStoreHiSparseResidentManager, AscendStoreHiSparseResidentSpec
 
 BLOCK_SIZE = 16
 
@@ -49,6 +48,7 @@ def _transfer_config(hisparse, store):
 
 
 def _cache_configs(*, hisparse=True, store=True, host_blocks=None, max_model_blocks=8, in_flight_blocks=2):
+    # The combined builder imports the Ascend spec, which registers at import time.
     register_all_kvcache_specs(None)
     hf_text_config = SimpleNamespace(model_type="glm_moe_dsa", index_topk=16)
     config = SimpleNamespace(
@@ -111,6 +111,8 @@ def test_registry_changes_only_the_resident_spec():
     _, original = _cache_configs(store=False)
     _, combined = _cache_configs()
     _, store_only = _cache_configs(hisparse=False)
+    from vllm_ascend.hisparse.admission import AscendStoreHiSparseResidentSpec
+
     assert not any(isinstance(group.kv_cache_spec, HiSparseResidentSpec) for group in store_only.kv_cache_groups)
     assert original.kv_cache_tensors == combined.kv_cache_tensors
     assert original.num_blocks == combined.num_blocks
@@ -134,6 +136,8 @@ def test_registry_changes_only_the_resident_spec():
 @pytest.mark.parametrize(("window", "sizing_pages"), [(2, 3), (8, 8), (12, 8)])
 def test_registry_shares_the_spec_window_and_sizes_for_the_import_tail(window, sizing_pages):
     config, cache = _cache_configs(in_flight_blocks=window)
+    from vllm_ascend.hisparse.admission import AscendStoreHiSparseResidentManager
+
     (manager,) = get_hisparse_coordinator(_cache_manager(config, cache)).resident_managers
     assert type(manager) is AscendStoreHiSparseResidentManager
     spec = manager.kv_cache_spec
@@ -184,6 +188,8 @@ def test_registered_resident_admission(tokens, computed, local, admission, tail_
 )
 def test_scheduler_cache_manager_admits_partial_import(store, host_blocks, admitted):
     config, cache = _cache_configs(store=store, host_blocks=host_blocks)
+    from vllm_ascend.hisparse.admission import AscendStoreHiSparseResidentManager
+
     manager = _cache_manager(config, cache)
     (resident_manager,) = get_hisparse_coordinator(manager).resident_managers
     assert type(resident_manager) is (AscendStoreHiSparseResidentManager if store else HiSparseResidentManager)
