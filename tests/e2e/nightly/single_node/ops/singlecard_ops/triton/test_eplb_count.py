@@ -15,7 +15,10 @@ def reference(ids, mask, start, count):
 
 
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
-@pytest.mark.parametrize("t,k,c", [(0, 8, 128), (4, 0, 3), (1, 1, 1), (65, 8, 17), (10240, 8, 128)])
+@pytest.mark.parametrize(
+    "t,k,c",
+    [(0, 8, 128), (4, 0, 3), (1, 1, 1), (65, 8, 17), (511, 1, 128), (512, 1, 128), (513, 1, 129), (10240, 8, 128)],
+)
 @pytest.mark.parametrize("pattern", ["mixed", "hot", "disabled", "all_valid", "remote"])
 def test_exact(dtype, t, k, c, pattern):
     start = 7

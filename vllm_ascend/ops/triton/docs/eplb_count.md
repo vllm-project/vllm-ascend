@@ -12,11 +12,17 @@ Duplicate routes each count once; padded, masked, negative and nonlocal routes
 contribute zero. Empty T or K returns zeros.
 
 Torch initializes the output on the input device. A Triton kernel then visits
-512-assignment tiles, distributes them evenly across at most the actual device
-Vector Core count, and performs masked INT64 atomic adds. Invalid lanes use a
-safe address and are excluded by the atomic mask. IDs retain their width before
-localization. No tensor values are read on the host. Work is O(T*K); temporary
-index, clamped-index and eligibility INT64 tensors are eliminated.
+512-assignment tiles and distributes them evenly across a grid bounded by the
+Vector Core count from the shared device-property helper. Each program retains
+an INT64 expert histogram across its assigned tiles, then merges nonzero bins
+with one vectorized atomic add. Histogram length is the next power of two of C;
+the 128-expert case has 128 private counters (1 KiB of logical state).
+Invalid lanes are excluded from each tile histogram. IDs retain their width
+before localization and eligibility checks. A single expert uses a sum reduction
+because the tested A5 compiler fails to convert a one-bin histogram.
+No tensor values are read on the host. Intermediate global index, clamped-index
+and eligibility INT64 tensors are eliminated. The caller must select the current
+NPU, matching the worker convention used by the shared capability helper.
 
 The kernel follows the tiled scheduling idea used by the V2 penalty bincount,
 but does not perform prompt-flag generation or bitmap packing. It implements
@@ -26,6 +32,17 @@ The caller still owns mask gathering and padding alignment, record-enable state,
 and persistent load accumulation. This change does not route additional hardware
 or communication modes into the all-gather EPLB path.
 
+The current local-histogram revision is a draft awaiting A3 and A5 acceptance.
+The initial A5 trial failed on the one-bin histogram; the 128-bin trial reached
+binary loading but failed to map a temporary shared library from `/tmp`.
+The single-bin reduction and project-local temporary directory are prepared,
+but the rerun was interrupted by SSH connectivity failure. A3 initialization
+was blocked by thread creation failure in the selected isolated containers.
+There are no completed correctness or performance results for this revision.
+Physical UB placement has not yet been confirmed from compiler evidence.
+
+The following results belong to the previous direct-atomic implementation
+at commit `28ccdd63f5ebbac332ed10e5c3b003fb4501b28d`, not the histogram revision.
 A5 validation on Ascend950DT_9582 (CANN 9.2.1, Torch-NPU 2.10.0.post7,
 Triton-Ascend 3.6.0.post2) passed all 50 integer-exact differential cases and
 the mutable-input graph replay test. A3 and model-level integration remain
