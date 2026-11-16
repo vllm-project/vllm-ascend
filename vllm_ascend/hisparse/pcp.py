@@ -131,19 +131,17 @@ class PCPHiSparseConnector(ActiveKVConnector):
             attn_metadata = get_forward_context().attn_metadata
         manager = self._pcp_manager
         global_batch = manager.global_batch
-        indices = manager._padded_gather_idx
-        mask = manager._gathered_kv_write_mask
-        assert indices is not None and mask is not None
-        count = indices.numel()
-        if not manager.is_decode_sharded and not global_batch.is_prefilling_np.any():
-            # Replicated decode writes once per rank without a KV collective.
-            # Rank 0's gathered span has the same rows, including graph padding.
-            count = input_batch.num_tokens_after_padding
-            indices = torch.arange(count, device=indices.device)
-            mask = indices < global_batch.num_tokens
-        write_request_ids = get_pcp_write_request_ids(global_batch, indices, mask)
+        write_request_ids = None
+        if global_batch.is_prefilling_np.any():
+            write_request_ids = get_pcp_write_request_ids(
+                global_batch, manager._padded_gather_idx, manager._gathered_kv_write_mask
+            )
+        # Replicated decode reuses attention's canonical request rows and padding.
+        count = write_request_ids.numel() if write_request_ids is not None else input_batch.num_tokens_after_padding
         for metadata in (attn_metadata or {}).values():
-            metadata.hisparse_write_req_id_per_token = write_request_ids
+            metadata.hisparse_write_req_id_per_token = (
+                metadata.req_id_per_token if write_request_ids is None else write_request_ids
+            )
         self._pcp_attn_metadata = attn_metadata or {}
         # Core owns request lifecycle and load scheduling. Only its load kwargs
         # need canonical requests and a gathered Resident slot snapshot length.
