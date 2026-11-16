@@ -1,0 +1,8 @@
+pr: 22024
+entries:
+  - category: feature
+    text: >-
+      Added experimental layerwise KV offload for the existing DeepSeek-V4 Flash
+      and Pro models through AscendStore and Memcache, including sliding-window
+      and compressor-state caches.
+    model: deepseek-v4
