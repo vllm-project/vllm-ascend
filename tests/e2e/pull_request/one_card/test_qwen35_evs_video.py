@@ -32,13 +32,14 @@ def test_qwen35_evs_reduces_video_prompt_tokens():
     videos = [(video.np_ndarrays, video.metadata)]
     prompts = [
         prompt.replace("<|image_pad|>", "<|video_pad|>")
-        for prompt in qwen_prompt(["What object is the baby holding and reading? Answer briefly."])
+        for prompt in qwen_prompt(["Describe the object in the baby's hands. Answer briefly."])
     ]
     model_path = hf_snapshot_download(
         "Qwen/Qwen3.5-2B",
         local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
     )
     visual_token_counts = []
+    nonvisual_token_ids = []
     for pruning_rate in (0.0, 0.75):
         with VllmRunner(
             model_path,
@@ -53,7 +54,13 @@ def test_qwen35_evs_reduces_video_prompt_tokens():
         ) as runner:
             # RequestOutput exposes prompt_token_ids separately from generated
             # tokens, so the assertion measures pruning independently of EOS.
-            video_token_id = runner.model.llm_engine.vllm_config.model_config.hf_config.video_token_id
+            hf_config = runner.model.llm_engine.vllm_config.model_config.hf_config
+            video_token_id = hf_config.video_token_id
+            visual_marker_ids = {
+                video_token_id,
+                hf_config.vision_start_token_id,
+                hf_config.vision_end_token_id,
+            }
             outputs = runner.model.generate(
                 runner.get_inputs(prompts, videos=videos),
                 sampling_params=SamplingParams(max_tokens=32, temperature=0.0),
@@ -69,6 +76,9 @@ def test_qwen35_evs_reduces_video_prompt_tokens():
                     f"Expected the visible book to be identified, got: {output.outputs[0].text!r}"
                 )
             visual_token_counts.append(outputs[0].prompt_token_ids.count(video_token_id))
+            nonvisual_token_ids.append(
+                [token_id for token_id in outputs[0].prompt_token_ids if token_id not in visual_marker_ids]
+            )
 
     assert visual_token_counts[0] > 0, "Baseline should contain video tokens."
     # A 75% EVS rate on this eight-frame asset should remove at least half
@@ -76,9 +86,6 @@ def test_qwen35_evs_reduces_video_prompt_tokens():
     assert 0 < visual_token_counts[1] <= visual_token_counts[0] // 2, (
         f"Expected substantial visual-token pruning: baseline={visual_token_counts[0]}, pruned={visual_token_counts[1]}"
     )
-    # The EVS processor also replaces the two outer video wrapper markers.
-    # All remaining nonvisual prompt tokens must be preserved.
-    nonvisual_reduction = (prompt_token_counts[0] - prompt_token_counts[1]) - (
-        visual_token_counts[0] - visual_token_counts[1]
-    )
-    assert 0 <= nonvisual_reduction <= 2, "Unexpected removal of nonvisual prompt tokens."
+    # Ignore visual payload and wrappers, including the replaced outer pair.
+    # Text and timestamps must retain their exact token content and order.
+    assert nonvisual_token_ids[1] == nonvisual_token_ids[0], "EVS changed nonvisual prompt tokens."

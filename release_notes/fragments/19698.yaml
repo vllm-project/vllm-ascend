@@ -1,0 +1,4 @@
+pr: 19698
+entries:
+  - category: feature
+    text: Enabled EVS video token pruning for Qwen3.5 on Ascend through video_pruning_rate.
