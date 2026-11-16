@@ -269,6 +269,71 @@ def test_slice_blocks_partial_out_of_range_reports_used_ids():
     assert torch.equal(out[0], t[1])
 
 
+def test_multi_group_dump_uses_per_group_block_ids(tmp_path: Path):
+    """Hybrid: group0 and group1 must not share group0's page list."""
+    from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
+
+    g0 = torch.arange(0, 4 * 4, dtype=torch.float32).reshape(4, 4)
+    g1 = torch.arange(100, 100 + 4 * 4, dtype=torch.float32).reshape(4, 4)
+    # Fill distinctive rows: g0 block1 → 4..7; g1 block2 → 108..111
+    requests = {
+        "r1": SimpleNamespace(block_ids=([1], [2])),
+    }
+    groups = [
+        SimpleNamespace(layer_names=["L0"]),
+        SimpleNamespace(layer_names=["L1"]),
+    ]
+    runner = SimpleNamespace(
+        requests=requests,
+        kv_caches={"L0": g0, "L1": g1},
+        kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1, 1]),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+    )
+    snaps = KvCacheReader(runner).snapshot_request_blocks(
+        req_id="r1",
+        block_ids=[1],  # arm-time group0 hint
+        out_dir=tmp_path / "kv",
+    )
+    by_layer = {s.payload["layer"]: s.payload for s in snaps}
+    assert set(by_layer) == {"L0", "L1"}
+    assert by_layer["L0"]["block_ids"] == [1]
+    assert by_layer["L1"]["block_ids"] == [2]
+    assert torch.equal(by_layer["L0"]["tensor"][0], g0[1])
+    assert torch.equal(by_layer["L1"]["tensor"][0], g1[2])
+
+
+def test_draft_layer_in_non_zero_group_uses_that_group(tmp_path: Path):
+    """Spec draft resident in group1 must use group1 block_ids (not group0)."""
+    from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
+
+    target = torch.zeros(4, 4)
+    draft = torch.arange(0, 4 * 4, dtype=torch.float32).reshape(4, 4)
+    requests = {"r1": SimpleNamespace(block_ids=([0], [3]))}
+    groups = [
+        SimpleNamespace(layer_names=["target.attn"]),
+        SimpleNamespace(layer_names=["draft.attn"]),
+    ]
+    runner = SimpleNamespace(
+        requests=requests,
+        kv_caches={"target.attn": target, "draft.attn": draft},
+        kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1, 1]),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+    )
+    snaps = KvCacheReader(runner).snapshot_request_blocks(req_id="r1", block_ids=[0], out_dir=tmp_path / "kv")
+    draft_snap = next(s for s in snaps if s.payload["layer"] == "draft.attn")
+    assert draft_snap.payload["block_ids"] == [3]
+    assert draft_snap.payload["kv_cache_group"] == 1
+    assert torch.equal(draft_snap.payload["tensor"][0], draft[3])
+
+
 def test_snapshot_skips_empty_block_ids(tmp_path: Path):
     runner = SimpleNamespace(
         kv_caches={"layers.0": torch.randn(8, 16, 4)},
