@@ -1,0 +1,8 @@
+pr: 21906
+entries:
+  - category: bugfix
+    text: >-
+      Requests with thinking_token_budget above 18446744073709551615 now fail
+      clearly during Ascend request validation instead of overflowing engine
+      transport serialization. Errors remain printable for arbitrarily large
+      Python integers.
