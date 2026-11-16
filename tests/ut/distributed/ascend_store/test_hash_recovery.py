@@ -5,7 +5,7 @@ import ctypes
 import importlib
 import random
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -119,6 +119,8 @@ def test_boundary_save_lookup_and_physical_page_replay(seed):
     result = bare_worker(coord, db, store)._lookup_with_coordinator(13, hashes, [0, 1], True)
     assert result.hit_length == 8
     assert result.tail_key_boundaries == ((0, 8), (1, 8))
+    # The worker's token-count API remains an int, even in hash mode.
+    assert bare_worker(coord, db, store).lookup(13, hashes, [0, 1]) == 8
     # Attention is a whole physical page, and Mamba is an entire checkpoint,
     # even though the recoverable hash boundary is inside that page.
     output = 0
@@ -131,6 +133,15 @@ def test_boundary_save_lookup_and_physical_page_replay(seed):
         assert torch.all(target[1:] == -999)
         output += target[0].sum()
     torch.testing.assert_close(output, sources[0][1].sum() + sources[1][3].sum(), rtol=0, atol=0)
+
+
+def test_partial_chunks_do_not_fold_hashes_into_page_keys():
+    db = metadata.ChunkedTokenDatabase([metadata.KeyMetadata("model", 0, 0, 0, 0)], [16], None, hash_block_size=4)
+    db.cache_coordinator = Mock(cacheable_group_ids=[0], enable_partial_hash_hits=True)
+    hashes = [BlockHash(bytes([i + 1]) * 8) for i in range(5)]
+    with patch.object(metadata, "get_block_hashes", side_effect=AssertionError("unused page hash folding")):
+        chunks = list(db._iter_token_chunks(20, hashes))
+    assert chunks == [(0, 16, hashes[3], None), (16, 20, hashes[4], None)]
 
 
 def test_core_boundary_offload_is_not_positional_recurrent_table():

@@ -2051,6 +2051,7 @@ def test_hash_hit_preserves_subpage_boundary_and_local_apc(local_start, pool_end
 def test_lookup_early_return_discards_stale_load_spec(early_return):
     scheduler = KVPoolScheduler(make_config(), use_layerwise=False)
     scheduler.load_specs["retry"] = LoadSpec(768, 12288, True)
+    scheduler._lookup_tail_boundaries["retry"] = ((0, 12288),)
     request = SimpleNamespace(request_id="retry", prompt_token_ids=list(range(32)), num_tokens=32)
     local_tokens = 0
     if early_return == "consumer":
@@ -2062,6 +2063,7 @@ def test_lookup_early_return_discards_stale_load_spec(early_return):
         local_tokens = 32
     assert scheduler.get_num_new_matched_tokens(request, local_tokens) == (0, False)
     assert request.request_id not in scheduler.load_specs
+    assert request.request_id not in scheduler._lookup_tail_boundaries
 
 
 @pytest.mark.parametrize("pool_hit_tokens", [832, 896])

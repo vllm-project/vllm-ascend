@@ -8,7 +8,7 @@ from collections.abc import Callable, Sequence
 
 import torch
 import vllm.envs as envs
-from vllm.config import VllmConfig, get_current_vllm_config_or_none
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pcp_group,
     get_pp_group,
@@ -63,6 +63,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_str,
     dense_cache_segments,
     get_block_hashes,
+    get_engine_transfer_config,
     get_group_cache_family,
     get_sharded_mamba_group_ids,
     infer_group_block_sizes,
@@ -80,17 +81,6 @@ from vllm_ascend.distributed.utils import (
 )
 
 SAVE_BATCH_FAILURE_POLL_INTERVAL_S = 1.0
-
-
-def _engine_transfer_config(vllm_config, kv_cache_config):
-    # MultiConnector replaces only the child's transfer config. The scheduler
-    # planner retains the engine config; worker RPCs run in Core's explicit
-    # current-config context (the dynamic planner attribute may not cross IPC).
-    resolved = getattr(kv_cache_config, "kv_transfer_config", None)
-    if resolved is not None:
-        return resolved
-    current = get_current_vllm_config_or_none()
-    return (current if current is not None else vllm_config).kv_transfer_config
 
 
 def _shares_mooncake_v2_engine(transfer):
@@ -703,7 +693,7 @@ class BaseKVPoolWorker(ABC):
         Therefore, we down-align the start address to meet the 2MB alignment requirement.
         """
         if getattr(self, "enable_partial_hash_hits", False):
-            if _shares_mooncake_v2_engine(_engine_transfer_config(self.vllm_config, self.kv_cache_config)):
+            if _shares_mooncake_v2_engine(get_engine_transfer_config(self.vllm_config, self.kv_cache_config)):
                 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
                     collect_configured_register_regions,
                 )
@@ -1052,7 +1042,7 @@ class BaseKVPoolWorker(ABC):
                 )
             )
             if coordinator_hit is not None:
-                return coordinator_hit
+                return coordinator_hit.hit_length if isinstance(coordinator_hit, StoreLookupResult) else coordinator_hit
             for group_id in kv_cache_group_ids:
                 keys, starts, ends = self._build_lookup_keys(token_len, block_hashes, group_id)
 

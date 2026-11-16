@@ -1759,9 +1759,7 @@ paths. Buffer sizes follow those backend rules, not the requested PMU.
 When using `MultiConnector`, keep the Store and native P/D transport configurations
 separate. Check engine mode, memory registration and port compatibility for the
 installed SDK. A successful Store read does not prove P/D transfer succeeded, and
-a successful P/D transfer does not prove an external hash-boundary hit. For the
-implementation contracts and validation requirements, see
-[AscendStore hash-granular recovery](../../developer_guide/ascend_store_recovery.md).
+a successful P/D transfer does not prove an external hash-boundary hit.
 
 ## FAQ
 

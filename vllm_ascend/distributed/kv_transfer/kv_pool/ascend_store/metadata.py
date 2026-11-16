@@ -343,13 +343,23 @@ class PoolCacheGeometry:
     core_hit_alignment: int
     transfer_granularity: int
     groups: tuple = ()
-    scheduler_block_size: int = 0
     use_eagle: bool = False
     retention_interval: int | None = None
+    use_layerwise: bool = False
 
     @property
     def partial_hits(self) -> bool:
-        return self.core_hit_alignment < self.transfer_granularity
+        return not self.use_layerwise and self.core_hit_alignment < self.transfer_granularity
+
+
+def get_engine_transfer_config(vllm_config, kv_cache_config):
+    # MultiConnector replaces the child's transfer config, not the engine's.
+    # The planner retains it; worker RPCs use Core's current-config context.
+    resolved = getattr(kv_cache_config, "kv_transfer_config", None)
+    if resolved is not None:
+        return resolved
+    current = get_current_vllm_config_or_none()
+    return (current if current is not None else vllm_config).kv_transfer_config
 
 
 def resolve_pool_cache_geometry(vllm_config, kv_cache_config, *, use_layerwise: bool) -> PoolCacheGeometry:
@@ -396,15 +406,9 @@ def resolve_pool_cache_geometry(vllm_config, kv_cache_config, *, use_layerwise: 
             f"{tuple(block_sizes[i] for i in group_ids)}"
         )
     extra = vllm_config.kv_transfer_config.kv_connector_extra_config
-    partial_hits = not use_layerwise and hit_alignment < page_alignment
-    if partial_hits and extra.get("discard_partial_chunks", True) is not True:
-        raise ValueError("AscendStore hash recovery requires discard_partial_chunks=true")
     speculative = getattr(vllm_config, "speculative_config", None)
     eagle = getattr(speculative, "use_eagle_block_drop", None)
-    engine_transfer = getattr(kv_cache_config, "kv_transfer_config", None)
-    if engine_transfer is None:
-        current = get_current_vllm_config_or_none()
-        engine_transfer = (current if current is not None else vllm_config).kv_transfer_config
+    engine_transfer = get_engine_transfer_config(vllm_config, kv_cache_config)
     producer_only = bool(engine_transfer and engine_transfer.is_kv_producer and not engine_transfer.is_kv_consumer)
     use_eagle = bool(callable(eagle) and eagle() is True and not producer_only)
     resolved_groups = tuple(
@@ -415,6 +419,19 @@ def resolve_pool_cache_geometry(vllm_config, kv_cache_config, *, use_layerwise: 
         )
         for group in groups or []
     )
+    geometry = PoolCacheGeometry(
+        block_sizes=block_sizes,
+        cacheable_group_ids=group_ids,
+        hash_block_size=hash_size,
+        core_hit_alignment=hit_alignment,
+        transfer_granularity=page_alignment,
+        groups=resolved_groups,
+        use_eagle=use_eagle,
+        retention_interval=getattr(kv_cache_config, "prefix_cache_retention_interval", None),
+        use_layerwise=use_layerwise,
+    )
+    if geometry.partial_hits and extra.get("discard_partial_chunks", True) is not True:
+        raise ValueError("AscendStore hash recovery requires discard_partial_chunks=true")
     logger.info(
         "AscendStore prefix geometry: requested_pmu=%s core_hash=%d core_hit_alignment=%d "
         "pool_transfer_alignment=%d mode=%s group_pages=%s",
@@ -422,20 +439,10 @@ def resolve_pool_cache_geometry(vllm_config, kv_cache_config, *, use_layerwise: 
         hash_size,
         hit_alignment,
         page_alignment,
-        "hash" if partial_hits else "existing",
+        "hash" if geometry.partial_hits else "existing",
         block_sizes,
     )
-    return PoolCacheGeometry(
-        block_sizes,
-        group_ids,
-        hash_size,
-        hit_alignment,
-        page_alignment,
-        resolved_groups,
-        page_alignment,
-        use_eagle,
-        getattr(kv_cache_config, "prefix_cache_retention_interval", None),
-    )
+    return geometry
 
 
 class ChunkedTokenDatabase:
@@ -693,19 +700,11 @@ class ChunkedTokenDatabase:
         if not block_hashes:
             return
         logical_block_size = self.get_block_size(kv_cache_group_id)
-        grouped_hashes = get_block_hashes(block_hashes, logical_block_size, self.hash_block_size)
         partial = bool(self.cache_coordinator is not None and self.cache_coordinator.enable_partial_hash_hits)
-        if not grouped_hashes and not partial:
-            return
-        num_logical_blocks = (
-            (
-                cdiv(token_len, logical_block_size)
-                if partial
-                else min(len(grouped_hashes), cdiv(token_len, logical_block_size))
-            )
-            if token_len > 0
-            else 0
-        )
+        num_logical_blocks = cdiv(token_len, logical_block_size) if token_len > 0 else 0
+        if not partial:
+            grouped_hashes = get_block_hashes(block_hashes, logical_block_size, self.hash_block_size)
+            num_logical_blocks = min(len(grouped_hashes), num_logical_blocks)
         block_id_offset = max(num_logical_blocks - len(block_ids), 0) if block_ids is not None else 0
         first_chunk = max(0, cdiv(mask_num, logical_block_size), block_id_offset)
         chunk_ids: Iterable[int] = range(first_chunk, num_logical_blocks)

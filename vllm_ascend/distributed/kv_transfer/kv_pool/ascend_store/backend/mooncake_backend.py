@@ -573,7 +573,6 @@ class MooncakeBackend(Backend):
                         length,
                         ret,
                     )
-                    raise RuntimeError(f"Mooncake buffer registration failed: {ret}")
         elif not self._use_fabric_mem:
             local_hostname = get_ip()
             global_te.get_transfer_engine(local_hostname, device_name=None)

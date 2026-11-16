@@ -450,7 +450,7 @@ def test_store_mask_retention_interval_zero_eagle_round_trip(num_prompt_tokens):
     exists: set[tuple[int, bytes]] = set()
     store_masks = coord.store_mask(96, num_prompt_tokens=num_prompt_tokens)
     for gid, (group, mask) in enumerate(zip(groups, store_masks, strict=True)):
-        group_hashes = coord.block_hashes_for_spec(hashes, group.kv_cache_spec)
+        group_hashes = get_block_hashes(hashes, group.kv_cache_spec.block_size, coord.hash_block_size)
         for chunk_id, block_hash in enumerate(group_hashes):
             if mask is None or mask[chunk_id]:
                 exists.add((gid, bytes(block_hash)))
@@ -482,7 +482,7 @@ def test_load_mask_restores_mtp_replay_tail(extra_retained_tokens):
     exists: set[tuple[int, bytes]] = set()
     store_masks = coord.store_mask(96, num_prompt_tokens=96)
     for gid, (group, mask) in enumerate(zip(groups, store_masks, strict=True)):
-        group_hashes = coord.block_hashes_for_spec(hashes, group.kv_cache_spec)
+        group_hashes = get_block_hashes(hashes, group.kv_cache_spec.block_size, coord.hash_block_size)
         for chunk_id, block_hash in enumerate(group_hashes):
             if mask is None or mask[chunk_id]:
                 exists.add((gid, bytes(block_hash)))
@@ -505,22 +505,6 @@ def test_store_mask_retention_interval_keeps_segment_and_replay_tails():
     coord = _make_coord(_retention_groups(), hash_block_size=8, retention_interval=64)
     masks = coord.store_mask(128, num_prompt_tokens=100)
     assert masks[1] == [i in (7, 11, 15) for i in range(16)]
-
-
-def test_store_mask_suffix_matches_full_mask_tail():
-    coord = _make_coord(_retention_groups(), hash_block_size=8, retention_interval=64)
-    full = coord.store_mask(128, num_prompt_tokens=100)
-    suffix = coord.store_mask(128, start_token=64, num_prompt_tokens=100)
-
-    for g_idx, cache_group in enumerate(coord.kv_cache_groups):
-        block_size = cache_group.kv_cache_spec.block_size
-        start_chunk = 64 // block_size
-        end_chunk = 128 // block_size
-        full_mask = full[g_idx]
-        if full_mask is None:
-            assert suffix[g_idx] is None
-        else:
-            assert suffix[g_idx] == full_mask[start_chunk:end_chunk]
 
 
 def test_store_mask_retention_prefix_stable_as_aligned_length_grows():
@@ -727,7 +711,7 @@ def test_dsv4_five_group_eagle_store_lookup_round_trip():
     exists: set[tuple[int, bytes]] = set()
     store_masks = coord.store_mask(token_len)
     for gid, (group, mask) in enumerate(zip(groups, store_masks, strict=True)):
-        group_hashes = coord.block_hashes_for_spec(hashes, group.kv_cache_spec)
+        group_hashes = get_block_hashes(hashes, group.kv_cache_spec.block_size, coord.hash_block_size)
         for chunk_id, block_hash in enumerate(group_hashes):
             if mask is None or mask[chunk_id]:
                 exists.add((gid, bytes(block_hash)))

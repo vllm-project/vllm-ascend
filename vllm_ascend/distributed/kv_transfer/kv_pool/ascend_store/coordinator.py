@@ -159,11 +159,11 @@ class AscendStoreCoordinator:
                 "scheduler_block_size must be a multiple of each group's effective block_size"
             )
 
-        self.eagle_group_ids = {i for i, group in enumerate(kv_cache_groups) if group.is_eagle_group}
-        if use_eagle and not self.eagle_group_ids:
-            self.eagle_group_ids = set(range(len(kv_cache_groups)))
+        eagle_group_ids = {i for i, group in enumerate(kv_cache_groups) if group.is_eagle_group}
+        if use_eagle and not eagle_group_ids:
+            eagle_group_ids = set(range(len(kv_cache_groups)))
 
-        self._verify_and_split_kv_cache_groups()
+        self._verify_and_split_kv_cache_groups(eagle_group_ids)
         # Do not keep the coordinator alive through its cache while GC is frozen.
         self._cached_reachable_masks = lru_cache(maxsize=_REACHABLE_MASK_CACHE_SIZE)(
             partial(type(self)._reachable_masks, proxy(self))
@@ -173,7 +173,7 @@ class AscendStoreCoordinator:
         alignment = self.hash_block_size if self.enable_partial_hash_hits else self.lcm_block_size
         return length // alignment * alignment
 
-    def _verify_and_split_kv_cache_groups(self) -> None:
+    def _verify_and_split_kv_cache_groups(self, eagle_group_ids: set[int]) -> None:
         attention_groups: list[tuple[KVCacheSpec, list[int], type[SingleTypeKVCacheManager]]] = []
         self.group_effective_specs: list[KVCacheSpec] = []
 
@@ -206,14 +206,13 @@ class AscendStoreCoordinator:
         self.eagle_attn_group_indices: set[int] = {
             index
             for index, (_, group_ids, _) in enumerate(self.attention_groups)
-            if any(group_id in self.eagle_group_ids for group_id in group_ids)
+            if any(group_id in eagle_group_ids for group_id in group_ids)
         }
         if self.use_eagle and not self.eagle_attn_group_indices:
             self.eagle_attn_group_indices = set(range(len(self.attention_groups)))
-        self.eagle_reachable_group_ids: set[int] = {
+        self.eagle_group_ids: set[int] = {
             group_id for index in self.eagle_attn_group_indices for group_id in self.attention_groups[index][1]
         }
-        self.eagle_group_ids = self.eagle_reachable_group_ids.copy()
         self.eagle_proof_margin_by_group = {
             group_id: eagle_proof_margin(
                 spec.block_size,
@@ -289,7 +288,7 @@ class AscendStoreCoordinator:
                 end_block=num_chunks,
                 alignment_tokens=self.lcm_block_size,
                 kv_cache_spec=spec,
-                use_eagle=group_id in self.eagle_reachable_group_ids,
+                use_eagle=group_id in self.eagle_group_ids,
                 retention_interval=retention_interval,
                 num_prompt_tokens=num_prompt_tokens,
                 reachable_boundaries=reachable_boundaries,
@@ -301,19 +300,16 @@ class AscendStoreCoordinator:
         self,
         aligned_token_len: int,
         num_prompt_tokens: int | None = None,
-        *,
-        start_token: int = 0,
     ) -> tuple[list[bool], ...]:
         masks = self._cached_reachable_masks(aligned_token_len, self.retention_interval, num_prompt_tokens)
         result = []
         for group_id, (num_chunks, mask) in enumerate(masks):
-            start_chunk = min(num_chunks, cdiv(start_token, self.group_effective_block_sizes[group_id]))
             if self.enable_partial_hash_hits and group_id in self.mamba_group_ids:
                 # Align-mode recurrent tables are not append-only. Only Core's
                 # pinned boundary-state handoff can identify a saveable state.
-                result.append([False] * (num_chunks - start_chunk))
+                result.append([False] * num_chunks)
             else:
-                result.append(([True] * num_chunks if mask is None else mask.copy())[start_chunk:])
+                result.append([True] * num_chunks if mask is None else mask.copy())
         return tuple(result)
 
     def lookup_mask(
@@ -379,9 +375,6 @@ class AscendStoreCoordinator:
         )
         logger.debug("%s: token_len=%d hit_tokens=%d", log_context, token_len, hit_length)
         return hit_length
-
-    def block_hashes_for_spec(self, block_hashes: Sequence[BlockHash], spec: KVCacheSpec) -> BlockHashList:
-        return cast(BlockHashList, get_block_hashes(block_hashes, spec.block_size, self.hash_block_size))
 
     def _find_hit_blocks(
         self,
