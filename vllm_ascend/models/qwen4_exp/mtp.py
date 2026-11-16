@@ -135,22 +135,10 @@ def _make_draft_vllm_config(
     mtp_start_layer_idx: int,
     num_mtp_layers: int | None = None,
 ) -> VllmConfig:
-    # Align the speculator-owned config before upstream derives the runtime
-    # draft config and its QSA cache specs from it.
-    _align_draft_rope_with_target(vllm_config)
-    # Run before the Qwen4Exp MTP layers construct their rotary embeddings so
-    # graph capture cannot retain an undersized cache.
-    _align_qwen4_exp_mtp_position_cache(vllm_config)
     if num_mtp_layers is None:
-        draft_vllm_config = _upstream_make_draft_vllm_config(
-            vllm_config,
-            mtp_start_layer_idx,
-        )
-        num_mtp_layers = getattr(
-            vllm_config.model_config.hf_text_config,
-            "mtp_num_hidden_layers",
-            1,
-        )
+        # vLLM v0.33.0 uses the two-argument API; its caller supplies no count.
+        draft_vllm_config = _upstream_make_draft_vllm_config(vllm_config, mtp_start_layer_idx)
+        num_mtp_layers = getattr(vllm_config.model_config.hf_text_config, "mtp_num_hidden_layers", 1)
     else:
         draft_vllm_config = _upstream_make_draft_vllm_config(
             vllm_config,

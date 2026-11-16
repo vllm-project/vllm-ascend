@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from vllm_ascend.models.qwen4_exp import mtp
 
 
@@ -154,10 +156,10 @@ def test_draft_config_remaps_modelslim_description(monkeypatch) -> None:
     monkeypatch.setattr(
         mtp,
         "_upstream_make_draft_vllm_config",
-        lambda _config, _start: draft_config,
+        lambda _config, _start, _num_layers: draft_config,
     )
 
-    actual = mtp._make_draft_vllm_config(target_config, mtp_start_layer_idx=48)
+    actual = mtp._make_draft_vllm_config(target_config, 48, 1)
 
     assert actual is draft_config
     assert draft_config.quant_config.quant_description == {
@@ -165,62 +167,45 @@ def test_draft_config_remaps_modelslim_description(monkeypatch) -> None:
     }
 
 
-def test_position_cache_is_aligned_before_upstream_draft_config(monkeypatch) -> None:
-    vllm_config, draft_model_config, _ = _make_long_context_config()
-    draft_model_config.hf_text_config.mtp_num_hidden_layers = 1
-    draft_config = SimpleNamespace(quant_config=None)
+def test_draft_config_forwards_explicit_mtp_layer_count(monkeypatch) -> None:
+    draft_config = SimpleNamespace(
+        quant_config=SimpleNamespace(quant_description={"mtp.layers.1.mlp.weight": "W4A8_DYNAMIC"})
+    )
+    target_config = SimpleNamespace()
+    calls = []
 
-    def make_draft_config(_config, _start, num_mtp_layers):
-        assert num_mtp_layers == 1
-        assert draft_model_config.hf_text_config.max_position_embeddings == 1010000
-        assert draft_model_config.max_model_len == 1010000
+    def make_draft(config, start, num_layers):
+        calls.append((config, start, num_layers))
         return draft_config
 
-    monkeypatch.setattr(
-        mtp,
-        "_upstream_make_draft_vllm_config",
-        make_draft_config,
-    )
-
-    actual = mtp._make_draft_vllm_config(
-        vllm_config,
-        mtp_start_layer_idx=48,
-        num_mtp_layers=1,
-    )
+    monkeypatch.setattr(mtp, "_upstream_make_draft_vllm_config", make_draft)
+    actual = mtp._make_draft_vllm_config(target_config, 48, 2)
 
     assert actual is draft_config
+    assert calls == [(target_config, 48, 2)]
+    assert draft_config.quant_config.quant_description == {
+        "mtp.layers.49.mlp.weight": "W4A8_DYNAMIC",
+    }
 
 
-def test_text_target_strips_mrope_from_mtp_draft() -> None:
-    target_model_config = _rope_model_config(uses_mrope=False)
-    draft_model_config = _rope_model_config(uses_mrope=True)
-    config = SimpleNamespace(
-        model_config=target_model_config,
-        speculative_config=SimpleNamespace(
-            target_model_config=target_model_config,
-            draft_model_config=draft_model_config,
-        ),
+@pytest.mark.parametrize("hf_config", [SimpleNamespace(), SimpleNamespace(mtp_num_hidden_layers=2)])
+def test_draft_config_preserves_legacy_two_argument_api(monkeypatch, hf_config) -> None:
+    last_layer = getattr(hf_config, "mtp_num_hidden_layers", 1) - 1
+    draft_config = SimpleNamespace(
+        quant_config=SimpleNamespace(quant_description={f"mtp.layers.{last_layer}.mlp.weight": "W4A8_DYNAMIC"})
     )
+    target_config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=hf_config))
+    calls = []
 
-    mtp._align_draft_rope_with_target(config)
+    def make_draft(config, start):
+        calls.append((config, start))
+        return draft_config
 
-    assert draft_model_config.hf_text_config.rope_parameters == {}
+    monkeypatch.setattr(mtp, "_upstream_make_draft_vllm_config", make_draft)
+    actual = mtp._make_draft_vllm_config(target_config, 48)
 
-
-def test_mrope_target_preserves_mrope_on_mtp_draft() -> None:
-    target_model_config = _rope_model_config(uses_mrope=True)
-    draft_model_config = _rope_model_config(uses_mrope=True)
-    config = SimpleNamespace(
-        model_config=target_model_config,
-        speculative_config=SimpleNamespace(
-            target_model_config=target_model_config,
-            draft_model_config=draft_model_config,
-        ),
-    )
-
-    mtp._align_draft_rope_with_target(config)
-
-    assert draft_model_config.hf_text_config.rope_parameters == {
-        "mrope_section": [24, 20, 20],
-        "mrope_interleaved": True,
+    assert actual is draft_config
+    assert calls == [(target_config, 48)]
+    assert draft_config.quant_config.quant_description == {
+        f"mtp.layers.{48 + last_layer}.mlp.weight": "W4A8_DYNAMIC",
     }

@@ -1,34 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Thin bindings for CANN LightningIndexerV2 and its scheduling metadata.
+"""Upstream PyTorch bindings for LightningIndexerV2 and its metadata.
 
-Requires the CANN transformer op-api library exposing both V2 entry points.
-Import the vllm_ascend_C extension before calling these functions. This module
-performs no QSA-specific parameter conversion and never copies the key cache.
+Requires cann_ops_transformer and its matching CANN transformer op-api library.
+Registration is deferred to the worker's first call; importing this module must
+not load/build the upstream extension in unrelated processes. The default
+overload preserves the V2 two-output ABI (no candidate/V3 mode). This module
+does not prepare QSA metadata or copy the key cache.
 """
 
 import torch
 
+_LI_V2_METADATA_SIZE = 2048
+
 
 def _lightning_metadata_op():
-    try:
-        return torch.ops._C_ascend.npu_lightning_indexer_v2_metadata
-    except AttributeError:
-        from cann_ops_transformer.ops.attention.lightning_indexer_v2 import (
-            lightning_indexer_metadata,
-        )
+    import cann_ops_transformer  # noqa: F401  # Register upstream schemas in the worker.
 
-        return lightning_indexer_metadata
+    return torch.ops.cann_ops_transformer.lightning_indexer_metadata.default
 
 
 def _lightning_op():
-    try:
-        return torch.ops._C_ascend.npu_lightning_indexer_v2
-    except AttributeError:
-        from cann_ops_transformer.ops.attention.lightning_indexer_v2 import (
-            lightning_indexer,
-        )
+    import cann_ops_transformer  # noqa: F401  # Register upstream schemas in the worker.
 
-        return lightning_indexer
+    return torch.ops.cann_ops_transformer.lightning_indexer.default
 
 
 def lightning_indexer_v2_metadata(
@@ -55,8 +49,16 @@ def lightning_indexer_v2_metadata(
     At least one NPU length tensor is required for device dispatch. TND query
     boundaries include the initial zero. Length tensors must be INT32.
     """
-    if all(tensor is None for tensor in (cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, cmp_residual_k)):
+    length_tensors = [
+        tensor for tensor in (cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, cmp_residual_k) if tensor is not None
+    ]
+    if not length_tensors:
         raise ValueError("LightningIndexerV2 metadata requires at least one NPU length tensor")
+    # Upstream's fake implementation hardcodes device="npu". Preserve pure-Meta
+    # shape inspection without allocating on a real device. Fake NPU tensors
+    # still have device.type == "npu" and use the upstream dispatcher below.
+    if all(tensor.device.type == "meta" for tensor in length_tensors):
+        return torch.empty((_LI_V2_METADATA_SIZE,), dtype=torch.int32, device="meta")
     # Match upstream Python defaults before entering the typed C++ schema.
     batch_size = 0 if batch_size is None else batch_size
     max_seqlen_q = -1 if max_seqlen_q is None else max_seqlen_q
