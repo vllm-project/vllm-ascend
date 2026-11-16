@@ -11,6 +11,7 @@ import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.sampling_params import SamplingParams
+from vllm.v1.worker.utils import AttentionGroup
 
 import vllm_ascend._310p.worker.v2.model_runner as model_runner_module
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
@@ -1210,6 +1211,45 @@ def test_block_table_expands_logical_blocks_to_310p_kernel_blocks(_pin_memory) -
     )
     block_tables.append_block_ids(0, ([7],), overwrite=True)
     assert block_tables.block_tables_cpu[0][0, :2].tolist() == [14, 15]
+
+
+@pytest.mark.skipif(
+    not hasattr(AttentionGroup, "_with_kernel_block_table"),
+    reason="This vLLM version does not map block tables in AttentionGroup",
+)
+@pytest.mark.parametrize("for_capture", [False, True])
+def test_attention_metadata_uses_preexpanded_310p_block_table(_pin_memory, for_capture: bool) -> None:
+    block_tables = Ascend310PBlockTables(
+        block_sizes=[128],
+        max_num_reqs=1,
+        max_num_batched_tokens=2,
+        max_num_blocks_per_group=[1],
+        device=torch.device("cpu"),
+        kernel_block_sizes=[64],
+    )
+    block_tables.append_block_ids(0, ([7],), overwrite=True)
+    (kernel_block_table,) = block_tables.gather_block_tables(np.array([0]), num_reqs_padded=1)
+    common_metadata = MagicMock(block_table_tensor=kernel_block_table)
+    builder = MagicMock()
+    group = AttentionGroup(
+        backend=MagicMock(),
+        layer_names=["layer"],
+        kv_cache_spec=MagicMock(block_size=128),
+        kv_cache_group_id=0,
+        kernel_block_size=64,
+        metadata_builders=[builder],
+    )
+    group.block_table_is_kernel_granular = True  # type: ignore[attr-defined]
+
+    if for_capture:
+        group.build_metadata_for_cudagraph_capture(common_metadata)
+        (received_metadata,) = builder.build_for_cudagraph_capture.call_args.args
+    else:
+        group.build_metadata(common_metadata)
+        _, received_metadata = builder.build.call_args.args
+
+    assert received_metadata.block_table_tensor is kernel_block_table
+    assert received_metadata.block_table_tensor.tolist() == [[14, 15]]
 
 
 def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:

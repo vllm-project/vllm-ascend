@@ -833,6 +833,10 @@ class NPUModelRunner310V2(NPUModelRunner):
             cp_interleave=self.cp_interleave,
             slot_mapping_enabled=slot_mapping_enabled,
         )
+        # Ascend310PBlockTables expands manager block IDs when appending them.
+        for groups in self.attn_groups:
+            for attn_group in groups:
+                attn_group.block_table_is_kernel_granular = True  # type: ignore[attr-defined]
         initialize_mamba_ssu_backend(self.vllm_config.mamba_config, self.kv_cache_config)
 
         # vLLM #60517 removed the `tensor_parallel_size` parameter on main.
