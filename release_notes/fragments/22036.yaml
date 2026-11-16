@@ -1,0 +1,4 @@
+pr: 22036
+entries:
+  - category: performance
+    text: Reduced owner-prefix selection work for heavily skewed context-parallel indexer candidates.
