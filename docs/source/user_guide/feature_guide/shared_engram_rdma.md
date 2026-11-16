@@ -105,3 +105,9 @@ the deployment; there is no automatic failover.
 
 For a single owner, use the `endpoint` string configuration. The `endpoints`
 list requires at least two owners.
+
+The multi-owner A2 component test used a distinct physical NPU for each owner
+and consumer. In the tested environment, two owner processes sharing one NPU
+failed when the consumer connected to the second owner. The multi-owner test
+covered INT8 codes with FP32 scales; FP8 multi-owner and A5 multi-owner
+validation remain outstanding.
