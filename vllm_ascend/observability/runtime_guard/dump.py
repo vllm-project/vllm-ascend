@@ -246,7 +246,12 @@ def block_ids_for_request(
             raw = getattr(state, "block_ids", None)
             parsed = _normalize_block_ids(raw, kv_cache_group=kv_cache_group)
             if parsed:
-                return parsed
+                # ``requests[].block_ids`` are scheduler/manager ids. Ascend
+                # kernel-paged caches use dim0 = manager_id * R + k; expand here.
+                # ``runner.block_tables`` paths below are already kernel-expanded
+                # by AscendBlockTables — do not expand those twice.
+                ratio = _blocks_per_kv_block_for_group(runner, kv_cache_group)
+                return expand_manager_block_ids(parsed, ratio)
 
     if input_batch is None:
         # V2: runner.input_batch stays None; prefer execute_model_state batch
@@ -431,6 +436,50 @@ def _kv_cache_config_layer_names(runner: Any) -> list[str]:
     return names
 
 
+def _layer_name_to_kv_cache_group(runner: Any) -> dict[str, int]:
+    """Map logical layer name → ``kv_cache_groups`` index."""
+    cfg = getattr(runner, "kv_cache_config", None)
+    groups = getattr(cfg, "kv_cache_groups", None) if cfg is not None else None
+    if not groups:
+        return {}
+    out: dict[str, int] = {}
+    for gi, group in enumerate(groups):
+        for name in getattr(group, "layer_names", None) or []:
+            out[str(name)] = int(gi)
+    return out
+
+
+def _logical_layer_name(layer_name: str) -> str:
+    """Strip dump part suffix ``name[i]`` back to the config layer name."""
+    if layer_name.endswith("]") and "[" in layer_name:
+        return layer_name[: layer_name.rfind("[")]
+    return layer_name
+
+
+def _blocks_per_kv_block_for_group(runner: Any, kv_cache_group: int) -> int:
+    """Kernel pages per manager block for ``kv_cache_group`` (default 1)."""
+    block_tables = getattr(runner, "block_tables", None)
+    ratios = getattr(block_tables, "blocks_per_kv_block", None) if block_tables is not None else None
+    if ratios is None:
+        return 1
+    try:
+        return max(1, int(ratios[kv_cache_group]))
+    except (TypeError, ValueError, IndexError):
+        return 1
+
+
+def expand_manager_block_ids(block_ids: list[int], blocks_per_kv_block: int) -> list[int]:
+    """Expand scheduler/manager block ids to kernel dim0 indices."""
+    ratio = max(1, int(blocks_per_kv_block))
+    if ratio == 1:
+        return [int(b) for b in block_ids]
+    out: list[int] = []
+    for bid in block_ids:
+        base = int(bid) * ratio
+        out.extend(range(base, base + ratio))
+    return out
+
+
 def _list_layer_name(i: int, *, names: list[str], start_layer: int) -> str:
     if 0 <= i < len(names):
         return names[i]
@@ -513,7 +562,39 @@ class KvCacheReader:
         self._runner = runner
 
     def _kv_sources(self) -> list[tuple[str, Any]]:
-        kv = getattr(self._runner, "kv_caches", None)
+        """Prefer dict/tuple KV (preserves C8/TQ4 part names) over flattened list.
+
+        Ascend binds a flattened ``runner.kv_caches`` list for attention kernels.
+        ``compilation_config.static_forward_context[layer].kv_cache`` still holds
+        the original tensor or ``(k, v[, scale…])`` tuple per logical layer.
+        """
+        runner = self._runner
+        ctx = None
+        try:
+            cfg = getattr(runner, "compilation_config", None)
+            ctx = getattr(cfg, "static_forward_context", None) if cfg is not None else None
+        except Exception:
+            ctx = None
+        if isinstance(ctx, dict) and ctx:
+            rebuilt: dict[str, Any] = {}
+            for layer_name, module in ctx.items():
+                kv = getattr(module, "kv_cache", None)
+                if kv is None:
+                    continue
+                # Some bindings store a list of virtual-engine caches; take [0].
+                if isinstance(kv, list) and kv and not isinstance(kv[0], torch.Tensor):
+                    # list of tuples / tensors per VE
+                    first = kv[0] if kv else None
+                    if first is not None:
+                        rebuilt[str(layer_name)] = first
+                elif isinstance(kv, list) and kv and isinstance(kv[0], torch.Tensor):
+                    rebuilt[str(layer_name)] = tuple(kv) if len(kv) > 1 else kv[0]
+                else:
+                    rebuilt[str(layer_name)] = kv
+            if rebuilt:
+                return [("static_forward_context", rebuilt)]
+
+        kv = getattr(runner, "kv_caches", None)
         if isinstance(kv, dict) and kv:
             return [("kv_caches", kv)]
         if isinstance(kv, list) and kv:
@@ -526,8 +607,29 @@ class KvCacheReader:
             _pp_start_layer(self._runner),
         )
 
+    def _block_ids_for_layer(
+        self,
+        *,
+        req_id: str,
+        layer_name: str,
+        fallback_ids: list[int],
+        group_cache: dict[int, list[int]],
+        layer_to_group: dict[str, int],
+    ) -> list[int]:
+        logical = _logical_layer_name(layer_name)
+        gid = int(layer_to_group.get(logical, 0))
+        if gid not in group_cache:
+            got = block_ids_for_request(self._runner, req_id, None, kv_cache_group=gid)
+            if not got and gid == 0 and fallback_ids:
+                # Arm-time hint is already in the address space used at arm
+                # (usually group-0 table / requests); do not re-expand.
+                got = list(fallback_ids)
+            group_cache[gid] = list(got)
+        return group_cache[gid]
+
     def estimate_dump_bytes(self, *, block_ids: list[int]) -> int:
         """Host-side size estimate of a request dump (no D2H)."""
+        # Conservative: use the provided ids (typically group 0) across layers.
         ids = list(block_ids)
         names, start = self._list_layer_meta()
         total = 0
@@ -545,18 +647,11 @@ class KvCacheReader:
     ) -> Iterator[KvDumpSnapshot]:
         """Yield per-layer CPU snapshots for one request (D2H per layer).
 
-        Only the request's ``block_ids`` are dumped (never the full KV pool).
-        Yielding per layer lets callers enqueue each layer for async save as
-        soon as it lands on host.
+        ``block_ids`` is the arm-time group-0 hint. Each layer resolves its own
+        ``kv_cache_group`` block table (hybrid / draft / multi-group) and expands
+        manager ids to kernel pages when ``blocks_per_kv_block > 1``.
         """
-        ids = list(block_ids)
-        if not ids:
-            logger.warning(
-                "[runtime_guard dump_kv] skip req_id=%s: empty block_ids (refusing full-cache D2H)",
-                req_id,
-            )
-            return
-
+        fallback_ids = list(block_ids)
         out_dir.mkdir(parents=True, exist_ok=True)
         produced = False
         # Record which shard produced the dump so cross-rank comparisons can
@@ -569,8 +664,26 @@ class KvCacheReader:
         pp_rank = runner_pp_rank(self._runner)
         cp_rank = runner_cp_rank(self._runner)
         names, start = self._list_layer_meta()
+        layer_to_group = _layer_name_to_kv_cache_group(self._runner)
+        group_cache: dict[int, list[int]] = {}
+        skipped_empty_group = False
         for src_name, kv_caches in self._kv_sources():
             for layer_name, tensor in _iter_kv_tensors(kv_caches, list_names=names, start_layer=start):
+                ids = self._block_ids_for_layer(
+                    req_id=req_id,
+                    layer_name=layer_name,
+                    fallback_ids=fallback_ids,
+                    group_cache=group_cache,
+                    layer_to_group=layer_to_group,
+                )
+                if not ids:
+                    skipped_empty_group = True
+                    logger.warning(
+                        "[runtime_guard dump_kv] skip layer=%s req_id=%s: empty block_ids for group",
+                        layer_name,
+                        req_id,
+                    )
+                    continue
                 num_kv_heads = int(tensor.shape[-2]) if tensor.dim() >= 3 else None
                 sliced = _slice_blocks(tensor, ids)
                 if sliced is None:
@@ -585,12 +698,14 @@ class KvCacheReader:
                 safe_layer = layer_name.replace("/", "_")
                 path = out_dir / f"{req_id}_{safe_layer}_req.pt"
                 produced = True
+                logical = _logical_layer_name(layer_name)
                 yield KvDumpSnapshot(
                     path=path,
                     payload={
                         "req_id": req_id,
                         "block_ids": used_ids,
                         "layer": layer_name,
+                        "kv_cache_group": int(layer_to_group.get(logical, 0)),
                         "source": src_name,
                         "rank_tag": rank_tag,
                         "tp_rank": tp_rank,
@@ -601,7 +716,13 @@ class KvCacheReader:
                     },
                 )
         if not produced:
-            logger.warning("[runtime_guard dump_kv] no kv tensors found req_id=%s", req_id)
+            if not fallback_ids and not skipped_empty_group:
+                logger.warning(
+                    "[runtime_guard dump_kv] skip req_id=%s: empty block_ids (refusing full-cache D2H)",
+                    req_id,
+                )
+            else:
+                logger.warning("[runtime_guard dump_kv] no kv tensors found req_id=%s", req_id)
 
     def snapshot_request_blocks(
         self,
