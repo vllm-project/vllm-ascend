@@ -30,6 +30,23 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_enable_sp_current_config_precedes_initialized_config(enabled):
+    current = SimpleNamespace(
+        parallel_config=SimpleNamespace(use_sequence_parallel_moe=enabled, tensor_parallel_size=1)
+    )
+    fallback = SimpleNamespace(
+        parallel_config=SimpleNamespace(use_sequence_parallel_moe=not enabled, tensor_parallel_size=1)
+    )
+    with (
+        mock.patch("vllm.config.get_current_vllm_config", return_value=current),
+        mock.patch("vllm_ascend.ascend_config.get_init_vllm_config", return_value=fallback) as get_fallback,
+    ):
+        assert utils.enable_sp() is enabled
+        get_fallback.assert_not_called()
+        assert utils.enable_sp(fallback) is not enabled
+
+
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
 def test_register_customop_selects_gdn_before_import(device_type):
     from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
