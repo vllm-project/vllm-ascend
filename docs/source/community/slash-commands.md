@@ -224,6 +224,9 @@ labels the PR currently carries (`ready-precise`, `ready-a5`,
 same scope a push used to get. If a run for the same commit is already queued or in
 progress, `/run` is a no-op.
 
+`/run` requests tests, so the CODEOWNERS approval gate is not evaluated in its
+runs; it is evaluated when reviews are submitted instead.
+
 **Examples:**
 
 ```text

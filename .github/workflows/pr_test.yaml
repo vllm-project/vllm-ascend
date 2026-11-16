@@ -806,9 +806,15 @@ jobs:
   # access count as approvers on purpose (this is why the native
   # require_code_owner_review is not used).
   codeowner-approval:
-    # Bot reviews (e.g. gemini-code-assist COMMENTED) never change the
-    # approval state, so skip re-evaluating the gate for them.
-    if: ${{ github.event_name != 'pull_request_review' || github.event.review.user.type != 'Bot' }}
+    # Skip on bot reviews (they never change the approval state) and on
+    # /run-triggered runs (a `ci-run` labeled pull_request event): codeowner
+    # approval is a merge-review concern and is evaluated when reviews are
+    # submitted, not when tests are requested manually.
+    if: >-
+      ${{
+        (github.event_name != 'pull_request_review' || github.event.review.user.type != 'Bot') &&
+        github.event.label.name != 'ci-run'
+      }}
     runs-on: linux-amd64-cpu-2-hk
     permissions:
       pull-requests: read
@@ -1037,7 +1043,12 @@ jobs:
             esac
           fi
 
-          if [ "${OWNER_RESULT}" != "success" ]; then
+          # /run-triggered runs skip the codeowner-approval job on purpose
+          # (see the job condition); the gate still passes here and owner
+          # approval is evaluated when reviews are submitted.
+          if [ "${{ github.event.label.name }}" = "ci-run" ]; then
+            echo "codeowner-approval: skipped (/run requested; evaluated when reviews are submitted)"
+          elif [ "${OWNER_RESULT}" != "success" ]; then
             fail "CODEOWNERS approval gate failed: at least one changed file has no approval from its owner(s). Open the 'codeowner-approval' job above to see which files are missing approvals and who can approve."
           fi
 
