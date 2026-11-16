@@ -1,11 +1,11 @@
 # Qwen-family batch-invariance cases: every model runs the same BS=1 vs BS=N check.
 import pytest
 
-from tests.e2e.conftest import ModelName
-from tests.e2e.pull_request.four_card.rlhf.consistency.batch_invariant._common import (
+from tests.e2e.common.rlhf.batch_invariant.common import (
     assert_bitwise_batch_invariance,
     model_kwargs,
 )
+from tests.e2e.conftest import ModelName
 
 DEFAULT_MODEL = ModelName.QWEN3_30B_A3B
 

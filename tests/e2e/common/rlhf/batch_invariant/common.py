@@ -6,6 +6,9 @@ import pytest
 import torch
 from vllm import SamplingParams
 
+# Every case that uses these helpers runs in batch-invariant mode.
+os.environ["VLLM_BATCH_INVARIANT"] = "1"
+
 
 def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
     # Generate more realistic prompts that will actually produce varied tokens
