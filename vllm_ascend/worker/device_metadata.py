@@ -221,6 +221,29 @@ class TargetDeviceMetadata:
         if not full_graph:
             self.begin_forward()
 
+    @contextmanager
+    def capture(self):
+        """Retire metadata even if capture fails before model forward."""
+        try:
+            yield
+        finally:
+            self.finish()
+
+    @contextmanager
+    def forward(self):
+        """Submit producers inside warmup/capture and join them after consumers."""
+        with self.capture():
+            self.begin_forward()
+            yield
+
+    @contextmanager
+    def replay(self):
+        """Retire runtime preparation without resubmitting captured producers."""
+        try:
+            yield
+        finally:
+            self.finish_replay()
+
     def begin_forward(self):
         """Called inside target graph warmup/capture, or after eager prepare."""
         if not self._tasks or self.executor.submission_in_flight:

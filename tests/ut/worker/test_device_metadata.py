@@ -337,14 +337,6 @@ def test_wait_helper_is_noop_without_forward_context(monkeypatch):
     wait_for_device_metadata(DeviceMetadataStage.ATTENTION, 7)
 
 
-@contextmanager
-def execution(state):
-    try:
-        yield
-    finally:
-        state.finish()
-
-
 class Executor:
     submission_in_flight = False
 
@@ -398,27 +390,27 @@ def prepare(state, builder, full=False, fail=False):
 
 
 def test_eager_lifecycle(state):
-    with execution(state):
+    with state.capture():
         prepare(state, Builder())
         assert state.executor.calls == ["submit"]
     assert state.executor.calls == ["submit", "wait", "release"]
 
 
 def test_graph_producers_only_run_inside_forward_not_runtime_prepare(state):
-    with execution(state):
+    with state.capture():
         prepare(state, Builder(), full=True)
         assert state.executor.calls == []
-        state.begin_forward()  # ModelWithContext, inside capture
-        state.finish()
+        with state.forward():
+            assert state.executor.calls == ["submit"]
         assert state.executor.calls == ["submit", "wait", "release"]
-        prepare(state, Builder(), full=True)
-        state.finish_replay()  # all device work comes from captured nodes
+        with state.replay():
+            prepare(state, Builder(), full=True)
     assert state.executor.calls == ["submit", "wait", "release"]
 
 
 def test_build_failure_clears_provider(state):
     builder = Builder()
-    with pytest.raises(ValueError), execution(state):
+    with pytest.raises(ValueError), state.capture():
         prepare(state, builder, fail=True)
     assert not builder.enabled and builder.tasks == ()
     assert state.executor.calls == []
@@ -426,7 +418,7 @@ def test_build_failure_clears_provider(state):
 
 @pytest.mark.parametrize("full", [False, True])
 def test_unretired_inputs_cannot_be_rebuilt(state, full):
-    with execution(state):
+    with state.capture():
         prepare(state, Builder(), full=full)
         with pytest.raises(RuntimeError, match="not retired"):
             prepare(state, Builder(), full=full)
@@ -442,12 +434,27 @@ def test_failure_joins_only_submitted_stream(state, monkeypatch):
         raise ValueError("producer failure")
 
     state.executor.submit = fail
-    with pytest.raises(ValueError), execution(state):
-        prepare(state, Builder(), full=True)
-        state.begin_forward()
+    prepare(state, Builder(), full=True)
+    with pytest.raises(ValueError), state.forward():
+        pytest.fail("forward must not run after producer submission fails")
     assert waits == [state.executor.stream]
     assert state.executor.calls == ["release"]
     with pytest.raises(RuntimeError, match="recreate"):
+        prepare(state, Builder(), full=True)
+
+
+@pytest.mark.parametrize("scope", ["capture", "forward", "replay"])
+def test_scope_failure_retires_inputs_and_propagates_exception(state, scope):
+    prepare(state, Builder(), full=True)
+    error = ValueError("execution failed")
+    with pytest.raises(ValueError) as exc_info, getattr(state, scope)():
+        raise error
+
+    assert exc_info.value is error
+    expected = ["submit", "wait", "release"] if scope == "forward" else []
+    assert state.executor.calls == expected
+    # A subsequent preparation must not inherit stale tasks from the failure.
+    with state.capture():
         prepare(state, Builder(), full=True)
 
 
@@ -498,3 +505,55 @@ def test_capture_preparation_failure_retires_metadata(state, monkeypatch):
     prepare(state, Builder(), full=True)
     state.finish()
     assert state.executor.calls == []
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_model_forward_retires_metadata(state, monkeypatch, fail):
+    from vllm_ascend.worker.v2 import aclgraph_utils
+
+    prepare(state, Builder(), full=True)
+    monkeypatch.setattr(aclgraph_utils, "get_forward_context", SimpleNamespace)
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)
+    result = object()
+
+    def forward():
+        assert state.executor.calls == ["submit"]
+        if fail:
+            raise ValueError("model forward failed")
+        return result
+
+    model = aclgraph_utils.ModelWithContext(forward, device_metadata=state)
+    with pytest.raises(ValueError, match="model forward failed") if fail else nullcontext():
+        assert model() is result
+    assert state.executor.calls == ["submit", "wait", "release"]
+
+
+@pytest.mark.parametrize("updatable", [False, True])
+@pytest.mark.parametrize("fail", [False, True])
+def test_graph_replay_retires_metadata_without_submitting(state, monkeypatch, updatable, fail):
+    from vllm_ascend.worker.v2 import aclgraph_utils
+
+    prepare(state, Builder(), full=True)
+    manager = aclgraph_utils.ModelAclGraphManager.__new__(aclgraph_utils.ModelAclGraphManager)
+    manager.model_runner = SimpleNamespace(
+        attn_groups=[], model_state=SimpleNamespace(device_metadata=state, attn_metadata={})
+    )
+    manager.vllm_config = object()
+    manager.update_stream = object()
+    monkeypatch.setattr(aclgraph_utils, "set_current_vllm_config", lambda _: nullcontext())
+    monkeypatch.setattr(aclgraph_utils, "_get_graph_update_backend", lambda _: object())
+    monkeypatch.setattr(aclgraph_utils, "use_updatable_graph", lambda _: updatable)
+    result = object()
+
+    def replay(*args):
+        if fail:
+            raise ValueError("graph replay failed")
+        return result
+
+    manager._updatable_graph_replay = replay
+    manager._graph_relay = replay
+    with pytest.raises(ValueError, match="graph replay failed") if fail else nullcontext():
+        assert manager.run_fullgraph(SimpleNamespace(num_tokens=4)) is result
+    assert state.executor.calls == []
+    with state.capture():
+        prepare(state, Builder(), full=True)
