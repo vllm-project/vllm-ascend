@@ -15,6 +15,7 @@ def embedding():
     torch.nn.Module.__init__(obj)
     obj.weight = torch.nn.Parameter(torch.zeros(4, 160, dtype=torch.bfloat16), requires_grad=False)
     obj._shared_group = None
+    obj.etp_data_parallel_size = 1
     obj.shard_indices = SimpleNamespace(org_vocab_start_index=10, org_vocab_end_index=14)
     return obj
 
@@ -419,3 +420,30 @@ def test_constructor_cleanup_failure_retains_host_owner(monkeypatch, buffer_cons
         owner.close.assert_called_once()
     instances[0].close_host_offload()
     assert instances[0]._host_table is None
+
+
+def test_load_scope_retains_successful_and_failed_constructors(monkeypatch):
+    from vllm.models.qwen4_exp.common.ngram_embedding import Qwen4ExpPLEEmbedding
+
+    from vllm_ascend.models.host_offload import track_host_offload_owners
+    from vllm_ascend.models.qwen4_exp import ple_embedding
+
+    monkeypatch.setattr(ple_embedding, "get_current_vllm_config", lambda: SimpleNamespace(engram_config=None))
+    buffers = [Mock(), Mock()]
+
+    def initialize(self, fail=False):
+        torch.nn.Module.__init__(self)
+        self._host_table = buffers[int(fail)]
+        if fail:
+            raise ValueError("later layer failed")
+
+    monkeypatch.setattr(Qwen4ExpPLEEmbedding, "__init__", initialize)
+    with track_host_offload_owners() as owners:
+        first = AscendPLEHostEmbedding()
+        with pytest.raises(ValueError, match="later layer"):
+            AscendPLEHostEmbedding(fail=True)
+        assert len(owners) == 2 and owners[0] is first
+        for owner in owners:
+            owner.close_host_offload()
+    for buffer in buffers:
+        buffer.close.assert_called_once()

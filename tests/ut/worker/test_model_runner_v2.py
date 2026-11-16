@@ -2585,3 +2585,44 @@ def test_shutdown_releases_uva_owner_without_shared_pool_client():
     with patch.object(GPUModelRunner, "shutdown", side_effect=lambda: calls.append("parent")):
         runner.shutdown()
     assert calls == ["parent", "release"]
+
+
+@pytest.mark.parametrize("published_model", [False, True])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_load_failure_closes_unpublished_host_owners(published_model, cleanup_fails):
+    from vllm_ascend.model_executor.warmup import nz_warmup
+    from vllm_ascend.models.host_offload import register_host_offload_owner
+
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.vllm_config = MagicMock()
+    first, second = MagicMock(), MagicMock()
+    if cleanup_fails:
+        first.close_host_offload.side_effect = [RuntimeError("unregister failed"), None]
+    load_error = ValueError("later layer or checkpoint failed")
+
+    def fail_load(*args, **kwargs):
+        register_host_offload_owner(first)
+        register_host_offload_owner(second)
+        if published_model:
+            runner.model = MagicMock()
+            runner.model.modules.return_value = [first, second]
+        raise load_error
+
+    with (
+        patch.object(nz_warmup, "start_nz_warm_thread"),
+        patch.object(nz_warmup, "join_nz_warm_thread") as join,
+        patch("vllm_ascend.worker.v2.model_runner.get_pd_dspark_aux_layer_ids"),
+        patch.object(GPUModelRunner, "load_model", side_effect=fail_load),
+        pytest.raises(ValueError) as caught,
+    ):
+        runner.load_model()
+    assert caught.value is load_error
+    join.assert_called_once()
+    first.close_host_offload.assert_called_once()
+    second.close_host_offload.assert_called_once()
+    assert runner._shared_engram_shutdown_pending == ([first] if cleanup_fails else [])
+    if cleanup_fails:
+        with patch.object(GPUModelRunner, "shutdown"):
+            runner.shutdown()
+        assert first.close_host_offload.call_count == 2
+        assert runner._shared_engram_shutdown_pending == []

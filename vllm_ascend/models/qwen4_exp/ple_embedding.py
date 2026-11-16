@@ -15,6 +15,7 @@ from vllm_ascend.models.deepseek_v41.engram.npu import (
     HostUvaBufferCleanupError,
     SharedUvaBuffer,
 )
+from vllm_ascend.models.host_offload import register_host_offload_owner
 from vllm_ascend.ops.triton.qwen4_exp import ple_lookup
 
 
@@ -25,6 +26,7 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
     def __init__(self, *args, **kwargs):
         self._host_table: HostUvaBuffer | SharedUvaBuffer | None = None
         self._shared_group = None
+        register_host_offload_owner(self)
         config = get_current_vllm_config().engram_config
         if config is not None and config.dp_shared_memory:
             group = get_engram_dp_group()
@@ -119,6 +121,9 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
         raise NotImplementedError("PLE asynchronous prefetch is not enabled")
 
     def forward(self, ngram_ids: torch.Tensor) -> torch.Tensor:
+        return self.sync_lookup(ngram_ids)
+
+    def _lookup(self, ngram_ids: torch.Tensor) -> torch.Tensor:
         if self._host_table is None or self.weight is None:
             raise RuntimeError("PLE host table has been closed")
         output = torch.empty((*ngram_ids.shape, self.embedding_dim), dtype=torch.bfloat16, device=ngram_ids.device)
@@ -130,6 +135,4 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
             self.shard_indices.org_vocab_end_index,
             CHUNK_ROWS,
         )
-        if self.reduce_results and self.tp_size > 1:
-            output = self.parallel_group.all_reduce(output)
         return output
