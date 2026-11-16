@@ -1,0 +1,6 @@
+pr: 21985
+entries:
+  - category: bugfix
+    text: >-
+      Reduced excessive prefill MC2 and MegaMoe communication-buffer reservation
+      with PCP while retaining mixed-batch, chunk-rounding, and graph-padding capacity.
