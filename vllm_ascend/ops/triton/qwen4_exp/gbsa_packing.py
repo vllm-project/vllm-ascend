@@ -37,7 +37,10 @@ def _pack_selected_blocks(
     slot = tokens // 4
     group = tl.load(indices + head * idx_head_stride + row * idx_row_stride + slot * idx_group_stride,
                     mask=(slot < count) & (slot < GROUPS), other=-1)
-    logical = group * 4 + tokens % 4
+    # Keep masked lanes within the source allocation as Triton may form pointer
+    # offsets before applying the load mask.
+    safe_group = tl.where(group >= 0, group, 0)
+    logical = safe_group * 4 + tokens % 4
     valid = (group >= 0) & (logical < visible)
     page = tl.load(source_table + row * table_row_stride + (logical // 128) * table_col_stride,
                    mask=valid, other=0).to(tl.int64)
