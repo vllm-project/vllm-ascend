@@ -1,52 +1,10 @@
-# Adapt from https://github.com/vllm-project/vllm/blob/main/tests/v1/determinism/test_batch_invariant.py
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# This file is a part of the vllm-ascend project.
-#
+# Shared helpers for the batch-invariance e2e cases.
 import os
 import random
 
 import pytest
 import torch
 from vllm import SamplingParams
-
-from tests.e2e.conftest import ModelName
-
-os.environ["VLLM_BATCH_INVARIANT"] = "1"
-
-DEFAULT_MODEL = ModelName.QWEN3_30B_A3B
-
-# Shrink Qwen3-30B-A3B so it fits in CI: only the first 2 of the 48 hidden
-# layers are instantiated, keeping memory and runtime small. Weights are
-# random-initialized via `--load-format dummy` (see the test marker below).
-SMALL_QWEN3_OVERRIDES = {
-    "num_hidden_layers": 2,
-}
-
-# Qwen3.5-35B-A3B is a hybrid MoE: 30 gated-delta-net layers plus 10
-# full-attention layers, 256 experts top-8. It adds the GDN kernels and the
-# linear/full interleave to what the Qwen3 case covers; the real checkpoint is
-# already cached on the four-card runners.
-QWEN35_MODEL = "Qwen/Qwen3.5-35B-A3B"
-
-
-@pytest.fixture(autouse=True)
-def enable_batch_invariant_mode(monkeypatch: pytest.MonkeyPatch):
-    """Automatically enable batch invariant kernel overrides for all tests."""
-    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
 
 
 def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
@@ -91,7 +49,7 @@ def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
     return base_prompt
 
 
-def _extract_step_logprobs(request_output):
+def extract_step_logprobs(request_output):
     if getattr(request_output, "outputs", None):
         inner = request_output.outputs[0]
         if hasattr(inner, "logprobs") and inner.logprobs is not None:
@@ -104,7 +62,7 @@ def _extract_step_logprobs(request_output):
     return None, None
 
 
-def _assert_bitwise_batch_invariance(vllm_runner) -> None:
+def assert_bitwise_batch_invariance(vllm_runner) -> None:
     """Compare a BS=1 and a BS=N run of the same prompt set, step by step.
 
     Both runs share one engine instance, so any difference -- in the sampled
@@ -148,7 +106,7 @@ def _assert_bitwise_batch_invariance(vllm_runner) -> None:
         print(f"\n[BS=1] Running prompt {idx}/{len(prompts)} - Preview: {p[:80]}...")
         outs = vllm_runner.model.generate([p], sp, use_tqdm=False)
         assert len(outs) == 1
-        step_logprobs, token_ids = _extract_step_logprobs(outs[0])
+        step_logprobs, token_ids = extract_step_logprobs(outs[0])
         if step_logprobs is None:
             pytest.skip("Logits are not available on RequestOutput; enable logprobs return to run this test.")
         bs1_logprobs_per_prompt.append(step_logprobs)
@@ -170,7 +128,7 @@ def _assert_bitwise_batch_invariance(vllm_runner) -> None:
     for idx, o in enumerate(outs_batched):
         tokens = o.outputs[0].token_ids if o.outputs else "N/A"
         print(f"[BS={len(prompts)}] Prompt {idx} generated tokens: {tokens}")
-        step_logprobs, token_ids = _extract_step_logprobs(o)
+        step_logprobs, token_ids = extract_step_logprobs(o)
         if step_logprobs is None:
             pytest.skip("Logits are not available on RequestOutput; enable logprobs return to run this test.")
         bsN_logprobs_per_prompt.append(step_logprobs)
@@ -286,7 +244,7 @@ def _assert_bitwise_batch_invariance(vllm_runner) -> None:
         pytest.fail(msg)
 
 
-def _model(model_name: str, *, utilization: float = 0.9, overrides: dict | None = None) -> dict:
+def model_kwargs(model_name: str, *, utilization: float = 0.9, overrides: dict | None = None) -> dict:
     """Engine kwargs shared by the batch-invariance cases; only the model differs."""
     extra_kwargs: dict = {"enable_chunked_prefill": False, "block_size": 128}
     if overrides is not None:
@@ -304,35 +262,3 @@ def _model(model_name: str, *, utilization: float = 0.9, overrides: dict | None 
         "gpu_memory_utilization": float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", str(utilization))),
         "extra_kwargs": extra_kwargs,
     }
-
-
-@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B")
-@pytest.mark.e2e_coverage(
-    arch="moe",
-    feature="batch_invariant,logprobs",
-    parallel="TP",
-    deploy="pd_mix",
-    hardware="A3",
-    quantization="BF16",
-    graph_mode="full_and_piecewise",
-)
-@pytest.mark.model(**_model(DEFAULT_MODEL, utilization=0.95, overrides=SMALL_QWEN3_OVERRIDES))
-def test_qwen3_moe_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner):
-    """Verify bitwise token/logprob invariance across batch sizes with the default graph configuration."""
-    _assert_bitwise_batch_invariance(vllm_runner)
-
-
-@pytest.mark.e2e_model("Qwen/Qwen3.5-35B-A3B")
-@pytest.mark.e2e_coverage(
-    arch="moe",
-    feature="batch_invariant,logprobs",
-    parallel="TP",
-    deploy="pd_mix",
-    hardware="A3",
-    quantization="BF16",
-    graph_mode="full_and_piecewise",
-)
-@pytest.mark.model(**_model(QWEN35_MODEL, utilization=0.9))
-def test_qwen35_moe_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner):
-    """Same bitwise check as above, for the hybrid linear/full attention MoE model."""
-    _assert_bitwise_batch_invariance(vllm_runner)
