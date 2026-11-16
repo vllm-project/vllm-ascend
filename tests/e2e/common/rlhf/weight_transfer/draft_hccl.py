@@ -3,16 +3,18 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Draft HCCL client, model snapshots and two-draft/one-target transaction."""
 
+import json
+
 import torch
 import torch_npu  # noqa: F401
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.common.rlhf.common import (
+    post_control,
     rlhf_server,
     server_visible_devices,
     wait_for_free_device_memory,
 )
-from tests.e2e.common.rlhf.weight_transfer.case import QWEN3_DRAFT_CASE, QWEN3_DRAFT_TARGET_CASE
 from tests.e2e.common.rlhf.weight_transfer.hccl import (
     INFERENCE_DEVICE_INDEX,
     INFERENCE_WORLD_SIZE,
@@ -38,7 +40,7 @@ def _log(message):
     print(f"[trainer] {message}", flush=True)
 
 
-def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_eager: bool):
+def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_eager: bool, speculative_case):
     """Full draft payload twice, then target payload, against independent loads.
 
     Greedy output alone cannot observe a changed draft. Match every parameter
@@ -47,7 +49,7 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     torch.npu.set_device(TRAINER_DEVICE_INDEX)
     device = torch.device("npu", TRAINER_DEVICE_INDEX)
-    case, draft_case = QWEN3_DRAFT_TARGET_CASE, QWEN3_DRAFT_CASE
+    case, draft_case = speculative_case.target, speculative_case.draft
     initial = FixedRandomWeightSource(case, device, draft_case=draft_case)
     draft_updated = FixedRandomWeightSource(case, device, draft_case=draft_case, draft_seed=FIXED_WEIGHT_SEED + 2)
     target_updated = FixedRandomWeightSource(
@@ -68,45 +70,81 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
         port = get_open_port()
         with rlhf_server(
             str(checkpoint),
-            vllm_serve_args=draft_serve_args(checkpoint, case, port, enforce_eager=enforce_eager, live=False),
+            vllm_serve_args=draft_serve_args(
+                checkpoint, speculative_case, port, enforce_eager=enforce_eager, live=False
+            ),
             server_host="127.0.0.1",
             server_port=port,
             env_dict=env_dict,
         ) as server:
             signature = generation_signature(server.get_client(), case.id)
-            references.append((parameter_digests(snapshot_weight_update_models(server)), signature))
+            projections = post_control(
+                server, "collective_rpc", json={"method": "snapshot_draft_context_projections"}
+            ).json()["results"]
+            references.append((parameter_digests(snapshot_weight_update_models(server)), signature, projections))
+            (tmp_path / f"{name}.json").write_text(json.dumps(references[-1], indent=2))
 
     wait_for_free_device_memory(INFERENCE_DEVICE_INDEX, 0.2)
     port = get_open_port()
     with rlhf_server(
         str(initial_path),
-        vllm_serve_args=draft_serve_args(initial_path, case, port, enforce_eager=enforce_eager, live=True),
+        vllm_serve_args=draft_serve_args(initial_path, speculative_case, port, enforce_eager=enforce_eager, live=True),
         server_host="127.0.0.1",
         server_port=port,
         env_dict=env_dict,
     ) as server:
         client = server.get_client()
-        generation_signature(client, case.id)  # Capture/warm up graphs before checking addresses.
-        before = snapshot_weight_update_models(server)
-        addresses = parameter_addresses(before)
         sync_client = WeightUpdateClient(server.url_root)
         assert draft_updated.draft_source is not None
         engine = create_draft_hccl_trainer(sync_client, draft_updated.draft_source, packed, target_updated)
         try:
+            # Reuse the same HCCL session for inference and all update rounds.
+            generation_signature(client, case.id)  # Capture/warm up graphs before checking addresses.
+            architectures = post_control(server, "collective_rpc", json={"method": "draft_model_architecture"}).json()[
+                "results"
+            ]
+            assert len(architectures) == INFERENCE_WORLD_SIZE
+            assert all(name.endswith(speculative_case.draft_architecture) for name in architectures), architectures
+            before = snapshot_weight_update_models(server)
+            addresses = parameter_addresses(before)
+            (tmp_path / "initial-snapshot.json").write_text(json.dumps(before, indent=2))
             assert parameter_digests(before)["draft"] != references[0][0]["draft"], "Draft payload is not observable"
             for update_round in range(2):
-                _log(f"draft round={update_round + 1}")
+                _log(f"{speculative_case.id} draft round={update_round + 1}")
                 send_update(server, engine, sync_client, draft_updated.draft_source, is_draft=True)
-                assert generation_signature(client, case.id) == references[0][1]
                 after = snapshot_weight_update_models(server)
-                assert parameter_digests(after) == references[0][0]
+                (tmp_path / f"draft-snapshot-{update_round + 1}.json").write_text(json.dumps(after, indent=2))
+                differences = {
+                    role: [key for key, value in expected.items() if parameter_digests(after)[role].get(key) != value]
+                    for role, expected in references[0][0].items()
+                }
+                assert parameter_digests(after) == references[0][0], differences
+                assert (
+                    post_control(
+                        server, "collective_rpc", json={"method": "snapshot_draft_context_projections"}
+                    ).json()["results"]
+                    == references[0][2]
+                )
                 assert parameter_digests(after)["target"] == parameter_digests(before)["target"]
                 assert parameter_addresses(after) == addresses
+                signature = generation_signature(client, case.id)
+                (tmp_path / f"draft-generation-{update_round + 1}.json").write_text(json.dumps(signature, indent=2))
+                assert signature == references[0][1]
 
+            _log(f"{speculative_case.id} target round=1")
             send_update(server, engine, sync_client, target_updated, is_draft=False)
-            assert generation_signature(client, case.id) == references[1][1]
+            signature = generation_signature(client, case.id)
+            (tmp_path / "target-generation.json").write_text(json.dumps(signature, indent=2))
+            assert signature == references[1][1]
             after = snapshot_weight_update_models(server)
+            (tmp_path / "target-snapshot.json").write_text(json.dumps(after, indent=2))
             assert parameter_digests(after) == references[1][0]
+            assert (
+                post_control(server, "collective_rpc", json={"method": "snapshot_draft_context_projections"}).json()[
+                    "results"
+                ]
+                == references[1][2]
+            )
             assert parameter_addresses(after) == addresses
         finally:
             engine.shutdown()

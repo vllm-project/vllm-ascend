@@ -6,7 +6,7 @@
 import pytest
 import torch
 
-from tests.e2e.common.rlhf.weight_transfer.case import PACKED_LANE_SKIP_REASON
+from tests.e2e.common.rlhf.weight_transfer.case import DRAFT_MODEL_CASES, PACKED_LANE_SKIP_REASON
 from tests.e2e.common.rlhf.weight_transfer.draft_hccl import run_draft_hccl_weight_transfer
 
 
@@ -17,5 +17,6 @@ from tests.e2e.common.rlhf.weight_transfer.draft_hccl import run_draft_hccl_weig
     ids=["unpacked", "packed"],
 )
 @pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "aclgraph"])
-def test_hccl_draft_then_target_update(tmp_path, monkeypatch, packed, enforce_eager):
-    run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed, enforce_eager)
+@pytest.mark.parametrize("speculative_case", DRAFT_MODEL_CASES, ids=lambda case: case.id)
+def test_hccl_draft_then_target_update(tmp_path, monkeypatch, packed, enforce_eager, speculative_case):
+    run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed, enforce_eager, speculative_case)

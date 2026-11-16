@@ -644,6 +644,19 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
+                # Layerwise reload parks each owner on meta independently, so
+                # a shared HC parameter has two temporary loader destinations.
+                # Populate both or finalizing the decoder owner can overwrite
+                # the already-updated shared storage with an unloaded tensor.
+                if name in ("model.hc_head_fn", "model.hc_head_base", "model.hc_head_scale"):
+                    last_layer = self.config.num_hidden_layers + self.model.num_dspark_layers - 1
+                    alias_name = f"model.layers.{last_layer}.{name.removeprefix('model.')}"
+                    alias = params_dict.get(alias_name)
+                    if alias is not None and alias is not param:
+                        alias_loader = getattr(alias, "weight_loader", default_weight_loader)
+                        alias_loader(alias, loaded_weight)
+                        loaded_params.add(alias_name)
+
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
 

@@ -15,7 +15,9 @@ from vllm import envs
 
 from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import (
     deepseek_v4_checkpoint_name,
-    deepseek_v4_vision_params,
+    deepseek_v4_dspark_parameters,
+    qwen3_draft_parameters,
+    qwen3_next_mtp_parameters,
     expand_fused_expert_params,
     expand_minimax_m3_params,
     minimax_m3_checkpoint_name,
@@ -44,6 +46,7 @@ class WeightUpdateModelCase:
     checkpoint_param_expander: Callable[[str, tuple[int, ...]], list[tuple[str, tuple[int, ...]]]] = (
         expand_fused_expert_params
     )
+    checkpoint_parameter_adapter: Callable | None = None
     # Independent draft configs cannot inherit target CLI overrides.
     write_config_overrides: bool = False
     expert_intermediate_size: int | None = None
@@ -53,8 +56,6 @@ class WeightUpdateModelCase:
         "The capital of France is",
         "Explain why the sky is blue in one sentence:",
     )
-    extra_param_builder: Callable[[Any], list[tuple[str, tuple[int, ...], Any]]] | None = None
-    image_prompt: bool = False
     # One representative model covers both backends and packing modes.
     full_transfer_matrix: bool = False
     skip_reason: str | None = None
@@ -226,28 +227,6 @@ DEEPSEEK_V41_ENGRAM_CASE = WeightUpdateModelCase(
 DEEPSEEK_V41_CASES = (DEEPSEEK_V41_ENGRAM_CASE,)
 
 
-DEEPSEEK_V4_VISION_CASE = WeightUpdateModelCase(
-    id="deepseek-v4-flash-vision-bf16-4l-vit2-e8-hash3",
-    model="deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
-    full_transfer_matrix=True,
-    hf_overrides={
-        "architectures": ["DeepseekV4ForConditionalGeneration"],
-        "num_hidden_layers": 4,
-        "vision_n_layers": 2,
-        "n_routed_experts": 8,
-        "num_hash_layers": 3,
-        "num_nextn_predict_layers": 0,
-        "dspark_target_layer_ids": [],
-        "quantization_config": None,
-    },
-    checkpoint_name_map=deepseek_v4_checkpoint_name,
-    expert_intermediate_size=2048,
-    extra_param_builder=deepseek_v4_vision_params,
-    image_prompt=True,
-    extra_server_args=("--tokenizer-mode", "deepseek_v4"),
-)
-
-
 GLM51_CASE = WeightUpdateModelCase(
     id="glm-5.1-sfa-derived-kv",
     model="zai-org/GLM-5.1",
@@ -341,6 +320,127 @@ PACKED_LANE_SKIP_REASON = (
 
 
 MODEL_CASES = (*QWEN_CASES, *DEEPSEEK_CASES, *DEEPSEEK_V41_CASES, *GLM_CASES, MINIMAX_M3_CASE, MINIMAX_M31_FLASH_CASE)
+
+
+@dataclass(frozen=True)
+class DraftWeightUpdateCase:
+    """A target/draft pair exercising a real speculative architecture."""
+
+    id: str
+    target: WeightUpdateModelCase
+    draft: WeightUpdateModelCase
+    method: str
+    draft_architecture: str
+    num_speculative_tokens: int = 2
+    draft_sample_method: str = "greedy"
+
+
+# Keep the published hidden/MLP/head dimensions, vocabulary and tokenizer.
+# Like the target cases above, reduce depth rather than inventing a tiny width.
+_QWEN3_REDUCED = {"num_hidden_layers": 4, "layer_types": ["full_attention"] * 4}
+QWEN3_DRAFT_TARGET = WeightUpdateModelCase(
+    id="qwen3-reduced",
+    model="Qwen/Qwen3-8B",
+    hf_overrides=_QWEN3_REDUCED,
+    write_config_overrides=True,
+)
+
+
+def _qwen3_draft_case(method: str, architecture: str) -> DraftWeightUpdateCase:
+    overrides = {
+        **_QWEN3_REDUCED,
+        "num_hidden_layers": 1,
+        "layer_types": ["full_attention"],
+        "architectures": [architecture],
+        "draft_vocab_size": 151936,
+        # MRV2 reads the top-level capture-after indices (1-based), while
+        # DFlash's target_layer_ids below use zero-based decoder indices.
+        "eagle_aux_hidden_state_layer_ids": [1, 2, 3],
+    }
+    if method == "dflash":
+        overrides.update(
+            block_size=3,
+            num_target_layers=4,
+            dflash_config={"mask_token_id": 151669, "target_layer_ids": [0, 1, 2]},
+        )
+    return DraftWeightUpdateCase(
+        id=f"qwen3-{method}",
+        target=QWEN3_DRAFT_TARGET,
+        method=method,
+        draft_architecture="Eagle3Qwen3ForCausalLM" if method == "eagle3" else "DFlashQwen3ForCausalLM",
+        draft=WeightUpdateModelCase(
+            id=f"qwen3-{method}-draft",
+            model="Qwen/Qwen3-8B",
+            hf_overrides=overrides,
+            checkpoint_parameter_adapter=qwen3_draft_parameters,
+            write_config_overrides=True,
+        ),
+    )
+
+
+QWEN3_EAGLE3_CASE = _qwen3_draft_case("eagle3", "Eagle3Qwen3ForCausalLM")
+QWEN3_DFLASH_CASE = _qwen3_draft_case("dflash", "DFlashDraftModel")
+DEEPSEEK_V4_DSPARK_CASE = DraftWeightUpdateCase(
+    id="deepseek-v4-flash-dspark",
+    method="dspark",
+    draft_architecture="DSparkDeepseekV4ForCausalLM",
+    draft_sample_method="probabilistic",
+    target=replace(
+        DEEPSEEK_V4_CASE,
+        id="deepseek-v4-flash-dspark-target",
+        skip_reason=None,
+        write_config_overrides=True,
+        hf_overrides={"num_hidden_layers": 4, "n_routed_experts": 8, "compress_ratios": [0, 0, 4, 128]},
+    ),
+    draft=replace(
+        DEEPSEEK_V4_CASE,
+        id="deepseek-v4-flash-dspark-draft",
+        skip_reason=None,
+        write_config_overrides=True,
+        checkpoint_parameter_adapter=deepseek_v4_dspark_parameters,
+        hf_overrides={
+            "num_hidden_layers": 4,
+            "n_routed_experts": 8,
+            "num_hash_layers": 0,
+            "mlp_layer_types": ["moe"] * 4,
+            "compress_ratios": [0] * 5,
+            "n_mtp_layers": 1,
+            "dspark_num_mtp_layers": 1,
+            "dspark_block_size": 2,
+            "dspark_target_layer_ids": [0, 1, 2],
+            "dspark_markov_rank": 256,
+            "enable_confidence_head": True,
+            "dspark_noise_token_id": 128799,
+        },
+    ),
+)
+
+_QWEN3_NEXT_REDUCED = {
+    "num_hidden_layers": 4,
+    "layer_types": ["linear_attention"] * 3 + ["full_attention"],
+    "num_experts": 8,
+    "num_experts_per_tok": 2,
+    "num_nextn_predict_layers": 1,
+}
+QWEN3_NEXT_MTP_CASE = DraftWeightUpdateCase(
+    id="qwen3-next-mtp",
+    method="qwen3_next_mtp",
+    draft_architecture="Qwen3NextMTP",
+    target=WeightUpdateModelCase(
+        id="qwen3-next-reduced",
+        model="Qwen/Qwen3-Next-80B-A3B-Instruct",
+        hf_overrides=_QWEN3_NEXT_REDUCED,
+        write_config_overrides=True,
+    ),
+    draft=WeightUpdateModelCase(
+        id="qwen3-next-mtp-draft",
+        model="Qwen/Qwen3-Next-80B-A3B-Instruct",
+        hf_overrides={**_QWEN3_NEXT_REDUCED, "layer_types": ["full_attention"] * 4},
+        checkpoint_parameter_adapter=qwen3_next_mtp_parameters,
+        write_config_overrides=True,
+    ),
+)
+DRAFT_MODEL_CASES = (QWEN3_EAGLE3_CASE, QWEN3_DFLASH_CASE, DEEPSEEK_V4_DSPARK_CASE, QWEN3_NEXT_MTP_CASE)
 
 
 def pytest_model_cases(backend: str, *, model_cases: tuple[WeightUpdateModelCase, ...] = MODEL_CASES) -> list[Any]:
