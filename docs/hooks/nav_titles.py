@@ -196,6 +196,7 @@ TITLES = {
     "user_guide/feature_guide/context_parallel.md": {"en": "Context Parallel", "zh": "上下文并行"},
     "user_guide/feature_guide/cpu_binding.md": {"en": "CPU Binding", "zh": "CPU 绑定"},
     "user_guide/feature_guide/epd_disaggregation.md": {"en": "EPD Disaggregation", "zh": "EPD 分离"},
+    "user_guide/feature_guide/engram_local_vmm.md": {"en": "Local Shared Engram VMM", "zh": "本地共享 Engram VMM"},
     "user_guide/feature_guide/encoder_cache_cpu_offload.md": {
         "en": "Encoder Cache CPU Offload",
         "zh": "编码器缓存 CPU 卸载",

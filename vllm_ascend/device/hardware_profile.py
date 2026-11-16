@@ -95,6 +95,8 @@ class HardwareCapability(Enum):
     ENGRAM_UNROTATED_GATE = auto()
     # Decode native FP8 codes and E8M0 group scales in Engram table lookups.
     ENGRAM_MXFP8 = auto()
+    # Node-local shared INT8 Engram tables can use the A3 Host VMM backend.
+    ENGRAM_LOCAL_HOST_VMM = auto()
     # Enable dynamic-MX norm fusion and the associated ``wo_a`` weight-layout contract.
     DYNAMIC_MX_QUANT_FUSION = auto()
     # Select DynamicMxQuantV3 ``scale_alg=1`` for model paths that require it.
@@ -362,6 +364,7 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
     HardwareCapability.KDA_INT8_QUANT_OVERLAP,
     HardwareCapability.NATIVE_INT8_SPARSE,
     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,

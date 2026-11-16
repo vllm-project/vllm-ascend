@@ -289,6 +289,9 @@ class NPUWorker(WorkerBase):
             if not matches:
                 raise ValueError(f"No parameter matches sleep retention: {pattern}")
             names.update(matches)
+        meta_names = [name for name in names if parameters[name].device.type == "meta"]
+        if meta_names:
+            raise ValueError(f"Sleep retention cannot snapshot meta parameters: {', '.join(sorted(meta_names))}")
         self._sleep_saved_parameters = {
             name: param.detach().to("cpu") for name, param in parameters.items() if name in names and not param.is_cpu
         }
