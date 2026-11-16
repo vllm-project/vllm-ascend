@@ -170,6 +170,14 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 "is not supported with layerwise KV transfer (use_layerwise=True). "
                 "The layerwise threads do not implement TP-mismatch handling."
             )
+        if self.dcp_size > 1 and self.pcp_size == 1:
+            expected_dcp_rank = self.tp_rank % self.dcp_size
+            if expected_dcp_rank != self.dcp_rank:
+                raise ValueError(
+                    f"Layerwise DCP rank mapping mismatch: tp_rank={self.tp_rank}, "
+                    f"dcp_size={self.dcp_size} maps to dcp_rank={expected_dcp_rank}, "
+                    f"but the DCP group reports {self.dcp_rank}."
+                )
         # Both PD sides must derive the same GVA shard layout.
         if self.kv_role in ("kv_producer", "kv_consumer") and infer_dcp_mismatch_info(
             self.kv_role, self._extra_config, self.dcp_size, self.pcp_size
@@ -588,6 +596,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._transfer_threads_started = True
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        if self.use_recoverssm:
+            kv_caches = self._recoverssm_store_caches(kv_caches)
         draft_names = set(getattr(self, "_dspark_draft_layer_names", ()))
         draft_caches = {name: cache for name, cache in kv_caches.items() if name in draft_names}
         target_caches = (
@@ -713,10 +723,18 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         return self.tp_rank == min(peers)
 
     def _is_layerwise_save_owner(self, group_id: int = 0) -> bool:
-        # Recurrent state is TP-sharded even when the model's MLA KV is replicated.
-        return is_kv_save_role(self.kv_role, self.consumer_is_to_put) and (
-            self._is_layerwise_save_leader() or self.group_uses_align_state[group_id]
-        )
+        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
+            return False
+
+        # Each rank must save its own Mamba state shard.
+        if group_id in self.sharded_mamba_group_ids:
+            return True
+
+        # Deduplicate PCP replicas only when DCP does not shard their KV.
+        if self.dcp_size == 1 and self.pcp_rank != 0:
+            return False
+
+        return self._is_layerwise_save_leader() or self.group_uses_align_state[group_id]
 
     def _groups_for_layerwise_transfer(self, local_layer: int) -> list[tuple[int, int]]:
         if self.use_block_key_layerwise:
@@ -757,7 +775,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         """Use the backend-bound layout shared with scheduler hit checks."""
         assert self.layerwise_keys is not None
         return self.layerwise_keys.make_full_key(
-            group_id, block_hash_hex, self.metadata[group_id].head_or_tp_rank, self.pp_rank, self.pcp_rank
+            group_id,
+            block_hash_hex,
+            self.metadata[group_id].head_or_tp_rank,
+            self.pp_rank,
+            self.pcp_rank,
+            self.dcp_rank,
         )
 
     def _make_layerwise_partial_key(

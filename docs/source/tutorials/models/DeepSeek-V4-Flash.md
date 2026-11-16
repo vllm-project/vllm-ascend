@@ -32,7 +32,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 |  Weight Version                              | Hardware Requirements                                                      | Download Links |
 |----------------------------------------------|----------------------------------------------------------------------------|----------------|
 | `DeepSeek-V4-Flash-0731-w8a8` | 1 Atlas 800I A3 (128GB × 8) node or 1 Atlas 800I A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8) |
-| `DeepSeek-V4-Flash-0731` | 1 950DT node (96GB × 8)| [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) |
+| `DeepSeek-V4-Flash-0731` | 1 950DT node (96GB × 8)| [ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4-Flash-0731) \| [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) |
 | `DeepSeek-V4-Flash-0731-w4a4c8` | 950PR&950DT products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_flash_w4a4c8.yaml) |
 
 - `DeepSeek-V4-Flash-0731-w4a4c8` (W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
@@ -844,7 +844,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
                 --enable-expert-parallel \
                 --seed 1024 \
                 --served-model-name dsv4 \
-                --max-model-len 1048576 \
+                --max-model-len 512000 \
                 --max-num-batched-tokens 16384 \
                 --max-num-seqs 16 \
                 --no-disable-hybrid-kv-cache-manager \
@@ -911,7 +911,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
                 --enable-expert-parallel \
                 --seed 1024 \
                 --served-model-name dsv4 \
-                --max-model-len 1048576 \
+                --max-model-len 512000 \
                 --max-num-batched-tokens 480 \
                 --max-num-seqs 60 \
                 --async-scheduling \
@@ -1720,7 +1720,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --enable-expert-parallel \
             --seed 1024 \
             --served-model-name dsv4 \
-            --max-model-len 1048576 \
+            --max-model-len 512000 \
             --max-num-batched-tokens 16384 \
             --max-num-seqs 16 \
             --no-disable-hybrid-kv-cache-manager \
@@ -1825,7 +1825,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --enable-expert-parallel \
             --seed 1024 \
             --served-model-name dsv4 \
-            --max-model-len 1048576 \
+            --max-model-len 512000 \
             --max-num-batched-tokens 480 \
             --max-num-seqs 60 \
             --async-scheduling \
@@ -2583,7 +2583,18 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ### 9.1 Recommended Configurations
 
-> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
+For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
+
+#### Table 1: Detailed Node Configuration
+
+| Scenario | Configuration | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | PCP |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Short Sequence | Prefill Pool | 16 (1 A3 node) | 1 | 2 | 16 | 16384 | 512000 | PCP=8 |
+| Short Sequence | Decode Pool | 16 (1 A3 node) | 1 | 16 | 60 | 480 | 512000 | PCP=1 |
+| Long Context (~1M Input, Reference) | Prefill Pool | 16 (1 A3 node) | 8 | 2 | 16 | 4096 | 1048576 | PCP=1 |
+| Long Context (~1M Input, Reference) | Decode Pool | 16 (1 A3 node) | 1 | 16 | 60 | 480 | 1048576 | PCP=1 |
+
+> **Note**: **The configurations in the table and the following notes apply only to A3.** Except for the differences listed in the table, all settings remain identical between the short-sequence and long-context configurations. The long-context configuration is provided for reference.
 
 ### 9.2 Tuning Guidelines
 

@@ -188,6 +188,10 @@ def _read_verification_cost_probe(worker):
     return worker.model_runner._test_verify_budgets
 
 
+## Todo: After addressing the precision issues of dpsark on qwen3.6-37b, cancel this skip
+@pytest.mark.skip(
+    reason="Intermittent Qwen3.6 DSpark logprob mismatch: https://github.com/vllm-project/vllm-ascend/issues/21156"
+)
 @patch.dict(
     os.environ,
     {

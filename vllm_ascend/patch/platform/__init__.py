@@ -18,6 +18,8 @@ import os
 
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_glm53_reasoning  # noqa
+import vllm_ascend.patch.platform.patch_kimi_k31_config  # noqa
+import vllm_ascend.patch.platform.patch_kv_cache_admission  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
@@ -79,8 +81,7 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 #
 # ** File: platform/patch_kv_cache_utils.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.kv_cache_utils` (v0.32.0) /
-#      `vllm.v1.core.kv_cache_planning` (main, vLLM #61183)
+#   1. `vllm.v1.core.kv_cache_planning` (both supported versions, vLLM #61183)
 #    Why:
 #       vLLM's generic KV-cache planner cannot represent GLM-Next's cache
 #       topology, where MLA and compressed indexer caches share block IDs while
@@ -95,12 +96,10 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 #       Remove this patch when upstream's generic KV-cache layout supports the
 #       Ascend GLM-Next cache topology.
 #
-#       On main, Ascend grouping and pool accounting live in
-#       `vllm_ascend.core.kv_cache_config_builder`, which the platform selects
-#       through `NPUPlatform.get_kv_cache_config_builder_cls`; its default
-#       materialization delegates back to the patched planning functions
-#       applied by this file. The v0.32.0 lane, which has no pluggable
-#       builder, applies the same rules directly from this file.
+#       On both supported versions, Ascend grouping and pool accounting live
+#       in AscendKVCacheConfigBuilder, which the platform selects through
+#       NPUPlatform.get_kv_cache_config_builder_cls. Its default materialization
+#       delegates to the patched planning functions in this file.
 #
 # ** File: platform/patch_mamba_config.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -135,3 +134,13 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 #    Future Plan:
 #       Remove this patch when upstream supports per-group or backend-defined
 #       prefill boundaries.
+
+# ** File: platform/patch_kv_cache_admission.py **
+# Targets SWA and chunked-local admission in SingleTypeKVCacheManager.
+# First-time admission shifts the cap past skipped prefix entries. Existing
+# requests offset the cap only with non-NULL blocks held exclusively by that
+# request; releasing shared blocks does not return capacity to the pool.
+# Uncapped allocation and full-attention managers retain upstream behavior.
+# Upstream plan: contribute physical-block accounting to vLLM and remove this
+# patch once both supported vLLM versions cover first-time and shared-block
+# admission accounting.

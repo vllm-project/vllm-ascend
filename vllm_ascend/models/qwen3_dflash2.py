@@ -5,6 +5,7 @@ from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
+    get_pcp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
@@ -21,7 +22,10 @@ from vllm.model_executor.models.qwen3_dflash import (
 from vllm.model_executor.models.utils import maybe_prefix
 
 from vllm_ascend.models.qwen3_dspark import align_draft_weights
+from vllm_ascend.ops.vocab_parallel_embedding import VocabParallelMode
 from vllm_ascend.utils import get_rotation_path
+
+_MAX_EXACT_FP32_TOKEN_ID = 1 << 24
 
 
 def _grouped_conv(
@@ -303,9 +307,36 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
         values, ids = torch.topk(logits, selector.top_k, dim=-1)
         ids = ids.to(torch.int64) + self.lm_head.shard_indices.org_vocab_start_index
 
-        if get_tensor_model_parallel_world_size() > 1:
-            values = tensor_model_parallel_all_gather(values, dim=-1)
-            ids = tensor_model_parallel_all_gather(ids, dim=-1)
+        pcp_sharded = getattr(self.lm_head, "parallel_mode", None) is VocabParallelMode.PCP_X_TP
+        tp_size = get_tensor_model_parallel_world_size()
+        if pcp_sharded or tp_size > 1:
+            # The target head can be shared with a logically PCP=1 draft while
+            # its resident vocabulary still spans TP x PCP. Merge candidates
+            # from every vocabulary shard before selecting the global TopK.
+            # Interleave score/id pairs so each group needs only one collective.
+            # FP32 exactly represents FP16/BF16/FP32 scores and token IDs within
+            # this bound. Keep the separate path for larger vocabularies/dtypes.
+            packed = (
+                values.dtype in (torch.float16, torch.bfloat16, torch.float32)
+                and self.lm_head.num_embeddings_padded <= _MAX_EXACT_FP32_TOKEN_ID
+            )
+            if packed:
+                score_dtype = values.dtype
+                pairs = torch.stack((values.float(), ids.float()), dim=-1)
+                # Gather the candidate dimension, keeping each score/id pair intact.
+                if pcp_sharded:
+                    pairs = get_pcp_group().all_gather(pairs.contiguous(), dim=-2)
+                if tp_size > 1:
+                    pairs = tensor_model_parallel_all_gather(pairs.contiguous(), dim=-2)
+                values = pairs[..., 0].to(score_dtype)
+                ids = pairs[..., 1].to(torch.int64)
+            else:
+                if pcp_sharded:
+                    values = get_pcp_group().all_gather(values.contiguous(), dim=-1)
+                    ids = get_pcp_group().all_gather(ids.contiguous(), dim=-1)
+                if tp_size > 1:
+                    values = tensor_model_parallel_all_gather(values.contiguous(), dim=-1)
+                    ids = tensor_model_parallel_all_gather(ids.contiguous(), dim=-1)
             values, selected = torch.topk(values, selector.top_k, dim=-1)
             ids = ids.gather(-1, selected)
 

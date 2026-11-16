@@ -1069,7 +1069,8 @@ if __name__ == "__main__":
         node_rank=0
 
         export VLLM_PP_LAYER_PARTITION="41,37"
-        export HCCL_BUFFSIZE=400
+        export HCCL_BUFFSIZE=2400
+        export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_IF_IP=$local_ip
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_SOCKET_IFNAME=$nic_name
@@ -1113,7 +1114,7 @@ if __name__ == "__main__":
             "kv_port": "30000",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
-                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
+                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pcp_size": 16, "pp_layer_partition": "41,37"},
                 "decode": {"dp_size": 8, "tp_size": 4}
             }
         }'
@@ -1131,7 +1132,8 @@ if __name__ == "__main__":
         node_rank=1
 
         export VLLM_PP_LAYER_PARTITION="41,37"
-        export HCCL_BUFFSIZE=400
+        export HCCL_BUFFSIZE=2400
+        export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_IF_IP=$local_ip
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_SOCKET_IFNAME=$nic_name
@@ -1175,7 +1177,7 @@ if __name__ == "__main__":
             "kv_port": "30000",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
-                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
+                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pcp_size": 16, "pp_layer_partition": "41,37"},
                 "decode": {"dp_size": 8, "tp_size": 4}
             }
         }'
@@ -1233,7 +1235,7 @@ if __name__ == "__main__":
             "kv_port": "30200",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
-                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
+                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pcp_size": 16, "pp_layer_partition": "41,37"},
                 "decode": {"dp_size": 8, "tp_size": 4}
             }
         }'
@@ -1291,7 +1293,7 @@ if __name__ == "__main__":
             "kv_port": "30200",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
-                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
+                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pcp_size": 16, "pp_layer_partition": "41,37"},
                 "decode": {"dp_size": 8, "tp_size": 4}
             }
         }'
@@ -1500,9 +1502,9 @@ Test cases use the notation `input/output`, e.g., `128k/1k` means 128K input tok
 |Dual-Node Co-Located 198K Low Latency (A3)|w8a8c8|Dual-Node Co-Located Node (0/1)|16|1|16|1|16|4096|202752|3|
 |PD 198K High Throughput (A3)|w8a8c8|PD — Server-P Node (PP2, PCP16)|16|1|16|1|64|16384|202752|1|
 |PD 198K High Throughput (A3)|w8a8c8|PD — Server-D Node|16|4|1|4|32|164|202752|3|
-|PD 135K High Throughput (950DT Products)|w4a4|PD — Server-P Node (PCP 8)|8|1|8|1|20|8192|135000|1|
+|PD 135K High Throughput (950DT Products)|w4a4|PD — Server-P Node (PCP 8)|8|1|8|1|8|8192|135000|1|
 |PD 135K High Throughput (950DT Products)|w4a4|PD — Server-D Node|8|1|1|8|60|240|135000|3|
-|PD 135K Low Latency (950DT Products)|w4a4|PD — Server-P Node (PCP 8)|8|1|8|1|20|8192|135000|1|
+|PD 135K Low Latency (950DT Products)|w4a4|PD — Server-P Node (PCP 8)|8|1|8|1|8|8192|135000|1|
 |PD 135K Low Latency (950DT Products)|w4a4|PD — Server-D Node|8|1|1|8|60|240|135000|3|
 
 #### 9.1.2 Table 2: Optimizations Requiring Explicit Enablement

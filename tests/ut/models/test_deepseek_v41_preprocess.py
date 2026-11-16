@@ -41,8 +41,8 @@ def test_dsa_v41_custom_op_forwards_its_output_buffer(monkeypatch):
         ("replicated", 1, True, "decode", False),
         ("replicated", 5, True, "mixed", False),
         ("replicated", 1, True, "dummy", False),
-        ("pcp", 5, True, None, False),
-        ("pcp", 5, True, "prefill", False),
+        ("sliced", 5, True, None, False),
+        ("sliced", 5, True, "prefill", False),
         ("empty", 5, True, None, False),
         ("empty", 5, True, "prefill", False),
     ],
@@ -51,7 +51,7 @@ def test_dsa_v41_custom_op_forwards_its_output_buffer(monkeypatch):
 def test_preprocess_equivalence_and_stream_dependencies(
     monkeypatch, layout, num_tokens, quantized_kv, a5_batch, communication, overlap
 ):
-    """Exercise real projections with shared, sliced and PCP-local Query inputs."""
+    """Exercise real Q/KV projections on the same full, sliced or empty input."""
     trace: list[tuple[str, str, str]] = []
     quant_inputs = []
     active = "main"
@@ -171,16 +171,22 @@ def test_preprocess_equivalence_and_stream_dependencies(
         ),
     )
     hidden = torch.randn(num_tokens, 8)
-    padded_hidden = torch.cat((hidden, torch.full((3, 8), 9999.0)))
     cos, sin = torch.randn(num_tokens, 1, 1, 2), torch.randn(num_tokens, 1, 1, 2)
     slots = torch.tensor([[1, i] for i in range(num_tokens)])
     slots[-1] = -1
     if a5_batch == "dummy":
         slots.fill_(-1)
-    cache_metadata = SimpleNamespace(
-        positions=torch.arange(num_tokens),
+    ids = list(range(num_tokens)) if layout == "replicated" else [0, 4]
+    if layout == "empty":
+        ids = []
+    hidden = hidden[ids]
+    cos, sin, slots = cos[ids], sin[ids], slots[ids]
+    padded_hidden = torch.cat((hidden, torch.full((3, 8), 9999.0)))
+    metadata = SimpleNamespace(
+        positions=torch.arange(num_tokens)[ids],
         swa=SimpleNamespace(
-            num_actual_tokens=num_tokens,
+            num_actual_tokens=len(ids),
+            global_metadata=None,
             slot_mapping=slots,
             flat_slot_mapping=slots,
             num_prefills=int(a5_batch == "prefill"),
@@ -189,26 +195,14 @@ def test_preprocess_equivalence_and_stream_dependencies(
         ),
         rope=lambda *args: (cos, sin),
     )
-    ids = list(range(num_tokens)) if layout == "replicated" else [0, 4]
-    if layout == "empty":
-        ids = []
-    local_hidden, local_cos, local_sin = hidden[ids], cos[ids], sin[ids]
-    query_metadata = (
-        cache_metadata
-        if layout == "replicated"
-        else SimpleNamespace(
-            swa=SimpleNamespace(num_actual_tokens=len(ids)),
-            rope=lambda *args: (local_cos, local_sin),
-        )
-    )
     impl_class = dsa_v41.AscendDSAV41Impl
     impl = impl_class.__new__(impl_class)
     impl.multistream_dsv4_dsa_overlap = overlap
     impl.role = SimpleNamespace(is_kv_source=False, has_long_context=False)
 
-    expected_qr = attn.q_norm(qa(local_hidden))
+    expected_qr = attn.q_norm(qa(hidden))
     expected_q = qb(expected_qr).unflatten(-1, (2, 4))
-    rope(expected_q.unsqueeze(1), local_cos, local_sin, partial_slice=[2, 4])
+    rope(expected_q.unsqueeze(1), cos, sin, partial_slice=[2, 4])
     expected_kv = attn.kv_norm(kv(hidden)).view(-1, 1, 4)
     rope(expected_kv.unsqueeze(1), cos, sin, partial_slice=[2, 4])
     scatter(cache, slots, expected_kv.squeeze(1))
@@ -217,24 +211,18 @@ def test_preprocess_equivalence_and_stream_dependencies(
     trace.clear()
     quant_inputs.clear()
 
-    if layout == "replicated":
-        q, qr, prepared = impl._prepare_inputs_and_caches(attn, padded_hidden, query_metadata, {})
-    else:
-        local_padded = torch.cat((local_hidden, torch.full((3, 8), 9999.0)))
-        q, qr, prepared = impl._preprocess(attn, local_padded, padded_hidden, query_metadata, cache_metadata)
+    q, prepared = impl._prepare_inputs_and_caches(attn, padded_hidden, metadata, {})
     assert prepared is None
     torch.testing.assert_close(cache, expected_cache)
-    assert sum(item[1:] == ("cache", "scatter") for item in trace) == 1
+    assert sum(item[1:] == ("cache", "scatter") for item in trace) == int(bool(ids))
     if not ids:
-        assert q is qr is None
+        assert q is None
         assert not any(name in {"qa", "qb"} for _, name, _ in trace)
         return
     torch.testing.assert_close(q, expected_q)
-    torch.testing.assert_close(qr, expected_qr)
-    assert qr.is_floating_point()
-    share_quant = overlap and layout == "replicated" and quantized_kv and not communication
+    share_quant = overlap and quantized_kv and not communication
     assert len(quant_inputs) == 2 + int(quantized_kv and not share_quant)
-    torch.testing.assert_close(quant_inputs[0][1], local_hidden)
+    torch.testing.assert_close(quant_inputs[0][1], hidden)
     if quantized_kv and not share_quant:
         cache_quant = next(value for _, value in quant_inputs[1:] if value.shape[-1] == 8)
         torch.testing.assert_close(cache_quant, hidden)

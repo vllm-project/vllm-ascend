@@ -1,27 +1,31 @@
-"""Compressor 算子 triton 实现。
+"""Triton implementation of the compressor.
 
-kernel 结构：
-  K1 投影 GEMM ×2（bf16 权重，swizzle，block 由 autotune 按 M 择优）
-  K2 组池化（变长/残余拼接，两遍 softmax；段首残余从 cache 读取）
-  K3 cache 更新（只写每段最后 cache_size 个 token，每 slot 唯一写者）
-K2 必须先于 K3 执行：段尾写入与段首残余读取会命中同一 slot，并发时读取
-结果会被本段写入覆盖。
-compressor_ref 为纯 torch 参考实现。
+Kernel stages:
+  K1: Two projection GEMMs (BF16 weights, swizzled launch order, blocks autotuned by M).
+  K2: Group pooling (variable lengths, residual concatenation and two-pass softmax).
+      Leading residuals are read from the cache.
+  K3: Cache update (only the last cache_size tokens per segment, one writer per slot).
+K2 must run before K3: tail writes and leading residual reads may access the same
+slot. Concurrent execution could overwrite the residual before it is read.
+compressor_ref is the pure PyTorch reference implementation.
 """
 
 import numpy as np
 import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
+
 DEV = "npu"
-MAX_CHUNK_ROWS = 8  # 池化组内分块行数上限（UB 容量：三遍循环中间量 <192KB）
+MAX_CHUNK_ROWS = 8  # Max rows per pooling chunk; intermediates across three passes use <192 KB of UB.
 
 
 # ============================================================================
-# K1: 投影 GEMM（bf16 权重，swizzle，fp32 输出）
+# K1: Projection GEMM (BF16 weights, swizzled launch order, FP32 output)
 # ============================================================================
 
-# autotune 候选（key=['M']）。BK 影响 fp32 累加分组（ulp 级差异），在精度容差内。
+# Autotune candidates keyed by M. BK changes FP32 accumulation grouping,
+# introducing ULP-level differences within the numerical tolerance.
 _proj_tune_configs = [
     triton.Config({"BM": 128, "BN": 256, "BK": 256, "GROUP": 8}),
     triton.Config({"BM": 128, "BN": 256, "BK": 128, "GROUP": 8}),
@@ -48,7 +52,7 @@ def _proj_kernel(
     BK: tl.constexpr,
     GROUP: tl.constexpr,
 ):
-    """x (M, IN_DIM) @ w^T，w 为 (OUT_DIM, IN_DIM) 行主序，输出 fp32。"""
+    """Compute x (M, IN_DIM) @ w.T with row-major w (OUT_DIM, IN_DIM) and FP32 output."""
     pid = tl.program_id(0)
     num_progs = tl.num_programs(0)
     offs_m = tl.arange(0, BM)
@@ -77,7 +81,7 @@ def _proj_kernel(
 
 
 # ============================================================================
-# K2: 组池化（task_id -> (batch, local_group) O(1) 除法解码；控制量 kernel 内 load）
+# K2: Group pooling (O(1) task_id -> (batch, local_group) decoding; controls loaded in the kernel)
 # ============================================================================
 
 
@@ -90,6 +94,8 @@ def _pooled_blocked(
     kv_ptr,
     score_ptr,
     cache_ptr,
+    prev_rows_ptr,
+    prev_row_idx,
     offs_h,
     CACHE_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
@@ -97,15 +103,26 @@ def _pooled_blocked(
     RATIO_PAD: tl.constexpr,
     CHUNK_ROWS: tl.constexpr,
     HAS_RES,
+    HAS_PREV_ROWS: tl.constexpr,
 ):
-    """组内分块三遍循环（max / denom / 加权和）。HAS_RES=0 时不访问 cache。
+    """Pool a group in chunks using three passes: max, denominator and weighted sum.
 
-    组覆盖全局 token [group_idx*RATIO, (group_idx+1)*RATIO)：seg_off >= 0 读
-    投影大矩阵 (seg_row_base+seg_off)，< 0 为段前残余，读 cache
-    (cache_row, token_pos % CACHE_SIZE)。"""
+    HAS_RES=0 skips cache reads. The group covers global tokens
+    [group_idx*RATIO, (group_idx+1)*RATIO). For seg_off >= 0, read projection
+    row seg_row_base+seg_off; negative offsets read leading residuals from
+    cache[cache_row, token_pos % CACHE_SIZE]. PCP prefers the gathered
+    predecessor row, falling back to the cache when its index is -1.
+    """
     # Keep masked history lanes inside the projection allocation. Ascend may
     # form a DMA address for a masked lane before applying the load mask.
     # The original masks and ring selection still supply all history values.
+    history_ptr = cache_ptr + cache_row * CACHE_SIZE * 2 * HEAD_DIM
+    history_slot_stride = 2 * HEAD_DIM
+    if HAS_PREV_ROWS:
+        if prev_row_idx >= 0:
+            # Only residual lanes read this row; broadcast the gathered predecessor.
+            history_ptr = prev_rows_ptr + prev_row_idx * 2 * HEAD_DIM
+            history_slot_stride = 0
     score_max = tl.full((HEAD_DIM,), -float("inf"), dtype=tl.float32)
     for chunk0 in range(0, RATIO_PAD, CHUNK_ROWS):
         rows = chunk0 + tl.arange(0, CHUNK_ROWS)
@@ -121,7 +138,7 @@ def _pooled_blocked(
         if HAS_RES:
             slot = token_pos % CACHE_SIZE
             score_cache = tl.load(
-                cache_ptr + (cache_row * CACHE_SIZE + slot[:, None]) * 2 * HEAD_DIM + HEAD_DIM + offs_h[None, :],
+                history_ptr + slot[:, None] * history_slot_stride + HEAD_DIM + offs_h[None, :],
                 mask=(row_valid & (seg_off < 0))[:, None],
                 other=0.0,
             )
@@ -145,7 +162,7 @@ def _pooled_blocked(
         if HAS_RES:
             slot = token_pos % CACHE_SIZE
             score_cache = tl.load(
-                cache_ptr + (cache_row * CACHE_SIZE + slot[:, None]) * 2 * HEAD_DIM + HEAD_DIM + offs_h[None, :],
+                history_ptr + slot[:, None] * history_slot_stride + HEAD_DIM + offs_h[None, :],
                 mask=(row_valid & (seg_off < 0))[:, None],
                 other=0.0,
             )
@@ -169,7 +186,7 @@ def _pooled_blocked(
         if HAS_RES:
             slot = token_pos % CACHE_SIZE
             score_cache = tl.load(
-                cache_ptr + (cache_row * CACHE_SIZE + slot[:, None]) * 2 * HEAD_DIM + HEAD_DIM + offs_h[None, :],
+                history_ptr + slot[:, None] * history_slot_stride + HEAD_DIM + offs_h[None, :],
                 mask=(row_valid & (seg_off < 0))[:, None],
                 other=0.0,
             )
@@ -186,7 +203,7 @@ def _pooled_blocked(
         if HAS_RES:
             slot = token_pos % CACHE_SIZE
             kv_cache = tl.load(
-                cache_ptr + (cache_row * CACHE_SIZE + slot[:, None]) * 2 * HEAD_DIM + offs_h[None, :],
+                history_ptr + slot[:, None] * history_slot_stride + offs_h[None, :],
                 mask=(row_valid & (seg_off < 0))[:, None],
                 other=0.0,
             )
@@ -203,11 +220,13 @@ def _pool_kernel(
     kv_ptr,
     score_ptr,
     cache_ptr,
+    prev_rows_ptr,
+    prev_row_indices_ptr,
     norm_w_ptr,
-    meta_ptr,  # 拼包 [start_pos | used_len | out_row_offset | seg_row_base]
+    meta_ptr,  # Packed [start_pos | used_len | out_row_offset | seg_row_base]
     block_table_ptr,
     total_group_slots,
-    GROUP_SLOTS_PER_BATCH,  # 每 batch 组槽位上界 ceil(max_used_len / RATIO)
+    GROUP_SLOTS_PER_BATCH,  # Group slots per batch: ceil(max_used_len / RATIO)
     NUM_BATCH,
     CACHE_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
@@ -217,6 +236,7 @@ def _pool_kernel(
     eps: tl.constexpr,
     SINGLE_BLOCK: tl.constexpr,
     NO_PAD: tl.constexpr,
+    HAS_PREV_ROWS: tl.constexpr,
     TOKEN_ALIGNED: tl.constexpr = False,
     NUM_CACHE_BLOCKS: tl.constexpr = 0,
 ):
@@ -242,10 +262,13 @@ def _pool_kernel(
             rows = tl.arange(0, CHUNK_ROWS)
             token_pos = group_idx * RATIO + rows
             seg_off = token_pos - start_pos
-            residual = start_pos - group_idx * RATIO  # 段前残余数，仅 local_group==0 时可能 >0
+            # Leading residual count; nonzero only when local_group == 0.
+            residual = start_pos - group_idx * RATIO
             cache_row = tl.load(block_table_ptr + batch).to(tl.int64)
             if residual > 0:
-                # 残余组（每 batch 至多 1 个）：cache 拼接
+                prev_row_idx = -1
+                if HAS_PREV_ROWS:
+                    prev_row_idx = tl.load(prev_row_indices_ptr + batch).to(tl.int64)
                 pooled = _pooled_blocked(
                     group_idx,
                     start_pos,
@@ -254,6 +277,8 @@ def _pool_kernel(
                     kv_ptr,
                     score_ptr,
                     cache_ptr,
+                    prev_rows_ptr,
+                    prev_row_idx,
                     offs_h,
                     CACHE_SIZE,
                     HEAD_DIM,
@@ -261,9 +286,11 @@ def _pool_kernel(
                     RATIO_PAD,
                     CHUNK_ROWS,
                     True,
+                    HAS_PREV_ROWS,
                 )
             else:
-                # 非残余组：单块直读；RATIO 超出单块容量时走分块版
+                # Read groups without residuals directly if they fit in one block;
+                # otherwise, use chunked pooling.
                 if SINGLE_BLOCK:
                     if NO_PAD:
                         score = tl.load(score_ptr + (seg_row_base + seg_off)[:, None] * HEAD_DIM + offs_h[None, :])
@@ -299,12 +326,15 @@ def _pool_kernel(
                         kv_ptr,
                         score_ptr,
                         cache_ptr,
+                        prev_rows_ptr,
+                        -1,
                         offs_h,
                         CACHE_SIZE,
                         HEAD_DIM,
                         RATIO,
                         RATIO_PAD,
                         CHUNK_ROWS,
+                        False,
                         False,
                     )
             if TOKEN_ALIGNED:
@@ -321,7 +351,7 @@ def _pool_kernel(
 
 
 # ============================================================================
-# K3: cache 更新（只写每段最后 min(used_len, CACHE_SIZE) 个 token）
+# K3: Cache update (only the last min(used_len, CACHE_SIZE) tokens per segment)
 # ============================================================================
 
 
@@ -333,7 +363,7 @@ def _cache_update_kernel(
     meta_ptr,
     block_table_ptr,
     total_write_slots,
-    WRITE_SLOTS_PER_BATCH,  # 每 batch 写槽位上界 min(max_used_len, CACHE_SIZE)
+    WRITE_SLOTS_PER_BATCH,  # Write slots per batch: min(max_used_len, CACHE_SIZE)
     NUM_BATCH,
     CACHE_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
@@ -353,7 +383,7 @@ def _cache_update_kernel(
         if PROTECT_NULL:
             valid = valid & (cache_row > 0) & (cache_row < NUM_CACHE_BLOCKS)
         if valid:
-            token_in_seg = used_len - tail_count + write_idx  # 最后 tail_count 个 token 中的第 write_idx 个
+            token_in_seg = used_len - tail_count + write_idx  # write_idx-th token in the segment tail
             proj_row = tl.load(meta_ptr + 3 * NUM_BATCH + batch) + token_in_seg
             token_pos = tl.load(meta_ptr + batch) + token_in_seg
             slot = token_pos % CACHE_SIZE
@@ -365,12 +395,12 @@ def _cache_update_kernel(
 
 
 # ============================================================================
-# Host：布局归一、控制量拼包、launch
+# Host: Normalize layouts, pack controls and launch kernels
 # ============================================================================
 
 
 def _ints(v):
-    """控制量解析：list/tuple/np.ndarray 直取；torch.Tensor 走一次 D2H（仅兼容）。"""
+    """Read list/tuple/NumPy controls directly; tensors require one D2H copy for compatibility."""
     if v is None:
         return None
     if isinstance(v, torch.Tensor):
@@ -380,15 +410,18 @@ def _ints(v):
     return list(v)
 
 
-# 控制量拼包的异步上传环：pinned + non_blocking 拷贝。
-# from_numpy().to(dev) 为同步 H2D，会阻塞至此前入队的全部 kernel 完成。
-_META_UPLOAD_POOLS = {}  # (device, 拼包元素数) → _MetaUploadRing
-_META_RING_SIZE = 32  # 槽位数，须大于 host 领先 device 的最大调用数
+# Asynchronous upload ring for packed controls, using pinned memory and non_blocking copies.
+# from_numpy().to(dev) performs synchronous H2D and waits for all previously queued kernels.
+_META_UPLOAD_POOLS = {}  # (device, packed element count) -> _MetaUploadRing
+_META_RING_SIZE = 32  # Must exceed the maximum number of calls the host can enqueue ahead of the device.
 
 
 class _MetaUploadRing:
-    """每槽位含锁页中转、device 副本与上传完成事件；复用槽位前等待其事件，
-    避免写入中转缓冲时上一次 DMA 尚未完成。"""
+    """Keep pinned staging memory, a device copy and an upload event in each slot.
+
+    Wait for the event before reusing a slot so the staging buffer is not
+    overwritten while its previous DMA transfer is still in progress.
+    """
 
     def __init__(self, n_int, dev):
         self.pinned_staging = [torch.empty(n_int, dtype=torch.int32).pin_memory() for _ in range(_META_RING_SIZE)]
@@ -414,13 +447,15 @@ def _meta_upload(meta_np, dev):
     return _META_UPLOAD_POOLS[pool_key].upload(meta_np)
 
 
-_CUBE_CORE_NUM = None  # AI core 数，首次查询后缓存
+_CUBE_CORE_NUM = None  # AI core count, cached after the first query
 
 
 def _cube_core_num():
-    """设备 AI core 数（grid 并行单位）。
+    """Return the device AI core count used for grid parallelism.
 
-    multi_processor_count 为 vector core 数（num_aicore 的 2 倍），不可用作上限。"""
+    multi_processor_count counts vector cores (twice num_aicore), so it
+    cannot be used as the upper bound.
+    """
     global _CUBE_CORE_NUM
     if _CUBE_CORE_NUM is None:
         driver = triton.runtime.driver
@@ -442,18 +477,19 @@ def compressor(
     start_pos=None,
     num_cores=None,
 ):
-    """返回 cmp_kv（bf16）。
+    """Return cmp_kv in BF16.
 
-    cu_seqlens / seqused / start_pos 为 host 控制量（推荐 list[int]/np.ndarray，
-    tensor 兼容但有 D2H 同步）；state_cache / state_block_table 为 device tensor。
-    num_cores 为并行核数，缺省取设备 AI core 数。
+    cu_seqlens / seqused / start_pos are host controls; list[int] or NumPy arrays
+    are preferred. Tensor inputs are supported but require D2H synchronization.
+    state_cache / state_block_table are device tensors. num_cores controls
+    parallelism and defaults to the device AI core count.
     """
     hidden_dim = x.shape[-1]
     head_dim = wkv.shape[0]
     assert hidden_dim == 5120 and head_dim == 512, f"规格约束 hidden=5120/D=512, got {hidden_dim}/{head_dim}"
     ratio = int(cmp_ratio)
     assert 2 <= ratio <= 128
-    # batch 数与每段长度（布局归一）
+    # Normalize layouts to obtain the batch count and per-segment lengths.
     cu_list = _ints(cu_seqlens)
     if cu_list is not None:
         num_batch = len(cu_list) - 1
@@ -472,15 +508,15 @@ def compressor(
     start_pos_list = _ints(start_pos) if start_pos is not None else [0] * num_batch
     cache_size = state_cache.shape[1]
 
-    # 槽位网格：task_id -> (batch, 槽位) O(1) 除法解码，越界槽位 kernel 内跳过；
-    # 控制量拼包 [start_pos | used_len | out_row_offset | seg_row_base | batch_idx] 一次 H2D
+    # Decode task_id -> (batch, slot) in O(1); kernels skip out-of-range slots.
+    # Upload packed [start_pos | used_len | out_row_offset | seg_row_base | batch_idx] in one H2D copy.
     max_used_len = max(used_lens)
     group_slots_per_batch = (max_used_len + ratio - 1) // ratio
     write_slots_per_batch = min(max_used_len, cache_size)
-    total_group_slots = num_batch * group_slots_per_batch  # ≥ Σ组数
+    total_group_slots = num_batch * group_slots_per_batch  # At least the sum of per-batch group counts
     total_write_slots = num_batch * write_slots_per_batch
     dev = x.device
-    # 每段有效组数与输出布局
+    # Compute valid group counts per segment and the output layout.
     group_counts = [(spb + used_lens[b]) // ratio - spb // ratio for b, spb in enumerate(start_pos_list)]
     out_rows_per_batch = (max_seg_len + ratio - 1) // ratio
     if is_packed:
@@ -511,7 +547,7 @@ def compressor(
         else meta_dev[4 * num_batch : 5 * num_batch]
     )
 
-    # K1 投影 ×2
+    # K1: Two projections.
     kv = torch.empty(total_tokens, head_dim, dtype=torch.float32, device=dev)
     score = torch.empty(total_tokens, head_dim, dtype=torch.float32, device=dev)
     x_2d = x if is_packed else x.view(total_tokens, hidden_dim)
@@ -520,7 +556,7 @@ def compressor(
     _proj_kernel[gemm_grid](kv, x_2d, wkv, total_tokens, IN_DIM=hidden_dim, OUT_DIM=head_dim)
     _proj_kernel[gemm_grid](score, x_2d, wgate, total_tokens, IN_DIM=hidden_dim, OUT_DIM=head_dim)
 
-    # K2 组池化 → K3 cache 更新（顺序执行，先读后写）
+    # K2 group pooling, then K3 cache update: finish reads before writes.
     padded_ratio = max(2, triton.next_power_of_2(ratio))
     if total_group_slots > 0:
         pool_grid = (min(cores, total_group_slots),)
@@ -529,6 +565,8 @@ def compressor(
             kv,
             score,
             state_cache,
+            None,
+            None,
             norm_w,
             meta_dev,
             block_table_ptr,
@@ -543,6 +581,7 @@ def compressor(
             eps=1e-20,
             SINGLE_BLOCK=(padded_ratio <= MAX_CHUNK_ROWS),
             NO_PAD=(padded_ratio == ratio),
+            HAS_PREV_ROWS=False,
         )
     if total_write_slots > 0:
         cache_grid = (min(cores, total_write_slots),)
@@ -563,7 +602,7 @@ def compressor(
 
 
 # ============================================================================
-# 参考实现（纯 torch，逐 batch；cache 原地更新与实现一致）
+# Reference implementation (pure PyTorch, per batch, with matching in-place cache updates)
 # ============================================================================
 
 
@@ -644,13 +683,66 @@ def compressor_ref(
     return out_full
 
 
-def compressor_from_projected(kv, scores, state_cache, metadata, out, *, max_query_len, num_cores):
-    """Pool C2 into token-aligned BF16 rows, then update a private FP32 ring.
+@triton.jit(do_not_specialize=["num_writes", "num_requests"])
+def _write_pcp_ring_rows_kernel(
+    kv_score_rows_ptr,
+    ring_state_ptr,
+    ring_metadata_ptr,
+    source_row_indices_ptr,
+    request_indices_ptr,
+    token_offsets_ptr,
+    num_writes,
+    num_requests,
+    NUM_BLOCKS: tl.constexpr,
+    ROW_WIDTH: tl.constexpr,
+    RING_ROWS: tl.constexpr,
+):
+    write_idx = tl.program_id(0)
+    columns = tl.arange(0, ROW_WIDTH)
+    request_idx = tl.load(request_indices_ptr + write_idx, mask=write_idx < num_writes, other=-1)
+    if (write_idx < num_writes) & (request_idx >= 0) & (request_idx < num_requests):
+        block_idx = tl.load(ring_metadata_ptr + 4 * num_requests + request_idx).to(tl.int64)
+        num_tokens = tl.load(ring_metadata_ptr + num_requests + request_idx)
+        if (block_idx > 0) & (block_idx < NUM_BLOCKS) & (num_tokens > 0):
+            source_row_idx = tl.load(source_row_indices_ptr + write_idx).to(tl.int64)
+            start_pos = tl.load(ring_metadata_ptr + request_idx)
+            token_offset = tl.load(token_offsets_ptr + write_idx)
+            ring_slot = (start_pos + token_offset) % RING_ROWS
+            kv_score_row = tl.load(kv_score_rows_ptr + source_row_idx * ROW_WIDTH + columns)
+            tl.store(ring_state_ptr + (block_idx * RING_ROWS + ring_slot) * ROW_WIDTH + columns, kv_score_row)
+
+
+def write_pcp_ring_rows(
+    gathered_kv_scores, ring_state, ring_metadata, source_row_indices, request_indices, token_offsets
+):
+    """Write request-relative rows using rejection-corrected device ring starts."""
+    if source_row_indices.numel():
+        _write_pcp_ring_rows_kernel[(source_row_indices.numel(),)](
+            gathered_kv_scores,
+            ring_state,
+            ring_metadata,
+            source_row_indices,
+            request_indices,
+            token_offsets,
+            num_writes=source_row_indices.numel(),
+            num_requests=ring_metadata.shape[1],
+            NUM_BLOCKS=ring_state.shape[0],
+            ROW_WIDTH=ring_state.shape[-1],
+            RING_ROWS=STATE_RING_ROWS,
+        )
+
+
+def compressor_from_projected(
+    kv, scores, state_cache, metadata, out, *, max_query_len, num_cores, prev_rows, prev_row_indices
+):
+    """Pool C2 into token-aligned BF16 rows; PCP updates the ring after gathering.
 
     metadata is contiguous device INT32 [5, requests]: start positions, used
     lengths, output bases (reserved), input bases, and actual global block IDs.
     Controls must be bounded by the input rows and request table; padded requests
     have used length and block ID zero. No tensor contents are read by the host.
+    With prev_rows, chunk predecessors come from the gather or the old ring,
+    and the caller writes the global request tails after all local reads.
     """
     if kv.dtype != torch.float32 or scores.dtype != torch.float32 or state_cache.dtype != torch.float32:
         raise ValueError("Aurora projections and ring state must be FP32")
@@ -659,13 +751,21 @@ def compressor_from_projected(kv, scores, state_cache, metadata, out, *, max_que
     tokens, width = kv.shape
     if width < 1 or width & (width - 1):
         raise ValueError("Compressor width must be a positive power of two")
-    if state_cache.ndim != 3 or state_cache.shape[1:] != (32, 2 * width):
-        raise ValueError("Expected [blocks, 32, 2*width] ring state")
+    if state_cache.ndim != 3 or state_cache.shape[1:] != (STATE_RING_ROWS, 2 * width):
+        raise ValueError(f"Expected [blocks, {STATE_RING_ROWS}, 2*width] ring state")
     if out.dtype != torch.bfloat16 or out.shape != kv.shape:
         raise ValueError("Expected token-aligned BF16 pooled output")
     if metadata.dtype != torch.int32 or metadata.ndim != 2 or metadata.shape[0] != 5:
         raise ValueError("Expected INT32 [5, requests] device metadata")
-    tensors = (kv, scores, state_cache, metadata, out)
+    tensors = [kv, scores, state_cache, metadata, out]
+    if (prev_rows is None) != (prev_row_indices is None):
+        raise ValueError("Expected both gathered rows and predecessor indices, or neither")
+    if prev_rows is not None:
+        if prev_rows.dtype != torch.float32 or prev_rows.ndim != 2 or prev_rows.shape[1] != 2 * width:
+            raise ValueError("Expected FP32 [gathered rows, 2*width] projections")
+        if prev_row_indices.dtype != torch.int64 or prev_row_indices.shape != (metadata.shape[1],):
+            raise ValueError("Expected one INT64 predecessor index per local chunk")
+        tensors.extend((prev_rows, prev_row_indices))
     if not all(t.is_contiguous() for t in tensors):
         raise ValueError("Compressor requires contiguous projections, ring pages and controls")
     if not all(t.device == kv.device for t in tensors):
@@ -679,20 +779,22 @@ def compressor_from_projected(kv, scores, state_cache, metadata, out, *, max_que
     if kv.device.type != "npu":
         raise ValueError("Projected Triton compressor requires an NPU")
     groups = (max_query_len + 1) // 2
-    writes = min(max_query_len, 32)
+    writes = min(max_query_len, STATE_RING_ROWS)
     # Same-stream launch order is required: residual reads precede ring writes.
     _pool_kernel[(min(num_cores, batches * groups),)](
         out,
         kv,
         scores,
         state_cache,
+        prev_rows,
+        prev_row_indices,
         out,
         metadata,
         metadata[4],
         batches * groups,
         groups,
         batches,
-        CACHE_SIZE=32,
+        CACHE_SIZE=STATE_RING_ROWS,
         HEAD_DIM=width,
         RATIO=2,
         RATIO_PAD=2,
@@ -702,7 +804,10 @@ def compressor_from_projected(kv, scores, state_cache, metadata, out, *, max_que
         NO_PAD=True,
         TOKEN_ALIGNED=True,
         NUM_CACHE_BLOCKS=state_cache.shape[0],
+        HAS_PREV_ROWS=prev_rows is not None,
     )
+    if prev_rows is not None:
+        return out
     _cache_update_kernel[(min(num_cores, batches * writes),)](
         kv,
         scores,
@@ -712,7 +817,7 @@ def compressor_from_projected(kv, scores, state_cache, metadata, out, *, max_que
         batches * writes,
         writes,
         batches,
-        CACHE_SIZE=32,
+        CACHE_SIZE=STATE_RING_ROWS,
         HEAD_DIM=width,
         PROTECT_NULL=True,
         NUM_CACHE_BLOCKS=state_cache.shape[0],

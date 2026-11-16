@@ -46,6 +46,8 @@ Select the image for your target hardware.
 
     Run Docker on the host. `IMAGE` selects the image; `NAME` is the container name used by `docker exec`. Image versions follow the documentation release; replace the version template when copying raw Markdown.
 
+    The image tag template follows the documentation build. For the recommended vLLM-Ascend 0.32 RC runtime, select the matching 0.32 RC image tag for your hardware if the rendered tag is from another release. This also applies to the pooling images in Section 4.3.
+
 === "A2 series"
 
     ```bash
@@ -172,9 +174,9 @@ Initialize the CANN and ATB environments in the serving shell as described in th
 
 ### 4.3 Docker for Three-Tier PD Pooling
 
-Use these containers for [MemCache three-tier PD pooling](#54-pd-separation-with-memcache-three-tier-kv-cache-pool). Other deployment modes use Section 4.1. Container privileges follow the [MemCache Docker example](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-1-prerequisite-checks).
+Use these containers for [MemCache three-tier PD pooling](#55-pd-separation-with-memcache-three-tier-kv-cache-pool). Other deployment modes use Section 4.1. Container privileges follow the [MemCache Docker example](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-1-prerequisite-checks).
 
-Prepare storage on the **host**, then create one container per host using the matching hardware tab. Start the services inside the containers as described in Section 5.4.
+Prepare storage on the **host**, then create one container per host using the matching hardware tab. Start the services inside the containers as described in Section 5.5.
 
 For A2, prepare a separate SSD and configuration directory on each host. Run Prefill, MetaService, and Proxy on the prefill host, and Decode on the decode host, using shared MetaService and ConfigStore endpoints.
 
@@ -222,13 +224,13 @@ For a new pool, proceed only after confirming that each selected device has no f
 
 !!! warning
 
-    In Section 5.4, `MEMCACHE_FORCE_NEW_DISK` controls `ubsio.standalone.force_new_disk`. Setting it to `true` reinitializes cache storage at startup. Select its value for the target deployment and use only dedicated cache storage.
+    In Section 5.5, `MEMCACHE_FORCE_NEW_DISK` controls `ubsio.standalone.force_new_disk`. Setting it to `true` reinitializes cache storage at startup. Select its value for the target deployment and use only dedicated cache storage.
 
 !!! note
 
-    Set `MEMCACHE_CONFIG_DIR` before starting Docker. `-e` passes its value into the container, and `-v` mounts the directory at the same path. Section 5.4 copies image templates into this directory and uses those personal files.
+    Set `MEMCACHE_CONFIG_DIR` before starting Docker. `-e` passes its value into the container, and `-v` mounts the directory at the same path. Section 5.5 copies image templates into this directory and uses those personal files.
 
-In Section 5.4, set `MEMCACHE_SSD_PATHS` to the device paths mapped by `--device`.
+In Section 5.5, set `MEMCACHE_SSD_PATHS` to the device paths mapped by `--device`.
 
 Verify that all host device and file paths exist before running Docker.
 
@@ -275,7 +277,7 @@ Verify that all host device and file paths exist before running Docker.
 
 === "A3 series"
 
-    The A3 example in Section 5.4 uses two SSD-backed devices. Set `SSD_DEVICE_PATH` to the first device and `SSD_DEVICE_PATH_2` to the second device prepared above; check both before creating the container. The example device names are `/dev/loop0` and `/dev/loop1`, but use the actual names returned on your host.
+    The A3 example in Section 5.5 uses two SSD-backed devices. Set `SSD_DEVICE_PATH` to the first device and `SSD_DEVICE_PATH_2` to the second device prepared above; check both before creating the container. The example device names are `/dev/loop0` and `/dev/loop1`, but use the actual names returned on your host.
 
     ```bash
     export SSD_DEVICE_PATH_2="<SECOND_ACTUAL_SSD_DEVICE_PATH>"
@@ -374,7 +376,7 @@ Keep the container running. Open additional service terminals from the host with
 docker exec -it vllm-ascend-qwen38-pool bash
 ```
 
-Use the container name set by `NAME`. New shells inherit `MEMCACHE_CONFIG_DIR`; repeat the Section 5.4 library and service exports in each shell. Keep the directory path consistent with the container's environment and mount.
+Use the container name set by `NAME`. New shells inherit `MEMCACHE_CONFIG_DIR`; repeat the Section 5.5 library and service exports in each shell. Keep the directory path consistent with the container's environment and mount.
 
 After entering the container, check that the model and storage dependencies are available:
 
@@ -382,7 +384,7 @@ After entering the container, check that the model and storage dependencies are 
 python -c "import vllm, vllm_ascend, mooncake, memcache_hybrid, memfabric_hybrid; print('Model and pool dependencies are available')"
 ```
 
-Check MemCache dependency versions in Section 5.4. Budget pool DRAM and UBS IO memory separately from the container's `/dev/shm` limit (`--shm-size`).
+Check MemCache dependency versions in Section 5.5. Budget pool DRAM and UBS IO memory separately from the container's `/dev/shm` limit (`--shm-size`).
 
 !!! note "950 DT pooling runtime"
 
@@ -396,7 +398,7 @@ Check MemCache dependency versions in Section 5.4. Budget pool DRAM and UBS IO m
     export LD_LIBRARY_PATH="${MODEL_RUNTIME_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     ```
 
-    Use the active environment's Mooncake, Torch, and torch_npu library directories. MemCache/MemFabric library paths are set in Section 5.4.
+    Use the active environment's Mooncake, Torch, and torch_npu library directories. MemCache/MemFabric library paths are set in Section 5.5.
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
@@ -540,7 +542,6 @@ Before starting:
     **Key parameters:**
 
     - TP4 × DP1 uses devices 0–3 and a W4A8-MXFP checkpoint. NPU graph extension and static kernels are enabled; super kernels are disabled.
-    - Prefix caching automatically selects Mamba cache mode `align` from the default `none`; A2/A3 set `align` explicitly.
 
 **Service Verification:**
 
@@ -556,13 +557,15 @@ The response should list the configured model name. After startup, use [Section 
 
 Prepare the runtime from Section 4 and follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake). Run P/D commands in separate terminals, then start the proxy after their APIs are ready.
 
+For 950DT products, basic PD, the image-and-text 10K case, and the long-context case use the same Docker container setup from [Section 4.1](#41-docker-image-installation), under the `950DT products` tab.
+
 !!! note
 
     Set the IP and interface variables in each terminal; `nic_name` must own `local_ip`. The communication exports use these values, and `no_proxy`/`NO_PROXY` bypass HTTP proxies for the service addresses.
 
 === "A2 series"
 
-    This W4A8 deployment uses two eight-device A2 series hosts. Prefill runs on `PREFILL_HOST` and Decode runs on `DECODE_HOST`, each using devices 0–7. Prefill uses TP4 × PP2 × DP1, and Decode uses TP2 × DP4, matching the A3 model topology. Both roles load the same checkpoint; the proxy routes requests through one API endpoint per role (1P1D).
+    This W4A8 deployment uses two eight-device A2 series hosts. Prefill runs on `PREFILL_HOST` and Decode runs on `DECODE_HOST`, each using devices 0–7. Prefill uses TP4 × PP2 × DP1, and Decode uses TP2 × DP4. Both roles load the same checkpoint; the proxy routes requests through one API endpoint per role (1P1D).
 
     Before starting:
 
@@ -717,7 +720,7 @@ Prepare the runtime from Section 4 and follow the [Mooncake installation guide](
 
 === "A3 series"
 
-    This W4A8 PD deployment uses one 16-device A3 series host specified by `local_ip`. Prefill uses TP4 × PP2 × DP1 on devices 0–7; Decode uses TP2 × DP4 on devices 8–15. Both roles load the same checkpoint. The proxy routes requests through one Prefill API endpoint and one Decode API endpoint (1P1D); Decode runs four DP replicas behind its endpoint.
+    This W4A8 PD deployment uses one 16-device A3 series host specified by `local_ip`. Prefill uses TP2 × PP4 × DP1 (EP2) on devices 0–7. Decode uses TP2 × DP4 (EP8) on devices 8–15. Both roles load the same checkpoint. The proxy routes requests through one Prefill API endpoint and one Decode API endpoint (1P1D); Decode runs four DP replicas behind its endpoint.
 
     Before starting:
 
@@ -755,10 +758,10 @@ Prepare the runtime from Section 4 and follow the [Mooncake installation guide](
         --served-model-name qwen38-flash-next-a3-pd \
         --trust-remote-code \
         --quantization ascend \
-        --tensor-parallel-size 4 \
-        --pipeline-parallel-size 2 \
+        --tensor-parallel-size 2 \
+        --pipeline-parallel-size 4 \
         --data-parallel-size 1 \
-        --max-model-len 141312 \
+        --max-model-len 262144 \
         --max-num-seqs 32 \
         --max-num-batched-tokens 8192 \
         --gpu-memory-utilization 0.90 \
@@ -771,7 +774,7 @@ Prepare the runtime from Section 4 and follow the [Mooncake installation guide](
         --enforce-eager \
         --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
         --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
-        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}}'
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}'
     ```
 
     **Decode:**
@@ -807,7 +810,7 @@ Prepare the runtime from Section 4 and follow the [Mooncake installation guide](
         --quantization ascend \
         --tensor-parallel-size 2 \
         --data-parallel-size 4 \
-        --max-model-len 141312 \
+        --max-model-len 262144 \
         --max-num-seqs 32 \
         --max-num-batched-tokens 8192 \
         --gpu-memory-utilization 0.90 \
@@ -820,7 +823,7 @@ Prepare the runtime from Section 4 and follow the [Mooncake installation guide](
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
         --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
-        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}}'
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}'
     ```
 
     **Proxy:**
@@ -840,7 +843,7 @@ Prepare the runtime from Section 4 and follow the [Mooncake installation guide](
 
     **Service Verification:**
 
-    Check the startup logs for TP4 × PP2 × DP1 on Prefill and TP2 × DP4 with `enable_static_kernel=true` on Decode. From the serving host, check that both APIs list `qwen38-flash-next-a3-pd`:
+    Check the startup logs for TP2 × PP4 × DP1 (EP2) on Prefill and TP2 × DP4 (EP8) with `enable_static_kernel=true` on Decode. From the serving host, check that both APIs list `qwen38-flash-next-a3-pd`:
 
     ```bash
     curl --fail "http://127.0.0.1:25568/v1/models"
@@ -864,16 +867,17 @@ Prepare the runtime from Section 4 and follow the [Mooncake installation guide](
 
 === "950DT products"
 
-    This W4A8-MXFP deployment uses eight devices on one 950DT products host. Prefill and decode each use TP2 × DP2 without pipeline parallelism, with one command per role managing both DP replicas behind a single API endpoint. MooncakeConnectorV2 transfers KV cache between the two roles.
+    This W4A8-MXFP deployment uses eight devices on one 950DT products host. Prefill and Decode each use TP2 × DP2 (EP4), with one command per role managing both DP replicas behind a single API endpoint. MooncakeConnectorV2 transfers KV cache between the two roles.
 
     | Setting | Prefill | Decode |
     | --- | --- | --- |
     | Visible devices | 0,1,2,3 | 4,5,6,7 |
-    | TP × DP | 2 × 2 | 2 × 2 |
+    | TP × PP × DP | 2 × 1 × 2 | 2 × 1 × 2 |
+    | EP | 4 | 4 |
     | API port | 8088 | 8092 |
     | DP RPC port | 13388 | 13389 |
     | Mooncake role / KV base port | `kv_producer` / 30000 | `kv_consumer` / 30100 |
-    | Maximum context / sequences / batched tokens | 141312 / 128 / 4096 | 141312 / 128 / 4096 |
+    | Maximum context / sequences / batched tokens | 143360 / 64 / 4096 | 143360 / 64 / 4096 |
 
     Both roles load `Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp`. Set `local_ip` to the serving host address and `nic_name` to its network interface in each command block. Provide sufficient host memory for Engram CPU offload and shared memory.
 
@@ -931,12 +935,14 @@ Prepare the runtime from Section 4 and follow the [Mooncake installation guide](
         --data-parallel-size 2 \
         --data-parallel-address "${local_ip}" \
         --data-parallel-rpc-port 13388 \
-        --max-model-len 141312 \
-        --max-num-seqs 128 \
+        --max-model-len 143360 \
+        --max-num-seqs 64 \
         --max-num-batched-tokens 4096 \
         --gpu-memory-utilization 0.90 \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --enable-prefix-caching \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
         --async-scheduling \
         --enable-expert-parallel \
         --compilation-config '{"cudagraph_mode":"NONE"}' \
@@ -995,12 +1001,14 @@ Prepare the runtime from Section 4 and follow the [Mooncake installation guide](
         --data-parallel-size 2 \
         --data-parallel-address "${local_ip}" \
         --data-parallel-rpc-port 13389 \
-        --max-model-len 141312 \
-        --max-num-seqs 128 \
+        --max-model-len 143360 \
+        --max-num-seqs 64 \
         --max-num-batched-tokens 4096 \
         --gpu-memory-utilization 0.90 \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --enable-prefix-caching \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
         --async-scheduling \
         --enable-expert-parallel \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
@@ -1029,7 +1037,7 @@ Prepare the runtime from Section 4 and follow the [Mooncake installation guide](
 
     **Service Verification:**
 
-    Check the startup logs for TP2 × DP2 on each role, `cudagraph_mode=NONE` on Prefill, and `FULL_DECODE_ONLY` with static kernels on Decode. Check that both APIs list `qwen38-flash-next-950-dt-pd` before starting the proxy:
+    Check the startup logs for TP2 × DP2 (EP4) on each role, `cudagraph_mode=NONE` on Prefill, and `FULL_DECODE_ONLY` with static kernels on Decode. Check that both APIs list `qwen38-flash-next-950-dt-pd` before starting the proxy:
 
     ```bash
     local_ip="<LOCAL_SERVICE_IP>"
@@ -1050,33 +1058,343 @@ Prepare the runtime from Section 4 and follow the [Mooncake installation guide](
 
 **A2/A3 key parameters:**
 
-- Prefill uses TP4 × PP2 × DP1 in eager mode, with `enable_prefill_mc2=true` and fused MC2 disabled. Check MC2 token limits before increasing the batch budget.
-- Decode uses TP2 × DP4, `FULL_DECODE_ONLY`, NPU graph extension, static kernels, and recompute scheduling; super kernels are disabled.
+- A2 Prefill uses TP4 × PP2 × DP1 (EP4), and A3 Prefill uses TP2 × PP4 × DP1 (EP2). Both run in eager mode with `enable_prefill_mc2=true` and fused MC2 disabled. Check MC2 token limits before increasing the batch budget.
+- A2 and A3 Decode use TP2 × DP4 (EP8), `FULL_DECODE_ONLY`, NPU graph extension, static kernels, and recompute scheduling; super kernels are disabled.
 - Both roles use three MTP draft tokens, with `enforce_eager=true` on P and `false` on D. Batch tokens are 8192; P/D HCCL buffers are 8192/512.
-- Engram CPU offload requires supported n-gram layers and sufficient host memory. P uses `dp_shared_memory=false`; D uses `true`. Shared-memory DP replicas must share a host and shared-memory namespace; elastic EP is unsupported.
+- Engram CPU offload requires supported n-gram layers and sufficient host memory. P uses `dp_shared_memory=false`; D uses `true`. Shared-memory DP replicas must share a host and shared-memory namespace.
 - Both roles set prefix caching, Mamba cache mode `align`, and Mamba state dtype `bfloat16`. Keep Mooncake TP/PP/DP declarations consistent with the model commands; clear `VLLM_PP_LAYER_PARTITION` to use the default partition.
-- `enable_fused_mc2=0` is compatible with shared expert overlap; D uses the runtime default of zero. For tool calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to both roles and verify requests through the proxy.
+- Prefill sets `enable_fused_mc2=0` while enabling shared expert overlap.
 
 **950DT products key parameters:**
 
-- Each command starts TP2 × DP2 on four devices. `--api-server-count 1` exposes one API endpoint per role; use distinct DP RPC ports for Prefill and Decode.
-- Model Runner V2, async scheduling, and expert parallelism are enabled; EPLB is not enabled.
-- Engram uses CPU offload and DP shared memory. DP replicas must share the same host and shared-memory namespace; elastic EP is not enabled.
-- Prefill enables prefix caching, which automatically selects Mamba cache mode `align` from the default `none`, and uses `cudagraph_mode=NONE`; static kernels are disabled. Its validated MTP configuration leaves `enforce_eager` unset, inheriting the model setting; graph capture remains disabled by `cudagraph_mode=NONE`.
-- Decode enables prefix caching, `FULL_DECODE_ONLY`, static kernels, and recompute scheduling; MTP sets `enforce_eager=false` to allow graph execution.
+- Each command starts TP2 × DP2 (EP4) on four devices. `--api-server-count 1` exposes one API endpoint per role. Use distinct DP RPC ports for Prefill and Decode.
+- Model Runner V2, async scheduling, and expert parallelism are enabled.
+- Engram uses CPU offload and DP shared memory. DP replicas must share the same host and shared-memory namespace.
+- Both roles enable prefix caching with Mamba cache mode `align` and Mamba SSM cache dtype `bfloat16`.
+- Prefill uses `cudagraph_mode=NONE` with static kernels disabled.
+- Decode uses `FULL_DECODE_ONLY`, static kernels, and recompute scheduling. MTP sets `enforce_eager=false` to allow graph execution.
 - Both roles enable CPU binding, shared expert DP, FlashComm1, shared expert multistream overlap, and NPU graph extension. Fused MC2, norm/quantization fusion, and super kernels are disabled.
 - Both roles use three MTP draft tokens and `VLLM_ENGINE_READY_TIMEOUT_S=4800` for engine startup; model execution uses `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000`.
 - Both roles use `HCCL_BUFFSIZE=8192` and `ASCEND_BUFFER_POOL=0:0`. The validated configuration separates Prefill and Decode HCCL base ports (62000/63000) and NPU socket ranges (61400–61499/61500–61599).
 - Keep Mooncake DP2/TP2 declarations consistent with the services. The proxy connects to Prefill on port 8088 and Decode on port 8092. Keep the configured KV base ports at 30000 and 30100; the connector applies rank offsets internally.
-- For Function Calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to both model commands and verify proxy forwarding. Validate multimodal input and thinking control through the proxy with the selected checkpoint.
 
 ### 5.3 Image-and-Text 10K PD Separation Deployment
 
-This case uses the same eight-device 950DT products host as the basic PD example in [Section 5.2](#52-basic-pd-separation-deployment). For image-and-text 10K validation, prefill uses TP2 × PP2 × DP1 with a `25,23` layer partition, and decode uses TP2 × DP2 behind one API endpoint. Both roles use 8192 batch tokens and `HCCL_BUFFSIZE=512`. Both roles enable prefix caching; decode also enables static kernels.
+The 10K target is the processed input length, including text and image tokens. Keep the input plus requested output within the model length configured for your deployment.
 
-The 10K target is the processed input length, including text and image tokens. Both roles retain `--max-model-len 143360`; keep the input plus requested output within this limit. Use the W4A8-MXFP checkpoint from [Section 3.1](#31-model-weight) with its vision encoder and image processor.
+For A2 and A3, make sure Mooncake is importable in both serving containers before running the environment setup. If needed, follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md).
+
+=== "A2 series"
+
+    This W4A8 example uses two eight-device A2 series hosts. Prefill uses TP4 × PP2 × DP1 (EP4) on the Prefill host, and Decode uses TP2 × DP4 (EP8) on the Decode host. Each host uses devices 0–7. The proxy runs on the Prefill host and routes to one Prefill API and four Decode APIs, one per DP rank.
+
+    On both hosts, initialize the A2 container and runtime as described in [Section 4.1](#41-docker-image-installation). Use the same W4A8 checkpoint with the vision encoder and image processor on both hosts.
+
+    In each engine terminal, set `PREFILL_HOST` and `DECODE_HOST` to the two hosts' service IPs and `nic_name` to the local interface. Set `local_ip="${PREFILL_HOST}"` on Prefill and `local_ip="${DECODE_HOST}"` on Decode before applying the exports below.
+
+    ```bash
+    PREFILL_HOST="<PREFILL_LOCAL_IP>"
+    DECODE_HOST="<DECODE_LOCAL_IP>"
+    local_ip="<THIS_HOST_SERVICE_IP>"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY all_proxy ALL_PROXY
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
+    export no_proxy="localhost,127.0.0.1,${PREFILL_HOST},${DECODE_HOST}"
+    export NO_PROXY="${no_proxy}"
+    export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
+    export VLLM_USE_MODELSCOPE=True
+    export VLLM_SERVER_DEV_MODE=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export VLLM_ASCEND_PLE_BACKEND=torch
+    ```
+
+    **Prefill:**
+
+    ```bash
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
+    export HCCL_BUFFSIZE=4096
+    export VLLM_PP_LAYER_PARTITION=24,24
+
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+        --host 0.0.0.0 \
+        --port 25568 \
+        --served-model-name qwen38-flash-next-a2-pd \
+        --trust-remote-code \
+        --mm-encoder-tp-mode data \
+        --quantization ascend \
+        --tensor-parallel-size 4 \
+        --pipeline-parallel-size 2 \
+        --data-parallel-size 1 \
+        --data-parallel-size-local 1 \
+        --max-model-len 262144 \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 8192 \
+        --gpu-memory-utilization 0.90 \
+        --no-enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --compilation-config '{"cudagraph_mode":"NONE"}' \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --additional-config '{"enable_shared_expert_dp":false,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"34600","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2,"pp_layer_partition":"24,24"},"decode":{"dp_size":4,"tp_size":2}}}'
+    ```
+
+    **Decode:**
+
+    Start all four ranks in the same Decode container so they share the host memory namespace. Keep this terminal open while the ranks run.
+
+    | DP rank | Visible devices | API port |
+    | --- | --- | --- |
+    | 0 | 0,1 | 25569 |
+    | 1 | 2,3 | 25579 |
+    | 2 | 4,5 | 25589 |
+    | 3 | 6,7 | 25599 |
+
+    ```bash
+    unset VLLM_PP_LAYER_PARTITION
+    export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
+    export HCCL_BUFFSIZE=512
+
+    for rank in 0 1 2 3; do
+        first_device=$((rank * 2))
+        api_port=$((25569 + rank * 10))
+        kv_port=$((32700 + rank * 20))
+
+        ASCEND_RT_VISIBLE_DEVICES="${first_device},$((first_device + 1))" \
+        vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+            --host 0.0.0.0 \
+            --port "${api_port}" \
+            --served-model-name qwen38-flash-next-a2-pd \
+            --trust-remote-code \
+            --quantization ascend \
+            --tensor-parallel-size 2 \
+            --data-parallel-size 4 \
+            --data-parallel-size-local 1 \
+            --data-parallel-rank "${rank}" \
+            --data-parallel-address "${DECODE_HOST}" \
+            --data-parallel-rpc-port 29569 \
+            --max-model-len 262144 \
+            --max-num-seqs 32 \
+            --max-num-batched-tokens 4096 \
+            --gpu-memory-utilization 0.90 \
+            --no-enable-prefix-caching \
+            --async-scheduling \
+            --enable-expert-parallel \
+            --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
+            --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
+            --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"'"$kv_port"'","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2,"pp_layer_partition":"24,24"},"decode":{"dp_size":4,"tp_size":2}}}' &
+    done
+    wait
+    ```
+
+    **Proxy:**
+
+    On the Prefill host, check that all five model endpoints respond, then start the proxy from the vLLM-Ascend repository root.
+
+    ```bash
+    PREFILL_HOST="<PREFILL_LOCAL_IP>"
+    DECODE_HOST="<DECODE_LOCAL_IP>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY all_proxy ALL_PROXY
+    export no_proxy="localhost,127.0.0.1,${PREFILL_HOST},${DECODE_HOST}"
+    export NO_PROXY="${no_proxy}"
+
+    curl --fail --noproxy '*' "http://${PREFILL_HOST}:25568/v1/models" || exit 1
+    for port in 25569 25579 25589 25599; do
+        curl --fail --noproxy '*' "http://${DECODE_HOST}:${port}/v1/models" || exit 1
+    done
+
+    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+        --host 0.0.0.0 --port 25570 \
+        --prefiller-hosts "${PREFILL_HOST}" --prefiller-ports 25568 \
+        --decoder-hosts "${DECODE_HOST}" "${DECODE_HOST}" "${DECODE_HOST}" "${DECODE_HOST}" \
+        --decoder-ports 25569 25579 25589 25599
+    ```
+
+    **Service Verification:**
+
+    Send a 10K sample through the proxy. Replace `<IMAGE_URL>` with an image URL accessible to Prefill and Decode, and replace `<TEXT_PROMPT>` with the corresponding text. For local image files, mount the dataset at the same container path on both hosts and set `--allowed-local-media-path` to that directory in both engine commands.
+
+    ```bash
+    curl --fail "http://127.0.0.1:25570/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -d '{"model":"qwen38-flash-next-a2-pd","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"<IMAGE_URL>"}},{"type":"text","text":"<TEXT_PROMPT>"}]}],"max_tokens":1024,"temperature":0}'
+    ```
+
+    Expect HTTP 200 and an answer addressing the image and text. Check `usage.prompt_tokens` against the 10K target and confirm there are no image-processing, KV-transfer, or out-of-memory errors.
+
+    **Key parameters:**
+
+    - Prefill uses a `24,24` layer partition. `--mm-encoder-tp-mode data` distributes complete images across the TP ranks for the vision encoder. The language model uses TP4 × PP2.
+    - Decode enables static kernels and uses an API endpoint per DP rank.
+    - This case disables prefix caching on both roles. The Prefill/Decode batch token limits are 8192/4096, and both roles use `--max-model-len 262144`.
+
+=== "A3 series"
+
+    This single-host W4A8 example uses TP4 × PP2 × DP1 (EP4) on devices 0–7 for Prefill and TP2 × DP4 (EP8) on devices 8–15 for Decode. The proxy routes to one Prefill API and four Decode APIs, one per DP rank.
+
+    Initialize the A3 container and runtime as described in [Section 4.1](#41-docker-image-installation). Use a W4A8 checkpoint with the vision encoder and image processor. Run the following environment setup in both the Prefill and Decode terminals. Set `local_ip` and `nic_name` to the serving host's address and interface.
+
+    ```bash
+    local_ip="<LOCAL_SERVICE_IP>"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY all_proxy ALL_PROXY
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
+    export no_proxy="localhost,127.0.0.1,${local_ip}"
+    export NO_PROXY="${no_proxy}"
+    export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
+    export VLLM_USE_MODELSCOPE=True
+    export VLLM_SERVER_DEV_MODE=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export VLLM_ASCEND_PLE_BACKEND=torch
+    ```
+
+    **Prefill:**
+
+    ```bash
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
+    export HCCL_BUFFSIZE=4096
+    export VLLM_PP_LAYER_PARTITION=24,24
+
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+        --host 0.0.0.0 \
+        --port 25568 \
+        --served-model-name qwen38-flash-next-a3-pd \
+        --trust-remote-code \
+        --mm-encoder-tp-mode data \
+        --quantization ascend \
+        --tensor-parallel-size 4 \
+        --pipeline-parallel-size 2 \
+        --data-parallel-size 1 \
+        --data-parallel-size-local 1 \
+        --max-model-len 262144 \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 8192 \
+        --gpu-memory-utilization 0.90 \
+        --no-enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --compilation-config '{"cudagraph_mode":"NONE"}' \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --additional-config '{"enable_shared_expert_dp":false,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"34600","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2,"pp_layer_partition":"24,24"},"decode":{"dp_size":4,"tp_size":2}}}'
+    ```
+
+    **Decode:**
+
+    Start all four ranks in the same container so they share the host memory namespace. Keep this terminal open while the ranks run.
+
+    | DP rank | Visible devices | API port |
+    | --- | --- | --- |
+    | 0 | 8,9 | 25569 |
+    | 1 | 10,11 | 25579 |
+    | 2 | 12,13 | 25589 |
+    | 3 | 14,15 | 25599 |
+
+    ```bash
+    unset VLLM_PP_LAYER_PARTITION
+    export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
+    export HCCL_BUFFSIZE=512
+
+    for rank in 0 1 2 3; do
+        first_device=$((8 + rank * 2))
+        api_port=$((25569 + rank * 10))
+        kv_port=$((32700 + rank * 20))
+
+        ASCEND_RT_VISIBLE_DEVICES="${first_device},$((first_device + 1))" \
+        vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+            --host 0.0.0.0 \
+            --port "${api_port}" \
+            --served-model-name qwen38-flash-next-a3-pd \
+            --trust-remote-code \
+            --quantization ascend \
+            --tensor-parallel-size 2 \
+            --data-parallel-size 4 \
+            --data-parallel-size-local 1 \
+            --data-parallel-rank "${rank}" \
+            --data-parallel-address "${local_ip}" \
+            --data-parallel-rpc-port 29569 \
+            --max-model-len 262144 \
+            --max-num-seqs 32 \
+            --max-num-batched-tokens 4096 \
+            --gpu-memory-utilization 0.90 \
+            --no-enable-prefix-caching \
+            --async-scheduling \
+            --enable-expert-parallel \
+            --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
+            --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
+            --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"'"$kv_port"'","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2,"pp_layer_partition":"24,24"},"decode":{"dp_size":4,"tp_size":2}}}' &
+    done
+    wait
+    ```
+
+    **Proxy:**
+
+    Check that all five model endpoints respond, then start the proxy from the vLLM-Ascend repository root.
+
+    ```bash
+    local_ip="<LOCAL_SERVICE_IP>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY all_proxy ALL_PROXY
+    export no_proxy="localhost,127.0.0.1,${local_ip}"
+    export NO_PROXY="${no_proxy}"
+
+    for port in 25568 25569 25579 25589 25599; do
+        curl --fail --noproxy '*' "http://${local_ip}:${port}/v1/models" || exit 1
+    done
+
+    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+        --host 0.0.0.0 --port 25570 \
+        --prefiller-hosts "${local_ip}" --prefiller-ports 25568 \
+        --decoder-hosts "${local_ip}" "${local_ip}" "${local_ip}" "${local_ip}" \
+        --decoder-ports 25569 25579 25589 25599
+    ```
+
+    **Service Verification:**
+
+    Send a 10K sample through the proxy. Replace `<IMAGE_URL>` with an image URL accessible to Prefill and Decode, and replace `<TEXT_PROMPT>` with the corresponding text. For local image files, mount the dataset in the serving container and set `--allowed-local-media-path` to the mounted directory in both engine commands.
+
+    ```bash
+    curl --fail "http://127.0.0.1:25570/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -d '{"model":"qwen38-flash-next-a3-pd","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"<IMAGE_URL>"}},{"type":"text","text":"<TEXT_PROMPT>"}]}],"max_tokens":1024,"temperature":0}'
+    ```
+
+    Expect HTTP 200 and an answer addressing the image and text. Check `usage.prompt_tokens` against the 10K target and confirm there are no image-processing, KV-transfer, or out-of-memory errors.
+
+    **Key parameters:**
+
+    - Prefill uses a `24,24` layer partition. `--mm-encoder-tp-mode data` distributes complete images across the TP ranks for the vision encoder. The language model uses TP4 × PP2.
+    - Decode enables static kernels and uses an API endpoint per DP rank. The 32-way concurrency in the MMMU-Pro benchmark is a client-side setting.
+    - This case disables prefix caching on both roles. The Prefill/Decode batch token limits are 8192/4096, and both roles use `--max-model-len 262144`.
 
 === "950DT products"
+
+    This case uses the same eight-device 950DT products host as the basic PD example in [Section 5.2](#52-basic-pd-separation-deployment). For image-and-text 10K validation, prefill uses TP2 × PP2 × DP1 with a `25,23` layer partition, and decode uses TP2 × DP2 behind one API endpoint. Both roles use 8192 batch tokens and `HCCL_BUFFSIZE=512`. Both roles enable prefix caching; decode also enables static kernels.
+
+    The 10K target is the processed input length, including text and image tokens. Both roles retain `--max-model-len 143360`; keep the input plus requested output within this limit. Use the W4A8-MXFP checkpoint from [Section 3.1](#31-model-weight) with its vision encoder and image processor.
 
     Initialize the environment as described in [Section 4](#4-installation) and run Prefill and Decode in separate terminals. Both roles load `Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp` from ModelScope.
 
@@ -1144,7 +1462,7 @@ The 10K target is the processed input length, including text and image tokens. B
         --enable-prefix-caching \
         --async-scheduling \
         --enable-expert-parallel \
-        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false},"enable_fused_mc2":0}' \
         --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
@@ -1186,16 +1504,451 @@ The 10K target is the processed input length, including text and image tokens. B
     - Prefill partitions the layers across two pipeline stages with `VLLM_PP_LAYER_PARTITION=25,23`. Keep `pp_size=2` and `pp_layer_partition="25,23"` in both Mooncake configurations consistent with this partition.
     - Decode uses TP2 × DP2 behind one API endpoint on port `8248`; the proxy routes to that endpoint rather than separate DP-rank APIs.
     - Both roles enable prefix caching. Prefill disables graph capture and sets MTP `enforce_eager=true`. Decode uses `FULL_DECODE_ONLY`, sets MTP `enforce_eager=false`, enables static kernels, and disables super kernels.
-    - Both roles enable Engram CPU offload with `dp_shared_memory=false`, use `HCCL_BUFFSIZE=512`, and set `VLLM_ENGINE_READY_TIMEOUT_S=4800` to allow sufficient engine initialization time. Provide sufficient host memory for the checkpoint and the decode DP replicas.
+    - Both roles enable Engram CPU offload. Decode enables DP shared memory for its two replicas. Both roles use `HCCL_BUFFSIZE=512` and set `VLLM_ENGINE_READY_TIMEOUT_S=4800`. Provide sufficient host memory and container shared memory for the deployment.
     - `VLLM_ASCEND_PLE_BACKEND` only applies to runtimes that implement it; an unknown-variable warning means it has no effect.
 
-### 5.4 PD Separation with MemCache Three-Tier KV Cache Pool
+### 5.4 Long-Context PD Separation Deployment
 
-`MultiConnector` combines Mooncake P-to-D transport with MemCache-backed KV caching in HBM, DRAM, and SSD. Each hardware tab contains its complete pooling Prefill and Decode commands. A2/A3 retain the model settings from [Section 5.2](#52-basic-pd-separation-deployment) and add the matching MemCache environment and connector configuration. This section does not cover colocated deployment or the image-and-text 10K case.
+This section extends the model context for PD separation on A2 series, A3 series, and 950DT products.
+
+!!! note "Extending the native 256K context to approximately 1M"
+
+    The checkpoint's native context window is 256K (262144 tokens). This long-context case requires all three settings on **both Prefill and Decode**: the complete YaRN `--hf-overrides` shown below, with `factor=4.0` and `original_max_position_embeddings=262144`; `export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`; and `--max-model-len 1010000`. Keep the YaRN configuration and maximum model length identical on both roles; none of these three settings can be omitted.
+
+    Each request must satisfy `input token count + maximum output token count <= max-model-len`. With this configuration, the total must not exceed 1,010,000 tokens.
+
+    The runtime must also size the Qwen4Exp MTP draft's position cache for the configured context length. The 0.32 RC branch applies the Qwen4Exp-specific fix in [PR #21347](https://github.com/vllm-project/vllm-ascend/pull/21347). With main, use a compatible vLLM build with the upstream draft position-cache expansion, such as vLLM v0.33.0, and verify the long-context request on your target image.
+
+On 950DT products, this case reuses ports 8247, 8248, and 8246 from the image-and-text case. Stop that deployment before starting this case.
+
+=== "A2 series"
+
+    This example uses two eight-device A2 series hosts. Prefill uses TP2 × PP4 × DP1 (EP2) on `PREFILL_HOST`, and Decode uses TP2 × DP4 (EP8) on `DECODE_HOST`. Each host uses devices 0–7. Set the two service addresses and the local network interface in the commands.
+
+    Prepare the A2 containers as in [Section 5.2](#52-basic-pd-separation-deployment) and run each command on its designated host. Stop any deployment already using ports 25568, 25569, or 25570 on these hosts. After both model APIs are ready, run the proxy on the Prefill host from the vLLM-Ascend repository root.
+
+    **Prefill:**
+
+    ```bash
+    PREFILL_HOST="<PREFILL_LOCAL_IP>"
+    DECODE_HOST="<DECODE_LOCAL_IP>"
+    local_ip="${PREFILL_HOST}"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+
+    unset VLLM_PP_LAYER_PARTITION
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
+    export no_proxy="localhost,127.0.0.1,${PREFILL_HOST},${DECODE_HOST}"
+    export NO_PROXY="${no_proxy}"
+    export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
+    export VLLM_USE_MODELSCOPE=True
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
+    export HCCL_BUFFSIZE=8192
+
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+        --host 0.0.0.0 \
+        --port 25568 \
+        --served-model-name qwen38-flash-next-a2-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 2 \
+        --pipeline-parallel-size 4 \
+        --data-parallel-size 1 \
+        --max-model-len 1010000 \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 8192 \
+        --gpu-memory-utilization 0.90 \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --enforce-eager \
+        --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
+        --hf-overrides '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}'
+    ```
+
+    **Decode:**
+
+    ```bash
+    PREFILL_HOST="<PREFILL_LOCAL_IP>"
+    DECODE_HOST="<DECODE_LOCAL_IP>"
+    local_ip="${DECODE_HOST}"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+
+    unset VLLM_PP_LAYER_PARTITION
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
+    export no_proxy="localhost,127.0.0.1,${PREFILL_HOST},${DECODE_HOST}"
+    export NO_PROXY="${no_proxy}"
+    export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
+    export VLLM_USE_MODELSCOPE=True
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
+    export HCCL_BUFFSIZE=512
+
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+        --host 0.0.0.0 \
+        --port 25569 \
+        --served-model-name qwen38-flash-next-a2-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 2 \
+        --data-parallel-size 4 \
+        --max-model-len 1010000 \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 8192 \
+        --gpu-memory-utilization 0.90 \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
+        --hf-overrides '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}'
+    ```
+
+    **Proxy:**
+
+    ```bash
+    PREFILL_HOST="<PREFILL_LOCAL_IP>"
+    DECODE_HOST="<DECODE_LOCAL_IP>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    export no_proxy="localhost,127.0.0.1,${PREFILL_HOST},${DECODE_HOST}"
+    export NO_PROXY="${no_proxy}"
+
+    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+        --host 0.0.0.0 --port 25570 \
+        --prefiller-hosts "${PREFILL_HOST}" --prefiller-ports 25568 \
+        --decoder-hosts "${DECODE_HOST}" --decoder-ports 25569
+    ```
+
+    **Service Verification:**
+
+    Confirm `max_model_len=1010000` in both startup logs. Check the model APIs from the Prefill host.
+
+    ```bash
+    PREFILL_HOST="<PREFILL_LOCAL_IP>"
+    DECODE_HOST="<DECODE_LOCAL_IP>"
+
+    curl --fail --noproxy '*' "http://${PREFILL_HOST}:25568/v1/models"
+    curl --fail --noproxy '*' "http://${DECODE_HOST}:25569/v1/models"
+    ```
+
+    Start Proxy after both checks succeed. Prepare `long-context-request.json` with `model` set to `qwen38-flash-next-a2-pd`, the input in `messages`, and the requested output budget in `max_tokens`. Keep the input token count plus the maximum output token count within 1,010,000 tokens.
+
+    ```bash
+    curl --fail "http://127.0.0.1:25570/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        --data-binary @long-context-request.json
+    ```
+
+    Verify the response and compare `usage.prompt_tokens` with the test input.
+
+=== "A3 series"
+
+    This example uses one 16-device A3 series host. Prefill uses TP2 × PP4 × DP1 (EP2) on devices 0–7. Decode uses TP2 × DP4 (EP8) on devices 8–15. Set `local_ip` and `nic_name` in the commands for the serving host.
+
+    Prepare the container as in [Section 5.2](#52-basic-pd-separation-deployment) and run Prefill and Decode in separate terminals. Stop any A3 deployment already using ports 25568, 25569, or 25570. After both model APIs are ready, run Proxy from the vLLM-Ascend repository root.
+
+    **Prefill:**
+
+    ```bash
+    local_ip="<LOCAL_SERVICE_IP>"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+
+    unset VLLM_PP_LAYER_PARTITION
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
+    export no_proxy="localhost,127.0.0.1,${local_ip}"
+    export NO_PROXY="${no_proxy}"
+    export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
+    export VLLM_USE_MODELSCOPE=True
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
+    export HCCL_BUFFSIZE=8192
+
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+        --host 0.0.0.0 \
+        --port 25568 \
+        --served-model-name qwen38-flash-next-a3-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 2 \
+        --pipeline-parallel-size 4 \
+        --data-parallel-size 1 \
+        --max-model-len 1010000 \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 8192 \
+        --gpu-memory-utilization 0.90 \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --enforce-eager \
+        --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
+        --hf-overrides '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}'
+    ```
+
+    **Decode:**
+
+    ```bash
+    local_ip="<LOCAL_SERVICE_IP>"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+
+    unset VLLM_PP_LAYER_PARTITION
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
+    export no_proxy="localhost,127.0.0.1,${local_ip}"
+    export NO_PROXY="${no_proxy}"
+    export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
+    export VLLM_USE_MODELSCOPE=True
+    export ASCEND_RT_VISIBLE_DEVICES=8,9,10,11,12,13,14,15
+    export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
+    export HCCL_BUFFSIZE=512
+
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+        --host 0.0.0.0 \
+        --port 25569 \
+        --served-model-name qwen38-flash-next-a3-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 2 \
+        --data-parallel-size 4 \
+        --max-model-len 1010000 \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 8192 \
+        --gpu-memory-utilization 0.90 \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
+        --hf-overrides '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}'
+    ```
+
+    **Proxy:**
+
+    ```bash
+    local_ip="<LOCAL_SERVICE_IP>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    export no_proxy="localhost,127.0.0.1,${local_ip}"
+    export NO_PROXY="${no_proxy}"
+
+    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+        --host 0.0.0.0 --port 25570 \
+        --prefiller-hosts "${local_ip}" --prefiller-ports 25568 \
+        --decoder-hosts "${local_ip}" --decoder-ports 25569
+    ```
+
+    **Service Verification:**
+
+    Check that both model APIs are ready and confirm `max_model_len=1010000` in the startup logs.
+
+    ```bash
+    curl --fail "http://127.0.0.1:25568/v1/models"
+    curl --fail "http://127.0.0.1:25569/v1/models"
+    ```
+
+    Start Proxy after both checks succeed. Prepare `long-context-request.json` with `model` set to `qwen38-flash-next-a3-pd`, the input in `messages`, and the requested output budget in `max_tokens`. Keep the input token count plus the maximum output token count within 1,010,000 tokens.
+
+    ```bash
+    curl --fail "http://127.0.0.1:25570/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        --data-binary @long-context-request.json
+    ```
+
+    Verify the response and compare `usage.prompt_tokens` with the test input.
+
+=== "950DT products"
+
+    This case uses eight devices on a single 950DT products host, with TP4 × DP1 for both Prefill and Decode. Both roles set the maximum combined input and output length to 1,010,000 tokens, with up to 16 active sequences and 4096 batch tokens. Initialize the environment as described in [Section 4](#4-installation) and run each role in a separate terminal.
+
+    **Prefill:**
+
+    ```bash
+    unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+
+    export VLLM_USE_MODELSCOPE=True
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export VLLM_ASCEND_PLE_BACKEND=torch
+    export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
+    export HCCL_BUFFSIZE=512
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp \
+        --host 0.0.0.0 \
+        --port 8247 \
+        --served-model-name qwen38-megamoe-sp-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 4 \
+        --pipeline-parallel-size 1 \
+        --data-parallel-size 1 \
+        --max-model-len 1010000 \
+        --max-num-seqs 16 \
+        --max-num-batched-tokens 4096 \
+        --gpu-memory-utilization 0.9 \
+        --enable-prefix-caching \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --compilation-config '{"cudagraph_mode":"NONE"}' \
+        --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
+        --hf-overrides '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32470","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4},"decode":{"dp_size":1,"tp_size":4}}}'
+    ```
+
+    **Decode:**
+
+    ```bash
+    unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+
+    export VLLM_USE_MODELSCOPE=True
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export VLLM_ASCEND_PLE_BACKEND=torch
+    export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
+    export HCCL_BUFFSIZE=512
+    export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
+
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp \
+        --host 0.0.0.0 \
+        --port 8248 \
+        --served-model-name qwen38-megamoe-sp-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 4 \
+        --data-parallel-size 1 \
+        --max-model-len 1010000 \
+        --max-num-seqs 16 \
+        --max-num-batched-tokens 4096 \
+        --gpu-memory-utilization 0.9 \
+        --enable-prefix-caching \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
+        --hf-overrides '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32480","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4},"decode":{"dp_size":1,"tp_size":4}}}'
+    ```
+
+    **Proxy:**
+
+    After both model APIs are ready, run the proxy from the vLLM-Ascend repository root:
+
+    ```bash
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+
+    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+        --host 0.0.0.0 \
+        --port 8246 \
+        --prefiller-hosts 127.0.0.1 \
+        --prefiller-ports 8247 \
+        --decoder-hosts 127.0.0.1 \
+        --decoder-ports 8248
+    ```
+
+    **Service Verification:**
+
+    Check the startup logs for TP4 × DP1 on both roles and `max_model_len=1010000`. Prepare `long-context-request.json` as a chat-completion request with `model` set to `qwen38-megamoe-sp-pd`, the long input in `messages`, and `max_tokens` set to the required output budget. Keep the processed input plus output budget within 1,010,000 tokens, then run:
+
+    ```bash
+    curl --fail "http://127.0.0.1:8247/v1/models"
+    curl --fail "http://127.0.0.1:8248/v1/models"
+    curl --fail "http://127.0.0.1:8246/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        --data-binary @long-context-request.json
+    ```
+
+    Verify the response content and `usage.prompt_tokens` against the test input. Successful API startup alone does not verify long-context inference.
+
+    **Key parameters:**
+
+    - Both roles use TP4 × DP1 without pipeline parallelism. The Mooncake declarations use `tp_size=4` and `dp_size=1` for both roles.
+    - Both roles use Mamba cache mode `align` and Mamba SSM cache dtype `bfloat16`.
+    - Prefill disables graph capture and sets MTP `enforce_eager=true`. Decode uses `FULL_DECODE_ONLY`, sets MTP `enforce_eager=false`, and enables static kernels and recompute scheduling.
+    - Both roles enable Engram CPU offload with `dp_shared_memory=false` and use `HCCL_BUFFSIZE=512`. The supplied configuration sets the engine-ready timeout to 2400 seconds on Prefill and 4800 seconds on Decode; the model-execution timeout is 3000 seconds on both roles.
+    - `VLLM_ASCEND_PLE_BACKEND` only applies to runtimes that implement it; an unknown-variable warning means it has no effect.
+
+### 5.5 PD Separation with MemCache Three-Tier KV Cache Pool
+
+`MultiConnector` combines Mooncake P-to-D transport with MemCache-backed KV caching in HBM, DRAM, and SSD. Each hardware tab contains its complete pooling Prefill and Decode commands. A2 uses the basic PD topology from [Section 5.2](#52-basic-pd-separation-deployment). A3 uses a dedicated Prefill topology for the 128K/1K multi-prefix workload. This section does not cover colocated deployment, the image-and-text 10K case, or the long-context case.
 
 **Before starting:**
 
 Prepare the container, SSD mapping, configuration directory, and A2 HDK requirement in [Section 4.3](#43-docker-for-three-tier-pd-pooling). Run the following inside the container. A3 HCCS also requires LingQu Computing Network 1.5 or later; see the [MemCache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend) for runtime dependencies.
+
+Use the same vLLM-Ascend release and compatible MemCache and MemFabric package versions across the pool. Verify cache reuse and SSD restore on the runtime you deploy.
 
 ```bash
 free -h
@@ -1232,6 +1985,27 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
 - **Existing pool:** skip the new-pool exports, template copying, INI edits, and MetaService startup below. Use the existing pool's MetaService/ConfigStore endpoints and approved LocalService files in `MEMCACHE_CONFIG_DIR` (A2/A3: `mmc-local.conf`; 950DT products: `mmc-local-p.conf` and `mmc-local-d.conf`). Preserve its storage initialization policy; do not apply the new-pool `force_new_disk=true` example. Check the existing service's actual endpoints, then continue with the matching service environment and P/D commands.
 
 `dram.size` and `ubsio.mem.size_in_gb` apply per DRAM-enabled LocalService; budget their total alongside Engram, vLLM, and operating-system memory. `world_size` is pool capacity; `device_count` counts the host's DRAM-enabled LocalServices, not SSDs. LocalServices run inside P/D workers; the `ubsio.standalone.*` keys do not require a separate process.
+
+!!! note "Check host huge pages if pooling stalls"
+
+    If a P or D worker stalls during MemCache DRAM initialization and the host kernel repeatedly reports `alloc_contig_range ... PFNs busy`, check the reserved 1 GiB HugeTLB pages on each affected host. The following example assumes NUMA nodes 0–7.
+
+    ```bash
+    for n in 0 1 2 3 4 5 6 7; do
+        printf 'node%s: ' "$n"
+        cat "/sys/devices/system/node/node${n}/hugepages/hugepages-1048576kB/nr_hugepages"
+    done
+    ```
+
+    To test with preallocated pages, run the following as root on the host before starting Prefill and Decode. Adjust the node IDs and page count for the available host memory. Writing `32` to `nr_hugepages` sets the target total to 32 pages per NUMA node (32 GiB per node, 256 GiB across eight nodes). Check the existing count before changing it and leave enough memory for MemCache, Engram, and vLLM.
+
+    ```bash
+    for n in 0 1 2 3 4 5 6 7; do
+        echo 32 > "/sys/devices/system/node/node${n}/hugepages/hugepages-1048576kB/nr_hugepages"
+    done
+    ```
+
+    Repeat the first command and confirm that each selected node reports the requested count. Recheck after a host reboot. Use the P/D startup logs and API checks to verify that the services are ready. Watchdog dumps and shared-memory broadcast wait messages can also occur while static kernels compile. Check the worker stack and kernel log before attributing the wait to huge-page allocation.
 
 === "A2 series"
 
@@ -1432,7 +2206,7 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
 
 === "A3 series"
 
-    Keep the A3 model configuration from Section 5.2.
+    The 128K/1K multi-prefix pooling example uses 16 devices, eight per role. Prefill uses TP2 × PP2 × DP2 (EP4) on devices 0–7, and Decode uses TP2 × DP4 (EP8) on devices 8–15. Both Mooncake configurations declare this topology. Both roles enable Engram CPU offload and DP shared memory.
 
     **Prepare a new pool:**
 
@@ -1454,6 +2228,8 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
     ```
 
     Replace `/dev/loop0:/dev/loop1` with the two device paths already mapped in Section 4.3. These new-pool values allocate `10GB` of DRAM and `10` GB for UBS IO per LocalService; `force_new_disk=true` reinitializes SSD cache storage at startup.
+
+    After a host reboot, confirm that the backing filesystem is mounted and check the loop mappings with `losetup -l`. Identify any dedicated NVMe device by its serial number or WWN. If a device path changes, update both the Docker mapping and `ubsio.disk.path`. Run `blockdev --getsize64` on each configured device inside the container before starting P and D. If MemCache initialization fails after model loading, check these devices even if MetaService is listening.
 
     ```bash
     cp -n "${MEMCACHE_TEMPLATE_DIR}/mmc-meta.conf" "${MEMCACHE_CONFIG_DIR}/mmc-meta.conf"
@@ -1542,10 +2318,10 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
         --served-model-name qwen38-flash-next-a3-pd \
         --trust-remote-code \
         --quantization ascend \
-        --tensor-parallel-size 4 \
+        --tensor-parallel-size 2 \
         --pipeline-parallel-size 2 \
-        --data-parallel-size 1 \
-        --max-model-len 141312 \
+        --data-parallel-size 2 \
+        --max-model-len 262144 \
         --max-num-seqs 32 \
         --max-num-batched-tokens 8192 \
         --gpu-memory-utilization 0.90 \
@@ -1554,11 +2330,11 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
         --enable-expert-parallel \
         --mamba-cache-mode align \
         --mamba-ssm-cache-dtype bfloat16 \
-        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --enforce-eager \
         --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
         --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
-        --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_p","use_layerwise":false}}]}}'
+        --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_p","use_layerwise":false}}]}}'
     ```
 
     **Decode:**
@@ -1604,7 +2380,7 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
         --quantization ascend \
         --tensor-parallel-size 2 \
         --data-parallel-size 4 \
-        --max-model-len 141312 \
+        --max-model-len 262144 \
         --max-num-seqs 32 \
         --max-num-batched-tokens 8192 \
         --gpu-memory-utilization 0.90 \
@@ -1617,14 +2393,14 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
         --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
-        --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_d","use_layerwise":false}}]}}'
+        --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_d","use_layerwise":false}}]}}'
     ```
 
-    Complete the matching Section 5.2 API checks and start its Proxy, then perform the cache-reuse checks below.
+    Check the startup logs for the Prefill and Decode topologies above. Use the A3 API checks and Proxy command from Section 5.2, then perform the cache-reuse checks below.
 
 === "950DT products"
 
-    This single-host example uses TP2 × DP2 per role, with Prefill on devices 0–3 and Decode on devices 4–7. Use the prepared runtime from Section 4.3 and the same W4A8-MXFP checkpoint for both roles.
+    This single-host example uses TP2 × DP2 (EP4) per role, with Prefill on devices 0–3 and Decode on devices 4–7. Use the prepared runtime from Section 4.3 and the same W4A8-MXFP checkpoint for both roles. Both roles use Mamba cache mode `align` and Mamba SSM cache dtype `bfloat16`.
 
     **Prepare a new pool:**
 
@@ -1729,7 +2505,7 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
 
     **Prefill:**
 
-    In the Prefill terminal, first apply the library exports at the beginning of Section 5.4 and the **Set the service environment** block above, then run the following commands.
+    In the Prefill terminal, first apply the library exports at the beginning of Section 5.5 and the **Set the service environment** block above, then run the following commands.
 
     ```bash
     export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local-p.conf"
@@ -1749,13 +2525,15 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
       --max-num-batched-tokens 4096 \
       --gpu-memory-utilization 0.9 \
       --enable-prefix-caching \
+      --mamba-cache-mode align \
+      --mamba-ssm-cache-dtype bfloat16 \
       --async-scheduling \
       --enable-expert-parallel \
       --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
       --compilation-config '{"cudagraph_mode":"NONE"}' \
       --additional-config '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}' \
       --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
-      --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32470","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2,"pp_size":1},"decode":{"dp_size":2,"tp_size":2,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_p","use_layerwise":false,"load_async":false,"consumer_is_to_load":false,"consumer_is_to_put":false,"save_decode_cache":false}}]}}' \
+      --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32470","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"0","use_layerwise":false}}]}}' \
       --enable-auto-tool-choice \
       --tool-call-parser qwen3_coder \
       --reasoning-parser qwen3 \
@@ -1767,7 +2545,7 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
 
     **Decode:**
 
-    In the Decode terminal, first apply the library exports at the beginning of Section 5.4 and the **Set the service environment** block above, then run the following commands.
+    In the Decode terminal, first apply the library exports at the beginning of Section 5.5 and the **Set the service environment** block above, then run the following commands.
 
     ```bash
     export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local-d.conf"
@@ -1787,13 +2565,15 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
       --max-num-batched-tokens 4096 \
       --gpu-memory-utilization 0.9 \
       --enable-prefix-caching \
+      --mamba-cache-mode align \
+      --mamba-ssm-cache-dtype bfloat16 \
       --async-scheduling \
       --enable-expert-parallel \
       --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
       --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
-      --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32480","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2,"pp_size":1},"decode":{"dp_size":2,"tp_size":2,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_d","use_layerwise":false,"load_async":false,"consumer_is_to_load":false,"consumer_is_to_put":false,"save_decode_cache":false}}]}}' \
+      --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32480","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"1","use_layerwise":false}}]}}' \
       --enable-auto-tool-choice \
       --tool-call-parser qwen3_coder \
       --reasoning-parser qwen3 \
@@ -1822,7 +2602,7 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
         -d '{"model":"qwen38-megamoe-sp-pd","messages":[{"role":"user","content":"Who are you?"}],"max_tokens":1024,"temperature":0}'
     ```
 
-    `load_async=false` keeps external cache loading synchronous. Decode-side pool loading and saving remain disabled.
+    The tested configuration sets `lookup_rpc_port` to `"0"` for Prefill and `"1"` for Decode.
 
 **Verify three-tier cache reuse:**
 
@@ -1848,11 +2628,14 @@ Verify generation through `/v1/chat/completions`, using the API address and mode
 | 950DT products colocated | `http://127.0.0.1:8087` | `qwen3.8-flash-next-950-dt` |
 | A2 series PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a2-pd` |
 | A3 series PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a3-pd` |
+| A2 series long-context PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a2-pd` |
+| A3 series long-context PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a3-pd` |
 | 950DT products PD proxy | `http://<LOCAL_SERVICE_IP>:8087` | `qwen38-flash-next-950-dt-pd` |
 | 950DT products image-and-text 10K PD proxy | `http://127.0.0.1:8246` | `qwen38-megamoe-sp-pd` |
+| 950DT products long-context PD proxy | `http://127.0.0.1:8246` | `qwen38-megamoe-sp-pd` |
 | 950DT products three-tier pooling PD proxy | `http://127.0.0.1:8249` | `qwen38-megamoe-sp-pd` |
 
-For PD, first complete the matching startup and proxy checks in Sections [5.2](#52-basic-pd-separation-deployment), [5.3](#53-image-and-text-10k-pd-separation-deployment), or [5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool). Pooling also requires the SSD eviction/restore checks in Section 5.4.
+For PD, first complete the matching startup and proxy checks in Sections [5.2](#52-basic-pd-separation-deployment), [5.3](#53-image-and-text-10k-pd-separation-deployment), [5.4](#54-long-context-pd-separation-deployment), or [5.5](#55-pd-separation-with-memcache-three-tier-kv-cache-pool). Pooling also requires the SSD eviction/restore checks in Section 5.5.
 
 ### 6.1 Basic Chat Completion
 
@@ -1906,13 +2689,13 @@ Expected result: the service returns HTTP 200 OK and describes the supplied imag
 
 ### 6.3 Function Calling
 
-The colocated examples and the optional Function Calling setup in [Section 5.2](#52-basic-pd-separation-deployment) use the following options:
+To enable Function Calling, use the following options in the model commands for colocated deployment ([Section 5.1](#51-single-node-online-deployment)) or basic PD separation ([Section 5.2](#52-basic-pd-separation-deployment)). For PD separation, add them to both Prefill and Decode commands:
 
 ```text
 --enable-auto-tool-choice --tool-call-parser qwen3_xml
 ```
 
-The 950DT products pooling commands in [Section 5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool) already enable Function Calling with `qwen3_coder`; retain that parser when verifying this deployment.
+The 950DT products pooling commands in [Section 5.5](#55-pd-separation-with-memcache-three-tier-kv-cache-pool) already enable Function Calling with `qwen3_coder`; retain that parser when verifying this deployment.
 
 Send a request containing the available tools and set `tool_choice` to `auto`:
 
@@ -1956,7 +2739,7 @@ When the model chooses the function, the parsed result appears in `choices[0].me
 
 ### 6.4 Reasoning Parser and Thinking Control
 
-Reasoning parsing requires the following startup option, which is included in the colocated examples in Section 5; for PD separation, see [Section 5.2](#52-basic-pd-separation-deployment):
+Reasoning parsing requires the following startup option. The colocated examples in [Section 5.1](#51-single-node-online-deployment) already include it; for basic PD separation in [Section 5.2](#52-basic-pd-separation-deployment), add it to both Prefill and Decode commands:
 
 ```text
 --reasoning-parser qwen3
@@ -2054,7 +2837,7 @@ Confirm that all requests succeed, then record throughput, TTFT, and TPOT from t
 
 ### 9.1 Recommended Configurations
 
-Use the configuration for your hardware and deployment mode. The table summarizes the commands in [Section 5](#5-online-service-deployment); tune context length, concurrency, and memory utilization for the target workload.
+Use the configuration for your hardware and deployment mode. The table summarizes the deployment configurations in [Section 5](#5-online-service-deployment); tune context length, concurrency, and memory utilization for the target workload.
 
 | Hardware | Deployment / role | Devices | TP × PP × DP | Max model length | Max sequences | Batch tokens |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -2062,19 +2845,31 @@ Use the configuration for your hardware and deployment mode. The table summarize
 | A3 series | Colocated | 0–7 | 8 × 1 × 1 | 131072 | 8 | 4096 |
 | 950DT products | Colocated | 0–3 | 4 × 1 × 1 | 141312 | 32 | 4096 |
 | A2 series | Prefill | 0–7 on prefill host | 4 × 2 × 1 | 141312 | 32 | 8192 |
-| A3 series | Prefill | 0–7 | 4 × 2 × 1 | 141312 | 32 | 8192 |
-| 950DT products | Prefill | 0–3 | 2 × 1 × 2 | 141312 | 128 | 4096 |
+| A3 series | Prefill (basic PD) | 0–7 | 2 × 4 × 1 (EP2) | 262144 | 32 | 8192 |
+| 950DT products | Prefill (basic PD) | 0–3 | 2 × 1 × 2 (EP4) | 143360 | 64 | 4096 |
 | A2 series | Decode | 0–7 on decode host | 2 × 1 × 4 | 141312 | 32 | 8192 |
-| A3 series | Decode | 8–15 | 2 × 1 × 4 | 141312 | 32 | 8192 |
-| 950DT products | Decode | 4–7 | 2 × 1 × 2 | 141312 | 128 | 4096 |
+| A3 series | Decode (basic PD) | 8–15 | 2 × 1 × 4 (EP8) | 262144 | 32 | 8192 |
+| 950DT products | Decode (basic PD) | 4–7 | 2 × 1 × 2 (EP4) | 143360 | 64 | 4096 |
+| A2 series | Prefill (image-and-text 10K) | 0–7 on prefill host | 4 × 2 × 1 (EP4) | 262144 | 32 | 8192 |
+| A3 series | Prefill (image-and-text 10K) | 0–7 | 4 × 2 × 1 (EP4) | 262144 | 32 | 8192 |
 | 950DT products | Prefill (image-and-text 10K) | 0–3 | 2 × 2 × 1 | 143360 | 64 | 8192 |
+| A2 series | Decode (image-and-text 10K) | 0–7 on decode host | 2 × 1 × 4 (EP8) | 262144 | 32 | 4096 |
+| A3 series | Decode (image-and-text 10K) | 8–15 | 2 × 1 × 4 (EP8) | 262144 | 32 | 4096 |
 | 950DT products | Decode (image-and-text 10K) | 4–7 | 2 × 1 × 2 | 143360 | 64 | 8192 |
-| 950DT products | Prefill (three-tier pooling) | 0–3 | 2 × 1 × 2 | 262144 | 64 | 4096 |
-| 950DT products | Decode (three-tier pooling) | 4–7 | 2 × 1 × 2 | 262144 | 64 | 4096 |
+| A2 series | Prefill (long-context) | 0–7 on prefill host | 2 × 4 × 1 (EP2) | 1010000 | 32 | 8192 |
+| A3 series | Prefill (long-context) | 0–7 | 2 × 4 × 1 (EP2) | 1010000 | 32 | 8192 |
+| 950DT products | Prefill (long-context) | 0–3 | 4 × 1 × 1 | 1010000 | 16 | 4096 |
+| A2 series | Decode (long-context) | 0–7 on decode host | 2 × 1 × 4 (EP8) | 1010000 | 32 | 8192 |
+| A3 series | Decode (long-context) | 8–15 | 2 × 1 × 4 (EP8) | 1010000 | 32 | 8192 |
+| 950DT products | Decode (long-context) | 4–7 | 4 × 1 × 1 | 1010000 | 16 | 4096 |
+| A3 series | Prefill (128K/1K three-tier pooling) | 0–7 | 2 × 2 × 2 (EP4) | 262144 | 32 | 8192 |
+| A3 series | Decode (128K/1K three-tier pooling) | 8–15 | 2 × 1 × 4 (EP8) | 262144 | 32 | 8192 |
+| 950DT products | Prefill (three-tier pooling) | 0–3 | 2 × 1 × 2 (EP4) | 262144 | 64 | 4096 |
+| 950DT products | Decode (three-tier pooling) | 4–7 | 2 × 1 × 2 (EP4) | 262144 | 64 | 4096 |
 
 Pair the P/D rows for your hardware. A2 uses two eight-device hosts; A3 uses one 16-device host. A2/A3 Prefill sets `--enforce-eager`; 950DT products Prefill sets `cudagraph_mode=NONE`. All PD Decode examples use `FULL_DECODE_ONLY` with static kernels enabled.
 
-For A2/A3 MemCache three-tier pooling, retain the basic PD token budgets above. For 950 DT, use the dedicated three-tier pooling rows and the complete commands in [Section 5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool); both roles use `HCCL_BUFFSIZE=512`. Pool and UBS IO memory must be budgeted separately from Engram CPU offload.
+For MemCache three-tier pooling, A2 uses the basic PD token budgets above. Use the dedicated pooling rows for A3 and 950DT products and the corresponding commands in [Section 5.5](#55-pd-separation-with-memcache-three-tier-kv-cache-pool). Both 950DT products roles use `HCCL_BUFFSIZE=512`. Pool and UBS IO memory must be budgeted separately from Engram CPU offload.
 
 ### 9.2 Tuning Guidelines
 

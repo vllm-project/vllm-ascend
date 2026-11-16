@@ -238,7 +238,7 @@ class TestSharedPCPMetadata:
         del config.index_topk
         batch = _batch(2, 0, "prefill")
         metadata = state.build(0, batch.local, pcp_context=batch.context, pcp_cache_group_idx=0)
-        assert metadata.c2_ring_metadata is None
+        assert metadata.c2_ring_metadata is not None
         assert metadata.global_metadata.c2_ring_metadata is not None
         assert metadata.global_metadata.smla_metadata is None
         assert metadata.global_metadata.qli_metadata is None
@@ -305,7 +305,10 @@ class TestSharedPCPMetadata:
                 if kind != "compressor_state" and result.num_actual_tokens:
                     assert result.slot_mapping.numel() == 0
                     assert result.flat_slot_mapping is None
-                assert result.c2_ring_metadata is None
+                if kind == "compressor_state":
+                    torch.testing.assert_close(result.c2_ring_metadata, expected.c2_ring_metadata)
+                else:
+                    assert result.c2_ring_metadata is None
             if kind == "swa" and result.num_actual_tokens:
                 torch.testing.assert_close(result.cos[LAYER], expected.cos[LAYER])
                 torch.testing.assert_close(result_cache.cos[LAYER], expected_cache.cos[LAYER])
@@ -360,7 +363,7 @@ class TestSharedPCPMetadata:
             metadata = result[PREFIXES[kind]]
             assert metadata.slot_mapping.numel() == 0
             assert metadata.global_metadata.slot_mapping.numel() > 0
-        assert result[PREFIXES["compressor_state"]].c2_ring_metadata is None
+        assert result[PREFIXES["compressor_state"]].c2_ring_metadata is not None
         assert result[PREFIXES["compressor_state"]].global_metadata.c2_ring_metadata is not None
 
     def test_direct_build_without_batch_cache(self, builders):
@@ -368,7 +371,9 @@ class TestSharedPCPMetadata:
         batch = _batch(2, 0, "prefill")
         metadata = builder.build(0, batch.local, pcp_context=batch.context, pcp_cache_group_idx=0)
         assert metadata.slot_mapping.numel() == 0
-        assert metadata.global_metadata.slot_mapping.numel() > 0
+        slots = metadata.global_metadata.flat_slot_mapping
+        torch.testing.assert_close(slots[: len(batch.slots)], batch.slots)
+        assert torch.all(slots[len(batch.slots) :] == -1)
 
     @pytest.mark.parametrize("ratio", [1, 2])
     def test_query_operators_only_run_on_local_consumers(self, builders, monkeypatch, ratio):
@@ -408,17 +413,24 @@ class TestSharedPCPMetadata:
         for target_buffer, draft_buffer in zip(target_rope[2:], draft_rope[2:]):
             assert target_buffer.data_ptr() != draft_buffer.data_ptr()
 
-    def test_deferred_c2_task_has_one_global_owner(self, builders):
+    def test_deferred_c2_tasks_have_separate_local_and_global_owners(self, builders):
         owners = builders(specialized=True)
         for builder in owners.values():
             builder.enable_device_metadata()
         metadata = _build_planes(owners, _batch(2, 0, "prefill"))
         tasks = [task for builder in owners.values() for task in builder.take_device_metadata_tasks()]
-        assert len(tasks) == 1
-        assert tasks[0].stage == dsa_v41.DeviceMetadataStage.COMPRESSOR
-        tasks[0].run()
         state = metadata[PREFIXES["compressor_state"]]
-        assert state.c2_ring_metadata is None
+        assert len(tasks) == 2
+        assert {task.group_id for task in tasks} == {
+            state.c2_metadata_group_id,
+            state.global_metadata.c2_metadata_group_id,
+        }
+        assert state.c2_metadata_group_id != state.global_metadata.c2_metadata_group_id
+        for task in tasks:
+            assert task.stage == dsa_v41.DeviceMetadataStage.COMPRESSOR
+            task.run()
+        # Local controls describe four rank segments; global controls describe two requests.
+        assert state.c2_ring_metadata[1].tolist() == [2, 2, 2, 2]
         assert state.global_metadata.c2_ring_metadata[1].tolist() == [8, 8]
         assert all(not builder.take_device_metadata_tasks() for builder in owners.values())
 

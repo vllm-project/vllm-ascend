@@ -16,6 +16,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionImplBase,
     AttentionMetadataBuilder,
+    max_decode_query_len,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -63,11 +64,8 @@ from vllm_ascend.worker.device_metadata import (
     DeviceMetadataTask,
     wait_for_device_metadata,
 )
-from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-
     from vllm_ascend.ops.triton.dspark_swa_indices import (
         build_dspark_swa_slot_indices_triton,
         dspark_swa_indices_supported,
@@ -124,16 +122,6 @@ CompressorForwardOutput = tuple[torch.Tensor, torch.Tensor]
 CompressorOverlapOutput = tuple[CompressorForwardOutput, torch.npu.Event]
 
 _COMPRESSOR_METADATA_CACHE_KEY = "dsv4_compressor_metadata_cache"
-
-
-def reset_compressor_metadata_cache() -> None:
-    """Drop the cached compressor metadata before a composite forward enters its next substep."""
-    try:
-        forward_context = get_forward_context()
-    except AssertionError:
-        # No active forward context (e.g. draft-model unit tests): no cache to reset.
-        return
-    forward_context.additional_kwargs.pop(_COMPRESSOR_METADATA_CACHE_KEY, None)
 
 
 def get_or_compute_compressor_metadata(
@@ -912,61 +900,15 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     ) -> AttentionCGSupport:
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
-        speculative_config = vllm_config.speculative_config
-        if (
-            speculative_config is not None
-            and speculative_config.method == "dspark"
-            and getattr(speculative_config, "enable_adaptive_verification", False)
-        ):
-            return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
 
-    def reorder_batch(self, input_batch: "NPUInputBatch", scheduler_output: "SchedulerOutput") -> bool:
-        # We now want to reorder the batch so that the "decode" requests are at
-        # the front and the "prefill" requests are at the using the least amount
-        # swaps possible. (NOTE for now we loosely use "decode" to mean requests
-        # where attention is likely memory-bound and "prefill" to mean requests
-        # where attention is likely compute-bound, TODO(lucas): figure out a
-        # better naming here)
-        decodes = []
-        prefills = []
-
-        for i, req_id in enumerate(input_batch.req_ids):
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            if num_tokens <= self.decode_threshold:
-                decodes.append(i)
-            else:
-                prefills.append(i)
-
-        # We hope that this is fairly minimal since decodes
-        # should be around for a number of iterations so hopefully they are
-        # relatively stationary (and new request are generally appended to the
-        # persistent batch so already should be at the back)
-        # To achieve this we loop over the decodes in descending order and
-        # the prefills in ascending order. We swap decodes from the  "back"
-        # i.e. past where the last decode should be in the reodorered with
-        # prefills from the front of the batch.
-        # `decodes` and `prefills` are already in ascending order just based on
-        # the above loop
-        num_decodes = len(decodes)
-        num_prefills = len(prefills)
-        first_prefill = 0
-        modified_batch = False
-
-        for i in range(1, min(num_decodes, num_prefills) + 1):
-            # If the decode is at the "back" of the batch, i, we can swap it
-            # with the prefill closest to the front of the batch
-            if decodes[num_decodes - i] >= num_decodes:
-                input_batch.swap_states(prefills[first_prefill], decodes[num_decodes - i])
-                first_prefill += 1
-                modified_batch = True
-            else:
-                break
-
-        # Save for next `build` call
-        # TODO(lucas): this is a bit of a hack, we should probably have a
-        # better way of doing this
-        return modified_batch
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls: type["AscendDSAMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> int | None:
+        return max_decode_query_len(vllm_config)
 
     def set_num_actual_tokens(
         self,
@@ -1366,15 +1308,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if preamble is None:
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
             max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
-            if (
-                self.speculative_config is not None
-                and getattr(self.speculative_config, "method", None) == "dspark"
-                and getattr(self.speculative_config, "enable_adaptive_verification", False)
-                and self.num_prefills == 0
+            if self.speculative_config is not None and getattr(
+                self.speculative_config, "enable_adaptive_verification", False
             ):
-                # `query_start_loc_cpu` retains a layout with tokens evenly distributed across requests.
-                # Longer query will typically appear after reallocation, recorded in `query_start_loc`.
-                # So use the upper bound `num_speculative_tokens + 1` as `max_seqlen_q`.
+                # Adaptive verification redistributes decode tokens on device,
+                # so CPU query lengths may underestimate an individual request.
+                # Include the speculative-token limit plus one bonus token,
+                # while preserving the bound for longer prefill requests.
                 max_seqlen_q = max(max_seqlen_q, self.speculative_config.num_speculative_tokens + 1)
             preamble = (
                 max_seqlen_q,

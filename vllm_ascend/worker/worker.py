@@ -50,12 +50,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandsha
 from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.model_loader.weight_checksum import compute_tensor_digests, zero_weights
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+from vllm.v1.core.kv_cache_planning import unify_hybrid_kv_cache_specs
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -83,9 +86,6 @@ from vllm_ascend.core.kv_cache_placement import (
     KVPPPhysicalCachePlan,
     create_kvpp_cache_allocation_plan,
     register_kvpp_draft_layers,
-)
-from vllm_ascend.core.profiling_chunk_predictor import (
-    _attach_profiling_chunk_execution_time,
 )
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -115,26 +115,15 @@ from vllm_ascend.utils import (
     register_ascend_fla_customop,
     register_device_print,
     setup_ascend_local_comm_res,
-    vllm_version_is,
 )
 
-# vLLM #61183 moved the planning helpers on main; v0.32.0 keeps them
-# in kv_cache_utils, so importing the main-only module breaks worker startup.
-# Main resolves grouping through the platform's `KVCacheConfigBuilder`.
-if vllm_version_is("0.32.0"):
-    from vllm.v1.core.kv_cache_utils import (
-        get_kv_cache_groups,
-        unify_hybrid_kv_cache_specs,
-    )
-else:
-    from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
-    from vllm.v1.core.kv_cache_planning import unify_hybrid_kv_cache_specs
 
-    def get_kv_cache_groups(
-        vllm_config: VllmConfig,
-        kv_cache_spec: dict[str, KVCacheSpec],
-    ) -> list[KVCacheGroupSpec]:
-        return get_kv_cache_config_builder(vllm_config).get_kv_cache_groups(vllm_config, kv_cache_spec)
+# Both supported versions resolve grouping through the platform's builder.
+def get_kv_cache_groups(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec]:
+    return get_kv_cache_config_builder(vllm_config).get_kv_cache_groups(vllm_config, kv_cache_spec)
 
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
@@ -150,18 +139,6 @@ torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_grap
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
-
-
-class _V1ModelRunnerFactory:
-    """Import the V1 model runner only when one is actually constructed."""
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        from vllm_ascend.worker.v1.model_runner import NPUModelRunner
-
-        return NPUModelRunner(*args, **kwargs)
-
-
-NPUModelRunner = _V1ModelRunnerFactory()
 
 
 class NPUWorker(WorkerBase):
@@ -455,6 +432,14 @@ class NPUWorker(WorkerBase):
         self._weight_update_active = False
 
     def shutdown(self) -> None:
+        model = getattr(getattr(self, "model_runner", None), "model", None)
+        close_engram = getattr(model, "close_shared_engram", None)
+        engram_error = None
+        if callable(close_engram):
+            try:
+                close_engram()
+            except Exception as exc:
+                engram_error = exc
         state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
         if isinstance(state, AscendEplbState):
             state.close()
@@ -473,10 +458,19 @@ class NPUWorker(WorkerBase):
             shutdown_fn = getattr(model_runner, "shutdown", None)
             if callable(shutdown_fn):
                 shutdown_fn()
+        if engram_error is not None:
+            raise engram_error
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
+
+    def _get_gpu_memory_utilization(self) -> float:
+        utilization = self.cache_config.gpu_memory_utilization
+        # vLLM #56492 defers the default until the KV allocation mode is known.
+        if utilization is None:
+            return self.cache_config.resolved_gpu_memory_utilization
+        return utilization
 
     def _init_device(self):
         # vLLM v0.24.0 (PR #45026) removed automatic per-process device
@@ -549,7 +543,7 @@ class NPUWorker(WorkerBase):
 
         # take current memory snapshot
         self.init_snapshot = MemorySnapshot(device=device)
-        self.requested_memory = self.init_snapshot.total_memory * self.cache_config.gpu_memory_utilization
+        self.requested_memory = self.init_snapshot.total_memory * self._get_gpu_memory_utilization()
         if self.init_snapshot.free_memory < self.requested_memory:
             GiB = lambda b: round(b / GiB_bytes, 2)
             raise ValueError(
@@ -557,7 +551,7 @@ class NPUWorker(WorkerBase):
                 f"({GiB(self.init_snapshot.free_memory)}/"
                 f"{GiB(self.init_snapshot.total_memory)} GiB) on startup "
                 f"is less than desired GPU memory utilization "
-                f"({self.cache_config.gpu_memory_utilization}, "
+                f"({self._get_gpu_memory_utilization()}, "
                 f"{GiB(self.requested_memory)} GiB). Decrease GPU memory "
                 f"utilization or reduce GPU memory used by other processes."
             )
@@ -599,20 +593,16 @@ class NPUWorker(WorkerBase):
         num_ubatches = 1
         init_workspace_manager(self.device, num_ubatches)
         # Init ModelRunner here, so that we have access to self.device.
-        if self.use_v2_model_runner:
-            logger.warning("npu model runner v2 is in developing, some features doesn't work for now.")
-            if self.vllm_config.is_mm_encoder_only:
-                from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
+        if self.vllm_config.is_mm_encoder_only:
+            from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
 
-                from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+            from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
-                with torch_cuda_wrapper():
-                    self.model_runner = MMEncoderModelRunner(self.vllm_config, self.device)
-            else:
-                from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
-
-                self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
+            with torch_cuda_wrapper():
+                self.model_runner = MMEncoderModelRunner(self.vllm_config, self.device)
         else:
+            from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
         if self.rank == 0:
@@ -676,6 +666,11 @@ class NPUWorker(WorkerBase):
 
         maybe_apply_startup_plan(self)
 
+        if self.vllm_config.attention_config.hisparse_config is not None:
+            from vllm_ascend.hisparse.backend import prepare_hisparse_workspaces
+
+            prepare_hisparse_workspaces(self.vllm_config.compilation_config.static_forward_context)
+
         randomize_inputs = envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and self.parallel_config.data_parallel_size > 1
 
         # Fast path: user has explicitly specified KV cache size via
@@ -723,9 +718,14 @@ class NPUWorker(WorkerBase):
         # Override torch_peak_increase with the pre-graph-capture value to
         # avoid double-counting graph pool memory as activation memory.
         profile_result.torch_peak_increase = profile_torch_peak - profile_result.before_profile.torch_peak
-        profile_result.non_kv_cache_memory = (
-            profile_result.non_torch_increase + profile_result.torch_peak_increase + profile_result.weights_memory
-        )
+        if self.vllm_config.attention_config.hisparse_config is None:
+            profile_result.non_kv_cache_memory = (
+                profile_result.non_torch_increase + profile_result.torch_peak_increase + profile_result.weights_memory
+            )
+        else:
+            # Reuse Core's measured total, including owners retained from an
+            # earlier profile. Preserve this authority for startup suggestions.
+            self._hisparse_profiled_non_kv_memory = profile_result.non_kv_cache_memory
 
         # Save per-category memory for use in compile_or_warm_up_model() (step 5).
         self.peak_activation_memory = profile_result.torch_peak_increase
@@ -787,6 +787,9 @@ class NPUWorker(WorkerBase):
         derives a num_blocks (and block pool) small enough for the per-layer
         buffers to fit.
         """
+        if self.vllm_config.attention_config.hisparse_config is not None:
+            # Core budgets the shared Resident/Hot/Indexer slab, not per-layer buffers.
+            return available_memory
         kv_cache_spec = self.get_kv_cache_spec()
         if not isinstance(kv_cache_spec, dict):
             return available_memory
@@ -954,11 +957,6 @@ class NPUWorker(WorkerBase):
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         output = self.model_runner.sample_tokens(grammar_output)
-        _attach_profiling_chunk_execution_time(
-            self.model_runner.ascend_config.scheduler_config.profiling_chunk_config,
-            self.model_runner,
-            output,
-        )
         return output
 
     def load_model(self) -> None:
@@ -1045,6 +1043,8 @@ class NPUWorker(WorkerBase):
                 + self.non_torch_memory
                 + npugraph_memory_bytes
             )
+            if self.vllm_config.attention_config.hisparse_config is not None:
+                non_kv_memory = self._hisparse_profiled_non_kv_memory + npugraph_memory_bytes
             self.npugraph_memory_bytes = npugraph_memory_bytes
             suggested_to_requested = int(self.requested_memory) - non_kv_memory - redundancy_buffer
             suggested_to_gpu_limit = int(self.init_snapshot.free_memory) - non_kv_memory - redundancy_buffer
@@ -1053,7 +1053,7 @@ class NPUWorker(WorkerBase):
                 f"({format_gib(self.init_snapshot.free_memory)}/"
                 f"{format_gib(self.init_snapshot.total_memory)} GiB) on startup. "
                 f"Desired GPU memory utilization is "
-                f"({self.cache_config.gpu_memory_utilization}, "
+                f"({self._get_gpu_memory_utilization()}, "
                 f"{format_gib(self.requested_memory)} GiB). "
                 f"Actual usage: {format_gib(self.model_runner.model_memory_usage)} GiB "
                 f"for weights, {format_gib(self.peak_activation_memory)} GiB for peak "
@@ -1115,67 +1115,37 @@ class NPUWorker(WorkerBase):
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
-    @torch.inference_mode()
-    def profile_prefill_latency(self, num_tokens: int) -> float:
-        """
-        Profile prefill latency for a given number of tokens.
+    def _weight_checksum_model(self) -> nn.Module:
+        # The v1 model runner exposes get_model(); the v2 runner (still under
+        # development) only exposes the model attribute.
+        get_model = getattr(self.model_runner, "get_model", None)
+        if callable(get_model):
+            return get_model()
+        return self.model_runner.model
 
-        This runs a real model forward pass and measures the execution time.
-        Used for profiling-based dynamic chunk sizing.
+    def _weight_checksum_prefix(self) -> str:
+        # Aligned with upstream gpu_worker: data_parallel_rank is reset to 0
+        # in dense workers; only data_parallel_index keeps DP keys unique.
+        # (locals renamed from upstream's dp/pp/pcp/tp: dp is this module's
+        # dynamic_profile alias)
+        dp_rank = self.parallel_config.data_parallel_index
+        pp_rank = get_pp_group().rank_in_group
+        pcp_rank = get_pcp_group().rank_in_group
+        tp_rank = get_tp_group().rank_in_group
+        return f"dp{dp_rank}:pp{pp_rank}:pcp{pcp_rank}:tp{tp_rank}:"
 
-        In PP (Pipeline Parallelism) mode:
-        - All workers execute the forward pass to stay synchronized
-        - Only the timing from PP0 (first rank) is meaningful for scheduling
-        - PP0 includes all the pipeline stages' latency when using async scheduling
+    def compute_weight_checksums(self) -> dict[str, str]:
+        prefix = self._weight_checksum_prefix()
+        digests = compute_tensor_digests(self._weight_checksum_model())
+        return {prefix + name: digest for name, digest in digests.items()}
 
-        Args:
-            num_tokens: Number of tokens to profile
-
-        Returns:
-            Latency in milliseconds
-        """
-        import time
-
-        # Clamp to valid range
-        num_tokens = min(num_tokens, self.scheduler_config.max_num_batched_tokens)
-        num_tokens = max(num_tokens, 1)
-
-        # Synchronize all devices before timing
-        # This ensures clean measurement in PP/TP scenarios
-        torch.npu.synchronize()
-
-        # In PP mode, we still run on all ranks to keep them synchronized
-        # but only the first rank's timing is used for scheduling decisions
-        is_first_pp_rank = get_pp_group().is_first_rank
-
-        start = time.perf_counter()
-
-        # Run a real model forward with attention enabled in eager mode.
-        # _dummy_run handles PP internally (intermediate tensors, etc.).
-        self.model_runner._dummy_run(
-            num_tokens=num_tokens,
-            force_attention=True,
-            is_profile=False,
-            cudagraph_runtime_mode=CUDAGraphMode.NONE,
-            profile_cpp=True,
-        )
-
-        # Synchronize after forward to ensure NPU operations complete
-        torch.npu.synchronize()
-
-        latency_ms = (time.perf_counter() - start) * 1000
-
-        # Log for debugging in PP mode
-        if not is_first_pp_rank:
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "[ProfilingChunk] PP rank %s: profiled %s tokens, latency=%.2f ms (not used)",
-                    get_pp_group().rank_in_group,
-                    num_tokens,
-                    latency_ms,
-                )
-
-        return latency_ms
+    def reset_weights(self) -> None:
+        if get_ascend_config().weight_nz_mode:
+            logger.warning(
+                "weight_nz_mode is enabled: weight transfer update is unavailable, "
+                "reset weights can only be restored via checkpoint reload (reload_weights)."
+            )
+        zero_weights(self._weight_checksum_model())
 
     def get_kv_connector_handshake_metadata(
         self,
@@ -1199,22 +1169,16 @@ class NPUWorker(WorkerBase):
         return {(pp_rank, tp_rank): metadata}
 
     def get_simple_cpu_offload_num_cpu_blocks(self) -> int | None:
-        if vllm_version_is("0.32.0"):
-            # v0.32.0's engine core never issues this RPC, and the upstream
-            # `._find_simple_cpu_offload_connector` / `get_aligned_num_cpu_blocks`
-            # helpers do not exist on that lane.
-            return None
-        else:
-            from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
-                _find_simple_cpu_offload_connector,
-            )
+        from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
+            _find_simple_cpu_offload_connector,
+        )
 
-            if not has_kv_transfer_group():
-                return None
-            connector = _find_simple_cpu_offload_connector(get_kv_transfer_group())
-            if connector is None:
-                return None
-            return connector.get_aligned_num_cpu_blocks()
+        if not has_kv_transfer_group():
+            return None
+        connector = _find_simple_cpu_offload_connector(get_kv_transfer_group())
+        if connector is None:
+            return None
+        return connector.get_aligned_num_cpu_blocks()
 
     def _get_layerwise_kv_cache_memory_info(
         self,
@@ -1348,20 +1312,8 @@ class NPUWorker(WorkerBase):
         )
 
         # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
-        # set, so its worker-side consumer must use the same condition. Keep the
-        # narrower Mamba + Eagle3 condition for MRV1, where zeroing was
-        # introduced only to prevent a recycled Mamba block from exposing stale
-        # values when reused by full attention during multi-step speculation.
-        speculative_config = self.vllm_config.speculative_config
-        needs_mrv1_mamba_eagle_zeroing = (
-            kv_cache_config.has_mamba_layers
-            and speculative_config is not None
-            and speculative_config.method == "eagle3"
-            and speculative_config.num_speculative_tokens > 1
-        )
-        should_init_kv_zeroer = kv_cache_config.needs_kv_cache_zeroing and (
-            self.use_v2_model_runner or needs_mrv1_mamba_eagle_zeroing
-        )
+        # set, so its worker-side consumer must use the same condition.
+        should_init_kv_zeroer = kv_cache_config.needs_kv_cache_zeroing
         # Keep bookkeeping buffers outside the sleep-mode KV-cache pool so they
         # survive sleep/wake cycles.
         if should_init_kv_zeroer and hasattr(self.model_runner, "_init_kv_zero_meta"):
@@ -1396,10 +1348,9 @@ class NPUWorker(WorkerBase):
                 logger.debug("Starting torch profiler with trace name: %s", trace_name)
             # Else: profiler already initialized. Restart profiling but keep the
             # original trace name from the first initialization.
-            if not vllm_version_is("0.32.0"):
-                # vLLM main supports per-session profiler kwargs; the release
-                # wrapper has no slot for them.
-                self.profiler.set_profiler_kwargs(profiler_kwargs)
+            # vLLM main supports per-session profiler kwargs; the release
+            # wrapper has no slot for them.
+            self.profiler.set_profiler_kwargs(profiler_kwargs)
             self.profiler.start(delay_iterations=delay_iterations, max_iterations=max_iterations)
         else:
             if self.profiler is None:

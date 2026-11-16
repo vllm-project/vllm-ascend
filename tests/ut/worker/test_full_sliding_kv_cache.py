@@ -8,6 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.config import AttentionConfig
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -29,6 +30,7 @@ from vllm_ascend.worker.v2.attn_utils import (
 def _config():
     layout = SimpleNamespace(is_layer_compact=True, is_block_compact=True)
     return SimpleNamespace(
+        attention_config=AttentionConfig(),
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="gemma4_text"), use_mla=False),
         cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: layout, cache_dtype="auto"),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
