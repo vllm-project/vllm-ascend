@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from transformers import PretrainedConfig, Qwen3Config
+from vllm import config as vllm_config
 from vllm.config import ParallelConfig
 from vllm.config.model import ModelConfig
 from vllm.config.model_arch import ModelArchitectureConfig
@@ -16,6 +17,7 @@ from vllm_ascend.patch.platform.patch_speculative_config import (
     _ascend_verify_with_parallel_config,
     _normalize_deepseek_dspark_draft,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_legacy_qwen3_dspark_config_uses_qwen3_loader():
@@ -87,6 +89,10 @@ def test_deepseek_v4_vision_dspark_restores_draft_architecture():
 
 
 class _DraftModelConfig(SimpleNamespace):
+    # These fixtures model self-contained DSpark drafts, as declared by the
+    # Kimi/Qwen model classes; None would select the DeepSeek target-config path.
+    speculator_config_class = "vllm.v1.worker.gpu.spec_decode.dspark.config.DSparkSpeculatorConfig"
+
     @property
     def architectures(self):
         return self.model_arch_config.architectures
@@ -158,7 +164,10 @@ def initialize_dspark(monkeypatch):
         draft.verify_with_parallel_config = verify
         # Mock only checkpoint loading; run the real post-init, architecture
         # normalization, draft parallel-config creation, and after-validator.
-        monkeypatch.setattr(patch_speculative_config.speculative_config, "ModelConfig", lambda **_: draft)
+        # vLLM #63205 moves draft construction to a method that imports
+        # ModelConfig from vllm.config rather than vllm.config.speculative.
+        model_config_module = patch_speculative_config.speculative_config if vllm_version_is("0.33.0") else vllm_config
+        monkeypatch.setattr(model_config_module, "ModelConfig", lambda **_: draft)
         create_draft_pc = SpeculativeConfig.create_draft_parallel_config
         created = []
 
