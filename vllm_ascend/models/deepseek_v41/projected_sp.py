@@ -14,7 +14,7 @@ def projected_sp_supported(config, ascend_config, *, is_draft_layer: bool, batch
     dspark = speculative is not None and speculative.use_dspark()
     return (
         ascend_config.dsv41_projected_sp
-        and (not is_draft_layer or dspark)
+        and not is_draft_layer
         and parallel.tensor_parallel_size > 1
         and parallel.prefill_context_parallel_size == 1
         and parallel.decode_context_parallel_size == 1
