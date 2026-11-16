@@ -147,7 +147,7 @@ def make_shared_worker(
         for source in sources
         for name in (f"model.layers.{source}.attn.long_kv_cache", f"model.layers.{source}.attn.indexer.k_cache")
     ]
-    groups = [names]
+    groups = [names[::2], names[1::2]]
     if not bounded:
         groups.append([f"model.layers.{layer}.attn.swa_cache" for layer in range(num_layers)])
     if draft:
@@ -198,7 +198,7 @@ def make_shared_worker(
             use_layerwise=True,
             num_layers=num_layers,
             num_hidden_layers=num_layers,
-            extra_config={"backend": "memcache", "layerwise_num_shared_buffers": 1, **(extra_config or {})},
+            extra_config={"backend": "memcache", **(extra_config or {})},
             kv_cache_config=cache_config,
             pcp_size=pcp_size,
             pcp_rank=pcp_rank,
@@ -268,17 +268,17 @@ def save_prefix(worker):
 
 
 class TestSharedSourceLayerwise(unittest.TestCase):
-    def test_sparse_single_group_keeps_model_layer_slots(self):
+    def test_sparse_groups_keep_model_layer_slots(self):
         worker, store, caches = make_shared_worker(self, bounded=True)
         self.assertIs(type(worker), LayerwiseKVPoolWorker)
         self.assertEqual(worker.num_layers, 12)
         self.assertFalse(worker.layerwise_offload)
-        self.assertEqual(worker._groups_for_layerwise_transfer(2), [(0, 0)])
-        self.assertEqual(worker._groups_for_layerwise_transfer(8), [(0, 1)])
+        self.assertEqual(worker._groups_for_layerwise_transfer(2), [(0, 0), (1, 0)])
+        self.assertEqual(worker._groups_for_layerwise_transfer(8), [(0, 1), (1, 1)])
         self.assertEqual(worker._groups_for_layerwise_transfer(0), [])
         save_prefix(worker)
         self.assertTrue(store.published)
-        self.assertEqual({size for _, size in store.objects.values()}, {64})
+        self.assertEqual({size for _, size in store.objects.values()}, {32})
 
     def test_roundtrip_sparse_sources_swa_and_draft(self):
         for bounded in (False, True):

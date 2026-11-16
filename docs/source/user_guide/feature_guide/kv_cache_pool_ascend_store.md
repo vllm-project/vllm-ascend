@@ -70,7 +70,9 @@ and eager execution (`--enforce-eager`). TP and PCP are supported; PP, DCP,
 KVPP, and graph replay are not supported for this shared-source layout.
 No additional transfer-mode option is needed. The model's `kv_source_layer_ids`
 select the shared-source layout automatically. Layerwise scratch-buffer reuse
-is disabled because later layers still consume the source layers' KV.
+is not supported because later layers still consume the source layers' KV.
+Do not configure `layerwise_num_shared_buffers` for this model; the existing
+GVA layout uses independent buffers by default.
 
 The transfer sequence keeps every model layer. Layers without registered KV
 have empty tasks; source KV, index caches, SWA, and registered draft caches

@@ -54,7 +54,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         self.load_async = False
-        if self.use_layerwise_transfer and not getattr(self, "has_shared_kv", False):
+        if self.use_layerwise_transfer:
             self._init_layerwise_offload(vllm_config, kv_cache_config, extra_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.layerwise_keys = (
@@ -81,7 +81,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             raise ValueError("AscendStore private KV state requires Mooncake block-key or non-layerwise transfer")
 
     def _process_hit_without_alloc(self, store_skip_tokens: int) -> bool:
-        return not getattr(self, "has_shared_kv", False) and store_skip_tokens > 0
+        return store_skip_tokens > 0
 
     def _async_load_enabled(self) -> bool:
         return False
