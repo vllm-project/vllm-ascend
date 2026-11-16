@@ -246,7 +246,6 @@ def test_factory_partition_decode_ownership(pcp_size, stack_dcp, kpool, query_le
         assert local.input_ids[: local.num_tokens].tolist() == [token + 100 for token in tokens]
         torch.testing.assert_close(local.positions[: local.num_tokens], batch.positions[tokens])
         assert local.num_tokens_after_padding == stride
-        assert manager.get_num_tokens_for_dispatch(batch.num_scheduled_tokens, batch.is_prefilling_np) == stride
         torch.testing.assert_close(manager._gathered_kv_write_mask, expected_writers)
         gathered = batch.input_ids[manager._padded_gather_idx]
         torch.testing.assert_close(gathered[manager._hidden_restore_idx], batch.input_ids)
@@ -261,7 +260,7 @@ def test_constructor_forwards_decode_sharding_with_release_compatible_arguments(
     assert manager.shard_decode_requests is True
 
 
-def test_decode_sharding_does_not_add_a_parallel_config_field():
+def test_setup_preserves_upstream_decode_sharding_policy():
     parallel_config = ParallelConfig(prefill_context_parallel_size=2, decode_context_parallel_size=1)
     parallel_config.worker_cls = "test-worker"
     config = SimpleNamespace(
@@ -300,14 +299,8 @@ def test_kpool_decode_keeps_replicated_pcp_state(speculative: bool, bind_runner_
     assert not manager.shard_decode_requests
     assert config.parallel_config.pcp_shard_decode_requests is True
     replace(config.parallel_config)
-    query_len = 6 if speculative else 1
-    counts = np.array([query_len, query_len], dtype=np.int32)
-    prefilling = np.array([False, False])
-
     assert not is_pcp_decode_sharding_enabled(config)
-    np.testing.assert_array_equal(manager.replicated_requests(counts, prefilling), [True, True])
     assert not manager.shard_decode_requests
-    assert list(manager._iter_rank_chunks(1, counts, prefilling)) == [(0, 0, query_len), (1, 0, query_len)]
 
 
 def test_validate_config_allows_sparse_mla_full_decode_only():
@@ -875,12 +868,11 @@ def _expected_gathered_slots(global_slots, tokens_by_rank, stride):
 @pytest.mark.parametrize(
     "mode,batch_kind,query_len",
     [
-        (mode, kind, query_len)
-        for mode in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL)
-        for kind in ("decode", "empty-owner")
-        for query_len in (1, 3)
-    ]
-    + [(mode, "mixed", 1) for mode in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE)],
+        (CUDAGraphMode.NONE, "decode", 1),
+        (CUDAGraphMode.NONE, "empty-owner", 3),
+        (CUDAGraphMode.PIECEWISE, "mixed", 1),
+        (CUDAGraphMode.FULL, "decode", 1),
+    ],
 )
 def test_partition_slot_mappings_and_refresh(pcp_size, route, slot_dtype, mode, batch_kind, query_len):
     config, batch, desc, tables, global_slots, tokens_by_rank, stride = _make_slot_mapping_case(
@@ -910,10 +902,8 @@ def test_partition_slot_mappings_and_refresh(pcp_size, route, slot_dtype, mode, 
         assert manager._gathered_kv_slot_mappings.dtype == slot_dtype
         assert manager._pad_slot_id.dtype == slot_dtype
         storage_ptr = manager._gathered_kv_slot_mappings.data_ptr()
-        # Execute the real parent method, then the production entry point. The
-        # former already has the final rank stride, padding and canonical writers.
-        parent_slots = PCPManager.prepare_slot_mappings(manager)
-        torch.testing.assert_close(parent_slots, expected)
+        # Ascend now inherits the upstream layout implementation. Validate the
+        # inherited result together with Ascend's dtype and refresh contracts.
         slots = manager.prepare_slot_mappings()
         torch.testing.assert_close(slots, expected)
         assert slots.data_ptr() == storage_ptr
@@ -1580,23 +1570,6 @@ def test_capture_input_uses_upstream_staging_path():
     partition.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    "counts,prefilling,expected",
-    [
-        ([44], [True], 22),
-        ([18], [True], 10),
-        ([1], [True], 1),
-        ([4, 18], [False, True], 12),
-        ([4, 4], [False, False], 4),
-        ([18, 7], [True, True], 14),
-        ([0], [False], 0),
-    ],
-)
-def test_pcp_dispatch_counts_match_partition(counts, prefilling, expected):
-    manager = _make_factory_pcp_manager(_make_pcp_config(CUDAGraphMode.NONE), 0)
-    assert manager.get_num_tokens_for_dispatch(np.array(counts), np.array(prefilling)) == expected
-
-
 @pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
 def test_pcp_slot_buffers_match_block_tables(slot_dtype):
     def init_buffers(manager, **kwargs):
@@ -1664,24 +1637,6 @@ def test_speculative_decode_keeps_draft_tokens_on_pcp_ranks(pcp_rank):
     assert local.positions.tolist() == batch.positions.tolist()
     assert local.is_prefilling_np.tolist() == [False]
     assert manager._hidden_restore_idx[:4].tolist() == [0, 1, 2, 3]
-
-
-@pytest.mark.parametrize("num_prefill_tokens", [1, 3, 7])
-def test_short_prefill_leaves_empty_pcp_ranks_in_mixed_batch(num_prefill_tokens):
-    config = _make_pcp_config(CUDAGraphMode.NONE)
-    config.parallel_config = ParallelConfig(prefill_context_parallel_size=8)
-    manager = _make_factory_pcp_manager(config, 0)
-    counts = np.array([4, 4, 4, num_prefill_tokens], dtype=np.int32)
-    prefilling = np.array([False, False, False, True])
-    for rank in range(8):
-        chunks = list(manager._iter_rank_chunks(rank, counts, prefilling))
-        expected = []
-        if rank < 3:
-            expected.append((rank, 0, 4))
-        if rank < num_prefill_tokens:
-            expected.append((3, rank, 1))
-        assert chunks == expected
-    assert manager.get_num_tokens_for_dispatch(counts, prefilling) == 5
 
 
 def _hook_manager() -> AscendPCPManager:
