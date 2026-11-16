@@ -851,6 +851,12 @@ platform-specific group is labeled. Shared parameter meanings are listed in
 - `--data-parallel-rpc-port 12980`: RPC port for data parallel master communication. Must be the same across all nodes.
 - `--headless`: Used on node 1. Node 0 hosts the API server.
 
+In this internal-DP layout, explicitly setting `--data-parallel-start-rank 0` on the
+API node triggers external/hybrid DP load-balancing inference. The remote
+headless engines are then rejected with
+`Remote engine must not use --headless in external or hybrid dp lb mode`.
+Keep the API node's rank implicit so all EngineCores join the same DP group.
+
 **A2 four-node network and data parallel configuration:**
 
 - `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and
