@@ -3,14 +3,14 @@
 
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import get_tp_group, tensor_model_parallel_all_gather
-from vllm.forward_context import get_forward_context
+from vllm.distributed import get_tp_group
 from vllm.logger import logger
-from vllm.utils.torch_utils import direct_register_custom_op
+
+from .decoder_replay_sp import SPReplayPlan
 
 if TYPE_CHECKING:
     from .model import DeepseekV41Model
@@ -37,6 +37,7 @@ class AscendDecoderReplayLayers:
         self.num_actual_rows = 0
         self.num_padded_rows: int | None = None
         self.sequence_parallel = False
+        self.sp_plan: SPReplayPlan | None = None
 
     def __call__(self, *states: torch.Tensor | None) -> tuple[torch.Tensor, ...]:
         if self.rows is None:
@@ -66,10 +67,9 @@ class AscendDecoderReplayLayers:
                     continue
                 sharded = self.sequence_parallel and index != 2
                 if sharded:
-                    state = tensor_model_parallel_all_gather(state, dim=0)
-                state = state.index_select(0, rows)
-                if sharded:
-                    state = state.chunk(get_tp_group().world_size)[get_tp_group().rank_in_group]
+                    state = cast(SPReplayPlan, self.sp_plan).compact(state, get_tp_group().device_group)
+                else:
+                    state = state.index_select(0, rows)
                 if self.num_padded_rows is not None:
                     padding = self.num_padded_rows - state.shape[0]
                     state = torch.cat((state, state.new_zeros((padding, *state.shape[1:]))))
@@ -81,64 +81,12 @@ class AscendDecoderReplayLayers:
                 # have already been gathered by the model's layer loop.
                 sharded = self.sequence_parallel and index < 2
                 if sharded:
-                    row_output = tensor_model_parallel_all_gather(row_output, dim=0)
+                    outputs.append(cast(SPReplayPlan, self.sp_plan).restore(row_output, get_tp_group().device_group))
+                    continue
                 output = row_output.new_zeros((positions.shape[0], *row_output.shape[1:]))
                 output.index_copy_(0, rows[: self.num_actual_rows], row_output[: self.num_actual_rows])
-                if sharded:
-                    tp = get_tp_group()
-                    output = output.chunk(tp.world_size)[tp.rank_in_group]
                 outputs.append(output)
             return tuple(outputs)
-
-
-def dsv41_decoder_replay_forward(
-    hidden_states: torch.Tensor,
-    pre_mix: torch.Tensor,
-    positions: torch.Tensor,
-    input_ids: torch.Tensor | None,
-    num_late_aux: int,
-    layer_name: str,
-) -> list[torch.Tensor]:
-    """Run the decoder tail outside Dynamo's compiled model graph.
-
-    The replay rows and attention context are mutable per-forward state. Resolve
-    them only when this custom op executes so the compiler cannot specialize on
-    the warmup value of ``AscendDecoderReplayLayers.rows``. During graph capture,
-    ordinary tail operators remain in the graph; nested Ascend attention ops
-    keep their own capture boundaries. Return all outputs so eager and compiled
-    execution can use the same operator without caller-owned output buffers.
-    """
-    forward_context = get_forward_context()
-    replay = forward_context.no_compile_layers[layer_name]
-    outputs = replay(hidden_states, pre_mix, positions, input_ids)
-    if len(outputs) - 2 != num_late_aux:
-        raise RuntimeError(f"Decoder replay returned {len(outputs) - 2} auxiliary outputs, expected {num_late_aux}")
-    return list(outputs)
-
-
-def dsv41_decoder_replay_forward_fake(
-    hidden_states: torch.Tensor,
-    pre_mix: torch.Tensor,
-    positions: torch.Tensor,
-    input_ids: torch.Tensor | None,
-    num_late_aux: int,
-    layer_name: str,
-) -> list[torch.Tensor]:
-    """Fake outputs for decoder replay, including configured auxiliary states."""
-    return [
-        torch.empty_like(hidden_states),
-        torch.empty_like(pre_mix),
-        *(hidden_states.new_empty((positions.shape[0], hidden_states.shape[-1])) for _ in range(num_late_aux)),
-    ]
-
-
-direct_register_custom_op(
-    op_name="dsv41_decoder_replay_forward",
-    op_func=dsv41_decoder_replay_forward,
-    mutates_args=[],
-    fake_impl=dsv41_decoder_replay_forward_fake,
-    dispatch_key="PrivateUse1",
-)
 
 
 def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> AscendDecoderReplayLayers | None:
@@ -153,13 +101,14 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
     cut = max(model.config.kv_source_layer_ids)
     if cut >= model.end_layer - 1:
         return None
-    if (
-        model.use_sequence_parallel
-        or parallel.pipeline_parallel_size > 1
-        or parallel.decode_context_parallel_size > 1
-        or parallel.use_ubatching
-    ):
-        reason = "SP, PP, DCP and microbatching need a separate replay layout"
+    if parallel.pipeline_parallel_size > 1 or parallel.decode_context_parallel_size > 1 or parallel.use_ubatching:
+        reason = "PP, DCP and microbatching need a separate replay layout"
+    elif model.use_sequence_parallel and (not config.use_v2_model_runner or parallel.prefill_context_parallel_size > 1):
+        reason = "SP replay requires MRV2 without PCP"
+    elif model.use_sequence_parallel and speculative is not None and speculative.enable_adaptive_verification:
+        # Adaptive verification can change device query boundaries without
+        # updating the CPU counts used to plan the SP all-to-all.
+        reason = "SP replay requires CPU-known query boundaries; adaptive verification is unsupported"
     elif config.compilation_config.cudagraph_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY):
         reason = "replay prefill requires eager execution; use NONE or FULL_DECODE_ONLY"
     elif any(layer > cut for layer in model.config.engram_layer_ids):
