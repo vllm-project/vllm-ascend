@@ -1,0 +1,9 @@
+pr: 21799
+entries:
+  - category: feature
+    text: >-
+      Added the draft_lm_head_quantization=w8a8_dynamic startup option for
+      online quantization of the draft model's copy of a shared target LM head
+      (EAGLE3/MTP) with Model Runner V2, using INT8 on A2/A3 and MXFP8 on A5.
+      When lm_head_quantization is also set, the drafter shares the quantized
+      target LM head directly.
