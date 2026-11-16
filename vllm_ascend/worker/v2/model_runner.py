@@ -94,6 +94,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     init_sparse_kv_offload_manager,
 )
 from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target_host_mirror
+from vllm_ascend.kv_trace.kv_trace_runner import install_trace
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
@@ -311,6 +312,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 self.debugger = AclGraphDumper(dump_cfg)
         self.runtime_guard = RuntimeGuardProcessor.bind(self)
+        self._kv_trace = install_trace(self)
 
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
@@ -565,6 +567,9 @@ class NPUModelRunner(GPUModelRunner):
         self._fill_c8_mxfp_v_scale_caches()
         if self.vllm_config.attention_config.hisparse_config is not None:
             self.kv_connector = overlap_target_host_mirror(self)
+        guard = getattr(self, "_kv_trace", None)
+        if guard is not None:
+            guard.configure(self)
 
     def _fill_c8_mxfp_v_scale_caches(self) -> None:
         """Initialize C8 V scales and retain views for page reassignment."""
