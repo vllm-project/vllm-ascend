@@ -87,7 +87,7 @@ PCP rank 2:         [2]      [5]
 PCP rank 3:            [3][4]
 ```
 
-Each fragment keeps its original positions and computed-prefix length, so tail queries can attend to earlier chunks. Local buffers are padded for collectives. Short requests can leave PCP-only ranks without queries; the PCP+DCP path replicates short prefills when splitting would leave an empty chunk.
+Each fragment keeps its original positions and computed-prefix length, so tail queries can attend to earlier chunks. Local buffers are padded for collectives. With PCP-only decode request sharding, a cached one-token prompt tail uses decode request ownership instead of prefill splitting across attention backends; its original prefill lifecycle state is retained. Speculative draft tokens do not count toward this one-token check. Fresh prompts still use prefill splitting, and PCP+DCP replicates short prefills when splitting would leave an empty chunk. Models that disable decode request sharding, such as KPool models, keep their existing partitioning policy.
 
 #### Decode: request ownership and cache shards
 
