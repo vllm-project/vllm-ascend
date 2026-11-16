@@ -157,9 +157,11 @@ guide_sections:
     31 layout blocks, checked content/bounds/JSON/Markdown. These are functional
     checks, separate from full-dataset accuracy and performance.
 
-    The frontend exited with code 0 after SIGTERM without a forced kill, but
-    shutdown logged eight ERROR lines containing `EngineDeadError` and a leaked
-    semaphore warning. Client logs passed the error/exception/traceback scan;
+    The API frontend exited with code 0 after SIGTERM. However, with
+    shutdown timeout=0 the process manager logged force-killing the remaining
+    EngineCore process (pid 15271). The output handler then logged one
+    eight-line `EngineDeadError` traceback, and Python warned about one
+    leaked semaphore. Client logs passed the error/exception/traceback scan;
     the strict server-log check failed. These errors are retained and this
     stable-image result does not meet an error-free-log acceptance criterion.
     Native Docker launch, stable-image full-dataset evaluation, 910B3 and 310P
