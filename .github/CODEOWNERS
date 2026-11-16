@@ -191,7 +191,7 @@
 /vllm_ascend/models/glm5next/kda.py @lijiahang226 @drslark
 /vllm_ascend/models/glm5_dspark.py @lijiahang226
 /vllm_ascend/models/kimi_k3 @Dawn952
-/vllm_ascend/models/kimi_k3/recoverssm_metadata.py @Dawn952 @drslark
+/vllm_ascend/models/kimi_k3/recoverssm_metadata.py @drslark
 # /vllm_ascend/models/d3.py
 # /vllm_ascend/models/gemma4_mm.py
 # /vllm_ascend/models/llama_eagle3.py
