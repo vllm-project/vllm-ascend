@@ -129,8 +129,6 @@ def packed_sfa_cache_groups(config, specs):
     }
     if len(full) + len(recurrent) != len(specs):
         raise ValueError("Unexpected cache role in block-outermost Kimi layout.")
-    if len(set(recurrent.values())) > 1:
-        raise ValueError("Kimi recurrent layers must share state geometry.")
     # Every recurrent group can use the whole history row, regardless of
     # draft presence or repeating page-size patterns.
     anchor = sum(s.page_size_bytes for s in full.values())
