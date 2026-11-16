@@ -1,0 +1,4 @@
+pr: 21688
+entries:
+  - category: bugfix
+    text: Fixed cached one-token prompt extensions using inconsistent request partitioning, graph dispatch, and attention metadata when PCP decode-request sharding is enabled.
