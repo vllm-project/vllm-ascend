@@ -55,6 +55,9 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import (
     MooncakeKVConnectorStats,
     MooncakePromMetrics,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    get_layerwise_reuse_layout,
+)
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
@@ -273,7 +276,7 @@ class MooncakePushConnector(MooncakeBaseConnector):
         transfer_config = vllm_config.kv_transfer_config
         assert transfer_config is not None
         self.is_producer = transfer_config.is_kv_producer
-        self.supports_layerwise_buffer_reuse = getattr(kv_cache_config, "layerwise_kv_cache_reuse", False)
+        self.supports_layerwise_buffer_reuse = get_layerwise_reuse_layout(kv_cache_config) is not None
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = MooncakePushConnectorScheduler(vllm_config, str(self.engine_id), kv_cache_config)
         elif role == KVConnectorRole.WORKER:
