@@ -66,6 +66,14 @@ def init_speculator(
 
         return AscendDSparkSpeculator(vllm_config, device)
     if speculative_config.use_dflash():
+        if {"Qwen3XPressModel", "DFlashQwen3XPressModel"}.intersection(
+            speculative_config.draft_model_config.architectures or ()
+        ):
+            from vllm_ascend.worker.v2.spec_decode.xpress.speculator import (
+                AscendXPressSpeculator,
+            )
+
+            return AscendXPressSpeculator(vllm_config, device)
         if "LiLiCorrDraftModel" in speculative_config.draft_model_config.architectures:
             from vllm_ascend.worker.v2.spec_decode.lilicorr.speculator import (
                 AscendLiLiCorrSpeculator,
