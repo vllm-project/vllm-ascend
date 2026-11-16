@@ -973,7 +973,8 @@ jobs:
               "queued", "requested", "waiting", "in_progress"
           ):
               if time.time() > deadline:
-                  raise SystemExit("timed out waiting for pull_request CI")
+                  verdict("ci-still-running")
+                  raise SystemExit(0)
               time.sleep(60)
               run = latest_pull_request_run()
 
@@ -1022,6 +1023,9 @@ jobs:
                 ;;
               no-ci)
                 fail "A review was submitted before any pull_request CI run existed for this commit (${HEAD_SHA}). CI must run first; no re-review is needed."
+                ;;
+              ci-still-running)
+                fail "A review was submitted, but the pull_request CI for this commit (${HEAD_SHA}) was still running after ${GATE_WAIT_SECONDS}s and the gate cannot carry its verdict forward. Wait for CI to finish, then re-submit the review (no new code push is needed)."
                 ;;
               code-failure)
                 fail "A review was submitted, but the code CI for this commit did not pass (failed: ${VERDICT_DETAIL}). Fix/re-run the failing job(s); the gate will pass once CI is green and no re-review is needed."
