@@ -254,6 +254,51 @@ def test_selected_backends_reach_both_initializers():
     assert init_ascend.call_args.kwargs["device_backend"] == "hccl"
 
 
+@pytest.mark.parametrize("assigned", [None, [2, 3]])
+def test_repeated_configuration_is_idempotent(monkeypatch, assigned):
+    monkeypatch.setenv("HCCL_IF_BASE_PORT", "60000")
+    worker = make_worker(
+        data_parallel_size=2,
+        data_parallel_rank_local=1,
+        data_parallel_index=1,
+        assigned_physical_gpu_ids=assigned,
+        world_size=2,
+    )
+    with (
+        patch.object(worker_module.torch.npu, "device_count", return_value=4),
+        patch("vllm.platforms.interface.set_assigned_physical_gpu_ids") as publish,
+    ):
+        worker._configure_parallel_device()
+        first_rank = worker.local_rank
+        first_port = worker_module.os.environ["HCCL_IF_BASE_PORT"]
+        worker._configure_parallel_device()
+
+    assert worker.local_rank == first_rank
+    assert worker_module.os.environ["HCCL_IF_BASE_PORT"] == first_port
+    assert publish.call_count == (1 if assigned else 0)
+
+
+def test_failed_configuration_leaves_no_state_and_can_retry(monkeypatch):
+    monkeypatch.setenv("HCCL_IF_BASE_PORT", "65504")
+    worker = make_worker()
+    with (
+        patch.object(worker_module.torch.npu, "device_count", return_value=8),
+        pytest.raises(ValueError, match="HCCL_IF_BASE_PORT"),
+    ):
+        worker._configure_parallel_device()
+
+    assert worker.local_rank == 0
+    assert worker_module.os.environ["HCCL_IF_BASE_PORT"] == "65504"
+    assert getattr(worker, "_parallel_device_configured", False) is False
+
+    # Fixing the input allows a retry, and the DP offset is applied once.
+    monkeypatch.setenv("HCCL_IF_BASE_PORT", "60000")
+    with patch.object(worker_module.torch.npu, "device_count", return_value=8):
+        worker._configure_parallel_device()
+    assert worker.local_rank == 7
+    assert worker_module.os.environ["HCCL_IF_BASE_PORT"] == "60224"
+
+
 def _ascend_config(**overrides):
     config = SimpleNamespace(
         kvpp_config=SimpleNamespace(size=1),

@@ -201,12 +201,22 @@ class NPUWorker310(NPUWorker):
         logger.info_once("Skip warm-up atb ops for 310P device.")
 
     def _configure_parallel_device(self):
+        """Bind this worker to its device and reserve its HCCL port block.
+
+        The helper is idempotent: repeated calls on the same worker are no-ops,
+        and nothing is committed until every check has passed. This does not
+        make the whole ``init_device`` flow re-entrant.
+        """
+        if getattr(self, "_parallel_device_configured", False):
+            return
+
         parallel_config = self.parallel_config
         assigned_devices = parallel_config.assigned_physical_gpu_ids
+        logical_rank = self.local_rank
         if assigned_devices is None:
             # Single-node non-Ray launch: each engine core restarts its local
             # rank at 0, so apply the DP offset the upstream CUDA worker uses.
-            self.local_rank = parallel_config.get_local_gpu_index(self.local_rank)
+            device_index = parallel_config.get_local_gpu_index(logical_rank)
             visible_count = torch.npu.device_count()
         else:
             # vLLM already sliced --device-ids per DP rank for this process
@@ -214,13 +224,13 @@ class NPUWorker310(NPUWorker):
             # non-CUDA/XPU platforms) and published the slice as the config.
             # local_rank is therefore an index into this replica's own shard;
             # applying the DP offset again would run past the shard.
-            from vllm.platforms.interface import set_assigned_physical_gpu_ids
-
-            set_assigned_physical_gpu_ids(assigned_devices)
+            device_index = logical_rank
             visible_count = len(assigned_devices)
-        if not 0 <= self.local_rank < visible_count:
-            raise ValueError(f"310P local rank {self.local_rank} is outside {visible_count} visible devices.")
+        if not 0 <= device_index < visible_count:
+            raise ValueError(f"310P local rank {device_index} is outside {visible_count} visible devices.")
 
+        effective_base_port: int | None = None
+        dp_local_rank: int | None = None
         if parallel_config.data_parallel_size > 1:
             dp_local_rank = parallel_config.data_parallel_rank_local
             if dp_local_rank is None:
@@ -235,14 +245,24 @@ class NPUWorker310(NPUWorker):
                     f"[{base_port}, {last_port}] must stay within "
                     f"[{_MIN_HCCL_PORT}, {_MAX_HCCL_PORT}]."
                 )
-            os.environ["HCCL_IF_BASE_PORT"] = str(base_port + dp_local_rank * _HCCL_PORTS_PER_DP_REPLICA)
+            effective_base_port = base_port + dp_local_rank * _HCCL_PORTS_PER_DP_REPLICA
+
+        # All checks passed: commit the configuration once.
+        if assigned_devices is not None:
+            from vllm.platforms.interface import set_assigned_physical_gpu_ids
+
+            set_assigned_physical_gpu_ids(assigned_devices)
+        self.local_rank = device_index
+        if effective_base_port is not None:
+            os.environ["HCCL_IF_BASE_PORT"] = str(effective_base_port)
             logger.info(
                 "310P DP mapping: rank=%s local_rank=%s dp_local_rank=%s HCCL_IF_BASE_PORT=%s",
                 self.rank,
                 self.local_rank,
                 dp_local_rank,
-                os.environ["HCCL_IF_BASE_PORT"],
+                effective_base_port,
             )
+        self._parallel_device_configured = True
 
     def _init_device(self):
         self._configure_parallel_device()
