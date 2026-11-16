@@ -14,70 +14,61 @@ VllmConfig, via the platform's quant-config registration), the upstream
 """
 
 import torch
-
-try:
-    from vllm.config.cache import register_kv_cache_dtype
-    from vllm.v1.kv_cache_interface import KVQuantMode
-except ImportError:  # pragma: no cover - vLLM without the pluggable mechanism.
-    # vLLM builds that lack ``register_kv_cache_dtype`` (e.g.
-    # releases/v0.27.x) keep the upstream dtype table untouched. Ascend's
-    # legacy worker patch (patch/worker/patch_kv_cache_dtype.py) handles the
-    # fp8 flip on those builds.
-    register_kv_cache_dtype = None
-    KVQuantMode = None
+from vllm.config.cache import register_kv_cache_dtype
+from vllm.v1.kv_cache_interface import KVQuantMode
 
 
-if register_kv_cache_dtype is not None:
+@register_kv_cache_dtype("fp8")
+class Fp8AscendHandler:
+    """fp8 KV cache stored as ``torch.float8_e4m3fn`` on Ascend.
 
-    @register_kv_cache_dtype("fp8")
-    class Fp8AscendHandler:
-        """fp8 KV cache stored as ``torch.float8_e4m3fn`` on Ascend.
+    The upstream builtin ``"fp8"`` maps to ``torch.uint8`` (raw fp8 bytes
+    consumed by NVIDIA cutlass kernels). Ascend's MLA/DSA kernels operate
+    on native ``torch.float8_e4m3fn`` directly, so re-registering ``"fp8"``
+    here flips that mapping to ``float8_e4m3fn``. The decorator logs an
+    ``already exists and will be overwritten`` warning; this is expected
+    and intentional on the Ascend platform.
 
-        The upstream builtin ``"fp8"`` maps to ``torch.uint8`` (raw fp8 bytes
-        consumed by NVIDIA cutlass kernels). Ascend's MLA/DSA kernels operate
-        on native ``torch.float8_e4m3fn`` directly, so re-registering ``"fp8"``
-        here flips that mapping to ``float8_e4m3fn``. The decorator logs an
-        ``already exists and will be overwritten`` warning; this is expected
-        and intentional on the Ascend platform.
+    No per-token scale: ``quant_mode`` returns ``KVQuantMode.CUSTOM`` so
+    the Ascend backend fully self-manages kernel dispatch rather than
+    reusing an upstream generic fp8/per-token-head kernel path.
+    """
 
-        No per-token scale: ``quant_mode`` returns ``KVQuantMode.CUSTOM`` so
-        the Ascend backend fully self-manages kernel dispatch rather than
-        reusing an upstream generic fp8/per-token-head kernel path.
-        """
+    name = "fp8"
 
-        name = "fp8"
+    def torch_dtype(self) -> torch.dtype:
+        return torch.float8_e4m3fn
 
-        def torch_dtype(self) -> torch.dtype:
-            return torch.float8_e4m3fn
+    def quant_mode(self):
+        return KVQuantMode.CUSTOM
 
-        def quant_mode(self):
-            return KVQuantMode.CUSTOM
 
-    @register_kv_cache_dtype("int8")
-    class Int8AscendHandler:
-        """int8 KV cache stored as ``torch.int8`` on Ascend."""
+@register_kv_cache_dtype("int8")
+class Int8AscendHandler:
+    """int8 KV cache stored as ``torch.int8`` on Ascend."""
 
-        name = "int8"
+    name = "int8"
 
-        def torch_dtype(self) -> torch.dtype:
-            return torch.int8
+    def torch_dtype(self) -> torch.dtype:
+        return torch.int8
 
-        def quant_mode(self):
-            return KVQuantMode.CUSTOM
+    def quant_mode(self):
+        return KVQuantMode.CUSTOM
 
-    @register_kv_cache_dtype("mxfp8")
-    class Mxfp8AscendHandler:
-        """C8-MXFP KV cache payload stored as ``torch.float8_e4m3fn``.
 
-        The C8 backend swaps in its own cache class and owns the E8M0 scale
-        layout, so the generic dtype/quant-mode tables only need to expose the
-        fp8 payload storage that the cache constructor resolves first.
-        """
+@register_kv_cache_dtype("mxfp8")
+class Mxfp8AscendHandler:
+    """C8-MXFP KV cache payload stored as ``torch.float8_e4m3fn``.
 
-        name = "mxfp8"
+    The C8 backend swaps in its own cache class and owns the E8M0 scale
+    layout, so the generic dtype/quant-mode tables only need to expose the
+    fp8 payload storage that the cache constructor resolves first.
+    """
 
-        def torch_dtype(self) -> torch.dtype:
-            return torch.float8_e4m3fn
+    name = "mxfp8"
 
-        def quant_mode(self):
-            return KVQuantMode.CUSTOM
+    def torch_dtype(self) -> torch.dtype:
+        return torch.float8_e4m3fn
+
+    def quant_mode(self):
+        return KVQuantMode.CUSTOM

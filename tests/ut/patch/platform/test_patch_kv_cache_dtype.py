@@ -15,11 +15,10 @@ The patch widens both, so both gates are exercised here where they exist.
 import typing
 
 import pytest
+import vllm_ascend.patch.platform.patch_kv_cache_dtype  # noqa: F401
 from pydantic import ValidationError
 from vllm.config import cache as cache_mod
 from vllm.config.cache import CacheConfig
-
-import vllm_ascend.patch.platform.patch_kv_cache_dtype  # noqa: F401
 
 # Ascend-only ``--kv-cache-dtype`` values the patch widens with (kept in
 # sync with the patch files).
