@@ -108,7 +108,7 @@ Fine-grained TP shards the configured layer **across the data-parallel (DP) dime
 |-----------|------------------------------------------|
 | `o_proj` / `mlp` | **Cannot be combined — rejected at config load.** For `o_proj`, the DSA attention output is reshaped with `n_local_groups = n_groups // tp_size` (standard TP), while the wo_a/wo_b weights are sharded by the OTP group (DP dimension); the two axes no longer align (for MLP, the combination is simply untested). Both knobs require `tensor_parallel_size == 1`. |
 | QKV IProj | Requires `tensor_parallel_size == 1`. See [preconditions for QKV IProj TP](#preconditions-for-qkv-iproj-tp). |
-| `embedding` / LM head | **Can be combined — the sharding composes.** The vocabulary is sharded over the combined `finegrained_size × tensor_parallel_size` grid (TP-outer / fine-grained-inner), so every rank holds a distinct `vocab / (finegrained_size × tp_size)` slice; the exchange stays on the fine-grained group and one TP collective (all-gather for the LM head, all-reduce for the embedding) completes the full vocabulary result. Scenario 1 shows a stacked example. |
+| `embedding` / LM head | **Can be combined — the sharding composes.** The vocabulary is sharded over the combined `finegrained_size × tensor_parallel_size` grid (TP-outer / fine-grained-inner), so every rank holds a distinct `vocab / (finegrained_size × tp_size)` slice. The exchange runs on the fine-grained group first; one TP collective afterwards (all-gather for the LM head, all-reduce for the embedding) completes the full vocabulary result. Scenario 1 shows a stacked example. |
 
 ## Feature Usage
 
