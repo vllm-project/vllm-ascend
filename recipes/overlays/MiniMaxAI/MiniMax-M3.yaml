@@ -1,0 +1,443 @@
+# Source: https://github.com/vllm-project/vllm/blob/c5d1d77d2bd50c985c16bc11bcacd0dabab52024/recipes/models/MiniMaxAI/MiniMax-M3.yaml
+# Extracted with vllm-project/recipes@8509229176ba2d1837339ffc4cbb4f34c1bf5e66.
+variants:
+  ascend_bf16:
+    model_id: MiniMax/MiniMax-M3
+    label: BF16 (Ascend A3)
+    precision: bf16
+    # 427B BF16 weights are 854 GB. The params x bytes x 1.2 rule of thumb (1025)
+    # would fail the single-node fit check on a 1024 GB Atlas 800 A3 node.
+    vram_minimum_gb: 854
+    description: Native MiniMax/MiniMax-M3 BF16 on Atlas 800 A3 (16x Ascend 910C) - tutorial layout TP8 + DP2 + EP. Single-node works, but the tutorial recommends two nodes for BF16.
+    tp:
+      ascend_910c: 8
+    supported_hardware:
+      - ascend_910c
+    extra_args:
+      - '--enable-expert-parallel'
+      - '--data-parallel-size'
+      - '2'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--max-model-len'
+      - '133000'
+      - '--max-num-seqs'
+      - '16'
+      - '--gpu-memory-utilization'
+      - '0.92'
+      - '--limit-mm-per-prompt'
+      - '{"image":1,"video":0}'
+      - '--enable-chunked-prefill'
+      - '--enable-prefix-caching'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true,"enable_flashcomm1":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2}'
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+  ascend_w8a8:
+    model_id: Eco-Tech/MiniMax-M3-w8a8-0626
+    label: W8A8 (Ascend A3)
+    precision: int8
+    vram_minimum_gb: 513
+    description: ModelSlim INT8 W8A8 for one Atlas 800 A3 node (16x Ascend 910C) - tutorial layout TP4 + DP4 + EP with the Eagle3 GQA head. Requires --quantization ascend; weights come from ModelScope.
+    tp:
+      ascend_910c: 4
+    supported_hardware:
+      - ascend_910c
+    default_modes:
+      spec_decoding: eagle3_gqa
+    extra_args:
+      - '--enable-expert-parallel'
+      - '--data-parallel-size'
+      - '4'
+      - '--quantization'
+      - ascend
+      - '--api-server-count'
+      - '1'
+      - '--max-num-batched-tokens'
+      - '32768'
+      - '--long-prefill-token-threshold'
+      - '4096'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--max-model-len'
+      - '133000'
+      - '--max-num-seqs'
+      - '32'
+      - '--gpu-memory-utilization'
+      - '0.92'
+      - '--limit-mm-per-prompt'
+      - '{"image":1,"video":0}'
+      - '--enable-chunked-prefill'
+      - '--enable-prefix-caching'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true,"enable_flashcomm1":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"weight_nz_mode":2}'
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+  ascend_mxfp8:
+    model_id: MiniMax/MiniMax-M3-MXFP8
+    label: MXFP8 (Ascend A5)
+    precision: mxfp8
+    vram_minimum_gb: 513
+    description: NPU MXFP8 (W8A8C8, where C8 is dynamic KV-cache quantization) for one 950DT node (8x Ascend 950DT) - tutorial layout TP4 + DP2 + EP with the Eagle3 GQA head. Requires --quantization mxfp8 and --kv-cache-dtype fp8.
+    tp:
+      ascend_950dt_8x: 4
+    supported_hardware:
+      - ascend_950dt_8x
+    default_modes:
+      spec_decoding: eagle3_gqa
+    extra_args:
+      - '--enable-expert-parallel'
+      - '--data-parallel-size'
+      - '2'
+      - '--dtype'
+      - bfloat16
+      - '--quantization'
+      - mxfp8
+      - '--kv-cache-dtype'
+      - fp8
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--max-model-len'
+      - '133000'
+      - '--max-num-batched-tokens'
+      - '16384'
+      - '--max-num-seqs'
+      - '500'
+      - '--async-scheduling'
+      - '--safetensors-load-strategy'
+      - prefetch
+      - '--enable-chunked-prefill'
+      - '--enable-prefix-caching'
+      - '--gpu-memory-utilization'
+      - '0.92'
+      - '--limit-mm-per-prompt'
+      - '{"image":1,"video":0}'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}'
+    extra_env:
+      HCCL_BUFFSIZE: '512'
+    hardware_overrides:
+      ascend_950dt_8x:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a5
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+  ascend_w8a8_1m:
+    model_id: Eco-Tech/MiniMax-M3-w8a8-0626
+    label: W8A8 1M (Ascend A3)
+    precision: int8
+    # Weight-only figure, same checkpoint as ascend_w8a8. The 1M KV cache is not
+    # accounted for here - the tutorial's layout, not this number, is the source
+    # of truth for whether the node fits.
+    vram_minimum_gb: 513
+    description: Same W8A8 checkpoint at the tutorial's 1M layout - TP4 + PP4 + DP1 with --max-model-len 1049600. Text-only (--language-model-only) with a 8192 long-prefill threshold; prefix caching, async scheduling and speculative decoding are off.
+    tp:
+      ascend_910c: 4
+    supported_hardware:
+      - ascend_910c
+    extra_args:
+      - '--pipeline-parallel-size'
+      - '4'
+      - '--data-parallel-size'
+      - '1'
+      - '--enable-expert-parallel'
+      - '--quantization'
+      - ascend
+      - '--max-model-len'
+      - '1049600'
+      - '--max-num-seqs'
+      - '1'
+      - '--max-num-batched-tokens'
+      - '8192'
+      - '--long-prefill-token-threshold'
+      - '8192'
+      - '--gpu-memory-utilization'
+      - '0.95'
+      - '--language-model-only'
+      - '--no-enable-prefix-caching'
+      - '--no-async-scheduling'
+      - '--enable-chunked-prefill'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":false,"weight_nz_mode":2,"enable_flashcomm1":true,"enable_reduce_sample":false}'
+    extra_env:
+      VLLM_PP_LAYER_PARTITION: '15,15,15,15'
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: '1'
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '7200'
+      HCCL_BUFFSIZE: '256'
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+  ascend_mxfp8_1m_tp8:
+    model_id: MiniMax/MiniMax-M3-MXFP8
+    label: MXFP8 1M TP8 (Ascend A5)
+    precision: mxfp8
+    vram_minimum_gb: 513
+    description: 950DT 1M layout - TP8 + PP1 + DP1 with --max-model-len 1048576. FP8 KV cache with layers 0-2 skipped, multimodal inputs disabled; no speculative model, prefix caching or async scheduling.
+    tp:
+      ascend_950dt_8x: 8
+    supported_hardware:
+      - ascend_950dt_8x
+    extra_args:
+      - '--data-parallel-size'
+      - '1'
+      - '--dtype'
+      - bfloat16
+      - '--quantization'
+      - mxfp8
+      - '--kv-cache-dtype'
+      - fp8
+      - '--kv-cache-dtype-skip-layers'
+      - '0'
+      - '1'
+      - '2'
+      - '--limit-mm-per-prompt'
+      - '{"image":0,"video":0}'
+      - '--max-model-len'
+      - '1048576'
+      - '--max-num-seqs'
+      - '1'
+      - '--max-num-batched-tokens'
+      - '2048'
+      - '--gpu-memory-utilization'
+      - '0.92'
+      - '--safetensors-load-strategy'
+      - prefetch
+      - '--no-enable-prefix-caching'
+      - '--no-async-scheduling'
+      - '--enable-chunked-prefill'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":false,"enable_shared_expert_dp":false,"enable_flashcomm1":false}'
+    extra_env:
+      HCCL_BUFFSIZE: '256'
+    hardware_overrides:
+      ascend_950dt_8x:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a5
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+  ascend_mxfp8_1m_pp2:
+    model_id: MiniMax/MiniMax-M3-MXFP8
+    label: MXFP8 1M TP4/PP2 (Ascend A5)
+    precision: mxfp8
+    vram_minimum_gb: 513
+    description: 950DT 1M layout - TP4 + PP2 + DP1 with --max-model-len 1048576. Same FP8 KV settings as the TP8 layout, split across two pipeline stages.
+    tp:
+      ascend_950dt_8x: 4
+    supported_hardware:
+      - ascend_950dt_8x
+    extra_args:
+      - '--pipeline-parallel-size'
+      - '2'
+      - '--data-parallel-size'
+      - '1'
+      - '--dtype'
+      - bfloat16
+      - '--quantization'
+      - mxfp8
+      - '--kv-cache-dtype'
+      - fp8
+      - '--kv-cache-dtype-skip-layers'
+      - '0'
+      - '1'
+      - '2'
+      - '--max-model-len'
+      - '1048576'
+      - '--max-num-seqs'
+      - '1'
+      - '--max-num-batched-tokens'
+      - '8192'
+      - '--gpu-memory-utilization'
+      - '0.92'
+      - '--safetensors-load-strategy'
+      - prefetch
+      - '--no-enable-prefix-caching'
+      - '--no-async-scheduling'
+      - '--enable-chunked-prefill'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":false,"enable_shared_expert_dp":false,"enable_flashcomm1":false}'
+    extra_env:
+      HCCL_BUFFSIZE: '256'
+    hardware_overrides:
+      ascend_950dt_8x:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a5
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+meta:
+  hardware:
+    ascend_910c: verified
+    ascend_950dt_8x: verified
+guide_sections:
+  ascend: |
+    ### Huawei Ascend (vLLM Ascend)
+
+    Six single-node layouts are covered here, all taken from the
+    [MiniMax-M3 tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/MiniMax-M3.html).
+    **Pick the variant explicitly** - the GPU variants on this page (`default`,
+    `mxfp8`, `nvfp4`, `mxfp4`) still appear when an Ascend card is selected, but
+    they are NVIDIA/AMD checkpoints and their commands do not apply here.
+
+    | Layout | Weights | Variant |
+    | --- | --- | --- |
+    | A3, 128K, TP4 / DP4 | W8A8 | [ascend_w8a8](https://recipes.vllm.ai/MiniMaxAI/MiniMax-M3?hardware=ascend_910c&variant=ascend_w8a8) |
+    | A3, 128K, TP8 / DP2 | BF16 | [ascend_bf16](https://recipes.vllm.ai/MiniMaxAI/MiniMax-M3?hardware=ascend_910c&variant=ascend_bf16) |
+    | A5, 128K, TP4 / DP2 | MXFP8 | [ascend_mxfp8](https://recipes.vllm.ai/MiniMaxAI/MiniMax-M3?hardware=ascend_950dt_8x&variant=ascend_mxfp8) |
+    | A3, 1M, TP4 / PP4 | W8A8 | [ascend_w8a8_1m](https://recipes.vllm.ai/MiniMaxAI/MiniMax-M3?hardware=ascend_910c&variant=ascend_w8a8_1m) |
+    | A5, 1M, TP8 / PP1 | MXFP8 | [ascend_mxfp8_1m_tp8](https://recipes.vllm.ai/MiniMaxAI/MiniMax-M3?hardware=ascend_950dt_8x&variant=ascend_mxfp8_1m_tp8) |
+    | A5, 1M, TP4 / PP2 | MXFP8 | [ascend_mxfp8_1m_pp2](https://recipes.vllm.ai/MiniMaxAI/MiniMax-M3?hardware=ascend_950dt_8x&variant=ascend_mxfp8_1m_pp2) |
+
+    #### Install
+
+    The Ascend images ship vLLM, vLLM-Ascend, the matching CANN user space and
+    the NPU kernels; the NVIDIA pip wheel cannot run here.
+
+    ```bash
+    docker pull quay.io/ascend/vllm-ascend:v0.30.0-a3   # Atlas 800 A3 (910C)
+    docker pull quay.io/ascend/vllm-ascend:v0.30.0-a5   # 950DT
+    ```
+
+    Weights come from ModelScope, not Hugging Face. Download them on the host and
+    pass the local directory to `vllm serve`, or keep `VLLM_USE_MODELSCOPE=True`,
+    which is preset for every variant:
+
+    ```bash
+    pip install modelscope
+    modelscope download --model MiniMax/MiniMax-M3              --local_dir ./MiniMax-M3
+    modelscope download --model Eco-Tech/MiniMax-M3-w8a8-0626   --local_dir ./MiniMax-M3-w8a8
+    modelscope download --model MiniMax/MiniMax-M3-MXFP8        --local_dir ./MiniMax-M3-MXFP8
+    modelscope download --model Inferact/MiniMax-M3-EAGLE3-GQA  --local_dir ./MiniMax-M3-EAGLE3
+    ```
+
+    `--quantization` must match the checkpoint: `ascend` for W8A8, `mxfp8` for
+    MXFP8, and no value for BF16 - a stray quant method aborts the load.
+
+    #### 1M context
+
+    The three `*_1m` variants carry the tutorial's 1M layouts. They are separate
+    variants because `--max-model-len` differs from the 128K ones:
+
+    | Layout | `--max-model-len` | Batched tokens | KV cache |
+    | --- | --- | --- | --- |
+    | A3 W8A8 TP4 / PP4 | 1049600 | 8192 | default |
+    | A5 MXFP8 TP8 / PP1 | 1048576 | 2048 | FP8, layers 0-2 skipped |
+    | A5 MXFP8 TP4 / PP2 | 1048576 | 8192 | FP8, layers 0-2 skipped |
+
+    All three run with `--max-num-seqs 1`, `FULL_DECODE_ONLY`, chunked prefill,
+    no prefix caching, no async scheduling and no speculative model, and all
+    three export `HCCL_BUFFSIZE=256`. The A3 variant is text-only
+    (`--language-model-only`), splits the 60 layers as
+    `VLLM_PP_LAYER_PARTITION="15,15,15,15"`, sets `--gpu-memory-utilization 0.95`
+    and a `8192` long-prefill threshold, and needs
+    `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`. The 950DT variants keep layers 0-2 in the
+    default KV dtype (`--kv-cache-dtype-skip-layers 0 1 2`) and prefetch
+    safetensors; the TP8 one also disables multimodal inputs, while the TP4/PP2
+    layout keeps the tutorial's defaults. Everything above is preset on the
+    variants. The 950DT 1M layouts also need the `experimental_950_transformer`
+    vendor package.
+
+    #### Not covered by this page
+
+    - **Dual-node**: BF16 runs TP8 / DP4 / dp-local 2 and W8A8 TP4 / DP8 /
+      dp-local 4, both with the Eagle3 head. TP stays inside a node, DP spans
+      them. The builder cannot emit a `dp-local` other than 1, so these stay
+      hand-written.
+    - **Prefill/decode disaggregation**: `MooncakeConnectorV1` (and
+      `MultiConnector` with `AscendStoreConnector` for the Mooncake KV cache
+      pool) driven by the tutorial's `launch_online_dp.py`. The generator only
+      offers the NIXL path and sizes each role as one whole-node TP pool, so the
+      tutorial's 1P1D / 1P2D commands are not reproduced here.
+
+    Source: https://github.com/vllm-project/vllm-ascend/blob/91db901e4716f2de54608c210a79694a0327e2b4/docs/source/tutorials/models/MiniMax-M3.md
+hardware_overrides:
+  npu:
+    extra_args:
+      - '--trust-remote-code'
+      - '--distributed-executor-backend'
+      - mp
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      VLLM_USE_V2_MODEL_RUNNER: '1'
+      HCCL_OP_EXPANSION_MODE: AIV
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+hardware_notes:
+  ascend_910c:
+    title: vLLM Ascend A3 image required
+    body: Pick one of the ascend_* variants - the GPU variants on this page are NVIDIA/AMD checkpoints and their commands do not apply. Single-node layouts fill all 16 NPUs - BF16 at TP8 + DP2, W8A8 at TP4 + DP4, and the 1M layout at TP4 + PP4 + DP1. Pin quay.io/ascend/vllm-ascend:v0.30.0-a3; the NVIDIA pip wheel cannot run here. Weights come from ModelScope, and --quantization ascend applies to W8A8 only - the BF16 checkpoint takes no quant flag at all, and a second or wrong value aborts the load.
+    link:
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/MiniMax-M3.html
+      label: MiniMax-M3 on vLLM-Ascend
+  ascend_950dt_8x:
+    title: vLLM Ascend A5 image required
+    body: This profile is the tutorial's 950DT products - pick ascend_mxfp8 for 128K (TP4 + DP2) or one of the two 1M variants (TP8 or TP4 + PP2). Pin quay.io/ascend/vllm-ascend:v0.30.0-a5; the MXFP8 checkpoint needs --quantization mxfp8 and --kv-cache-dtype fp8, the 1M variants also skip KV layers 0-2, and HCCL_BUFFSIZE=512 has to be set before launch.
+    link:
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/MiniMax-M3.html
+      label: MiniMax-M3 on vLLM-Ascend
+features:
+  spec_decoding:
+    modes:
+      eagle3:
+        hardware:
+          npu: unsupported
+      eagle3_gqa:
+        hardware:
+          npu: supported
+        hardware_overrides:
+          ascend_910c:
+            args:
+              - '--speculative-config'
+              - '{"model":"Inferact/MiniMax-M3-EAGLE3-GQA","method":"eagle3","num_speculative_tokens":3}'
+          ascend_950dt_8x:
+            args:
+              - '--speculative-config'
+              - '{"model":"Inferact/MiniMax-M3-EAGLE3-GQA","method":"eagle3","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}'
+  encoder_parallel:
+    hardware_overrides:
+      npu:
+        args:
+          - '--mm-encoder-tp-mode'
+          - data
+strategy_hardware:
+  # Every variant carries the tutorial's exact single-node split, so single_node_tp
+  # is the only strategy that reproduces a documented command. The rest are opted
+  # out because they would rewrite that split:
+  #   - TEP/DEP and the multi-node TP variants re-size TP, add PP, or add a second
+  #     DP on top of the one the variant already sets;
+  #   - multi_node_tp_dp pins TP to the whole node with dp-local 1 (TP16 / DP2 on
+  #     A3), while the tutorial asks for TP8 / DP4 / dp-local 2 on BF16 and
+  #     TP4 / DP8 / dp-local 4 on W8A8 - a recipe cannot set dp-local;
+  #   - pd_cluster can only offer the NIXL connector on NPU and sizes each role as
+  #     one whole-node TP pool (TP16 x DP4), not the tutorial's 1P1D / 1P2D.
+  # The guide links the tutorial sections for the dual-node and PD layouts.
+  single_node_tep:
+    npu: unsupported
+  single_node_dep:
+    npu: unsupported
+  multi_node_tp_dp:
+    npu: unsupported
+  multi_node_tp:
+    npu: unsupported
+  multi_node_tep:
+    npu: unsupported
+  multi_node_dep:
+    npu: unsupported
+  multi_node_tp_pp:
+    npu: unsupported
+  pd_cluster:
+    npu: unsupported

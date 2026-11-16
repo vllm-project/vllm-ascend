@@ -35,7 +35,6 @@ from vllm_ascend.platform import (
 UNSUPPORTED_MODES = [
     ("recompute_scheduler_enable", {"recompute_scheduler_enable": True}),
     ("dyntra_lb_config", {"dyntra_lb_config": SimpleNamespace(enabled=True)}),
-    ("profiling_chunk_config", {"profiling_chunk_config": SimpleNamespace(enabled=True)}),
     ("enable_balance_scheduling", {"enable_balance_scheduling": True}),
 ]
 
@@ -46,7 +45,6 @@ def _ascend_config(**overrides) -> SimpleNamespace:
     scheduler_config = SimpleNamespace(
         recompute_scheduler_enable=False,
         dyntra_lb_config=SimpleNamespace(enabled=False),
-        profiling_chunk_config=SimpleNamespace(enabled=False),
         # Not a fork: reaches upstream through super().schedule().
         batch_job_sched_config=SimpleNamespace(enabled=True),
         # Not a fork either: does not override schedule() at all.
@@ -94,7 +92,7 @@ def test_unsupported_mode_turns_the_switch_off(mode, overrides):
 def test_switch_already_off_is_not_touched():
     vllm_config = _vllm_config(swa_bounded_replay=False)
 
-    _downgrade_swa_bounded_replay(vllm_config, _ascend_config(profiling_chunk_config=SimpleNamespace(enabled=True)))
+    _downgrade_swa_bounded_replay(vllm_config, _ascend_config(enable_balance_scheduling=True))
 
     assert not vllm_config.cache_config.swa_bounded_replay
 
@@ -118,7 +116,7 @@ def test_release_lane_without_the_switch_is_not_an_error():
 
     _downgrade_swa_bounded_replay(
         SimpleNamespace(cache_config=cache_config, model_config=SimpleNamespace(architectures=list(V41))),
-        _ascend_config(profiling_chunk_config=SimpleNamespace(enabled=True)),
+        _ascend_config(enable_balance_scheduling=True),
     )
 
     assert not hasattr(cache_config, "swa_bounded_replay")
