@@ -26,6 +26,9 @@ HC_COUNT = 4
 GROUP_DIM = 2560
 HYPER_HIDDEN_SIZE = HC_COUNT * GROUP_DIM
 DTYPE = torch.bfloat16
+BF16_RTOL = 2**-6
+BF16_ATOL = 2**-6
+BF16_MAX_ABS_ERROR = 1.0
 
 
 def _make_input(rows: int, width: int, *, row_strided: bool) -> torch.Tensor:
@@ -41,6 +44,16 @@ def _reference_gate_mix(x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
     grouped_x = x.float().unflatten(-1, (HC_COUNT, GROUP_DIM))
     grouped_gate = torch.sigmoid(gate.float()).unflatten(-1, (HC_COUNT, GROUP_DIM))
     return (grouped_x * grouped_gate).mean(dim=-2).to(x.dtype)
+
+
+def _assert_bf16_reference_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    actual_fp64 = actual.detach().to(device="cpu", dtype=torch.float64)
+    expected_fp64 = expected.detach().to(device="cpu", dtype=torch.float64)
+    error = (actual_fp64 - expected_fp64).abs()
+    passing = error <= BF16_ATOL + BF16_RTOL * expected_fp64.abs()
+    assert torch.isfinite(error).all()
+    assert passing.double().mean() >= 0.99
+    assert error.max() <= BF16_MAX_ABS_ERROR
 
 
 def _legacy_gate_mix(x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
@@ -104,7 +117,7 @@ def test_hc_gate_mix_row_block_matches_legacy_kernel(rows: int, row_strided: boo
     torch.npu.synchronize()
 
     torch.testing.assert_close(actual, legacy, atol=0, rtol=0)
-    torch.testing.assert_close(actual.float(), expected.float(), atol=3e-2, rtol=3e-2)
+    _assert_bf16_reference_close(actual, expected)
 
 
 @torch.inference_mode()

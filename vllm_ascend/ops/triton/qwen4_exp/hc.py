@@ -210,7 +210,7 @@ def _hc_gate_mix_needs_wide_offsets(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["rows"])
 def _hc_gate_mix_row_block_kernel(
     x_ptr,
     gate_ptr,
