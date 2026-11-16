@@ -2,7 +2,6 @@ e2e-upstream_pr:
   - name: tests/v1/worker/test_mamba_utils.py
     estimated_time: 20
 e2e-upstream_singlecard:
-e2e-upstream_singlecard:
   - name: tests/config/test_watchdog_config.py
     estimated_time: 20
   - name: tests/distributed/test_cpu_all_reduce.py
