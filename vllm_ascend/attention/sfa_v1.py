@@ -2232,7 +2232,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             kv_outputs: Callable[[], tuple] | tuple | None
             if mistral_no_q_lora and shares_kv:
                 # A sharing layer reads the latent cache its neighbour owns, so
-                # it must neither recompute KV nor write the cache itself.
+                # it must neither recompute KV nor write the cache itself. It
+                # still reaches the written hook below.
                 kv_outputs = None
                 k_pe = k_nope = knope_scale = None
             else:
@@ -2270,6 +2271,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             if kv_outputs is not None and self.uses_packed_sfa_main_cache:
                 self._store_packed_kv_cache(k_pe, k_nope, knope_scale, kv_cache, slot_mapping_sfa, attn_metadata)
+            # Fires even for a layer that skipped the write above: a sharing
+            # layer owns no write, but DCP prefill still starts its KV
+            # all-gather from here, so it has to reach this hook too.
             self._on_kv_cache_written(kv_cache, attn_metadata)
 
         # A sharded-decode PCP rank can own no request but must still write
