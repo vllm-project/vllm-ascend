@@ -1,0 +1,4 @@
+pr: 15828
+entries:
+  - category: bugfix
+    text: Fixed the FA3 attention cache-shape keyword argument to match the vLLM backend interface.
