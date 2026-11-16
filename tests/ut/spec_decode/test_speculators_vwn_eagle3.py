@@ -22,6 +22,7 @@ Eagle3VwnLlamaForCausalLM using CPU-only execution with mocked VllmConfig.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -112,6 +113,16 @@ def _cpu_add_rms_norm_bias(x, residual, weight, bias, eps):
     return out, _, new_residual
 
 
+def _cp_config(pcp_size: int = 1, dcp_size: int = 1):
+    """Minimal current-config stub for the registry-based CP selection seam."""
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=pcp_size,
+            decode_context_parallel_size=dcp_size,
+        )
+    )
+
+
 @pytest.fixture(autouse=True)
 def _mock_npu_env():
     """Patch TP group, Ascend config, and NPU ops so all tests run on CPU.
@@ -155,12 +166,19 @@ def _mock_npu_env():
         ),
         # These tests do not exercise context parallelism. Short-circuit the
         # backend routing checks so their mocked config stays scoped to VWN.
-        patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False),
+        patch(
+            "vllm_ascend.attention.attention_v1.get_current_vllm_config",
+            return_value=_cp_config(),
+        ),
         patch(
             "vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer",
             return_value=False,
         ),
         patch("vllm_ascend.attention.mla_v1.is_dcp_enabled", return_value=False),
+        patch(
+            "vllm_ascend.attention.mla_v1.get_current_vllm_config",
+            return_value=_cp_config(),
+        ),
     ):
         yield
 

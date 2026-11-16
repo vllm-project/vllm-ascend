@@ -230,7 +230,7 @@ def runtime(monkeypatch):
 
     methods.update(
         {
-            name: load_method("vllm_ascend/attention/context_parallel/common_cp.py", "DCPImplMixin", name, scope)
+            name: load_method("vllm_ascend/attention/context_parallel/metadata.py", "DCPImplMixin", name, scope)
             for name in ("_local_decode_query", "_merge_dcp_attention_output")
         }
     )
