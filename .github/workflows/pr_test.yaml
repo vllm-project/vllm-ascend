@@ -900,7 +900,7 @@ jobs:
             if [ "${OWNER_RESULT}" != "success" ]; then
               fail "CODEOWNERS approval gate failed: every changed file needs an approval from one of its owners. Approvals survive pushes; an owner can withdraw one by submitting a review that requests changes."
             fi
-          PREV_FILE="${RUNNER_TEMP}/prev_conclusion.txt"
+          export PREV_FILE="${RUNNER_TEMP}/prev_conclusion.txt"
           python3 - <<'PY'
           import json, os, urllib.request
 
