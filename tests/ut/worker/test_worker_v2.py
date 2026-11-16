@@ -200,9 +200,14 @@ class TestNPUWorkerV2(TestBase):
         worker = self._make_worker_for_lifecycle_test()
         worker.model_runner.load_model.side_effect = lambda: events.append("model")
 
-        worker.load_model()
+        with patch(
+            "vllm_ascend.worker.worker.initialize_attn_backend_kernels",
+            side_effect=lambda config: events.append("backend_kernels"),
+        ) as initialize_kernels:
+            worker.load_model()
 
-        self.assertEqual(events, ["model", "ec"])
+        self.assertEqual(events, ["model", "backend_kernels", "ec"])
+        initialize_kernels.assert_called_once_with(worker.vllm_config)
         mock_has_ec_transfer.assert_called_once_with()
         mock_get_ec_transfer.assert_called_once_with()
         connector.start_worker_services.assert_called_once_with()
