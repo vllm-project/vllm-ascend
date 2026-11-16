@@ -84,7 +84,10 @@ if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKE
 
     _ar_spec.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager310
     if not vllm_version_is("0.33.0"):
-        from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as _shared_ar_spec
+        try:
+            from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as _shared_ar_spec
+        except ModuleNotFoundError:
+            _shared_ar_spec = _ar_spec
 
         _shared_ar_spec.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager310
 

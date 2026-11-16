@@ -20,10 +20,12 @@
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import AutoRegressiveAclGraphManager
 
-if vllm_version_is("0.33.0"):
-    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as ar_speculator
-else:
+try:
     from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as ar_speculator
+except ModuleNotFoundError:
+    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as ar_speculator
+
+if not vllm_version_is("0.33.0"):
     from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as target_speculator
 
     # #60989 moved decode graph construction to the shared AR base class.
