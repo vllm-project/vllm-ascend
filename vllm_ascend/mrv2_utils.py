@@ -45,7 +45,9 @@ def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max
             return max_num_tokens
         query_per_req = 1 + spec.num_speculative_tokens
     local_tokens = (max_num_tokens + pcp_size - 1) // pcp_size
-    return min(max_num_tokens, max(local_tokens, max_num_reqs * query_per_req))
+    # DualChunkSwap rounds two chunks per request on each PCP rank.
+    padding_tokens = 2 * max_num_reqs
+    return min(max_num_tokens, max(local_tokens, max_num_reqs * query_per_req) + padding_tokens)
 
 
 def use_v2_model_runner(vllm_config: VllmConfig) -> bool:

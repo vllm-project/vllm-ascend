@@ -717,10 +717,10 @@ def test_extra_ctx_env_true_uses_additional_kwargs(monkeypatch):
 @pytest.mark.parametrize(
     "tp,pcp,tokens,requests,query,method,expected",
     [
-        (1, 8, 16384, 500, 2, "mtp", 2048),
+        (1, 8, 16384, 500, 2, "mtp", 3048),
         (8, 1, 16384, 500, 2, "mtp", 16384),
-        (3, 8, 513, 16, 1, "mtp", 66),
-        (1, 16, 16384, 512, 4, "mtp", 2048),
+        (3, 8, 513, 16, 1, "mtp", 99),
+        (1, 16, 16384, 512, 4, "mtp", 3072),
         (1, 8, 16384, 500, 2, "dflash", 16384),
     ],
 )

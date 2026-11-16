@@ -32,9 +32,9 @@ def make_runner(tokens=16384, pcp=16, requests=64, query=4, replicated=False):
     "tokens,pcp,requests,query,replicated,expected",
     [
         (16384, 1, 64, 4, False, 16384),
-        (16384, 16, 64, 4, False, 1024),
-        (16384, 16, 512, 4, False, 2048),
-        (17, 4, 2, 1, False, 5),
+        (16384, 16, 64, 4, False, 1152),
+        (16384, 16, 512, 4, False, 3072),
+        (17, 4, 2, 1, False, 9),
         (17, 16, 64, 4, False, 17),
         (16384, 16, 64, 9, True, 16384),
     ],
@@ -50,7 +50,7 @@ def test_no_draft_preserves_target_decode_requests():
     runner = make_runner(requests=2048)
     runner.speculative_config = None
     runner.vllm_config.speculative_config = None
-    assert get_pcp_profile_num_tokens(runner.vllm_config, runner.max_num_tokens, runner.max_num_reqs) == 2048
+    assert get_pcp_profile_num_tokens(runner.vllm_config, runner.max_num_tokens, runner.max_num_reqs) == 6144
 
 
 def test_non_model_draft_keeps_global_budget():
@@ -95,7 +95,7 @@ def test_local_dummy_preserves_actual_upstream_request_count(tokens, requests):
 
 
 @pytest.mark.parametrize("fail", [False, True])
-@pytest.mark.parametrize("replicated,expected", [(False, 2048), (True, 16384)])
+@pytest.mark.parametrize("replicated,expected", [(False, 3072), (True, 16384)])
 def test_profile_temporarily_sets_budget_and_restores_on_failure(fail, replicated, expected):
     runner = make_runner(requests=512, replicated=replicated)
     runner.ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False))
