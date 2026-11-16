@@ -21,10 +21,6 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 
 
-def is_glm5_next_cache_spec(spec: KVCacheSpec) -> bool:
-    return getattr(spec, "model_version", None) == "glm5_next"
-
-
 def get_kpool_tail_ring_capacity(vllm_config: VllmConfig, compress_ratio: int) -> int:
     """Keep the open pool plus every not-yet-accepted speculative token.
 

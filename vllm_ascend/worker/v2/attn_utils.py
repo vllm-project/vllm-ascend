@@ -82,6 +82,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     get_kv_cache_compression_ratio,
+    is_glm5_next_cache_spec,
     requires_padded_page_layout,
     supports_component_major_mla_pd,
 )
@@ -244,7 +245,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             attention_layer_names.append(layer_name)
             continue
 
-    if mamba_specs:
+    # The GLM-Next planner aligns MLA/KDA and indexer/tail pages separately.
+    if mamba_specs and not any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
         if any(isinstance(spec, AscendSFAIndexerCacheSpec) for spec in kv_cache_spec.values()):
             # K3.1 recurrent padding is settled by NPUPlatform before the
             # layers construct their specs. Keep indexer/draft pages native.
@@ -268,7 +270,6 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 spec = kv_cache_spec[layer_name]
                 if spec.page_size_bytes < mamba_page_size:
                     kv_cache_spec[layer_name] = replace(spec, page_size_padded=mamba_page_size)
-            kv_cache_spec.update(mamba_specs)
         else:
             _align_hybrid_attention_page_sizes(kv_cache_spec)
             common_page_size = max(spec.page_size_bytes for spec in (*kv_cache_spec.values(), *mamba_specs.values()))
@@ -281,7 +282,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             for layer_name, spec in mamba_specs.items():
                 if spec.page_size_bytes < common_page_size:
                     mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
-            kv_cache_spec.update(mamba_specs)
+    kv_cache_spec.update(mamba_specs)
 
     if vllm_config.attention_config.hisparse_config is not None:
         from vllm.v1.hisparse.binding import resolve_hisparse_specs

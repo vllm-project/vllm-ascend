@@ -39,6 +39,11 @@ def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     return kv_cache_spec.tokens_per_state
 
 
+def is_glm5_next_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
+    """Return whether the spec belongs to the GLM-Next cache layout."""
+    return getattr(kv_cache_spec, "model_version", None) == "glm5_next"
+
+
 def is_circular_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
     """Resolve the fixed-block addressing capability through grouped specs."""
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):

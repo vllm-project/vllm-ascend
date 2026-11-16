@@ -1,0 +1,8 @@
+pr: 22089
+entries:
+  - category: feature
+    model: glm-5.3-flash
+    text: >-
+      GLM-5.3-Flash can now use DFlash2 speculative decoding in Model Runner V2
+      with `--prefill-context-parallel-size` greater than 1 and
+      `--decode-context-parallel-size` set to 1.

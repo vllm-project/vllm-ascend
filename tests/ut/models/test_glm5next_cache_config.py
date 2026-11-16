@@ -350,6 +350,65 @@ def test_sliding_window_draft_caches_use_independent_physical_tensors():
     assert all((name,) in tensor_layers for name in draft_names)
 
 
+@pytest.mark.parametrize(
+    "method,num_speculative_tokens",
+    [(None, 0), ("deepseek_mtp", 3), ("dflash", 7)],
+    ids=["no-speculation", "mtp", "dflash2"],
+)
+def test_worker_defers_glm5_next_page_alignment_to_planner(monkeypatch, method, num_speculative_tokens):
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+    from vllm_ascend.worker.v2 import attn_utils
+
+    config = make_config()
+    config.speculative_config = (
+        SimpleNamespace(method=method, num_speculative_tokens=num_speculative_tokens) if method is not None else None
+    )
+    specs = make_specs()
+    main_name = "model.layers.3.attn"
+    kda_name = "model.layers.0.linear_attn"
+    native_kda_page_size = specs[kda_name].page_size_bytes
+    expected_main_stride = specs[main_name].page_size_bytes
+    draft_specs = {}
+    if method == "deepseek_mtp":
+        draft_specs = {
+            "model.layers.4.attn": specs[main_name],
+            "model.layers.4.indexer.k_cache": specs["model.layers.3.indexer.k_cache"],
+            "model.layers.4.indexer.tail_cache": specs["model.layers.3.indexer.tail_cache"],
+        }
+    elif method == "dflash":
+        config.parallel_config.prefill_context_parallel_size = 8
+        # This draft page exceeds the target MLA page, exposing generic pre-alignment.
+        draft_specs["draft.layers.4.attn"] = SlidingWindowSpec(
+            block_size=128,
+            num_kv_heads=16,
+            head_size=128,
+            dtype=torch.bfloat16,
+            sliding_window=2048,
+        )
+
+    # The layer fixtures already publish the backend's cache geometry.
+    layers = {
+        name: SimpleNamespace(
+            get_kv_cache_spec=lambda _config, spec=spec: spec,
+            get_attn_backend=lambda: None,
+            is_draft_layer=name in draft_specs,
+            align_kv_cache_with_mamba="indexer" not in name,
+        )
+        for name, spec in (specs | draft_specs).items()
+    }
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    monkeypatch.setattr(attn_utils, "customize_attention_spec", lambda _backend, spec: spec)
+
+    worker_specs = attn_utils.get_kv_cache_spec(config)
+    assert worker_specs[kda_name].page_size_bytes == native_kda_page_size
+
+    builder = AscendKVCacheConfigBuilder()
+    groups = builder.get_kv_cache_groups(config, worker_specs)
+    plan = builder.get_kv_cache_config_from_groups(config, groups, num_blocks=3)
+    main_tensor = next(tensor for tensor in plan.kv_cache_tensors if main_name in get_kv_cache_tensor_layers(tensor))
+    assert main_tensor.block_stride == expected_main_stride
+
+
 def test_misaligned_logical_block_is_rejected():
     specs = make_specs(pool=16)
     object.__setattr__(

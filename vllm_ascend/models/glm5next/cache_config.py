@@ -34,6 +34,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     get_kv_cache_compression_ratio,
+    is_glm5_next_cache_spec,
 )
 
 
@@ -50,10 +51,6 @@ class _Glm5NextCacheLayout:
     small_page_size: int
     main_slot_count: int
     small_slot_count: int
-
-
-def _is_glm5_next_spec(spec: KVCacheSpec) -> bool:
-    return getattr(spec, "model_version", None) == "glm5_next"
 
 
 def _unpadded_page_size(spec: KVCacheSpec) -> int:
@@ -81,17 +78,25 @@ def _layer_indices(layer_names: tuple[str, ...]) -> tuple[int, ...] | None:
 
 
 def _is_glm5_next_main_spec(spec: KVCacheSpec) -> bool:
-    return isinstance(spec, MLAAttentionSpec) and _is_glm5_next_spec(spec) and get_kv_cache_compression_ratio(spec) == 1
+    return (
+        isinstance(spec, MLAAttentionSpec)
+        and is_glm5_next_cache_spec(spec)
+        and get_kv_cache_compression_ratio(spec) == 1
+    )
 
 
 def _is_glm5_next_indexer_spec(spec: KVCacheSpec) -> bool:
-    return isinstance(spec, MLAAttentionSpec) and _is_glm5_next_spec(spec) and get_kv_cache_compression_ratio(spec) > 1
+    return (
+        isinstance(spec, MLAAttentionSpec)
+        and is_glm5_next_cache_spec(spec)
+        and get_kv_cache_compression_ratio(spec) > 1
+    )
 
 
 def _is_glm5_next_tail_spec(spec: KVCacheSpec) -> bool:
     return (
         isinstance(spec, AscendIndexerKPoolTailSpec)
-        and _is_glm5_next_spec(spec)
+        and is_glm5_next_cache_spec(spec)
         and getattr(spec, "cache_role", None) == "indexer_tail"
     )
 
@@ -230,21 +235,21 @@ def _get_glm5_next_cache_layout(
             mamba_groups.append(group)
             continue
         if not isinstance(group_spec, UniformTypeKVCacheSpecs):
-            if not _is_glm5_next_spec(group_spec):
+            if not is_glm5_next_cache_spec(group_spec):
                 draft_groups.append(group)
             continue
 
         values = list(group_spec.kv_cache_specs.values())
         if (
             values
-            and all(isinstance(spec, MLAAttentionSpec) and _is_glm5_next_spec(spec) for spec in values)
+            and all(isinstance(spec, MLAAttentionSpec) and is_glm5_next_cache_spec(spec) for spec in values)
             and any(_is_glm5_next_main_spec(spec) for spec in values)
             and any(_is_glm5_next_indexer_spec(spec) for spec in values)
         ):
             full_groups.append(group)
         elif values and all(_is_glm5_next_tail_spec(spec) for spec in values):
             tail_groups.append(group)
-        elif values and all(not _is_glm5_next_spec(spec) for spec in values):
+        elif values and all(not is_glm5_next_cache_spec(spec) for spec in values):
             draft_groups.append(group)
 
     has_glm5_next_group = bool(full_groups or tail_groups)
@@ -373,7 +378,7 @@ def get_glm5_next_kv_cache_groups(
 ) -> list[KVCacheGroupSpec]:
     """Build GLM-Next scheduler groups and align their physical page sizes."""
 
-    if not any(_is_glm5_next_spec(spec) for spec in kv_cache_spec.values()):
+    if not any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
         raise ValueError("Expected GLM-Next cache specs.")
 
     scheduler_config = getattr(vllm_config, "scheduler_config", None)
