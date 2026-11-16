@@ -44,7 +44,7 @@ on:
       target:
         required: true
         type: string
-        description: "Build target: 'a2', 'a3', '310p' or 'a5'"
+        description: "Build target: 'a2', 'a3', '310p', 'a5' or 'a5-ubx'"
       vllm_ascend_branch:
         required: false
         type: string
@@ -154,6 +154,7 @@ jobs:
             a2)   UBUNTU_DOCKERFILE=Dockerfile;      OPENEULER_DOCKERFILE=Dockerfile.openEuler ;;
             a3)   UBUNTU_DOCKERFILE=Dockerfile.a3;   OPENEULER_DOCKERFILE=Dockerfile.a3.openEuler ;;
             a5)   UBUNTU_DOCKERFILE=Dockerfile.a5;   OPENEULER_DOCKERFILE=Dockerfile.a5.openEuler ;;
+            a5-ubx) UBUNTU_DOCKERFILE=Dockerfile.a5.ubx; OPENEULER_DOCKERFILE=Dockerfile.a5.ubx.openEuler ;;
             310p) UBUNTU_DOCKERFILE=Dockerfile.310p; OPENEULER_DOCKERFILE=Dockerfile.310p.openEuler ;;
             *)
               echo "::error::Unsupported target '${{ inputs.target }}'"
@@ -161,8 +162,17 @@ jobs:
               ;;
           esac
 
+          # Resolve the CANN version of the base image. The base image may be
+          # referenced directly in FROM or indirectly through an ARG declared
+          # before FROM (e.g. Dockerfile.a5.ubx uses ${CANN_BASE_IMAGE}).
           read_cann_version() {
-            sed -n 's|^FROM .*cann:\([^-]*\)-.*|\1|p' "$1" | head -n 1 | tr '[:upper:]' '[:lower:]'
+            local ref arg
+            ref=$(grep -m1 '^FROM' "$1")
+            if [[ "$ref" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]]; then
+              arg="${BASH_REMATCH[1]}"
+              ref=$(grep -m1 "^ARG ${arg}=" "$1")
+            fi
+            echo "$ref" | sed -n 's|.*cann:\([^-]*\)-.*|\1|p' | head -n 1 | tr '[:upper:]' '[:lower:]'
           }
 
           DATE=$(date -u +%Y%m%d)
@@ -271,11 +281,20 @@ jobs:
             PUSH_IMAGE="${FINAL_IMAGE}"
           fi
 
+          # a5-ubx reuses the a5 nightly Dockerfile and only switches the base
+          # image tag variant, so there is no per-variant Dockerfile to keep in
+          # sync. All other targets map 1:1 to Dockerfile.nightly.<target>.
+          case "${{ inputs.target }}" in
+            a5-ubx) NIGHTLY_DOCKERFILE="Dockerfile.nightly.a5"; BASE_VARIANT="-ubx" ;;
+            *)      NIGHTLY_DOCKERFILE="Dockerfile.nightly.${{ inputs.target }}"; BASE_VARIANT="" ;;
+          esac
+
           BUILD_ARGS=(
             --platform ${{ matrix.arch_platform }}
-            -f .github/workflows/dockerfiles/Dockerfile.nightly.${{ inputs.target }}
+            -f ".github/workflows/dockerfiles/${NIGHTLY_DOCKERFILE}"
             --build-arg VLLM_ASCEND_BRANCH="${BASE_BRANCH_TAG}"
             --build-arg BASE_IMAGE="${BASE_IMAGE}"
+            --build-arg BASE_VARIANT="${BASE_VARIANT}"
             --build-arg OS_MARK="${OS_MARK}"
             --build-arg TAG_SUFFIX="${TAG_SUFFIX}"
           )
