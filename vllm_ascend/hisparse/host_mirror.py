@@ -173,12 +173,10 @@ class HostMirrorConnector:
         eligible = self._eligible_forward
         self._eligible_forward = False
         worker = self._worker
-        if not eligible or self._connector._disabled:
+        if not eligible or self._connector._disabled or not self._sources.can_defer(worker):
             return self._connector.finish_forward()
         if isinstance(self._connector, PCPHiSparseConnector):
             self._connector.prepare_host_mirror()
-        if not self._sources.can_defer(worker):
-            return self._connector.finish_forward()
 
         compute_stream = torch.accelerator.current_stream()
         worker._forward_ready_event.record(compute_stream)

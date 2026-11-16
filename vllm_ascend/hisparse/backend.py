@@ -224,9 +224,9 @@ class AscendHiSparseBackend(HiSparseBackend):
         if self._failed_dma_batches:
             raise RuntimeError("HiSparse DMA submission previously failed; restart this worker.")
         limit = self._D2H_BATCH_LIMIT
-        count = src.numel()
-        if any(t.ndim != 1 or t.size(0) != count or not t.is_contiguous() for t in (src, dst, sizes)):
-            raise ValueError("HiSparse D2H requires equal-length contiguous descriptor arrays.")
+        count = src.size(0)
+        if count > limit and any(t.ndim != 1 or t.size(0) != count or not t.is_contiguous() for t in (src, dst, sizes)):
+            raise ValueError("HiSparse D2H split requires equal-length contiguous descriptor arrays.")
         submit = torch.ops._C_ascend.swap_blocks_batch
         try:
             if count <= limit:
