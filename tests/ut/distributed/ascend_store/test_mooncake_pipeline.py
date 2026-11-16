@@ -27,7 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import _LayerRevokeTask
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata, LoadSpec, ReqMeta
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import BaseKVPoolScheduler
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
 
 
 class TestMooncakePipeline(unittest.TestCase):
@@ -44,6 +44,10 @@ class TestMooncakePipeline(unittest.TestCase):
         cache_block_size=16,
         pcp_size=1,
         pcp_rank=0,
+        dcp_size=1,
+        dcp_rank=0,
+        tp_size=2,
+        num_kv_heads=None,
     ):
         # Uneven PP partition; the last stage optionally owns an extra draft
         # layer that is not part of get_num_layers().
@@ -70,7 +74,7 @@ class TestMooncakePipeline(unittest.TestCase):
             groups[1].layer_names = ["model.layers.4.c4", "model.layers.5.c4"]
             groups[2].layer_names = ["model.layers.6.state"]
         config = SimpleNamespace(num_blocks=10, kv_cache_groups=groups)
-        with patch.object(KVPoolWorker, "_build_cache_coordinator", return_value=None):
+        with patch.object(BaseKVPoolWorker, "_build_cache_coordinator", return_value=None):
             worker = make_worker(
                 self,
                 num_layers=(3, 4)[stage],
@@ -79,13 +83,15 @@ class TestMooncakePipeline(unittest.TestCase):
                 use_layerwise=True,
                 pp_rank=stage,
                 pp_partition=(3, 4),
-                tp_size=2,
+                tp_size=tp_size,
                 tp_rank=tp_rank,
-                num_kv_heads=1 if mla else 2,
+                num_kv_heads=(1 if mla else 2) if num_kv_heads is None else num_kv_heads,
                 use_mla=mla,
                 cache_block_size=cache_block_size,
                 pcp_size=pcp_size,
                 pcp_rank=pcp_rank,
+                dcp_size=dcp_size,
+                dcp_rank=dcp_rank,
             )
         worker.m_store = store
         arrays = {}
@@ -405,9 +411,13 @@ class TestMooncakePipeline(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "empty groups"):
             protocol.validate_pp_groups(SimpleNamespace(kv_cache_groups=[group]), worker.vllm_config.parallel_config)
         config = SimpleNamespace(
-            parallel_config=SimpleNamespace(pipeline_parallel_size=2, decode_context_parallel_size=2)
+            parallel_config=SimpleNamespace(
+                pipeline_parallel_size=2,
+                prefill_context_parallel_size=2,
+                decode_context_parallel_size=2,
+            )
         )
-        with self.assertRaisesRegex(ValueError, "decode context parallelism"):
+        with self.assertRaisesRegex(ValueError, "supports PCP or DCP, not both"):
             worker.layerwise_backend.bind_layerwise_keys(
                 vllm_config=config,
                 kv_cache_config=worker.kv_cache_config,

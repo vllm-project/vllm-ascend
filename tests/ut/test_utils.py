@@ -198,7 +198,11 @@ class TestUtils(TestBase):
             parallel_config=SimpleNamespace(
                 use_sequence_parallel_moe=True,
                 enable_expert_parallel=False,
-            )
+                tensor_parallel_size=2,
+                pipeline_parallel_size=1,
+            ),
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3_5_text")),
+            additional_config={},
         )
         self.assertTrue(utils.enable_sp(sequence_parallel_config))
 
@@ -206,7 +210,11 @@ class TestUtils(TestBase):
             parallel_config=SimpleNamespace(
                 use_sequence_parallel_moe=False,
                 enable_expert_parallel=True,
-            )
+                tensor_parallel_size=2,
+                pipeline_parallel_size=1,
+            ),
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3_5_text")),
+            additional_config={},
         )
         self.assertFalse(utils.enable_sp(shared_expert_dp_config))
 
@@ -214,7 +222,11 @@ class TestUtils(TestBase):
             parallel_config=SimpleNamespace(
                 use_sequence_parallel_moe=False,
                 enable_expert_parallel=False,
-            )
+                tensor_parallel_size=2,
+                pipeline_parallel_size=1,
+            ),
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3_5_text")),
+            additional_config={},
         )
         self.assertFalse(utils.enable_sp(no_sequence_parallel_config))
 
@@ -928,3 +940,15 @@ def test_finegrained_tp_enable_requires_weight_sharding(knob, enable_fn, size, e
     config = SimpleNamespace(finegrained_tp_config=SimpleNamespace(**{knob: size}))
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=config):
         assert getattr(utils, enable_fn)() is enabled
+
+
+@pytest.mark.parametrize("v2", [False, True])
+@pytest.mark.parametrize("lmhead", [False, True])
+@pytest.mark.parametrize("dcp", [1, 2])
+def test_requires_lmhead_dp_sync_is_scoped_to_v2_reduced_padding(monkeypatch, v2, lmhead, dcp):
+    config = SimpleNamespace(
+        use_v2_model_runner=v2,
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
+    )
+    monkeypatch.setattr(utils, "lmhead_tp_enable", lambda: lmhead)
+    assert utils.requires_lmhead_dp_sync(config) is (v2 and lmhead and dcp == 1)

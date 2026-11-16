@@ -272,7 +272,7 @@ class TestAscendModelSlimConfig(TestBase):
             method = self.ascend_config.get_quant_method(layer, "model.layers.0.mlp.experts")
 
         self.assertIs(method, mock_ascend_fused_moe.return_value)
-        mock_ascend_fused_moe.assert_called_once_with(mock_scheme, layer.moe_config, None)
+        mock_ascend_fused_moe.assert_called_once_with(mock_scheme, layer.moe_config)
 
         param = torch.nn.Parameter(torch.empty(1))
         loaded_weight = torch.empty(1)

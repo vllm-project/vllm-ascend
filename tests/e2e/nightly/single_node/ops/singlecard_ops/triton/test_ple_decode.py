@@ -27,10 +27,11 @@ def test_decode_parameter_categories(
     state_len = (kernel_size - 1) * dilation
     inputs = torch.randn(tokens, channels, device="npu", dtype=dtype)
     weights = torch.randn(channels, kernel_size, device="npu", dtype=dtype)
+    # Ascend kernels use the SD layout [slots, window, channels].
     if window_contiguous:
-        state = torch.randn(tokens + 1, channels, state_len, device="npu", dtype=dtype)
+        state = torch.randn(tokens + 1, channels, state_len, device="npu", dtype=dtype).transpose(1, 2)
     else:
-        state = torch.randn(tokens + 1, state_len, channels, device="npu", dtype=dtype).transpose(1, 2)
+        state = torch.randn(tokens + 1, state_len, channels, device="npu", dtype=dtype)
     output = torch.randn_like(inputs)
     outer = torch.randn_like(inputs) if mapped else None
     ids = torch.arange(1, tokens + 1, device="npu", dtype=torch.int32)
@@ -53,7 +54,7 @@ def test_decode_parameter_categories(
     original_inputs, original_weights = inputs.clone(), weights.clone()
     expected, actual = output.clone(), output.clone()
     expected_state, actual_state = state.clone(), state.clone()
-    upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state, mode="decode")
+    upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state.transpose(1, 2), mode="decode")
     ple_conv_decode(**kwargs, residual=actual, conv_state=actual_state)
     torch.npu.synchronize()
 

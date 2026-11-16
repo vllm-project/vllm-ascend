@@ -248,6 +248,9 @@ class Ascend310PSampler:
         self.top_k_cpu[unset] = self.vocab_size
         self.sampling_states.top_k.gpu[unset] = self.vocab_size
 
+    def needs_cpu_token_history(self, idx_mapping_np: np.ndarray) -> bool:
+        return bool(np.any(self._use_penalty[idx_mapping_np]) or np.any(self._use_bad_words[idx_mapping_np]))
+
     def _batch_needs_logits_processing(self, idx_mapping_np: np.ndarray) -> bool:
         temp = self._temperature_np[idx_mapping_np]
         return bool(

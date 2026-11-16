@@ -19,7 +19,7 @@ from vllm_ascend.worker.v2.attn_utils import (
 
 
 class AscendStandaloneARSpeculator(StandaloneARSpeculator):
-    if not vllm_version_is("0.32.0"):
+    if not vllm_version_is("0.33.0"):
 
         def supports_batch_sharded_draft_logits(self) -> bool:
             # NPU draft-logits kernels index the cache by request state.

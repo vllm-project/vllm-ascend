@@ -63,8 +63,8 @@ def test_embed_models_correctness(model: str):
 def test_qwen3_vl_embedding_pooling():
     """Verify Qwen3-VL-Embedding pooling execution on 310P.
 
-    Pooling remains on the V2 feature blacklist, so this exercises the
-    platform default path for pooling models (V1 unless env overrides).
+    Pooling models run on Model Runner V2, so this exercises the decoder
+    pooling path next to the encoder-only models above.
     """
     queries = [
         "The capital of China is Beijing.",

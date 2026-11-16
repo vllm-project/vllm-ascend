@@ -99,9 +99,10 @@ CRITICAL RULES — violations will cause the translation to be rejected:
    These should be copied verbatim from msgid to msgstr.
    Example: "Xiyuan Wang [@wangxiyuan] 2025-01-15" → keep as-is.
 
-10. DO NOT translate table headers or table separator rows that are purely
-    structural. Copy them verbatim.
-    Example: "| Name | GitHub ID | Date |" → keep as-is.
+10. Translate text in all table header rows. Preserve row order, indentation,
+    separators, URLs, code, and identifiers.
+    Keep || (merged columns), ^^ (merged rows), and | | (a blank cell) unchanged.
+    Example: "| Model | Graph Mode ||" → "| 模型 | 图模式 ||".
     Example: "|:-----------:|:-----:|:-----:|" → keep as-is.
 
 11. DO NOT translate code identifiers, variable names, CLI flags, or shell
@@ -216,6 +217,8 @@ class POTranslator:
             max_tokens=8000,
             temperature=0.3,
         )
+        if response.choices[0].finish_reason == "length":
+            return None
         text = response.choices[0].message.content
         if not text:
             return None

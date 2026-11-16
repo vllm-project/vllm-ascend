@@ -15,10 +15,17 @@
 """Ascend wrappers for the upstream Qwen4Exp model implementation."""
 
 from vllm.config import VllmConfig
+from vllm.model_executor.models.qwen3_vl import Qwen3VLDummyInputsBuilder
 from vllm.models.qwen4_exp.amd import (
     hyperconnection as upstream_hc,
 )
+from vllm.multimodal import MULTIMODAL_REGISTRY
 
+from vllm_ascend.models.qwen3_5_vl import (
+    AscendQwen3_5VLProcessor,
+    _AscendProcessorMixin,
+    _AscendVLPreprocessMixin,
+)
 from vllm_ascend.ops.triton.qwen4_exp.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
@@ -85,7 +92,18 @@ class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
         return AscendQwen4ExpModelState
 
 
-class AscendQwen4ExpForConditionalGeneration(upstream_model.Qwen4ExpForConditionalGeneration):
+class AscendQwen4ExpProcessingInfo(_AscendProcessorMixin, upstream_model.Qwen4ExpProcessingInfo):
+    """Preserve Qwen4Exp config handling while emitting raw image payloads."""
+
+    pass
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    AscendQwen3_5VLProcessor,
+    info=AscendQwen4ExpProcessingInfo,
+    dummy_inputs=Qwen3VLDummyInputsBuilder,
+)
+class AscendQwen4ExpForConditionalGeneration(_AscendVLPreprocessMixin, upstream_model.Qwen4ExpForConditionalGeneration):
     """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
 
     @classmethod

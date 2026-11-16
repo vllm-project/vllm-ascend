@@ -26,9 +26,11 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_offload.base import CanonicalKVCaches
 
 import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector as connector_mod
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector import (
     AscendOffloadingConnectorWorker,
 )
+from vllm_ascend.hisparse.binding import _bind_indexer_views
 
 NUM_BLOCKS = 4
 BLOCK_SIZE = 2
@@ -126,6 +128,42 @@ def test_only_prefix_cacheable_groups_are_registered(
     assert len(canonical.group_data_refs) == len(group_ids) < len(kv_cache_config.kv_cache_groups)
     assert [ref.page_size_bytes for ref in canonical.group_data_refs[0]] == [12, 12]
     assert [tensor.tensor.shape for tensor in canonical.tensors] == [(NUM_BLOCKS, 12)] * 2
+
+
+def test_hisparse_bf16_offloading_preserves_shared_slab_stride(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    names = ["model.layers.0.indexer.k_cache", "model.layers.1.indexer.k_cache"]
+    spec = AscendSFAIndexerCacheSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    )
+    group = KVCacheGroupSpec(names, spec, role=KVCacheGroupRole.HISPARSE_INDEXER)
+    worker, captured = _prepare_worker(monkeypatch, _config([group], hisparse_host_num_blocks=8))
+    forward_context = {name: SimpleNamespace() for name in names}
+    worker.vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context=forward_context))
+
+    # Each logical block contains two layer pages followed by padding.
+    page_elements = BLOCK_SIZE * HEAD_SIZE
+    slab = torch.arange(NUM_BLOCKS * 3 * page_elements, dtype=DTYPE).reshape(NUM_BLOCKS, 3, page_elements)
+    caches = {name: slab[:, layer_id].view(NUM_BLOCKS, 1, BLOCK_SIZE, HEAD_SIZE) for layer_id, name in enumerate(names)}
+    _bind_indexer_views(caches, dict.fromkeys(names, spec), forward_context)
+    assert [forward_context[name].hisparse_block_stride for name in names] == [3, 3]
+    worker.register_kv_caches(caches)
+
+    canonical = captured[0]
+    assert len(canonical.group_data_refs[0]) == len(names)
+    source, target = 1, 3
+    expected = slab.clone()
+    for layer_id, ref in enumerate(canonical.group_data_refs[0]):
+        offload_view = canonical.tensors[ref.tensor_idx].tensor
+        offloaded = offload_view[source].clone()
+        assert torch.equal(offloaded, slab[source, layer_id].view(torch.int8))
+        offload_view[target].copy_(offloaded)
+        expected[target, layer_id].copy_(expected[source, layer_id])
+    assert torch.equal(slab, expected)
 
 
 def test_registered_groups_follow_group_ids_not_positions(

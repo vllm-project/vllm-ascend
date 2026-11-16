@@ -1,0 +1,8 @@
+pr: 20704
+entries:
+  - category: bugfix
+    text: >-
+      Fixed EPLB keeping expert-load samples from the previous placement after a rearrangement
+      on hardware other than A5. The load history is keyed by physical slot, so those samples
+      were attributed to whichever logical expert moved into the slot, skewing the next
+      rearrangement decision.

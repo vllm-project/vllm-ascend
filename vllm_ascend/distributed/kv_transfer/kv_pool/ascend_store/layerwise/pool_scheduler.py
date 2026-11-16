@@ -23,6 +23,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_str,
     get_block_hashes,
     get_group_block_size,
+    get_sharded_mamba_group_ids,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import BaseKVPoolScheduler
 
@@ -49,6 +50,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
+        self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         self.load_async = False
         if self.use_layerwise_transfer:
             self._init_layerwise_offload(vllm_config, kv_cache_config, extra_config)
@@ -305,17 +307,18 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         backend's protocol module.
 
         Single-group uses PR #11585 format; multi-group includes group_id.
-        A block is a hit only when every PP stage and PCP rank has saved it,
-        so the protocol helper enumerates all stages, PCP ranks and heads.
+        The protocol helper covers every PP stage and head, and every PCP
+        rank for sharded Mamba groups. PCP replicas share one object.
         """
         assert self.layerwise_keys is not None
         draft_keys = self.dspark_prefix_keys
         if draft_keys is not None and group_id in self.dspark_draft_only_group_ids:
             # Draft-only groups have no ordinary layerwise target object.
             return draft_keys.make_hit_check_keys(block_hash_hex)
-        head_or_tp_ranks = (
-            self.tp_size if group_id in self.num_speculative_blocks_by_group else self.tp_size // self.put_step
-        )
+        if group_id in self.sharded_mamba_group_ids or group_id in self.num_speculative_blocks_by_group:
+            head_or_tp_ranks = self.tp_size
+        else:
+            head_or_tp_ranks = self.tp_size // self.put_step
         keys = self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, head_or_tp_ranks)
         if draft_keys is not None:
             keys.extend(draft_keys.make_hit_check_keys(block_hash_hex))

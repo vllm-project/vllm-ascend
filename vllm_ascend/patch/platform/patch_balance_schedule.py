@@ -78,7 +78,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import init_ascend_config
-from vllm_ascend.utils import vllm_version_is
 
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
@@ -193,6 +192,8 @@ class BalanceScheduler(Scheduler):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        # Whether any scheduled request has a synchronous connector KV load.
+        has_sync_kv_loads = False
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -346,9 +347,7 @@ class BalanceScheduler(Scheduler):
                         break
 
             if new_blocks is None:
-                if not vllm_version_is("0.32.0") and (
-                    self.policy == SchedulingPolicy.PRIORITY and request.status == RequestStatus.PREEMPTED
-                ):
+                if self.policy == SchedulingPolicy.PRIORITY and request.status == RequestStatus.PREEMPTED:
                     # The request was the lowest-priority running request and
                     # preempted itself. The requests after it have higher
                     # priority and may still fit; it was removed from
@@ -702,6 +701,9 @@ class BalanceScheduler(Scheduler):
                 request = request_queue.pop_request()
                 self.deferred_waiting.discard(request)
                 self.running.append(request)
+                if num_external_computed_tokens > 0:
+                    # load_kv_async is False here
+                    has_sync_kv_loads = True
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
@@ -847,6 +849,7 @@ class BalanceScheduler(Scheduler):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            has_sync_kv_loads=has_sync_kv_loads,
         )
         scheduler_output_kwargs["kv_connector_block_state"] = kv_connector_block_state
         scheduler_output = SchedulerOutput(**scheduler_output_kwargs)

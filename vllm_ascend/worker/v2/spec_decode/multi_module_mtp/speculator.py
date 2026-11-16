@@ -51,7 +51,7 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
     UpdatableGraph attention-parameter updates on replay).
     """
 
-    if not vllm_version_is("0.32.0"):
+    if not vllm_version_is("0.33.0"):
 
         def supports_batch_sharded_draft_logits(self) -> bool:
             # NPU draft-logits kernels index the cache by request state.

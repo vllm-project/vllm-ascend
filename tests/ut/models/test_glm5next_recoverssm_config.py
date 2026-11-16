@@ -40,7 +40,9 @@ def test_default_does_not_change_native_cache_contract():
     assert not config.cache_config.use_kda_recoverssm
 
 
-@pytest.mark.parametrize("connector", [None, "MooncakeConnectorV2", "MooncakePullConnector"])
+@pytest.mark.parametrize(
+    "connector", [None, "MooncakeConnectorV2", "MooncakePullConnector", "AscendStoreConnector", "MultiConnector"]
+)
 @pytest.mark.parametrize("prefix_caching", [False, True])
 def test_configuration_validation_derives_recoverssm_before_worker_initialization(connector, prefix_caching):
     config = make_config()
@@ -68,14 +70,13 @@ def test_initialization_requires_speculative_decoding():
         ("cache_config", "mamba_cache_mode", "align", "Mamba cache mode none"),
         ("cache_config", "enable_prefix_caching", True, "Mamba cache mode align"),
         ("parallel_config", "pipeline_parallel_size", 2, "PP=1"),
-        ("parallel_config", "prefill_context_parallel_size", 2, "requires a Mooncake KV producer"),
+        ("parallel_config", "prefill_context_parallel_size", 2, "requires a KV producer"),
         ("parallel_config", "decode_context_parallel_size", 2, "DCP=1"),
-        (None, "kv_transfer_config", SimpleNamespace(kv_connector="AscendStoreConnector"), "requires Mooncake"),
     ],
 )
 def test_initialization_rejects_unsupported_execution(section, field, value, message):
     config = make_config()
-    setattr(getattr(config, section) if section else config, field, value)
+    setattr(getattr(config, section), field, value)
     with pytest.raises(ValueError, match=message):
         validate_glm_recoverssm(config)
     assert not config.cache_config.use_kda_recoverssm
@@ -103,9 +104,8 @@ def test_pcp_prefill_producer_and_dp_decode_consumer(connector, prefix_caching, 
     "section,field,value,message",
     [
         ("parallel_config", "tensor_parallel_size", 2, "PCP requires TP=1"),
-        ("kv_transfer_config", "kv_role", "kv_consumer", "PCP requires a Mooncake KV producer"),
-        ("kv_transfer_config", "kv_role", "kv_both", "PCP requires a Mooncake KV producer"),
-        ("kv_transfer_config", "kv_connector", "AscendStoreConnector", "requires Mooncake"),
+        ("kv_transfer_config", "kv_role", "kv_consumer", "PCP requires a KV producer"),
+        ("kv_transfer_config", "kv_role", "kv_both", "PCP requires a KV producer"),
     ],
 )
 def test_pcp_rejects_unsupported_execution(section, field, value, message):
@@ -117,6 +117,16 @@ def test_pcp_rejects_unsupported_execution(section, field, value, message):
     with pytest.raises(ValueError, match=message):
         patch_replayssm_config.validate_mamba_cached_kernel(config)
     assert not config.cache_config.use_kda_recoverssm
+
+
+def test_pcp_store_enables_recoverssm():
+    config = make_config()
+    config.parallel_config.prefill_context_parallel_size = 2
+    config.cache_config.enable_prefix_caching = True
+    config.cache_config.mamba_cache_mode = "align"
+    config.kv_transfer_config = SimpleNamespace(kv_connector="AscendStoreConnector", kv_role="kv_producer")
+    assert patch_replayssm_config.validate_mamba_cached_kernel(config) is config
+    assert config.cache_config.use_kda_recoverssm
 
 
 def test_other_models_and_disabled_switch_keep_upstream_validation(monkeypatch):
