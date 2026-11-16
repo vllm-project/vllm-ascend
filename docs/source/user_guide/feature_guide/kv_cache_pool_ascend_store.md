@@ -703,7 +703,27 @@ For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase bef
 
     Script location: [mem_scan.py](https://gitcode.com/Ascend/memfabric_hybrid/blob/develop/src/smem/python/memfabric_hybrid/memfabric_hybrid/mem_scan.py)
 
-3. **950PR&950DT Products only (disable signature verification + mount key paths + install kernel package):**
+3. **Check software compatibility:**
+
+    Before deployment, compare the driver, firmware, OS, and network software against the [Memcache compatibility matrix](https://gitcode.com/Ascend/memcache/blob/master/docs/zh/compatibility.md). Key requirements and how to check them:
+
+    | Item | A2 (`device_rdma`) | A3 HCCS (`device_sdma`) | A3 NPU RDMA (`device_rdma`) | A5 (`device_urma`/`device_rdma`) | How to check |
+    | ---- | ------------------ | ----------------------- | ---------------------------- | -------------------------------- | ------------ |
+    | HDK | >= 25.5.1 | >= 25.5.1 | >= 25.5.1 | Per model type, see [MemFabric Hybrid hardware support](https://memfabric-hybrid.readthedocs.io/zh-cn/latest/wiki/user_guide/basic_configuration/hardware_support/) | `npu-smi info` |
+    | HDK firmware | N/A | >= 7.8.0.6.201 | N/A | N/A | `/usr/local/Ascend/driver/tools/upgrade-tool --device_index -1 --component -1 --version` |
+    | LingQu Computing Network L1 | Not required | >= 1.5.0 (1.5.1 recommended) | Not required | Not required | See the LingQu version query guide |
+    | Page size | 4K (64K supported since v1.3.1) | N/A | 4K (64K supported since v1.3.1) | 4K, 64K | `getconf PAGESIZE` |
+    | OS kernel | N/A | 5.10.0 <= kernel < 6.6.0-114.0.0 | N/A | N/A | `uname -a` |
+    | BIOS / A3 memory configuration | N/A | 1 TB (must upgrade), 1.5 TB / 2 TB (upgrade recommended to expand the pool), 3 TB (no upgrade needed) | N/A | N/A | `dmidecode -t bios`; see [expanding A3 available memory](https://gitcode.com/Ascend/memcache/wiki/MemCache%E6%89%A9%E5%A4%A7A3%E5%8F%AF%E7%94%A8%E5%86%85%E5%AD%98%E7%A9%BA%E9%97%B4.md) |
+    | Max cluster scale | 16 nodes | Within one super pod | 8 nodes | Per model type, see MemFabric Hybrid hardware support | - |
+
+    If the HDK and LingQu versions match the matrix but A3 `device_sdma` still reports `sdma move comperr`, verify the HDK firmware version.
+
+4. **Check super pod boundaries (A3 `device_sdma`):**
+
+    A3 `device_sdma` transfers KV data over HCCS, so all Memcache ranks (both Prefill and Decode) must stay within one super pod. Deploying ranks in different super pods (different super pod IDs) leads to `transfer page error`. Also confirm that network switches do not age out long-idle connections during the model loading window, which can take tens of minutes; for switch timeout behavior, see the [Memcache FAQ](https://gitcode.com/Ascend/memcache/wiki/FAQ.md).
+
+5. **950PR&950DT Products only (disable signature verification + mount key paths + install kernel package):**
 
     ```shell
     # Step 1: Disable HDK signature verification (only needs to be executed once per machine)
@@ -735,7 +755,7 @@ For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase bef
 
     Update `/lib/route.conf` inside the container.
 
-4. **Check disk status before enabling SSD:**
+6. **Check disk status before enabling SSD:**
 
     ```shell
     lsblk /dev/nvme1n1                    # No partitions expected
@@ -1167,6 +1187,24 @@ For disk config, eviction watermarks, and other UBS IO parameters, see the [DRAM
     ```
 
     Expected output: Returns a JSON response in OpenAI Completions API format.
+
+### Memcache Log Diagnosis
+
+Use the following log signatures to confirm that Memcache started successfully and to localize failures.
+
+Healthy startup means all of the following:
+
+- The MetaService ports from `mmc-meta.conf` (default `5000` and `6000`, metrics `18000`) are listening.
+- vLLM starts without `memcache_backend` errors, and no `smem_bm_init` failure is logged on any KV pool worker rank.
+
+Typical failure signatures and how to respond:
+
+| Log | Meaning | Action |
+| --- | ------- | ------ |
+| `read version is empty` / `does not support mf` (hybm) | The driver does not meet the MemFabric Hybrid requirement. | Compare the driver version against the compatibility matrix in Step 1. |
+| `smem_bm_init` returns non-zero (an `assert res == 0` failure in `memcache_backend.py`) | KV pool creation failed, typically a driver or HYBM initialization problem. | Check the driver version against the compatibility matrix and confirm `memcache-hybrid` / `memfabric-hybrid` versions. |
+| `Failed to get N keys out of N. error_codes=[...]` followed by `Failed to load blocks` | A Memcache KV get failed for the affected request. | With `kv_load_failure_policy=recompute` the request is rescheduled and recomputed. Check MetaService connectivity and pool health. |
+| `transfer page error` | KV data transfer failed across the HCCS domain. | Confirm all ranks are inside the same super pod (see Step 1). |
 
 ### Tuning
 
@@ -1719,7 +1757,7 @@ Public FAQ references:
 
 ### Issue 5: Memcache Related Issues
 
-Pre-operation checks (memory inspection, A3 available memory scanning, 950PR&950DT Products signature verification disabling and container mounts, SSD disk status checks) are described in "Step 1: Prerequisite Checks" of [Scenario 2: Memcache Backend](#scenario-2-memcache-backend). For Memcache troubleshooting, refer to the [Memcache FAQ](https://gitcode.com/Ascend/memcache/wiki/FAQ.md).
+Pre-operation checks (software compatibility and super pod checks, memory inspection, A3 available memory scanning, 950PR&950DT Products signature verification disabling and container mounts, SSD disk status checks) are described in "Step 1: Prerequisite Checks" of [Scenario 2: Memcache Backend](#scenario-2-memcache-backend). For Memcache troubleshooting, refer to the [Memcache FAQ](https://gitcode.com/Ascend/memcache/wiki/FAQ.md), and see [Memcache Log Diagnosis](#memcache-log-diagnosis) for startup and runtime log signatures.
 
 ### Issue 6: DSv4 Deployment Notes
 
