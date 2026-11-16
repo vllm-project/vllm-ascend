@@ -46,6 +46,7 @@ def pool_key_indexer_nonempty(
     layout_q="TND",
     layout_k="PA_BBND",
     mask_mode=3,
+    block_table_stride=1,
 ):
     """Keep CANN's TND indexer out of its unsafe zero-work paths.
 
@@ -60,7 +61,7 @@ def pool_key_indexer_nonempty(
         raise ValueError("The KPool empty-work adapter requires causal TND/PA_BBND inputs.")
     tokens = query.shape[0]
     query_padded, weights_padded, query_ends, key_lengths, tails, tables = prepare_nonempty_keypool_inputs(
-        query, weights, actual_seq_q, actual_seq_k, pool_tail_k, block_table
+        query, weights, actual_seq_q, actual_seq_k, pool_tail_k, block_table, block_table_stride
     )
     indices, values = op(
         query_padded,

@@ -103,6 +103,7 @@ class HardwareCapability(Enum):
     FP8_ATTENTION = auto()
     # CANN PoolKeyIndexer quant_mode=0 with E4M3 query/key and FP32 descales.
     POOL_KEY_INDEXER_FP8 = auto()
+    POOL_KEY_INDEXER_WIDE_PAGES = auto()
     # Prepare and reuse the fixed CANN GBSA schedule across supported M3 decode layers.
     # Callers must also check block size, dtype, and uniform query length.
     MINIMAX_M3_GBSA_METADATA_REUSE = auto()
@@ -359,6 +360,7 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.POOL_KEY_INDEXER_WIDE_PAGES,
     HardwareCapability.KDA_INT8_QUANT_OVERLAP,
     HardwareCapability.NATIVE_INT8_SPARSE,
     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,

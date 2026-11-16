@@ -557,6 +557,8 @@ def test_cann_indexer_writes_caches_before_optional_selection(
         setattr(op, "_" + name, mock)
         calls.attach_mock(mock, name)
     metadata = _indexer_metadata()
+    if not quantized:
+        metadata.scoring_block_table_stride = 4
     metadata.query_start_loc = torch.tensor([0, 4, 8], dtype=torch.int32)
     metadata.start_pos = torch.zeros(2, dtype=torch.int32)
     metadata.pool_tail = torch.zeros(2, dtype=torch.int64)
@@ -575,8 +577,8 @@ def test_cann_indexer_writes_caches_before_optional_selection(
     metadata.num_actual_tokens = actual_query_tokens
     tail_metadata = _tail_metadata()
     tail_metadata.cann_inputs = SimpleNamespace(retained_indices=None)
-    cache = torch.empty(2, 2, 1, 2, dtype=torch.float8_e4m3fn if quantized else torch.bfloat16)
-    scale_cache = torch.empty(2, 2, 1, 1) if quantized else None
+    cache = torch.empty(8, 2, 1, 2, dtype=torch.float8_e4m3fn if quantized else torch.bfloat16)
+    scale_cache = torch.empty(8, 2, 1, 1) if quantized else None
     tail = torch.empty(2, 4, 4)
     with patch.object(torch.Tensor, "item", side_effect=AssertionError("unexpected device synchronization")):
         result = op._forward_cann(
@@ -617,7 +619,13 @@ def test_cann_indexer_writes_caches_before_optional_selection(
     elif compute_topk:
         assert result is packed
         assert names[3:] == ["pool_key_indexer", "pack_keypool_indices"]
-        assert op._pool_key_indexer.call_args.args[2] is cache
+        scoring_cache = op._pool_key_indexer.call_args.args[2]
+        assert op._pool_key_indexer.call_args.kwargs["block_table_stride"] == metadata.scoring_block_table_stride
+        if quantized:
+            assert scoring_cache is cache
+        else:
+            assert scoring_cache.shape == (2, 8, 1, 2)
+            assert scoring_cache.data_ptr() == cache.data_ptr()
         assert op._pool_key_indexer.call_args.kwargs["block_table"] is metadata.block_table
         assert op._pool_key_indexer.call_args.kwargs["actual_seq_q"] is metadata.cum_query_lens
         assert op._pool_key_indexer.call_args.kwargs["actual_seq_k"] is metadata.seq_lens
@@ -860,7 +868,7 @@ def test_glm_nonempty_indexer_quantizes_fp8_after_padding(monkeypatch, quantized
             pool_size=4,
         )
 
-    prepare.assert_called_once_with(query, weights, ends, lengths, tails, table)
+    prepare.assert_called_once_with(query, weights, ends, lengths, tails, table, 1)
     assert native.call_count == 1
     assert native.call_args.args == (quantized_query if quantized else padded[0], cache, padded[1], padded[4])
     assert native.call_args.kwargs["actual_seq_q"] is padded[2]

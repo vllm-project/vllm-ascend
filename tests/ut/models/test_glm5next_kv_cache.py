@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.worker.utils import select_common_block_size
@@ -697,6 +698,23 @@ def _common():
         slot_mapping=torch.tensor([2, -1, 4, 5, 6, 7, 135, 136, -1, -1]),
         positions=torch.tensor([2, 3, 4, 5, 6, 7, 7, 8, 3, 7]),
     )
+
+
+@pytest.mark.parametrize(
+    ("block_size", "max_query_len", "expected_stride"), [(512, 1, 4), (1152, 1, 3), (640, 1, 1), (1152, 6, 1)]
+)
+def test_a3_indexer_wide_pages_respect_block_geometry_and_query_width(block_size, max_query_len, expected_stride):
+    config = _config()
+    config.cache_config.block_size = block_size
+    config.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
+    common = _common()
+    common.max_query_len = max_query_len
+    common.block_table_tensor = torch.arange(2 * (block_size // 128), dtype=torch.int32).view(2, -1)
+    with patch("vllm_ascend.attention.indexer_kpool.get_current_hardware_profile") as profile:
+        profile.return_value.supports.return_value = True
+        metadata = _builder(config).build(0, common)
+    assert metadata.scoring_block_table_stride == expected_stride
+    assert metadata.block_table.data_ptr() == common.block_table_tensor.data_ptr()
 
 
 @pytest.mark.parametrize("input_tokens", [9, 10])
