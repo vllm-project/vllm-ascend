@@ -415,7 +415,35 @@ class MooncakeBaseConnectorScheduler:
         self.group_block_size = [group.kv_cache_spec.block_size for group in self.kv_cache_groups]
         self.group_unique_specs = [self._get_group_unique_specs(group) for group in self.kv_cache_groups]
         self.need_truncate = self._needs_prefill_token_truncation()
+        # Whether any KV cache group is stateful (Mamba/SSM). Stateful groups
+        # hold ONE state snapshot per request — taken at the end of the
+        # sequence — so a bidirectional D→P pull is only correct when the
+        # next prompt prefix matches D's ENTIRE advertised sequence (the
+        # pulled state must be the state at the exact resume boundary).
+        self.has_stateful_groups = any(
+            isinstance(spec, MambaSpec)
+            for group_specs in self.group_unique_specs
+            for spec in group_specs
+        )
         self._logged_mamba_allocation = False
+        # Bi-directional KV transfer: KV block transfers from D node to P
+        # node (e.g., multi-turn dialogue scenarios). Configuration
+        # precedence: extra_config > environment variable > default.
+        from vllm_ascend import envs as ascend_envs
+
+        self.is_bidirectional_kv_xfer_enabled = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "bidirectional_kv_xfer", False
+            )
+            or ascend_envs.VLLM_ASCEND_BIDIRECTIONAL_KV_XFER
+        )
+        # TTL (in seconds) for KV blocks cached on Decode nodes. After this
+        # timeout, blocks are released if not pulled by Prefill nodes.
+        self.decoder_kv_blocks_ttl = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "decoder_kv_blocks_ttl", ascend_envs.VLLM_ASCEND_DECODER_KV_BLOCKS_TTL
+            )
+        )
 
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 

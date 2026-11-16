@@ -92,6 +92,19 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Enable bidirectional KV transfer in the Mooncake P/D connector: Decode
+    # nodes delay-release their KV blocks so a Prefill node can pull the
+    # incremental KV produced during decode when the same conversation's next
+    # turn arrives, avoiding a full re-prefill. 0: disabled (default), 1: on.
+    "VLLM_ASCEND_BIDIRECTIONAL_KV_XFER": lambda: _bool_env(
+        "VLLM_ASCEND_BIDIRECTIONAL_KV_XFER", False
+    ),
+    # TTL (seconds) for KV blocks cached on Decode nodes during bidirectional
+    # transfer. After this timeout the blocks are released if not pulled by a
+    # Prefill node. Default 480s (8 minutes); raise for long multi-turn sessions.
+    "VLLM_ASCEND_DECODER_KV_BLOCKS_TTL": lambda: int(
+        os.getenv("VLLM_ASCEND_DECODER_KV_BLOCKS_TTL", "480")
+    ),
 }
 
 # end-env-vars-definition

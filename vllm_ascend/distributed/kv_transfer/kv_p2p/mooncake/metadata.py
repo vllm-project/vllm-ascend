@@ -154,6 +154,9 @@ class ReqMeta:
     remote_request_id: str
     remote_num_prompt_tokens: int
     local_full_block_ids: BlockIds
+    # For bidirectional KV transfer: remote token count and blocks expiry time
+    remote_num_tokens: int = 0
+    remote_blocks_expiry_time: float | None = None
 
 
 @dataclass(frozen=True)
@@ -224,6 +227,8 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_request_id=kv_transfer_params["remote_request_id"],
             remote_num_prompt_tokens=kv_transfer_params["remote_num_prompt_tokens"],
             local_full_block_ids=local_full_block_ids or tuple(),
+            remote_num_tokens=kv_transfer_params.get("remote_num_tokens", 0),
+            remote_blocks_expiry_time=kv_transfer_params.get("remote_blocks_expiry_time"),
         )
 
     def add_new_push_req(
