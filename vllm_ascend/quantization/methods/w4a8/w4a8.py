@@ -126,8 +126,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         group_size = vllm_config.quant_config.quant_description.get("group_size", 0)
         if group_size > 0:
             raise ValueError(
-                "The current weights use Per鈥慓roup quantization, which is no longer supported. Please "
-                "switch to Per鈥慍hannel quantized weights."
+                "The current weights use Per‑Group quantization, which is no longer supported. Please "
+                "switch to Per‑Channel quantized weights."
             )
 
         # Only per-channel W4A8 is supported, this parameter will be removed soon.
@@ -156,7 +156,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
     ) -> dict[str, Any]:
         param_dict = {}
-        # Note: compressed鈥憈ensors: one int4 per int8; modelslim: packs two int4 into one int8
+        # Note: compressed‑tensors: one int4 per int8; modelslim: packs two int4 into one int8
         if self.quant_method == COMPRESSED_TENSORS_METHOD:
             w13_output_size = 2 * intermediate_size_per_partition
             w2_output_size = hidden_sizes
