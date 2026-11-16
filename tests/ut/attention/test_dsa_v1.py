@@ -929,6 +929,7 @@ def _make_req_metadata() -> AscendDSAReqMetadata:
 
 def _make_impl(
     impl_cls: type[AscendDSAImpl] = AscendDSAImpl,
+    overlap_enabled: bool = False,
     **extra_kwargs,
 ) -> AscendDSAImpl:
     linear = MagicMock()
@@ -939,7 +940,7 @@ def _make_impl(
         ),
         patch(
             "vllm_ascend.attention.dsa_v1.get_ascend_config",
-            return_value=SimpleNamespace(multistream_dsv4_dsa_overlap=False),
+            return_value=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap_enabled),
         ),
         patch(
             "vllm_ascend.attention.context_parallel.dsa_cp.enable_pcp_o_proj_weight_sharding",
@@ -2007,14 +2008,16 @@ def _attach_parallel_o_proj(impl, pcp_group, *, tp_group=None, decode_sharded=Fa
 @pytest.mark.parametrize("local_num_actual_tokens", [2, 0], ids=["local_tokens", "empty_rank"])
 @pytest.mark.parametrize("shard_o_proj", [False, True])
 @pytest.mark.parametrize("global_prefill,decode_sharded", [(True, False), (True, True), (False, True)])
+@pytest.mark.parametrize("overlap_enabled", [False, True])
 def test_pcp_forward_updates_global_caches_before_local_attention(
     local_num_actual_tokens: int,
     shard_o_proj: bool,
     global_prefill: bool,
     decode_sharded: bool,
+    overlap_enabled: bool,
 ):
     """Exercise batched cache preparation, local attention, and empty ranks."""
-    impl = _make_impl(AscendDSAPCPImpl)
+    impl = _make_impl(AscendDSAPCPImpl, overlap_enabled=overlap_enabled)
     impl.enable_pcp_o_proj_weight_sharding = shard_o_proj
     impl._parallel_o_proj.enabled = shard_o_proj
     impl._parallel_o_proj._weight_switch_enabled = shard_o_proj
@@ -2177,7 +2180,8 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
             if "projection" in events:
                 assert events.index("cache") < events.index("projection")
 
-    assert query_prolog.call_count == (num_calls if global_prefill and local_num_actual_tokens else 0)
+    overlap = overlap_enabled and global_prefill and local_num_actual_tokens > 0
+    assert query_prolog.call_count == (num_calls if overlap else 0)
     assert actual is output
     assert torch.equal(pcp_group.all_gather.call_args.args[0], hidden_states)
     assert pcp_group.all_gather.call_args.kwargs == {"dim": 0}
@@ -2208,7 +2212,7 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
             hidden_states[:local_num_actual_tokens],
         )
         assert forward_attention.call_args.args[4] is True
-        assert forward_attention.call_args.kwargs == {"prepared_query": prepared_query if global_prefill else None}
+        assert forward_attention.call_args.kwargs == {"prepared_query": prepared_query if overlap else None}
         assert len(captured_o_proj_inputs) == num_calls
         assert torch.count_nonzero(captured_o_proj_inputs[0][local_num_actual_tokens:]) == 0
         assert torch.equal(

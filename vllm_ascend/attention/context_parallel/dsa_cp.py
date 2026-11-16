@@ -522,6 +522,7 @@ class AscendDSAPCPImpl(AscendDSAImpl):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        self.pcp_q_projection_overlap = self.multistream_dsv4_dsa_overlap
         # PCP prepares replicated caches before local attention, leaving no
         # cache-update work for the auxiliary stream to overlap.
         self.multistream_dsv4_dsa_overlap = False
@@ -593,13 +594,13 @@ class AscendDSAPCPImpl(AscendDSAImpl):
             common = layer_metadata.swa
         actual_tokens = common.num_actual_tokens
         prepared_query = None
-        query_stream = None
-        current_stream = None
+        query_streams = None
         try:
-            if pcp_metadata.pcp_has_global_prefill and actual_tokens > 0:
+            if self.pcp_q_projection_overlap and pcp_metadata.pcp_has_global_prefill and actual_tokens > 0:
                 req_metadata = dsa_v1._require_req_metadata(common)
                 current_stream = torch.npu.current_stream()
                 query_stream = dsa_v1.dsv4_dsa_overlap_stream()
+                query_streams = (current_stream, query_stream)
                 query_stream.wait_stream(current_stream)
                 with torch.npu.stream(query_stream):
                     prepared_query = self._mla_prolog_single_stream(
@@ -661,7 +662,8 @@ class AscendDSAPCPImpl(AscendDSAImpl):
             # local attention on nonempty ranks.
             self._parallel_o_proj.all_gather_weights()
         finally:
-            if query_stream is not None:
+            if query_streams is not None:
+                current_stream, query_stream = query_streams
                 current_stream.wait_stream(query_stream)
         # No tensor is cached on the layer: every invocation owns its outputs.
         return True, prepared_query
