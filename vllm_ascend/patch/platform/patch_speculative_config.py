@@ -192,11 +192,39 @@ def _temporarily_disable_dspark_dcp(self: SpeculativeConfig):
         self.target_parallel_config = target_parallel_config
 
 
+def _configure_kimi_dspark_context_parallel(self: SpeculativeConfig) -> None:
+    """Restore the target PCP/DCP topology on the Kimi DSpark draft config.
+
+    The upstream constructor runs under the temporary DCP=1 guard, which also
+    zeroes the draft's prefill_context_parallel_size. For Kimi K3 DSpark the
+    target uses PCP to form the physical DCP group; the draft must validate
+    against that configured topology even though its replicated queries run
+    with a PCP=1 view at execution time.
+    """
+    target_parallel_config = self.target_parallel_config
+    draft_model_config = self.draft_model_config
+    if (
+        target_parallel_config is None
+        or target_parallel_config.prefill_context_parallel_size <= 1
+        or self.draft_parallel_config is None
+        or getattr(getattr(draft_model_config, "hf_config", None), "model_type", None) != "k3_dspark"
+    ):
+        return
+    self.draft_parallel_config = replace(
+        self.draft_parallel_config,
+        prefill_context_parallel_size=target_parallel_config.prefill_context_parallel_size,
+        decode_context_parallel_size=target_parallel_config.decode_context_parallel_size,
+        cp_kv_cache_interleave_size=target_parallel_config.cp_kv_cache_interleave_size,
+        dcp_kv_cache_interleave_size=target_parallel_config.dcp_kv_cache_interleave_size,
+    )
+
+
 def _dspark_post_init(self):
     # TODO: This block can be deleted after the upstream supports the overlay of mla dcp and dspark
     with _temporarily_disable_dspark_dcp(self):
         _orig_post_init(self)
     if self.use_dspark():
+        _configure_kimi_dspark_context_parallel(self)
         draft_model_config = getattr(self, "draft_model_config", None)
         draft_hf_config = getattr(draft_model_config, "hf_config", None)
         _normalize_deepseek_dspark_draft(draft_model_config)

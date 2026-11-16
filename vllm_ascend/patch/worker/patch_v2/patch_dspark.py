@@ -54,6 +54,41 @@ from vllm_ascend.worker.v2.pp_transport import (
 _original_get_draft_quant_config = model_utils.get_draft_quant_config
 _original_load_dspark_model = dspark_utils.load_dspark_model
 _original_maybe_share_target_embed = eagle_utils.maybe_share_target_embed
+_original_get_dspark_parallel_config = dspark_utils._get_dspark_parallel_config
+
+
+def _is_kimi_dspark_pcp_dcp(speculative_config, parallel_config) -> bool:
+    """Kimi K3 DSpark under target PCP+DCP topology."""
+    return (
+        speculative_config is not None
+        and speculative_config.method == "dspark"
+        and getattr(getattr(speculative_config, "draft_model_config", None), "hf_config", None) is not None
+        and speculative_config.draft_model_config.hf_config.model_type == "k3_dspark"
+        and parallel_config.prefill_context_parallel_size > 1
+        and parallel_config.decode_context_parallel_size > parallel_config.tensor_parallel_size
+    )
+
+
+def _patch_dspark_parallel_config_for_pcp(target_parallel_config):
+    """Return a PCP-aware replacement for _get_dspark_parallel_config.
+
+    The Kimi draft consumes replicated queries on the last target PP stage.
+    Its attention must keep PCP gathering disabled (PCP=1) while still
+    addressing KV through the physical DCP group formed for the target.
+    """
+    dcp_size = target_parallel_config.decode_context_parallel_size
+
+    def _pcp_aware_config(parallel_config, tensor_parallel_size):
+        config = _original_get_dspark_parallel_config(parallel_config, tensor_parallel_size)
+        # Draft queries are replicated: use a PCP=1 view.  Preserve the
+        # target DCP so the draft's KV addressing matches the physical group.
+        return type(config)(
+            **{**config.__dict__,
+               "prefill_context_parallel_size": 1,
+               "decode_context_parallel_size": dcp_size}
+        ) if hasattr(config, "__dict__") and config.__dict__ else config
+
+    return _pcp_aware_config
 
 
 def _pp_safe_maybe_share_target_embed(draft_model, draft_inner, target_inner):
@@ -102,6 +137,13 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
     if inherits_target_quant:
         model_utils.get_draft_quant_config = lambda _vllm_config: vllm_config.quant_config
     eagle_utils.maybe_share_target_embed = _pp_safe_maybe_share_target_embed
+    # Kimi DSpark PCP+DCP: redirect the parallel-config helper so the draft
+    # loads with a PCP=1 query view but the target DCP for KV addressing.
+    is_pcp_dcp = _is_kimi_dspark_pcp_dcp(speculative_config, vllm_config.parallel_config)
+    if is_pcp_dcp:
+        dspark_utils._get_dspark_parallel_config = _patch_dspark_parallel_config_for_pcp(
+            vllm_config.parallel_config
+        )
     try:
         # Native draft loading already sets PP=1, but still reads the target's
         # manual layer partition. Mask that partition on both version paths.
@@ -114,6 +156,8 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
         eagle_utils.maybe_share_target_embed = _original_maybe_share_target_embed
         if inherits_target_quant:
             model_utils.get_draft_quant_config = _original_get_draft_quant_config
+        if is_pcp_dcp:
+            dspark_utils._get_dspark_parallel_config = _original_get_dspark_parallel_config
         if bypass_pp_guard:
             eagle_utils._should_share = original_eagle_should_share
             dspark_utils.get_pp_group = original_get_pp_group
@@ -123,3 +167,34 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
 # the utils module and the speculator module must point at the wrapper.
 dspark_utils.load_dspark_model = _load_dspark_model_with_target_quant
 speculator_module.load_dspark_model = _load_dspark_model_with_target_quant
+
+
+# Patch DFlashSpeculator.__init__ so that Kimi DSpark under PCP+DCP keeps
+# the target DCP for KV addressing instead of having it discarded alongside
+# the PCP reduction.  The upstream constructor unconditionally drops PCP to
+# 1; for non-Kimi models that is fine because the DCP group equals the TP
+# group.  For Kimi DSpark the physical DCP group spans the PCP ranks, so
+# zeroing PCP must not also lose the DCP size.
+from copy import copy as _shallow_copy
+
+import vllm.v1.worker.gpu.spec_decode.dflash.speculator as _dflash_spec_module
+
+_original_dflash_init = _dflash_spec_module.DFlashSpeculator.__init__
+
+
+def _pcp_aware_dflash_init(self, vllm_config, device):
+    parallel_config = vllm_config.parallel_config
+    spec_config = vllm_config.speculative_config
+    if parallel_config.prefill_context_parallel_size > 1 and _is_kimi_dspark_pcp_dcp(
+        spec_config, parallel_config
+    ):
+        vllm_config = _shallow_copy(vllm_config)
+        draft_pc = _shallow_copy(parallel_config)
+        draft_pc.prefill_context_parallel_size = 1
+        # decode_context_parallel_size is inherited from the target and keeps
+        # the draft's KV addressing inside the physical DCP group.
+        vllm_config.parallel_config = draft_pc
+    _original_dflash_init(self, vllm_config, device)
+
+
+_dflash_spec_module.DFlashSpeculator.__init__ = _pcp_aware_dflash_init

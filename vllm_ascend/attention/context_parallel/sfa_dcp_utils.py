@@ -1,13 +1,63 @@
 """SFA-specific CP helpers shared by the attention and indexer builders.
 
-These helpers encode the replicated SFA indexer-cache layout, so they stay
-outside ``common_cp`` while avoiding a dependency between the two builders.
+These helpers encode SFA cache addresses and compact history views, so they
+stay outside ``common_cp`` without coupling the attention and indexer builders.
 """
 
 from typing import Any
 
 import torch
 from vllm.utils.math_utils import cdiv
+
+
+def as_byte_view(x: torch.Tensor) -> torch.Tensor:
+    """Return a byte view for FP8 tensors, preserving their bit patterns."""
+    if x.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+        return x.view(torch.uint8)
+    return x
+
+
+def _index_select_kv_blocks(cache: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    # FP8 block movement must preserve bytes, including NaN bit patterns.
+    return torch.index_select(as_byte_view(cache), 0, indices).view(cache.dtype)
+
+
+def build_sfa_dcp_compact_kv_metadata(
+    dcp_block_table: torch.Tensor,
+    column_indices: torch.Tensor,
+    collective_rank_order: torch.Tensor,
+    kernel_block_size: int,
+    interleave: int,
+    *,
+    global_dcp_block_table: torch.Tensor | None = None,
+    global_dcp_num_blocks: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Map global token blocks into a compact, rank-major history gather."""
+    if interleave < kernel_block_size or interleave % kernel_block_size:
+        raise NotImplementedError(
+            f"SFA history gather requires interleave ({interleave}) to be a multiple of "
+            f"the kernel block size ({kernel_block_size})."
+        )
+    if global_dcp_block_table is None:
+        valid_block_ids = dcp_block_table.flatten().unique()
+    else:
+        # PCP receivers can own different request rows, including no queries.
+        # Every sender must nevertheless pack the same allocated block IDs.
+        if global_dcp_num_blocks is None:
+            raise ValueError("PCP+DCP compact KV metadata requires valid block counts for the global block table.")
+        valid_mask = column_indices[: global_dcp_block_table.shape[1]].unsqueeze(0) < global_dcp_num_blocks.unsqueeze(1)
+        valid_block_ids = global_dcp_block_table[valid_mask].unique()
+
+    world = collective_rank_order.numel()
+    columns = column_indices[: dcp_block_table.shape[1] * world]
+    blocks_per_interleave = interleave // kernel_block_size
+    local_columns = columns // (world * blocks_per_interleave) * blocks_per_interleave + columns % blocks_per_interleave
+    owners = columns // blocks_per_interleave % world
+    local_blocks = dcp_block_table[:, local_columns].contiguous()
+    compact_blocks = torch.searchsorted(valid_block_ids, local_blocks)
+    # Keep the large gathered tensor in HCCL order; only remap its addresses.
+    block_table = compact_blocks + collective_rank_order[owners] * valid_block_ids.numel()
+    return valid_block_ids, block_table.to(torch.int32)
 
 
 def get_sfa_pcp_global_metadata(
