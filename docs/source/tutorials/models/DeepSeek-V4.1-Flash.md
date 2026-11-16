@@ -379,10 +379,13 @@ vLLM Ascend revision.
     - `enable_flashcomm1: false` keeps FlashComm disabled for this A3 configuration.
       Decoder bounded replay also supports SP/FlashComm1 with model runner V2,
       PCP size 1, and `NONE` or `FULL_DECODE_ONLY` graph mode. Prefill runs outside
-      ACL Graph capture. Each SP rank
-      selects its retained rows locally and exchanges only compact states for
-      the layers after the last KV source. Decode rows and requests requiring
-      prompt logprobs retain their full query spans. The decoder custom op reads
+      ACL Graph capture. Each SP rank selects its retained rows locally and packs
+      hidden states and pre-mix without numerical conversion. One AlltoAllV enters the compact decoder
+      and one returns its results to the original owners. Routing IDs and
+      padding masks are selected locally from the runner's replicated batch
+      metadata. These counts exclude the layers' own collectives.
+      Decode rows and requests requiring prompt logprobs retain their full query
+      spans. The decoder custom op reads
       the current replay plan at runtime, including the context for untrimmed
       DP peers. The layers before it remain in the `torch.compile` graph;
       the decoder tail stays opaque to FX optimization, as in non-SP replay.

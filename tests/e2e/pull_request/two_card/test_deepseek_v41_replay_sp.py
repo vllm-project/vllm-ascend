@@ -28,27 +28,29 @@ def _hccl_replay_worker(rank, init_method):
             compact_rows = rows[rank * compact_width : (rank + 1) * compact_width]
             local_rows = rows[(rows >= rank * original_width) & (rows < (rank + 1) * original_width)]
             local_rows -= rank * original_width
-            # Hidden states, pre-mix, routing IDs and padding masks keep their
-            # actual communication dtypes; BF16 values stay exactly representable.
-            for dtype, shape in (
-                (torch.bfloat16, (4, 128)),
-                (torch.float32, (4,)),
-                (torch.int64, ()),
-                (torch.int32, ()),
-                (torch.int8, ()),
-            ):
-                full = (torch.arange(original_width * 2) % 31).to(dtype)
-                full = full.reshape(-1, *(1 for _ in shape)).expand(-1, *shape).clone()
-                source = full[rank * original_width : (rank + 1) * original_width].to(device)
-                compact = plan.compact(source, dist.group.WORLD)
-                expected = torch.zeros((compact_width, *shape), dtype=dtype)
-                expected[: len(compact_rows)] = full[compact_rows]
-                torch.testing.assert_close(compact.cpu(), expected, rtol=0, atol=0)
-
-                restored = plan.restore(compact, dist.group.WORLD)
-                expected_original = torch.zeros((original_width, *shape), dtype=dtype)
-                expected_original[local_rows] = source.cpu()[local_rows]
-                torch.testing.assert_close(restored.cpu(), expected_original, rtol=0, atol=0)
+            # BF16 hidden values stay exactly representable; FP32 pre-mix
+            # fractions must survive the shared int8 payload bit-for-bit.
+            for dtype in (torch.bfloat16, torch.float16, torch.float32):
+                tokens = torch.arange(original_width * 2)
+                full_hidden = (tokens % 31).to(dtype).reshape(-1, 1, 1).expand(-1, 4, 128).clone()
+                full_mix = (tokens.float() / 7).reshape(-1, 1).expand(-1, 4).clone()
+                full_mix.view(torch.int32)[:, 0] = -2147483648  # negative zero
+                full_mix.view(torch.int32)[:, 1] = 0x7FC01234  # NaN payload
+                shard = slice(rank * original_width, (rank + 1) * original_width)
+                hidden, mix = full_hidden[shard].to(device), full_mix[shard].to(device)
+                compact_hidden, compact_mix = plan.compact(hidden, mix, dist.group.WORLD)
+                restored_hidden, restored_mix = plan.restore(compact_hidden, compact_mix, dist.group.WORLD)
+                for compact, restored, full, source in (
+                    (compact_hidden, restored_hidden, full_hidden, hidden),
+                    (compact_mix, restored_mix, full_mix, mix),
+                ):
+                    assert compact.is_contiguous() and restored.is_contiguous()
+                    expected = full.new_zeros((compact_width, *full.shape[1:]))
+                    expected[: len(compact_rows)] = full[compact_rows]
+                    assert torch.equal(compact.cpu().view(torch.int8), expected.view(torch.int8))
+                    expected_original = source.cpu().new_zeros(source.shape)
+                    expected_original[local_rows] = source.cpu()[local_rows]
+                    assert torch.equal(restored.cpu().view(torch.int8), expected_original.view(torch.int8))
     finally:
         dist.destroy_process_group()
 

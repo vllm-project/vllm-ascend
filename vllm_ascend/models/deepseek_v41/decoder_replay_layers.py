@@ -40,6 +40,7 @@ class AscendDecoderReplayLayers:
         self.num_padded_rows: int | None = None
         self.sequence_parallel = False
         self.sp_plan: SPReplayPlan | None = None
+        self.sp_replay_input_ids: torch.Tensor | None = None
 
     def __call__(self, *states: torch.Tensor | None) -> tuple[torch.Tensor, ...]:
         if self.rows is None:
@@ -62,29 +63,34 @@ class AscendDecoderReplayLayers:
                 buffer[: rows.numel()].copy_(buffer.index_select(0, rows))
                 if self.num_padded_rows is not None:
                     buffer[rows.numel() : self.num_padded_rows].zero_()
-            replay_states: list[torch.Tensor | None] = []
-            for index, state in enumerate(states):
-                if state is None:
-                    replay_states.append(None)
-                    continue
-                sharded = self.sequence_parallel and index != 2
-                if sharded:
-                    state = cast(SPReplayPlan, self.sp_plan).compact(state, get_tp_group().device_group)
-                else:
+            replay_states: list[torch.Tensor | None]
+            if self.sequence_parallel:
+                hidden, mix = cast(SPReplayPlan, self.sp_plan).compact(
+                    cast(torch.Tensor, states[0]), cast(torch.Tensor, states[1]), get_tp_group().device_group
+                )
+                replay_states = [hidden, mix, positions.index_select(0, rows), self.sp_replay_input_ids]
+            else:
+                replay_states = []
+                for state in states:
+                    if state is None:
+                        replay_states.append(None)
+                        continue
                     state = state.index_select(0, rows)
-                if self.num_padded_rows is not None:
-                    padding = self.num_padded_rows - state.shape[0]
-                    state = torch.cat((state, state.new_zeros((padding, *state.shape[1:]))))
-                replay_states.append(state)
+                    if self.num_padded_rows is not None:
+                        padding = self.num_padded_rows - state.shape[0]
+                        state = torch.cat((state, state.new_zeros((padding, *state.shape[1:]))))
+                    replay_states.append(state)
             row_outputs = self.run_layers(*replay_states)
-            outputs = []
-            for index, row_output in enumerate(row_outputs):
-                # Hidden states and pre-mix are SP-local; auxiliary states
-                # have already been gathered by the model's layer loop.
-                sharded = self.sequence_parallel and index < 2
-                if sharded:
-                    outputs.append(cast(SPReplayPlan, self.sp_plan).restore(row_output, get_tp_group().device_group))
-                    continue
+            outputs: list[torch.Tensor] = []
+            if self.sequence_parallel:
+                outputs.extend(
+                    cast(SPReplayPlan, self.sp_plan).restore(
+                        row_outputs[0], row_outputs[1], get_tp_group().device_group
+                    )
+                )
+                # Auxiliary states already use the full token layout.
+                row_outputs = row_outputs[2:]
+            for row_output in row_outputs:
                 output = row_output.new_zeros((positions.shape[0], *row_output.shape[1:]))
                 output.index_copy_(0, rows[: self.num_actual_rows], row_output[: self.num_actual_rows])
                 outputs.append(output)

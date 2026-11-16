@@ -421,6 +421,7 @@ def test_compiled_entry_reads_each_replay_plan_and_peer_context(compiled_replay_
             case.replay.sp_plan = SPReplayPlan.build(
                 np.array(offsets), np.array(kept), 6, len(rows), 1, 0, torch.device("cpu")
             )
+            case.replay.sp_replay_input_ids = torch.tensor(rows)
         output, aux = case.forward()
         expected = torch.zeros_like(case.embeddings)
         expected[rows] = case.embeddings[rows] * 24
@@ -436,6 +437,7 @@ def test_compiled_entry_reads_each_replay_plan_and_peer_context(compiled_replay_
     # which resolves the current context rather than the warmup metadata.
     case.replay.rows = None
     case.replay.sp_plan = None
+    case.replay.sp_replay_input_ids = None
     output, _ = case.forward()
     torch.testing.assert_close(output, case.embeddings * 24)
     assert len(case.calls) == 4

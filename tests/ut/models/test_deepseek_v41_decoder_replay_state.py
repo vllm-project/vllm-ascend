@@ -42,6 +42,8 @@ def inputs(*, dummy=False):
         idx_mapping_np=np.array([2, 0, 1]),
         seq_lens_np=np.array([1, 6, 6], dtype=np.int32),
         is_dummy=dummy,
+        input_ids=torch.arange(16, dtype=torch.int32) * 7 + 5,
+        is_padding=torch.ones(16, dtype=torch.bool) if dummy else torch.arange(16) >= 13,
     )
     return replay_mod.DecoderReplayInputs(batch, (), torch.empty(1, 13), [], torch.zeros(3, dtype=torch.int32))
 
@@ -79,17 +81,24 @@ def test_prefill_trims_but_decode_and_prompt_logprobs_keep_rows(state):
 
 
 @pytest.mark.parametrize("rank", [0, 1])
-def test_sp_replay_plan_aligns_execution_and_preserves_row_ownership(state, monkeypatch, rank):
+@pytest.mark.parametrize("ids_dtype", [torch.int32, torch.int64])
+def test_sp_replay_plan_aligns_execution_and_preserves_row_ownership(state, monkeypatch, rank, ids_dtype):
     state.layers.sequence_parallel = True
     state.config.parallel_config.tensor_parallel_size = 2
     monkeypatch.setattr(replay_mod, "get_tp_group", lambda: SimpleNamespace(world_size=2, rank_in_group=rank))
-    state.prepare(inputs(), CUDAGraphMode.NONE)
+    source = inputs()
+    source.batch.input_ids = source.batch.input_ids.to(ids_dtype)
+    state.rows[:6] = torch.tensor([0, 5, 6, 11, 12, 0])
+    state.prepare(source, CUDAGraphMode.NONE)
     assert state.num_actual_tokens == 5
     assert state.num_tokens == 6
     assert state.layers.sp_plan.original_local_tokens == 8
     assert state.layers.sp_plan.replay_local_tokens == 3
     assert state.layers.sp_plan.local_rows.tolist() == ([0, 5, 6] if rank == 0 else [3, 4])
     assert state._build_metadata.call_args.args[1].tolist() == [0, 1, 3, 5]
+    assert state.layers.sp_replay_input_ids.tolist() == ([5, 40, 47] if rank == 0 else [82, 89, 0])
+    assert state.layers.sp_replay_input_ids.dtype == source.batch.input_ids.dtype
+    assert state.original_padding is source.batch.is_padding
 
     previous_plan = state.layers.sp_plan
 
@@ -98,9 +107,15 @@ def test_sp_replay_plan_aligns_execution_and_preserves_row_ownership(state, monk
     state.prepare(inputs(), CUDAGraphMode.NONE)
     assert state.layers.sp_plan is None
     assert state.layers.rows is None
+    assert state.layers.sp_replay_input_ids is None
+    assert state.original_padding is None
     state.layers.sp_plan = previous_plan
+    state.layers.sp_replay_input_ids = torch.ones(3, dtype=torch.int32)
+    state.original_padding = source.batch.is_padding
     state.prepare(inputs(), CUDAGraphMode.FULL, for_capture=True)
     assert state.layers.sp_plan is None
+    assert state.layers.sp_replay_input_ids is None
+    assert state.original_padding is None
 
 
 @pytest.mark.parametrize(
@@ -397,14 +412,13 @@ def test_replay_context_preserves_layout_masks_and_restores_mc2(
     monkeypatch.setattr(replay_mod.envs, "VLLM_MOE_SKIP_PADDING", skip_padding)
     sharded_padding = sequence_parallel and skip_padding
     state.layers.sequence_parallel = sequence_parallel
-    gathered_padding = torch.tensor([False, False, True, True]) if compact else original_padding
-    gather_padding = Mock(side_effect=lambda *args, **kwargs: gathered_padding.clone())
-    monkeypatch.setattr(replay_mod, "tensor_model_parallel_all_gather", gather_padding)
+    state.original_padding = original_padding if sequence_parallel else None
+    gather_padding = Mock(side_effect=AssertionError("replay metadata must not communicate"))
+    monkeypatch.setattr(replay_mod.dist, "all_gather", gather_padding)
+    monkeypatch.setattr(replay_mod.dist, "all_to_all_single", gather_padding)
     monkeypatch.setattr(
         replay_mod, "get_tp_group", lambda: SimpleNamespace(world_size=2, rank_in_group=0, device_group=None)
     )
-    if compact and sharded_padding:
-        state.layers.sp_plan = SimpleNamespace(compact=lambda tensor, group: tensor.new_zeros(2), received_tokens=2)
     outer = SimpleNamespace(
         attn_metadata={"original": object()},
         slot_mapping={"original": torch.arange(4)},
@@ -451,7 +465,42 @@ def test_replay_context_preserves_layout_masks_and_restores_mc2(
         assert fail
     assert torch.equal(mask, saved_mask)
     assert torch.equal(original_padding, torch.tensor([False, True, False, True]))
-    assert gather_padding.call_count == int(sharded_padding)
+    gather_padding.assert_not_called()
+
+
+def test_untrimmed_sp_peer_keeps_full_mask_before_tp_padding(state, monkeypatch):
+    state.layers.sequence_parallel = True
+    state.original_padding = torch.tensor([False, True, False])
+    state.num_tokens = state.num_actual_tokens = 3
+    state.dp_tokens = torch.tensor([4, 3])
+    # Rank 1 owns original row 2 and one synthetic SP padding row.
+    outer = SimpleNamespace(
+        is_padding=torch.tensor([False, True]), attn_metadata={}, slot_mapping={}, additional_kwargs={}
+    )
+    mask = torch.tensor([False, True, False, True])
+    saved_mask = mask.clone()
+    current = [outer]
+    monkeypatch.setattr(replay_mod.envs, "VLLM_MOE_SKIP_PADDING", True)
+    monkeypatch.setattr(replay_mod, "get_forward_context", lambda: current[0])
+    monkeypatch.setattr(replay_mod, "get_mc2_mask", lambda: mask)
+    no_gather = Mock(side_effect=AssertionError("SP peer mask is already replicated"))
+    monkeypatch.setattr(replay_mod.dist, "all_gather", no_gather)
+
+    @contextmanager
+    def forward(metadata, config, **kwargs):
+        assert kwargs["is_padding"] is outer.is_padding
+        mask.fill_(True)
+        current[0] = SimpleNamespace(additional_kwargs={"mc2_mask": mask})
+        try:
+            yield
+        finally:
+            current[0] = outer
+
+    monkeypatch.setattr(replay_mod, "set_forward_context", forward)
+    with state.forward_context():
+        assert mask.tolist() == [True, False, True, False]
+    assert torch.equal(mask, saved_mask)
+    no_gather.assert_not_called()
 
 
 @pytest.mark.parametrize(
