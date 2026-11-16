@@ -370,9 +370,11 @@ class BaseKVPoolWorker(ABC):
     def _hisparse_layout_id(self) -> str:
         # Hash planned page geometry, never addresses or pool capacity. Bump
         # the key version for any serialization change outside these fields.
+        kv_cache_config = self.kv_cache_config
+        assert kv_cache_config is not None
         groups = []
         layers = set()
-        for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups):
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
             if not group.enable_kv_transfer:
                 continue
             group_layers = []
@@ -396,7 +398,7 @@ class BaseKVPoolWorker(ABC):
             groups.append((group_id, group.role, group.host_resident, group_layers))
         block_strides = sorted(
             (name, tensor.block_stride)
-            for tensor in self.kv_cache_config.kv_cache_tensors
+            for tensor in kv_cache_config.kv_cache_tensors
             for name in tensor.layers
             if name in layers
         )
@@ -764,11 +766,13 @@ class BaseKVPoolWorker(ABC):
         self._hisparse_host_num_blocks_by_layer: dict[str, int] = {}
         self._hisparse_host_storage_keys: set[int] = set()
         host_resident_groups = set()
-        if getattr(self.kv_cache_config, "hisparse_host_num_blocks", None) is not None:
+        kv_cache_config = self.kv_cache_config
+        host_num_blocks: int | None = getattr(kv_cache_config, "hisparse_host_num_blocks", None)
+        if kv_cache_config is not None and host_num_blocks is not None:
             excluded_layer_names = set()
             normalized_caches = {}
             context = self.vllm_config.compilation_config.static_forward_context
-            for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups):
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
                 if not group.enable_kv_transfer:
                     excluded_layer_names.update(group.layer_names)
                     continue
@@ -781,7 +785,7 @@ class BaseKVPoolWorker(ABC):
                         parts = tuple(part[::stride] for part in parts)
                     normalized_caches[name] = parts
                     if group.host_resident:
-                        self._hisparse_host_num_blocks_by_layer[name] = self.kv_cache_config.hisparse_host_num_blocks
+                        self._hisparse_host_num_blocks_by_layer[name] = host_num_blocks
                         self._hisparse_host_storage_keys.update(self._get_storage_key(part) for part in parts)
             kv_caches = normalized_caches
         self._hisparse_host_resident_groups = frozenset(host_resident_groups)
@@ -1018,7 +1022,7 @@ class BaseKVPoolWorker(ABC):
         else:
             done_sending = set()
 
-        done_recving = set()
+        done_recving: set[str] = set()
         if self.kv_recv_thread is not None:
             if self.load_async and not self.use_layerwise:
                 assert isinstance(self.kv_recv_thread, KVCacheStoreRecvingThread)
@@ -1454,7 +1458,7 @@ class KVPoolWorker(BaseKVPoolWorker):
     def _start_kv_transfer_threads(self) -> None:
         if self._transfer_threads_started:
             return
-        host_resident_groups = getattr(self, "_hisparse_host_resident_groups", frozenset())
+        host_resident_groups: frozenset[int] = getattr(self, "_hisparse_host_resident_groups", frozenset())
 
         if self.can_put:
             ready_event_sending = threading.Event()

@@ -265,7 +265,8 @@ class MemcacheBackend(Backend):
         sizes: list[list[int]],
         host_keys: list[bool],
     ) -> list[int]:
-        assert self.store is not None
+        store = self.store
+        assert store is not None
         results = [-1] * len(keys)
 
         def get_batch(indices: list[int], direction: MmcDirect) -> None:
@@ -273,7 +274,7 @@ class MemcacheBackend(Backend):
             batch_results = require_aligned_batch_results(
                 "HiSparse Memcache GET",
                 selected_keys,
-                self.store.batch_get_into_layers(
+                store.batch_get_into_layers(
                     selected_keys,
                     [addrs[index] for index in indices],
                     [sizes[index] for index in indices],

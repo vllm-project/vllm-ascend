@@ -966,6 +966,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return False
             if current_event is not None:
                 current_event.synchronize()
+            put_result: bool | list[bool] | None
             if group_id in self.host_resident_groups:
                 assert isinstance(self.m_store, MemcacheBackend)
                 put_result = self.m_store.put(keys, addrs, sizes, host=True)

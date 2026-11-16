@@ -514,7 +514,7 @@ class NPUModelRunner(GPUModelRunner):
                 if sparse_cfg.use_fused_copy_sfa
                 else set()
             )
-        slab_alignment = nullcontext()
+        slab_alignment: AbstractContextManager[None] = nullcontext()
         transfer = self.vllm_config.kv_transfer_config
         if (
             getattr(kv_cache_config, "hisparse_host_num_blocks", None) is not None
