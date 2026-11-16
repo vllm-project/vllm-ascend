@@ -416,14 +416,14 @@ def test_multi_connector_forwards_strictest_prefix_limit(limits, expected):
 
 
 @pytest.mark.parametrize("model", ["flash", "pro"])
-def test_full_hit_rechecks_earlier_state_boundary_without_losing_external_hit(model):
+def test_full_hit_does_not_advertise_an_unrestorable_external_tail(model):
     pool = PrefixPool(model)
     pool.save(0, 4096)
     # 4096 cannot be adopted locally in full: generation recomputes a tail.
     # A state checkpoint at 4096 does not prove one at the previous boundary.
     request = pool.request(4096)
     assert pool.scheduler.get_local_prefix_cache_limit(request) == 0
-    assert pool.scheduler._lookup_external_hit_tokens(request, 0) == 4096
+    assert pool.scheduler._lookup_external_hit_tokens(request, 0) == 0
     assert pool.scheduler._prefix_probe is None
 
 
@@ -442,5 +442,5 @@ def test_old_window_prefix_survives_request_advancement(model, buffers):
             # The original boundary is genuinely absent from A's HBM table.
             assert latest_tables[group][4096 // pool.sizes[group] - 1] == 0
     assert before <= pool.worker.m_store.committed
-    assert pool.hit(4096) == 4096
+    assert pool.hit(4097) == 4096
     pool.restore(4096)

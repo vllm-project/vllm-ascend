@@ -1925,6 +1925,7 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
         request = MagicMock()
         request.request_id = "r1"
         request.block_hashes = [bytes([idx]) * 32 for idx in range(num_blocks)]
+        request.num_tokens = num_blocks * 16 + 1
         return request
 
     def test_sparse_swa_storage_still_yields_full_hit(self):
