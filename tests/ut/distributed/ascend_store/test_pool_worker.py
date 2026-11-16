@@ -1695,9 +1695,7 @@ class TestKVPoolWorkerPreviousSave(unittest.TestCase):
         self.worker = KVPoolWorker.__new__(KVPoolWorker)
         self.worker.tp_rank = 0
         self.worker._previous_save_batch = None
-        self.worker.kv_send_thread = KVCacheStoreSendingThread(
-            MagicMock(), MagicMock(group_block_len={0: [16]}), 16, 0
-        )
+        self.worker.kv_send_thread = KVCacheStoreSendingThread(MagicMock(), MagicMock(group_block_len={0: [16]}), 16, 0)
 
     def test_fatal_cleanup_during_wait_preserves_cause_and_fence(self):
         sender = self.worker.kv_send_thread
@@ -1714,9 +1712,11 @@ class TestKVPoolWorkerPreviousSave(unittest.TestCase):
             return wait(timeout=timeout)
 
         # Inject the fatal transition after the entry check, at the wait boundary.
-        with patch.object(batch.done, "wait", side_effect=fail_during_wait):
-            with self.assertRaisesRegex(RuntimeError, "failed during asynchronous transfer") as raised:
-                self.worker.wait_for_previous_save()
+        with (
+            patch.object(batch.done, "wait", side_effect=fail_during_wait),
+            self.assertRaisesRegex(RuntimeError, "failed during asynchronous transfer") as raised,
+        ):
+            self.worker.wait_for_previous_save()
         self.assertIs(raised.exception.__cause__, cause)
         self.assertTrue(batch.done.is_set())
         self.assertEqual(sender.request_queue.unfinished_tasks, 0)
