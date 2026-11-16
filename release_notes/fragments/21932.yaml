@@ -1,4 +1,4 @@
-pr: 21926
+pr: 21932
 entries:
   - category: bugfix
     text: Fixed overlapping KV cache buffer registration in dense Mooncake P/D disaggregation when K/V views share an interleaved backing allocation.
