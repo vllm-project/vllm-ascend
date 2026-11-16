@@ -298,7 +298,7 @@ def _mooncake_pool_config(tier_ssd: bool, case_name: str) -> MooncakeKVPoolConfi
                 "enable_ssd_offload": True,
                 "ssd_offload_path": ssd_root,
                 "enable_ssd_prefetch": True,
-                "ssd_prefetch_cooldown_sec": 5,
+                "ssd_prefetch_cooldown_sec": int(os.environ.get("QWEN38_POOL_PREFETCH_COOLDOWN_SEC", "5")),
                 "ssd_prefetch_dedup_ttl_sec": 30,
             }
         )
