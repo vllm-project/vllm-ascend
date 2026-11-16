@@ -430,7 +430,8 @@ def test_sharded_decode_keeps_gathered_resident_and_host_rows(capture):
     assert cache.slot_mapping.data_ptr() == manager._gathered_kv_slot_mappings[1].data_ptr()
     assert cache.slot_mapping.tolist() == [100, 103, -1, 101, 104, -1]
     assert meta.hisparse_write_req_id_per_token.tolist() == [0, 0, -1, 0, 1, -1]
-    assert cache.runtime.request_state_indices.tolist() == [7, 7, 9]
+    assert connector._pending_load_kwargs["request_state_indices"].tolist() == [7, 9]
+    assert meta.hisparse_request_state_indices.tolist() == [7, 7, 9]
 
 
 def test_draft_decode_uses_global_slots_tables_and_persistent_canonical_states():
@@ -706,7 +707,7 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     expected = [10 * rank + row if row else 0 for rank in range(pcp_world_size) for row in (1, 2, 0)]
     assert impl.hisparse_cache.view.cache[:, 0].tolist() == expected
     impl.hisparse_cache.finish_kv_update.assert_not_called()
-    assert impl.hisparse_cache.submit_layer_mirror.call_count == (0 if capture else 1)
+    assert impl.hisparse_cache.submit_layer_mirror.call_count == int(prefill and not capture)
 
 
 def test_native_packed_store_does_not_write_host_source():
