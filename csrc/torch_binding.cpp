@@ -2226,6 +2226,7 @@ namespace {
 struct HostCallbackGraphPayloadRegistry {
   aclmdlRI model_ri;
   std::vector<std::shared_ptr<void>> payloads;
+  std::vector<std::shared_ptr<std::atomic<bool>>> destroyed_flags;
 };
 
 std::mutex& host_callback_graph_registry_mutex() {
@@ -2251,13 +2252,14 @@ void delete_host_callback_graph_payloads(void* args) noexcept {
       registries.erase(it);
     }
   }
+  if (owned_registry) {
+    for (const auto& flag : owned_registry->destroyed_flags) {
+      flag->store(true, std::memory_order_release);
+    }
+  }
 }
 
-template <typename Payload>
-Payload* retain_host_callback_graph_payload(
-    aclmdlRI model_ri, std::unique_ptr<Payload> payload) {
-  auto* raw_payload = payload.get();
-  std::lock_guard<std::mutex> lock(host_callback_graph_registry_mutex());
+HostCallbackGraphPayloadRegistry& get_host_callback_graph_registry_locked(aclmdlRI model_ri) {
   auto& registries = host_callback_graph_registries();
   auto it = registries.find(model_ri);
   if (it == registries.end()) {
@@ -2274,8 +2276,21 @@ Payload* retain_host_callback_graph_payload(
         register_ret == ACL_SUCCESS,
         "failed to bind Host callback payload to graph lifetime, error code: ", register_ret);
   }
-  it->second->payloads.emplace_back(std::move(payload));
+  return *it->second;
+}
+
+template <typename Payload>
+Payload* retain_host_callback_graph_payload(
+    aclmdlRI model_ri, std::unique_ptr<Payload> payload) {
+  auto* raw_payload = payload.get();
+  std::lock_guard<std::mutex> lock(host_callback_graph_registry_mutex());
+  get_host_callback_graph_registry_locked(model_ri).payloads.emplace_back(std::move(payload));
   return raw_payload;
+}
+
+void retain_selective_graph_destroy_flag(aclmdlRI model_ri, const std::shared_ptr<std::atomic<bool>>& flag) {
+  std::lock_guard<std::mutex> lock(host_callback_graph_registry_mutex());
+  get_host_callback_graph_registry_locked(model_ri).destroyed_flags.emplace_back(flag);
 }
 
 }  // namespace
@@ -3325,10 +3340,7 @@ class SelectiveNativeGraph {
     aclmdlRI model = nullptr;
     TORCH_CHECK(aclmdlRICaptureGetInfo(stream, &status, &model) == ACL_SUCCESS &&
                 status == ACL_MODEL_RI_CAPTURE_STATUS_ACTIVE && model, "selective native requires active capture");
-    auto* callback_owner = new std::shared_ptr<std::atomic<bool>>(destroyed_);
-    const auto callback_result = aclmdlRIDestroyRegisterCallback(model, mark_graph_destroyed, callback_owner);
-    if (callback_result != ACL_SUCCESS) delete callback_owner;
-    TORCH_CHECK(callback_result == ACL_SUCCESS, "selective native graph lifetime registration failed");
+    retain_selective_graph_destroy_flag(model, destroyed_);
     captured_ = true;
     model_ri_ = model;
     capture_stream_ = stream;
@@ -3614,10 +3626,6 @@ class SelectiveNativeGraph {
     selective_owner_spans().erase(this);
     if (--it->second.references == 0) owners.erase(it);
     owner_registered_ = false;
-  }
-  static void mark_graph_destroyed(void* ptr) noexcept {
-    std::unique_ptr<std::shared_ptr<std::atomic<bool>>> flag(static_cast<std::shared_ptr<std::atomic<bool>>*>(ptr));
-    (*flag)->store(true, std::memory_order_release);
   }
   static void check_acl(aclError result, const char* op) { TORCH_CHECK(result == ACL_SUCCESS, op, ": ", result); }
   void create_acl_resources() {
