@@ -317,7 +317,7 @@ def _model(model_name: str, *, utilization: float = 0.9, overrides: dict | None 
     graph_mode="full_and_piecewise",
 )
 @pytest.mark.model(**_model(DEFAULT_MODEL, utilization=0.95, overrides=SMALL_QWEN3_OVERRIDES))
-def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner):
+def test_qwen3_moe_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner):
     """Verify bitwise token/logprob invariance across batch sizes with the default graph configuration."""
     _assert_bitwise_batch_invariance(vllm_runner)
 
