@@ -254,13 +254,18 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         first_positions: torch.Tensor,
     ) -> torch.Tensor:
         """Normalize and rotate compressed Indexer keys."""
+        original_pooled = pooled
+        original_positions = first_positions
         if getattr(self.rotary_emb, "mrope_section", None):
             first_positions = first_positions.transpose(0, 1)
         else:
             first_positions = first_positions[:, 0]
         pooled = pooled.reshape(-1, 1, self.index_head_dim)
         if not self._fused_norm_rope_eligible(pooled, first_positions):
-            raise ValueError("QSA compressed-key fused norm+RoPE ABI is not satisfied")
+            return super().normalize_compressed_keys(
+                original_pooled,
+                original_positions,
+            )
         return self._fused_norm_rope(
             pooled,
             self.k_layernorm,
@@ -378,7 +383,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         )
         q = q_raw.reshape(-1, self.index_n_heads, self.index_head_dim)
         if not self._fused_norm_rope_eligible(q, positions):
-            raise ValueError("QSA query fused norm+RoPE ABI is not satisfied")
+            return super().project_qk(hidden_states, positions)
         q = self._fused_norm_rope(q, self.q_layernorm, positions)
         return q, token_k.reshape(-1, 1, self.index_head_dim)
 
@@ -398,25 +403,46 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             position_rows = qsa_indexer.canonical_qsa_rope_positions(positions)[:num_tokens].to(
                 device=raw_key_cache.device
             )
-        if not self._fused_norm_rope_eligible(token_k, positions):
-            raise ValueError("QSA compressed-key fused norm+RoPE ABI is not satisfied")
-        rotary_cache = self.rotary_emb._match_cos_sin_cache_dtype(token_k)  # noqa: SLF001
-        qsa_compress_groups_with_ratio_fused(
-            token_k[:num_tokens],
-            position_rows,
-            raw_key_cache,
-            raw_metadata.block_table,
-            raw_metadata.token_to_req,
-            raw_metadata.query_start_loc,
-            raw_metadata.logical_positions,
-            compressed_metadata.slot_mapping,
-            self.compress_ratio,
-            rope_position_cache,
-            norm_weight=self.k_layernorm.weight,
-            rotary_cache=rotary_cache,
-            compressed_cache=self.compressed_key_cache.kv_cache,
-            norm_eps=self.k_layernorm.variance_epsilon,
-        )
+        if self._fused_norm_rope_eligible(token_k, positions):
+            rotary_cache = self.rotary_emb._match_cos_sin_cache_dtype(token_k)  # noqa: SLF001
+            qsa_compress_groups_with_ratio_fused(
+                token_k[:num_tokens],
+                position_rows,
+                raw_key_cache,
+                raw_metadata.block_table,
+                raw_metadata.token_to_req,
+                raw_metadata.query_start_loc,
+                raw_metadata.logical_positions,
+                compressed_metadata.slot_mapping,
+                self.compress_ratio,
+                rope_position_cache,
+                norm_weight=self.k_layernorm.weight,
+                rotary_cache=rotary_cache,
+                compressed_cache=self.compressed_key_cache.kv_cache,
+                norm_eps=self.k_layernorm.variance_epsilon,
+            )
+        else:
+            pooled, first_positions = _compress_qsa_groups(
+                token_k[:num_tokens],
+                position_rows,
+                raw_key_cache,
+                raw_metadata.block_table,
+                raw_metadata.token_to_req,
+                raw_metadata.query_start_loc,
+                raw_metadata.logical_positions,
+                compressed_metadata.slot_mapping,
+                self.compress_ratio,
+                rope_position_cache,
+            )
+            normalized = self.normalize_compressed_keys(
+                pooled,
+                first_positions,
+            )
+            _store_qsa_cache_rows(
+                self.compressed_key_cache.kv_cache,
+                compressed_metadata.slot_mapping,
+                normalized,
+            )
         # Keep ring writes after the fused launch: other rows can still read
         # the previous ring contents while producing compressed groups.
         _store_qsa_cache_rows(raw_key_cache, raw_metadata.slot_mapping, token_k[:num_tokens])
@@ -778,7 +804,10 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         if self.layer_name.startswith("mtp."):
             return super()._project_qkv_gate(qkv, positions)
         if not self._main_fused_norm_rope_eligible(qkv, positions):
-            raise ValueError("QSA main-attention fused norm+RoPE ABI is not satisfied")
+            # Graph warmup and high-TP execution can use padded or locally
+            # sharded projection geometry outside the fused kernel ABI.
+            # Preserve correctness through the portable upstream path.
+            return super()._project_qkv_gate(qkv, positions)
 
         # Gather directly from the stable rotary cache using the current graph
         # inputs; padded rows are clamped inside the kernel.

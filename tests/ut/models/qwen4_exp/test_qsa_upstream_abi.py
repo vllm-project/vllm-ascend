@@ -9,9 +9,34 @@ from vllm_ascend.models.qwen4_exp import qsa
 from vllm_ascend.utils import vllm_version_is
 
 
-def test_main_and_draft_qkv_projection_use_upstream_path() -> None:
-    assert "_project_qkv_gate" not in qsa.AscendQwen4ExpQSAAttention.__dict__
-    assert qsa.AscendQwen4ExpQSAAttention._project_qkv_gate is qsa.upstream_qsa.Qwen4ExpQSAAttention._project_qkv_gate
+def test_main_qkv_projection_falls_back_when_fused_abi_is_ineligible(
+    monkeypatch,
+) -> None:
+    layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.layer_name = "model.layers.0.self_attn.attn"
+    monkeypatch.setattr(
+        layer,
+        "_main_fused_norm_rope_eligible",
+        Mock(return_value=False),
+    )
+    expected = (
+        torch.empty(1),
+        torch.empty(1),
+        torch.empty(1),
+        torch.empty(1),
+    )
+    fallback = Mock(return_value=expected)
+    monkeypatch.setattr(
+        qsa.upstream_qsa.Qwen4ExpQSAAttention,
+        "_project_qkv_gate",
+        fallback,
+    )
+    qkv = torch.empty((2, 8))
+    positions = torch.arange(2)
+
+    assert layer._project_qkv_gate(qkv, positions) is expected
+    fallback.assert_called_once_with(qkv, positions)
 
 
 def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> None:
