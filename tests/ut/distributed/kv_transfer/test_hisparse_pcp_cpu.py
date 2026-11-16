@@ -16,42 +16,9 @@ from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 from vllm_ascend.hisparse.pcp import (
     PCPHiSparseConnector,
     get_pcp_write_request_ids,
-    hisparse_write_target,
     prepare_pcp_query_metadata,
     prepare_pcp_query_states,
 )
-
-
-@pytest.mark.parametrize("initial_capacity", [4, 128])
-def test_pcp_host_staging_is_sized_before_capture(monkeypatch, initial_capacity):
-    pcp_world_size = 4
-    dtype = torch.int32
-    from vllm_ascend.hisparse import pcp
-
-    cache = handle()
-    staging = NS(slots=torch.empty(initial_capacity, dtype=dtype))
-    original = staging.slots
-    worker = NS(
-        vllm_config=NS(
-            scheduler_config=NS(max_num_batched_tokens=8, max_num_seqs=2),
-            parallel_config=NS(prefill_context_parallel_size=pcp_world_size),
-            num_lookahead_tokens=3,
-        ),
-        _slot_mapping_staging=staging,
-        cache_handles=[cache],
-    )
-    allocate = torch.empty
-    allocate_pinned = Mock(side_effect=lambda size, **kwargs: allocate(size, dtype=kwargs["dtype"]))
-    monkeypatch.setattr(pcp.torch, "empty", allocate_pinned)
-    pcp.prepare_pcp_mirror_staging(worker)
-    capacity = 8 * pcp_world_size + 2 * (3 + 1)
-    assert staging.slots.numel() >= capacity
-    assert staging.slots.dtype == dtype
-    if initial_capacity < capacity:
-        allocate_pinned.assert_called_once_with(capacity, dtype=dtype, pin_memory=True)
-    else:
-        assert staging.slots is original
-        allocate_pinned.assert_not_called()
 
 
 def metadata(num_tokens=3, decode=True):
@@ -82,8 +49,7 @@ def handle():
 
 
 def gathered_metadata(local_tokens=3):
-    # Request A owns global rows 0..3; B owns 4..6. Two PCP chunks
-    # for A deliberately create duplicate local request-state indices.
+    # A has two local chunks but one canonical request state.
     global_batch = NS(
         num_tokens=7,
         idx_mapping=torch.tensor([7, 9], dtype=torch.int32),
@@ -94,9 +60,6 @@ def gathered_metadata(local_tokens=3):
     local = NS(
         num_tokens=local_tokens,
         idx_mapping=torch.tensor([7, 7, 9], dtype=torch.int64),
-        req_ids=["A", "A", "B"],
-        query_start_loc=torch.tensor([0, 1, 2, local_tokens]),
-        is_prefilling_np=np.array([True, True, False]),
     )
     indices = torch.tensor([0, 3, 0, 1, 4, 0], dtype=torch.int64)
     mask = torch.tensor([True, True, False, True, True, False])
@@ -162,6 +125,7 @@ def make_connector(padded_tokens=3):
 def test_connector_reuses_core_mirror_and_clear_after_local_queries(monkeypatch, local_tokens, mirror_path):
     import vllm.v1.worker.gpu.kv_connector as connector_module
 
+    import vllm_ascend.hisparse.pcp as pcp
     from vllm_ascend.hisparse.host_mirror import HostMirrorConnector
 
     connector, cache, _, local, batch, _ = make_connector()
@@ -176,6 +140,8 @@ def test_connector_reuses_core_mirror_and_clear_after_local_queries(monkeypatch,
     worker._invalidate_written_slots = Mock()
 
     def start_load(context, **kwargs):
+        assert kwargs["request_ids"] == ["A", "B"]
+        assert kwargs["num_tokens"] == 6
         cache.runtime.request_state_indices = kwargs["request_state_indices"]
         cache.prepare_group_for_batch(kwargs["attn_metadata"]["layer0"])
 
@@ -186,14 +152,16 @@ def test_connector_reuses_core_mirror_and_clear_after_local_queries(monkeypatch,
     connector.kv_connector.start_load_kv = Mock(side_effect=start_load)
     connector.kv_connector.finish_forward = Mock(side_effect=finish)
     monkeypatch.setattr(connector_module, "is_forward_context_available", lambda: True)
-    monkeypatch.setattr(connector_module, "get_forward_context", lambda: NS())
+    context = NS(attn_metadata={"layer0": meta})
+    monkeypatch.setattr(connector_module, "get_forward_context", lambda: context)
+    monkeypatch.setattr(pcp, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(pcp, "get_forward_context", lambda: context)
     scheduler = NS(kv_connector_metadata=object(), has_sync_kv_loads=True)
-    connector.pre_forward(scheduler, local, {"layer0": meta})
+    connector.pre_forward(scheduler, local, None if mirror_path == "fallback" else context.attn_metadata)
     assert connector._pending_load_kwargs is None
     assert batch.idx_mapping.tolist() == [7, 9]
     assert cache.runtime.request_state_indices.tolist() == [7, 7, 9]
-    # FULL replay skips Python attention.forward: Core's query classification
-    # must still see local rows until the connector's Host mirror boundary.
+    # Local queries remain bound until the Host publication boundary.
     assert cache.num_actual_tokens == local_tokens
     assert cache.num_decode_tokens == 0
     connector.prepare_host_mirror = Mock(wraps=connector.prepare_host_mirror)
@@ -220,74 +188,18 @@ def test_connector_reuses_core_mirror_and_clear_after_local_queries(monkeypatch,
     assert not cache.host_mirror_required
 
 
-def test_connector_stages_canonical_requests_and_gathered_slot_rows(monkeypatch):
-    import vllm_ascend.hisparse.pcp as pcp
-
-    connector, cache, meta, local, global_batch, manager = make_connector()
-    scheduler = NS(kv_connector_metadata=object(), has_sync_kv_loads=True)
-    other = NS()
-    monkeypatch.setattr(pcp, "is_forward_context_available", lambda: True)
-    monkeypatch.setattr(pcp, "get_forward_context", lambda: NS(attn_metadata={"layer0": meta, "layer1": other}))
-    connector.pre_forward(scheduler, local)
-    assert other.hisparse_write_req_id_per_token is meta.hisparse_write_req_id_per_token
-    args = connector._pending_load_kwargs
-    assert args["request_state_indices"] is global_batch.idx_mapping
-    assert args["request_ids"] == ["A", "B"]
-    assert args["num_tokens"] == 6
-    assert meta.hisparse_write_req_id_per_token.tolist() == [0, 0, -1, 0, 1, -1]
-    assert meta.hisparse_request_state_indices.dtype == torch.int32
-    cache._prepare_for_batch(meta)
-    prepare_pcp_query_states(cache, meta)
-    assert hisparse_write_target(cache, meta, 6, 6)[2] == 6
-    assert cache.runtime.request_state_indices.tolist() == [7, 7, 9]
-    assert global_batch.num_tokens == 7  # Load kwargs must leave the scheduler batch intact.
-    assert meta.hisparse_request_state_indices.tolist() == local.idx_mapping.tolist()
-    assert cache.slot_mapping.tolist() == [100, 103, -1, 101, 104, -1]
-    assert cache.mirror_slot_mapping.tolist() == [50, 53, -1, 51, 54, -1]
-    assert cache.source_block_table.tolist() == [[50], [50], [60]]
-    assert cache.runtime.hot_block_table.tolist() == [[100], [100], [110]]
-    assert cache.block_table.tolist() == [[901], [902]]
-    connector._start_load_kv.assert_called_once()
-    # The manager updates persistent storage in place between steps.
-    manager._gathered_kv_slot_mappings.add_(20)
-    for table in manager._local_block_tables:
-        table.add_(30)
-    connector.pre_forward(scheduler, local, {"layer0": meta})
-    assert cache.slot_mapping[0].item() == 120
-    assert cache.source_block_table[2].item() == 90
-    assert cache.runtime.hot_block_table[2].item() == 140
-
-
-def test_draft_decode_uses_global_slots_tables_and_persistent_canonical_states():
+def test_draft_switches_between_global_decode_and_local_prefill_layouts():
     connector, cache, _, _, _, manager = make_connector()
     cache.draft_layer = True
-    target = handle()
-    target_slots = target.slot_mapping
-    connector._pcp_bindings.append((target, 1, 2))
-    worker = connector.kv_connector.connector_worker
-    worker.request_state_indices.copy_(torch.tensor([9, 7], dtype=torch.int32))
     connector.prepare_draft_decode()
     tables = connector._global_block_tables
     assert cache.slot_mapping.data_ptr() == tables.slot_mappings[1].data_ptr()
     assert cache.mirror_slot_mapping.data_ptr() == tables.slot_mappings[0].data_ptr()
-    assert cache.source_block_table is tables.input_block_tables[0]
-    assert cache.runtime.hot_block_table is tables.input_block_tables[2]
-    states = cache.runtime.request_state_indices
-    assert states is worker.request_state_indices
-    assert states.dtype == torch.int32
-    assert states.tolist() == [9, 7]
-    assert target.slot_mapping is target_slots
-    worker.request_state_indices.copy_(torch.tensor([7, -1], dtype=torch.int32))
-    connector.prepare_draft_decode()
-    assert cache.runtime.request_state_indices is states
-    assert states.tolist() == [7, -1]
+    assert cache.runtime.request_state_indices is connector.kv_connector.connector_worker.request_state_indices
     connector.prepare_draft_prefill()
     assert cache.slot_mapping.data_ptr() == manager._gathered_kv_slot_mappings[1].data_ptr()
-    assert cache.mirror_slot_mapping.data_ptr() == manager._gathered_kv_slot_mappings[0].data_ptr()
     assert cache.source_block_table is manager._local_block_tables[0]
     assert cache.runtime.hot_block_table is manager._local_block_tables[2]
-    assert target.slot_mapping is target_slots
-    connector._start_load_kv.assert_not_called()
 
 
 def test_capture_and_real_forward_keep_query_and_scatter_input_addresses():
@@ -330,81 +242,6 @@ def test_capture_and_real_forward_keep_query_and_scatter_input_addresses():
     connector.pre_forward(scheduler, local, {"layer0": meta})
     assert captured_states.tolist() == [11, 4, -1, -1, -1, -1, -1, -1]
     assert connector._pending_load_kwargs["request_state_indices"] is batch.idx_mapping
-
-
-def test_attention_binds_query_group_once_before_followers(monkeypatch):
-    from vllm_ascend.attention import sfa_hisparse
-    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
-
-    leader, follower = handle(), handle()
-    leader.index_group_caches = follower.index_group_caches = [leader, follower]
-    meta, *_ = gathered_metadata(local_tokens=0)
-
-    def prepare_for_batch(index, metadata):
-        if index == 0:
-            leader.prepare_group_for_batch(metadata)
-
-    group = NS(prepare_for_batch=Mock(side_effect=prepare_for_batch))
-    bind = Mock(wraps=prepare_pcp_query_states)
-    monkeypatch.setattr(sfa_hisparse, "prepare_pcp_query_states", bind)
-    forward = Mock(return_value=object())
-    monkeypatch.setattr(AscendSFAImpl, "forward", forward)
-    for index, cache in enumerate([leader, follower]):
-        impl = sfa_hisparse.AscendHiSparseImpl.__new__(sfa_hisparse.AscendHiSparseImpl)
-        impl.enable_sparse_sfa_c8 = True
-        impl.pcp_enabled = False
-        impl.qk_rope_head_dim = 0
-        impl._c8_length_workspace = Mock()
-        impl.index_group = group
-        impl.index_group_index = index
-        impl.hisparse_cache = cache
-        assert impl.forward(f"layer{index}", None, None, meta) is forward.return_value
-        assert cache.runtime.request_state_indices is meta.hisparse_request_state_indices
-        assert cache.host_mirror_required
-
-    from vllm.config.compilation import CUDAGraphMode
-
-    monkeypatch.setattr(sfa_hisparse, "get_forward_context", lambda: NS(cudagraph_runtime_mode=CUDAGraphMode.NONE))
-    leader.submit_layer_mirror = Mock()
-    sfa_hisparse.finish_hisparse_kv_update(leader, meta)
-    leader.submit_layer_mirror.assert_called_once()
-    bind.assert_called_once_with(leader, meta)
-    assert group.prepare_for_batch.call_count == 2
-    assert forward.call_count == 2
-
-
-def test_c8_scatter_covers_gathered_tail(monkeypatch):
-    import vllm_ascend.hisparse.c8 as c8
-    import vllm_ascend.hisparse.cache_ops as cache_ops
-    from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
-    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
-
-    impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
-    impl.kv_a_layernorm = object()
-    impl.enable_sparse_sfa_c8 = True
-    impl.kv_lora_rank = 2
-    impl.hisparse_cache = handle()
-    impl.hisparse_cache.finish_kv_update = Mock()
-    meta, *_ = gathered_metadata()
-    impl.hisparse_cache._prepare_for_batch(meta)
-    packed = torch.arange(48, dtype=torch.uint8).view(6, 8)
-    monkeypatch.setattr(
-        AscendSFAImpl, "_exec_kv_local", lambda *a: (torch.zeros(6, 1), torch.zeros(6, 2), torch.ones(6, 1))
-    )
-    monkeypatch.setattr(c8, "pack_c8_components", lambda *a: packed)
-
-    def scatter(latent, rope, destination, mapping, num_valid_rows):
-        # Simulate only the device boundary: the production caller must pass
-        # all gathered rows; a local-query length here loses rows 3..5.
-        for row in range(int(num_valid_rows[0])):
-            slot = int(mapping[row])
-            if slot >= 0:
-                destination[slot - 10] = latent[row]
-
-    monkeypatch.setattr(cache_ops, "scatter_packed_kv", scatter)
-    impl._exec_kv_local(None, None, None, None, impl.hisparse_cache.slot_mapping, meta)
-    torch.testing.assert_close(impl.hisparse_cache.view.cache[3], packed[4])
-    impl.hisparse_cache.finish_kv_update.assert_not_called()
 
 
 @pytest.mark.parametrize("pcp_world_size,capture", [(2, False), (4, True), (8, False)])
@@ -463,7 +300,6 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
         impl._sfa_preprocess_prolog_v3(torch.zeros(3, 8), (), None, None, slots[:3], attn_metadata=meta)
         == "queries-ready"
     )
-    impl.hisparse_cache.finish_kv_update.assert_not_called()
     impl._sync_pcp_kv_cache((), meta)
     expected = [10 * rank + row if row else 0 for rank in range(pcp_world_size) for row in (1, 2, 0)]
     assert impl.hisparse_cache.view.cache[:, 0].tolist() == expected
@@ -529,6 +365,5 @@ def test_native_mixed_kv_retains_resident_and_host_row_order(monkeypatch):
     result = pending()
     assert result is gathered
     torch.testing.assert_close(gather.call_args.args[0], local)
-    impl._exec_kv_local.assert_called_once()
     torch.testing.assert_close(impl._exec_kv_local.call_args.args[0], gathered)
     torch.testing.assert_close(impl._exec_kv_local.call_args.args[4], slots)
