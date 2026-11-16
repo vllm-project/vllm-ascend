@@ -1731,6 +1731,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 
         worker = self._make_worker()
         worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        worker.kv_send_thread.request_queue = MagicMock()
         store = AscendStoreConnector.__new__(AscendStoreConnector)
         store.can_put = True
         store.use_layerwise = False
@@ -1802,6 +1803,8 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             connector.wait_for_save()
 
         draft_ready_event.record.assert_called_once_with(compute_stream)
+        worker.kv_send_thread.request_queue.join.assert_called_once_with()
+        worker.kv_send_thread.raise_if_failed.assert_called_once_with()
         self.assertEqual(
             trace,
             ["record draft event", "enqueue draft copy", "wait for draft copy", "record save event", bytes([37, 91])],
