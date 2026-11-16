@@ -44,11 +44,7 @@ def _count_allgather_kernel(
         local_ids = physical_ids - local_start.to(tl.int64)
         eligible = in_bounds & valid_token & (local_ids >= 0) & (local_ids < local_count)
         safe_ids = tl.where(eligible, local_ids, 0).to(tl.int32)
-        if NUM_BINS == 1:
-            # A single bin is a reduction; avoid the backend's 1-bin histogram conversion.
-            local_counts += tl.sum(eligible.to(tl.int32), 0).to(tl.int64)
-        else:
-            local_counts += tl.histogram(safe_ids, NUM_BINS, mask=eligible).to(tl.int64)
+        local_counts += tl.histogram(safe_ids, NUM_BINS, mask=eligible).to(tl.int64)
     bins = tl.arange(0, NUM_BINS)
     tl.atomic_add(counts_ptr + bins, local_counts, mask=(bins < local_count) & (local_counts != 0), sem="relaxed")
 
@@ -91,6 +87,7 @@ def count_allgather_tokens_triton(
         MASK_STRIDE=token_mask.stride(0),
         TOPK=topk_ids.shape[1],
         BLOCK_SIZE=ASSIGNMENTS_PER_TILE,
-        NUM_BINS=triton.next_power_of_2(local_expert_count),
+        # Keep a vector accumulator: the backend cannot lower a one-element loop-carried tensor.
+        NUM_BINS=max(2, triton.next_power_of_2(local_expert_count)),
     )
     return counts

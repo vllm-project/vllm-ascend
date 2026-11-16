@@ -1,81 +1,77 @@
 # EPLB all-gather route counting
 
-`count_allgather_tokens_triton(ids, mask, start, count)` replaces the NPU
-implementation of `distributed/eplb/tensor_ops.py::count_allgather_tokens`.
-CPU inputs retain the existing Torch reference.
+`count_allgather_tokens_triton(ids, mask, start, count)` implements the NPU path
+of `distributed/eplb/tensor_ops.py::count_allgather_tokens`. CPU inputs retain
+the existing Torch reference. Inputs are INT32/INT64 physical expert IDs [T,K],
+a BOOL token mask [T], and the nonnegative local start and positive count C.
+Output is a fresh INT64 [C] tensor: `out[e] = sum(mask[t] and ids[t,j] == start+e)`.
+Repeated routes count separately; masked, negative and nonlocal routes count zero.
+Strided inputs and empty T/K are supported.
 
-Inputs are physical expert IDs `[T,K]` (INT32 or INT64), an aligned BOOL token
-mask `[T]`, and the nonnegative local expert start and positive local count C.
-Strided inputs are supported. Output is a fresh INT64 `[C]` tensor, defined by
-`out[e] = sum(mask[t] and ids[t,j] == start+e for t,j)`.
-Duplicate routes each count once; padded, masked, negative and nonlocal routes
-contribute zero. Empty T or K returns zeros.
+The output is zero-initialized. Fixed 512-route tiles are balanced across a grid
+bounded by the Vector Core count from the shared capability helper. Each program
+accumulates a private INT64 histogram across all its tiles, then atomically merges
+its nonzero bins into the output once. Histogram length is the next power of two
+of C, with a minimum of two: the A5 backend failed to lower a one-element
+loop-carried tensor, including an attempted sum reduction. Padding resolves that
+case without changing the 128-bin main case. The caller selects the current NPU,
+following the normal worker convention.
 
-Torch initializes the output on the input device. A Triton kernel then visits
-512-assignment tiles and distributes them evenly across a grid bounded by the
-Vector Core count from the shared device-property helper. Each program retains
-an INT64 expert histogram across its assigned tiles, then merges nonzero bins
-with one vectorized atomic add. Histogram length is the next power of two of C;
-the 128-expert case has 128 private counters (1 KiB of logical state).
-Invalid lanes are excluded from each tile histogram. IDs retain their width
-before localization and eligibility checks. A single expert uses a sum reduction
-because the tested A5 compiler fails to convert a one-bin histogram.
-No tensor values are read on the host. Intermediate global index, clamped-index
-and eligibility INT64 tensors are eliminated. The caller must select the current
-NPU, matching the worker convention used by the shared capability helper.
+No host reads of tensor values or global intermediate index/mask tensors are
+introduced. The 128-bin logical accumulator is 1 KiB. Saved compiler IR confirms
+the loop-carried histogram and atomic store outside the loop; final physical UB
+placement and compiler-internal workspace have not been established.
 
-The kernel follows the tiled scheduling idea used by the V2 penalty bincount,
-but does not perform prompt-flag generation or bitmap packing. It implements
-the specific 0/1 route-count scatter, not a general weighted scatter API.
+The caller still owns gathering/padding, record-enable state and persistent
+load accumulation. This is the existing 0/1 route-count contract, not a general
+weighted scatter API.
 
-The caller still owns mask gathering and padding alignment, record-enable state,
-and persistent load accumulation. This change does not route additional hardware
-or communication modes into the all-gather EPLB path.
+## Validation
 
-The current local-histogram revision is a draft awaiting A3 and A5 acceptance.
-The initial A5 trial failed on the one-bin histogram; the 128-bin trial reached
-binary loading but failed to map a temporary shared library from `/tmp`.
-The single-bin reduction and project-local temporary directory are prepared,
-but the rerun was interrupted by SSH connectivity failure. A3 initialization
-was blocked by thread creation failure in the selected isolated containers.
-There are no completed correctness or performance results for this revision.
-Physical UB placement has not yet been confirmed from compiler evidence.
+Both A3 Ascend910_9362 (NpuArch 2201) and A5 Ascend950DT_9582 (NpuArch 3510)
+passed 81 tests with exact integer equality, including mutable-input Graph replay.
+Cases include both ID dtypes, strides, empty inputs, single expert, 511/512/513
+route boundaries, non-power-of-two expert counts, hotspots, disabled tokens,
+nonlocal and large INT64 IDs. The kernel, wrapper and helper import hashes match
+the tested source. The package snapshot was taken from this PR and the final
+minimum-two-bin correction overlaid before both device runs.
 
-The following results belong to the previous direct-atomic implementation
-at commit `28ccdd63f5ebbac332ed10e5c3b003fb4501b28d`, not the histogram revision.
-A5 validation on Ascend950DT_9582 (CANN 9.2.1, Torch-NPU 2.10.0.post7,
-Triton-Ascend 3.6.0.post2) passed all 50 integer-exact differential cases and
-the mutable-input graph replay test. A3 and model-level integration remain
-unvalidated. INT64 atomic compatibility on other backends is not inferred
-from the existing INT32 penalty bincount implementation.
-
-Synthetic tests exercise the actual `count_allgather_tokens` dispatch, tails,
-strides, local ranges, repeated IDs, masks, empty inputs and mutable graph replay:
+Both environments: CANN 9.2.1, Python 3.12.16, Torch 2.10.0+cpu,
+Torch-NPU 2.10.0.post7, Triton 3.6.0 / Triton-Ascend 3.6.0.post2.
+A3 driver: 26.2.rc1.b081; A5 driver: 25.6.rc3.1.
 
 ```bash
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_eplb_count.py
 ```
 
-For synthetic INT64 IDs `[10240,8]`, output `[128]` and local start 7, complete
-function Graph timing gave the following medians. Each Graph contains 20 calls;
-after 5 warmup replays, 10 samples alternate baseline/candidate execution order.
-NPU Event replay duration is divided by 20. Both implementations are checked
-against the CPU reference before and after measurement.
+For standalone validation, the test file was copied outside the e2e tree to avoid
+unrelated conftest setup, with the tested package first on PYTHONPATH.
 
-| Distribution | Torch count (ms) | Triton count (ms) | Speedup |
-| --- | ---: | ---: | ---: |
-| Uniform local routes, all tokens valid | 2.2001 | 2.1336 | 1.031x |
-| All routes target one local expert | 13.9165 | 13.4789 | 1.032x |
-| Mixed local/nonlocal routes and masked tokens | 2.3427 | 1.4117 | 1.660x |
+## Complete-function Graph performance
 
-Uniform IDs cycle through `start + [0,127]`. Hotspot IDs all equal `start`.
-Mixed IDs cycle through `[start-2,start+129]`, with every third token disabled.
-These synthetic distributions do not establish production-model speedups.
+Synthetic INT64 IDs [10240,8], output [128], local start 7. Each Graph captures
+20 complete count calls; after 5 warmup replays, 10 samples alternate original
+Torch/candidate execution order. NPU Event replay duration is divided by 20;
+medians are below. Outputs are checked before and after measurement.
 
-Separate full msprof captures for the uniform case show 9 compute kernels per
-original count call versus 2 for the candidate (zeroing and counting). After
-excluding 5 warmup calls, 20 samples give mean scatter-kernel durations of
-2140.433 us for Torch and 2145.109 us for Triton. The complete function improves
-slightly while the counting kernels take similar time; hotspot contention
-remains expensive. These eager profiler durations are distinct from Graph
-Event timing.
+| Device | Distribution | Torch ms | Histogram ms | Torch / histogram |
+| --- | --- | ---: | ---: | ---: |
+| A3 | uniform | 0.6136 | 0.6401 | 0.959x |
+| A3 | hot | 0.7204 | 0.6174 | 1.167x |
+| A3 | mixed | 0.6192 | 0.6466 | 0.958x |
+| A5 | uniform | 2.2008 | 1.0258 | 2.145x |
+| A5 | hot | 13.9194 | 1.0270 | 13.554x |
+| A5 | mixed | 2.3428 | 1.0272 | 2.281x |
+
+Uniform IDs cycle start+[0,127]; hot IDs equal start; mixed IDs cycle
+[start-2,start+129], with every third token disabled. These are synthetic operator
+results, not production-model speedups. A3 independent repeat speedups were
+0.923x / 1.136x / 0.968x (uniform / hot / mixed). Its non-hot cases regressed
+in both runs, by about 3-8.3% in latency. This is not an unconditional A3 win.
+
+Separate full msprof uniform runs retained 20 calls after 5 warmups. Original
+Torch uses 9 compute kernels/call; the histogram path uses 2. Mean counting-kernel
+durations were 730.851 / 664.864 us (Torch / histogram) on A3 and
+2140.067 / 1002.915 us on A5. These eager task durations are distinct from the
+Graph complete-function timings above. Model/serving validation and repository
+CI remain pending; the PR stays draft for review of the A3 tradeoff.
