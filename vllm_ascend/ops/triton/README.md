@@ -107,6 +107,7 @@ configuration rather than the runner input or sampling interface.
 | [fused_gdn_gating.py](fused_gdn_gating.py) | Model/attention primitive or shared utility |
 | [gdn/gdn_recoverssm_commit.py](gdn/gdn_recoverssm_commit.py) | GDN RecoverSSM commit. [Operator documentation](docs/gdn_recoverssm_commit.md) |
 | [gdn/gdn_recoverssm_verify.py](gdn/gdn_recoverssm_verify.py) | GDN RecoverSSM verify. [Operator documentation](docs/gdn_recoverssm_verify.md) |
+| [gdn/recoverssm_gdn.py](gdn/recoverssm_gdn.py) | GDN RecoverSSM operators and commit context; [design](../../../docs/source/developer_guide/Design_Documents/qwen_gdn_recoverssm.md) |
 | [glm5_next_cann_keypool.py](glm5_next_cann_keypool.py) | Model/attention primitive or shared utility |
 | [glm5_next_kpool_tail_compress.py](glm5_next_kpool_tail_compress.py) | Model/attention primitive or shared utility |
 | [glm5_next_lightning_indexer.py](glm5_next_lightning_indexer.py) | Model/attention primitive or shared utility |
@@ -135,6 +136,7 @@ configuration rather than the runner input or sampling interface.
 | [mamba/compact_conv_state.py](mamba/compact_conv_state.py) | [RecoverSSM convolution compaction](docs/compact_conv_state.md) |
 | [mamba/lightning_attn.py](mamba/lightning_attn.py) | Model state/attention |
 | [mamba/prepare_commit_plan.py](mamba/prepare_commit_plan.py) | [RecoverSSM commit planning](docs/prepare_commit_plan.md) |
+| [mamba/recoverssm.py](mamba/recoverssm.py) | Shared RecoverSSM plan and convolution compaction; [operator documentation](docs/kda_recoverssm.md) |
 | [mamba/state_index.py](mamba/state_index.py) | Model state/attention |
 | [mamba/state_ops.py](mamba/state_ops.py) | Model state/attention |
 | [msa/minimax_qknorm_rope_cache.py](msa/minimax_qknorm_rope_cache.py) | Model sparse attention |

@@ -42,7 +42,7 @@ def test_select_always_uses_cann_lightning_v2(monkeypatch) -> None:
         return sentinel
 
     monkeypatch.setattr(ascend_qsa, "qsa_select_paged_tokens_lightning_v2", lightning)
-    result = _make_indexer()._select(torch.zeros(1, 4, 128), metadata, None)
+    result = _make_indexer()._select(torch.zeros(1, 4, 128), _select_metadata(), None)
 
     assert result is sentinel
     assert len(calls) == 1

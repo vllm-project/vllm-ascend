@@ -26,7 +26,6 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask, TargetDeviceMetadata
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.attn_utils import (
@@ -204,7 +203,7 @@ def test_layerwise_connector_defers_mamba_pre_copy(mock_has_group, mock_get_grou
     spec = _mamba_spec()
     kv_cache_config = _kv_cache_config(spec)
     state = _make_defer_state(kv_cache_config)
-    ctx = MagicMock()
+    ctx = MagicMock(is_initialized=True)
     # vLLM main removed `MambaHybridModelState._ensure_align_ctx`; the
     # Ascend override must resolve the context built in initialize_kv_cache.
     state._mamba_ctx = ctx
@@ -231,70 +230,42 @@ def test_layerwise_connector_defers_mamba_pre_copy(mock_has_group, mock_get_grou
     connector.finish_mamba_state_copy.assert_called_once()
 
 
-def test_ensure_align_ctx_falls_back_to_mamba_ctx():
-    # vLLM main removed `MambaHybridModelState._ensure_align_ctx`; the Ascend
-    # override must return the context built in initialize_kv_cache instead of
-    # calling the (now absent) inherited helper.
+def test_ensure_align_ctx_preserves_initialized_persistent_tables():
     spec = _mamba_spec()
     kv_cache_config = _kv_cache_config(spec)
     state = _make_defer_state(kv_cache_config)
-    ctx = MagicMock()
-    state._mamba_ctx = ctx
-    assert state._ensure_align_ctx(kv_cache_config, [0], ()) is ctx
-
-
-def test_ensure_align_ctx_lazily_recreates_mamba_ctx():
-    # The align context can be absent when preprocess_state runs (e.g. it was
-    # torn down by the CUDA-graph memory profiler), so the main-lane override
-    # must lazily (re)create it like the v0.31.0 base helper did.
-    spec = _mamba_spec()
-    kv_cache_config = _kv_cache_config(spec)
-    state = _make_defer_state(kv_cache_config)
-    state._mamba_state_copy_funcs = None
-    state.max_num_reqs = 4
-    state.device = torch.device("cpu")
-    state.vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
-    copy_funcs = {"mamba": [MagicMock()]}
-    state.model = SimpleNamespace(get_mamba_state_copy_funcs=MagicMock(return_value=copy_funcs))
-
-    ctx = MagicMock()
-    ctx.is_initialized = False
-    with (
-        patch(
-            "vllm_ascend.worker.v2.model_states.mamba_hybrid.get_mamba_groups",
-            return_value={spec: [0]},
-        ),
-        patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.validate_mamba_state_copy_funcs"),
-        patch(
-            "vllm_ascend.worker.v2.model_states.mamba_hybrid.MambaSpecDecodeGPUContext.create",
-            autospec=True,
-            return_value=ctx,
-        ) as mock_create,
-    ):
-        block_table = torch.zeros(3, dtype=torch.int32)
-        result = state._ensure_align_ctx(kv_cache_config, [0], (block_table,))
-        ctx.is_initialized = True
-        assert state._ensure_align_ctx(kv_cache_config, [0], (block_table,)) is ctx
-
-    assert result is ctx
-    assert state._mamba_ctx is ctx
-    assert state._mamba_state_copy_funcs is copy_funcs
-    mock_create.assert_called_once()
-    # Enforce the installed upstream signature, rather than accepting any
-    # keyword/omitted argument through an unconstrained MagicMock.
-    if not vllm_version_is("0.33.0"):
-        assert (
-            mock_create.call_args.kwargs["forward_context"]
-            is state.vllm_config.compilation_config.static_forward_context
-        )
-    else:
-        assert "forward_context" not in mock_create.call_args.kwargs
-    ctx.initialize_from_forward_context.assert_called_once_with(
-        kv_cache_config,
-        state.vllm_config.compilation_config.static_forward_context,
-        copy_funcs,
-        [block_table],
+    persistent_tables = torch.tensor([11, 22], dtype=torch.int64)
+    aligned_index_tables = torch.tensor([33, 44], dtype=torch.int64)
+    ctx = SimpleNamespace(
+        is_initialized=True,
+        block_table_ptrs=persistent_tables,
+        aligned_index_block_table_ptrs=aligned_index_tables,
+        initialize_from_forward_context=MagicMock(),
     )
+    state._mamba_ctx = ctx
+    batch_tables = (torch.tensor([[7], [2]], dtype=torch.int32),)
+
+    assert state._ensure_align_ctx(kv_cache_config, [0], batch_tables) is ctx
+
+    # Incoming attention tables are batch ordered. They must not replace the
+    # persistent request-slot pointers installed by initialize_kv_cache.
+    assert ctx.block_table_ptrs is persistent_tables
+    assert ctx.aligned_index_block_table_ptrs is aligned_index_tables
+    ctx.initialize_from_forward_context.assert_not_called()
+
+
+@pytest.mark.parametrize("context_state", ["missing", "uninitialized"])
+def test_ensure_align_ctx_rejects_missing_initialization(context_state):
+    spec = _mamba_spec()
+    kv_cache_config = _kv_cache_config(spec)
+    state = _make_defer_state(kv_cache_config)
+    state._mamba_ctx = None if context_state == "missing" else SimpleNamespace(is_initialized=False)
+    with (
+        patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.MambaSpecDecodeGPUContext.create") as mock_create,
+        pytest.raises(RuntimeError, match="initialize_kv_cache"),
+    ):
+        state._ensure_align_ctx(kv_cache_config, [0], (torch.zeros(3, dtype=torch.int32),))
+    mock_create.assert_not_called()
 
 
 @patch("vllm.v1.worker.mamba_utils.precopy_mamba_align_fused_kernel")

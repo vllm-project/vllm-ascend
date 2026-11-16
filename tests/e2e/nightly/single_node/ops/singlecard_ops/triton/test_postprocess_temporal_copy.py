@@ -164,7 +164,7 @@ def test_mixed_postprocess_replay_uses_updated_metadata(
         values = new_counts if precomputed else [count - acc for count, acc in zip(new_counts, accept_counts)]
         computed.copy_(tensor(values, torch.int32))
         accepted_out.fill_(-99)
-        for batch, req in enumerate(reordering):
+        for req in reordering:
             if req < 0:
                 continue
             running = new_counts[req] - accept_counts[req] + 1
@@ -178,15 +178,17 @@ def test_mixed_postprocess_replay_uses_updated_metadata(
             if src == dst and bias == 0:
                 continue
             for state, offset in enumerate(offsets):
+                # These tables persist in request-slot order; mapping only
+                # selects which request slots participate in this batch.
                 if state_kinds[state] == "conv":
                     copy_size = (conv_width - bias) * conv_inner * 2
-                    src_block = batch * num_blocks + src
+                    src_block = req * num_blocks + src
                     src_offset = offset + bias * conv_inner * 2
                 else:
                     copy_size = sizes[state]
-                    src_block = batch * num_blocks + src + bias
+                    src_block = req * num_blocks + src + bias
                     src_offset = offset
-                expected[state][batch * num_blocks + dst, offset : offset + copy_size] = initial[state][
+                expected[state][req * num_blocks + dst, offset : offset + copy_size] = initial[state][
                     src_block, src_offset : src_offset + copy_size
                 ]
         if graph_mode:
@@ -196,6 +198,141 @@ def test_mixed_postprocess_replay_uses_updated_metadata(
         for actual, reference in zip(storage, expected):
             assert torch.equal(actual.cpu(), reference)
         assert torch.equal(accepted_out.cpu(), expected_out)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+@pytest.mark.parametrize("mapping_kind", ["v1-none", "identity", "permuted", "sparse", "padded"])
+@pytest.mark.parametrize("dim_first", [False, True], ids=["SD", "DS"])
+@pytest.mark.parametrize("tiles", [1, 4])
+def test_postprocess_uses_persistent_request_slot_tables(mapping_kind, dim_first, tiles):
+    """A mapped batch selects persistent request rows for every state group.
+
+    Only two live requests participate out of eight persistent request slots.
+    Whole-buffer CPU references also protect all other blocks and row padding.
+    """
+    max_slots, num_blocks = 8, 8
+    mappings = {
+        "v1-none": None,
+        "identity": [0, 1],
+        "permuted": [1, 0],
+        "sparse": [7, 2],
+        "padded": [7, -1, 2],
+    }
+    selected = mappings[mapping_kind]
+    num_requests = 2 if selected is None else len(selected)
+    request_slots = list(range(num_requests)) if selected is None else selected
+    assert num_requests < max_slots
+
+    conv_width, conv_dims, temporal_elements = 7, 13, 16384
+    conv_bytes, temporal_bytes = conv_width * conv_dims * 2, temporal_elements * 4
+    kinds = ("conv", "temporal", "conv", "temporal")
+    groups = (0, 0, 1, 1)
+    sizes = [conv_bytes if kind == "conv" else temporal_bytes for kind in kinds]
+    strides = [size + 64 for size in sizes]
+    storage = [
+        torch.randint(0, 256, (max_slots * num_blocks, stride), dtype=torch.uint8, device="npu") for stride in strides
+    ]
+    initial = [data.cpu() for data in storage]
+    expected = [data.clone() for data in initial]
+    cpu_tables = [
+        torch.arange(max_slots * num_blocks, dtype=torch.int32).reshape(max_slots, num_blocks),
+        ((torch.arange(max_slots * num_blocks, dtype=torch.int32) * 7 + 3) % (max_slots * num_blocks)).reshape(
+            max_slots, num_blocks
+        ),
+    ]
+    tables = [table.to("npu") for table in cpu_tables]
+
+    def tensor(values, dtype=torch.int64):
+        return torch.tensor(values, dtype=dtype, device="npu")
+
+    # Slots0/2 reset then skip exact self-copy; slot1 copies distinct blocks.
+    # Slot7 shifts within its running block (bias3) and resets acceptance,
+    # coupling the copy result to the next step's neutral accepted count.
+    # The unused decisions are deliberately nontrivial, so accidental accesses
+    # outside the selected slots remain visible in whole-state comparisons.
+    accept_counts = [1, 2, 1, 1, 3, 1, 4, 4]
+    new_counts = [128, 128, 128, 127, 128, 129, 128, 128]
+    src_columns = [0, 3, 0, 3, 3, 3, 3, 0]
+    accepted = tensor(accept_counts, torch.int32)
+    accepted_out = tensor([-99] * max_slots, torch.int32)
+    assert accepted.data_ptr() != accepted_out.data_ptr()
+    mapping = None if selected is None else tensor(selected, torch.int32)
+    args = (
+        accepted,
+        tensor(src_columns, torch.int32),
+        None,
+        tensor(new_counts, torch.int32),
+        None,
+        tensor([table.data_ptr() for table in tables]),
+        num_blocks,
+        tensor([data.data_ptr() for data in storage]),
+        tensor(strides),
+        tensor([2 if kind == "conv" else 4 for kind in kinds]),
+        tensor([(1 if dim_first else conv_dims) if kind == "conv" else temporal_elements for kind in kinds]),
+        tensor([conv_width if kind == "conv" else 0 for kind in kinds], torch.int32),
+        tensor(groups, torch.int32),
+        tensor([conv_dims if kind == "conv" and dim_first else 0 for kind in kinds], torch.int32),
+        tensor([conv_width * 2 if kind == "conv" and dim_first else 0 for kind in kinds]),
+        accepted_out,
+        mapping,
+        num_requests,
+    )
+    immutable = [arg for arg in args if isinstance(arg, torch.Tensor) and arg is not accepted_out] + tables
+    immutable_before = [arg.cpu() for arg in immutable]
+    assert sum(data.numel() * data.element_size() for data in storage + immutable + [accepted_out]) < 64 * 1024**2
+
+    expected_out = torch.full((max_slots,), -99, dtype=torch.int32)
+    for req in request_slots:
+        if req < 0:
+            continue
+        running = new_counts[req] - accept_counts[req] + 1
+        aligned = new_counts[req] // 128 * 128
+        if aligned < running:
+            continue
+        bias = aligned - running
+        src, dst = src_columns[req], aligned // 128 - 1
+        if src == dst:
+            expected_out[req] = 1
+        if src == dst and bias == 0:
+            continue
+        for state, kind in enumerate(kinds):
+            table = cpu_tables[groups[state]]
+            dest_block = int(table[req, dst])
+            if kind == "temporal":
+                source_block = int(table[req, src + bias])
+                expected[state][dest_block, :temporal_bytes] = initial[state][source_block, :temporal_bytes]
+            elif dim_first:
+                source_block = int(table[req, src])
+                for dim in range(conv_dims):
+                    row_start = dim * conv_width * 2
+                    copy_bytes = (conv_width - bias) * 2
+                    expected[state][dest_block, row_start : row_start + copy_bytes] = initial[state][
+                        source_block, row_start + bias * 2 : row_start + bias * 2 + copy_bytes
+                    ]
+            else:
+                source_block = int(table[req, src])
+                copy_bytes = (conv_width - bias) * conv_dims * 2
+                offset = bias * conv_dims * 2
+                expected[state][dest_block, :copy_bytes] = initial[state][source_block, offset : offset + copy_bytes]
+
+    postprocess_mamba_fused_kernel[(num_requests, len(kinds), tiles)](
+        *args,
+        block_size=128,
+        COPY_BLOCK_SIZE=1024,
+        CONV_STATE_DIM_FIRST=dim_first,
+        HAS_IDX_MAPPING=selected is not None,
+        PRECOMPUTED_NEW_COMPUTED=True,
+        TEMPORAL_TILES=tiles,
+    )
+    torch.npu.synchronize()
+    for actual, reference in zip(storage, expected):
+        assert torch.equal(actual.cpu(), reference)
+    assert torch.equal(accepted_out.cpu(), expected_out)
+    for actual, before in zip(immutable, immutable_before):
+        assert torch.equal(actual.cpu(), before)
 
 
 @pytest.mark.skipif(

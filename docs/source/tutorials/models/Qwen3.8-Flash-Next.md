@@ -20,6 +20,11 @@ Qwen3.8-Flash-Next (experimental) was first supported in `vllm-ascend:v0.26.0rc`
 
 ## 2 Supported Features
 
+Prefill context parallelism (PCP) uses Model Runner V2
+(`VLLM_USE_V2_MODEL_RUNNER=1`). Set `--prefill-context-parallel-size` to the
+desired size and `--decode-context-parallel-size 1`. Both the GDN key head count
+and value head count must be divisible by `TP × PCP`.
+
 See [supported features](../../user_guide/support_matrix/supported_features.md) for feature availability and the [Feature Guide](../../user_guide/feature_guide/index.md) for configuration details.
 
 ## 3 Prerequisites

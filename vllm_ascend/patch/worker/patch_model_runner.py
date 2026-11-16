@@ -217,6 +217,7 @@ def initialize_kv_cache(
         self.replayssm_block_copy_tensors = upstream.get_replayssm_block_copy_tensors(
             self.compilation_config.static_forward_context
         )
+    self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
     if is_profiling:
         self.kv_connector = upstream.NO_OP_KV_CONNECTOR
     else:

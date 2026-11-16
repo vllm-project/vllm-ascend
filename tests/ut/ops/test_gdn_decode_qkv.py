@@ -4,7 +4,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm_ascend.ops.gdn import _rearrange_decode_qkv
+from vllm_ascend.attention.gdn import _rearrange_decode_qkv
 
 
 @pytest.mark.parametrize("tokens", [0, 1, 4, 17])

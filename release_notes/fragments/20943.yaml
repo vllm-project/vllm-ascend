@@ -1,0 +1,5 @@
+pr: 20943
+entries:
+  - category: performance
+    text: Fused QSA rotary-position clamping and gathering into RMSNorm/MRoPE preparation, including main Q/K norm weight offsets.
+    model: Qwen3.8-Flash-Next

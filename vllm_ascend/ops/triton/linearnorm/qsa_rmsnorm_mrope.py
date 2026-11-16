@@ -2,6 +2,8 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.ops.triton.linearnorm.qsa_rope_utils import validate_qsa_rope_positions
+
 
 def _validate_rope_positions(
     positions: torch.Tensor,
@@ -43,9 +45,9 @@ def _qsa_rmsnorm_mrope_kernel(
     has_mrope: tl.constexpr,
     block_dim: tl.constexpr,
     positions_ptr=None,
-    POSITION_STRIDE_AXIS: tl.constexpr = 0,
-    POSITION_STRIDE_TOKEN: tl.constexpr = 0,
-    CACHE_ROWS: tl.constexpr = 0,
+    position_stride_axis: tl.constexpr = 0,
+    position_stride_token: tl.constexpr = 0,
+    cache_rows: tl.constexpr = 0,
     GATHER_CACHE: tl.constexpr = False,
 ):
     token_id = tl.program_id(0)
@@ -80,19 +82,23 @@ def _qsa_rmsnorm_mrope_kernel(
     elif has_mrope:
         h_mask = (rotary_offsets % 3 == 1) & (rotary_offsets < mrope_section_h * 3)
         w_mask = (rotary_offsets % 3 == 2) & (rotary_offsets < mrope_section_w * 3)
-        cache_row = cos_sin_ptr + token_id * cos_sin_stride_token
-        cos_t = tl.load(cache_row + rotary_offsets).to(tl.float32)
-        cos_h = tl.load(cache_row + cos_sin_stride_axis + rotary_offsets).to(tl.float32)
-        cos_w = tl.load(cache_row + 2 * cos_sin_stride_axis + rotary_offsets).to(tl.float32)
-        sin_t = tl.load(cache_row + rotary_offsets + half_rope_dim).to(tl.float32)
-        sin_h = tl.load(cache_row + cos_sin_stride_axis + rotary_offsets + half_rope_dim).to(tl.float32)
-        sin_w = tl.load(cache_row + 2 * cos_sin_stride_axis + rotary_offsets + half_rope_dim).to(tl.float32)
-        cos = tl.where(h_mask, cos_h, tl.where(w_mask, cos_w, cos_t))
-        sin = tl.where(h_mask, sin_h, tl.where(w_mask, sin_w, sin_t))
+        axis = tl.where(h_mask, 1, tl.where(w_mask, 2, 0))
     else:
-        cache_row = cos_sin_ptr + token_id * cos_sin_stride_token
-        cos = tl.load(cache_row + rotary_offsets).to(tl.float32)
-        sin = tl.load(cache_row + rotary_offsets + half_rope_dim).to(tl.float32)
+        axis = tl.full((half_rope_dim,), 0, tl.int32)
+    if GATHER_CACHE:
+        if has_mrope:
+            position = tl.load(positions_ptr + axis * position_stride_axis + token_id * position_stride_token)
+        else:
+            # Keep the shared position scalar: an all-zero axis vector creates
+            # a repeated-address gather unsupported by Triton Ascend lowering.
+            position = tl.load(positions_ptr + token_id * position_stride_token)
+        position = tl.minimum(tl.maximum(position, 0), cache_rows - 1)
+        cache_row = cos_sin_ptr + position.to(tl.int64) * cos_sin_stride_token
+    else:
+        cache_row = cos_sin_ptr + axis * cos_sin_stride_axis + token_id * cos_sin_stride_token
+
+    cos = tl.load(cache_row + rotary_offsets).to(tl.float32)
+    sin = tl.load(cache_row + rotary_offsets + half_rope_dim).to(tl.float32)
     first = tl.load(input_row + rotary_offsets).to(tl.float32)
     first_weight = tl.load(weight_ptr + rotary_offsets).to(tl.float32) + 1.0
     first = (first * reciprocal_std * first_weight).to(tl.bfloat16)
@@ -137,7 +143,7 @@ def triton_qsa_rmsnorm_mrope(
         raise ValueError("QSA norm+RoPE token and rotary rows must match")
 
     if positions is not None:
-        _validate_rope_positions(positions, cos_sin, tensor, rope_dim)
+        validate_qsa_rope_positions(positions, cos_sin, tensor, rope_dim)
     has_mrope = cos_sin.ndim == 3 if positions is None else positions.ndim == 2
     if has_mrope:
         if (positions is None and cos_sin.shape[0] != 3) or len(mrope_section) != 3:
@@ -170,9 +176,9 @@ def triton_qsa_rmsnorm_mrope(
         has_mrope=has_mrope,
         block_dim=triton.next_power_of_2(head_dim),
         positions_ptr=positions,
-        POSITION_STRIDE_AXIS=positions.stride(0) if positions is not None and positions.ndim == 2 else 0,
-        POSITION_STRIDE_TOKEN=positions.stride(-1) if positions is not None else 0,
-        CACHE_ROWS=cos_sin.shape[0],
+        position_stride_axis=positions.stride(0) if positions is not None and positions.ndim == 2 else 0,
+        position_stride_token=positions.stride(-1) if positions is not None else 0,
+        cache_rows=cos_sin.shape[0],
         GATHER_CACHE=positions is not None,
         num_warps=1,
         num_stages=1,
