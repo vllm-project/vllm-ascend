@@ -338,4 +338,4 @@ def allocate_cache_views(config, device="cpu"):
     )
     for name, cache in caches.items():
         layers[name].bind_kv_cache(cache)
-    return [raw], {name: layer.kv_cache[0] for name, layer in layers.items()}
+    return [raw], {name: layer.kv_cache for name, layer in layers.items()}

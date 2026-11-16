@@ -2779,7 +2779,7 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     assert module.build_attn_metadata is stub
 
 
-def test_mrv2_binding_wraps_only_v41_slots():
+def test_mrv2_binds_v41_cache_views_directly():
     from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
     from vllm_ascend.patch.worker.patch_bind_kv_cache import bind_kv_cache_to_layers
 
@@ -2804,14 +2804,10 @@ def test_mrv2_binding_wraps_only_v41_slots():
 
     bind_kv_cache_to_layers(kv_caches, forward_context)
 
-    # vLLM main (#53781) routes init_kv_cache through bind_kv_cache_to_layers:
-    # V4.1 slots dispatch to their own bind_kv_cache (kv_cache[0] contract)
-    # while other layers keep the raw (k, v) allocation.
-    assert isinstance(v41_layer.kv_cache, list)
-    assert v41_layer.kv_cache[0] is kv_caches["model.layers.0.self_attn.attn"][0]
+    assert v41_layer.kv_cache is kv_caches["model.layers.0.self_attn.attn"][0]
     assert other_layer.kv_cache is kv_caches["model.layers.1.self_attn.attn"]
-    # The indexer consumer unpacks kv_cache[0] into (kv, scale).
-    kv_view, scale_view = v41_indexer.kv_cache[0]
+    assert isinstance(v41_indexer.kv_cache, tuple)
+    kv_view, scale_view = v41_indexer.kv_cache
     assert kv_view is kv_caches["model.layers.2.self_attn.indexer.k_cache"][0]
     assert scale_view is kv_caches["model.layers.2.self_attn.indexer.k_cache"][1]
 

@@ -58,7 +58,7 @@ class DeepseekV41Compressor(nn.Module):
         pooled = compressor_from_projected(
             kv,
             scores,
-            self.state_cache.kv_cache[0].squeeze(-2),
+            self.state_cache.kv_cache.squeeze(-2),
             metadata.c2_ring_metadata,
             self._ring_pooled[: kv.shape[0]],
             max_query_len=metadata.max_query_len,

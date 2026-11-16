@@ -261,7 +261,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
             # device-routed writer.  The draft proposer already supplies linear
             # physical slots, so keep them in that form for the native kernel.
             attn.packed_cache_ops.write_attention_cache(
-                cache.kv_cache[0],
+                cache.kv_cache,
                 slot_mapping,
                 values,
                 kind="win",
@@ -274,7 +274,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
                 torch.int32
             )
             slot_mapping.masked_fill_(~valid.unsqueeze(-1), -1)
-        scatter_cache_sk(cache.kv_cache[0], slot_mapping, values)
+        scatter_cache_sk(cache.kv_cache, slot_mapping, values)
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids).unsqueeze(-2).repeat(1, self.hc_mult, 1)
