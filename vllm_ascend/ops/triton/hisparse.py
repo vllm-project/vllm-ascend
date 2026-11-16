@@ -142,6 +142,7 @@ def invalidate_written_slots_sorted(
     HOT: tl.constexpr,
     TILE: tl.constexpr,
     STEPS: tl.constexpr,
+    UNROLL_SEARCH: tl.constexpr = True,
 ):
     table = tl.load(tables + tl.program_id(0)).to(tl.pointer_type(tl.int32))
     state = tl.program_id(1)
@@ -153,7 +154,8 @@ def invalidate_written_slots_sorted(
         query = (state.to(tl.int64) << _HOST_SLOT_BITS) | cached.to(tl.int64)
         low = tl.full((TILE,), 0, tl.int32)
         high = tl.full((TILE,), ROWS, tl.int32)
-        for _ in tl.static_range(STEPS):
+        # A3 requires a loop for masked indirect loads.
+        for _ in tl.range(STEPS, loop_unroll_factor=STEPS if UNROLL_SEARCH else 1):
             active = valid & (low < high)
             mid = low + (high - low) // 2
             value = tl.load(keys + mid, mask=active, other=_INVALID_SORTED_SLOT_KEY)

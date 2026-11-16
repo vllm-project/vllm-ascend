@@ -66,14 +66,16 @@ def prepare_workspaces(request):
         reset_workspace_manager()
 
 
+@pytest.mark.parametrize("cache_dtype", [torch.int8, torch.float8_e4m3fn])
 @pytest.mark.parametrize("mxfp8", [False, True])
-def test_c8_prolog_requires_matching_fp8_weight_scheme(mxfp8):
+def test_c8_prolog_requires_matching_fp8_weight_scheme(mxfp8, cache_dtype):
     from vllm_ascend.attention.utils import PreprocessType
     from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, AscendW8A8MXFP8DynamicLinearMethod
 
     method = AscendW8A8MXFP8DynamicLinearMethod if mxfp8 else AscendW8A8DynamicLinearMethod
     impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
     impl.enable_sparse_sfa_c8 = True
+    impl.c8_cache_dtype = cache_dtype
     impl.fused_qkv_a_proj = NS(quant_method=NS(quant_method=method.__new__(method)))
     impl.is_kv_consumer, impl.has_indexer = False, False
     impl.dcp_group = None
@@ -81,7 +83,7 @@ def test_c8_prolog_requires_matching_fp8_weight_scheme(mxfp8):
     impl.q_a_layernorm = impl.kv_a_layernorm = NS()
     impl.q_proj = NS(_chunk_size=0)
     impl.enable_sparse_sfa_turboquant = False
-    expected = PreprocessType.PROLOG_V3 if mxfp8 else None
+    expected = PreprocessType.PROLOG_V3 if mxfp8 == (cache_dtype == torch.float8_e4m3fn) else None
     assert impl._fused_preprocess_type() is expected
 
 
@@ -378,20 +380,22 @@ def test_capture_metadata_prevents_warmup_host_mirrors(monkeypatch):
     assert submitted == [True]
 
 
-def test_c8_packing_preserves_opaque_rope_scale_and_nan_payloads():
+@pytest.mark.parametrize("dtype", [torch.int8, torch.float8_e4m3fn])
+def test_c8_packing_preserves_opaque_rope_scale_and_nan_payloads(dtype):
     rows = 3
     raw = [torch.arange(rows * width).to(torch.uint8).reshape(rows, width) for width in (512, 128, 16)]
-    components = [values.view(torch.float8_e4m3fn) for values in raw]
+    components = [values.view(dtype) for values in raw]
     packed = pack_c8_components(*components)
     assert packed.dtype == torch.uint8 and packed.shape == (rows, 656)
     torch.testing.assert_close(packed, torch.cat(raw, dim=-1), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("stride_rows", [128, 136])
-def test_c8_storage_mapping_preserves_shared_slab_offsets(stride_rows):
+@pytest.mark.parametrize("dtype", [torch.int8, torch.float8_e4m3fn])
+def test_c8_storage_mapping_preserves_shared_slab_offsets(stride_rows, dtype):
     pages, block, width, offset = 3, 128, 656, 1312
     backing = torch.full((offset + pages * stride_rows * width,), 17, dtype=torch.uint8)
-    cache = backing.view(torch.float8_e4m3fn).as_strided(
+    cache = backing.view(dtype).as_strided(
         (pages, block, width), (stride_rows * width, width, 1), storage_offset=offset
     )
     view, actual_block, actual_stride, capacity = c8_storage_view(cache)
@@ -410,8 +414,9 @@ def test_c8_storage_mapping_preserves_shared_slab_offsets(stride_rows):
 
 
 @pytest.mark.parametrize("pages,stride_rows,max_rows", [(2, 128, 9), (3, 136, 37)])
+@pytest.mark.parametrize("dtype", [torch.int8, torch.float8_e4m3fn])
 def test_c8_decode_lengths_follow_binding_geometry_and_survive_rebind(
-    monkeypatch, pages, stride_rows, max_rows, prepare_workspaces
+    monkeypatch, pages, stride_rows, max_rows, prepare_workspaces, dtype
 ):
     monkeypatch.setattr(
         hisparse_ops, "_load_resolver", lambda: NS(hisparse_resolver_validate_scratch=lambda hot, union: None)
@@ -424,14 +429,14 @@ def test_c8_decode_lengths_follow_binding_geometry_and_survive_rebind(
         region_stride=128,
         max_union_rows=64,
         device=torch.device("cpu"),
-        kv_dtype=torch.float8_e4m3fn,
+        kv_dtype=dtype,
         registered_host_pool=NS(_hisparse_registration=object()),
     )
     group.shared_topk = NS(device_topk_rows=torch.empty((max_rows, runtime.max_union_rows), dtype=torch.int32))
     group.leader = runtime
 
     def bind(num_pages):
-        backing = torch.empty(num_pages * stride_rows * 656, dtype=torch.float8_e4m3fn)
+        backing = torch.empty(num_pages * stride_rows * 656, dtype=dtype)
         cache = backing.as_strided((num_pages, 128, 656), (stride_rows * 656, 656, 1))
         runtime.hot = NS(cache=cache, attention_cache=cache, block_size=128)
         if prepare_workspaces is not None:
@@ -492,14 +497,17 @@ def test_bf16_hisparse_indexer_passes_through_page_scatter_indices(monkeypatch):
 
 
 @pytest.mark.parametrize("padding", [0, 256])
-def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(monkeypatch, indexer_spec, padding):
+@pytest.mark.parametrize("dtype,scale_dtype", [(torch.int8, torch.float16), (torch.float8_e4m3fn, torch.float32)])
+def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(monkeypatch, indexer_spec, padding, dtype, scale_dtype):
+    scale_size = scale_dtype.itemsize
+    scale_bits = torch.int16 if scale_size == 2 else torch.int32
     spec = replace(
         indexer_spec,
         block_size=128,
         head_size=128,
-        dtype=torch.float8_e4m3fn,
+        dtype=dtype,
         scale_dim=1,
-        scale_dtype=torch.float32,
+        scale_dtype=scale_dtype,
         cache_sparse_li_c8=True,
     )
     pages, offset = 3, 256
@@ -510,7 +518,7 @@ def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(monkeypatch
         size=raw.numel(), layers=["indexer"], layer_stride=spec.page_size_bytes, block_stride=stride, offset=offset
     )
     (cache,) = create_kv_cache_views(raw.view(torch.int8), spec, pages, KVCacheLayout.BLHNC, tensor_config)
-    assert cache.shape == (pages, 1, 128, 132)
+    assert cache.shape == (pages, 1, 128, 128 + scale_size)
     layer = NS()
     caches = {"indexer": cache}
     _bind_indexer_views(caches, {"indexer": spec}, {"indexer": layer})
@@ -519,14 +527,14 @@ def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(monkeypatch
     assert layer.hisparse_block_stride == 1
     slots = torch.tensor([127, 0, 128, 383, -1, 256], dtype=torch.int32)
     values_raw = torch.arange(6 * 128).to(torch.uint8).reshape(6, 128)
-    values = values_raw.view(torch.float8_e4m3fn)
+    values = values_raw.view(dtype)
     scales = torch.arange(6, dtype=torch.float32).reshape(6, 1) + 0.5
 
     def store(quant, scales, slots, cache, scale_cache, *, block_size, key_block_stride, scale_block_stride):
         # Emulate only the device-store boundary; production views and addresses
         # are checked against the independent byte oracle below.
-        assert block_size == 128 and key_block_stride == stride and scale_block_stride == stride // 4
-        assert cache.dtype == torch.int8 and scale_cache.dtype == torch.int32
+        assert block_size == 128 and key_block_stride == stride and scale_block_stride == stride // scale_size
+        assert cache.dtype == torch.int8 and scale_cache.dtype == scale_bits
         for i, slot in enumerate(slots.tolist()):
             if 0 <= slot < pages * block_size:
                 page, row = divmod(slot, block_size)
@@ -540,15 +548,15 @@ def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(monkeypatch
     writer.enable_sparse_li_c8 = True
     writer.enable_sparse_li_c4 = False
     expected = raw.clone()
-    scale_bytes = scales.view(torch.uint8).reshape(6, 4)
+    scale_bytes = scales.to(scale_dtype).view(torch.uint8).reshape(6, scale_size)
     for i, slot in enumerate(slots.tolist()):
         if slot < 0:
             continue
         page, row = divmod(slot, 128)
         start = offset + page * stride + row * 128
         expected[start : start + 128] = values_raw[i]
-        start = offset + page * stride + key_bytes + row * 4
-        expected[start : start + 4] = scale_bytes[i]
+        start = offset + page * stride + key_bytes + row * scale_size
+        expected[start : start + scale_size] = scale_bytes[i]
     scatter_indices = torch.stack((slots // spec.block_size, slots % spec.block_size), dim=-1)
     writer.write_cache(values, scales, slots, scatter_indices)
     torch.testing.assert_close(raw, expected, rtol=0, atol=0)

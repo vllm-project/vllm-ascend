@@ -225,6 +225,13 @@ else()
   )
 endif()
 
+# A2/A3 share the arch22 direct kernel; A5 retains its ACLNN resolver.
+if(SOC_VERSION MATCHES "ascend910b.*|ascend910_93.*")
+  add_subdirectory(csrc/hisparse)
+  target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_HISPARSE_ARCH22)
+  target_link_libraries(vllm_ascend_C PRIVATE vllm_ascend_hisparse)
+endif()
+
 target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/custom_transformer/op_api/lib")
 
 # A3 shared host Engram uses the optional CANN Fabric-handle API.

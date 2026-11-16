@@ -5,11 +5,17 @@
 #include <ATen/ATen.h>
 
 #include "op_kernel/resolver_scratch.h"
+#ifdef VLLM_ASCEND_HISPARSE_ARCH22
+#include "../../hisparse/hisparse_resolver_torch_adpt.h"
+#endif
 
 namespace vllm_ascend::hisparse {
 
 inline void validate_resolver_scratch(int64_t hot, int64_t union_rows)
 {
+#ifdef VLLM_ASCEND_HISPARSE_ARCH22
+    validate_resolver_scratch_arch22(hot, union_rows);
+#else
     TORCH_CHECK(union_rows > 0 && union_rows <= hot && hot <= 32768,
                 "HiSparse union must fit the hot cache and int16 LRU slots");
     const uint64_t minimum_bytes = resolver_scratch_bytes(hot, union_rows + 1);
@@ -18,6 +24,7 @@ inline void validate_resolver_scratch(int64_t hot, int64_t union_rows)
                 " needs at least ", minimum_bytes,
                 " UB bytes; the target SIMT UB budget allows ", kResolverMaxSimtUbBytes,
                 ". Lower device_buffer_size or speculative tokens.");
+#endif
 }
 
 /**
@@ -39,6 +46,13 @@ inline void resolve_residency(
     int64_t resident_block_size, int64_t resident_null_block,
     int64_t attention_block_stride, int64_t union_rows, int64_t attention_capacity)
 {
+#ifdef VLLM_ASCEND_HISPARSE_ARCH22
+    resolve_residency_arch22(logical, hot_table, requests, states, source, resident, valid_rows,
+                            dgi, lru, output, resolved, errors, attention, counts, swap_host,
+                            swap_device, swap_counts, miss_mask, stats, host_rows, hot_block_size,
+                            source_block_size, resident_block_size, resident_null_block,
+                            attention_block_stride, union_rows, attention_capacity);
+#else
     const int64_t topk = logical.size(1);
     // EXEC_NPU_CMD binds arguments to non-const lvalue references, so every
     // argument must be a named local instead of a temporary.
@@ -78,6 +92,7 @@ inline void resolve_residency(
         swap_host_t, swap_device_t,
         swap_counts_t, miss_mask_t,
         stats_t);
+#endif
 }
 
 }  // namespace vllm_ascend::hisparse
