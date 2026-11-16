@@ -88,6 +88,7 @@
 /vllm_ascend/distributed @LCAIZJ @zzzzwwjj @weijinqian0
 /vllm_ascend/distributed/ec_transfer @weijinqian0
 /vllm_ascend/distributed/eplb @freyfwt
+/vllm_ascend/distributed/kvpp.py @weiguihua2 @pisceskkk @zhaochuang001 @recky-c @li1how
 /vllm_ascend/distributed/weight_transfer @Ronald1995 @Annarine
 /vllm_ascend/distributed/kv_transfer @weijinqian0
 /vllm_ascend/distributed/kv_transfer/kv_pool @weijinqian0 @HF-001
@@ -134,7 +135,7 @@
 # kv cache
 /vllm_ascend/core/kv_cache_config_builder.py @yzeyu71 @Angazenn @zhenwenqi2024 @@yiz-liu
 /vllm_ascend/core/kv_cache_interface.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu
-/vllm_ascend/core/kv_cache_placement.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu
+/vllm_ascend/core/kv_cache_placement.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu @weiguihua2 @pisceskkk @zhaochuang001 @recky-c @li1how
 /vllm_ascend/core/single_type_kv_cache_manager.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu
 
 # Core framework
@@ -167,7 +168,7 @@
 /vllm_ascend/worker/device_metadata.py @linfeng-yuan
 /vllm_ascend/worker/dspark_utils.py @wxsIcey
 /vllm_ascend/worker/encoder_acl_graph.py @yiz-liu
-# /vllm_ascend/worker/kvpp_cache.py
+/vllm_ascend/worker/kvpp_cache.py @weiguihua2 @pisceskkk @zhaochuang001 @recky-c @li1how
 /vllm_ascend/worker/spec_decode_utils.py @wxsIcey
 /vllm_ascend/worker/utils.py @wxsIcey
 
@@ -179,7 +180,7 @@
 /vllm_ascend/worker/v2/eplb.py @freyfwt
 /vllm_ascend/worker/v2/input_batch.py @yiz-liu @zzzzwwjj
 /vllm_ascend/worker/v2/kv_connector.py @yzeyu71
-/vllm_ascend/worker/v2/kvpp.py @recky-c
+/vllm_ascend/worker/v2/kvpp.py @weiguihua2 @pisceskkk @zhaochuang001 @recky-c @li1how
 /vllm_ascend/worker/v2/model_runner.py @yiz-liu @zzzzwwjj @xuchi-0808 @zhenwenqi2024 @drslark
 /vllm_ascend/worker/v2/pcp_manager.py @weiguihua2 @zhenwenqi2024 @pisceskkk @zhaochuang001 @li1how @wzx0726
 /vllm_ascend/worker/v2/pp_transport.py @LostFox11
