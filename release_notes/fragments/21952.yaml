@@ -1,0 +1,6 @@
+pr: 21952
+entries:
+  - category: bugfix
+    text: Fixed A5 SWA KV selection during bounded replay for DeepSeek V4.1.
+    model: deepseek-v4.1
+    hardware: [A5]
