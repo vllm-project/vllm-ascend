@@ -867,7 +867,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             )
             metadata_groups.extend(self.speculator.attn_groups)
 
-        # The target and draft consume the same table that expands IDs on append.
+        # Skip remapping to preserve 310P's existing block table expansion.
         for groups in metadata_groups:
             for attn_group in groups:
                 attn_group.block_table_is_kernel_granular = True  # type: ignore[attr-defined]
