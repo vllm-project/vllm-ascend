@@ -2269,3 +2269,26 @@ msgstr ""
 "`--prefix-cache-retention-interval None`；省略该参数则选择 `0`。\n"
 "如需迁移原本设定的间隔 `4096`，请在之前导出该环境变量的\n"
 "相同实例上传入 `--prefix-cache-retention-interval 4096`。"
+
+msgid "| Layerwise transfer | See the authoritative [layerwise support matrix](layerwise_kv_pool.md#support-matrix) for backend, KV role, cache layout and parallelism constraints. |"
+msgstr "| 逐层传输 | 后端、KV 角色、缓存布局和并行约束统一参阅权威的[逐层支持矩阵](layerwise_kv_pool.md#support-matrix)。 |"
+
+
+msgid "    `use_layerwise=true` enables per-layer KV access. Backend, role and topology constraints are defined in the [layerwise support matrix](layerwise_kv_pool.md#support-matrix). Configure consumer pool reads/writes explicitly with `consumer_is_to_load` and `consumer_is_to_put` in `kv_connector_extra_config`."
+msgstr "    `use_layerwise=true` 开启逐层 KV 访问。后端、角色和拓扑约束见[逐层支持矩阵](layerwise_kv_pool.md#support-matrix)。Consumer 必须在 `kv_connector_extra_config` 中通过 `consumer_is_to_load` 和 `consumer_is_to_put` 显式开启池读写。"
+
+
+msgid "| `use_layerwise` | bool | false | No | false | Yuanrong layerwise transfer is unsupported and rejected during initialization. Keep this setting and `kv_connector_extra_config.use_layerwise` false; non-layerwise lookup is delegated to the TP0 worker. See the [layerwise support matrix](layerwise_kv_pool.md#support-matrix). |"
+msgstr "| `use_layerwise` | bool | false | 否 | false | Yuanrong 不支持逐层传输，初始化时会拒绝。保持本设置及 `kv_connector_extra_config.use_layerwise` 为 false；非逐层查询由 TP0 Worker 执行。见[逐层支持矩阵](layerwise_kv_pool.md#support-matrix)。 |"
+
+
+msgid "| `use_layerwise` | bool | false | No | true / false | Layer-by-layer KV save/load; see the [support matrix](layerwise_kv_pool.md#support-matrix). |"
+msgstr "| `use_layerwise` | bool | false | 否 | true / false | 逐层保存/加载 KV；见[支持矩阵](layerwise_kv_pool.md#support-matrix)。 |"
+
+
+msgid "| `layerwise_prefetch_layers` | int or decimal string | GVA: `min(layerwise_num_shared_buffers, 8)`; Mooncake: `2` | No | Positive integers | Shared strict parsing and validation before backend/thread creation. See [defaults and compatibility](layerwise_kv_pool.md#parameters-and-defaults). |"
+msgstr "| `layerwise_prefetch_layers` | 整数或十进制字符串 | GVA：`min(layerwise_num_shared_buffers, 8)`；Mooncake：`2` | 否 | 正整数 | 后端/线程创建前使用统一的严格解析与校验。见[默认值与兼容性](layerwise_kv_pool.md#parameters-and-defaults)。 |"
+
+
+msgid "| `discard_partial_chunks` | bool | true | No | true / false | Same default for ordinary and layerwise pooling. |"
+msgstr "| `discard_partial_chunks` | bool | true | 否 | true / false | 丢弃不完整的块；普通池化和逐层池化均默认为 `true`。 |"

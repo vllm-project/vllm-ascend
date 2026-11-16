@@ -1,5 +1,9 @@
 # Layerwise and Sparse KV Cache Offloading Guide
 
+For the Store connector's backend, KV role, attention and parallelism contract,
+see the [layerwise support matrix](layerwise_kv_pool.md#support-matrix).
+This page describes the additional restrictions of the combined offload deployment.
+
 Layerwise and sparse KV cache offloading are supported only in disaggregated
 Prefill/Decode (PD) deployments. Colocated Prefill/Decode serving is not supported.
 
@@ -113,6 +117,8 @@ Do not set `sparse_kv_offload_config` on Prefill. The
 | :--- | :--- |
 | `layerwise_num_shared_buffers` | Defaults to the number of cache-bearing layers, so omitting it does not enable cross-layer buffer reuse. Explicitly set a smaller count, such as `3`, to enable reuse. Independent layers keep dedicated buffers in addition to this shared-buffer budget; unused slots are not allocated. |
 | `layerwise_independent_layers` | Layers that keep dedicated buffers. The default is `[0]`; `"all"` disables cross-layer reuse. |
+| `layerwise_prefetch_layers` | Defaults to `min(layerwise_num_shared_buffers, 8)` for GVA. Accepts positive integers or decimal integer strings; controls submission timing rather than allocating more NPU buffers. |
+| `discard_partial_chunks` | Defaults to `true`, as in ordinary pooling. |
 
 The following log confirms that buffer reuse is enabled:
 

@@ -23,6 +23,10 @@ multiple cache groups, see [Mooncake Layerwise Hybrid Attention](mooncake_hybrid
 
 ### Constraints and Limitations
 
+Backend, KV role, attention, cache layout and parallelism support are defined
+in the common [layerwise support matrix](layerwise_kv_pool.md#support-matrix).
+The following deployment details refine that contract.
+
 | Category | Constraint |
 | --- | --- |
 | Software | Requires a Mooncake NPU client with session and range transfer APIs; use Mooncake 0.3.14 or later. Required interfaces are checked at startup. |
@@ -214,7 +218,7 @@ Set these options in `kv_transfer_config.kv_connector_extra_config`.
 | `backend` | string | `"mooncake"` | Selects the Mooncake Store backend. |
 | `use_layerwise` | bool | `false` | Set to `true` to enable layerwise save and load. |
 | `load_async` | bool | `false` | Keep `false` for layerwise loading. Future-layer prefetch is managed by the layerwise transfer pipeline. |
-| `layerwise_prefetch_layers` | int | `2` | Positive prefetch distance in layers. Larger values submit loads earlier. |
+| `layerwise_prefetch_layers` | int or decimal string | `2` | Positive prefetch distance; floats and booleans are rejected before client/thread creation. See the [common parser contract](layerwise_kv_pool.md#parameters-and-defaults). |
 | `layerwise_max_transfer_blocks` | int | `0` | Maximum key/block rows per range transfer batch. Also batches session operations and lookup work. `0` adds no block limit. |
 | `layerwise_max_transfer_bytes` | int | `0` | Maximum size in bytes of an individual contiguous transfer segment. Larger segments are split. This is not a limit on total bytes per API call; `0` adds no segment-size limit. |
 

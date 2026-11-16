@@ -43,6 +43,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cach
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVTransferThread,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.config import (
+    DEFAULT_KEY_PREFETCH_LAYERS,
+    parse_layerwise_prefetch_layers,
+    validate_layerwise_config,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
     KVCacheStoreKeyLayerRecvingThread,
     KVCacheStoreKeyLayerSendingThread,
@@ -129,6 +134,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.layerwise_data_plane = (
             self.layerwise_backend.layerwise_data_plane if self.layerwise_backend is not None else None
         )
+        if use_layerwise:
+            validate_layerwise_config(extra_config, backend_name, self.layerwise_data_plane)
         self.use_block_key_layerwise = self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = self.layerwise_data_plane == "gva"
         self._step_load_keys: set[str] = set()
@@ -338,17 +345,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 self.layerwise_offload = layout.has_layer_reuse
                 self.num_prefetch_layers = layout.num_prefetch_layers
         else:
-            self.num_prefetch_layers = 2
-            if self.use_layerwise:
-                prefetch_layers = self._extra_config.get("layerwise_prefetch_layers", 2)
-                if isinstance(prefetch_layers, bool):
-                    raise ValueError("layerwise_prefetch_layers must be a positive integer")
-                try:
-                    self.num_prefetch_layers = int(prefetch_layers)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError("layerwise_prefetch_layers must be a positive integer") from exc
-                if self.num_prefetch_layers <= 0:
-                    raise ValueError("layerwise_prefetch_layers must be a positive integer")
+            self.num_prefetch_layers = (
+                parse_layerwise_prefetch_layers(self._extra_config, DEFAULT_KEY_PREFETCH_LAYERS)
+                if self.use_layerwise
+                else DEFAULT_KEY_PREFETCH_LAYERS
+            )
         self.sync_save_events: list[torch.npu.Event] | None = None
 
         logger.info(

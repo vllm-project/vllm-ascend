@@ -11,6 +11,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.config import validate_layerwise_config
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
@@ -40,11 +41,8 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         self.layerwise_data_plane = (
             self.layerwise_backend.layerwise_data_plane if self.layerwise_backend is not None else None
         )
-        if use_layerwise and self.layerwise_data_plane not in ("block_key", "gva"):
-            raise ValueError(
-                f"Backend {backend_name!r} does not support layerwise KV pooling: "
-                f"unsupported layerwise_data_plane={self.layerwise_data_plane!r}"
-            )
+        if use_layerwise:
+            validate_layerwise_config(extra_config, backend_name, self.layerwise_data_plane)
         self.use_block_key_layerwise = use_layerwise and self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = use_layerwise and self.layerwise_data_plane == "gva"
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None

@@ -27,7 +27,7 @@ KV Cache supports the following three external storage backends, choose the stor
 | Hardware | Supported hardware A2/A3/950PR&950DT Products. |
 | Software Dependencies | For HDK/CANN requirements of each series, see the [HDK and CANN Version Compatibility Reference](#hdk-and-cann-version-compatibility-reference). |
 | Model | `kv_load_failure_policy=recompute` does not yet support hybrid attention models (e.g., DeepSeekV4, Qwen 3.5). |
-| Feature Mutex | `use_layerwise` only supported on the Prefill node of the Mooncake/Memcache backends. |
+| Layerwise transfer | See the authoritative [layerwise support matrix](layerwise_kv_pool.md#support-matrix) for backend, KV role, cache layout and parallelism constraints. |
 
 **Backend-specific**
 
@@ -967,7 +967,7 @@ Expected output: MetaService starts successfully with no errors.
     echo "vLLM started. Log file: log_${ROLE}.log"
     ```
 
-    `use_layerwise` can be set to `true` to enable per-layer KV access, supported by both the Mooncake and Memcache backends; it is only supported on the Prefill node. `consumer_is_to_put` and `consumer_is_to_load` can also be configured via `kv_connector_extra_config`.
+    `use_layerwise=true` enables per-layer KV access. Backend, role and topology constraints are defined in the [layerwise support matrix](layerwise_kv_pool.md#support-matrix). Configure consumer pool reads/writes explicitly with `consumer_is_to_load` and `consumer_is_to_put` in `kv_connector_extra_config`.
 
     To start proxy_server and run inference, refer to the corresponding sub-steps in "PD Disaggregation Scenario" of [Scenario 1: Mooncake Backend](#scenario-1-mooncake-backend).
 
@@ -1463,7 +1463,7 @@ Configure `yuanrong.json` (pointed to by `YR_CONFIG_PATH`):
 | `remote_h2d_transport_backend` | str | HIXL | No | HIXL / P2P_TRANSFER | vLLM-side transport name, corresponds to Worker `--remote_h2d_link_type` (HCCS ↔ HIXL, ROCE ↔ P2P_TRANSFER). Under `HIXL` the backend pre-registers device memory unless `enable_fabric_mem` is `true`; under `P2P_TRANSFER` it skips pre-registration. |
 | `enable_fabric_mem` | bool | false | No | true / false | Selects HIXL FabricMem mode, where HIXL `OPTION_ENABLE_USE_FABRIC_MEM` handles Fabric shareable handle exchange automatically and the backend skips client-side `pre_register_device_memory`. Only meaningful when `remote_h2d_transport_backend="HIXL"`. FabricMem requires datasystem-side support (HIXL FabricMem build and the corresponding datasystem environment variable); check the datasystem documentation before enabling this flag. |
 | `enable_dev_mem_pregister` | bool | false | No | true / false | Master toggle for client-side device memory pre-registration (`pre_register_device_memory`). To actually pre-register, this flag must be `true` and the automatic conditions must hold: `enable_remote_h2d=true`, `remote_h2d_transport_backend="HIXL"`, and `enable_fabric_mem=false`. Under `P2P_TRANSFER` or FabricMem mode pre-registration is always skipped regardless of this toggle. Set this to `true` for HIXL HCCS Remote H2D deployments that require client-side device memory registration. |
-| `use_layerwise` | bool | false | No | true / false | Must match `kv_connector_extra_config.use_layerwise`. When `false`, the scheduler-side Yuanrong store skips initialization because non-layerwise lookup is delegated to the TP0 worker. When `true`, the scheduler initializes a metadata-only Yuanrong client with Remote H2D disabled, so it does not create a HIXL engine. |
+| `use_layerwise` | bool | false | No | false | Yuanrong layerwise transfer is unsupported and rejected during initialization. Keep this setting and `kv_connector_extra_config.use_layerwise` false; non-layerwise lookup is delegated to the TP0 worker. See the [layerwise support matrix](layerwise_kv_pool.md#support-matrix). |
 
 </details>
 
@@ -1611,7 +1611,9 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 | `consumer_is_to_put` | bool | false | No | true / false | Whether Decode node puts KV Cache into KV Pool. |
 | `save_decode_cache` | bool | false | No | true / false | Save complete Decode KV blocks. A consumer can enable this without `consumer_is_to_put`, keeping Prefill writes disabled; this consumer mode requires `use_layerwise=false`. |
 | `consumer_is_to_load` | bool | false | No | true / false | Whether Decode node loads KV Cache from KV Pool. |
-| `use_layerwise` | bool | false | No | true / false | Layer-by-layer KV save/load, supported by both Mooncake and Memcache backends. Only supported on the Prefill node. |
+| `use_layerwise` | bool | false | No | true / false | Layer-by-layer KV save/load; see the [support matrix](layerwise_kv_pool.md#support-matrix). |
+| `layerwise_prefetch_layers` | int or decimal string | GVA: `min(layerwise_num_shared_buffers, 8)`; Mooncake: `2` | No | Positive integers | Shared strict parsing and validation before backend/thread creation. See [defaults and compatibility](layerwise_kv_pool.md#parameters-and-defaults). |
+| `discard_partial_chunks` | bool | true | No | true / false | Same default for ordinary and layerwise pooling. |
 | `prefill_pp_size` | int | 1 | Required when Prefill PP + consumer writes | Positive integer | Prefill PP size. |
 | `prefill_pp_layer_partition` | str | No default | No | Comma-separated layer numbers, e.g., "30,31" | Prefill PP layer partition. If not configured, layers are evenly divided by `prefill_pp_size`. |
 | `qos_priority` | int | 0 | No | [0, 4] (integer, larger = higher priority) | KV Pool transfer QoS priority. |
