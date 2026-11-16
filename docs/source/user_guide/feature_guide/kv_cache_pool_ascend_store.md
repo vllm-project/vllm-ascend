@@ -76,9 +76,9 @@ The transfer sequence keeps every model layer. Layers without registered KV
 have empty tasks; source KV, index caches, SWA, and registered draft caches
 retain their existing cache-group addressing. For bounded replay, the cut
 layer loads before its cache-only write and saves after its normal forward's
-last write, while later layers can continue computing. Draft caches are loaded
-before draft preparation and saved after drafting. The final save fence waits
-for all copies before publishing a reusable pool entry or reusing source memory.
+last write, while later layers can continue computing. Registered draft caches
+follow the existing per-layer GVA load/save hooks. The existing final-layer save
+fence waits for all copies before source memory can be reused.
 
 With `AscendMultiConnector`, Mooncake V2 push uses the composite attention
 boundary to mark all caches owned by a layer ready. Draft caches remain deferred

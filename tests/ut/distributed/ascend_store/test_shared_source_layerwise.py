@@ -250,7 +250,10 @@ def metadata(worker, *, load=False, save=True):
 
 
 def forward_layer(worker, meta, layer):
-    name = f"model.layers.{layer}.v41_attn"
+    base_layers = worker.hf_config.num_hidden_layers
+    name = (
+        f"model.layers.{layer}.v41_attn" if layer < base_layers else f"model.mtp.layers.{layer - base_layers}.v41_attn"
+    )
     worker.wait_for_layer_load(name)
     worker.save_kv_layer(meta, name)
 
@@ -259,9 +262,8 @@ def save_prefix(worker):
     meta = metadata(worker)
     worker.prepare_layerwise_step(meta)
     worker.start_load_kv(meta)
-    for layer in range(worker.hf_config.num_hidden_layers):
+    for layer in range(worker.num_layers):
         forward_layer(worker, meta, layer)
-    worker.wait_for_save(meta)
     worker.get_finished(set(), meta)
 
 
@@ -289,10 +291,8 @@ class TestSharedSourceLayerwise(unittest.TestCase):
                 meta = metadata(worker, load=True, save=False)
                 worker.prepare_layerwise_step(meta)
                 worker.start_load_kv(meta)
-                for layer in range(12):
+                for layer in range(worker.num_layers):
                     forward_layer(worker, meta, layer)
-                worker.finish_forward()
-                worker.wait_for_save(meta)
                 worker.get_finished(set(), meta)
                 for name, cache in caches.items():
                     torch.testing.assert_close(cache[1], expected[name][1])
@@ -322,7 +322,6 @@ class TestSharedSourceLayerwise(unittest.TestCase):
         self.assertEqual(worker.current_layer, 9)
         for layer in range(9, 12):
             forward_layer(worker, meta, layer)
-        worker.wait_for_save(meta)
         self.assertTrue(store.published)
 
     def test_failed_load_reaches_consumer_and_never_publishes(self):
@@ -349,18 +348,6 @@ class TestSharedSourceLayerwise(unittest.TestCase):
         for mode in ("FULL", "FULL_DECODE_ONLY", "PIECEWISE", "FULL_AND_PIECEWISE"):
             with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, "enforce-eager"):
                 make_shared_worker(self, mode=mode)
-
-    def test_missing_target_suffix_is_not_flushed_as_draft(self):
-        for fence in ("finish_forward", "wait_for_save"):
-            with self.subTest(fence=fence):
-                worker, store, _ = make_shared_worker(self, bounded=True, draft=True)
-                meta = metadata(worker)
-                worker.prepare_layerwise_step(meta)
-                for layer in range(8):
-                    forward_layer(worker, meta, layer)
-                with self.assertRaisesRegex(RuntimeError, "target.*hook"):
-                    getattr(worker, fence)(*([meta] if fence == "wait_for_save" else []))
-                self.assertFalse(store.published)
 
     def test_transfer_failure_cannot_be_reset_by_next_bind(self):
         worker, store, _ = make_shared_worker(self, bounded=True)
@@ -397,7 +384,6 @@ class TestSharedSourceLayerwise(unittest.TestCase):
         self.assertEqual(set(counts.values()), {1})
         for layer in range(12):
             forward_layer(worker, meta, layer)
-        worker.finish_forward()
         worker.get_finished(set(), meta)
         self.assertEqual(set(counts.values()), {0})
 
@@ -411,15 +397,14 @@ class TestSharedSourceLayerwise(unittest.TestCase):
             worker.prepare_layerwise_step(metadata(worker, load=True, save=False))
         self.assertFalse(store.copies)
 
-    def test_draft_save_fence_blocks_publication_until_final_copy(self):
+    def test_draft_layer_save_blocks_publication_until_final_copy(self):
         worker, store, caches = make_shared_worker(self, bounded=True, draft=True)
         meta = metadata(worker)
         worker.prepare_layerwise_step(meta)
         for layer in range(12):
             forward_layer(worker, meta, layer)
-        worker.finish_forward()
         draft = caches["model.mtp.layers.0.attn.kv_cache"]
-        draft[1].fill_(99)  # final draft write after target forward
+        draft[1].fill_(99)  # draft cache write before its save hook
         store.block_address = draft[1].data_ptr()
         store.block_direction = 0
         done = threading.Event()
@@ -427,7 +412,7 @@ class TestSharedSourceLayerwise(unittest.TestCase):
 
         def save():
             try:
-                worker.wait_for_save(meta)
+                forward_layer(worker, meta, worker.hf_config.num_hidden_layers)
             except Exception as exc:
                 errors.append(exc)
             finally:
@@ -451,7 +436,7 @@ class TestSharedSourceLayerwise(unittest.TestCase):
         worker.prepare_layerwise_step(meta)
         for layer in range(12):
             forward_layer(worker, meta, layer)
-        worker.finish_forward()
+        forward_layer(worker, meta, worker.hf_config.num_hidden_layers)
         torch.testing.assert_close(draft[1], torch.full_like(draft[1], 99))
 
     def test_failed_draft_save_never_publishes_partial_prefix(self):
@@ -460,8 +445,7 @@ class TestSharedSourceLayerwise(unittest.TestCase):
         worker.prepare_layerwise_step(meta)
         for layer in range(12):
             forward_layer(worker, meta, layer)
-        worker.finish_forward()
         store.fail_copy = True
         with self.assertRaises(RuntimeError):
-            worker.wait_for_save(meta)
+            forward_layer(worker, meta, worker.hf_config.num_hidden_layers)
         self.assertFalse(store.published)

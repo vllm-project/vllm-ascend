@@ -136,10 +136,11 @@ class TestStandardConnectorHooks(unittest.TestCase):
         conn._current_step_has_real_forward = False
         conn.bind_connector_metadata(meta)
         conn.start_load_kv(SimpleNamespace())
-        for layer in range(12):
-            name = f"model.layers.{layer}.v41_attn"
+        for layer in range(worker.num_layers):
+            name = f"model.layers.{layer}.v41_attn" if layer < 12 else f"model.mtp.layers.{layer - 12}.v41_attn"
             conn.wait_for_layer_load(name)
             conn.save_kv_layer(name, [], None)
+        self.assertTrue(store.published)  # the final layer hook completed the save
         conn.finish_forward()
         conn.wait_for_save()
         conn.get_finished(set())

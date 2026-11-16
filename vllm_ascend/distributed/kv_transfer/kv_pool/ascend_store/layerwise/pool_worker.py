@@ -671,27 +671,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         # A deferred call must not reset state between target and MTP.
         return
 
-    def _check_target_forward_finished(self) -> None:
-        self._check_hybrid_load_errors()
-        if self._shared_step_has_tasks and self.current_layer < self.hf_config.num_hidden_layers:
-            self._layer_load_aborted.set()
-            raise RuntimeError("Shared-source target forward did not execute all layer hooks")
-
-    def finish_forward(self) -> None:
-        if getattr(self, "has_shared_kv", False):
-            self._check_target_forward_finished()
-            # Restore any draft/tail groups before draft preparation can overwrite them.
-            self._submit_ready_layer_loads(self.num_layers - 1)
-            self._drain_attention_transfers(drain_recv=True, full=True)
-
-    def wait_for_save(self, metadata: AscendConnectorMetadata) -> None:
-        if getattr(self, "has_shared_kv", False) and self.can_put:
-            self._check_target_forward_finished()
-            # Target hooks already submitted their saves. Only unhooked draft
-            # slots remain; the final task publishes after these copies too.
-            while self.current_layer < self.num_layers:
-                self.save_kv_layer(metadata)
-
     def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
         if self._step_load_keys:
             if self.kv_recv_thread is not None:
@@ -759,7 +738,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 request.block_ids_np = request.block_ids_by_group_np[0]
         self.process_layer_data(metadata.requests)
         if getattr(self, "has_shared_kv", False):
-            self._shared_step_has_tasks = any(self.layer_load_tasks) or any(self.layer_save_tasks)
             self._check_hybrid_load_errors()
 
     def _is_layerwise_save_leader(self) -> bool:
@@ -2345,7 +2323,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             # Errors are still surfaced per layer by wait_for_layer_load.
             self._check_hybrid_load_errors()
 
-    def _submit_ready_layer_loads(self, last_layer: int | None = None) -> None:
+    def _submit_ready_layer_loads(self) -> None:
         assert self.kv_recv_thread is not None
         recv_thread = self.kv_recv_thread
 
@@ -2370,11 +2348,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             )
             return True
 
-        window_end = (
-            min(self.current_layer + self.num_prefetch_layers, self.num_layers - 1)
-            if last_layer is None
-            else last_layer
-        )
+        window_end = min(self.current_layer + self.num_prefetch_layers, self.num_layers - 1)
         while self.next_layer_to_submit <= window_end:
             layer_id = self.next_layer_to_submit
             self.next_layer_to_submit += 1
@@ -2405,8 +2379,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
     def wait_for_layer_load(self, layer_name: str | None = None) -> None:
         if getattr(self, "has_shared_kv", False) and layer_name is not None:
             layer_id = self._extract_physical_layer_index(layer_name)
-            if layer_id >= self.hf_config.num_hidden_layers:
-                return  # draft slots load at finish_forward, and save after drafting
             self._check_hybrid_load_errors()
             if layer_id in self._loaded_layers:
                 return  # cache-only cut write followed by the same layer's forward
@@ -2477,7 +2449,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata, layer_name: str | None = None) -> None:
         if getattr(self, "has_shared_kv", False) and layer_name is not None:
             layer_id = self._extract_physical_layer_index(layer_name)
-            if layer_id >= self.hf_config.num_hidden_layers or layer_id < self.current_layer:
+            if layer_id < self.current_layer:
                 return
             if layer_id != self.current_layer:
                 raise RuntimeError(f"Missing layerwise save hook before model layer {layer_id}")

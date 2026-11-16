@@ -455,19 +455,12 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             worker.save_kv_layer(self._get_connector_metadata())
 
-    def finish_forward(self) -> None:
-        if self.use_layerwise:
-            cast(LayerwiseKVPoolWorker, self.connector_worker).finish_forward()
-        super().finish_forward()
-
     def wait_for_save(self):
         if not self.can_put:
             # A load-only consumer has no store thread to wait for.
             return
 
         if self.use_layerwise:
-            if getattr(self.connector_worker, "has_shared_kv", False) is True:
-                cast(LayerwiseKVPoolWorker, self.connector_worker).wait_for_save(self._get_connector_metadata())
             return
 
         assert self.connector_worker is not None
