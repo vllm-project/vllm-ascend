@@ -54,7 +54,7 @@ test_cases:
       - --speculative-config
       - '{"method":"dspark","num_speculative_tokens":5}'
       - --additional-config
-      - '{"multistream_overlap_shared_expert":true,"combine_quant_mode":4}'
+      - '{"enable_cpu_binding":true,"multistream_engram_overlap":true,"multistream_overlap_shared_expert":true,"multistream_dsv4_dsa_overlap":true,"combine_quant_mode":4}'
     test_content:
       - chat_completion
     # GPQA gate requested for this case; validate against A5 FP8 measurements.
