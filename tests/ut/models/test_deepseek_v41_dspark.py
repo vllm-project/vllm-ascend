@@ -101,6 +101,7 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch, num_layer
     model._mtp_hidden_buffer = None
     model.shared_attention_state = SimpleNamespace(reset=lambda: None)
     model.layers = [Layer(i) for i in range(num_layers)]
+    model._native_mhc_steps = (deepseek_v41_module._native_mhc_step,) * len(model.layers)
     model.norm = lambda hidden: hidden
     target = AscendDeepseekV41LLMForCausalLM.__new__(AscendDeepseekV41LLMForCausalLM)
     torch.nn.Module.__init__(target)

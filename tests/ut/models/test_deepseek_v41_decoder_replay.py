@@ -9,7 +9,7 @@ import torch
 from vllm.config import CUDAGraphMode
 
 from vllm_ascend.models.deepseek_v41 import decoder_replay_layers as replay_mod
-from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
+from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model, _native_mhc_step
 
 
 @pytest.mark.parametrize(("pcp_size", "prefix_caching"), [(1, True), (2, True), (2, False)])
@@ -257,6 +257,8 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch, num_layers, rep
     model._mtp_hidden_buffer = None
     model.shared_attention_state = SimpleNamespace(reset=lambda: None)
     model.layers = [Layer(i) for i in range(num_layers)]
+    model._native_mhc_steps = (_native_mhc_step,) * len(model.layers)
+    model._mhc_replay = None
     model.norm = lambda hidden: hidden
     model.end_layer = num_layers
     model.start_layer = 0

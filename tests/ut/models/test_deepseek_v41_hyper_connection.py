@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: E402
 
+from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,10 +13,17 @@ pytest.importorskip(
 )
 
 import torch
+from vllm.config import CUDAGraphMode
 
 from tests.deepseek_v41_utils import hc_mixes_reference, hc_post_reference
+from vllm_ascend.models.deepseek_v41 import mhc
 from vllm_ascend.models.deepseek_v41 import model as deepseek_v41_module
-from vllm_ascend.models.deepseek_v41.model import DeepseekV41DecoderLayer
+from vllm_ascend.models.deepseek_v41.model import (
+    AscendDeepseekV41LLMForCausalLM,
+    DeepseekV41DecoderLayer,
+    DeepseekV41Model,
+)
+from vllm_ascend.models.deepseek_v41.vl_model import AscendDeepseekV41ForCausalLM
 
 
 def _layer() -> DeepseekV41DecoderLayer:
@@ -25,6 +34,90 @@ def _layer() -> DeepseekV41DecoderLayer:
     layer.norm_eps = 1e-6
     layer.hc_eps = 1e-6
     return layer
+
+
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.NONE])
+def test_v41_mhc_defaults_to_overlap_for_eligible_batches(monkeypatch, graph_mode):
+    width = deepseek_v41_module.MHC_FUSION_HIDDEN_SIZE
+    layer = _layer()
+    norm = SimpleNamespace(weight=torch.ones(width, dtype=torch.bfloat16), variance_epsilon=layer.norm_eps)
+    layer.input_layernorm = layer.post_attention_layernorm = norm
+    layer.hc_attn_fn = layer.hc_ffn_fn = torch.empty((24, 4 * width), dtype=torch.float32)
+    layer.hc_attn_scale = layer.hc_ffn_scale = torch.empty(3, dtype=torch.float32)
+    layer.hc_attn_base = layer.hc_ffn_base = torch.empty(24, dtype=torch.float32)
+    backbone = MagicMock(
+        _mhc_prefix=None,
+        config=SimpleNamespace(hidden_size=width),
+        hc_mult=4,
+        use_sequence_parallel=False,
+        layers=[layer],
+        start_layer=0,
+        decoder_replay_start=1,
+        end_layer=1,
+    )
+    backbone.initialize_mhc.side_effect = lambda cfg: DeepseekV41Model.initialize_mhc(backbone, cfg)
+    fused = MagicMock()
+    monkeypatch.setattr(deepseek_v41_module, "HAS_TRITON", True)
+    monkeypatch.setattr(
+        deepseek_v41_module, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True)
+    )
+    monkeypatch.setattr(deepseek_v41_module, "is_global_first_rank", lambda: False)
+    monkeypatch.setattr(deepseek_v41_module, "MHC_POST_COLLAPSE_NORM", MagicMock())
+    monkeypatch.setattr(deepseek_v41_module, "DeepseekV41MhcForward", MagicMock(return_value=fused))
+    language_model = AscendDeepseekV41LLMForCausalLM.__new__(AscendDeepseekV41LLMForCausalLM)
+    torch.nn.Module.__init__(language_model)
+    language_model.model = backbone
+    language_model._mhc_forward = None
+    model = AscendDeepseekV41ForCausalLM.__new__(AscendDeepseekV41ForCausalLM)
+    torch.nn.Module.__init__(model)
+    model.language_model = language_model
+    cfg = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1, use_ubatching=False),
+        compilation_config=SimpleNamespace(cudagraph_mode=graph_mode),
+    )
+
+    model.initialize_mhc(cfg)
+    enabled = graph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+    assert model.dsv41_mhc_mode == ("overlap" if enabled else "baseline")
+    assert model(None, torch.arange(mhc.MHC_MAX_ROWS)) is (fused if enabled else backbone).return_value
+    assert model(None, torch.arange(mhc.MHC_MAX_ROWS + 1)) is backbone.return_value
+
+
+@pytest.mark.parametrize("capturing", [False, True])
+def test_v41_mhc_waits_only_at_coefficient_consumers_during_capture(monkeypatch, capturing):
+    x = torch.empty(2, 8, dtype=torch.bfloat16)
+    residual = torch.empty(2, 4, 8, dtype=x.dtype)
+    post, comb, pre = torch.empty(2, 4), torch.empty(2, 4, 4), torch.empty(2, 4)
+    weights = (torch.empty(8), torch.empty(24, 32), torch.ones(3), torch.zeros(24), 20, 1e-6, 1e-6)
+    events = []
+
+    def coefficients(source):
+        events.append(source)
+        return post, comb, pre
+
+    monkeypatch.setattr(mhc, "MHC_POST_COLLAPSE_NORM", lambda *args: events.append("fuse"))
+    monkeypatch.setattr(mhc, "_wait_for_coefficients", lambda _: events.append("wait"))
+    monkeypatch.setattr(mhc, "_coefficients_on_aux", lambda *args: coefficients("aux"))
+    monkeypatch.setattr(mhc, "_native_post", lambda *args: events.append("post"))
+    monkeypatch.setattr(
+        torch.ops._C_ascend, "dsv41_hc_pre_coefficients", lambda *args: coefficients("main"), raising=False
+    )
+
+    with mhc.record_mhc_overlap() if capturing else nullcontext():
+        updated, normed, routing, post, comb, pre = mhc._prepare_moe(
+            x, residual, post, comb, pre, *weights, overlap=True, wait_for_attention=False
+        )
+        updated, normed, post, comb, _ = mhc._prepare_attention(
+            normed, updated, post, comb, pre, *weights, overlap=True
+        )
+        mhc._finish_overlap(normed, updated, post, comb)
+
+    assert routing.shape == x.shape and routing.dtype == torch.float32
+    if capturing:
+        assert events == ["fuse", "aux", "wait", "fuse", "aux", "wait", "post"]
+    else:
+        assert events == ["fuse", "main", "fuse", "main", "post"]
 
 
 def test_v41_hc_pre_dispatches_fused_operator_with_pre_mix():
@@ -299,6 +392,7 @@ def test_v41_target_emits_input_residual_for_selected_aux_layers():
             return hidden + 1, pre_mix
 
     model.layers = torch.nn.ModuleList([Layer(i) for i in range(3)])
+    model._native_mhc_steps = (deepseek_v41_module._native_mhc_step,) * len(model.layers)
     ids = torch.tensor([0, 1])
     with patch(
         "vllm_ascend.models.deepseek_v41.model.get_pp_group",

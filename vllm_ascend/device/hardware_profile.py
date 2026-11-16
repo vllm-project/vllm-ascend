@@ -91,6 +91,8 @@ class HardwareCapability(Enum):
     DSV4_COMPRESSED_CACHE = auto()
     # Use the DeepSeek-V4.1 mixed-quant cache and packaged QLI/QSMLA ABI.
     DSV41_PACKED_CACHE = auto()
+    # Build and run the DeepSeek V4.1 mHC coefficient-only operator and boundary fusion.
+    DSV41_MHC_BOUNDARY_FUSION = auto()
     # Triton RMS/dot/gate/residual fusion for unrotated Engram inputs.
     ENGRAM_UNROTATED_GATE = auto()
     # Decode native FP8 codes and E8M0 group scales in Engram table lookups.
@@ -393,6 +395,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                 HardwareCapability.RMS_NORM_CAST,
                 HardwareCapability.NPU_TOP_K_TOP_P,
                 HardwareCapability.FLASH_ATTN_NPU_3,
+                HardwareCapability.DSV41_MHC_BOUNDARY_FUSION,
             },
         ),
         AscendDeviceType.A3: HardwareProfile(

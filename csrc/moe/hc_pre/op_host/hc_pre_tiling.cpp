@@ -19,6 +19,8 @@
 
 using namespace ge;
 namespace optiling {
+REGISTER_TILING_DATA_CLASS(HcPre, HcPreTilingData)
+
 namespace {
 constexpr uint64_t WORKSPACE_SIZE = 32;
 int64_t CeilDiv(int64_t x, int64_t y)
@@ -416,12 +418,10 @@ ge::graphStatus HcPreTiling::CalcMKSplitCoreMembasePart2Tiling()
 // preMix 场景的 Part2 tiling：按行分配，UB 预算包含 mix2、combFrag、base2 和 reduceBuf。
 ge::graphStatus HcPreTiling::CalcPremixPart2Tiling()
 {
-    rowOfFormerBlock_ = CeilDiv(bs_, static_cast<int64_t>(aivCoreNum_));
-    usedAivCoreNums_ = std::min(CeilDiv(bs_, rowOfFormerBlock_), static_cast<int64_t>(aivCoreNum_));
-    rowOfTailBlock_ = bs_ - (usedAivCoreNums_ - 1) * rowOfFormerBlock_;
+    const auto rowSplit = SplitHcPrePremixRows(bs_, aivCoreNum_);
 
     int64_t minRowPerCore = 1;
-    int64_t rowOnceLoop = std::min(rowOfFormerBlock_, minRowPerCore);
+    int64_t rowOnceLoop = std::min(rowSplit.rowsPerCore, minRowPerCore);
     int64_t kBlockNum = tilingData_.get_cubeBlockDimK();
 
     hcMultAlign_ = RoundUp(hcMult_, BLOCK_SIZE / sizeof(float));
@@ -487,7 +487,7 @@ ge::graphStatus HcPreTiling::CalcPremixPart2Tiling()
 
     // d全载,尝试搬入更多的bs
     if (dFactor_ == d_) {
-        while (rowFactor_ <= rowOfFormerBlock_) {
+        while (rowFactor_ <= rowSplit.rowsPerCore) {
             mix0OriginSize = kBlockNum * rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
             mix1OriginSize = kBlockNum * rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
             mix2OriginSize = kBlockNum * rowFactor_ * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
@@ -517,12 +517,8 @@ ge::graphStatus HcPreTiling::CalcPremixPart2Tiling()
             }
             rowFactor_ = rowFactor_ + 1;
         }
-        rowFactor_ = rowFactor_ > rowOfFormerBlock_ ? rowFactor_ - 1 : rowFactor_;
+        rowFactor_ = rowFactor_ > rowSplit.rowsPerCore ? rowFactor_ - 1 : rowFactor_;
     }
-    rowLoopOfFormerBlock_ = CeilDiv(rowOfFormerBlock_, rowFactor_);
-    rowLoopOfTailBlock_ = CeilDiv(rowOfTailBlock_, rowFactor_);
-    tailRowFactorOfFormerBlock_ = rowOfFormerBlock_ % rowFactor_ == 0 ? rowFactor_ : rowOfFormerBlock_ % rowFactor_;
-    tailRowFactorOfTailBlock_ = rowOfTailBlock_ % rowFactor_ == 0 ? rowFactor_ : rowOfTailBlock_ % rowFactor_;
 
     tilingKey_ = PREMIX_TILING_KEY;
     tilingData_.set_bs(bs_);
@@ -530,14 +526,7 @@ ge::graphStatus HcPreTiling::CalcPremixPart2Tiling()
     tilingData_.set_hcMult(hcMult_);
     tilingData_.set_d(d_);
     tilingData_.set_hcMultAlign(hcMultAlign_);
-    tilingData_.set_rowOfFormerBlock(rowOfFormerBlock_);
-    tilingData_.set_rowOfTailBlock(rowOfTailBlock_);
-    tilingData_.set_rowLoopOfFormerBlock(rowLoopOfFormerBlock_);
-    tilingData_.set_rowLoopOfTailBlock(rowLoopOfTailBlock_);
-    tilingData_.set_stage2RowFactor(rowFactor_);
-    tilingData_.set_secondUsedCoreNum(usedAivCoreNums_);
-    tilingData_.set_tailRowFactorOfFormerBlock(tailRowFactorOfFormerBlock_);
-    tilingData_.set_tailRowFactorOfTailBlock(tailRowFactorOfTailBlock_);
+    SetHcPrePremixRowTiling(tilingData_, rowSplit, rowFactor_);
     tilingData_.set_dLoop(dLoop_);
     tilingData_.set_dFactor(dFactor_);
     tilingData_.set_tailDFactor(tailDFactor_);

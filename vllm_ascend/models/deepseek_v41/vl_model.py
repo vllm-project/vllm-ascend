@@ -245,6 +245,16 @@ class AscendDeepseekV41ForCausalLM(
         # MRV2 needs the language model's lookback history and graph events.
         return self.language_model.get_model_state_cls()
 
+    def initialize_mhc(self, vllm_config):
+        self.language_model.initialize_mhc(vllm_config)
+
+    def warmup_mhc(self):
+        self.language_model.warmup_mhc()
+
+    @property
+    def dsv41_mhc_mode(self):
+        return self.language_model.dsv41_mhc_mode
+
     def prime_engram_v2_graph_inputs(self, padded_tokens):
         return self.language_model.prime_engram_v2_graph_inputs(padded_tokens)
 
