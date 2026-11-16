@@ -27,6 +27,9 @@ SCALE_GROUP = 32
 # can express, so the device address of every group of rows is published
 # separately.
 CHUNK_ROWS = 1 << 22
+# CANN runtime rejects host registrations above ~6 GiB on this platform;
+# register each pointer-chunk separately to stay under the limit.
+_REG_MAX_BYTES = 5 << 30
 
 
 def _madvise_hugepage(shm: shared_memory.SharedMemory, size: int) -> None:
@@ -165,22 +168,32 @@ class HostUvaBuffer:
         self.buffer = (ctypes.c_char * size).from_address(self.pointer.value)
         self.tensor = torch.frombuffer(self.buffer, dtype=dtype).reshape(shape)
         try:
-            rc = self.lib.aclrtHostRegisterV2(self.pointer, size, DeviceOperator.host_register_flags())
-            if rc:
-                raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
-            address = ctypes.c_void_p()
-            rc = self.lib.aclrtHostGetDevicePointer(self.pointer, ctypes.byref(address), 0)
-            if rc:
-                raise RuntimeError(f"aclrtHostGetDevicePointer failed: rc={rc}")
-            self.ptrs = torch.tensor(
-                [address.value + start * self.row_bytes for start in range(0, rows, CHUNK_ROWS)],
-                dtype=torch.int64,
-                device=device,
-            )
+            flags = DeviceOperator.host_register_flags()
+            # Register the range in chunks no larger than _REG_MAX_BYTES,
+            # aligned to the kernel CHUNK_ROWS granularity so each device
+            # pointer in self.ptrs maps to exactly one registered chunk.
+            reg_chunk_bytes = min(_REG_MAX_BYTES, CHUNK_ROWS * self.row_bytes)
+            self._reg_chunks: list[tuple[int, int]] = []  # (host_addr, chunk_size)
+            device_ptrs: list[int] = []
+            for start_row in range(0, rows, CHUNK_ROWS):
+                offset = start_row * self.row_bytes
+                host_addr = self.pointer.value + offset
+                chunk_size = min(reg_chunk_bytes, size - offset)
+                rc = self.lib.aclrtHostRegisterV2(ctypes.c_void_p(host_addr), chunk_size, flags)
+                if rc:
+                    raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={chunk_size}")
+                self._reg_chunks.append((host_addr, chunk_size))
+                addr = ctypes.c_void_p()
+                rc = self.lib.aclrtHostGetDevicePointer(ctypes.c_void_p(host_addr), ctypes.byref(addr), 0)
+                if rc:
+                    raise RuntimeError(f"aclrtHostGetDevicePointer failed: rc={rc}")
+                device_ptrs.append(addr.value)
+            self.ptrs = torch.tensor(device_ptrs, dtype=torch.int64, device=device)
         except Exception:
             # A half-built buffer must not leave the host range registered: the
             # caller only sees the exception, so nothing else can release it.
-            self.lib.aclrtHostUnregister(self.pointer)
+            for host_addr, _ in getattr(self, "_reg_chunks", []):
+                self.lib.aclrtHostUnregister(ctypes.c_void_p(host_addr))
             self.lib.aclrtFreeHost(self._allocation_pointer)
             self.tensor = None
             self.buffer = None
@@ -198,9 +211,22 @@ class HostUvaBuffer:
             return
         if self.ptrs is not None and self.ptrs.device.type == "npu":
             torch.npu.synchronize()
-        rc = self.lib.aclrtHostUnregister(self.pointer)
-        if rc:
-            raise RuntimeError(f"aclrtHostUnregister failed: rc={rc}")
+        reg_chunks = getattr(self, "_reg_chunks", None)
+        if reg_chunks:
+            remaining = []
+            for host_addr, chunk_size in reg_chunks:
+                rc = self.lib.aclrtHostUnregister(ctypes.c_void_p(host_addr))
+                if rc:
+                    remaining.append((host_addr, chunk_size))
+            if remaining:
+                self._reg_chunks = remaining
+                raise RuntimeError(f"aclrtHostUnregister failed for {len(remaining)} Engram chunks")
+            self._reg_chunks = []
+        else:
+            # Fallback for objects created before chunked registration existed.
+            rc = self.lib.aclrtHostUnregister(self.pointer)
+            if rc:
+                raise RuntimeError(f"aclrtHostUnregister failed: rc={rc}")
         self.tensor = None
         self.buffer = None
         self.ptrs = None
@@ -309,26 +335,35 @@ class SharedUvaBuffer:
                 with patch("multiprocessing.resource_tracker.register", lambda *args, **kwargs: None):
                     self.shm = shared_memory.SharedMemory(name=name)
             assert self.shm.size >= size
-            address_of_mapping = ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.shm.buf)))
+            base_addr = ctypes.addressof(ctypes.c_char.from_buffer(self.shm.buf))
             _madvise_hugepage(self.shm, size)
-            rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, DeviceOperator.host_register_flags())
-            if rc:
-                raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
-            # Registration succeeded: from here on the mapping owes exactly one
-            # aclrtHostUnregister, and close() must keep the owner until it
-            # returns success.  ``pointer`` is therefore set only
-            # after the registration it has to undo exists.
-            self.pointer = address_of_mapping
-            address = ctypes.c_void_p()
-            rc = self.lib.aclrtHostGetDevicePointer(self.pointer, ctypes.byref(address), 0)
-            if rc:
-                raise RuntimeError(f"aclrtHostGetDevicePointer failed: rc={rc}")
+            flags = DeviceOperator.host_register_flags()
+
+            # Register the shared range in chunks no larger than _REG_MAX_BYTES,
+            # aligned to the kernel CHUNK_ROWS granularity so each device
+            # pointer in self.ptrs maps to exactly one registered chunk.
+            reg_chunk_bytes = min(_REG_MAX_BYTES, CHUNK_ROWS * self.row_bytes)
+            self._reg_chunks: list[tuple[int, int]] = []  # (host_addr, chunk_size)
+            device_ptrs: list[int] = []
+            for start_row in range(0, rows, CHUNK_ROWS):
+                offset = start_row * self.row_bytes
+                host_addr = base_addr + offset
+                chunk_size = min(reg_chunk_bytes, size - offset)
+                rc = self.lib.aclrtHostRegisterV2(ctypes.c_void_p(host_addr), chunk_size, flags)
+                if rc:
+                    raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={chunk_size}")
+                self._reg_chunks.append((host_addr, chunk_size))
+                addr = ctypes.c_void_p()
+                rc = self.lib.aclrtHostGetDevicePointer(ctypes.c_void_p(host_addr), ctypes.byref(addr), 0)
+                if rc:
+                    raise RuntimeError(f"aclrtHostGetDevicePointer failed: rc={rc}")
+                device_ptrs.append(addr.value)
+
+            # Registration succeeded: chunks are recorded in _reg_chunks and
+            # close() will unregister each one.
+            self.pointer = ctypes.c_void_p(base_addr)
             self.tensor = torch.frombuffer(self.shm.buf, dtype=dtype, count=rows * row_elements).reshape(shape)
-            self.ptrs = torch.tensor(
-                [address.value + start * self.row_bytes for start in range(0, rows, CHUNK_ROWS)],
-                dtype=torch.int64,
-                device=device,
-            )
+            self.ptrs = torch.tensor(device_ptrs, dtype=torch.int64, device=device)
         except Exception as exc:  # noqa: BLE001 - aggregated below
             error = f"{type(exc).__name__}: {exc}"
 
@@ -360,16 +395,23 @@ class SharedUvaBuffer:
         """Unregister and close the mapping; shared memory is never aclrtFreeHost.
 
         Safe to call more than once.  A failed unregister raises and keeps the
-        pointer, the CPU views and the device address table, so the caller can
-        retry: the backing stays owned until CANN has really let go of it, the
-        same contract as the private ``HostUvaBuffer``.  The
-        mapping is only closed after the unregister succeeded -- or when
-        there is nothing registered to begin with, e.g. after a failed
-        ``aclrtHostRegisterV2``.
+        remaining chunks so the caller can retry.
         """
-        if self.pointer is not None and self.pointer.value:
-            if self.ptrs is not None and self.ptrs.device.type == "npu":
-                torch.npu.synchronize()
+        if self.ptrs is not None and self.ptrs.device.type == "npu":
+            torch.npu.synchronize()
+        reg_chunks = getattr(self, "_reg_chunks", None)
+        if reg_chunks:
+            remaining = []
+            for host_addr, chunk_size in reg_chunks:
+                rc = self.lib.aclrtHostUnregister(ctypes.c_void_p(host_addr))
+                if rc:
+                    remaining.append((host_addr, chunk_size))
+            if remaining:
+                self._reg_chunks = remaining
+                raise RuntimeError(f"aclrtHostUnregister failed for {len(remaining)} shared Engram chunks")
+            self._reg_chunks = []
+        elif self.pointer is not None and self.pointer.value:
+            # Fallback for objects created before chunked registration existed.
             rc = self.lib.aclrtHostUnregister(self.pointer)
             if rc:
                 raise RuntimeError(f"aclrtHostUnregister failed for shared Engram: rc={rc}")
