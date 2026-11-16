@@ -188,7 +188,7 @@
 /vllm_ascend/models/deepseek_v41 @lcfenglinwan @GDzhu01 @linfeng-yuan
 /vllm_ascend/models/deepseek_mtp.py @lcfenglinwan @GDzhu01 @linfeng-yuan
 /vllm_ascend/models/glm5next @lijiahang226
-/vllm_ascend/models/glm5next/kda.py @lijiahang226 @drslark
+/vllm_ascend/models/glm5next/kda.py @drslark
 /vllm_ascend/models/glm5_dspark.py @lijiahang226
 /vllm_ascend/models/kimi_k3 @Dawn952
 /vllm_ascend/models/kimi_k3/recoverssm_metadata.py @drslark
