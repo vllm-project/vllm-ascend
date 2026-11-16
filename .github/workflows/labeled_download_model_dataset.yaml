@@ -39,9 +39,7 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          apt-get update -y && apt-get install git jq -y
-          pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
-          pip install 'modelscope<1.38' datasets
+          apt-get update -y && apt-get install git jq curl -y
 
       - name: Show Current Disk Usage
         run: |
@@ -92,33 +90,66 @@ jobs:
           echo "New datasets:"
           cat /tmp/new_datasets.txt || true
 
-      - name: Download new models (CLI)
+      # Downloads are delegated to ascend-gha-runners/sync-tools model-library
+      # pipeline (repository_dispatch API): it routes runner_label to the right
+      # cluster disks, downloads on dedicated sync machines / in-cluster O-card
+      # runners (idempotent, serialized, xet-disabled, ledger-recorded).
+      # This job no longer occupies NPU runners' bandwidth or runtime.
+      - name: Delegate download to sync-tools API
+        env:
+          MODEL_SYNC_PAT: ${{ secrets.MODEL_SYNC_PAT }}
         run: |
           set -euo pipefail
-          if [ ! -s /tmp/new_models.txt ]; then
-            echo "No new models to download."
-            exit 0
-          fi
+          [ -n "${MODEL_SYNC_PAT:-}" ] || {
+            echo "::error::MODEL_SYNC_PAT secret is empty: secrets are not exposed to fork PRs. Push this branch to vllm-project/vllm-ascend and re-open the PR (list changes always need maintainer review anyway)."; exit 1; }
+          rid="${GITHUB_RUN_ID}-${{ strategy.job-index }}"
+          echo "request_id=$rid" >> "$GITHUB_ENV"
+          to_models()   { jq -R -c 'select(length>0) | split("/") | {platform:"modelscope",organization:.[0],model_name:(.[1:] | join("/"))}'; }
+          to_datasets() { jq -R -c 'select(length>0) | split("/") | {platform:"modelscope",organization:.[0],dataset_name:(.[1:] | join("/"))}'; }
+          m=""
+          d=""
+          if [ -s /tmp/new_models.txt ];   then m=$(to_models   < /tmp/new_models.txt);   fi
+          if [ -s /tmp/new_datasets.txt ]; then d=$(to_datasets < /tmp/new_datasets.txt); fi
+          if [ -z "${m}${d}" ]; then echo "no new items; nothing to request"; echo "SKIP_WAIT=1" >> "$GITHUB_ENV"; exit 0; fi
+          payload=$(jq -n --arg rid "$rid" --arg lbl "${{ matrix.runner }}" \
+            --argjson m "[${m//$'\n'/,}]" --argjson d "[${d//$'\n'/,}]" \
+            '{event_type:"model-download-request", client_payload:{
+               repo:"vllm-project/vllm-ascend", runner_label:$lbl, request_id:$rid,
+               models:$m, datasets:$d}}')
+          curl -sf -X POST -H "Authorization: Bearer $MODEL_SYNC_PAT" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/ascend-gha-runners/sync-tools/dispatches \
+            --data "$payload"
+          echo "Requested sync-tools to route & download $(echo "$payload" | jq '.client_payload.models | length') models / $(echo "$payload" | jq '.client_payload.datasets | length') datasets."
 
-          while read -r model; do
-            [ -z "$model" ] && continue
-            echo "▶ Downloading $model"
-            modelscope download "$model"
-          done < /tmp/new_models.txt
-
-      - name: Download new datasets (CLI)
+      - name: Wait for sync-tools download to land
+        if: env.SKIP_WAIT != '1'
+        env:
+          MODEL_SYNC_PAT: ${{ secrets.MODEL_SYNC_PAT }}
         run: |
           set -euo pipefail
-          if [ ! -s /tmp/new_datasets.txt ]; then
-            echo "No new datasets to download."
-            exit 0
-          fi
-
-          while read -r dataset; do
-            [ -z "$dataset" ] && continue
-            echo "▶ Downloading dataset $dataset"
-            modelscope download --dataset "$dataset"
-          done < /tmp/new_datasets.txt
+          api=https://api.github.com/repos/ascend-gha-runners/sync-tools
+          auth=(-H "Authorization: Bearer $MODEL_SYNC_PAT" -H "Accept: application/vnd.github+json")
+          deadline=$(( $(date +%s) + 10800 ))
+          runid=""
+          while :; do
+            if [ -z "$runid" ]; then
+              for r in $(curl -s "${auth[@]}" "$api/actions/runs?event=repository_dispatch&per_page=15" | jq -r '.workflow_runs[].id'); do
+                if curl -s "${auth[@]}" "$api/actions/runs/$r/jobs" \
+                     | jq -e --arg rid "$request_id" '[.jobs[].name | select(test(" <- api#" + $rid + "$"))] | length > 0' >/dev/null 2>&1; then
+                  runid=$r; echo "matched sync-tools run $runid"; break
+                fi
+              done
+            else
+              st=$(curl -s "${auth[@]}" "$api/actions/runs/$runid" | jq -r '.status + ":" + (.conclusion // "")')
+              case "$st" in
+                completed:success) echo "All requested models/datasets landed on the routed cluster disks."; break ;;
+                completed:*) echo "::error::sync-tools run $runid ended $st (check its log or open an issue in ascend-gha-runners/sync-tools)"; exit 1 ;;
+              esac
+            fi
+            [ "$(date +%s)" -lt "$deadline" ] || { echo "::error::timed out (3h) waiting sync-tools request $rid"; exit 1; }
+            sleep 60
+          done
 
       - name: Summary
         run: |
