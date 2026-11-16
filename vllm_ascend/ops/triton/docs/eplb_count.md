@@ -28,13 +28,25 @@ weighted scatter API.
 
 ## Validation
 
-The current launch explicitly sets `compile_mode="simd"` to select pure SIMD
-on Ascend 950. A2/A3 already use SIMD under the default hybrid mode. See the
+The current launch explicitly sets `compile_mode="simd"` on Ascend 950.
+A2/A3 already use SIMD under the default hybrid mode. See the
 [compiler options reference](https://triton-ascend.readthedocs.io/en/v3.6.0/environment_variable_and_compiler_options_reference.html).
-This compiler-option change is pending device validation: the available A5
-cards were mapped by other running containers at the latest resource check.
-The measurements and compiler evidence below belong to commit `980f446c2`,
-before this option was added, and do not validate the forced-SIMD candidate.
+Candidate `a46145c87` passed all 81 correctness tests on Ascend950DT_9582.
+Metadata confirms `compile_mode="simd"`, but saved adapter IR still lowers
+`tl.histogram` to `__builtin_histogram` with `vf_mode<SIMT>`; this option does
+not establish a SIMD-only histogram implementation with this toolchain.
+Paired, alternating Graph measurements on the same card (20 complete calls per
+replay, 10 samples) compare default hybrid versus explicit SIMD:
+
+| Distribution | Default hybrid ms | Explicit SIMD ms | SIMD time increase |
+| --- | ---: | ---: | ---: |
+| uniform | 1.0299 | 1.0587 | 2.80% |
+| hot | 1.0208 | 1.0509 | 2.95% |
+| mixed | 1.0246 | 1.0537 | 2.84% |
+
+This option did not improve performance. A3 has not been rerun with the explicit
+option. The remaining measurements below belong to commit `980f446c2`, before
+this option was added.
 
 Both A3 Ascend910_9362 (NpuArch 2201) and A5 Ascend950DT_9582 (NpuArch 3510)
 passed 81 tests with exact integer equality, including mutable-input Graph replay.
