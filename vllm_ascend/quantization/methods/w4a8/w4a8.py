@@ -35,7 +35,6 @@ from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
     dispose_tensor,
-    maybe_trans_nz,
 )
 
 from ..base import AscendLinearScheme, AscendMoEScheme, PreparedLinearInput, QuantType
@@ -44,8 +43,6 @@ from ..registry import register_scheme
 _MODELSLIM_SCALE_BIAS_PARTITIONS = 16
 _INT4_VALUES_PER_BYTE = 2
 _INT4_VALUES_PER_INT32 = 8
-_INT4_NZ_OUTPUT_ALIGNMENT = 64
-_INT4_NZ_INPUT_ALIGNMENT = 16
 
 
 @register_scheme("W4A8_DYNAMIC", "moe")
@@ -129,8 +126,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         group_size = vllm_config.quant_config.quant_description.get("group_size", 0)
         if group_size > 0:
             raise ValueError(
-                "The current weights use Per‑Group quantization, which is no longer supported. Please "
-                "switch to Per‑Channel quantized weights."
+                "The current weights use Per鈥慓roup quantization, which is no longer supported. Please "
+                "switch to Per鈥慍hannel quantized weights."
             )
 
         # Only per-channel W4A8 is supported, this parameter will be removed soon.
@@ -159,7 +156,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
     ) -> dict[str, Any]:
         param_dict = {}
-        # Note: compressed‑tensors: one int4 per int8; modelslim: packs two int4 into one int8
+        # Note: compressed鈥憈ensors: one int4 per int8; modelslim: packs two int4 into one int8
         if self.quant_method == COMPRESSED_TENSORS_METHOD:
             w13_output_size = 2 * intermediate_size_per_partition
             w2_output_size = hidden_sizes
@@ -662,23 +659,18 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         output_shape = (*input_shape[:-1], layer.weight_scale.numel())
         if quantized_x.numel() == 0:
             return torch.empty(output_shape, dtype=output_dtype, device=quantized_x.device)
-        # Use the per-channel A8W4 GMM interface for a single Linear group.
-        # The current quant_matmul fake implementation assumes per-group A8W4 scales.
-        group_list = torch.full((1,), quantized_x.shape[0], dtype=torch.int64, device=quantized_x.device)
-        output = torch_npu.npu_grouped_matmul(
-            x=[quantized_x],
-            weight=[layer.weight],
-            scale=[layer.weight_scale.reshape(1, 1, -1)],
-            bias=[layer.scale_bias.reshape(1, -1)],
-            per_token_scale=[pertoken_scale],
-            group_list=group_list,
-            group_list_type=1,
-            group_type=0,
-            split_item=2,
+        # Integer A8W4 uses offset for activation-shift compensation.
+        # Explicit no-group scales also support fake-tensor shape inference.
+        output = torch_npu.npu_quant_matmul(
+            quantized_x,
+            layer.weight,
+            layer.weight_scale,
+            offset=layer.scale_bias,
+            pertoken_scale=pertoken_scale,
+            group_sizes=[0, 0, 0],
             output_dtype=output_dtype,
-        )[0]
-        # The GMM bias compensates the A8W4 activation shift; a model bias is
-        # independent of the per-token scale and must be added afterwards.
+        )
+        # Model bias is independent of the per-token quantization scale.
         if bias is not None:
             output.add_(bias)
         return output.reshape(output_shape)
@@ -689,16 +681,8 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         weight_offset = layer.weight_offset.detach().cpu()
         if torch.any(weight_offset != 0).item():
             raise ValueError("W4A8 INT Linear only supports symmetric weight offsets.")
-        # Materialize the 3D single-group tensor before NZ conversion. A view
-        # retains the 2D storage descriptor and triggers an unsupported TransData.
-        packed_weight = layer.weight.data.transpose(0, 1).unsqueeze(0).contiguous()
-        # INT4 NZ requires K divisible by 16 and N divisible by 64. Keep ND
-        # for smaller TP partitions, such as the QSA indexer (N=80 at TP8).
-        if (
-            packed_weight.shape[1] % _INT4_NZ_INPUT_ALIGNMENT == 0
-            and layer.weight_scale.numel() % _INT4_NZ_OUTPUT_ALIGNMENT == 0
-        ):
-            packed_weight = maybe_trans_nz(packed_weight)
+        # QuantMatmul consumes 2D ND INT4 weights packed as INT32 [K, N / 8].
+        packed_weight = layer.weight.data.transpose(0, 1).contiguous()
         layer.weight.data = packed_weight.view(torch.int32)
         layer.weight_scale_fp32 = layer.weight_scale.data.flatten().to(torch.float32).contiguous()
         # CANN A8W4 consumes the FP32 scale bits in the low half of INT64.
