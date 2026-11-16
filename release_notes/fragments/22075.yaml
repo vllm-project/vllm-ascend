@@ -1,0 +1,4 @@
+pr: 22075
+entries:
+  - category: bugfix
+    text: Released all ACL graph managers (target, speculative-decoding, encoder and breakable piecewise) during sleep-mode extra cleanup and made repeated sleep/wake calls idempotent, so wake-time recapture no longer trips already-captured graph assertions.
