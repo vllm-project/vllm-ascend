@@ -287,7 +287,7 @@ vLLM Ascend revision.
         --reasoning-parser deepseek_v41 \
         --enable-auto-tool-choice \
         --trust-remote-code \
-        --swa-bounded-replay \
+        --no-swa-bounded-replay \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --speculative-config '{"method":"dspark","num_speculative_tokens":5}' \
         --additional-config '{
@@ -338,8 +338,9 @@ vLLM Ascend revision.
         --quantization ascend \
         --block-size 128 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --speculative-config '{"method":"dspark","num_speculative_tokens":5}' \
         --async-scheduling \
-        --swa-bounded-replay \
+        --no-swa-bounded-replay \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --additional-config '{
             "ascend_compilation_config":{
@@ -374,8 +375,8 @@ vLLM Ascend revision.
         Decode path while Prefill remains outside the captured graph.
     - `--safetensors-load-strategy lazy` avoids eagerly materializing the whole
         checkpoint during loading.
-    - `--swa-bounded-replay` enables SWA bounded replay.
-    - `enable_flashcomm1: false` disables FlashComm for compatibility with SWA bounded replay.
+    - `--no-swa-bounded-replay` disables SWA bounded replay.
+    - `enable_flashcomm1: false` keeps FlashComm disabled for this A3 configuration.
     - `enable_fused_mc2` and `enable_shared_expert_dp` enable the A3 MoE and
         communication optimizations
         used by this configuration. `enable_cpu_binding` pins worker processes to

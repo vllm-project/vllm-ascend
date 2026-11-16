@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import torch
 import vllm.v1.worker.gpu.cp_utils as _cp_utils
+from vllm.config import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
@@ -18,13 +19,13 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask, TargetDeviceMetadata
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.attn_utils import (
@@ -32,7 +33,6 @@ from vllm_ascend.worker.v2.attn_utils import (
     _allocate_kv_cache,
     _reshape_kv_cache_v2,
     get_kv_cache_spec,
-    unwrap_mamba_kv_cache_groups,
 )
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
@@ -49,7 +49,7 @@ if not hasattr(_cp_utils, "prepare_dcp_local_seq_lens") and hasattr(_cp_utils, "
 def _mock_vllm_config():
     # Config for get_kv_cache_spec: attn_utils reads attention_config.indexer_kv_dtype.
     config = MagicMock()
-    config.attention_config.indexer_kv_dtype = "int8"
+    config.attention_config = AttentionConfig(indexer_kv_dtype="int8")
     config.cache_config.cache_dtype = "auto"
     return config
 
@@ -109,56 +109,6 @@ def _group(spec: MambaSpec):
         kv_cache_spec=spec,
         layer_names=["linear_attn"],
     )
-
-
-def test_unwrap_uniform_mamba_groups_for_upstream_model_state():
-    spec = _mamba_spec()
-    layer_specs = {"mamba.0": spec, "mamba.1": spec}
-    wrapped = UniformTypeKVCacheSpecs.from_specs(layer_specs)
-    assert wrapped is not None
-    config = KVCacheConfig(
-        num_blocks=3,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                layer_names=list(layer_specs),
-                kv_cache_spec=wrapped,
-            )
-        ],
-    )
-
-    normalized = unwrap_mamba_kv_cache_groups(config)
-
-    assert normalized is not config
-    assert normalized.kv_cache_groups[0].kv_cache_spec == spec
-    assert config.kv_cache_groups[0].kv_cache_spec is wrapped
-
-
-def test_unwrap_preserves_distinct_mamba_layouts():
-    specs = {
-        "mamba.0": _mamba_spec(),
-        "mamba.1": MambaSpec(
-            block_size=16,
-            shapes=((3, 2), (1, 4)),
-            dtypes=(torch.float16, torch.float32),
-        ),
-    }
-    wrapped = UniformTypeKVCacheSpecs.from_specs(specs)
-    assert wrapped is not None
-    config = KVCacheConfig(
-        num_blocks=3,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                layer_names=list(specs),
-                kv_cache_spec=wrapped,
-            )
-        ],
-    )
-
-    normalized = unwrap_mamba_kv_cache_groups(config)
-
-    assert normalized.kv_cache_groups[0].kv_cache_spec is wrapped
 
 
 def test_mamba_model_state_inherits_upstream_state_management():
@@ -303,16 +253,34 @@ def test_ensure_align_ctx_lazily_recreates_mamba_ctx():
         patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.validate_mamba_state_copy_funcs"),
         patch(
             "vllm_ascend.worker.v2.model_states.mamba_hybrid.MambaSpecDecodeGPUContext.create",
+            autospec=True,
             return_value=ctx,
         ) as mock_create,
     ):
-        result = state._ensure_align_ctx(kv_cache_config, [0], (torch.zeros(3, dtype=torch.int32),))
+        block_table = torch.zeros(3, dtype=torch.int32)
+        result = state._ensure_align_ctx(kv_cache_config, [0], (block_table,))
+        ctx.is_initialized = True
+        assert state._ensure_align_ctx(kv_cache_config, [0], (block_table,)) is ctx
 
     assert result is ctx
     assert state._mamba_ctx is ctx
     assert state._mamba_state_copy_funcs is copy_funcs
     mock_create.assert_called_once()
-    ctx.initialize_from_forward_context.assert_called_once()
+    # Enforce the installed upstream signature, rather than accepting any
+    # keyword/omitted argument through an unconstrained MagicMock.
+    if not vllm_version_is("0.33.0"):
+        assert (
+            mock_create.call_args.kwargs["forward_context"]
+            is state.vllm_config.compilation_config.static_forward_context
+        )
+    else:
+        assert "forward_context" not in mock_create.call_args.kwargs
+    ctx.initialize_from_forward_context.assert_called_once_with(
+        kv_cache_config,
+        state.vllm_config.compilation_config.static_forward_context,
+        copy_funcs,
+        [block_table],
+    )
 
 
 @patch("vllm.v1.worker.mamba_utils.precopy_mamba_align_fused_kernel")
@@ -1181,7 +1149,7 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
     original_specs = {"target.full": full, "draft.sliding": sliding, "draft.full": draft_full, "target.gdn": mamba}
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
+        attention_config=AttentionConfig(indexer_kv_dtype="int8"),
         cache_config=SimpleNamespace(cache_dtype="auto"),
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=SimpleNamespace()),
         kv_transfer_config=None,

@@ -29,6 +29,15 @@ from vllm_ascend.models.deepseek_v41.engram.hash_state import DEAD_ID, AscendNgr
 from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
 
 
+def test_remote_host_offload_close_retires_reader():
+    table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    reader = Mock()
+    table._remote_reader = reader
+    table.close_host_offload()
+    reader.close.assert_called_once_with()
+
+
 @pytest.mark.parametrize("tp", [1, 2, 4])
 @pytest.mark.parametrize("dp", [1, 2])
 @pytest.mark.parametrize("tokens", [0, 3])
@@ -150,6 +159,37 @@ def test_shared_memory_needs_a_local_dp_peer(monkeypatch):
     monkeypatch.setattr(parallel, "get_engram_dp_size", lambda: 2)
     assert resolve_dp_shared_memory(True)
     assert not resolve_dp_shared_memory(False)
+
+
+@pytest.mark.parametrize("dtype,scale_dtype", [(torch.int8, torch.float32), (torch.float8_e4m3fn, torch.uint8)])
+def test_remote_embedding_accepts_quantized_rows_without_allocating_table(monkeypatch, dtype, scale_dtype):
+    group = SimpleNamespace(world_size=2, cpu_group=object())
+    monkeypatch.setattr(embedding_mod, "in_the_same_node_as", lambda group: [True, True])
+    monkeypatch.setattr(embedding_mod, "get_tp_group", lambda: SimpleNamespace(cpu_group=object()))
+    monkeypatch.setattr(embedding_mod, "get_engram_dp_group", lambda: group)
+    monkeypatch.setattr(embedding_mod, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(embedding_mod, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(upstream_engram, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(current_device=lambda: 0), raising=False)
+    device = torch.device
+    monkeypatch.setattr(torch, "device", lambda *args, **kwargs: device("cpu"))
+    table = embedding_mod.AscendParallelEngramEmbedding(
+        8, 64, (4, 4), 0, cpu_offload=True, dp_shared_memory=True, storage_dtype=dtype, remote_reader=object()
+    )
+    assert table.weight.device.type == table.weight_scale_inv.device.type == "meta"
+    assert table.weight.dtype == dtype and table.weight_scale_inv.dtype == scale_dtype
+
+    with pytest.raises(ValueError, match="Remote Engram requires"):
+        embedding_mod.AscendParallelEngramEmbedding(
+            8,
+            64,
+            (4, 4),
+            0,
+            cpu_offload=True,
+            dp_shared_memory=True,
+            storage_dtype=torch.bfloat16,
+            remote_reader=object(),
+        )
 
 
 @pytest.mark.parametrize("quantized", [False, True])

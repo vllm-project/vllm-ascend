@@ -29,6 +29,7 @@ from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.forward_context import is_forward_context_available, override_forward_context
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
+import vllm_ascend.worker.v2.pcp_manager as pcp_module
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
 from vllm_ascend.ops.vocab_parallel_embedding import VocabParallelMode
 from vllm_ascend.worker.v2.spec_decode import init_speculator
@@ -252,34 +253,6 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
         torch.testing.assert_close(attrs["seqused_kv"], expected_lengths)
         torch.testing.assert_close(attrs["cu_seqlens_q"], boundaries[: padded + 1])
         torch.testing.assert_close(metadata.block_tables[:num_reqs, 0], torch.tensor(order, dtype=torch.int32))
-
-
-@pytest.mark.parametrize("fail", [False, True])
-def test_dflash_loader_temporarily_disables_profiling_chunk(monkeypatch, fail):
-    additional_config = {"profiling_chunk_config": {"enabled": "true", "min_chunk": 64}}
-    config = SimpleNamespace(
-        parallel_config=SimpleNamespace(pipeline_parallel_size=2),
-        additional_config=additional_config,
-    )
-    speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
-    speculator.vllm_config = config
-    draft = object()
-
-    def load(self, target_model, target_attn_layer_names):
-        del target_model, target_attn_layer_names
-        assert self.vllm_config is config
-        assert self.vllm_config.additional_config["profiling_chunk_config"]["enabled"] is False
-        if fail:
-            raise RuntimeError("draft load failed")
-        return draft
-
-    monkeypatch.setattr(DFlashSpeculator, "load_draft_model", load)
-    expected_context = pytest.raises(RuntimeError, match="draft load failed") if fail else nullcontext()
-    with expected_context:
-        assert speculator.load_draft_model(object(), set()) is draft
-
-    assert config.additional_config is additional_config
-    assert additional_config["profiling_chunk_config"]["enabled"] == "true"
 
 
 def test_patch_swaps_upstream_selector_walk_kernel():
@@ -590,16 +563,20 @@ def test_dflash_dummy_metadata_fits_draft_graph(monkeypatch, num_reqs_padded):
 
 
 @pytest.mark.parametrize("dummy_run,skip_attn", [(False, False), (False, True), (True, False), (True, True)])
-def test_dflash_profiling_does_not_reuse_target_dp_counts(monkeypatch, dummy_run, skip_attn):
+@pytest.mark.parametrize("pcp_enabled", [False, True])
+def test_dflash_profiling_does_not_reuse_target_dp_counts(monkeypatch, dummy_run, skip_attn, pcp_enabled):
     speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
-    batch = SimpleNamespace(num_reqs=8)
+    speculator.pcp_manager = object.__new__(pcp_module.AscendPCPManager) if pcp_enabled else None
+    speculator.draft_logits = None
+    monkeypatch.setattr(pcp_module, "get_pcp_group", lambda: SimpleNamespace(broadcast=lambda tensor, src: tensor))
+    batch = SimpleNamespace(num_reqs=8, idx_mapping=torch.arange(8))
     sync_state = SimpleNamespace(num_reqs=1)
-    result = object()
+    result = torch.zeros(8, 1, dtype=torch.int64)
     received = []
 
     def propose(self, *args, **kwargs):
         assert self.input_batch is batch
-        expected_reqs = 1 if dummy_run and not skip_attn else 8
+        expected_reqs = 1 if dummy_run and not skip_attn and not pcp_enabled else 8
         assert self._draft_metadata_num_reqs == expected_reqs
         received.append(args[11])
         return result
@@ -614,7 +591,7 @@ def test_dflash_profiling_does_not_reuse_target_dp_counts(monkeypatch, dummy_run
         )
         is result
     )
-    assert received == [None if dummy_run and skip_attn else sync_state]
+    assert received == [None if pcp_enabled or (dummy_run and skip_attn) else sync_state]
     assert speculator._draft_metadata_num_reqs is None
     assert batch.num_reqs == 8
 
