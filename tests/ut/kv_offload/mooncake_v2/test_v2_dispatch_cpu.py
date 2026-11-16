@@ -1,0 +1,101 @@
+# SPDX-License-Identifier: Apache-2.0
+"""CPU regression tests for V2 dispatch and composite push allocations."""
+
+import ast
+import sys
+from pathlib import Path
+from types import MethodType, ModuleType, SimpleNamespace
+from unittest.mock import Mock, patch
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[4]
+PREFIX = "vllm_ascend/distributed/kv_transfer/"
+
+
+def execute(relative, scope, *, owner=None, method=None):
+    nodes = ast.parse((ROOT / (PREFIX + relative)).read_text(encoding="utf-8")).body
+    if owner:
+        nodes = next(n for n in nodes if isinstance(n, ast.ClassDef) and n.name == owner).body
+    if method:
+        nodes = [n for n in nodes if isinstance(n, ast.FunctionDef) and n.name == method]
+    else:
+        nodes = [n for n in nodes if isinstance(n, (ast.ClassDef, ast.Assign))]
+    future = ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)
+    exec(
+        compile(ast.fix_missing_locations(ast.Module(body=[future, *nodes], type_ignores=[])), relative, "exec"), scope
+    )
+    return scope
+
+
+def facade():
+    return execute(
+        "kv_p2p/mooncake/connector.py",
+        {"KVConnectorBase_V1": type("Base", (), {}), "SupportsHMA": type("HMA", (), {})},
+    )
+
+
+def registration():
+    registry = {}
+    factory = SimpleNamespace(
+        _registry=registry,
+        register_connector=lambda name, module, cls: registry.__setitem__(name, (module, cls)),
+    )
+    offloading = ModuleType("vllm.v1.kv_offload.factory")
+    offloading.OffloadingSpecFactory = SimpleNamespace(_registry={}, register_spec=Mock())
+    scope = {"KVConnectorFactory": factory, "logger": Mock()}
+    execute("__init__.py", scope, method="_register_with_class_name_alias")
+    execute("__init__.py", scope, method="register_connector")
+    with patch.dict(sys.modules, {offloading.__name__: offloading}):
+        scope["register_connector"]()
+    return registry
+
+
+@pytest.mark.parametrize(
+    "extra,expected",
+    [
+        ({}, "MooncakePullConnector"),
+        ({"use_layerwise": False}, "MooncakePullConnector"),
+        ({"use_layerwise": True}, "MooncakePushConnector"),
+    ],
+)
+def test_registered_v2_selects_requested_protocol(extra, expected):
+    classes = facade()
+    module, name = registration()["MooncakeConnectorV2"]
+    assert module == "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector"
+    config = SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector_extra_config=extra))
+    role, cache = object(), object()
+    with (
+        patch.object(classes["MooncakePushConnector"], "__init__", return_value=None) as push_init,
+        patch.object(classes["MooncakePullConnector"], "__init__", return_value=None) as pull_init,
+    ):
+        result = classes[name](config, role, cache)
+    assert type(result) is classes[expected]
+    selected = push_init if expected == "MooncakePushConnector" else pull_init
+    selected.assert_called_once_with(config, role, cache)
+    assert classes["MooncakeConnector"] is classes["MooncakePullConnector"]
+
+
+@pytest.mark.parametrize("chosen", [-1, 0, 1])
+def test_push_retains_source_blocks_with_or_without_pool_hit(chosen):
+    classes = facade()
+    push = object.__new__(classes["MooncakePushConnector"])
+    scheduler = SimpleNamespace(kv_transfer_config=SimpleNamespace(is_kv_producer=True), _reqs_need_send_layerwise={})
+    scope = execute(
+        "kv_p2p/mooncake/push_scheduler.py",
+        {},
+        owner="MooncakePushConnectorScheduler",
+        method="update_state_after_alloc",
+    )
+    scheduler.update_state_after_alloc = MethodType(scope["update_state_after_alloc"], scheduler)
+    push.connector_scheduler = scheduler
+    request = SimpleNamespace(
+        request_id="p", kv_transfer_params={"do_remote_decode": True, "remote_num_external_tokens": 32}
+    )
+    block_ids = ([2, 3], [8, 9])
+    empty = SimpleNamespace(get_block_ids=lambda: ([], []))
+    blocks = SimpleNamespace(get_block_ids=lambda: block_ids, new_empty=lambda: empty)
+    multi = SimpleNamespace(_requests_to_connector={"p": chosen}, _connectors=[Mock(), push])
+    scope = execute("ascend_multi_connector.py", {}, owner="AscendMultiConnector", method="update_state_after_alloc")
+    scope["update_state_after_alloc"](multi, request, blocks, 32)
+    assert scheduler._reqs_need_send_layerwise["p"][1] == block_ids
