@@ -1942,6 +1942,32 @@ def test_v25b_dump_rank_tag_uses_global_dp_rank(monkeypatch):
     assert rank_gate.runner_dp_rank(runner) == 1
     assert rank_gate.dump_rank_tag(runner).startswith("dp1_tp")
 
+
+def test_v25c_dump_rank_tag_reads_pcp_manager_rank(monkeypatch):
+    """PCP rank lives on pcp_manager; runner.pcp_rank is usually unset."""
+    import vllm_ascend.observability.runtime_guard.rank_gate as rank_gate
+
+    monkeypatch.setattr(
+        rank_gate,
+        "get_tp_group",
+        lambda: SimpleNamespace(rank_in_group=0, world_size=1),
+    )
+    monkeypatch.setattr(
+        rank_gate,
+        "get_pp_group",
+        lambda: SimpleNamespace(rank_in_group=0, is_last_rank=True),
+    )
+    runner = SimpleNamespace(
+        dp_rank=0,
+        dcp_rank=1,
+        dcp_size=2,
+        pcp_manager=SimpleNamespace(pcp_rank=3),
+    )
+    assert rank_gate.runner_pcp_rank(runner) == 3
+    # cp = pcp_rank * dcp_size + dcp_rank = 3*2+1 = 7
+    assert rank_gate.runner_cp_rank(runner) == 7
+    assert "_cp7" in rank_gate.dump_rank_tag(runner)
+
     monkeypatch.setattr(rank_gate, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0, world_size=2))
     runner0 = SimpleNamespace(use_async_scheduling=True, tp_rank=0, tp_size=2)
     assert rank_gate.anomaly_check_rank_skip_reason(runner0) is None

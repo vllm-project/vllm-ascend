@@ -108,16 +108,34 @@ def runner_pp_rank(runner: Any) -> int | str:
         return "?"
 
 
+def runner_pcp_rank(runner: Any) -> int:
+    """PCP rank for dump path tags.
+
+    Ascend / upstream runners usually keep ``pcp_rank`` on ``pcp_manager``, not
+    on the runner itself. Reading only ``runner.pcp_rank`` collapses every PCP
+    row to ``0`` and collides dump dirs (``…_cp0``).
+    """
+    try:
+        pcp_manager = getattr(runner, "pcp_manager", None)
+        if pcp_manager is not None:
+            val = getattr(pcp_manager, "pcp_rank", None)
+            if val is not None:
+                return int(val)
+    except (TypeError, ValueError, AttributeError):
+        pass
+    try:
+        return int(getattr(runner, "pcp_rank", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def runner_cp_rank(runner: Any) -> int:
     """Combined CP rank (``pcp_rank * dcp_size + dcp_rank``) when CP is on."""
     try:
         dcp = int(getattr(runner, "dcp_rank", 0) or 0)
     except Exception:
         dcp = 0
-    try:
-        pcp = int(getattr(runner, "pcp_rank", 0) or 0)
-    except Exception:
-        pcp = 0
+    pcp = runner_pcp_rank(runner)
     try:
         dcp_size = int(getattr(runner, "dcp_size", 1) or 1)
     except Exception:
