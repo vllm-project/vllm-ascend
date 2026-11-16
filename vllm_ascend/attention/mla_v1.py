@@ -183,6 +183,7 @@ class AscendMLAAttention(MLAAttention):
         dtype = spec.dtype
         cache_dtype_str = spec.cache_dtype_str
         if use_packed_sfa:
+            head_size = self.impl.sfa_qsfa_packed_kv_head_dim
             cache_dtype_str = self.impl.kv_cache_dtype
             if use_sfa_turboquant:
                 dtype = torch.int8
@@ -196,15 +197,13 @@ class AscendMLAAttention(MLAAttention):
             cache_dtype_str = None
 
         # Preserve upstream metadata and apply all owner fields together.
-        # The standard backend hook calculates SFA's physical packing.
+        # Reuse the physical packing selected by the execution implementation.
         values.update(
             num_heads=storage_heads,
             model_version=spec.model_version or getattr(self, "model_version", None),
             indexes_kv_by_block_stride=bool(
                 getattr(spec, "indexes_kv_by_block_stride", False) or getattr(self, "indexes_kv_by_block_stride", False)
             ),
-            kv_lora_rank=self.kv_lora_rank,
-            qk_rope_head_dim=self.qk_rope_head_dim,
             cache_sparse_sfa_turboquant=use_sfa_turboquant,
             cache_sparse_sfa_c8=use_sfa_c8,
             store_on_host=(
@@ -214,7 +213,7 @@ class AscendMLAAttention(MLAAttention):
             dtype=dtype,
             cache_dtype_str=cache_dtype_str,
         )
-        return self.get_attn_backend().customize_spec(AscendMLAAttentionSpec(**values))
+        return AscendMLAAttentionSpec(**values)
 
 
 @dataclass

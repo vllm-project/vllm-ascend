@@ -2,13 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 """Cache owners publish the formats used by their execution implementations."""
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 import torch
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.kv_cache_interface import KVQuantMode, MLAAttentionSpec, SparseCacheRole
 
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLAAttention, AscendMLABackend, AscendMLAImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAImpl
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
@@ -106,14 +110,17 @@ def _get_owner_spec(monkeypatch, layer):
     return layer.get_kv_cache_spec(config)
 
 
-@pytest.mark.parametrize("format_name,width", [("bf16", 576), ("c8", 656), ("c8_nope", 528), ("tq", 386)])
+@pytest.mark.parametrize(
+    "format_name,width", [("bf16", 576), ("c8", 656), ("c8_nope", 528), ("tq", 386), ("tq_both", 386)]
+)
 @pytest.mark.parametrize("offload", [False, True])
 def test_sfa_spec_uses_owner_decisions_and_backend_packing(monkeypatch, format_name, width, offload):
     impl = AscendSFAImpl.__new__(AscendSFAImpl)
-    impl.enable_sparse_sfa_c8 = format_name in ("c8", "c8_nope")
-    impl.enable_sparse_sfa_turboquant = format_name == "tq"
+    impl.enable_sparse_sfa_c8 = format_name in ("c8", "c8_nope", "tq_both")
+    impl.enable_sparse_sfa_turboquant = format_name in ("tq", "tq_both")
+    impl.sfa_qsfa_packed_kv_head_dim = 0 if format_name == "bf16" else width
     impl.c8_cache_dtype = torch.int8
-    impl.kv_cache_dtype = "turboquant" if format_name == "tq" else "int8"
+    impl.kv_cache_dtype = "turboquant" if impl.enable_sparse_sfa_turboquant else "int8"
     impl.store_kv_cache_on_host = offload
     layer = _make_owner(impl, AscendSFABackend, rope_dim=0 if format_name == "c8_nope" else 64)
     spec = _get_owner_spec(monkeypatch, layer)
@@ -121,10 +128,8 @@ def test_sfa_spec_uses_owner_decisions_and_backend_packing(monkeypatch, format_n
     assert spec.dtype == (torch.bfloat16 if format_name == "bf16" else torch.int8)
     assert spec.store_on_host is offload
     assert spec.cache_sparse_sfa_c8 is (format_name in ("c8", "c8_nope"))
-    assert spec.cache_sparse_sfa_turboquant is (format_name == "tq")
+    assert spec.cache_sparse_sfa_turboquant is (format_name in ("tq", "tq_both"))
     assert spec.page_size_bytes == 128 * (1152 if format_name == "bf16" else width)
-    # Framework callers may invoke the standard hook again.
-    assert AscendSFABackend.customize_spec(spec) == spec
 
 
 @pytest.mark.parametrize("quantized", [False, True])
@@ -142,23 +147,40 @@ def test_fa_quant_decision_stays_with_each_owner(monkeypatch, quantized):
         assert spec.cache_dtype_str is None
 
 
-def test_sfa_backend_requires_owner_component_dimensions():
-    spec = AscendMLAAttentionSpec(
-        block_size=128,
-        num_kv_heads=1,
-        head_size=576,
-        dtype=torch.int8,
-        cache_sparse_sfa_c8=True,
-    )
-    with pytest.raises(ValueError, match="NoPE and RoPE dimensions"):
-        AscendSFABackend.customize_spec(spec)
+def test_sfa_owner_reuses_execution_width_without_customizing(monkeypatch):
+    impl = AscendSFAImpl.__new__(AscendSFAImpl)
+    impl.enable_sparse_sfa_c8 = True
+    impl.enable_sparse_sfa_turboquant = False
+    # A backend-selected padded width must survive without being recomputed
+    # from the owner's logical dimensions (which would produce 656).
+    impl.sfa_qsfa_packed_kv_head_dim = 672
+    impl.c8_cache_dtype = torch.int8
+    impl.kv_cache_dtype = "int8"
+
+    def unexpected_customization(*_args):
+        raise AssertionError("The collector owns backend customization")
+
+    monkeypatch.setattr(AscendSFABackend, "customize_spec", unexpected_customization)
+    layer = _make_owner(impl, AscendSFABackend)
+    spec = _get_owner_spec(monkeypatch, layer)
+    assert spec.head_size == impl.sfa_qsfa_packed_kv_head_dim
+    assert spec.page_size_bytes == 128 * impl.sfa_qsfa_packed_kv_head_dim
 
 
-def test_worker_collects_mla_spec_without_reading_impl(monkeypatch):
+@pytest.mark.parametrize(
+    "backend", [AscendMLABackend, AscendSFABackend, AscendSFAIndexerBackend, AscendFlashAttentionBackend]
+)
+@pytest.mark.parametrize("alignment", [None, 256])
+def test_worker_customizes_spec_once_without_reading_impl(monkeypatch, backend, alignment):
     from vllm_ascend.worker.v2 import attn_utils
 
     source = AscendMLAAttentionSpec(
-        block_size=128, num_kv_heads=1, head_size=386, dtype=torch.int8, cache_sparse_sfa_turboquant=True
+        block_size=128,
+        num_kv_heads=1,
+        head_size=386,
+        dtype=torch.int8,
+        cache_sparse_sfa_turboquant=True,
+        block_stride_alignment=alignment,
     )
 
     class Owner(MLAAttention):
@@ -171,9 +193,21 @@ def test_worker_collects_mla_spec_without_reading_impl(monkeypatch):
 
     layer = Owner.__new__(Owner)
     torch.nn.Module.__init__(layer)
+    layer.attn_backend = backend
+    calls = []
+
+    def customize(spec):
+        calls.append(spec)
+        return replace(spec, head_size=spec.head_size + 1)
+
+    monkeypatch.setattr(backend, "customize_spec", customize)
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: {"main": layer})
     config = SimpleNamespace(
         cache_config=SimpleNamespace(cache_dtype="auto"),
         attention_config=SimpleNamespace(indexer_kv_dtype="auto", hisparse_config=None),
     )
-    assert attn_utils.get_kv_cache_spec(config)["main"] is source
+    actual = attn_utils.get_kv_cache_spec(config)["main"]
+    assert calls == [source]
+    assert actual.head_size == source.head_size + 1
+    expected_alignment = alignment if alignment is not None else MultipleOf(128)
+    assert actual.block_stride_alignment == expected_alignment

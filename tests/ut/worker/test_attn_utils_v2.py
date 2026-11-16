@@ -1118,6 +1118,7 @@ def test_gqa_pcp_dcp_cache_keeps_tp_local_kv_heads(monkeypatch, dcp_size):
         align_kv_cache_with_mamba=True,
         is_draft_layer=False,
         get_kv_cache_spec=lambda _config: source_spec,
+        get_attn_backend=lambda: AscendAttentionBackend,
     )
     model_config = SimpleNamespace(
         use_mla=False,
@@ -1164,6 +1165,7 @@ def test_draft_layer_specs_are_tagged_for_eagle_groups(monkeypatch, is_draft_lay
         align_kv_cache_with_mamba=True,
         is_draft_layer=is_draft_layer,
         get_kv_cache_spec=lambda _config: source_spec,
+        get_attn_backend=lambda: AscendAttentionBackend,
     )
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
@@ -2257,6 +2259,7 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
     layer = attn_utils.MLAAttention.__new__(attn_utils.MLAAttention)
     torch.nn.Module.__init__(layer)
     layer.kv_sharing_target_layer_name = None
+    layer.attn_backend = AscendSFABackend if sparse_c8 else AscendMLABackend
     layer.num_heads = 64
     layer.head_size = 64
     layer.qk_rope_head_dim = 64
@@ -2296,6 +2299,7 @@ def test_kpool_sfa_c8_main_cache_spec(monkeypatch):
     layer.attn_backend = AscendSFABackend
     layer.impl.kv_cache_dtype = "int8"
     layer.impl.c8_cache_dtype = torch.int8
+    layer.impl.sfa_qsfa_packed_kv_head_dim = 528
     vllm_config = SimpleNamespace(
         additional_config={},
         attention_config=AttentionConfig(indexer_kv_dtype="int8"),
@@ -2839,6 +2843,7 @@ def _run_get_kv_cache_spec(monkeypatch, vllm_config, spec) -> dict:
     attn_module = SimpleNamespace(
         is_draft_layer=False,
         get_kv_cache_spec=lambda _cfg: spec,
+        get_attn_backend=lambda: AscendAttentionBackend,
     )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda _cfg, _type: {"attn": attn_module})
     monkeypatch.setattr(attn_utils, "kv_cache_dtype_str_to_dtype", lambda _s, _m: torch.bfloat16)

@@ -1498,9 +1498,9 @@
 #    How：
 #       Monkey-patch `get_kv_cache_spec` so regular attention layers keep the
 #       upstream behavior. MLA and indexer owners publish complete Ascend
-#       specs through their owner construction and backend customize_spec hooks; the
-#       collector no longer reconstructs their formats or resolves indexer
-#       ownership through layer names.
+#       specs from their execution layouts. The collector applies the upstream
+#       customize_attention_spec helper without reconstructing their formats or
+#       resolving indexer ownership through layer names.
 #    Related PR (if no, explain why):
 #       No. This is a plugin-side compatibility patch for the current upstream
 #       helper path.

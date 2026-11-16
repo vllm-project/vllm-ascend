@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
 from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, Mock, patch
@@ -9,7 +10,7 @@ import pytest
 import torch
 import torch_npu
 from vllm.config import ParallelConfig
-from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backend import AttentionCGSupport, MultipleOf
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, SparseCacheRole
 
 from vllm_ascend.attention import indexer as indexer_module
@@ -681,4 +682,5 @@ def test_indexer_owner_tracks_runtime_cache_requirement(monkeypatch, mtp):
         specs = attn_utils.get_kv_cache_spec(config)
         assert ("cache_owner" in specs) is enabled
         if enabled:
-            assert specs["cache_owner"] == spec
+            assert specs["cache_owner"] == replace(spec, block_stride_alignment=MultipleOf(_KERNEL_BLOCK_SIZE))
+            assert owner.cache_spec == spec

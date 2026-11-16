@@ -57,7 +57,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup, customize_attention_spec
 
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
 from vllm_ascend.attention.attention_c8_mxfp import (
@@ -68,7 +68,6 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
-from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -242,9 +241,9 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 spec, is_index_group_leader=attn_module.hisparse_cache.runtime.is_group_leader, **source_layout
             )
             continue
-        if getattr(attn_module, "attn_backend", None) is AscendFlashAttentionBackend:
-            # Account for the kernel's physical width before sizing/allocating pages.
-            spec = AscendFlashAttentionBackend.customize_spec(spec)
+        if isinstance(spec, AttentionSpec):
+            # Match upstream customization, including kernel-block stride alignment.
+            spec = customize_attention_spec(attn_module.get_attn_backend(), spec)
         if type(spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(vllm_config):
             spec = mxfp_cache_spec(spec)
         kv_cache_spec[layer_name] = spec
