@@ -515,14 +515,26 @@ class NPUModelRunner(GPUModelRunner):
         if callable(initialize_cpu_lengths):
             initialize_cpu_lengths(self)
 
-        # Only target-model layers determine whether FIA is in use. This flag
-        # is used for adaptive verification handling.
+        # Only target-model layers determine the adaptive verification paths.
         draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
-        self.use_fia = any(
-            (group.backend is AscendAttentionBackend or group.backend is AscendMLABackend)
-            and any(layer_name not in draft_layer_names for layer_name in group.layer_names)
+        target_attn_groups = [
+            group
             for groups in self.attn_groups
             for group in groups
+            if any(layer_name not in draft_layer_names for layer_name in group.layer_names)
+        ]
+        target_mla_groups = [
+            group for group in target_attn_groups if group.backend is AscendMLABackend
+        ]
+        target_mla_builders = [(group, group.get_metadata_builder(0)) for group in target_mla_groups]
+        # AscendMLABackend is used on both A3 and A5. Its builder records the
+        # concrete decode path selected by AscendMLAImpl: FIA on the fallback
+        # path, external FlashMLA when flashmla_state is present.
+        self.use_fia = any(
+            group.backend is AscendAttentionBackend for group in target_attn_groups
+        ) or any(
+            getattr(builder, "flashmla_state", None) is None
+            for _, builder in target_mla_builders
         )
 
         self.kvpp = KVPPRuntime.create_from_kv_cache(

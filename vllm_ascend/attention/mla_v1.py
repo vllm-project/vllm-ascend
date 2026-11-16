@@ -13,6 +13,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
     MLACommonMetadataBuilder,
+    QueryLenSupport,
     plan_mla_context_chunks,
 )
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
@@ -24,6 +25,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
     MLAAttentionImpl,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
@@ -102,6 +104,10 @@ PROLOG_V3_SUPPORTED_INPUT_SIZES = (1024, 2048, 3072, 4096, 5120, 6144, 7168, 768
 
 class AscendMLABackend(AttentionBackend):
     accept_output_buffer: bool = True
+
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        return True
 
     @staticmethod
     def get_name() -> str:
@@ -289,6 +295,21 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
     """
 
     decode_metadata_cls: type[AscendMLADecodeMetadata] = AscendMLADecodeMetadata
+    # Adaptive verification gives each decode request an independent query
+    # length. Ascend's FIA and external FlashMLA paths consume those ragged
+    # boundaries; the FULL-graph replay limit is declared separately below.
+    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.VARLEN
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> int | None:
+        # Adaptive verification replays decode requests with independently
+        # admitted draft lengths. The Ascend MLA path supports up to the full
+        # scheduled verification width, including the target token.
+        return max_decode_query_len(vllm_config)
 
     def __init__(
         self,
@@ -549,6 +570,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
+                require_uniform=(self.query_len_support != QueryLenSupport.VARLEN),
                 treat_short_extends_as_decodes=(
                     not (self.use_pcp or self.use_dcp)
                     # Only DCP needs the PD last-token recompute override.
@@ -1131,7 +1153,15 @@ class AscendMLAImpl(MLAAttentionImpl):
 
                 layer_metadata = attn_metadata_current[key]
                 seq_lens_list = layer_metadata.decode.seq_lens_list
-                if speculative_config and speculative_config.use_eagle() and not _EXTRA_CTX.is_draft_model:
+                if (
+                    speculative_config
+                    and getattr(speculative_config, "enable_adaptive_verification", False)
+                    and not _EXTRA_CTX.is_draft_model
+                ):
+                    actual_seq_lengths = layer_metadata.decode.actual_seq_lengths_q
+                    seq_lens_list = seq_lens_list[: len(actual_seq_lengths)]
+                    seq_lens_list = seq_lens_list + [0] * (len(actual_seq_lengths) - len(seq_lens_list))
+                elif speculative_config and speculative_config.use_eagle() and not _EXTRA_CTX.is_draft_model:
                     actual_seq_lengths = layer_metadata.decode.actual_seq_lengths_q
                     spec_multiple = speculative_config.num_speculative_tokens + 1
                     seq_lens_list = seq_lens_list + [0] * (num_tokens // spec_multiple - len(seq_lens_list))

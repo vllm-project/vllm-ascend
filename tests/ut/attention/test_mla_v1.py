@@ -388,6 +388,9 @@ class TestAscendMLABackend(TestBase):
     def test_get_name(self):
         self.assertEqual(AscendMLABackend.get_name(), "ASCEND_MLA")
 
+    def test_supports_device_cpu_query_lens_mismatch(self):
+        self.assertTrue(AscendMLABackend.supports_device_cpu_query_lens_mismatch())
+
     def test_get_builder_cls(self):
         self.assertEqual(AscendMLABackend.get_builder_cls(), AscendMLAMetadataBuilder)
         self.mock_parallel_config.prefill_context_parallel_size = 2
@@ -1143,6 +1146,54 @@ class TestAscendMLAMetadataBuilder(TestBase):
         from vllm.v1.attention.backend import AttentionCGSupport
 
         self.assertEqual(result, AttentionCGSupport.UNIFORM_BATCH)
+
+    def test_get_varlen_cudagraph_max_query_len(self):
+        mock_kv_cache_spec = MagicMock()
+        configs_and_expected = (
+            (SimpleNamespace(speculative_config=None), 1),
+            (
+                SimpleNamespace(
+                    speculative_config=SimpleNamespace(
+                        enable_adaptive_verification=False,
+                        num_speculative_tokens=3,
+                        parallel_drafting=False,
+                    ),
+                    use_v2_model_runner=True,
+                ),
+                4,
+            ),
+        )
+        for mock_vllm_config, expected in configs_and_expected:
+            with self.subTest(expected=expected):
+                self.assertEqual(
+                    AscendMLAMetadataBuilder.get_varlen_cudagraph_max_query_len(mock_vllm_config, mock_kv_cache_spec),
+                    expected,
+                )
+
+    def test_adaptive_decode_metadata_preserves_ragged_query_boundaries(self):
+        builder = AscendMLAMetadataBuilder.__new__(AscendMLAMetadataBuilder)
+        builder.num_actual_tokens = 6
+        builder.num_decode_tokens = 6
+        builder.num_decodes = 3
+        builder.graph_pad_size = -1
+        builder.seq_lens = torch.tensor([8, 10, 12])
+        builder.slot_mapping = torch.arange(6)
+        builder.block_table = torch.zeros((3, 4), dtype=torch.int32)
+        builder.use_mla_rope = False
+        builder.speculative_config = SimpleNamespace(disable_padded_drafter_batch=False)
+        builder.attn_mask_builder = SimpleNamespace(get_splitfuse_attn_mask=lambda: None)
+        builder.nope_zero_rope_cache = None
+
+        common_metadata = SimpleNamespace(
+            num_reqs=3,
+            query_start_loc_cpu=torch.tensor([0, 1, 4, 6]),
+            positions=torch.arange(6),
+        )
+
+        metadata = builder.build_decode_metadata(0, common_metadata)
+
+        self.assertEqual(metadata.actual_seq_lengths_q, [1, 4, 6])
+        self.assertEqual(metadata.seq_lens_list, [8, 10, 12])
 
     def test_set_num_actual_tokens(self):
         mock_vllm_config = MagicMock()
@@ -2140,6 +2191,48 @@ class TestAscendMLAImpl(TestBase):
         mock_get_forward_context.return_value = mock_ctx
 
         AscendMLAImpl.update_graph_params(mock_update_stream, mock_forward_context, 100)
+
+    @patch("vllm_ascend.attention.mla_v1.get_graph_params")
+    @patch("torch_npu.npu_fused_infer_attention_score_v2.out")
+    @patch("torch.npu.graph_task_update_end")
+    @patch("torch.npu.graph_task_update_begin")
+    @patch("torch.npu.stream")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_update_graph_params_with_adaptive_ragged_queries(
+        self,
+        mock_get_forward_context,
+        mock_stream,
+        mock_update_begin,
+        mock_update_end,
+        mock_fia,
+        mock_get_graph_params,
+    ):
+        metadata = SimpleNamespace(
+            decode=SimpleNamespace(
+                seq_lens_list=[20, 30, 0],
+                actual_seq_lengths_q=[1, 4, 6],
+            ),
+            external_flashmla=None,
+        )
+        graph_params = SimpleNamespace(
+            attn_params={8: [tuple(MagicMock() for _ in range(18))]},
+            handles={8: [MagicMock()]},
+            events={8: [MagicMock()]},
+            workspaces={8: MagicMock()},
+        )
+        mock_get_graph_params.return_value = graph_params
+        mock_get_forward_context.return_value = SimpleNamespace(is_draft_model=False)
+
+        AscendMLAImpl.update_graph_params(
+            MagicMock(),
+            SimpleNamespace(attn_metadata={"layer_0": metadata}),
+            8,
+            speculative_config=SimpleNamespace(enable_adaptive_verification=True),
+        )
+
+        kwargs = mock_fia.call_args.kwargs
+        self.assertEqual(kwargs["actual_seq_qlen"], [1, 4, 6])
+        self.assertEqual(kwargs["actual_seq_kvlen"], [20, 30, 0])
 
     @patch("vllm_ascend.attention.mla_v1.get_graph_params")
     @patch("torch_npu.npu_fused_infer_attention_score_v2")
