@@ -103,20 +103,8 @@ def packed_sfa_cache_groups(config, specs):
         key=extract_layer_index,
     )
     indexer = sorted((n for n, s in specs.items() if isinstance(s, AscendSFAIndexerCacheSpec)), key=extract_layer_index)
-    if not main or [extract_layer_index(n) for n in main] != [extract_layer_index(n) for n in indexer]:
-        raise ValueError("Every sparse MLA layer must own one matching indexer cache.")
     full = {n: specs[n] for pair in zip(main, indexer) for n in pair}
     full.update(sorted(((n, s) for n, s in specs.items() if s.is_draft), key=lambda item: extract_layer_index(item[0])))
-    if any(not isinstance(s, (AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec)) for s in full.values()):
-        raise ValueError("Block-outermost Kimi cache requires MLA draft specs.")
-    if any(s.num_kv_heads != 1 or s.tokens_per_state != 1 for s in full.values()) or any(
-        s.store_on_host for s in full.values() if isinstance(s, AscendMLAAttentionSpec)
-    ):
-        raise ValueError("Block-outermost Kimi cache requires one uncompressed device-resident latent head.")
-    if any(not specs[n].uses_packed_sfa_main_cache for n in main):
-        raise ValueError("Block-outermost Kimi cache requires a packed SFA main cache.")
-    if any(s.block_size < 1 or s.block_size % KIMI_KERNEL_BLOCK_SIZE for s in full.values()):
-        raise ValueError("Block-outermost Kimi cache requires whole 128-token kernel pages.")
     full = {n: replace(s, block_outermost=True) for n, s in full.items()}
     recurrent = {
         n: s
