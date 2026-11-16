@@ -6,7 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.v1.kv_cache_interface import MambaSpec
 
+from vllm_ascend.models.kimi_k3.packed_sfa_cache import packed_sfa_cache_views
 from vllm_ascend.ops.triton.kda import recoverssm
 
 
@@ -62,6 +64,31 @@ def test_context_binds_request_records_and_detects_rebinding():
     layers[0].kv_cache = old
     layers[0].recoverssm_records.key_gate = layers[0].recoverssm_records.key_gate.clone()
     assert not context.is_bound_to(layers)
+
+
+@pytest.mark.parametrize("dim_first", [False, True], ids=["SD", "DS"])
+def test_context_preserves_packed_state_row_strides(monkeypatch, dim_first):
+    monkeypatch.setattr(recoverssm, "is_conv_state_dim_first", lambda: dim_first)
+    layer = make_layer()
+    conv, state = layer.kv_cache
+    if not dim_first:
+        conv = conv.transpose(-1, -2)
+    spec = MambaSpec(
+        block_size=128, shapes=(tuple(conv.shape[1:]), tuple(state.shape[1:])), dtypes=(conv.dtype, state.dtype)
+    )
+    row_bytes = 1024
+    backing = torch.empty(conv.shape[0] * row_bytes, dtype=torch.int8)
+    layer.kv_cache = tuple(packed_sfa_cache_views(backing[16:], spec, conv.shape[0], row_bytes))
+    context = recoverssm.KDARecoverSSMCommitContext.create([layer], spec_query_len=4, max_num_reqs=4)
+    assert context.is_bound_to([layer])
+    assert context.conv_history_len == 3
+    assert context.conv_state_block_strides.tolist() == [row_bytes // conv.element_size()]
+    assert context.state_block_strides.tolist() == [row_bytes // state.element_size()]
+    assert context.state_base_addrs.tolist() == [layer.kv_cache[1].data_ptr()]
+    assert context.correction_cache_base_addrs.tolist() == [layer.recoverssm_records.correction.data_ptr()]
+    assert context.correction_caches[0].shape[0] == 4
+    assert layer.kv_cache[1].shape[0] == 11
+    assert context.correction_caches[0].untyped_storage().data_ptr() != backing.untyped_storage().data_ptr()
 
 
 def test_context_rejects_mixed_layout_and_insufficient_scratch():

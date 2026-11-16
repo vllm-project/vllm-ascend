@@ -76,8 +76,10 @@ for _module_name, _module in _saved_modules.items():
 @pytest.mark.parametrize("draft_layers", [0, 3, 5])
 def test_preempt_packed_pool_budget_and_conv_restore(draft_layers):
     config = SimpleNamespace(
+        use_v2_model_runner=True,
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k31")),
         speculative_config=SimpleNamespace(num_speculative_tokens=3),
-        cache_config=SimpleNamespace(prefix_cache_retention_interval=None),
+        cache_config=SimpleNamespace(prefix_cache_retention_interval=None, kv_cache_layout="BLNHC"),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
     )
@@ -562,6 +564,7 @@ def _make_ready_mamba_scheduler() -> PreemptOffloadScheduler:
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler.dcp_world_size = 1
     scheduler.num_spec_tokens = 3
+    scheduler.use_kda_recoverssm = False
     scheduler._group_is_mamba = [True]
     scheduler._group_has_mamba_conv = [True]
     scheduler._preempted_req_states = {
@@ -584,11 +587,92 @@ def _make_ready_mamba_scheduler() -> PreemptOffloadScheduler:
     scheduler.cpu_kv_cache_config = SimpleNamespace(
         kv_cache_groups=[
             SimpleNamespace(
-                kv_cache_spec=SimpleNamespace(block_size=16, dcp_sharded=False),
+                kv_cache_spec=SimpleNamespace(block_size=16, dcp_sharded=False, mamba_cache_mode="align"),
             )
         ]
     )
     return scheduler
+
+
+@pytest.mark.parametrize("num_tokens,expected_block", [(17, 10), (18, 11), (33, 11), (34, 12)])
+def test_recoverssm_preempt_saves_only_committed_page(num_tokens, expected_block):
+    scheduler = _make_ready_mamba_scheduler()
+    scheduler.use_kda_recoverssm = True
+    scheduler._preempted_req_states.clear()
+    scheduler._create_preempt_state = MagicMock(return_value=True)
+    request = SimpleNamespace(request_id="recover", num_tokens=num_tokens)
+    assert scheduler.update_state_before_preempt(request, ([10, 11, 12],), num_tokens + 2)
+    scheduler._create_preempt_state.assert_called_once_with("recover", ([expected_block],), num_tokens - 1)
+
+
+@pytest.mark.parametrize("num_tokens,gpu_ids,expected", [(17, [50, 0], 50), (18, [0, 51], 51), (33, [0, 51, 0], 51)])
+def test_recoverssm_preempt_restores_committed_state_without_conv_shift(num_tokens, gpu_ids, expected):
+    scheduler = _make_ready_mamba_scheduler()
+    scheduler.use_kda_recoverssm = True
+    state = scheduler._preempted_req_states["req-1"]
+    state.cpu_block_ids = ([101],)
+    state.num_computed_tokens = num_tokens - 1
+    scheduler._gpu_block_pool.blocks = {expected: object()}
+    assert scheduler._prepare_preempt_load_after_alloc(
+        SimpleNamespace(request_id="req-1", num_tokens=num_tokens), (gpu_ids,), num_tokens - 1
+    )
+    assert state.load_transfer_meta == TransferMeta([expected], [101])
+    assert state.load_mamba_conv_meta == []
+
+
+def test_recoverssm_preempt_caps_partial_prefill_at_computed_tokens():
+    scheduler = _make_ready_mamba_scheduler()
+    scheduler.use_kda_recoverssm = True
+    scheduler._preempted_req_states.clear()
+    scheduler._create_preempt_state = MagicMock(return_value=True)
+    assert scheduler.update_state_before_preempt(
+        SimpleNamespace(request_id="prefill", num_tokens=64), ([10, 0, 0, 0],), 16
+    )
+    scheduler._create_preempt_state.assert_called_once_with("prefill", ([10],), 16)
+
+
+def test_recoverssm_preempt_none_mode_uses_single_private_page():
+    scheduler = _make_ready_mamba_scheduler()
+    scheduler.use_kda_recoverssm = True
+    scheduler.cpu_kv_cache_config.kv_cache_groups[0].kv_cache_spec.mamba_cache_mode = "none"
+    state = scheduler._preempted_req_states["req-1"]
+    state.cpu_block_ids = ([101],)
+    state.num_computed_tokens = 100
+    assert scheduler._prepare_preempt_load_after_alloc(
+        SimpleNamespace(request_id="req-1", num_tokens=101), ([50],), 100
+    )
+    assert state.load_transfer_meta == TransferMeta([50], [101])
+    assert state.load_mamba_conv_meta == []
+
+
+@pytest.mark.parametrize("cpu_ids", [[0], [101, 102]])
+def test_recoverssm_preempt_rejects_invalid_cpu_checkpoint(cpu_ids):
+    scheduler = _make_ready_mamba_scheduler()
+    scheduler.use_kda_recoverssm = True
+    state = scheduler._preempted_req_states["req-1"]
+    state.cpu_block_ids = (cpu_ids,)
+    state.num_computed_tokens = 16
+    with pytest.raises(RuntimeError, match="Invalid RecoverSSM CPU checkpoint"):
+        scheduler._prepare_preempt_load_after_alloc(SimpleNamespace(request_id="req-1", num_tokens=17), ([50, 0],), 16)
+
+
+def test_recoverssm_preempt_rejects_null_committed_page():
+    scheduler = _make_ready_mamba_scheduler()
+    scheduler.use_kda_recoverssm = True
+    state = scheduler._preempted_req_states["req-1"]
+    state.cpu_block_ids = ([101],)
+    state.num_computed_tokens = 16
+    with pytest.raises(RuntimeError, match="Invalid committed RecoverSSM block"):
+        scheduler._prepare_preempt_load_after_alloc(SimpleNamespace(request_id="req-1", num_tokens=17), ([0, 51],), 16)
+
+
+def test_recoverssm_preempt_does_not_save_uncomputed_state():
+    scheduler = _make_ready_mamba_scheduler()
+    scheduler.use_kda_recoverssm = True
+    scheduler._preempted_req_states.clear()
+    scheduler._create_preempt_state = MagicMock()
+    assert not scheduler.update_state_before_preempt(SimpleNamespace(request_id="empty", num_tokens=1), ([0],), 0)
+    scheduler._create_preempt_state.assert_not_called()
 
 
 def test_preempt_offload_connector_scheduler_classifies_mamba_conv_groups():

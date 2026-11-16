@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
@@ -173,6 +174,38 @@ def test_no_draft_groups_use_whole_row_capacity():
     assert all(g.kv_cache_spec.page_size_padded is None for g in groups[1:])
     payload = 12288 * 24 * (656 + 132)
     assert all(len(g.layer_names) * g.kv_cache_spec.page_size_bytes <= payload for g in groups[1:])
+
+
+@pytest.mark.parametrize("recover_ssm", [False, True])
+@pytest.mark.parametrize("cache_mode", ["align", "none"])
+def test_recoverssm_uses_actual_persistent_state_block_count(recover_ssm, cache_mode):
+    config = packed_config()
+    config.num_speculative_tokens = 3
+    config.cache_config.use_replayssm = recover_ssm
+    config.cache_config.mamba_cache_mode = cache_mode
+    config.cache_config.mamba_block_size = 10752
+    config.cache_config.mamba_page_size_padded = None
+    specs = make_packed_specs()
+    for name, spec in list(specs.items()):
+        if not isinstance(spec, MambaSpec):
+            continue
+        layer = SimpleNamespace(
+            get_state_shape=lambda spec=spec: spec.shapes,
+            get_state_dtype=lambda spec=spec: spec.dtypes,
+            mamba_type=spec.mamba_type,
+            is_kv_cache_tp_replicated=False,
+        )
+        specs[name] = MambaBase.get_kv_cache_spec(layer, config)
+    groups = packed_sfa_cache_groups(config, specs)
+    assert [len(g.layer_names) for g in groups[1:]] == [35, 34]
+    expected_spec_blocks = 0 if recover_ssm else 3
+    for group in groups[1:]:
+        assert group.kv_cache_spec.num_speculative_blocks == expected_spec_blocks
+        assert group.kv_cache_spec.page_size_bytes == 6733824
+    states_per_group = (2 if cache_mode == "align" else 1) + expected_spec_blocks
+    row = packed_sfa_row_bytes(groups)
+    assert row == 266010624
+    assert packed_sfa_max_memory(config, groups) == (98 + 2 * states_per_group) * row
 
 
 def test_three_layer_mla_draft_capacity():

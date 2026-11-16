@@ -102,6 +102,31 @@ workspaces and metadata. Recompute from actual specs when any layer count,
 dtype, tensor-parallel state shape, speculative window or transfer constraint
 changes. For example, 11776 is not divisible by a prefill block size of 1536.
 
+## RecoverSSM integration
+
+The capacity examples above use RecoverSSM disabled. With the merged Kimi KDA
+RecoverSSM path (`--use-replayssm`), the planner consumes the actual
+`MambaSpec.num_speculative_blocks=0` instead of reserving one persistent state
+block per speculative token. The per-checkpoint Conv/recurrent shapes still
+come from the model specs; three-token speculation still includes the Conv
+working window. With five draft layers and B=10752, aligned state caching uses
+98 history rows, four state rows and one null row: 25.5174 GiB of KV pool
+instead of 27.0038 GiB. Request-indexed verification records are separate
+allocations outside this budget, so this difference is not a process-HBM
+measurement.
+
+RecoverSSM receives the actual Conv and recurrent block strides from the packed
+views. PreemptOffload saves the committed checkpoint at its accepted token
+position, including exact block boundaries and partial prefill, and restores
+it without applying the native speculative Conv shift again. Temporary verify
+records are regenerated after resume rather than copied with persistent KV.
+
+The packed layout still requires PCP=DCP=1. RecoverSSM's own parallelism support
+does not relax that independent address-mapping restriction. Its configuration
+validation, including DS state-layout rejection for Mooncake P/D, remains in
+effect. Combined packed/RecoverSSM NPU execution, graph replay and P/D
+equivalence require hardware validation.
+
 ## Validation and upstream integration
 
 CPU tests cover no draft, three and five draft layers, per-role mapped addresses,

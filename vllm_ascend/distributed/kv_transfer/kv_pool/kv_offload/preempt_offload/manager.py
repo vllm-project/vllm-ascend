@@ -80,6 +80,7 @@ class PreemptOffloadScheduler:
         self.num_spec_tokens = (
             vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
         )
+        self.use_kda_recoverssm = getattr(vllm_config.cache_config, "use_kda_recoverssm", False)
         self.cpu_kv_cache_config = self._derive_cpu_config(
             kv_cache_config,
             cpu_capacity_bytes,
@@ -287,11 +288,34 @@ class PreemptOffloadScheduler:
     ) -> bool:
         if request.request_id in self._preempted_req_states:
             return True
+        if self.use_kda_recoverssm:
+            # Sampling has already committed the accepted state. Exclude the
+            # next sampled token and any rejected verification lookahead.
+            num_computed_tokens = min(num_computed_tokens, request.num_tokens - 1)
+            if num_computed_tokens <= 0:
+                return False
+            block_ids = tuple(
+                [self._get_committed_mamba_block_id(g, ids, num_computed_tokens)] if self._group_is_mamba[g] else ids
+                for g, ids in enumerate(block_ids)
+            )
         return self._create_preempt_state(
             request.request_id,
             block_ids,
             num_computed_tokens,
         )
+
+    def _get_committed_mamba_block_id(self, group_id: int, block_ids: list[int], num_computed_tokens: int) -> int:
+        spec = self.cpu_kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            spec = next(iter(spec.kv_cache_specs.values()))
+        block_idx = (num_computed_tokens - 1) // spec.block_size if spec.mamba_cache_mode == "align" else 0
+        block_id = block_ids[block_idx] if 0 <= block_idx < len(block_ids) else 0
+        if num_computed_tokens <= 0 or block_id <= 0:
+            raise RuntimeError(
+                f"Invalid committed RecoverSSM block: group={group_id}, tokens={num_computed_tokens}, "
+                f"block={block_id}@{block_idx}."
+            )
+        return block_id
 
     def _create_preempt_state(
         self,
@@ -473,6 +497,19 @@ class PreemptOffloadScheduler:
         mamba_conv_loads: list[MambaConvLoadMeta] = []
         for g, group_cpu_ids in enumerate(state.cpu_block_ids):
             if self._group_is_mamba[g]:
+                if self.use_kda_recoverssm:
+                    if len(group_cpu_ids) != 1 or group_cpu_ids[0] <= 0:
+                        raise RuntimeError(
+                            f"Invalid RecoverSSM CPU checkpoint for {request.request_id}: {group_cpu_ids}"
+                        )
+                    gpu_block_id = self._get_committed_mamba_block_id(
+                        g, block_ids_by_group[g], state.num_computed_tokens
+                    )
+                    cpu_block_ids.append(group_cpu_ids[0])
+                    gpu_block_ids.append(gpu_block_id)
+                    # RecoverSSM commit already compacted Conv history into
+                    # this checkpoint. Restore it without another shift.
+                    continue
                 accept_token_idx = self.num_spec_tokens - (state.num_computed_tokens - request.num_tokens + 1)
                 group_gpu_ids = block_ids_by_group[g]
                 state_block_idx = len(group_gpu_ids) - self.num_spec_tokens - 1
