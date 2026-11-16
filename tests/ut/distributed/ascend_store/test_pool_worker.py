@@ -948,6 +948,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.total_layers = 2
         worker.num_layers = 2
         worker.pp_size = 2
+        worker.layerwise_key_layer_offset = 23
         worker.dcp_size = 1
         worker.put_step = 1
 
