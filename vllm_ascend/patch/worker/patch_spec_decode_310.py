@@ -13,6 +13,10 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
     prepare_prefill_inputs_cpu,
     update_draft_inputs_cpu,
 )
+from vllm_ascend.worker.spec_decode_family import (
+    SpecDecodeFamily,
+    resolve_spec_decode_family,
+)
 from vllm_ascend.worker.v2 import spec_decode as ascend_spec_decode
 
 ar_speculator.prepare_prefill_inputs = prepare_prefill_inputs_cpu
@@ -28,11 +32,7 @@ _orig_init_speculator = ascend_spec_decode.init_speculator
 def _init_speculator_310p(vllm_config, device, req_states=None):
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
-    if (
-        speculative_config.method == "mtp"
-        and not speculative_config.use_gemma4_mtp()
-        and not speculative_config.use_step3p5_mtp()
-    ):
+    if resolve_spec_decode_family(vllm_config) is SpecDecodeFamily.MTP:
         from vllm_ascend._310p.worker.v2.spec_decode.mtp_speculator import (
             AscendMTPSpeculator310,
         )
