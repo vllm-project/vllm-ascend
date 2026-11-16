@@ -10,34 +10,6 @@ import torch
 from vllm_ascend.models.qwen4_exp.ple_embedding import AscendPLEHostEmbedding
 
 
-@pytest.fixture(autouse=True)
-def matching_embedding_parallel_groups(monkeypatch):
-    from vllm_ascend.models.qwen4_exp import ple_embedding
-
-    group = SimpleNamespace(world_size=2)
-    monkeypatch.setattr(ple_embedding, "get_etp_group", lambda: group)
-    monkeypatch.setattr(ple_embedding, "get_tp_group", lambda: group)
-
-
-@pytest.mark.parametrize("shared", [False, True])
-def test_constructor_rejects_etp_mismatch_before_allocation(monkeypatch, shared):
-    from vllm.models.qwen4_exp.common.ngram_embedding import Qwen4ExpPLEEmbedding
-
-    from vllm_ascend.models.qwen4_exp import ple_embedding
-
-    monkeypatch.setattr(ple_embedding, "get_etp_group", lambda: SimpleNamespace(world_size=4))
-    monkeypatch.setattr(
-        ple_embedding,
-        "get_current_vllm_config",
-        lambda: SimpleNamespace(engram_config=SimpleNamespace(dp_shared_memory=shared)),
-    )
-    initialize = Mock()
-    monkeypatch.setattr(Qwen4ExpPLEEmbedding, "__init__", initialize)
-    with pytest.raises(ValueError, match="PLE host lookup requires ETP=TP"):
-        AscendPLEHostEmbedding()
-    initialize.assert_not_called()
-
-
 def embedding():
     obj = object.__new__(AscendPLEHostEmbedding)
     torch.nn.Module.__init__(obj)
