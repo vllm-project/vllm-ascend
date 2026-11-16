@@ -5,24 +5,17 @@
 from contextlib import contextmanager
 
 import pytest
-from packaging.version import Version
-from vllm import __version__ as VLLM_VERSION
+import torch
+import torch_npu  # noqa: F401
 
-# Skip before importing HiSparse dependencies during pytest collection.
-if Version(VLLM_VERSION).release[:2] == (0, 33):
-    pytest.skip("HiSparse Triton tests are not supported on vLLM 0.33.x", allow_module_level=True)
-
-import torch  # noqa: E402
-import torch_npu  # noqa: E402, F401
-
-from vllm_ascend.device.device_config import is_950  # noqa: E402
-from vllm_ascend.hisparse.cache_ops import (  # noqa: E402
+from vllm_ascend.device.device_config import is_950
+from vllm_ascend.hisparse.cache_ops import (
     HiSparseNPUOps,
     gather_resident_rows,
     pack_attention_rows,
     scatter_packed_kv,
 )
-from vllm_ascend.hisparse.host_pool import allocate_mapped_host  # noqa: E402
+from vllm_ascend.hisparse.host_pool import allocate_mapped_host
 
 pytestmark = pytest.mark.skipif(
     not is_950(),
