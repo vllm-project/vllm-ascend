@@ -387,8 +387,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         # spec-decode draft layers) are present, num_layers is updated in
         # register_kv_caches to include them; the key layer count must follow
         # or those extra layers are skipped during the save/load lifecycle. A
-        # block-key store owns a stage-local object, so its count stays local
-        # under PP. A GVA store retains the global PP layout and offset below.
+        # pool object owns a stage-local payload; hook counts stay local under PP.
         if (
             self.use_block_key_layerwise
             or (self.num_kv_cache_groups == 1 and getattr(self, "pp_size", 1) == 1)
@@ -402,25 +401,19 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 if self.use_block_key_layerwise
                 else self._global_group_alloc_size(group_id)
             )
-            # Global byte offsets for the shared GVA region:
-            #   PP: each stage writes its local layers at
-            #       (pp_layer_offset + local_layer) * per_layer_bytes.
-            #   DCP (shard-major): ranks sharing head_or_tp_rank (put_step>1)
-            #       hold different context shards of the same logical block
-            #       and share ONE region; shard d occupies the byte range
-            #       [d * shard_stride, (d+1) * shard_stride) where the stride
-            #       is the group byte total aligned up to the GVA hugepage
-            #       size (unaligned strides yield misaligned GVA addresses).
-            #       With put_step == 1 every rank owns a distinct region key
-            #       and no shard separation is needed.
-            layer_byte_offset = self._group_pp_byte_offset(group_id)
+            # PP stages have distinct keys, so each stage's payload starts at zero.
+            # Shared DCP shards retain hugepage-aligned strides.
+            layer_byte_offset = 0
             gbl = self.group_block_len.get(group_id) or []
-            if not self.use_block_key_layerwise and gbl and group_num_layers > 0:
-                if self.dcp_size > 1 and self.put_step > 1:
-                    # Derive shard origins from the same PP-aware allocation size.
-                    shard_stride = self._global_group_alloc_size(group_id) // self.dcp_size
-                    shard_idx = self.dcp_rank
-                    layer_byte_offset += shard_idx * shard_stride
+            if (
+                not self.use_block_key_layerwise
+                and gbl
+                and group_num_layers > 0
+                and self.dcp_size > 1
+                and self.put_step > 1
+            ):
+                shard_stride = group_page_size // self.dcp_size
+                layer_byte_offset = self.dcp_rank * shard_stride
             builders.append(
                 LayerBatchBuilder(
                     self.token_database,
