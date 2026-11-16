@@ -1,0 +1,11 @@
+# Release note fragment. See release_notes/README.md.
+pr: 19776
+entries:
+  - category: feature
+    text: >
+      Gate vLLM Ascend MS service metrics by a two-value metric level
+      (basic, detail; accepted as names or the numerics 0 and 1, where 0
+      is basic). The level is read from the metrics.level runtime config
+      key and can be changed at runtime through runtime_config.json hot
+      reload. Detail-level series stay unregistered until the level rises
+      so expensive metrics are never sampled implicitly.
