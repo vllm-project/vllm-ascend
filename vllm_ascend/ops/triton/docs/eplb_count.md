@@ -33,8 +33,11 @@ A2/A3 already use SIMD under the default hybrid mode. See the
 [compiler options reference](https://triton-ascend.readthedocs.io/en/v3.6.0/environment_variable_and_compiler_options_reference.html).
 Candidate `a46145c87` passed all 81 correctness tests on Ascend950DT_9582.
 Metadata confirms `compile_mode="simd"`, but saved adapter IR still lowers
-`tl.histogram` to `__builtin_histogram` with `vf_mode<SIMT>`; this option does
-not establish a SIMD-only histogram implementation with this toolchain.
+`tl.histogram` to `__builtin_histogram` with `vf_mode<SIMT>`. This is an IR
+classification, not proof of the final instruction path: upstream AscendNPU-IR
+revision `fbf6d5ecc72c626100c147f7cf600f5945c04e87` includes both SIMT atomics
+and eligible `dhistv2` SIMD paths inside its histogram template. Whether the
+installed CANN binary contains those paths has not been established.
 Paired, alternating Graph measurements on the same card (20 complete calls per
 replay, 10 samples) compare default hybrid versus explicit SIMD:
 
@@ -47,6 +50,21 @@ replay, 10 samples) compare default hybrid versus explicit SIMD:
 This option did not improve performance. A3 has not been rerun with the explicit
 option. The remaining measurements below belong to commit `980f446c2`, before
 this option was added.
+
+A separate custom equality-plus-integer-reduction experiment (128 routes/tile,
+int64 per-program accumulation, final atomic merge) passed 81/81 A5 tests.
+Its 11 saved adapter variants contain no histogram builtin or SIMT VF operation
+and report `parallel_mode="simd"`. Same-card paired Graph timings were:
+
+| Distribution | Default histogram ms | Custom reduction ms | Time increase |
+| --- | ---: | ---: | ---: |
+| uniform | 1.0301 | 1.0707 | 3.95% |
+| hot | 1.0207 | 1.0753 | 5.34% |
+| mixed | 1.0233 | 1.0761 | 5.16% |
+
+The custom implementation was not promoted into this PR kernel because it
+regressed all three measured cases. This experiment changed both the counting
+method and tile size; it does not isolate the hardware SIMD/SIMT throughput.
 
 Both A3 Ascend910_9362 (NpuArch 2201) and A5 Ascend950DT_9582 (NpuArch 3510)
 passed 81 tests with exact integer equality, including mutable-input Graph replay.
