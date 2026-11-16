@@ -172,16 +172,13 @@ DEEPSEEK_V41_ENGRAM_CASE = WeightUpdateModelCase(
     # vocabulary and the MTP stages are reduced, and that reduction lives in the
     # model directory's own config.json rather than in ``--hf-overrides``.
     model=os.environ.get("DSV41_MODEL_DIR", ""),
-    # The reduction is already in that config.json: vLLM flattens the released
-    # ``text_config``, so a nested override would replace the sub-config and drop
-    # every field it does not restate (``num_attention_heads`` among them).
+    # The reduction lives in that config.json; a nested override would replace the
+    # sub-config (see ``_dsv41_text_config``).
     hf_overrides={},
     extra_server_args=(
         "--tokenizer-mode",
         "deepseek_v41",
-        # Engram stays part of the model, but its tables live in pinned host
-        # memory: vLLM only offloads when an ``EngramConfig`` is present at all,
-        # so the flag - not the default of ``cpu_offload`` - is what turns it on.
+        # The flag, not the default of ``cpu_offload``, is what enables offload.
         *_dsv41_engram_args(),
     ),
     weight_source_factory=_deepseek_v41_weight_source,

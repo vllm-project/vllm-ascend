@@ -177,9 +177,7 @@ def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed:
                 # in aclrtMallocPhysical with OOM, so hand the memory back
                 # explicitly.
                 torch.npu.empty_cache()
-                # Every trainer rank builds and sends a full payload on its own
-                # chip, so wait until the peer has released its blocks too before
-                # this rank asks the engine to allocate the co-located KV cache.
+                # Wait for the peer's release before the engine allocates the KV cache.
                 dist.barrier()
                 # The KV cache is re-allocated last, from the updated weights' state.
                 # That wake leaves nothing asleep, so the engine resumes scheduling on

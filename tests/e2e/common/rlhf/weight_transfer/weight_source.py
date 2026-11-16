@@ -10,14 +10,9 @@ Two sources share this module, the seeding scheme and the tensor sampler:
     Transformers knows, which is what makes the matrix download-free.
 
 ``DeepseekV41WeightSource``
-    DeepSeek-V4.1 has no Transformers implementation (``AutoConfig`` raises
-    ``KeyError: 'deepseek_v41'``), so there is no meta model to enumerate.  It
-    derives the payload geometry from the published checkpoint's **own
-    safetensors headers** instead: a safetensors file starts with a
-    ``<u64 header_len>`` followed by a JSON blob of every ``name -> dtype,
-    shape`` in that shard, so an HTTP range request for the leading bytes yields
-    the exact checkpoint-facing names and shapes without downloading a weight.
-    Headers are cached under ``DSV41_HEADER_CACHE``.
+    Derives the geometry from the published checkpoint's safetensors headers,
+    because Transformers has no ``deepseek_v41`` to enumerate; see the class
+    docstring and ``_dsv41_fetch_header``.
 """
 
 import contextlib
@@ -431,6 +426,9 @@ def _dsv41_fetch_weight_map() -> dict[str, str]:
 
 def _dsv41_fetch_header(shard: str) -> dict:
     """Read one shard's header through a range request; never the weights.
+
+    A shard starts with a ``<u64 header_len>`` followed by a JSON blob of
+    ``name -> dtype, shape``, so only the leading bytes are needed.
 
     The smallest range that usually fits is requested first and only grown when
     the header genuinely is bigger — asking for a fixed 8 MiB per shard would
