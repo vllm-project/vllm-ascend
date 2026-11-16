@@ -22,6 +22,8 @@ The additional job checks out the PR merge revision, target revision and
 JavaScript syntax checks, ESLint, tests and Ascend configuration checks. Jobs
 do not share a filesystem: the downstream job prepares its own source cache.
 Within that job, candidate and baseline use the same renderer and source pins.
+The baseline is the merge revision's first parent, so changes already merged
+into the target branch are not mistaken for new errors from the PR.
 Both jobs independently resolve renderer main, so the report records the exact
 downstream SHA rather than claiming it must match the earlier job's SHA.
 Checkouts do not persist credentials, contents permission is read-only, and no
@@ -124,12 +126,12 @@ precedence without depending on JSX text fingerprints. Missing shared APIs
 fail with an actionable compatibility diagnostic; integration tests cover
 the effective installation and command/assembly behavior against renderer main.
 
-Coverage is Huawei overlays, baseline preset, features disabled, Python
+Coverage is Huawei standalone recipes and overlays, baseline preset, features disabled, Python
 frontend requested, default PD connector/router, and minimum multi-node topology.
 Inherited environment is preserved: `VLLM_USE_RUST_FRONTEND=1` may still enable
 Rust despite the Python request. Reports disclose this limitation; frontend
-compatibility is not verified. Full
-recipes under `models/` are explicitly rejected. Tuned presets, feature
+compatibility is not verified. Full recipes under `models/` and fragments under
+`overlays/` use the same checks on their assembled configuration. Tuned presets, feature
 combinations, other frontends, all PD pool modes and all topology sizes are
 outside this change. Multi-node/PD per-node capacity is not verified.
 

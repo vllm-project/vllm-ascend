@@ -71,15 +71,18 @@ function inspectSource(recipes, content, tools, options, allowEmpty = false) {
     }
   }
   const snapshot = { inputs: [], results: [], findings: [], skipped: [] };
-  if (yamlFiles(path.join(recipes, "models")).length) throw new Error("Full recipes under models/ are not covered; only overlays are supported.");
+  const models = indexedYaml(path.join(recipes, "models"));
   const overlays = indexedYaml(path.join(recipes, "overlays"));
   const assembled = indexedYaml(path.join(content, "models"));
-  for (const [hfId, file] of overlays) {
+  for (const hfId of new Set([...models.keys(), ...overlays.keys()])) {
     if (options.model && options.model !== hfId) continue;
     const assembledFile = assembled.get(hfId);
     if (!assembledFile) throw new Error(`No assembled recipe for ${hfId}`);
     const recipe = readYaml(assembledFile);
-    snapshot.inputs.push({ model: hfId, overlay_sha256: hash(fs.readFileSync(file)), assembled_sha256: hash(fs.readFileSync(assembledFile)) });
+    snapshot.inputs.push({ model: hfId,
+      ...(models.has(hfId) ? { recipe_sha256: hash(fs.readFileSync(models.get(hfId))) } : {}),
+      ...(overlays.has(hfId) ? { overlay_sha256: hash(fs.readFileSync(overlays.get(hfId))) } : {}),
+      assembled_sha256: hash(fs.readFileSync(assembledFile)) });
     const before = snapshot.results.length;
     const sourceError = (code, message) => snapshot.findings.push({ model: hfId, code, severity: "error", message,
       fix: "Review the declared hardware/strategy selection and renderer compatibility." });
@@ -125,7 +128,7 @@ function inspectSource(recipes, content, tools, options, allowEmpty = false) {
     }
     if (snapshot.results.length === before) sourceError("SOURCE_EMPTY", "Selected model produced zero checked Huawei configurations.");
   }
-  if (!snapshot.inputs.length && !allowEmpty) throw new Error("No matching overlays; zero checks cannot pass.");
+  if (!snapshot.inputs.length && !allowEmpty) throw new Error("No matching recipes or overlays; zero checks cannot pass.");
   return snapshot;
 }
 
@@ -194,8 +197,8 @@ export async function run(options) {
     const comparison = compareFindings(head.findings, baseline ? snapshots[1].findings : null, options["warnings-as-errors"]);
     const report = { version: 1, created_at: new Date().toISOString(), renderer_sha: sha,
       mode: baseline ? "no-new-errors" : "strict", provenance: provenance[0], baseline_provenance: provenance[1] || null,
-      coverage: "Huawei overlays; baseline preset, features off, Python frontend requested with inherited environment preserved; minimum multi-node topology. No model execution.",
-      limitations: ["No full recipes, tuned presets, feature combinations or exhaustive topology enumeration.",
+      coverage: "Huawei standalone recipes and overlays; baseline preset, features off, Python frontend requested with inherited environment preserved; minimum multi-node topology. No model execution.",
+      limitations: ["No tuned presets, feature combinations or exhaustive topology enumeration.",
         "Inherited VLLM_USE_RUST_FRONTEND may still enable Rust; frontend compatibility is not verified.",
         "Multi-node/PD local device capacity and runtime/package/image compatibility are not verified.",
         "Known errors retained from the PR target branch remain errors, but do not block no-new-errors mode."],

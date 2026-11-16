@@ -56,6 +56,45 @@ test("valid fixture uses the official assembler and has no semantic errors", asy
   assert.equal(report.provenance.vllm.local, true);
 });
 
+function standaloneFixture(change = () => {}) {
+  const recipes = fixture();
+  const doc = { ...structuredClone(core), meta: { hardware: { ascend_910c: "verified" } },
+    model: { model_id: "test/AscendOnly" }, variants: structuredClone(overlay.variants) };
+  change(doc);
+  write(path.join(recipes, "models/test/AscendOnly.yaml"), doc);
+  return recipes;
+}
+
+test("standalone Ascend recipes and overlays are both checked", async () => {
+  const report = await run(config({ recipes: standaloneFixture() }));
+  assert.equal(report.summary.models, 2);
+  assert.equal(report.summary.scenarios, 2);
+  assert.equal(report.summary.blocking, 0);
+  assert.ok(report.inputs.find((input) => input.model === "test/AscendOnly").recipe_sha256);
+});
+
+test("standalone recipe errors block and existing baseline errors remain visible", async () => {
+  const recipes = standaloneFixture((doc) => {
+    doc.variants.ascend.hardware_overrides.ascend_910c.docker_image = "vllm/vllm-openai:latest";
+  });
+  const report = await run(config({ recipes, "baseline-recipes": standaloneFixture() }));
+  assert.equal(report.summary.new_errors, 1);
+  assert.equal(report.comparison.blocking[0].model, "test/AscendOnly");
+  assert.equal(report.comparison.blocking[0].code, "ASC001");
+  const unchanged = await run(config({ recipes, "baseline-recipes": recipes }));
+  assert.equal(unchanged.summary.existing_errors, 1);
+  assert.equal(unchanged.summary.blocking, 0);
+});
+
+test("a standalone-only source does not need an overlays directory", async () => {
+  const recipes = standaloneFixture();
+  fs.rmSync(path.join(recipes, "overlays"), { recursive: true });
+  const report = await run(config({ recipes }));
+  assert.equal(report.summary.models, 1);
+  assert.equal(report.results[0].model, "test/AscendOnly");
+  assert.equal(report.summary.blocking, 0);
+});
+
 test("inherited Rust frontend selection is preserved and disclosed in coverage", async () => {
   const recipes = fixture((o) => { o.variants.ascend.extra_env = { VLLM_USE_RUST_FRONTEND: "1" }; });
   const report = await run(config({ recipes }));
@@ -213,7 +252,7 @@ test("temporary channels are cleaned without changing renderer sources or public
 });
 test("identical baseline/head paths do not allow an empty candidate selection", async () => {
   const recipes = fixture();
-  await assert.rejects(run(config({ recipes, "baseline-recipes": recipes, model: "test/Typo" })), /No matching overlays/);
+  await assert.rejects(run(config({ recipes, "baseline-recipes": recipes, model: "test/Typo" })), /No matching recipes or overlays/);
 });
 test("symbolic links in source trees are rejected rather than silently skipped", async () => {
   const recipes = fixture();
