@@ -87,9 +87,6 @@ from vllm_ascend.core.kv_cache_placement import (
     create_kvpp_cache_allocation_plan,
     register_kvpp_draft_layers,
 )
-from vllm_ascend.core.profiling_chunk_predictor import (
-    _attach_profiling_chunk_execution_time,
-)
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device_allocator.camem import CaMemAllocator
@@ -121,6 +118,7 @@ from vllm_ascend.utils import (
 )
 
 
+# Both supported versions resolve grouping through the platform's builder.
 def get_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
@@ -467,6 +465,13 @@ class NPUWorker(WorkerBase):
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
+    def _get_gpu_memory_utilization(self) -> float:
+        utilization = self.cache_config.gpu_memory_utilization
+        # vLLM #56492 defers the default until the KV allocation mode is known.
+        if utilization is None:
+            return self.cache_config.resolved_gpu_memory_utilization
+        return utilization
+
     def _init_device(self):
         # vLLM v0.24.0 (PR #45026) removed automatic per-process device
         # isolation for DP workers. Mirror gpu_worker.py::init_device:
@@ -538,7 +543,7 @@ class NPUWorker(WorkerBase):
 
         # take current memory snapshot
         self.init_snapshot = MemorySnapshot(device=device)
-        self.requested_memory = self.init_snapshot.total_memory * self.cache_config.gpu_memory_utilization
+        self.requested_memory = self.init_snapshot.total_memory * self._get_gpu_memory_utilization()
         if self.init_snapshot.free_memory < self.requested_memory:
             GiB = lambda b: round(b / GiB_bytes, 2)
             raise ValueError(
@@ -546,7 +551,7 @@ class NPUWorker(WorkerBase):
                 f"({GiB(self.init_snapshot.free_memory)}/"
                 f"{GiB(self.init_snapshot.total_memory)} GiB) on startup "
                 f"is less than desired GPU memory utilization "
-                f"({self.cache_config.gpu_memory_utilization}, "
+                f"({self._get_gpu_memory_utilization()}, "
                 f"{GiB(self.requested_memory)} GiB). Decrease GPU memory "
                 f"utilization or reduce GPU memory used by other processes."
             )
@@ -661,6 +666,11 @@ class NPUWorker(WorkerBase):
 
         maybe_apply_startup_plan(self)
 
+        if self.vllm_config.attention_config.hisparse_config is not None:
+            from vllm_ascend.hisparse.backend import prepare_hisparse_workspaces
+
+            prepare_hisparse_workspaces(self.vllm_config.compilation_config.static_forward_context)
+
         randomize_inputs = envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and self.parallel_config.data_parallel_size > 1
 
         # Fast path: user has explicitly specified KV cache size via
@@ -708,9 +718,14 @@ class NPUWorker(WorkerBase):
         # Override torch_peak_increase with the pre-graph-capture value to
         # avoid double-counting graph pool memory as activation memory.
         profile_result.torch_peak_increase = profile_torch_peak - profile_result.before_profile.torch_peak
-        profile_result.non_kv_cache_memory = (
-            profile_result.non_torch_increase + profile_result.torch_peak_increase + profile_result.weights_memory
-        )
+        if self.vllm_config.attention_config.hisparse_config is None:
+            profile_result.non_kv_cache_memory = (
+                profile_result.non_torch_increase + profile_result.torch_peak_increase + profile_result.weights_memory
+            )
+        else:
+            # Reuse Core's measured total, including owners retained from an
+            # earlier profile. Preserve this authority for startup suggestions.
+            self._hisparse_profiled_non_kv_memory = profile_result.non_kv_cache_memory
 
         # Save per-category memory for use in compile_or_warm_up_model() (step 5).
         self.peak_activation_memory = profile_result.torch_peak_increase
@@ -772,6 +787,9 @@ class NPUWorker(WorkerBase):
         derives a num_blocks (and block pool) small enough for the per-layer
         buffers to fit.
         """
+        if self.vllm_config.attention_config.hisparse_config is not None:
+            # Core budgets the shared Resident/Hot/Indexer slab, not per-layer buffers.
+            return available_memory
         kv_cache_spec = self.get_kv_cache_spec()
         if not isinstance(kv_cache_spec, dict):
             return available_memory
@@ -939,11 +957,6 @@ class NPUWorker(WorkerBase):
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         output = self.model_runner.sample_tokens(grammar_output)
-        _attach_profiling_chunk_execution_time(
-            self.model_runner.ascend_config.scheduler_config.profiling_chunk_config,
-            self.model_runner,
-            output,
-        )
         return output
 
     def load_model(self) -> None:
@@ -1030,6 +1043,8 @@ class NPUWorker(WorkerBase):
                 + self.non_torch_memory
                 + npugraph_memory_bytes
             )
+            if self.vllm_config.attention_config.hisparse_config is not None:
+                non_kv_memory = self._hisparse_profiled_non_kv_memory + npugraph_memory_bytes
             self.npugraph_memory_bytes = npugraph_memory_bytes
             suggested_to_requested = int(self.requested_memory) - non_kv_memory - redundancy_buffer
             suggested_to_gpu_limit = int(self.init_snapshot.free_memory) - non_kv_memory - redundancy_buffer
@@ -1038,7 +1053,7 @@ class NPUWorker(WorkerBase):
                 f"({format_gib(self.init_snapshot.free_memory)}/"
                 f"{format_gib(self.init_snapshot.total_memory)} GiB) on startup. "
                 f"Desired GPU memory utilization is "
-                f"({self.cache_config.gpu_memory_utilization}, "
+                f"({self._get_gpu_memory_utilization()}, "
                 f"{format_gib(self.requested_memory)} GiB). "
                 f"Actual usage: {format_gib(self.model_runner.model_memory_usage)} GiB "
                 f"for weights, {format_gib(self.peak_activation_memory)} GiB for peak "
@@ -1131,68 +1146,6 @@ class NPUWorker(WorkerBase):
                 "reset weights can only be restored via checkpoint reload (reload_weights)."
             )
         zero_weights(self._weight_checksum_model())
-
-    @torch.inference_mode()
-    def profile_prefill_latency(self, num_tokens: int) -> float:
-        """
-        Profile prefill latency for a given number of tokens.
-
-        This runs a real model forward pass and measures the execution time.
-        Used for profiling-based dynamic chunk sizing.
-
-        In PP (Pipeline Parallelism) mode:
-        - All workers execute the forward pass to stay synchronized
-        - Only the timing from PP0 (first rank) is meaningful for scheduling
-        - PP0 includes all the pipeline stages' latency when using async scheduling
-
-        Args:
-            num_tokens: Number of tokens to profile
-
-        Returns:
-            Latency in milliseconds
-        """
-        import time
-
-        # Clamp to valid range
-        num_tokens = min(num_tokens, self.scheduler_config.max_num_batched_tokens)
-        num_tokens = max(num_tokens, 1)
-
-        # Synchronize all devices before timing
-        # This ensures clean measurement in PP/TP scenarios
-        torch.npu.synchronize()
-
-        # In PP mode, we still run on all ranks to keep them synchronized
-        # but only the first rank's timing is used for scheduling decisions
-        is_first_pp_rank = get_pp_group().is_first_rank
-
-        start = time.perf_counter()
-
-        # Run a real model forward with attention enabled in eager mode.
-        # _dummy_run handles PP internally (intermediate tensors, etc.).
-        self.model_runner._dummy_run(
-            num_tokens=num_tokens,
-            force_attention=True,
-            is_profile=False,
-            cudagraph_runtime_mode=CUDAGraphMode.NONE,
-            profile_cpp=True,
-        )
-
-        # Synchronize after forward to ensure NPU operations complete
-        torch.npu.synchronize()
-
-        latency_ms = (time.perf_counter() - start) * 1000
-
-        # Log for debugging in PP mode
-        if not is_first_pp_rank:
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "[ProfilingChunk] PP rank %s: profiled %s tokens, latency=%.2f ms (not used)",
-                    get_pp_group().rank_in_group,
-                    num_tokens,
-                    latency_ms,
-                )
-
-        return latency_ms
 
     def get_kv_connector_handshake_metadata(
         self,

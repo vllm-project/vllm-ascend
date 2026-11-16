@@ -64,8 +64,24 @@ This transfer path still requires end-to-end validation on Ascend hardware, incl
 
 #### Mooncake V2 Layerwise Push Connector
 
-Set `kv_connector` to `MooncakePushConnector` on P and D, with `kv_role` set to
-`kv_producer` and `kv_consumer`, respectively. Use
+Set `kv_connector` to `MooncakeConnectorV2` and
+`kv_connector_extra_config.use_layerwise` to `true` on both P and D, with
+`kv_role` set to `kv_producer` and `kv_consumer`, respectively. For example, on P:
+
+```json
+{
+  "kv_connector": "MooncakeConnectorV2",
+  "kv_role": "kv_producer",
+  "kv_connector_extra_config": {"use_layerwise": true}
+}
+```
+
+`use_layerwise` defaults to `false`, which keeps the pull-based behavior.
+Explicit `MooncakePushConnector` and `MooncakePullConnector` names remain
+supported and always select their respective modes. When using `MultiConnector`,
+set `use_layerwise` in the Mooncake child's `kv_connector_extra_config`.
+
+Use
 `examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py`
 as the proxy. This experimental path supports PCP/TP routing and PP layer
 lookup; workers currently require DCP=1 and do not support KVPP.

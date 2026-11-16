@@ -11,7 +11,7 @@ import math
 from bisect import bisect_left
 from collections.abc import Callable, Iterable, Sequence
 from copy import copy
-from typing import Any, TypeVar, cast
+from typing import Any, ClassVar, Literal, TypeVar, cast
 
 import torch
 import vllm.envs as envs
@@ -423,9 +423,11 @@ class AscendKimiMoE(nn.Module):
             self.shared_experts = None
 
         latent_quant_config = quant_config if quant_config is not None and quant_config.get_name() == "ascend" else None
+        self.routed_expert_down_proj: ReplicatedLinear | None
+        self.routed_expert_up_proj: ReplicatedLinear | None
         self.routed_output_transform: KimiRoutedOutputTransform | None
         if self.use_latent_moe:
-            self.routed_expert_down_proj = ReplicatedLinear(
+            self.routed_expert_down_proj = AscendKimiK3RoutedLinear(
                 hidden_size,
                 self.moe_hidden_size,
                 bias=False,
@@ -435,7 +437,7 @@ class AscendKimiMoE(nn.Module):
             self.routed_expert_norm = (
                 RMSNorm(self.moe_hidden_size, eps=config.rms_norm_eps) if self.latent_moe_use_norm else None
             )
-            self.routed_expert_up_proj = ReplicatedLinear(
+            self.routed_expert_up_proj = AscendKimiK3RoutedLinear(
                 self.moe_hidden_size,
                 hidden_size,
                 bias=False,
@@ -1318,6 +1320,7 @@ class KimiMixtureOfExperts(MixtureOfExperts):
 class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfExperts):
     """Causal-LM wrapper retaining vLLM 0.27 state/cache interfaces."""
 
+    supports_replayssm: ClassVar[Literal[True]] = True
     packed_modules_mapping = AscendKimiLinearModel.packed_modules_mapping
 
     @classmethod
@@ -1419,6 +1422,8 @@ class AscendKimiK3MultiModalProjector(KimiK25MultiModalProjector):
 )
 class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneration):
     """Upstream Kimi K3 multimodal wrapper with Ascend text/projector layers."""
+
+    supports_replayssm: ClassVar[Literal[True]] = True
 
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config):

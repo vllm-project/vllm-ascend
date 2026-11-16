@@ -19,6 +19,7 @@
 
 import inspect
 import logging
+from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from typing import Any
@@ -73,10 +74,6 @@ from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
-from vllm_ascend.core.profiling_chunk_predictor import (
-    _finish_profiling_chunk_timing,
-    _start_profiling_chunk_timing,
-)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     bind_dspark_context_receiver,
     configure_dspark_kv_transfer,
@@ -96,6 +93,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     allocate_kv_offload_topk_profile_buffers,
     init_sparse_kv_offload_manager,
 )
+from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target_host_mirror
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
@@ -163,6 +161,8 @@ class NPUModelRunner(GPUModelRunner):
         # boundary and sequence length padding during FULL graph execution.
         self.use_fia = False
         self._target_uses_flashmla = False
+        # #56492: inherited dummy runs inspect this even on non-VMM platforms.
+        self.extensible_kv_cache = None
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
@@ -213,7 +213,11 @@ class NPUModelRunner(GPUModelRunner):
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and (
                 self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-                or breakable_cudagraph.is_breakable_cudagraph_enabled()
+                or (
+                    breakable_cudagraph.is_breakable_cudagraph_enabled()
+                    if vllm_version_is("0.33.0")
+                    else breakable_cudagraph.is_breakable_cudagraph_enabled(self.compilation_config)
+                )
             )
             and not self.model_config.enforce_eager
         )
@@ -363,6 +367,8 @@ class NPUModelRunner(GPUModelRunner):
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
         # path (v1 parity: v1 finalizes at the end of sample_tokens).
         self._finalize_dump_data()
+        if isinstance(mirror := getattr(self, "kv_connector", None), HostMirrorConnector):
+            mirror.join_pending()
         return output
 
     def pool(self):
@@ -557,6 +563,8 @@ class NPUModelRunner(GPUModelRunner):
         self.model_state.kvpp_runtime = self.kvpp
 
         self._fill_c8_mxfp_v_scale_caches()
+        if self.vllm_config.attention_config.hisparse_config is not None:
+            self.kv_connector = overlap_target_host_mirror(self)
 
     def _fill_c8_mxfp_v_scale_caches(self) -> None:
         """Initialize C8 V scales and retain views for page reassignment."""
@@ -667,12 +675,8 @@ class NPUModelRunner(GPUModelRunner):
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
     ):
-        self._cpp_execution_time_ms = None
-        profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
-        execution_start_time = _start_profiling_chunk_timing(
-            profiling_config,
-            scheduler_output,
-        )
+        if isinstance(mirror := getattr(self, "kv_connector", None), HostMirrorConnector):
+            mirror.begin_execution(not dummy_run and not is_profile)
 
         # Preemption stores must complete before the parent updates states and
         # reuses or zeroes the preempted requests' physical KV cache blocks.
@@ -741,11 +745,6 @@ class NPUModelRunner(GPUModelRunner):
                 # Non-last pooling ranks do not reach pool(). Decoding ranks
                 # finalize after sample_tokens(), including non-last PP ranks.
                 self._finalize_dump_data()
-
-        self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
-            profiling_config,
-            execution_start_time,
-        )
 
         return output
 
@@ -1246,28 +1245,6 @@ class NPUModelRunner(GPUModelRunner):
         finally:
             self.input_buffers.dummy_num_tokens = previous_dummy_tokens
 
-    @contextmanager
-    def _cpp_profile_dummy(self, enabled: bool):
-        """Scope the target-only prefill semantics used by CPP profiling."""
-        if not enabled:
-            yield
-            return
-
-        previous_profile_cpp = getattr(self.input_buffers, "profile_cpp", False)
-        previous_speculator = self.speculator
-        previous_max_num_reqs = self.max_num_reqs
-        try:
-            self.input_buffers.profile_cpp = True
-            # CPP profiles only the target prefill, so skip the drafter dummy
-            # run while the profiling marker is active.
-            self.speculator = None
-            self.max_num_reqs = 1
-            yield
-        finally:
-            self.input_buffers.profile_cpp = previous_profile_cpp
-            self.speculator = previous_speculator
-            self.max_num_reqs = previous_max_num_reqs
-
     def _get_pcp_profile_num_tokens(self) -> int:
         """Keep replicated draft requests when profiling PCP-local prefill.
 
@@ -1299,7 +1276,6 @@ class NPUModelRunner(GPUModelRunner):
         context_len: int = 0,
         skip_eplb: bool = False,
         is_profile: bool = False,
-        profile_cpp: bool = False,
         **kwargs,
     ):
         """Balanced dummy routing for adaptive-verification profiling; EPLB
@@ -1318,8 +1294,6 @@ class NPUModelRunner(GPUModelRunner):
             )
         load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
         with (
-            # Disable the CPP drafter before entering contexts that inspect it.
-            self._cpp_profile_dummy(profile_cpp),
             # Preserve scheduled query tokens before PIECEWISE graph padding.
             self._preserve_dummy_query_tokens(num_tokens, uniform_decode),
             skip_ring_state_update(skip_ring),
@@ -1646,16 +1620,20 @@ def graph_manager_wrapper(model_runner):
         vllm_config: VllmConfig,
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int,
+        decode_query_len: int | None = None,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
-        ubatch_runner: Any = None,  # vLLM main (#51700)
+        ubatch_runner: Any = None,
+        *,
+        decode_query_lens: Mapping[int, int] | None = None,
     ):
+        query_shapes = decode_query_len if vllm_version_is("0.33.0") else decode_query_lens
+        assert query_shapes is not None
         return ModelAclGraphManager(
             vllm_config,
             device,
             cudagraph_mode,
-            decode_query_len,
+            query_shapes,
             model_runner,
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,
