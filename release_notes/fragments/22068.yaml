@@ -1,0 +1,4 @@
+pr: 22068
+entries:
+  - category: bugfix
+    text: Fixed Mooncake Push shared-buffer fence registration with the GLM-5.3-Flash prefill offload planner, and corrected offload layer offsets when combining pipeline and prefill context parallelism.
