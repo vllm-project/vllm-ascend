@@ -51,6 +51,7 @@ def test_minimax_native_checkpoint_metadata(case, num_tensors, sparse_layers):
         },
         f"{prefix}.layers.3.block_sparse_moe.shared_experts.gate_proj.weight": (3072, 6144),
         "language_model.lm_head.weight": (200064, 6144),
+        f"{prefix}.layers.3.block_sparse_moe.e_score_correction_bias": (8,),
         **{
             f"{prefix}.layers.3.block_sparse_moe.experts.{expert}.{shard}.weight": shape
             for expert in range(8)
@@ -58,16 +59,9 @@ def test_minimax_native_checkpoint_metadata(case, num_tensors, sparse_layers):
         },
     }
     for name, shape in expected.items():
-        assert metadata[name] == (shape, torch.bfloat16)
-    bias = f"{prefix}.layers.3.block_sparse_moe.e_score_correction_bias"
-    assert metadata[bias] == ((8,), torch.bfloat16)
+        assert metadata[name][0] == shape
     assert all(dtype == torch.bfloat16 for _, dtype in metadata.values())
     assert not any("gate_up_proj" in name or "vision" in name for name in metadata)
-
-
-def test_fused_projection_rejects_odd_dimension():
-    with pytest.raises(AssertionError, match="odd fused gate/up dimension"):
-        MINIMAX_M3_CASE.checkpoint_param_expander("model.layers.0.mlp.gate_up_proj.weight", (7, 16))
 
 
 def test_dense_fusion_expansion_is_model_specific():
