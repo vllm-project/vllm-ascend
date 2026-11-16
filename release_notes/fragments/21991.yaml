@@ -1,0 +1,7 @@
+pr: 21991
+entries:
+  - category: performance
+    text: >-
+      Switched integer ModelSlim W4A8 dynamic Linear projections from single-group
+      GroupedMatmul to QuantMatmul with ND packed weights. Routed MoE expert
+      kernels remain unchanged.
