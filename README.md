@@ -127,4 +127,4 @@ Apache License 2.0, as found in the [LICENSE](./LICENSE) file.
 
 ## MoonEP integration
 
-The v0.30 MoonEP source migration, configuration, and validation handoff are documented in [MoonEP](docs/features/moonep.md).
+The MoonEP main2main baseline, configuration, and validation handoff are documented in [MoonEP](docs/features/moonep.md).

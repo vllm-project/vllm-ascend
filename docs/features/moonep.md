@@ -1,30 +1,41 @@
-# MoonEP on vLLM Ascend v0.30.0
+# MoonEP on vLLM Ascend main
 
-## Source baselines and migration status
+## Current main2main baseline
 
-This branch migrates the final MoonEP implementation from `moonep_v0.23.0`
+The integration branch `moonep_main` replays the six MoonEP commits through
+`moonep_v0.30.0` (`8d173bb61238`) on vllm-ascend main (`4e11513255d8`).
+Its verified vLLM revision is `ba15685ab7f4` (main2main 1106).
+The working directory is `/mnt/share/x00893896/vllm_ascend_moonep_integration_main`.
+Model Runner V2 initializes MoonEP after weight loading inside its resource
+cleanup scope. Device and performance validation on this pair is pending.
+
+## Previous v0.30.0 migration and validation
+
+The v0.30.0 branch migrated the final MoonEP implementation from `moonep_v0.23.0`
 (`73d2f9e4e21e911ec86682684bc46d862674a595`) onto
 `releases/v0.30.0` (`56279e424b0636afe936d011ff65b9c4e6a6c82e`).
 
 The companion vLLM checkout is `releases/v0.30.0`
-(`ced6857afa0ea7b2e3f0846a62e1394e90f15607`). The SDK baseline is
+(`ced6857afa0ea7b2e3f0846a62e1394e90f15607`). The SDK feature baseline is
 `ascend-moonep` `urma_dev` (`6de30d77d0f21721bce35a73018160e56fb9d656`).
+The validation container uses `urma_dev_vllm_ascend_v0.30.0` with the CANN 9.2
+header-layout compatibility commit `5a312f186bc6bf197df223f67d2cd4f7c9b1274d`.
 This migration changes vllm-ascend source only. It does not install packages,
 rebind editable installations, rebuild native libraries, or update submodules.
 
-The workspace for this work is
+The workspace used for that migration was
 `/mnt/share/x00893896/vllm_ascend_moonep_integration_latest`.
 The previous workspace and source branch remain separate baselines.
 
-**Status: source adaptation with dependency-free contract checks. NPU operators,
-multirank collectives, model correctness, and performance are not yet validated.**
-Copied native binaries are not evidence of ABI compatibility.
+**Status: MoonEP CPU regression and fresh-process native-loader checks pass.
+NPU operators, multirank collectives, model correctness, and performance remain
+unvalidated.** Successful loading does not establish device numerical correctness.
 
 ## Execution integration
 
 - `AscendRoutedExperts` registers the actual owner of expert Parameters.
   Runtime allocation and weight publication occur after model weight loading
-  in both model runners, before the first forward.
+  in Model Runner V2, before the first forward.
 - SHMEM communication methods use the v0.30 per-configuration registry.
   Native hardware-policy selection remains the baseline when MoonEP is off.
 - Dispatch uses real token counts, rank-symmetric capacity selection, and the
@@ -51,6 +62,31 @@ Native Off retains its own EPLB and communication paths.
 The development timers, load-accounting diagnostics, simulated routing,
 predicted planning, and plan dumps removed from the source branch are not
 reintroduced. Historical experiments remain on the old branch.
+
+## MoonEP semantic compatibility
+
+Non-MoonEP execution follows the main baseline. MoonEP reuses its quant-method
+GMM and activation-quantization hooks through a read-only Home/Slot weight view;
+the public MLP implementation and native quantization methods are unchanged.
+
+Both ordinary Slot and BF16 Home execution honor the configured SwiGLUStep
+limit. A missing or zero limit retains the MoonEP default of 7.0. Quantized Home
+supports W4A8MXFP with SiLU only and rejects other activations before device work.
+The old quantized Home path accepted some non-SiLU configurations while executing
+SiLU; that unchecked behavior is not restored.
+
+MXFP8 selection recognizes both the torch-npu E8M0 format identifier emitted by
+v0.30 quantization methods and the native torch E8M0 tensor dtype. An unspecified
+scale format retains the implicit-E8M0 convention. A byte-carrier dtype alone
+does not declare E8M0 semantics. The selector still checks original contiguous
+BF16 input, E4M3 activation metadata, E8M0 runtime support and SDK wire geometry;
+unsupported formats, missing ABI symbols and execution errors do not retry BF16.
+
+Stage events are recorded only when the routed layer returns shared-expert
+milestones and shared-expert multistream overlap is enabled. The GMM2 event is
+recorded after activation/quantization and before GMM2. Dispatch and combine
+events keep their existing stage boundaries. This optimization does not remove
+prefetch-ready waits, SHMEM barriers or dedicated UDMA QP dependencies.
 
 ## Configuration
 
@@ -84,12 +120,13 @@ UDMA overlap retains the dedicated-QP requirement. The existing SDK runtime
 rejects expandable NPU allocator segments; keep
 `PYTORCH_NPU_ALLOC_CONF=expandable_segments:False` for MoonEP.
 
-## Independent validation environment
+## Previous v0.30.0 validation environment
 
-Prepare a dedicated environment later and install all three packages from
-the selected workspace. The v0.30 branch pins torch 2.10.0 and
-torch-npu 2.10.0.post7. The current container installation still points to
-the previous source workspace and is not a v0.30 validation environment.
+Validation uses host 118, container `xzx_moonep_latest`, with Python 3.12.13,
+torch 2.10.0 and torch-npu 2.10.0.post7. Fresh-process checks resolve vLLM,
+vllm-ascend and ascend-moonep to the selected latest workspace. The Python 3.12
+aarch64 SDK extension and unified MXFP8/publish library ABI load successfully.
+These checks do not initialize distributed communication or launch NPU kernels.
 
 Verify package origins, the native extension selected for the interpreter
 and architecture, loaded SDK/SHMEM/device libraries, and their hashes in a
@@ -123,10 +160,18 @@ bash -n scripts/dsv4flash_service/service/start_service_mode_dp4.sh
 git diff --check
 ```
 
-The 26 retained MoonEP regression files require the dedicated CPU/framework
-test environment. Their complete runtime execution remains pending.
-Then validate native imports and library provenance, BF16 and MXFP8 operators,
+Run the MoonEP CPU regressions with the validation interpreter:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /usr/local/python3.12.13/bin/python -m unittest discover \
+  -s tests/ut/ops -p 'test_moonep*.py' -v
+```
+
+These tests use CPU tensors and mocked device/framework boundaries; they cover
+native quant metadata, activation limits, Home/Slot aliases, token/count bounds,
+cache/prefetch ordering and conditional shared-expert events. They do not prove
+NPU execution. Device validation must additionally cover BF16 and MXFP8 operators,
 multiple ranks with empty/uneven batches and changing capacities, prefetch/cache
-event ordering, shared experts, both model runners, model correctness, and
+event ordering, shared experts, Model Runner V2, model correctness, and
 matched Off/On performance. Preserve raw evidence and report unsupported
 combinations instead of silently changing the requested configuration.

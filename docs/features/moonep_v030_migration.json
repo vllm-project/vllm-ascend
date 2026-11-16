@@ -1,19 +1,27 @@
 {
-  "status": "source_migrated_runtime_validation_pending",
+  "status": "semantic_repair_cpu_and_loader_verified_device_validation_pending",
   "workspace": "/mnt/share/x00893896/vllm_ascend_moonep_integration_latest",
   "branch": "moonep_v0.30.0",
   "source_commit": "73d2f9e4e21e911ec86682684bc46d862674a595",
   "target_base": "56279e424b0636afe936d011ff65b9c4e6a6c82e",
   "checks": {
-    "dependency_free_contract_tests": 11,
-    "python_syntax_files": 40,
+    "dependency_free_contract_tests": 14,
+    "python_syntax_files": 41,
     "shell_syntax": true,
     "local_import_paths": true,
-    "home_device_operator_keywords": true
+    "home_device_operator_keywords": true,
+    "moonep_cpu_regressions": 364,
+    "fresh_process_package_origins": true,
+    "native_import_and_wire_publish_ABI": true,
+    "real_torch_npu_e8m0_metadata": true,
+    "ruff_version": "0.14.0",
+    "ruff_check": true,
+    "ruff_format_check": true,
+    "runtime_ast_scope": true,
+    "non_moonep_baseline_preserved": true,
+    "pre_commit_full": "blocked: proxy certificate chain is not trusted during hook environment fetch"
   },
   "pending": [
-    "full_framework_CPU_regressions",
-    "native_import_and_ABI",
     "NPU_operators",
     "multirank_collectives",
     "model_correctness",
@@ -30,7 +38,7 @@
     },
     {
       "path": "docs/features/moonep.md",
-      "sha256": "8fbf8e928d79237528eb18b95266b7a5a4e966754a99e783865a3c09f2eebf4e"
+      "sha256": "84ee5c2164c39d88a4c1691460bc72d2713beee7b7f23047407a784f15fd1d71"
     },
     {
       "path": "scripts/dsv4flash_service/service/start_service_mode.sh",
@@ -50,7 +58,7 @@
     },
     {
       "path": "tests/ut/ops/test_moonep_auto_dispatch.py",
-      "sha256": "bcf8fac9d42a56b2ce484ea7f2d7bcea1872b31c46656ced1bcbc15677797b33"
+      "sha256": "509fffc9fd7b55fb89e2d0cf913ed9c49c46538f673cea482bfcbcfe399639dc"
     },
     {
       "path": "tests/ut/ops/test_moonep_bootstrap_type.py",
@@ -66,7 +74,7 @@
     },
     {
       "path": "tests/ut/ops/test_moonep_force_allgather.py",
-      "sha256": "7c54d1b6132153ed4414cbbc43fed998e21245a9f23b0299a45d5bb30f8cbba4"
+      "sha256": "ccc28092cc861e5d1e6548a3d477b5ea46542c84604a508d2323f4fd95a4fa75"
     },
     {
       "path": "tests/ut/ops/test_moonep_fused_publish.py",
@@ -74,7 +82,7 @@
     },
     {
       "path": "tests/ut/ops/test_moonep_home_gemm.py",
-      "sha256": "8e73ff2e4a88d73448f7a94592c0750f880d7d8f124f457dcbbab13e36342103"
+      "sha256": "a46fc5aa320716a84d0510c4a2f777a15a7e1541825711a1f2ad1a4f9c01c149"
     },
     {
       "path": "tests/ut/ops/test_moonep_no_early_prefetch.py",
@@ -90,7 +98,7 @@
     },
     {
       "path": "tests/ut/ops/test_moonep_no_load_diagnostics.py",
-      "sha256": "fe67c129b1be4229bf1b0355d5a22fbd0923ed77c4c1db7f33ecfe659f23396f"
+      "sha256": "b11a30f5ced5bb56d714d5011f3271eb92ffdea89c855d53cfff23f467769f80"
     },
     {
       "path": "tests/ut/ops/test_moonep_no_num_sms.py",
@@ -98,11 +106,11 @@
     },
     {
       "path": "tests/ut/ops/test_moonep_no_plan_diagnostics.py",
-      "sha256": "a45e6d5f0d6499409a40c94c9bb115085804563eb03474b0af0f08001739d5c1"
+      "sha256": "004d1429c8f645e6c8d9f66ccaa9270a40ec331b2d62adb6d3284c04ec025f66"
     },
     {
       "path": "tests/ut/ops/test_moonep_no_sim_route.py",
-      "sha256": "dbf45de4d07e5fd999638adc8d0f0d607fadff31311118f54eca7e93c5386a47"
+      "sha256": "c028b527714c5547261ffa7da204cdf0b5a3e74cf2e43116cde824e60cd3e6e6"
     },
     {
       "path": "tests/ut/ops/test_moonep_pin_memory.py",
@@ -118,19 +126,19 @@
     },
     {
       "path": "tests/ut/ops/test_moonep_real_tokens.py",
-      "sha256": "74bb5648a1cf01f82b2dd73ce97be7378e2eadfdef96be0ab5c654856f2b4e05"
+      "sha256": "6d9be70efae8b959a6153d9518da07d270b7d9364d2e1a2b65e9faefd69a2248"
     },
     {
       "path": "tests/ut/ops/test_moonep_redundant_slot_count.py",
-      "sha256": "7e47fc666275e52f6ff78f42b6bc5ec9a1e29bd20cc260847ea658dc73707f27"
+      "sha256": "8378adb52e0a2f92db4de221463efb735ead841034214dedd69bc0252944b1e7"
     },
     {
       "path": "tests/ut/ops/test_moonep_slot_cache_stream.py",
-      "sha256": "4629b62dc700cfbad5009bdf27055e1fee5d38e32520785cb8f81444cb6ebbe4"
+      "sha256": "8764f1439de48d3e156f618d1f03c0847120113c05a4bee577a7fcc59ce34f47"
     },
     {
       "path": "tests/ut/ops/test_moonep_slot_only.py",
-      "sha256": "d6892a73cea2cfccc547a3804250437a77688c38dedcf0a3b4936c5b89d4cc50"
+      "sha256": "1ca8eca9c0fd6e69f12326e480c394c6dde0d5bf6ca1d676e7e4c1fa27fe2058"
     },
     {
       "path": "tests/ut/ops/test_moonep_slot_quant_payloads.py",
@@ -138,11 +146,11 @@
     },
     {
       "path": "tests/ut/ops/test_moonep_transport_type.py",
-      "sha256": "ab4d93879ed23cea47426ea68d3c5729663c4aee6370795dac826ea17561af38"
+      "sha256": "b194ce3658623f42e5e26193339783ceaf3045a1946b7bebcd5cbf3fb230dd51"
     },
     {
       "path": "tests/ut/ops/test_moonep_v030_contract.py",
-      "sha256": "9245d6ed590dc578611ab27df577e657e7dfe1ebe0b145c13123a530a2118c9a"
+      "sha256": "b367ee14ed52a3ec742afa461b235ac3319271459dcc409360ec594361325f46"
     },
     {
       "path": "tests/ut/ops/test_moonep_weight_release.py",
@@ -170,19 +178,19 @@
     },
     {
       "path": "vllm_ascend/ops/fused_moe/moonep_balance.py",
-      "sha256": "0d052072aa8f4d45986e5de6e3c06756e615aec4eb94701d4934466aba499bf7"
+      "sha256": "3a18b2dca0c9466e046c5a38b4c9d43b99764825615e27bcb3789f70de67d595"
     },
     {
       "path": "vllm_ascend/ops/fused_moe/moonep_comm.py",
-      "sha256": "2d9216e3bd2cd7d2d15b4fe6731a9d94fd9d6c2a6392807ad97e5e3dbfb6ce1f"
+      "sha256": "6f342db612c1b370476aaafd6dc15dd880ae0667eb682c4e9462e4ba637e18ec"
     },
     {
       "path": "vllm_ascend/ops/fused_moe/moonep_home_gemm.py",
-      "sha256": "c7d02ecec4ac02bdc531b327ba03d51cb30558f26ec5c1bd61a4039860c23034"
+      "sha256": "b96abdfc2df7f417d4d656255631bbd61b5388e80f4d07aa2eb697490b4dc92c"
     },
     {
       "path": "vllm_ascend/ops/fused_moe/moonep_mlp.py",
-      "sha256": "a55646882a1c49548cabf8535a2f38d95213196f24587cb607c5b0b394c98c5c"
+      "sha256": "9265f9279baf23908afb9c342c0e654333fa2acdf09f0d8ac3172cf4f6ca7fbc"
     },
     {
       "path": "vllm_ascend/ops/fused_moe/routed_experts.py",
@@ -199,7 +207,28 @@
     {
       "path": "vllm_ascend/worker/v2/model_runner.py",
       "sha256": "ea1ac96ca2dec23d2265123ab3f21f8f1e727b8f438810d287989c8a1fcb2fcf"
+    },
+    {
+      "path": "tests/ut/ops/test_moonep_mlp_semantics.py",
+      "sha256": "63f7d4433a1c8cf1b45dd8bc9d7bff0a965f4aa6053b2767a1faecc6471071b5"
     }
   ],
-  "record_type": "pre_commit_source_validation_snapshot"
+  "record_type": "pre_commit_source_validation_snapshot",
+  "validation_environment": {
+    "host": "141.61.45.118",
+    "container": "xzx_moonep_latest",
+    "python": "/usr/local/python3.12.13/bin/python",
+    "python_version": "3.12.13",
+    "torch": "2.10.0+cpu",
+    "torch_npu": "2.10.0.post7",
+    "sdk_branch": "urma_dev_vllm_ascend_v0.30.0",
+    "sdk_commit": "5a312f186bc6bf197df223f67d2cd4f7c9b1274d"
+  },
+  "semantic_repairs": {
+    "e8m0_metadata": "accept native torch dtype, torch-npu runtime format identifier and implicit None; keep format/geometry checks and no BF16 retry",
+    "swiglustep_limit": "restore limit-or-7.0 within ordinary Slot and BF16 Home only",
+    "stage_events": "record only for shared-expert multistream consumers; preserve prefetch waits and communication synchronization",
+    "quantized_home_activation": "SiLU only; explicitly reject other activations as confirmed",
+    "native_baseline": "public MLP, quant dataclasses/methods, shared experts and native routers unchanged by this repair"
+  }
 }
