@@ -27,11 +27,14 @@ from vllm.models.kimi_k3.nvidia.ops.recoverssm import KDARecoverSSMRecords
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.distributed.parallel_state import get_qkv_iproj_tp_group
+from vllm_ascend.models.glm5next.kda_input_projection_tp import KDAInputProjectionTP
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
 from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
@@ -58,8 +61,8 @@ def get_kda_parallel_size(parallel_config: ParallelConfig) -> int:
 class PCPColumnParallelLinear(ColumnParallelLinear):
     """Column-parallel projection using PCP ranks and collectives."""
 
-    def __init__(self, input_size: int, output_size: int, **kwargs) -> None:
-        pcp_group = get_pcp_group()
+    def __init__(self, input_size: int, output_size: int, *, tp_group=None, **kwargs) -> None:
+        pcp_group = get_pcp_group() if tp_group is None else tp_group
         super().__init__(
             input_size,
             output_size,
@@ -82,8 +85,8 @@ class PCPColumnParallelLinear(ColumnParallelLinear):
 class PCPRowParallelLinear(RowParallelLinear):
     """Row-parallel projection reducing head contributions over PCP."""
 
-    def __init__(self, input_size: int, output_size: int, **kwargs) -> None:
-        pcp_group = get_pcp_group()
+    def __init__(self, input_size: int, output_size: int, *, tp_group=None, **kwargs) -> None:
+        pcp_group = get_pcp_group() if tp_group is None else tp_group
         # The pinned RowParallelLinear has no rank/size overrides. Allocate
         # the local input shard, then bind its inherited weight loaders to PCP.
         super().__init__(divide(input_size, pcp_group.world_size), output_size, disable_tp=True, **kwargs)
@@ -287,6 +290,16 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         projection_size = self.head_dim * self.num_heads
         self.local_projection_size = divide(projection_size, self.tp_size)
+        projection_tp_size = self.tp_size
+        merged_linear_kwargs = {}
+        self.projection_tp: KDAInputProjectionTP | None = None
+        qkv_iproj_tp_size = get_ascend_config().finegrained_tp_config.qkv_iproj_tensor_parallel_size
+        if qkv_iproj_tp_size > 1:
+            group = get_qkv_iproj_tp_group()
+            projection_tp_size = group.world_size
+            self.projection_tp = KDAInputProjectionTP(group, self.num_heads, self.head_dim)
+            merged_linear = PCPGlm5NextMergedColumnParallelLinear
+            merged_linear_kwargs["tp_group"] = group
 
         # Merge q, k, v, b, f_a, g_a projections into one GEMM (6→1 launches).
         # Order matches checkpoint's fused_qkvbfg_a_proj convention.
@@ -302,10 +315,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 self.head_dim,  # g_a (shard 5, replicated)
             ],
             replicated_shard_ids=(4, 5),
-            tp_size=self.tp_size,
+            tp_size=projection_tp_size,
             bias=False,
             quant_config=self.quant_config,
             prefix=f"{prefix}.in_proj_qkvbfg_a",
+            **merged_linear_kwargs,
         )
 
         self.f_b_proj = column_linear(
@@ -447,37 +461,47 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             # rank. Reconstruct causal order before advancing the head-sharded
             # recurrent state. With TP=1 each PCP rank owns different heads.
             hidden_states = self.pcp_group.all_gather(hidden_states, dim=0)[pcp_context.hidden_restore_idx]
-        num_tokens = hidden_states.size(0)
-        # One merged GEMM for q, k, v, b, f_a, g_a (replaces 6 separate GEMMs).
-        projected = self.in_proj_qkvbfg_a(hidden_states)[0]
-        qkv, beta_raw, f_a, g_a = projected.split(
-            [
-                3 * self.local_projection_size,
-                self.local_num_heads,
-                self.head_dim,
-                self.head_dim,
-            ],
-            dim=-1,
-        )
+        if self.projection_tp is not None:
+            projections = self.projection_tp.project(self, hidden_states)
+            if projections is None:
+                # Only a zero common capacity skips the core and output collectives.
+                if output_buffer is None:
+                    return torch.empty_like(hidden_states)
+                return None
+            qkv, g1, beta, g2 = projections
+            core_attn_out = hidden_states.new_zeros((1, qkv.shape[0], self.local_num_heads, self.head_dim))
+        else:
+            num_tokens = hidden_states.size(0)
+            # One merged GEMM for q, k, v, b, f_a, g_a (replaces 6 separate GEMMs).
+            projected = self.in_proj_qkvbfg_a(hidden_states)[0]
+            qkv, beta_raw, f_a, g_a = projected.split(
+                [
+                    3 * self.local_projection_size,
+                    self.local_num_heads,
+                    self.head_dim,
+                    self.head_dim,
+                ],
+                dim=-1,
+            )
 
-        # Beta stays raw (bf16) here: the recurrent kernel sigmoids it in fp32
-        # at load (SIGMOID_BETA), and only the chunked prefill path needs the
-        # pre-computed fp32 sigmoid — computed lazily in _forward_core. Pure decode
-        # / spec-verify steps then skip the separate sigmoid and its fp32
-        # intermediate entirely.
-        beta = beta_raw.unsqueeze(0)
-        g1 = self.f_b_proj(f_a)[0]
-        g1 = g1.reshape(1, -1, self.local_num_heads, self.head_dim)
+            # Beta stays raw (bf16) here: the recurrent kernel sigmoids it in fp32
+            # at load (SIGMOID_BETA), and only the chunked prefill path needs the
+            # pre-computed fp32 sigmoid — computed lazily in _forward_core. Pure decode
+            # / spec-verify steps then skip the separate sigmoid and its fp32
+            # intermediate entirely.
+            beta = beta_raw.unsqueeze(0)
+            g1 = self.f_b_proj(f_a)[0]
+            g1 = g1.reshape(1, -1, self.local_num_heads, self.head_dim)
 
-        g_proj_states = self.g_b_proj(g_a)[0]
-        # Must stay 3D: rms_norm_gated reads H from g.shape[-2].
-        g2 = g_proj_states.reshape(-1, self.local_num_heads, self.head_dim)
+            g_proj_states = self.g_b_proj(g_a)[0]
+            # Must stay 3D: rms_norm_gated reads H from g.shape[-2].
+            g2 = g_proj_states.reshape(-1, self.local_num_heads, self.head_dim)
 
-        core_attn_out = torch.empty(
-            (1, num_tokens, self.local_num_heads, self.head_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
+            core_attn_out = torch.empty(
+                (1, num_tokens, self.local_num_heads, self.head_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
         # Keep the layer's dispatch outside piecewise graph compilation.
         self._forward_core(
             qkv_proj_states=qkv,
@@ -512,6 +536,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 # Preserve the graph-owned output address on the fallback path.
                 torch.index_select(output, 0, local_indices, out=output_buffer)
                 return None
+            if self.projection_tp is not None:
+                output = output[:local_num_tokens]
         if output_buffer is None:
             return output
         output_buffer.copy_(output)
