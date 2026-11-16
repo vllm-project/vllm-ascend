@@ -154,7 +154,7 @@ def worker(monkeypatch, request):
     def initialize(self, *args):
         self.engine_id = "p"
         self.vllm_config = config
-        self.pp_rank = self.pcp_rank = self.tp_rank = 0
+        self.pp_rank = self.pcp_rank = self.tp_rank = self.dcp_rank = 0
         self.pp_size = self.pcp_size = self.tp_size = self.dcp_size = 1
         self.side_channel_host = "127.0.0.1"
         self.handshake_port = 0
@@ -209,8 +209,24 @@ def worker(monkeypatch, request):
     assert obj._zmq_context is None
 
 
-def test_proxy_destinations_and_two_chunks(worker):
-    worker.start_load_kv(source_meta())
+@pytest.mark.parametrize("dcp", [1, 2])
+def test_proxy_destinations_and_two_chunks(worker, monkeypatch, dcp):
+    worker.dcp_size = worker.tp_size = dcp
+    worker.kv_cache_specs[0].dcp_sharded = False
+    worker.transfer_metadata.dcp_sharded[:] = [False]
+    remote = replace(remote_metadata(tp_size=dcp), dcp_size=dcp)
+    remote.metadata_by_pp_rank[0].dcp_sharded[:] = [False]
+    monkeypatch.setattr(worker, "_get_remote_metadata", lambda _: remote)
+
+    def chunk(computed=0):
+        meta = source_meta(computed, 4)
+        meta.push_send_requests["p-request"] = replace(
+            meta.push_send_requests["p-request"],
+            remote_worker_addresses=tuple((0, 0, rank, f"tcp://127.0.0.1:{9001 + rank}") for rank in range(dcp)),
+        )
+        return meta
+
+    worker.start_load_kv(chunk())
     # Deferred finalization may collect results before all cache hooks run.
     # Polling must not publish unfinished caches or reset this step's state.
     assert not worker.get_transfer_results().finished_sending
@@ -220,12 +236,13 @@ def test_proxy_destinations_and_two_chunks(worker):
     worker.wait_for_save()
     drive(worker, lambda: worker.engine.batch_transfer_sync_write.call_count == 1)
     worker.wait_for_save()
-    assert not worker._send_done.called
+    # This P rank can finish D workers whose TP head slices it does not own.
+    assert worker._send_done.call_count == dcp - 1
     assert worker.engine.batch_transfer_sync_write.call_args.args[1:] == ([1032], [10320], [32])
-    worker.start_load_kv(source_meta(4, 4))
+    worker.start_load_kv(chunk(4))
     worker.save_kv_layer("model.layers.0.attn")
     worker.wait_for_save()
-    drive(worker, lambda: worker._send_done.called)
+    drive(worker, lambda: worker._send_done.call_count == dcp)
     assert worker.engine.batch_transfer_sync_write.call_count == 2
     assert worker.engine.batch_transfer_sync_write.call_args.args[1:] == ([1064], [10352], [32])
     # Sending DONE does not retire a request until scheduler reports its end.
@@ -420,13 +437,6 @@ def test_done_socket_timeout_is_bounded(worker, monkeypatch):
         sock.bind("tcp://127.0.0.1:*")
         message["completion_address"] = sock.getsockopt(SocketOption.LAST_ENDPOINT).decode()
         assert not push_worker.MooncakePushConnectorWorker._send_done(worker, message, "failed")
-
-
-def test_dcp_is_rejected_before_initialization():
-    with pytest.raises(ValueError, match="DCP=1"):
-        push_worker.MooncakePushConnectorWorker(
-            SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=2)), "p", None
-        )
 
 
 @pytest.mark.parametrize("write_fails", [False, True])
