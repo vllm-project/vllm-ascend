@@ -366,7 +366,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     num_input_tokens: int = 0
 
     # Per-request / per-token request identity used by the Sparse KV offload
-    # resident LRU (adler32-hashed request ids and token->request mapping).
+    # resident LRU (request incarnation owners and token->request mapping).
     req_ids_tensor: torch.Tensor | None = None
     token_to_req: torch.Tensor | None = None
     # CPU views of runner-owned CpuGpuBuffers; never exact sequence lengths.
