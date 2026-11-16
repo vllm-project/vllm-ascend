@@ -620,6 +620,7 @@ def test_three_owner_routing_restores_order_and_masks_invalid_ids(rdma, monkeypa
     sharded.readers, sharded.capacity = readers, 32
     sharded._last_use = None
     sharded._operation_lock = threading.Lock()
+    sharded._closing = False
     tables = [
         SimpleNamespace(
             _checkpoint_key=f"layers.{layer}.engram.embed.weight",
@@ -949,6 +950,7 @@ def test_sharded_reader_rejects_closed_or_failed_before_empty_lookup(rdma):
     for closed, failed in ((True, False), (False, True)):
         reader = object.__new__(rdma.ShardedRemoteReader)
         reader.readers = [SimpleNamespace(closed=closed, failed=failed)]
+        reader._closing = False
         reader._operation_lock = threading.Lock()
         reader.capacity = 1
         with pytest.raises(RuntimeError, match="failed or closed"):
@@ -961,3 +963,26 @@ def test_sharded_reader_rejects_closed_or_failed_before_empty_lookup(rdma):
 def test_sharded_reader_rejects_fewer_than_two_endpoints(rdma, endpoints):
     with pytest.raises(ValueError, match="at least two owners"):
         rdma.ShardedRemoteReader("model", endpoints, capacity=1)
+
+
+def test_sharded_reader_blocks_lookup_after_partial_close(rdma, monkeypatch):
+    engine = SimpleNamespace(close=lambda: None)
+
+    class Item:
+        closed = failed = False
+        wire = object()
+        generation = "g"
+
+    item = Item()
+    item.engine = engine
+    reader = object.__new__(rdma.ShardedRemoteReader)
+    reader.readers = [item]
+    reader._operation_lock = threading.Lock()
+    reader._closing = False
+    reader._last_use = None
+    monkeypatch.setattr(rdma, "_send", lambda *args: None)
+    monkeypatch.setattr(rdma, "_receive", lambda *args: (_ for _ in ()).throw(ConnectionError("ack failed")))
+    with pytest.raises(ConnectionError, match="ack failed"):
+        reader.close()
+    with pytest.raises(RuntimeError, match="failed or closed"):
+        reader._lookup([], [], [], [])

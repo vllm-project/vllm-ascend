@@ -933,6 +933,7 @@ def test_sharded_client_keeps_other_leases_if_common_mapping_cannot_close(pool_m
     client = object.__new__(pool_module.ShardedPoolClient)
     client.views = []
     client.closed = False
+    client._closing = False
     client._packed_mapping = None
     client.clients = [types.SimpleNamespace(close=fail), types.SimpleNamespace(close=lambda: events.append("released"))]
     with pytest.raises(RuntimeError, match="mapping still live"):
@@ -1033,3 +1034,30 @@ def test_config_requires_two_endpoints_when_using_a_list():
     assert validate(config) is config
     config.endpoints, config.endpoint = None, "owner:1"
     assert validate(config) is config
+
+
+def test_partial_lease_close_blocks_new_mapping_and_allows_retry(pool_module):
+    events = []
+    pending = [True]
+
+    def close_secondary():
+        if pending[0]:
+            pending[0] = False
+            raise RuntimeError("lease acknowledgement lost")
+        events.append("secondary released")
+
+    client = object.__new__(pool_module.ShardedPoolClient)
+    client.closed = False
+    client._closing = False
+    client.views = []
+    client._packed_mapping = None
+    client.clients = [
+        types.SimpleNamespace(close=lambda: events.append("primary closed")),
+        types.SimpleNamespace(close=close_secondary),
+    ]
+    with pytest.raises(RuntimeError, match="acknowledgement lost"):
+        client.close()
+    with pytest.raises(RuntimeError, match="closed or closing"):
+        client.view("key", 0, 1, rows=1, width=1, dtype=torch.int8)
+    client.close()
+    assert client.closed and events[-1] == "secondary released"
