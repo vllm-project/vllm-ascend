@@ -25,7 +25,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_b
     MmcDirect,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-from vllm_ascend.hisparse.backend import AscendHiSparseBackend
 from vllm_ascend.hisparse.binding import align_hisparse_slab_views, reserve_hisparse_slab_alignment
 
 SLAB_ALIGNMENT = 2 * 1024 * 1024
@@ -40,6 +39,9 @@ def aligned_tensor(size: int) -> torch.Tensor:
 @pytest.mark.parametrize("misalignment", [0, 1, SLAB_ALIGNMENT - 1])
 @pytest.mark.parametrize("indexer_c8", [False, True])
 def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool, misalignment: int) -> None:
+    pytest.importorskip("vllm.v1.hisparse.backend", reason="requires the HiSparse backend extension")
+    from vllm_ascend.hisparse.backend import AscendHiSparseBackend
+
     block_size = 128
     num_device_blocks = 4
     num_host_blocks = 5
