@@ -70,8 +70,8 @@ class TestEnvVariables(TestBase):
                 getattr(envs_ascend, var_name)
 
     def test_boolean_env_parsing_and_invalid_values(self):
-        # Only 0/1 are accepted; every other value must fail loudly.
-        rejected = ["true", "false", "yes", "no", "on", "off", "2", "enabled"]
+        # Accepts 1/0, true/false, yes/no, on/off (case-insensitive).
+        rejected = ["2", "enabled", "maybe"]
         # The expected defaults are spelled out on purpose: deriving them from
         # the implementation would let a wrong default still pass the assertions
         # below.
@@ -84,10 +84,21 @@ class TestEnvVariables(TestBase):
                 original_val = os.environ.get(var_name)
                 try:
                     # Accepted values, including surrounding whitespace.
-                    os.environ[var_name] = "1"
-                    self.assertIs(getattr(envs_ascend, var_name), True)
-                    os.environ[var_name] = "0"
-                    self.assertIs(getattr(envs_ascend, var_name), False)
+                    accepted = {
+                        "1": True,
+                        "0": False,
+                        "true": True,
+                        "false": False,
+                        "yes": True,
+                        "no": False,
+                        "on": True,
+                        "off": False,
+                        "TRUE": True,
+                        "False": False,
+                    }
+                    for raw, expected in accepted.items():
+                        os.environ[var_name] = raw
+                        self.assertIs(getattr(envs_ascend, var_name), expected)
                     os.environ[var_name] = " 1 "
                     self.assertIs(getattr(envs_ascend, var_name), True)
 
