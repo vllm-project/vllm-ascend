@@ -56,6 +56,7 @@
     | [Hy3-preview](../../tutorials/models/Hy3-preview.md) | 🔴 | A3 | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
     | [Hy4-preview (Experimental) ](../../tutorials/models/Hy4-preview.md) | 🔵 | A3 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
     | [Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md) | 🔴 | A2/A3 | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
+    | [Llama-3.2-3B-Instruct](../../tutorials/models/Llama-3.2-3B-Instruct.md) | ✅ | A2/A3 | 🟡 | 🟡 | ❌ | ✅ | 🟡 | 🟡 | ❌ | ❌ | ❌ | ✅ | ❌ | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | 🟡 | ❌ | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | 🟡 | 🟡 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ |
     | [MiniMax-M2.5/2.7](../../tutorials/models/MiniMax-M2.md) | 🔴 | A2/A3 | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
     | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) | ✅ | A2/A3 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
     | [Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md) | ✅ | A2/A3 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
