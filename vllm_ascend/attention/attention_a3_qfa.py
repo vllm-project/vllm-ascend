@@ -14,24 +14,31 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""A3/A2 QFA INT8-GQA prefill attention (quant_mode=12, no KV cache).
+"""A3/A2 QFA INT8-GQA attention (quant_mode=12).
 
-Prefill-only path enabled by ``VLLM_ASCEND_QFA_A3_PREFILL=1``. Q/K are
-quantized per-token-head and V per-head to INT8 (FP32 descales) and fed
-to the A2/A3 FULL_INT8_GQA operator on TND-packed inputs. Only
-PrefillNoCache steps qualify: chunked prefill and prefix-cache hits must
-fall back to the FIA path because the operator sees no paged cache, so
-the current step's K/V must already be the full history. The KV cache
-itself stays BF16 -- reshape_and_cache writes the unquantized K/V before
-forward_impl runs, so decode keeps the stock path unchanged.
+Two paths share this file:
+
+1. Prefill (``VLLM_ASCEND_QFA_A3_PREFILL=1``, no KV cache): Q/K quantized
+   per-token-head and V per-head to INT8, fed to the TND-packed operator.
+   Only PrefillNoCache steps qualify; the KV cache stays BF16.
+
+2. Decode (``VLLM_ASCEND_QFA_A3_DECODE=1``, paged KV cache): the decode
+   operator contract (PA_BNBD paged K/V, TND Q with NT q_descale,
+   per-token K descale stored per page, per-head static V descale). The
+   INT8 KV cache infrastructure is inherited from
+   AscendC8AttentionBackendImpl (C8/QuaRot channel); Step 1 covers
+   DecodeOnly, other states keep the inherited FIA fallbacks.
 """
 
 import torch
 import torch_npu
+from vllm.v1.attention.backend import AttentionType  # type: ignore[import-not-found]
 
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionState,
+    AscendC8AttentionBackendImpl,
+    AscendMetadata,
 )
 from vllm_ascend.utils import logger
 
@@ -159,3 +166,178 @@ class AscendQFA3PrefillBackendImpl(AscendAttentionBackendImpl):
         # attn_out is [T, Hq, D] and the runner's output buffer shares that layout.
         output[:num_tokens] = attn_out
         return output
+
+
+class AscendQFA3C8Impl(AscendC8AttentionBackendImpl):
+    """Decode path on the A3 QFA INT8-GQA paged operator (quant_mode=12).
+
+    Inherits the C8 INT8 KV-cache infrastructure (static per-channel
+    quantization, paged scatter writes, FIA fallbacks for prefill states)
+    from AscendC8AttentionBackendImpl and replaces the DecodeOnly forward
+    with the native INT8 QFA operator:
+
+    - Q: per-token-head dynamic quantization (TND payload, NT descale)
+    - K: INT8 paged cache + per-page FP32 descale cache (Step 2); until
+      then the inherited per-channel K path feeds the operator as
+      descale=scale broadcast (functional shape, unverified numerics)
+    - V: static per-head descale (v_cache_scale from the fa_v.scale
+      calibration channel)
+
+    Step 1 scope: DecodeOnly dispatch + call-chain bring-up with in-test
+    scales. Prefill states keep the inherited FIA dequant path.
+    """
+
+    _decode_logged = False
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        if not AscendQFA3C8Impl._decode_logged:
+            logger.info(
+                "A3 QFA INT8-GQA decode attention enabled "
+                "(VLLM_ASCEND_QFA_A3_DECODE=1); DecodeOnly steps run the "
+                "paged QFA operator, other states keep the C8 FIA path."
+            )
+            AscendQFA3C8Impl._decode_logged = True
+
+    # ------------------------------------------------------------------
+    # Step 1: DecodeOnly dispatch. The inherited forward() handles cache
+    # writes + state routing; only the decode branch is replaced here.
+    # ------------------------------------------------------------------
+    def _forward_c8_decode(
+        self,
+        query: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+        layer,
+    ) -> torch.Tensor:
+        return self._forward_qfa_decode(query, attn_metadata, output, layer)
+
+    def _forward_qfa_decode(self, query, attn_metadata, output, layer):
+        """Native INT8 decode via the paged QFA operator.
+
+        The preconditions below are invariants of the supported deployment
+        (causal decoder-only model, GPU-side length sources, bound caches);
+        a violation means the assembly chain broke, so fail fast instead
+        of silently falling back to FIA.
+        """
+        from cann_ops_transformer.ops import quant_flash_attn
+
+        if self.sliding_window is not None:
+            raise NotImplementedError(
+                "A3 QFA decode does not support sliding-window attention "
+                f"(layer={getattr(layer, 'layer_name', '?')})."
+            )
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER_DECODER):
+            raise NotImplementedError(
+                f"A3 QFA decode does not support attn_type={self.attn_type} "
+                f"(layer={getattr(layer, 'layer_name', '?')})."
+            )
+        qsl_gpu = attn_metadata.query_start_loc_gpu
+        seq_lens_gpu = attn_metadata.seq_lens_gpu
+        if qsl_gpu is None or seq_lens_gpu is None:
+            raise RuntimeError(
+                "A3 QFA decode requires the GPU-side length sources "
+                "(query_start_loc_gpu / seq_lens_gpu) on AscendMetadata."
+            )
+        if self.key_cache is None or self.value_cache is None:
+            raise RuntimeError(
+                "A3 QFA decode requires bound K/V caches "
+                f"(layer={getattr(layer, 'layer_name', '?')})."
+            )
+
+        num_tokens = query.shape[0]
+        batch_size = len(attn_metadata.seq_lens_list)
+        if num_tokens <= 0 or batch_size <= 0:
+            return output
+
+        # Device-side length derivation (graph-replay safe; sanitizes the
+        # padded tail the same way the C8-MXFP backend does).
+        cu_seqlens_q = qsl_gpu.clamp(min=0, max=num_tokens).cummax(dim=0).values[: batch_size + 1].to(torch.int32)
+        seqused_kv = seq_lens_gpu.clamp(min=1)[:batch_size].to(torch.int32)
+        max_seqlen_q = attn_metadata.max_query_len or num_tokens
+        mask_mode = QFA_MASK_NO_MASK if max_seqlen_q == 1 else QFA_MASK_CAUSAL
+
+        # Q per-token-head quantization (TND payload + NT descale).
+        q_int8, q_descale = torch_npu.npu_dynamic_quant(
+            query[:num_tokens], dst_type=torch.int8
+        )
+        q_descale_nt = q_descale.t().contiguous()  # (Q_N, Q_T)
+
+        # Paged K/V: the LBNHC cache IS the operator's PA_BNBD layout.
+        k_cache, v_cache = self.key_cache, self.value_cache
+
+        # K descale per page: Step 1 uses the inherited per-channel scale
+        # broadcast to the (Bn, KV_N, Bs) contract (functional placeholder;
+        # Step 2 replaces it with the dynamic per-token descale cache).
+        k_descale_pages = self._step1_k_descale_pages(k_cache, layer, batch_size)
+
+        # V descale: static per-head, from the fa_v.scale channel. The
+        # inherited _prepare_c8_scales shards per-channel (Hkv*D); the QFA
+        # contract wants per-head, so reduce over D.
+        self._prepare_c8_scales(layer, query.device)
+        v_descale = layer._c8_v_scale.view(self.num_kv_heads, -1).amax(dim=1)
+
+        p_scale = torch.tensor([QFA_INT8_SCALE_LEVEL], dtype=torch.float32, device=query.device)
+        block_table = self._qfa_block_table(attn_metadata, batch_size)
+
+        attn_out, _ = quant_flash_attn(
+            q_int8,
+            k_cache,
+            v_cache,
+            q_descale_nt,
+            k_descale_pages,
+            v_descale,
+            QFA_INT8_GQA_QUANT_MODE,
+            block_table=block_table,
+            cu_seqlens_q=cu_seqlens_q,
+            seqused_kv=seqused_kv,
+            p_scale=p_scale,
+            metadata=None,
+            softmax_scale=self.scale,
+            mask_mode=mask_mode,
+            win_left=-1,
+            win_right=-1,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=int(attn_metadata.seq_lens_list[batch_size - 1]) if batch_size else 1,
+            layout_q="TND",
+            layout_q_descale="NT",
+            layout_kv="PA_BNBD",
+            layout_out="TND",
+            return_softmax_lse=False,
+        )
+        output[:num_tokens] = attn_out
+        return output
+
+    def _step1_k_descale_pages(self, k_cache: torch.Tensor, layer, batch_size: int) -> torch.Tensor:
+        """Placeholder K descale (Bn, KV_N, Bs): the inherited per-channel
+        K scale reduced per head, broadcast over pages/tokens. Numerically
+        wrong for real quantization (per-channel cache holds round(x *
+        inv_perchannel)) -- Step 1 only proves the call chain; Step 2's
+        dynamic descale cache replaces this entirely."""
+        self._prepare_c8_scales(layer, k_cache.device)
+        k_scale = layer._c8_k_scale.view(self.num_kv_heads, -1).amax(dim=1)  # (Hkv,)
+        num_blocks = k_cache.shape[0]
+        block_size = k_cache.shape[2] if k_cache.dim() == 4 else 128
+        return k_scale.view(1, self.num_kv_heads, 1).expand(num_blocks, self.num_kv_heads, block_size).contiguous()
+
+    def _qfa_block_table(self, attn_metadata, batch_size: int) -> torch.Tensor:
+        """block_table for the operator, at kernel-block granularity.
+
+        The cache tensors are laid out in kernel blocks (Bs=128, see
+        model_runner get_kv_cache_shape(num_blocks * chunk, ...)). The
+        metadata table follows the scheduler page; for hybrid models that
+        page is 896 = 7 kernel blocks, so each scheduler entry expands to
+        `ratio` consecutive kernel blocks (device-side, replay-safe).
+        """
+        bt = attn_metadata.block_tables[:batch_size]
+        cache_bs = self.key_cache.shape[2] if self.key_cache.dim() == 4 else 128
+        sched_bs = self.vllm_config.cache_config.block_size
+        bt = bt.to(torch.int32)
+        if sched_bs == cache_bs:
+            return bt
+        ratio = sched_bs // cache_bs
+        # entry [i, j] covers kernel pages j*ratio .. j*ratio+ratio-1
+        expanded = bt.view(batch_size, -1, 1) * ratio + torch.arange(
+            ratio, device=bt.device, dtype=torch.int32
+        ).view(1, 1, ratio)
+        return expanded.view(batch_size, -1)

@@ -125,9 +125,16 @@ class AscendC8KVCacheAttentionMethod(AscendAttentionScheme):
             layer.kv_cache_torch_dtype = torch.int8
         # Upgrade impl to the C8-specific subclass so the C8 forward path is always used.
         if hasattr(layer, "impl"):
-            from vllm_ascend.attention.attention_v1 import AscendC8AttentionBackendImpl
+            from vllm_ascend import envs
 
-            layer.impl.__class__ = AscendC8AttentionBackendImpl
+            if envs.VLLM_ASCEND_QFA_A3_DECODE:
+                from vllm_ascend.attention.attention_a3_qfa import AscendQFA3C8Impl
+
+                layer.impl.__class__ = AscendQFA3C8Impl
+            else:
+                from vllm_ascend.attention.attention_v1 import AscendC8AttentionBackendImpl
+
+                layer.impl.__class__ = AscendC8AttentionBackendImpl
         dtype = torch.get_default_dtype()
         layer.k_cache_scale = torch.nn.Parameter(torch.ones(1, dtype=dtype), requires_grad=False)
         layer.k_cache_scale.weight_loader = _c8_kv_scale_weight_loader
