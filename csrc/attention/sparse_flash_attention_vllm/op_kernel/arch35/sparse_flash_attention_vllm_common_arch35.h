@@ -9,11 +9,11 @@
  */
 
 /*!
- * \file sparse_flash_attention_common_arch35.h
+ * \file sparse_flash_attention_vllm_common_arch35.h
  * \brief
  */
-#ifndef SPARSE_FLASH_ATTENTION_COMMON_ARCH35_H
-#define SPARSE_FLASH_ATTENTION_COMMON_ARCH35_H
+#ifndef SPARSE_FLASH_ATTENTION_VLLM_COMMON_ARCH35_H
+#define SPARSE_FLASH_ATTENTION_VLLM_COMMON_ARCH35_H
 #include <type_traits>
 #include "kernel_tiling/kernel_tiling.h"
 
@@ -109,4 +109,4 @@ template <CUBE_BLOCK_TRAITS_TYPE_FIELDS(GEN_TEMPLATE_TYPE_NODEF) \
     CUBE_BLOCK_TRAITS_TYPE_FIELDS(GEN_ARG_NAME) \
     CUBE_BLOCK_TRAITS_CONST_FIELDS(GEN_ARG_NAME) end
 
-#endif // SPARSE_FLASH_ATTENTION_COMMON_ARCH35_H
+#endif // SPARSE_FLASH_ATTENTION_VLLM_COMMON_ARCH35_H

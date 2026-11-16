@@ -39,7 +39,7 @@
 #include "mc2/dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
-#include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
+#include "attention/sparse_flash_attention_vllm/sparse_flash_attention_vllm_torch_adpt.h"
 #include "aclnn_torch_adapter/gbsa_torch_adpt.h"
 #include "attention/sparse_flash_mla_vllm/sparse_flash_mla_vllm_torch_adpt.h"
 #include "attention/kv_compress_epilog_v2/kv_compress_epilog_v2_torch_adpt.h"
@@ -3123,7 +3123,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                           int next_tokens=9223372036854775807, int attention_mode=2,"
         "                           bool return_softmax_lse=False) -> (Tensor attention_out, Tensor softmax_max, Tensor softmax_sum)"
     );
-    ops.impl("npu_sparse_flash_attention", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_attention);
+    ops.impl("npu_sparse_flash_attention", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_attention_vllm);
 
     ops.def(
         "npu_generic_block_sparse_attention_metadata(Tensor sparse_block_idx, Tensor sparse_block_count, "

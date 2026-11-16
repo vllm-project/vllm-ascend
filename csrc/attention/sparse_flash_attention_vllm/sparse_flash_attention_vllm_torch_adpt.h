@@ -13,14 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#ifndef SPARSE_FLASH_ATTENTION_TORCH_ADPT_H
-#define SPARSE_FLASH_ATTENTION_TORCH_ADPT_H
+#ifndef SPARSE_FLASH_ATTENTION_VLLM_TORCH_ADPT_H
+#define SPARSE_FLASH_ATTENTION_VLLM_TORCH_ADPT_H
 
 namespace vllm_ascend {
 
 namespace {
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_sparse_flash_attention_output_tensor(
+std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_sparse_flash_attention_vllm_output_tensor(
     const at::Tensor &query, const at::Tensor &key,
     const std::string &layout_query_str, const std::string &layout_kv_str, bool return_softmax_lse)
 {
@@ -90,7 +90,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_sparse_flash_attention_
 
 }  // namespace
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention(
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_vllm(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
     const at::Tensor &sparse_indices, double scale_value,
     const c10::optional<at::Tensor> &block_table,
@@ -110,19 +110,19 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention(
     std::string layout_query_str = std::string(layout_query);
     std::string layout_kv_str = std::string(layout_kv);
 
-    auto sparse_flash_attention_output =
-        construct_sparse_flash_attention_output_tensor(
+    auto sparse_flash_attention_vllm_output =
+        construct_sparse_flash_attention_vllm_output_tensor(
             query, key, layout_query_str, layout_kv_str, return_softmax_lse);
-    at::Tensor attention_output = std::get<0>(sparse_flash_attention_output);
-    at::Tensor softmax_max = std::get<1>(sparse_flash_attention_output);
-    at::Tensor softmax_sum = std::get<2>(sparse_flash_attention_output);
+    at::Tensor attention_output = std::get<0>(sparse_flash_attention_vllm_output);
+    at::Tensor softmax_max = std::get<1>(sparse_flash_attention_vllm_output);
+    at::Tensor softmax_sum = std::get<2>(sparse_flash_attention_vllm_output);
 
     // convert str
     char *layout_query_ptr = const_cast<char *>(layout_query_str.c_str());
     char *layout_kv_ptr = const_cast<char *>(layout_kv_str.c_str());
 
     EXEC_NPU_CMD(
-        aclnnSparseFlashAttention,
+        aclnnSparseFlashAttentionVllm,
         query,
         key,
         value,
@@ -149,4 +149,4 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention(
 }
 }  // namespace vllm_ascend
 
-#endif  // SPARSE_FLASH_ATTENTION_TORCH_ADPT_H
+#endif  // SPARSE_FLASH_ATTENTION_VLLM_TORCH_ADPT_H

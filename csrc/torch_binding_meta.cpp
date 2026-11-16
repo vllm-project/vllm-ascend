@@ -235,7 +235,7 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     return {out, expert_token_nums};
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_meta(
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_vllm_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
     const at::Tensor &sparse_indices, double scale_value,
     const c10::optional<at::Tensor> &block_table,
@@ -1839,7 +1839,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // Kimi K3 attention residual
     ops.impl("attn_res_fwd", &vllm_ascend::meta::attn_res_fwd_meta);
     // Sparse flash attention
-    ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
+    ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_vllm_meta);
     ops.impl("npu_generic_block_sparse_attention_metadata",
              &vllm_ascend::meta::npu_generic_block_sparse_attention_metadata_meta);
     ops.impl("npu_generic_block_sparse_attention",

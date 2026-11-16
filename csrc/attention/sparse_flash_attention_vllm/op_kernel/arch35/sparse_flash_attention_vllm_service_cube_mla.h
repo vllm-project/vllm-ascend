@@ -9,18 +9,18 @@
  */
 
 /*!
- * \file sparse_flash_attention_service_cube_mla.h
+ * \file sparse_flash_attention_vllm_service_cube_mla.h
  * \brief
  */
-#ifndef SPARSE_FLASH_ATTENTION_SERVICE_CUBE_MLA_H
-#define SPARSE_FLASH_ATTENTION_SERVICE_CUBE_MLA_H
+#ifndef SPARSE_FLASH_ATTENTION_VLLM_SERVICE_CUBE_MLA_H
+#define SPARSE_FLASH_ATTENTION_VLLM_SERVICE_CUBE_MLA_H
 
 #include "kernel_operator.h"
 #include "kernel_operator_list_tensor_intf.h"
 #include "kernel_tiling/kernel_tiling.h"
 #include "lib/matmul_intf.h"
 #include "lib/matrix/matmul/tiling.h"
-#include "sparse_flash_attention_common_arch35.h"
+#include "sparse_flash_attention_vllm_common_arch35.h"
 #include "util_regbase.h"
 
 #if __has_include("../../common/op_kernel/offset_calculator.h")
@@ -384,4 +384,4 @@ DEFINE_CUBE_BLOCK_TRAITS(SFAMatmulServiceDummy);
     CUBE_BLOCK_TRAITS_TYPE_FIELDS(GEN_ARGS_TYPE) \
     CUBE_BLOCK_TRAITS_CONST_FIELDS(GEN_ARGS_CONST)
 }
-#endif // SPARSE_FLASH_ATTENTION_SERVICE_CUBE_MLA_H
+#endif // SPARSE_FLASH_ATTENTION_VLLM_SERVICE_CUBE_MLA_H

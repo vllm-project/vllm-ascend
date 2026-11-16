@@ -26,7 +26,7 @@ A3/A5 的量化 DCP 统一保留完整 packed query，由 adaptor 处理连续�
 
 ## 功能说明
 
-- API功能：`kv_quant_sparse_flash_attention_vllm`在`sparse_flash_attention`的基础上支持了[Per-Token-Head-Tile-128量化]输入。随着大模型上下文长度的增加，Sparse Attention的重要性与日俱增，这一技术通过“只计算关键部分”大幅减少计算量，然而会引入大量的离散访存，造成数据搬运时间增加，进而影响整体性能。
+- API功能：`kv_quant_sparse_flash_attention_vllm`在`sparse_flash_attention_vllm`的基础上支持了[Per-Token-Head-Tile-128量化]输入。随着大模型上下文长度的增加，Sparse Attention的重要性与日俱增，这一技术通过“只计算关键部分”大幅减少计算量，然而会引入大量的离散访存，造成数据搬运时间增加，进而影响整体性能。
 
 - 计算公式：
 
