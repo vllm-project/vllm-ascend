@@ -1,4 +1,5 @@
 import math
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -305,7 +306,28 @@ def test_clipped_swiglu_kernel_selection_per_adaptor(adaptor, uses_fused_kernel)
     torch.testing.assert_close(out, gate * torch.sigmoid(alpha * gate) * (up + beta))
 
 
+@pytest.mark.parametrize("compress_ratio", [0, 128])
+def test_a5_forward_unpacks_cache_without_indexer(compress_ratio):
+    from vllm_ascend.ops.dsa import _build_kv_cache
+
+    compressed, swa, state = (torch.empty(0) for _ in range(3))
+    layer = SimpleNamespace(
+        compress_ratio=compress_ratio,
+        swa_cache_layer=SimpleNamespace(kv_cache=[swa]),
+        compressor=SimpleNamespace(state_cache=SimpleNamespace(kv_cache=[state])),
+        dsa_attn=SimpleNamespace(kv_cache=[compressed]),
+    )
+    with mock.patch(
+        "vllm_ascend.device.hardware_profile._CURRENT_HARDWARE_PROFILE",
+        get_hardware_profile(AscendDeviceType.A5),
+    ):
+        caches = _build_kv_cache(layer, SimpleNamespace())
+    expected = (compressed, swa, state) if compress_ratio == 128 else (None, swa, None)
+    assert A5DeviceAdaptor.unpack_dsa_forward_kv_cache(caches, compress_ratio) == (*expected, None, None, None)
+
+
 def test_a5_indexer_reconstructs_combined_cache_from_shared_components():
+    from vllm_ascend.ops.dsa import _build_kv_cache
     from vllm_ascend.worker.v2.attn_utils import create_cache_component_views
 
     blocks, tokens, width, stride = 2, 4, 128, 768
@@ -318,7 +340,21 @@ def test_a5_indexer_reconstructs_combined_cache_from_shared_components():
         stride,
     )
     state = torch.empty(0)
-    caches = [torch.empty(0), torch.empty(0), torch.empty(0), state, data, scales]
+    layer = SimpleNamespace(
+        compress_ratio=4,
+        swa_cache_layer=SimpleNamespace(kv_cache=[torch.empty(0)]),
+        compressor=SimpleNamespace(state_cache=SimpleNamespace(kv_cache=[torch.empty(0)])),
+        dsa_attn=SimpleNamespace(kv_cache=[torch.empty(0)]),
+        indexer=SimpleNamespace(
+            compressor=SimpleNamespace(state_cache=SimpleNamespace(kv_cache=[state])),
+            k_cache=SimpleNamespace(kv_cache=[data, scales]),
+        ),
+    )
+    with mock.patch(
+        "vllm_ascend.device.hardware_profile._CURRENT_HARDWARE_PROFILE",
+        get_hardware_profile(AscendDeviceType.A5),
+    ):
+        caches = _build_kv_cache(layer, SimpleNamespace())
     actual_state, actual_data, actual_scales, full = A5DeviceAdaptor.unpack_dsa_indexer_kv_cache(caches)
     assert actual_state is state and actual_data is data and actual_scales is scales
     assert full.shape == (blocks, tokens, 1, 132)
