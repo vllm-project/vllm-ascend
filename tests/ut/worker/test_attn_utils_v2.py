@@ -2159,7 +2159,7 @@ def test_build_attn_metadata_propagates_prefill_and_pcp_context(for_cudagraph_ca
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())],
     )
     is_prefilling = torch.tensor([True])
-    pcp_context = SimpleNamespace(for_attention_group=lambda _: pcp_context)
+    pcp_context: SimpleNamespace = SimpleNamespace(for_attention_group=lambda _: pcp_context)
 
     metadata = attn_utils.build_attn_metadata(
         attn_groups=[[attn_group]],
