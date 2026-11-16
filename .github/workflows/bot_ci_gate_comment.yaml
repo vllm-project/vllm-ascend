@@ -59,15 +59,15 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: result
 
-      - name: Download unclaimed-file list artifact
+      - name: Download gate details artifact
         # May not exist on runs older than the artifact's introduction; the
-        # comment simply omits the unclaimed section then.
+        # comment simply omits those sections then.
         uses: actions/download-artifact@v4
         with:
           run-id: ${{ github.event.workflow_run.id }}
-          name: codeowner-unclaimed-${{ github.event.workflow_run.id }}
+          name: codeowner-details-${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: unclaimed
+          path: details
         continue-on-error: true
 
       - name: Post or remove the failure comment
@@ -196,14 +196,25 @@ jobs:
                   "needs one approval from its CODEOWNERS owner(s):\n"
                   f"{listing}"
               )
+          self_owned = read_detail("self_owned_files.txt")
+          if self_owned:
+              listing = "\n".join(f"- `{path}`" for path in self_owned)
+              body += (
+                  "\n\n**Self-owned modules touched.** The only CODEOWNERS "
+                  "owner of these files is the PR author, so no additional "
+                  "approval is required; consider adding a co-owner:\n"
+                  f"{listing}"
+              )
           unclaimed = read_detail("unclaimed_files.txt")
           if unclaimed:
               listing = "\n".join(f"- `{path}`" for path in unclaimed)
+              plural = "s" if len(unclaimed) != 1 else ""
               body += (
-                  f"\n\n**Unclaimed modules touched ({len(unclaimed)} "
-                  "files).** These files have no CODEOWNERS owner yet, so "
-                  "no approval is required for them; maintainers will "
-                  f"handle claiming:\n{listing}"
+                  f"\n\n**Unclaimed module{plural} touched "
+                  f"({len(unclaimed)} file{plural}).** These files have no "
+                  "CODEOWNERS owner yet, so no approval is required for "
+                  "them; maintainers will handle claiming:\n"
+                  f"{listing}"
               )
 
           # Delete the previous failure comment (if any), then post a fresh
