@@ -3,10 +3,8 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import numpy as np
 import pytest
 import torch
-from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend import ascend_forward_context as afc
 from vllm_ascend.ascend_forward_context import MoECommType
@@ -55,15 +53,12 @@ def _make_vllm_config(
     model_config = SimpleNamespace(
         hf_text_config=SimpleNamespace(**hf_text_config_attrs),
         get_num_experts=lambda: num_experts,
-        enforce_eager=True,
     )
     parallel_config = SimpleNamespace(
         enable_expert_parallel=enable_expert_parallel,
         world_size_across_dp=world_size,
         pipeline_parallel_size=pipeline_parallel_size,
         tensor_parallel_size=tensor_parallel_size,
-        prefill_context_parallel_size=1,
-        decode_context_parallel_size=1,
     )
     compilation_config = SimpleNamespace(
         cudagraph_capture_sizes=cudagraph_capture_sizes or [],
@@ -78,7 +73,6 @@ def _make_vllm_config(
     )
     return SimpleNamespace(
         model_config=model_config,
-        speculative_config=None,
         parallel_config=parallel_config,
         compilation_config=compilation_config,
         scheduler_config=SimpleNamespace(
@@ -719,67 +713,13 @@ def test_extra_ctx_env_true_uses_additional_kwargs(monkeypatch):
     assert forward_context.additional_kwargs["capturing"] is False
 
 
-@pytest.mark.parametrize(
-    "tokens,requests,query,tp,pcp,expected",
-    [
-        (16384, 500, 2, 8, 1, 16384),
-        (16384, 500, 2, 1, 8, 3048),
-        (16384, 500, 2, 2, 4, 5096),
-        (17, 64, 2, 1, 8, 17),
-        (513, 16, 1, 3, 8, 99),
-        (16384, 500, 8, 1, 8, 6048),
-    ],
-)
-def test_prefill_mc2_capacity_uses_pcp_local_budget(monkeypatch, tokens, requests, query, tp, pcp, expected):
-    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_prefill_mc2=True, enable_fused_mc2=1))
+@pytest.mark.parametrize("tp,profile_tokens,expected", [(1, 2048, 2048), (3, 65, 66), (8, 16384, 16384)])
+@pytest.mark.parametrize("prefill_mc2", [True, False])
+def test_prefill_mc2_capacity_reuses_profile_budget(monkeypatch, tp, profile_tokens, expected, prefill_mc2):
+    monkeypatch.setattr(
+        afc, "get_ascend_config", lambda: SimpleNamespace(enable_prefill_mc2=prefill_mc2, enable_fused_mc2=1)
+    )
     monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: True)
-    config = _make_vllm_config(tensor_parallel_size=tp, max_num_batched_tokens=tokens)
-    config.parallel_config.prefill_context_parallel_size = pcp
-    config.speculative_config = SimpleNamespace(method="mtp", num_speculative_tokens=query - 1)
-    afc.set_mc2_tokens_capacity(config, max_num_reqs=requests, uniform_decode_query_len=query)
+    config = _make_vllm_config(tensor_parallel_size=tp, max_num_batched_tokens=16384)
+    afc.set_mc2_tokens_capacity(config, 500, 2, profile_num_tokens=profile_tokens)
     assert afc.get_mc2_tokens_capacity() == expected
-
-
-@pytest.mark.parametrize("dcp,method", [(2, "mtp"), (1, "dflash"), (1, "dspark"), (1, "draft_model")])
-def test_pcp_mc2_retains_replicated_context_budget(monkeypatch, dcp, method):
-    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_prefill_mc2=True, enable_fused_mc2=1))
-    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: True)
-    config = _make_vllm_config(max_num_batched_tokens=16384)
-    config.parallel_config.prefill_context_parallel_size = 8
-    config.parallel_config.decode_context_parallel_size = dcp
-    config.speculative_config = SimpleNamespace(method=method, num_speculative_tokens=1)
-    afc.set_mc2_tokens_capacity(config, max_num_reqs=500, uniform_decode_query_len=2)
-    assert afc.get_mc2_tokens_capacity() == 16384
-
-
-def test_pcp_mc2_capacity_keeps_graph_padding(monkeypatch):
-    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_prefill_mc2=True, enable_fused_mc2=1))
-    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: True)
-    config = _make_vllm_config(max_num_batched_tokens=16384, max_cudagraph_capture_size=4096)
-    config.parallel_config.prefill_context_parallel_size = 8
-    config.model_config.enforce_eager = False
-    afc.set_mc2_tokens_capacity(config, max_num_reqs=500, uniform_decode_query_len=2)
-    assert afc.get_mc2_tokens_capacity() == 4096
-
-
-@pytest.mark.parametrize("pcp,tp,query_len", [(2, 1, 1), (8, 1, 2), (4, 2, 5)])
-def test_pcp_mc2_capacity_covers_actual_mixed_batch_partition(monkeypatch, pcp, tp, query_len):
-    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_prefill_mc2=True, enable_fused_mc2=1))
-    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: True)
-    config = _make_vllm_config(tensor_parallel_size=tp, max_num_batched_tokens=513)
-    config.parallel_config.prefill_context_parallel_size = pcp
-    config.speculative_config = SimpleNamespace(method="mtp", num_speculative_tokens=query_len - 1)
-    afc.set_mc2_tokens_capacity(config, max_num_reqs=16, uniform_decode_query_len=query_len)
-    capacity = afc.get_mc2_tokens_capacity()
-    manager = PCPManager.__new__(PCPManager)
-    manager.pcp_world_size = pcp
-    manager.dcp_world_size = 1
-    manager.shard_decode_requests = False
-    rng = np.random.default_rng(0)
-    for _ in range(200):
-        lengths = rng.multinomial(513, np.full(16, 1 / 16))
-        prefilling = rng.integers(0, 2, size=16).astype(bool)
-        lengths[~prefilling] = np.minimum(lengths[~prefilling], query_len)
-        for rank in range(pcp):
-            local_tokens = sum(length for _, _, length in manager._iter_rank_chunks(rank, lengths, prefilling))
-            assert ((local_tokens + tp - 1) // tp) * tp <= capacity

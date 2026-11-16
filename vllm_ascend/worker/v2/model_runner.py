@@ -290,7 +290,12 @@ class NPUModelRunner(GPUModelRunner):
         # Set _mc2_tokens_capacity and _reserved_mc2_mask for MoE communication optimization.
         # TODO: remove set_cos_and_sin (together with update_cos_sin) when mla can properly handle cos/sin internally
         set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
-        set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
+        set_mc2_tokens_capacity(
+            vllm_config,
+            self.max_num_reqs,
+            self.decode_query_len,
+            profile_num_tokens=self._get_pcp_profile_num_tokens(),
+        )
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
 

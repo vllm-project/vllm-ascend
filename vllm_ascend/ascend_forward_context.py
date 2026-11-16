@@ -256,7 +256,7 @@ _mc2_tokens_capacity: int | None = None
 _reserved_mc2_mask: torch.Tensor | None = None
 
 
-def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len):
+def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len, *, profile_num_tokens=None):
     global _mc2_tokens_capacity
     if _mc2_tokens_capacity is not None:
         return
@@ -268,28 +268,12 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     # HCCL comm buffer (HCCL_BUFFSIZE); MegaMoe (use_mega_moe, non-decode-only)
     # uses the symm buffer (separate torch alloc, not HCCL_BUFFSIZE).
     if ascend_config.enable_prefill_mc2 or (use_mega_moe and not _is_decode_only_node(vllm_config)):
-        max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        parallel_config = vllm_config.parallel_config
-        pcp_size = parallel_config.prefill_context_parallel_size
-        spec = vllm_config.speculative_config
-        # PCP+DCP can replicate short prefills; block drafters can process
-        # global context. Those configurations retain the original budget.
-        if (
-            pcp_size > 1
-            and parallel_config.decode_context_parallel_size == 1
-            and (spec is None or spec.method in ("mtp", "eagle", "eagle3"))
-        ):
-            # The scheduler budget is global, but MC2 consumes PCP-local rows.
-            # DualChunkSwap contributes < 2 rounding rows per prefill request;
-            # decode queries may be replicated. Sum the per-request overhead
-            # rather than taking max(prefill / PCP, decode): batches can mix both.
-            query_len = max(uniform_decode_query_len, 1 + spec.num_speculative_tokens if spec else 1)
-            local_tokens = (max_num_tokens + pcp_size - 1) // pcp_size
-            local_tokens += max_num_reqs * max(2, query_len)
-            max_num_tokens = min(max_num_tokens, local_tokens)
-            # Graph descriptors can pad beyond the real local token count.
-            if not vllm_config.model_config.enforce_eager:
-                max_num_tokens = max(max_num_tokens, vllm_config.compilation_config.max_cudagraph_capture_size)
+        # Reuse the runner's PCP-local profiling budget before TP alignment.
+        max_num_tokens = (
+            profile_num_tokens
+            if profile_num_tokens is not None
+            else vllm_config.scheduler_config.max_num_batched_tokens
+        )
     elif vllm_config.compilation_config.cudagraph_capture_sizes:
         max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
         compilation_config = vllm_config.compilation_config

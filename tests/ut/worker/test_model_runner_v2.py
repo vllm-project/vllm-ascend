@@ -1217,7 +1217,8 @@ def test_init_without_speculation(monkeypatch, use_pp, backend_name, env_buffer_
         patch("vllm_ascend.worker.v2.model_runner.AscendRequestState", return_value="req"),
         patch("vllm_ascend.worker.v2.model_runner.AscendInputBuffers", return_value="buf"),
         patch("vllm_ascend.worker.v2.model_runner.set_cos_and_sin"),
-        patch("vllm_ascend.worker.v2.model_runner.set_mc2_tokens_capacity"),
+        patch.object(NPUModelRunner, "_get_pcp_profile_num_tokens", return_value=2048),
+        patch("vllm_ascend.worker.v2.model_runner.set_mc2_tokens_capacity") as set_capacity,
         patch("vllm_ascend.worker.v2.model_runner.set_mc2_mask"),
         patch(
             "vllm_ascend.worker.v2.model_runner.breakable_cudagraph.is_breakable_cudagraph_enabled",
@@ -1232,6 +1233,9 @@ def test_init_without_speculation(monkeypatch, use_pp, backend_name, env_buffer_
         ),
     ):
         runner = NPUModelRunner(vllm_config, torch.device("cpu"))
+    set_capacity.assert_called_once_with(
+        vllm_config, runner.max_num_reqs, runner.decode_query_len, profile_num_tokens=2048
+    )
     assert runner.eplb == "eplb"
     assert runner.req_states == "req"
     assert runner.input_buffers == "buf"
@@ -1298,7 +1302,8 @@ def test_init_spec_pp_full_graph_and_speculator(method):
         patch("vllm_ascend.worker.v2.model_runner.AscendRequestState", return_value="req") as request_state_cls,
         patch("vllm_ascend.worker.v2.model_runner.AscendInputBuffers", return_value="buf"),
         patch("vllm_ascend.worker.v2.model_runner.set_cos_and_sin"),
-        patch("vllm_ascend.worker.v2.model_runner.set_mc2_tokens_capacity"),
+        patch.object(NPUModelRunner, "_get_pcp_profile_num_tokens", return_value=2048),
+        patch("vllm_ascend.worker.v2.model_runner.set_mc2_tokens_capacity") as set_capacity,
         patch("vllm_ascend.worker.v2.model_runner.set_mc2_mask"),
         patch("torch.npu.Stream", return_value="stream"),
         patch("torch.npu.Event", return_value="event"),
@@ -1313,6 +1318,9 @@ def test_init_spec_pp_full_graph_and_speculator(method):
         ),
     ):
         runner = NPUModelRunner(vllm_config, torch.device("cpu"))
+    set_capacity.assert_called_once_with(
+        vllm_config, runner.max_num_reqs, runner.decode_query_len, profile_num_tokens=2048
+    )
     assert eplb_cls.call_args.args[2] is ascend_config.eplb_config
     assert runner.use_aclgraph is True
     assert runner.use_aux_hidden_state_outputs is True
