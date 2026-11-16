@@ -65,6 +65,11 @@ def count_allgather_tokens(
     local_expert_count: int,
 ) -> torch.Tensor:
     """Count eligible routes owned locally without changing the GMM counts."""
+    if topk_ids.device.type == "npu":
+        # Lazy import keeps the CPU tensor helpers independent of the NPU runtime.
+        from vllm_ascend.ops.triton.eplb_count import count_allgather_tokens_triton
+
+        return count_allgather_tokens_triton(topk_ids, token_mask, local_expert_start, local_expert_count)
     local_ids = topk_ids.to(torch.int64) - local_expert_start
     eligible = token_mask[:, None] & (local_ids >= 0) & (local_ids < local_expert_count)
     indices = local_ids.clamp(0, local_expert_count - 1).reshape(-1)

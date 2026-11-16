@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
+
+import torch
+from vllm.triton_utils import tl, triton
+
+ASSIGNMENTS_PER_TILE = 512
+
+
+@triton.jit(do_not_specialize=["num_assignments", "local_start", "local_count"])
+def _count_allgather_kernel(
+    ids_ptr,
+    mask_ptr,
+    counts_ptr,
+    num_assignments,
+    local_start,
+    local_count,
+    ID_ROW_STRIDE: tl.constexpr,
+    ID_COL_STRIDE: tl.constexpr,
+    MASK_STRIDE: tl.constexpr,
+    TOPK: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    programs = tl.num_programs(0)
+    tiles = tl.cdiv(num_assignments, BLOCK_SIZE)
+    quotient = tiles // programs
+    remainder = tiles % programs
+    first = pid * quotient + tl.minimum(pid, remainder)
+    count = quotient + (pid < remainder)
+    for tile in range(first, first + count):
+        offsets = tile.to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        rows = offsets // TOPK
+        cols = offsets % TOPK
+        in_bounds = offsets < num_assignments
+        physical_ids = tl.load(ids_ptr + rows * ID_ROW_STRIDE + cols * ID_COL_STRIDE, mask=in_bounds, other=-1).to(
+            tl.int64
+        )
+        valid_token = tl.load(mask_ptr + rows * MASK_STRIDE, mask=in_bounds, other=0).to(tl.int1)
+        local_ids = physical_ids - local_start.to(tl.int64)
+        eligible = in_bounds & valid_token & (local_ids >= 0) & (local_ids < local_count)
+        safe_ids = tl.where(eligible, local_ids, 0)
+        tl.atomic_add(counts_ptr + safe_ids, tl.full((BLOCK_SIZE,), 1, tl.int64), mask=eligible, sem="relaxed")
+
+
+def count_allgather_tokens_triton(
+    topk_ids: torch.Tensor,
+    token_mask: torch.Tensor,
+    local_expert_start: int,
+    local_expert_count: int,
+) -> torch.Tensor:
+    """Count valid physical routes into INT64 local bins without host reads.
+
+    The output is fresh per call. Persistent load accumulation remains in the
+    existing EPLB record operator. Repeated routes each contribute one.
+    """
+    if topk_ids.ndim != 2 or token_mask.ndim != 1 or token_mask.shape[0] != topk_ids.shape[0]:
+        raise ValueError("Expected physical IDs [T,K] and aligned token mask [T]")
+    if topk_ids.dtype not in (torch.int32, torch.int64) or token_mask.dtype != torch.bool:
+        raise TypeError("Expected INT32/INT64 IDs and BOOL mask")
+    if topk_ids.device.type != "npu" or token_mask.device != topk_ids.device:
+        raise ValueError("Inputs must be on the same NPU")
+    if local_expert_start < 0 or local_expert_count <= 0:
+        raise ValueError("Expected nonnegative local start and positive local expert count")
+    counts = torch.zeros(local_expert_count, dtype=torch.int64, device=topk_ids.device)
+    num_assignments = topk_ids.numel()
+    if num_assignments == 0:
+        return counts
+    # Query the actual input device, avoiding a cached count from another NPU.
+    with torch.npu.device(topk_ids.device):
+        properties = triton.runtime.driver.active.utils.get_device_properties(topk_ids.device.index)
+        vector_cores = properties["num_vectorcore"]
+        if vector_cores <= 0:
+            raise RuntimeError("Cannot determine the NPU Vector Core count")
+        programs = min(vector_cores, triton.cdiv(num_assignments, ASSIGNMENTS_PER_TILE))
+        _count_allgather_kernel[(programs,)](
+            topk_ids,
+            token_mask,
+            counts,
+            num_assignments,
+            local_expert_start,
+            local_expert_count,
+            ID_ROW_STRIDE=topk_ids.stride(0),
+            ID_COL_STRIDE=topk_ids.stride(1),
+            MASK_STRIDE=token_mask.stride(0),
+            TOPK=topk_ids.shape[1],
+            BLOCK_SIZE=ASSIGNMENTS_PER_TILE,
+        )
+    return counts
