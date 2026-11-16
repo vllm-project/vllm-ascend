@@ -778,9 +778,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self.pp_rank,
         )
 
-    def _make_mooncake_layerwise_key(self, block_hash_or_tail: str) -> str:
-        return self._make_layerwise_full_key(0, block_hash_or_tail)
-
     def _layerwise_key_batches(self, keys: list[str]) -> list[list[str]]:
         batch_size = self.layerwise_max_transfer_blocks if self.layerwise_max_transfer_blocks > 0 else max(1, len(keys))
         return [keys[start : start + batch_size] for start in range(0, len(keys), batch_size)]

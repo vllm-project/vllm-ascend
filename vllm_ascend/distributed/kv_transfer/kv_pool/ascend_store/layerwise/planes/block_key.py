@@ -97,12 +97,12 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
         request.save_block_keys = [None] * max(0, end_block - start_block)
         key_slots: list[tuple[str, int | None, int]] = []
         for block_index in range(start_block, min(end_block, len(group_block_hashes))):
-            key = worker._make_mooncake_layerwise_key(block_hash_to_str(group_block_hashes[block_index]))
+            key = worker._make_layerwise_full_key(0, block_hash_to_str(group_block_hashes[block_index]))
             request.save_block_keys[block_index - start_block] = key
             key_slots.append((key, block_index - start_block, block_index))
 
         if request.partial_block_index is not None:
-            request.save_last_block_key = worker._make_mooncake_layerwise_key(f"{request.req_id}_lastblock")
+            request.save_last_block_key = worker._make_layerwise_full_key(0, f"{request.req_id}_lastblock")
             key_slots.append((request.save_last_block_key, None, request.partial_block_index))
 
         requested_keys = list(dict.fromkeys(key for key, _, _ in key_slots))
@@ -158,7 +158,7 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
             for block_index in range(start_block, end_block):
                 current_entries.append(
                     (
-                        worker._make_mooncake_layerwise_key(block_hash_to_str(group_block_hashes[block_index])),
+                        worker._make_layerwise_full_key(0, block_hash_to_str(group_block_hashes[block_index])),
                         block_index,
                     )
                 )
@@ -169,7 +169,7 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
             if needs_last_block and 0 <= partial_block_index < len(request.block_ids):
                 current_entries.append(
                     (
-                        worker._make_mooncake_layerwise_key(f"{request.req_id}_lastblock"),
+                        worker._make_layerwise_full_key(0, f"{request.req_id}_lastblock"),
                         partial_block_index,
                     )
                 )
