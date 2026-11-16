@@ -206,7 +206,7 @@ AB_MODE = os.environ.get("KV_POOL_AB_MODE", "gate")
 # cost and the mooncake layerwise streaming does not hurt its throughput on
 # A2, so they share the default gate (across repeated runs on the shared
 # machine the cluster's noise band reaches 1.23x TTFT / 0.83x throughput, so
-# 1.35/0.75 keeps ~10% headroom while still failing catastrophic
+# 1.30/0.75 keeps ~6% headroom over that band while still failing catastrophic
 # regressions; a full re-prefill miss runs ~12x slower and ~0.1x
 # throughput). memcache layerwise is the sole outlier - its streamed
 # per-layer loads cost more than half the throughput - so it carries its own
@@ -214,7 +214,7 @@ AB_MODE = os.environ.get("KV_POOL_AB_MODE", "gate")
 # headroom) because the per-layer streaming shows real latency variance.
 # Both dicts stay editable for recalibration; recalibrate with CI medians
 # once available.
-TTFT_LIMITS = {"default": 1.35, "memcache_layerwise_tier3": 1.6}
+TTFT_LIMITS = {"default": 1.30, "memcache_layerwise_tier3": 1.6}
 THROUGHPUT_LIMITS = {"default": 0.75, "memcache_layerwise_tier3": 0.30}
 MEMCACHE_UBSIO_DISK = os.environ.get("KV_POOL_MEMCACHE_UBSIO_DISK", "/dev/ubsio0")
 MEMCACHE_UBSIO_DEVICES = int(os.environ.get("KV_POOL_MEMCACHE_UBSIO_DEVICES", TP_SIZE))
