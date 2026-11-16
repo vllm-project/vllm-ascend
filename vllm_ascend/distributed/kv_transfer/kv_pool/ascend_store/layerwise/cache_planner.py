@@ -275,8 +275,6 @@ def plan_layerwise_cache_reuse(
     # An empty device pool has no byte views to reuse.
     if not kv_cache_config.kv_cache_tensors or kv_cache_config.num_blocks == 0 or not kv_cache_config.kv_cache_groups:
         return None
-    if vllm_config.parallel_config.pipeline_parallel_size > 1:
-        return None
     rules = get_spec_reuse_rules(vllm_config)
     if rules is None:
         return None
