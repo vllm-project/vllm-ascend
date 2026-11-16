@@ -9,6 +9,7 @@ import pytest
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.mrv2_utils import get_pcp_profile_num_tokens
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 
@@ -22,6 +23,7 @@ def make_runner(tokens=16384, pcp=16, requests=64, query=4, replicated=False):
         num_speculative_tokens=query - 1,
         max_num_new_slots_for_drafting=0,
     )
+    runner.vllm_config.speculative_config = runner.speculative_config
     runner.speculator = None  # Non-last PP stages have no local drafter.
     return runner
 
@@ -39,7 +41,7 @@ def make_runner(tokens=16384, pcp=16, requests=64, query=4, replicated=False):
 )
 def test_local_prefill_preserves_draft_requests(tokens, pcp, requests, query, replicated, expected):
     runner = make_runner(tokens, pcp, requests, query, replicated)
-    assert runner._get_pcp_profile_num_tokens() == expected
+    assert get_pcp_profile_num_tokens(runner.vllm_config, runner.max_num_tokens, runner.max_num_reqs) == expected
     assert runner.max_num_tokens == tokens
     assert runner.max_num_reqs == requests
 
@@ -47,26 +49,30 @@ def test_local_prefill_preserves_draft_requests(tokens, pcp, requests, query, re
 def test_no_draft_preserves_target_decode_requests():
     runner = make_runner(requests=2048)
     runner.speculative_config = None
-    assert runner._get_pcp_profile_num_tokens() == 2048
+    runner.vllm_config.speculative_config = None
+    assert get_pcp_profile_num_tokens(runner.vllm_config, runner.max_num_tokens, runner.max_num_reqs) == 2048
 
 
 def test_non_model_draft_keeps_global_budget():
     runner = make_runner()
     runner.speculative_config.method = "ngram"
-    assert runner._get_pcp_profile_num_tokens() == 16384
+    assert get_pcp_profile_num_tokens(runner.vllm_config, runner.max_num_tokens, runner.max_num_reqs) == 16384
 
 
 @pytest.mark.parametrize("method", ["dflash", "dspark", "draft_model"])
 def test_replicated_draft_context_is_not_reduced(method):
     runner = make_runner()
     runner.speculative_config.method = method
-    assert runner._get_pcp_profile_num_tokens() == runner.max_num_tokens
+    assert (
+        get_pcp_profile_num_tokens(runner.vllm_config, runner.max_num_tokens, runner.max_num_reqs)
+        == runner.max_num_tokens
+    )
 
 
 @pytest.mark.parametrize("tokens,requests", [(16384, 64), (16384, 512), (17, 64)])
 def test_local_dummy_preserves_actual_upstream_request_count(tokens, requests):
     runner = make_runner(tokens=tokens, requests=requests)
-    local_tokens = runner._get_pcp_profile_num_tokens()
+    local_tokens = get_pcp_profile_num_tokens(runner.vllm_config, runner.max_num_tokens, runner.max_num_reqs)
     runner.speculator = SimpleNamespace(num_query_per_req=4, num_extra_query_per_req=0)
     runner.kv_connector = Mock()
     runner.is_first_pp_rank = True

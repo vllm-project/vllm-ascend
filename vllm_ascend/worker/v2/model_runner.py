@@ -98,6 +98,7 @@ from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target
 from vllm_ascend.kv_trace.kv_trace_runner import install_trace
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.models.host_offload import track_host_offload_owners
+from vllm_ascend.mrv2_utils import get_pcp_profile_num_tokens
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
     runtime_guard_step,
@@ -290,12 +291,7 @@ class NPUModelRunner(GPUModelRunner):
         # Set _mc2_tokens_capacity and _reserved_mc2_mask for MoE communication optimization.
         # TODO: remove set_cos_and_sin (together with update_cos_sin) when mla can properly handle cos/sin internally
         set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
-        set_mc2_tokens_capacity(
-            vllm_config,
-            self.max_num_reqs,
-            self.decode_query_len,
-            profile_num_tokens=self._get_pcp_profile_num_tokens(),
-        )
+        set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
 
@@ -842,7 +838,7 @@ class NPUModelRunner(GPUModelRunner):
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         global_tokens = self.max_num_tokens
-        profile_tokens = self._get_pcp_profile_num_tokens()
+        profile_tokens = get_pcp_profile_num_tokens(self.vllm_config, self.max_num_tokens, self.max_num_reqs)
         with override_mrv2_in_profile_run(True):
             if (
                 mc2_tokens_capacity is not None
@@ -1298,27 +1294,6 @@ class NPUModelRunner(GPUModelRunner):
             yield
         finally:
             self.input_buffers.dummy_num_tokens = previous_dummy_tokens
-
-    def _get_pcp_profile_num_tokens(self) -> int:
-        """Keep replicated draft requests when profiling PCP-local prefill.
-
-        Initial memory profiling precedes KV/PCP-manager initialization.
-        Block drafters retain the global budget: their context-KV precompute
-        processes all target hidden states, independently of short queries.
-        """
-        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
-        if pcp_size <= 1:
-            return self.max_num_tokens
-        query_per_req = 1
-        spec = self.speculative_config
-        if spec is not None:
-            # Use shared config, not the last PP rank's speculator instance:
-            # every pipeline stage must profile the same target token shape.
-            if spec.method not in ("mtp", "eagle", "eagle3"):
-                return self.max_num_tokens
-            query_per_req = 1 + spec.num_speculative_tokens
-        local_tokens = (self.max_num_tokens + pcp_size - 1) // pcp_size
-        return min(self.max_num_tokens, max(local_tokens, self.max_num_reqs * query_per_req))
 
     @step_eplb_after(is_dummy=True)
     def _dummy_run(

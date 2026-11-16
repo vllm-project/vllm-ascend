@@ -59,6 +59,7 @@ def _make_vllm_config(
         world_size_across_dp=world_size,
         pipeline_parallel_size=pipeline_parallel_size,
         tensor_parallel_size=tensor_parallel_size,
+        prefill_context_parallel_size=1,
     )
     compilation_config = SimpleNamespace(
         cudagraph_capture_sizes=cudagraph_capture_sizes or [],
@@ -713,13 +714,82 @@ def test_extra_ctx_env_true_uses_additional_kwargs(monkeypatch):
     assert forward_context.additional_kwargs["capturing"] is False
 
 
-@pytest.mark.parametrize("tp,profile_tokens,expected", [(1, 2048, 2048), (3, 65, 66), (8, 16384, 16384)])
+@pytest.mark.parametrize(
+    "tp,pcp,tokens,requests,query,method,expected",
+    [
+        (1, 8, 16384, 500, 2, "mtp", 2048),
+        (8, 1, 16384, 500, 2, "mtp", 16384),
+        (3, 8, 513, 16, 1, "mtp", 66),
+        (1, 16, 16384, 512, 4, "mtp", 2048),
+        (1, 8, 16384, 500, 2, "dflash", 16384),
+    ],
+)
 @pytest.mark.parametrize("prefill_mc2", [True, False])
-def test_prefill_mc2_capacity_reuses_profile_budget(monkeypatch, tp, profile_tokens, expected, prefill_mc2):
+def test_prefill_mc2_capacity_reuses_profile_budget(
+    monkeypatch, tp, pcp, tokens, requests, query, method, expected, prefill_mc2
+):
     monkeypatch.setattr(
         afc, "get_ascend_config", lambda: SimpleNamespace(enable_prefill_mc2=prefill_mc2, enable_fused_mc2=1)
     )
     monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: True)
-    config = _make_vllm_config(tensor_parallel_size=tp, max_num_batched_tokens=16384)
-    afc.set_mc2_tokens_capacity(config, 500, 2, profile_num_tokens=profile_tokens)
+    config = _make_vllm_config(tensor_parallel_size=tp, max_num_batched_tokens=tokens)
+    config.parallel_config.prefill_context_parallel_size = pcp
+    config.speculative_config = SimpleNamespace(method=method, num_speculative_tokens=query - 1)
+    afc.set_mc2_tokens_capacity(config, requests, query)
+    assert afc.get_mc2_tokens_capacity() == expected
+
+
+@pytest.mark.parametrize("pcp", [1, 8])
+@pytest.mark.parametrize("graph", [False, True])
+@pytest.mark.parametrize("mega_moe", [False, True])
+def test_decode_mc2_capacity_keeps_local_graph_and_request_budget(monkeypatch, pcp, graph, mega_moe):
+    monkeypatch.setattr(
+        afc, "get_ascend_config", lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=int(mega_moe))
+    )
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: mega_moe)
+    monkeypatch.setattr(afc, "_is_decode_only_node", lambda _: True)
+    config = _make_vllm_config(
+        tensor_parallel_size=8,
+        max_num_batched_tokens=16384,
+        cudagraph_capture_sizes=[257] if graph else [],
+        max_cudagraph_capture_size=257 if graph else 0,
+    )
+    config.parallel_config.prefill_context_parallel_size = pcp
+    afc.set_mc2_tokens_capacity(config, 200, 3)
+    assert afc.get_mc2_tokens_capacity() == (264 if graph else 600)
+
+
+@pytest.mark.parametrize("fused,mega_moe,expected", [(0, False, 1024), (1, False, 1024), (1, True, 32768)])
+def test_prefill_mc2_capacity_keeps_per_rank_operator_limit(monkeypatch, fused, mega_moe, expected):
+    monkeypatch.setattr(
+        afc, "get_ascend_config", lambda: SimpleNamespace(enable_prefill_mc2=True, enable_fused_mc2=fused)
+    )
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: mega_moe)
+    config = _make_vllm_config(tensor_parallel_size=2, max_num_batched_tokens=524288)
+    config.parallel_config.prefill_context_parallel_size = 8
+    config.speculative_config = None
+    afc.set_mc2_tokens_capacity(config, 500, 1)
+    assert afc.get_mc2_tokens_capacity() == expected
+
+
+@pytest.mark.parametrize("graph_tokens,expected", [(512, 2048), (4096, 4096)])
+@pytest.mark.parametrize("split_grid", [False, True])
+def test_prefill_mc2_capacity_also_covers_local_graphs(monkeypatch, graph_tokens, expected, split_grid):
+    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_prefill_mc2=True, enable_fused_mc2=1))
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: True)
+    config = _make_vllm_config(
+        max_num_batched_tokens=16384,
+        cudagraph_capture_sizes=[512, 4096, 8192],
+        max_cudagraph_capture_size=8192 if split_grid else graph_tokens,
+    )
+    config.parallel_config.prefill_context_parallel_size = 8
+    config.speculative_config = SimpleNamespace(method="mtp", num_speculative_tokens=1)
+    if split_grid:
+        if vllm_version_is("0.33.0"):
+            pytest.skip("Separate target/draft graph grids are a main-only API")
+        config.compilation_config.decode_cudagraph_capture_request_sizes = [1, 500]
+        config.compilation_config.max_decode_cudagraph_capture_tokens = None
+        config.compilation_config.max_prefill_cudagraph_capture_tokens = graph_tokens
+        config.get_decode_cudagraph_query_lens = lambda _: {2: 500}
+    afc.set_mc2_tokens_capacity(config, 500, 2)
     assert afc.get_mc2_tokens_capacity() == expected

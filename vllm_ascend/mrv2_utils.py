@@ -26,6 +26,28 @@ else:
     VllmConfig = None
 
 
+def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max_num_reqs: int) -> int:
+    """Keep replicated draft requests when profiling PCP-local prefill.
+
+    Initial memory profiling precedes KV/PCP-manager initialization.
+    Block drafters retain the global budget: their context-KV precompute
+    processes all target hidden states, independently of short queries.
+    """
+    pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+    if pcp_size <= 1:
+        return max_num_tokens
+    query_per_req = 1
+    spec = vllm_config.speculative_config
+    if spec is not None:
+        # Use shared config, not the last PP rank's speculator instance:
+        # every pipeline stage must profile the same target token shape.
+        if spec.method not in ("mtp", "eagle", "eagle3"):
+            return max_num_tokens
+        query_per_req = 1 + spec.num_speculative_tokens
+    local_tokens = (max_num_tokens + pcp_size - 1) // pcp_size
+    return min(max_num_tokens, max(local_tokens, max_num_reqs * query_per_req))
+
+
 def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     """Select the Ascend model runner.
 
