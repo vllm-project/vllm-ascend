@@ -356,6 +356,31 @@ def test_manager_block_ids_expanded_when_blocks_per_kv_gt_1():
     assert block_ids_for_request(runner, "r1", kv_cache_group=0) == [2, 3]
 
 
+def test_kv_source_prefers_forward_context_tuple_parts(tmp_path: Path):
+    """C8-style tuple on static_forward_context keeps part names (not flat list)."""
+    from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
+
+    k = torch.arange(0, 2 * 4, dtype=torch.float32).reshape(2, 4)
+    v = torch.arange(50, 50 + 2 * 4, dtype=torch.float32).reshape(2, 4)
+    scale = torch.arange(90, 90 + 2 * 2, dtype=torch.float32).reshape(2, 2)
+    layer = SimpleNamespace(kv_cache=(k, v, scale))
+    runner = SimpleNamespace(
+        requests={"r1": SimpleNamespace(block_ids=([1],))},
+        kv_caches=[k, v, scale],  # flattened Ascend bind — must NOT be preferred
+        compilation_config=SimpleNamespace(static_forward_context={"L0": layer}),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["L0"])]),
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+    )
+    snaps = KvCacheReader(runner).snapshot_request_blocks(req_id="r1", block_ids=[1], out_dir=tmp_path / "kv")
+    layers = [s.payload["layer"] for s in snaps]
+    assert layers == ["L0[0]", "L0[1]", "L0[2]"]
+    assert snaps[0].payload["source"] == "static_forward_context"
+    assert torch.equal(snaps[0].payload["tensor"][0], k[1])
+
+
 def test_snapshot_skips_empty_block_ids(tmp_path: Path):
     runner = SimpleNamespace(
         kv_caches={"layers.0": torch.randn(8, 16, 4)},
