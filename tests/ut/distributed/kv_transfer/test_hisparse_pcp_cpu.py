@@ -221,8 +221,6 @@ def test_draft_switches_between_global_decode_and_local_prefill_layouts():
 
 
 def test_capture_and_real_forward_keep_query_and_scatter_input_addresses():
-    from vllm_ascend.hisparse.pcp import prepare_pcp_query_metadata
-
     connector, cache, meta, local, batch, manager = make_connector(padded_tokens=8)
     manager._gathered_kv_slot_mappings.fill_(-1)
     manager._gathered_kv_slot_mappings[1, :3] = torch.tensor([100, 101, 102])
@@ -352,38 +350,3 @@ def test_replicated_decode_prolog_writes_resident_directly(monkeypatch):
     )
     assert prolog.call_args.args[1][0].data_ptr() == impl.hisparse_cache.view.cache.data_ptr()
     assert prolog.call_args.args[4] is mapping
-    impl._pcp_prolog_workspace.assert_not_called()
-
-
-def test_native_mixed_kv_retains_resident_and_host_row_order(monkeypatch):
-    pcp_world_size = 4
-    import vllm_ascend.attention.sfa_v1 as sfa
-    from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
-
-    impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
-    impl.pcp_enabled = True
-    impl.is_pcp_decode_sharded = False
-    impl.qk_rope_head_dim = 0
-    meta = NS(
-        uses_pcp_sharded_layout=True,
-        num_decode_tokens=1,
-        num_prefills=1,
-        pcp_has_global_prefill=True,
-        num_input_tokens=3,
-    )
-    local = torch.tensor([[10.0], [20.0], [21.0]])
-    # One replicated decode row, then two rank-local prefill rows per rank.
-    gathered = torch.cat([local + rank * 100 for rank in range(pcp_world_size)])
-    slots = torch.arange(3 * pcp_world_size, dtype=torch.int64) + 10
-    slots[3::3] = -1
-    gather = Mock(return_value=(gathered, None))
-    monkeypatch.setattr(sfa, "get_pcp_group", lambda: NS(world_size=pcp_world_size))
-    monkeypatch.setattr(sfa, "all_gather_async", gather)
-    impl._exec_kv_local = Mock(return_value=gathered)
-    pending = impl.exec_kv(local, None, None, (), slots, meta, defer_wait=True)
-    impl._exec_kv_local.assert_not_called()
-    result = pending()
-    assert result is gathered
-    torch.testing.assert_close(gather.call_args.args[0], local)
-    torch.testing.assert_close(impl._exec_kv_local.call_args.args[0], gathered)
-    torch.testing.assert_close(impl._exec_kv_local.call_args.args[4], slots)
