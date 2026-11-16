@@ -1,0 +1,4 @@
+pr: 22043
+entries:
+  - category: performance
+    text: Fused all-gather EPLB route counting with a masked Triton kernel to reduce temporary tensors and skip invalid route contributions.
