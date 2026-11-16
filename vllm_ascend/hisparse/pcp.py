@@ -33,12 +33,44 @@ def get_pcp_write_request_ids(global_batch, gather_indices, write_mask):
     return rows
 
 
+def prepare_pcp_query_states(cache, metadata):
+    """Bind local query states before the leader prefetches its followers."""
+    states = getattr(metadata, "hisparse_request_state_indices", None)
+    if states is not None:
+        for member in cache.index_group_caches:
+            member.runtime.request_state_indices = states
+            member.host_mirror_required = metadata.hisparse_write_has_prefill or member.runtime.eager_host_mirror
+
+
+def hisparse_write_target(cache, metadata, num_input_rows, num_slot_rows):
+    """Gathered writes include padding and must not use Core's decode row cap."""
+    count = getattr(metadata, "hisparse_num_write_tokens", None)
+    if count is None:
+        return cache.write_target(num_input_rows, num_slot_rows)
+    assert cache.view is not None and cache.slot_mapping is not None
+    count = min(num_input_rows, num_slot_rows, count)
+    return cache.view.cache, cache.slot_mapping[:count], count
+
+
+def prepare_pcp_mirror_staging(worker):
+    """Size pinned Host slot staging for gathered rows before graph capture."""
+    config = worker.vllm_config
+    capacity = (
+        config.scheduler_config.max_num_batched_tokens * config.parallel_config.prefill_context_parallel_size
+        + config.scheduler_config.max_num_seqs * (config.num_lookahead_tokens + 1)
+    )
+    staging = worker._slot_mapping_staging
+    if staging is not None and staging.slots.numel() < capacity:
+        staging.slots = torch.empty(capacity, dtype=staging.slots.dtype, pin_memory=True)
+
+
 class PCPHiSparseConnector(ActiveKVConnector):
     """Use canonical requests for Core and gathered slots for Resident/Host DMA."""
 
     def __init__(self, connector, manager, block_tables, host_group_id):
         self.__dict__.update(connector.__dict__)
         self._pcp_manager = manager
+        self._pcp_attn_metadata = {}
         self._global_block_tables = block_tables
         self._draft_request_states = torch.empty_like(block_tables.input_block_tables[0][:, 0], dtype=torch.int32)
         worker = self.kv_connector.connector_worker
@@ -66,10 +98,15 @@ class PCPHiSparseConnector(ActiveKVConnector):
         tables = manager._local_block_tables
         assert slots is not None and tables is not None
         for cache, group_id, hot_group_id in self._pcp_bindings:
-            cache.slot_mapping = slots[group_id]
-            cache.mirror_slot_mapping = slots[host_group_id]
-            cache.source_block_table = tables[host_group_id]
-            cache.runtime.hot_block_table = tables[hot_group_id]
+            self._bind_cache_layout(cache, group_id, hot_group_id, slots, tables)
+
+    def _bind_cache_layout(self, cache, group_id, hot_group_id, slots, tables):
+        cache.slot_mapping = slots[group_id]
+        cache.mirror_slot_mapping = slots[self._pcp_host_group_id]
+        # Source and Hot use local query request rows. Resident residency uses
+        # persistent state slots and must retain its original block table.
+        cache.source_block_table = tables[self._pcp_host_group_id]
+        cache.runtime.hot_block_table = tables[hot_group_id]
 
     def prepare_draft_prefill(self):
         """Draft prefill reuses the target's PCP query and gathered KV layout."""
@@ -77,10 +114,7 @@ class PCPHiSparseConnector(ActiveKVConnector):
         tables = self._pcp_manager._local_block_tables
         for cache, group_id, hot_group_id in self._pcp_bindings:
             if cache.draft_layer:
-                cache.slot_mapping = slots[group_id]
-                cache.mirror_slot_mapping = slots[self._pcp_host_group_id]
-                cache.source_block_table = tables[self._pcp_host_group_id]
-                cache.runtime.hot_block_table = tables[hot_group_id]
+                self._bind_cache_layout(cache, group_id, hot_group_id, slots, tables)
 
     def prepare_draft_decode(self, request_states, num_reqs):
         """Later draft steps are replicated; use global rows without KV gather."""
@@ -90,13 +124,13 @@ class PCPHiSparseConnector(ActiveKVConnector):
         block_tables = self._global_block_tables
         for cache, group_id, hot_group_id in self._pcp_bindings:
             if cache.draft_layer:
-                cache.slot_mapping = block_tables.slot_mappings[group_id]
-                cache.mirror_slot_mapping = block_tables.slot_mappings[self._pcp_host_group_id]
-                cache.source_block_table = block_tables.input_block_tables[self._pcp_host_group_id]
-                cache.runtime.hot_block_table = block_tables.input_block_tables[hot_group_id]
+                self._bind_cache_layout(
+                    cache, group_id, hot_group_id, block_tables.slot_mappings, block_tables.input_block_tables
+                )
                 cache.runtime.request_state_indices = states
 
     def _build_load_kwargs(self, scheduler_output, input_batch, attn_metadata):
+        self._pcp_attn_metadata = {}
         if input_batch is None:
             return super()._build_load_kwargs(scheduler_output, input_batch, attn_metadata)
         # The eager runner passes metadata through the active forward context;
@@ -113,33 +147,55 @@ class PCPHiSparseConnector(ActiveKVConnector):
         local_tables = manager._local_block_tables
         assert local_tables is not None
         for cache, group_id, hot_group_id in self._pcp_bindings:
-            cache.slot_mapping = slots[group_id, :count]
-            cache.mirror_slot_mapping = slots[self._pcp_host_group_id, :count]
-            # Source and Hot are indexed by local query request row. Resident
-            # residency is indexed by persistent state slot and must stay intact.
-            cache.source_block_table = local_tables[self._pcp_host_group_id]
-            cache.runtime.hot_block_table = local_tables[hot_group_id]
+            self._bind_cache_layout(cache, group_id, hot_group_id, slots[:, :count], local_tables)
         write_request_ids = get_pcp_write_request_ids(global_batch, indices, mask)
         for metadata in (attn_metadata or {}).values():
             metadata.hisparse_write_req_id_per_token = write_request_ids
+        self._pcp_attn_metadata = attn_metadata or {}
         # Core owns request lifecycle and load scheduling. Only its load kwargs
         # need canonical requests and a gathered Resident slot snapshot length.
         load_kwargs = super()._build_load_kwargs(scheduler_output, global_batch, attn_metadata)
         load_kwargs["num_tokens"] = count
         return load_kwargs
 
+    def _start_load_kv(self):
+        super()._start_load_kv()
+        # Core prepares handles even for FULL replay, where attention.forward
+        # does not run in Python. Keep its request lifecycle canonical while
+        # the resolver addresses the local PCP query rows.
+        for name, cache in self.kv_connector.connector_worker._group_leaders:
+            metadata = self._pcp_attn_metadata.get(name)
+            if metadata is not None:
+                prepare_pcp_query_states(cache, metadata)
+
+    def prepare_host_mirror(self):
+        """Project write rows only after attention has finished using query rows.
+
+        Core's mirror and clear methods then consume their original fields;
+        residency, DMA submission and completion fences remain unchanged.
+        """
+        for name, leader in self.kv_connector.connector_worker._group_leaders:
+            metadata = self._pcp_attn_metadata.get(name)
+            if metadata is None:
+                continue
+            for cache in leader.index_group_caches:
+                cache.num_actual_tokens = metadata.hisparse_num_write_tokens
+                cache.req_id_per_token = metadata.hisparse_write_req_id_per_token
+                cache.host_mirror_required = metadata.hisparse_write_has_prefill or cache.runtime.eager_host_mirror
+
+    def finish_forward(self):
+        if not self._disabled:
+            self.prepare_host_mirror()
+        return super().finish_forward()
+
 
 def adapt_pcp_hisparse_connector(runner):
-    # Worker patch registration imports the runner; defer this to avoid a cycle.
-    from vllm_ascend.patch.worker.patch_hisparse import install_pcp_cache_layout, prepare_pcp_mirror_staging
-
     connector = runner.kv_connector
     if runner.pcp_manager is None:
         return connector
 
     if type(connector) is not ActiveKVConnector or type(connector.kv_connector) is not HiSparseConnector:
         raise ValueError("HiSparse PCP requires the direct HiSparseConnector")
-    install_pcp_cache_layout()
     prepare_pcp_mirror_staging(connector.kv_connector.connector_worker)
     (host_group_id,) = runner.kv_cache_config.host_group_ids
     adapted = PCPHiSparseConnector(connector, runner.pcp_manager, runner.block_tables, host_group_id)
