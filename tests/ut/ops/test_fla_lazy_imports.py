@@ -146,6 +146,31 @@ class TestFLALazyImports(unittest.TestCase):
 
 
 class TestFLAImportBoundaries(unittest.TestCase):
+    def test_qkv_autotuner_resolves_benchmarker_only_when_benchmarking(self):
+        driver = Mock()
+        namespace = {"triton": SimpleNamespace(runtime=SimpleNamespace(driver=driver))}
+        path = "vllm_ascend/ops/triton/linearnorm/split_qkv_tp_rmsnorm_rope.py"
+        do_bench = _load_function(path, "_do_bench", namespace)
+        tree = ast.parse((ROOT / path).read_text(encoding="utf-8"))
+        kernel = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_split_qkv_and_compute_local_qk_var_kernel"
+        )
+        decorator = kernel.decorator_list[0]
+        self.assertIsInstance(decorator, ast.Call)
+        decorator = cast(ast.Call, decorator)
+        callback = next(keyword.value for keyword in decorator.keywords if keyword.arg == "do_bench")
+        self.assertIs(eval(compile(ast.Expression(callback), path, "eval"), namespace), do_bench)
+        driver.active.get_benchmarker.assert_not_called()
+
+        kernel_call = Mock()
+        quantiles = (0.5, 0.2, 0.8)
+        benchmarker = driver.active.get_benchmarker.return_value
+        self.assertIs(do_bench(kernel_call, quantiles), benchmarker.return_value)
+        driver.active.get_benchmarker.assert_called_once_with()
+        benchmarker.assert_called_once_with(kernel_call, quantiles=quantiles)
+
     def test_discovery_paths_have_no_eager_fla_imports(self):
         paths = ["device/device_op.py", "ops/kda.py", "ops/layernorm.py", "models/glm5next/kda.py"]
 

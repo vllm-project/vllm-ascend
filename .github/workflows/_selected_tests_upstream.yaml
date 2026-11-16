@@ -232,6 +232,23 @@ jobs:
               uv pip install --no-deps flash-linear-attention-npu-a2===26.9.1
               python3 -c "import fla_npu.ops.ascendc"
 
+          - name: Prepare upstream LoRA fixture cache
+            env:
+              HF_HUB_OFFLINE: 0
+            run: |
+              # The upstream qwen3_lora_files fixture is not included in older
+              # runner caches. Populate it before running the suite offline.
+              python3 - <<'PY'
+              from huggingface_hub import snapshot_download
+              from huggingface_hub.errors import LocalEntryNotFoundError
+
+              repo_id = "vllm-project/self_cognition_Alice"
+              try:
+                  snapshot_download(repo_id=repo_id, local_files_only=True)
+              except LocalEntryNotFoundError:
+                  snapshot_download(repo_id=repo_id)
+              PY
+
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty
             env:
