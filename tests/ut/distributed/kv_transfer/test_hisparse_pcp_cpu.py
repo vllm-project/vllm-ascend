@@ -27,9 +27,10 @@ def test_cache_layout_install_is_idempotent():
     assert HiSparseConnectorWorker._enqueue_host_mirror is mirror
 
 
-@pytest.mark.parametrize("initial_capacity", [4, 32])
+@pytest.mark.parametrize("pcp_world_size", [1, 2, 4, 8])
+@pytest.mark.parametrize("initial_capacity", [4, 128])
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
-def test_pcp_host_staging_is_sized_before_capture(monkeypatch, initial_capacity, dtype):
+def test_pcp_host_staging_is_sized_before_capture(monkeypatch, initial_capacity, dtype, pcp_world_size):
     from vllm_ascend.patch.worker import patch_hisparse
 
     cache = handle()
@@ -39,7 +40,7 @@ def test_pcp_host_staging_is_sized_before_capture(monkeypatch, initial_capacity,
     worker = NS(
         vllm_config=NS(
             scheduler_config=NS(max_num_batched_tokens=8, max_num_seqs=2),
-            parallel_config=NS(prefill_context_parallel_size=2),
+            parallel_config=NS(prefill_context_parallel_size=pcp_world_size),
             num_lookahead_tokens=3,
         ),
         _slot_mapping_staging=staging,
@@ -55,13 +56,14 @@ def test_pcp_host_staging_is_sized_before_capture(monkeypatch, initial_capacity,
 
     monkeypatch.setattr(patch_hisparse.torch, "empty", pinned_empty)
     patch_hisparse.prepare_pcp_mirror_staging(worker)
-    assert staging.slots.numel() >= 24
+    capacity = 8 * pcp_world_size + 2 * (3 + 1)
+    assert staging.slots.numel() >= capacity
     assert staging.slots.dtype == dtype
     assert cache.num_write_tokens == 0
     assert cache.write_req_id_per_token is None
     assert cache.write_has_prefill is False
-    if initial_capacity < 24:
-        assert allocations == [(24, {"dtype": dtype, "pin_memory": True})]
+    if initial_capacity < capacity:
+        assert allocations == [(capacity, {"dtype": dtype, "pin_memory": True})]
     else:
         assert staging.slots is original and not allocations
 
@@ -476,7 +478,8 @@ def test_pcp_reuses_supported_c8_prolog(monkeypatch):
 
 
 @pytest.mark.parametrize("capture", [False, True])
-def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, capture):
+@pytest.mark.parametrize("pcp_world_size", [2, 4, 8])
+def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, capture, pcp_world_size):
     import vllm_ascend.attention.sfa_hisparse as module
     from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
     from vllm_ascend.hisparse import cache_ops
@@ -489,7 +492,14 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     meta, *_ = gathered_metadata()
     meta.num_input_tokens = 3
     meta.hisparse_for_capture = capture
+    num_write_rows = meta.num_input_tokens * pcp_world_size
+    meta.hisparse_num_write_tokens = num_write_rows
+    meta.hisparse_num_valid_write_rows.fill_(num_write_rows)
+    meta.hisparse_write_req_id_per_token = torch.zeros(num_write_rows, dtype=torch.int32)
     impl.hisparse_cache._prepare_for_batch(meta)
+    impl.hisparse_cache.slot_mapping = torch.arange(num_write_rows) + 10
+    impl.hisparse_cache.slot_mapping[2::3] = -1
+    impl.hisparse_cache.view.cache = torch.zeros(num_write_rows, 656, dtype=torch.uint8)
     scratch = torch.zeros((1, 128, 1, 656), dtype=torch.uint8).view(torch.float8_e4m3fn)
     slots = torch.arange(128, dtype=torch.int64)
     impl._pcp_prolog_workspace = lambda: (scratch, slots)
@@ -504,11 +514,11 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
 
     def gather(payload, dim):
         assert payload.shape == (3, 656) and payload.dtype == torch.int8 and dim == 0
-        return torch.cat((payload, payload + 10), dim=0)
+        return torch.cat([payload + 10 * rank for rank in range(pcp_world_size)], dim=0)
 
     def scatter(payload, rope, destination, mapping, valid):
-        assert payload[:, 0].tolist() == [1, 2, 3, 11, 12, 13]
-        assert valid.tolist() == [6]
+        assert payload[:, 0].tolist() == [10 * rank + row for rank in range(pcp_world_size) for row in (1, 2, 3)]
+        assert valid.tolist() == [num_write_rows]
         for row, slot in enumerate(mapping.tolist()):
             if slot >= 0:
                 destination[slot - 10].fill_(int(payload[row, 0]))
@@ -522,7 +532,8 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     )
     impl.hisparse_cache.finish_kv_update.assert_not_called()
     impl._sync_pcp_kv_cache((), meta)
-    assert impl.hisparse_cache.view.cache[:4, 0].tolist() == [1, 2, 11, 12]
+    expected = [10 * rank + row if row else 0 for rank in range(pcp_world_size) for row in (1, 2, 0)]
+    assert impl.hisparse_cache.view.cache[:, 0].tolist() == expected
     assert impl.hisparse_cache.finish_kv_update.call_count == (0 if capture else 1)
 
 
@@ -544,17 +555,21 @@ def test_native_packed_store_does_not_write_host_source():
         ([9, 5], [True, True]),
         ([2, 3], [True, True]),
         ([0, 1, 3], [False, False, True]),
-        ([12, 8], [True, True]),
+        ([64, 32], [True, True]),
         ([1, 1, 9], [False, False, True]),
     ],
 )
-def test_real_pcp_layout_maps_each_global_write_once(monkeypatch, lengths, prefills):
+@pytest.mark.parametrize("pcp_world_size,pcp_rank", [(size, rank) for size in (1, 2, 4, 8) for rank in range(size)])
+def test_real_pcp_layout_maps_each_global_write_once(monkeypatch, lengths, prefills, pcp_world_size, pcp_rank):
     import vllm_ascend.worker.v2.pcp_manager as pcp_module
 
     monkeypatch.setattr(pcp_module, "async_copy_to_gpu", lambda values, device: torch.as_tensor(values).clone())
-    manager = pcp_module.AscendPCPManager(2, 0, torch.device("cpu"), True)
+    manager = pcp_module.AscendPCPManager(pcp_world_size, pcp_rank, torch.device("cpu"), True)
     manager.bind_config(
-        NS(model_config=None, parallel_config=NS(prefill_context_parallel_size=2, decode_context_parallel_size=1))
+        NS(
+            model_config=None,
+            parallel_config=NS(prefill_context_parallel_size=pcp_world_size, decode_context_parallel_size=1),
+        )
     )
     lens = np.array(lengths, dtype=np.int32)
     flags = np.array(prefills, dtype=np.bool_)
@@ -563,8 +578,8 @@ def test_real_pcp_layout_maps_each_global_write_once(monkeypatch, lengths, prefi
     batch = Batch(
         int(sum(lens)), torch.arange(len(lens), dtype=torch.int32), list(range(len(lens))), torch.tensor(starts), flags
     )
-    meta = metadata(counts[0], decode=not any(prefills))
-    local = NS(idx_mapping=torch.tensor([s.global_batch_req_idx for s in segments[0]], dtype=torch.int32))
+    meta = metadata(counts[pcp_rank], decode=not any(prefills))
+    local = NS(idx_mapping=torch.tensor([s.global_batch_req_idx for s in segments[pcp_rank]], dtype=torch.int32))
     meta.hisparse_write_req_id_per_token = get_pcp_write_request_ids(
         batch, manager._padded_gather_idx, manager._gathered_kv_write_mask
     )
@@ -575,7 +590,7 @@ def test_real_pcp_layout_maps_each_global_write_once(monkeypatch, lengths, prefi
     expected_ids = np.repeat(np.arange(len(lens)), lens)[indices[mask].numpy()]
     assert actual_ids.tolist() == expected_ids.tolist()
     assert torch.all(meta.hisparse_write_req_id_per_token[~mask] == -1)
-    if lengths == [12, 8]:
+    if lengths == [64, 32] and pcp_world_size > 1:
         assert len(local.idx_mapping) > len(batch.idx_mapping)  # genuine DualChunk duplication.
     global_slots = torch.arange(int(sum(lens)), dtype=torch.int64)[None, :] + 100
     gathered = manager._convert_to_gathered_slot_mappings(global_slots)
