@@ -235,7 +235,7 @@ To save the searcher's complete terminal output, use `set -o pipefail` and appen
 | Missing time units | Specify `--latency-unit ms` or `--latency-unit s`; units present in the logs take precedence |
 | Missing or invalid cache summary | With `--prefix_test`, the full benchmark must include a `Prefix cache hit summary` with HBM/external hit and query counts in `ALL_PODS`. Check node configuration and service `/metrics` access |
 | Output directory already exists | Use a new `--output-dir`, or omit it to generate a directory automatically |
-| Project directory is in use | `.slo_search.lock` prevents overlapping searchers. After forced termination, verify that related processes have stopped before deleting a stale lock |
+| Project directory is in use | `.slo_search.lock` prevents overlapping searchers. A `WARNING: could not remove lock` message reports a cleanup failure without changing the search result. Check permissions and verify that related processes have stopped before deleting a stale lock |
 | Subprocess exit, timeout, or metric parsing failure | Inspect `error` in `summary.json` and the trial's `console.log`. Recorded trials are preserved. Errors abort the search instead of being treated as ordinary SLO failures |
 
 The log format must match the summary tables supported by the tool. Missing percentiles or Stages, ERROR/Traceback output, skipped cache nodes, or invalid counters cause errors. The tool does not reuse warmup results or metrics from other trials.

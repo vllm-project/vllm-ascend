@@ -20,6 +20,7 @@ import signal
 import statistics
 import subprocess
 import sys
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -397,7 +398,8 @@ class Search:
                             stderr=subprocess.DEVNULL,
                         )
                     else:
-                        os.killpg(process.pid, signal.SIGKILL)
+                        with suppress(ProcessLookupError):
+                            os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
                     raise
             if row["returncode"] != 0:
@@ -666,7 +668,14 @@ def main(argv=None):
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     finally:
-        lock.unlink()
+        try:
+            lock.unlink(missing_ok=True)
+        except OSError as exc:
+            print(
+                f"WARNING: could not remove lock {lock}: {exc}; "
+                "verify related processes have stopped before removing it manually.",
+                file=sys.stderr,
+            )
 
 
 if __name__ == "__main__":
