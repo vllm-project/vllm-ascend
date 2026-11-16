@@ -9,8 +9,8 @@ Kimi K3.1 defaults to `BLNHC`. The existing `VLLM_KV_CACHE_LAYOUT` override
 can select another block-outermost layout such as `BLHNC`. The old layer-outermost
 paired-page implementation has been removed; explicit `LBNHC` selections fail
 during configuration. This implementation targets Model Runner V2, packed SFA
-main cache, C8 indexer K/scale storage, one latent KV head, PCP=1 and DCP=1. Unsupported context-parallel
-packing fails during planning.
+main cache, C8 indexer K/scale storage and one latent KV head. PCP and DCP keep
+their existing token/head ownership while using role-specific packed addresses.
 
 ## Ownership and storage
 
@@ -29,7 +29,7 @@ For a different ID owned by a recurrent group:
 ```
 
 The scheduler never assigns one live pool ID to both interpretations. Different
-KDA groups also own disjoint IDs. One state remains a complete checkpoint for
+history-coverage groups and KDA groups also own disjoint IDs. One state remains a complete checkpoint for
 one layer; packing changes where checkpoints fit, without reducing their data.
 
 The history payload is the sum of every actual history spec's `page_size_bytes`.
@@ -79,6 +79,56 @@ splits transfers at physical discontinuities even when individual kernel pages
 are contiguous. PreemptOffload budgets and transfers one backing row and retains
 Conv aliases for speculative resume correction.
 
+## Context parallelism
+
+History layers share a scheduler group only when their `block_size` and
+`dcp_sharded` fields agree. In particular, a replicated draft and DCP-sharded
+target require separate block tables, even though all their descriptors still
+alias the same backing pool. Each history group keeps its own non-causal draft
+ownership tag; recurrent groups follow all history groups.
+
+The row geometry and view formula above are unchanged. For capacity planning,
+sum the number of blocks required by every coverage group. A sharded history
+group covers `B * DCP` global tokens per manager block, while a replicated group
+covers `B`. Use the configured DCP domain, including PCP ranks when the parallel
+configuration unifies them; do not divide every cache budget by PCP again.
+KDA uses the actual head-sharded state specs and retains checkpoint block IDs.
+The numerical capacity examples below assume PCP=DCP=1 and one history group.
+
+```text
+positions / sequence lengths
+          |
+          v
+BlockTable resolves token owners -> dense local kernel IDs / gathered slots
+          |
+          v
+per-role packed mapping -> physical kernel IDs / slots
+          |
+          +-> sharded SFA DCP context -> MLA operator
+          +-> indexer scatter indices -> K/scale stores and TopK operator
+          +-> PCP rank-ordered slots -> local prolog / gathered cache read
+          +-> mapped PCP global table -> dense draft context gather
+```
+
+Sharded Kimi MLA/Indexer builders preserve those local addresses. They do not
+expand physical packed IDs into the replicated-indexer layout. Token positions,
+TopK token indices and sequence lengths retain their logical CP meaning.
+Quantized SFA and TurboQuant prefill use local KV with query gathering and LSE
+combination on the sharded-indexer path. Other models retain their replicated
+indexer path.
+
+Persistent mapping buffers allow two PCP prefill segments per request, a dummy
+request and the PCP gathered-token extent. Local and global tables, and distinct
+draft-step slot tensors, have independent buffers so one build cannot overwrite
+another captured metadata view. The mapped PCP context replaces only the
+role's global block table consumed by MLA; the scheduler's shared context stays
+unchanged.
+
+Mooncake mixed pools use group-aware transfer metadata instead of the legacy
+single-group replicated-indexer expansion. Dense wire IDs are still converted
+to physical packed pages at the final copy boundary. Row copy/zero and native
+KDA/RecoverSSM state strides retain their existing contracts.
+
 ## Block-size selection
 
 Packing does not automatically choose a workload-specific optimal block size.
@@ -126,9 +176,7 @@ position, including exact block boundaries and partial prefill, and restores
 it without applying the native speculative Conv shift again. Temporary verify
 records are regenerated after resume rather than copied with persistent KV.
 
-The packed layout still requires PCP=DCP=1. RecoverSSM's own parallelism support
-does not relax that independent address-mapping restriction. Its configuration
-validation, including DS state-layout rejection for Mooncake P/D, remains in
+RecoverSSM's configuration validation, including DS state-layout rejection for Mooncake P/D, remains in
 effect. Combined packed/RecoverSSM NPU execution, graph replay and P/D
 equivalence require hardware validation.
 
@@ -137,8 +185,16 @@ equivalence require hardware validation.
 CPU tests cover no draft, three and five draft layers, per-role mapped addresses,
 raw state views, buffer reuse, row copying cycles, zeroing metadata, P/D copies
 with different manager coverage, and PreemptOffload Conv-state restoration.
-NPU operator execution, graph replay, full-model numerical equivalence, P/D
-integration and measured HBM/latency remain hardware validation before merge.
+On Ascend A3, 816 affected framework CPU tests passed (14 skipped) against vLLM
+`4ba787ec9959e566d3b587a796dff07673324da5`. Three added real NPU tests passed:
+packed main-cache store/PCP read/sparse attention, indexer K/scale store/TopK,
+and native KDA Conv/recurrent updates, compared with contiguous storage.
+
+Two-rank DCP and PCP+DCP numerical/graph tests are included. Their execution was
+stopped at the user's request; no passing multi-rank or graph result is claimed.
+Full-model equivalence, distributed P/D integration and measured HBM/latency
+remain unverified. This evidence is operator/framework validation, not a
+complete model-serving qualification.
 
 This implementation reuses Ascend's existing planner and allocator extension
 points and the supported `KVCacheGroupSpec`/tuple cache contract. It does not

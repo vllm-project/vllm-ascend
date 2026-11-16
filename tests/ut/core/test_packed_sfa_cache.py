@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -219,6 +219,8 @@ def test_three_layer_mla_draft_capacity():
 class PackedCommonMetadata:
     block_table_tensor: torch.Tensor
     slot_mapping: torch.Tensor
+    pcp_context: object = None
+    pcp_cache_group_idx: int | None = None
 
 
 @pytest.mark.parametrize("draft_layers", [0, 3, 5])
@@ -277,12 +279,100 @@ def test_too_small_row_rejected():
         packed_sfa_cache_groups(packed_config(), make_packed_specs(128, 0, 3))
 
 
-@pytest.mark.parametrize("parallel_axis", ["prefill_context_parallel_size", "decode_context_parallel_size"])
-def test_unsupported_cp_fails_before_changing_specs(parallel_axis):
+@pytest.mark.parametrize("pcp,dcp", [(1, 2), (2, 1), (2, 4)])
+@pytest.mark.parametrize("replicated_draft", [False, True])
+def test_cp_groups_preserve_actual_token_coverage(pcp, dcp, replicated_draft):
     config = packed_config()
-    setattr(config.parallel_config, parallel_axis, 2)
+    config.parallel_config.prefill_context_parallel_size = pcp
+    config.parallel_config.decode_context_parallel_size = dcp
     specs = make_packed_specs(draft_layers=3)
-    before = specs.copy()
-    with pytest.raises(ValueError, match="PCP=1 and DCP=1"):
-        packed_sfa_cache_groups(config, specs)
-    assert specs == before
+    for name, spec in list(specs.items()):
+        if not isinstance(spec, MambaSpec):
+            specs[name] = replace(spec, dcp_sharded=not (spec.is_draft and replicated_draft))
+    groups = packed_sfa_cache_groups(config, specs)
+    histories = [g for g in groups if not isinstance(g.kv_cache_spec, MambaSpec)]
+    assert len(histories) == (2 if replicated_draft else 1)
+    assert all(len({specs[n].dcp_sharded for n in g.layer_names}) == 1 for g in histories)
+    history_blocks = sum(
+        (1048576 + (10752 * dcp if g.kv_cache_spec.dcp_sharded else 10752) - 1)
+        // (10752 * dcp if g.kv_cache_spec.dcp_sharded else 10752)
+        for g in histories
+    )
+    state_blocks = sum(
+        g.kv_cache_spec.max_memory_usage_bytes(config) // g.kv_cache_spec.page_size_bytes
+        for g in groups
+        if isinstance(g.kv_cache_spec, MambaSpec)
+    )
+    assert packed_sfa_max_memory(config, groups) == (history_blocks + state_blocks) * packed_sfa_row_bytes(groups)
+
+
+@dataclass(frozen=True)
+class PackedPCPContext:
+    global_block_tables: tuple[torch.Tensor, ...]
+    global_slot_mappings: torch.Tensor
+
+
+@pytest.mark.parametrize("pcp,dcp", [(1, 2), (2, 1), (2, 4)])
+@pytest.mark.parametrize("role", ["attn", "indexer.k_cache", "draft"])
+def test_cp_operator_addresses_match_rank_local_storage(pcp, dcp, role):
+    """Check every rank against token ownership, not a mapped-ID oracle."""
+    config = packed_config()
+    config.parallel_config.prefill_context_parallel_size = pcp
+    config.parallel_config.decode_context_parallel_size = dcp
+    specs = make_packed_specs(256, 3, 0, state_heads=1)
+    groups = packed_sfa_cache_groups(config, specs)
+    row = packed_sfa_row_bytes(groups)
+    plan = packed_sfa_cache_config(config, groups, 4 * row)
+    name = "model.layers.93.attn" if role == "draft" else f"model.layers.0.{role}"
+    spec = specs[name]
+    desc = next(t for t in plan.kv_cache_tensors if t.layers == [name])
+    # Boundary-crossing tokens, non-monotonic allocated IDs and two PCP
+    # fragments per request exercise real address discontinuities.
+    interleave = 128
+    global_tokens = 768 * dcp
+    for rank in range(dcp):
+        raw = torch.zeros(4 * row, dtype=torch.int8)
+        views = packed_sfa_cache_views(
+            raw[desc.offset : desc.offset + 3 * row + spec.page_size_bytes],
+            spec,
+            4,
+            row,
+            (512, 64) if role == "draft" else None,
+        )
+        block_ids = [3, 1, 2]
+        table = torch.tensor([[b * 2 + j for b in block_ids for j in range(2)]], dtype=torch.int32)
+        tokens = [t for t in range(global_tokens) if (t // interleave) % dcp == rank]
+        logical_slots = []
+        expected = []
+        for token in tokens:
+            local = token // (dcp * interleave) * interleave + token % interleave
+            block, within = divmod(local, 256)
+            logical_slots.append(block_ids[block] * 256 + within)
+            expected.append((block_ids[block], within))
+        # Graph padding and PCP gathered-order slots must retain -1.
+        config.scheduler_config.max_num_batched_tokens = len(tokens) + 8
+        slots = torch.tensor(logical_slots + [-1], dtype=torch.int64)
+        common = PackedCommonMetadata(table.repeat(2 * pcp + 1, 1), slots)
+        if pcp > 1:
+            common.pcp_context = PackedPCPContext((table.clone(),), slots.unsqueeze(0))
+            common.pcp_cache_group_idx = 0
+        builder = SimpleNamespace(vllm_config=config)
+        mapped = map_packed_sfa_metadata(builder, common, spec, row)
+        for slot, (block, within) in zip(mapped.slot_mapping.tolist(), expected):
+            page, offset = divmod(slot, 128)
+            for component in views:
+                component[page, offset].fill_(7)
+                byte_offset = (component.data_ptr() - raw.data_ptr()) + page * component.stride(
+                    0
+                ) * component.element_size()
+                assert byte_offset // row == block
+                assert byte_offset % row >= desc.offset
+            assert mapped.block_table_tensor[0, expected.index((block, within)) // 128] == page
+        assert mapped.slot_mapping[-1] == -1
+        assert torch.count_nonzero(raw[:row]) == 0  # null row
+        if pcp > 1:
+            torch.testing.assert_close(mapped.pcp_context.global_block_tables[0], mapped.block_table_tensor[:1])
+            assert mapped.pcp_context is not common.pcp_context
+            torch.testing.assert_close(common.pcp_context.global_block_tables[0], table)
+        pointer = mapped.slot_mapping.data_ptr()
+        assert map_packed_sfa_metadata(builder, common, spec, row).slot_mapping.data_ptr() == pointer

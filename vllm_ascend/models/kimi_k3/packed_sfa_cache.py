@@ -17,6 +17,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
+    KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -97,9 +98,6 @@ def packed_sfa_cache_groups(config, specs):
         raise ValueError("Kimi K3.1 packed KV cache requires Model Runner V2.")
     if config.scheduler_config.disable_hybrid_kv_cache_manager:
         raise ValueError("Block-outermost Kimi cache requires the hybrid KV cache manager.")
-    parallel = config.parallel_config
-    if parallel.decode_context_parallel_size != 1 or parallel.prefill_context_parallel_size != 1:
-        raise ValueError("Block-outermost Kimi cache currently requires PCP=1 and DCP=1.")
     main = sorted(
         (n for n, s in specs.items() if isinstance(s, AscendMLAAttentionSpec) and not s.is_draft),
         key=extract_layer_index,
@@ -117,8 +115,6 @@ def packed_sfa_cache_groups(config, specs):
         raise ValueError("Block-outermost Kimi cache requires one uncompressed device-resident latent head.")
     if any(not specs[n].uses_packed_sfa_main_cache for n in main):
         raise ValueError("Block-outermost Kimi cache requires a packed SFA main cache.")
-    if len({s.block_size for s in full.values()}) != 1 or len({s.dcp_sharded for s in full.values()}) != 1:
-        raise ValueError("Packed history layers must share token block coverage.")
     if any(s.block_size < 1 or s.block_size % KIMI_KERNEL_BLOCK_SIZE for s in full.values()):
         raise ValueError("Block-outermost Kimi cache requires whole 128-token kernel pages.")
     full = {n: replace(s, block_outermost=True) for n, s in full.items()}
@@ -136,12 +132,28 @@ def packed_sfa_cache_groups(config, specs):
     if anchor < state_bytes:
         raise ValueError("The packed history row must cover one recurrent checkpoint; increase --block-size.")
     max_group_size = anchor // state_bytes
-    groups = make_kimi_cache_groups(full, recurrent, recurrent_group_size=max_group_size, uniform_recurrent=False)
+    # DCP-local target history and replicated draft history cannot share a
+    # scheduler block table. Their physical regions can still share one pool.
+    coverage = {}
+    for name, spec in full.items():
+        coverage.setdefault((spec.block_size, spec.dcp_sharded), {})[name] = spec
+    histories = list(coverage.values())
+    groups = make_kimi_cache_groups(
+        histories[0], recurrent, recurrent_group_size=max_group_size, uniform_recurrent=False
+    )
     if groups is None:
         raise ValueError("Packed history layers must share full-attention semantics.")
-    groups[0] = replace(
-        groups[0], is_eagle_group=any(getattr(s, "non_causal_multi_token_decode", False) for s in full.values())
-    )
+    history_groups = [groups[0]]
+    for history in histories[1:]:
+        uniform = UniformTypeKVCacheSpecs.from_specs(history)
+        if uniform is None:
+            raise ValueError("Packed history layers must share full-attention semantics.")
+        history_groups.append(KVCacheGroupSpec(list(history), uniform))
+    history_groups = [
+        replace(g, is_eagle_group=any(s.non_causal_multi_token_decode for s in g.kv_cache_spec.kv_cache_specs.values()))
+        for g in history_groups
+    ]
+    groups = history_groups + groups[1:]
     specs.update(full)
     specs.update(recurrent)
     return groups
@@ -242,31 +254,30 @@ def packed_sfa_cache_views(raw, spec, num_blocks, row_bytes, mla_dims=None, fuse
     return (view(nope, spec.dtype), view(rope, spec.dtype, KIMI_KERNEL_BLOCK_SIZE * nope * get_dtype_size(spec.dtype)))
 
 
-def map_packed_sfa_metadata(builder, common, spec, row_bytes):
-    """Map dense scheduler/kernel IDs into this role's hole-spanning view.
-
-    Every builder owns its output buffers: history roles sharing ownership
-    have different kernel-page byte sizes and must not share mapped tables.
-    """
-    table, slots = common.block_table_tensor, common.slot_mapping
+def _map_packed_sfa_addresses(builder, key, table, slots, spec, row_bytes):
     pages = spec.block_size // KIMI_KERNEL_BLOCK_SIZE
     page_bytes = spec.page_size_bytes // pages
     step = row_bytes // page_bytes
-    buffers = getattr(builder, "_packed_sfa_metadata_buffers", None)
+    buffers_by_key = getattr(builder, "_packed_sfa_metadata_buffers", None)
+    if buffers_by_key is None:
+        buffers_by_key = builder._packed_sfa_metadata_buffers = {}
+    buffers = buffers_by_key.get(key)
     if buffers is None:
         cfg = builder.vllm_config
         capture_sizes = cfg.compilation_config.cudagraph_capture_sizes or []
-        max_rows = max([cfg.scheduler_config.max_num_seqs + 1, *capture_sizes])
+        pcp_size = cfg.parallel_config.prefill_context_parallel_size
+        segments = 2 if pcp_size > 1 else 1
+        max_rows = max([segments * cfg.scheduler_config.max_num_seqs + 1, *capture_sizes])
         lookahead = cfg.speculative_config.num_speculative_tokens if cfg.speculative_config is not None else 0
         max_cols = cdiv(cfg.model_config.max_model_len + lookahead, spec.block_size) * pages
-        max_tokens = max([cfg.scheduler_config.max_num_batched_tokens, *capture_sizes])
+        max_tokens = max([cfg.scheduler_config.max_num_batched_tokens, *capture_sizes]) * pcp_size
         buffers = (
             torch.empty((max_rows, max_cols), dtype=table.dtype, device=table.device),
             torch.empty(max_tokens, dtype=slots.dtype, device=slots.device),
             torch.empty((max_rows, max_cols), dtype=torch.bool, device=table.device),
             torch.empty(max_tokens, dtype=torch.bool, device=slots.device),
         )
-        builder._packed_sfa_metadata_buffers = buffers
+        buffers_by_key[key] = buffers
     mapped_table, mapped_slots, table_mask, slot_mask = buffers
     rows, cols = table.shape
     if rows > mapped_table.shape[0] or cols > mapped_table.shape[1] or slots.numel() > mapped_slots.numel():
@@ -283,4 +294,28 @@ def map_packed_sfa_metadata(builder, common, spec, row_bytes):
     mapped_slots.mul_(step * KIMI_KERNEL_BLOCK_SIZE - spec.block_size).add_(slots)
     torch.lt(slots, 0, out=slot_mask)
     mapped_slots.masked_fill_(slot_mask, -1)
-    return replace(common, block_table_tensor=mapped_table, slot_mapping=mapped_slots)
+    return mapped_table, mapped_slots
+
+
+def map_packed_sfa_metadata(builder, common, spec, row_bytes):
+    """Translate addresses after BlockTable has resolved CP token ownership.
+
+    Keep token positions, sequence lengths and KDA state IDs logical. Each
+    role and draft step owns stable output buffers for graph replay. Dense
+    MLA's PCP context gather also reads the global table, independently of
+    the local request table; expose the same role-specific addresses there.
+    """
+    key = common.slot_mapping.data_ptr()
+    table, slots = _map_packed_sfa_addresses(
+        builder, (key, "local"), common.block_table_tensor, common.slot_mapping, spec, row_bytes
+    )
+    result = replace(common, block_table_tensor=table, slot_mapping=slots)
+    context = getattr(common, "pcp_context", None)
+    if context is not None:
+        idx = common.pcp_cache_group_idx
+        tables = list(context.global_block_tables)
+        tables[idx], _ = _map_packed_sfa_addresses(
+            builder, (key, "global"), tables[idx], context.global_slot_mappings[idx], spec, row_bytes
+        )
+        result.pcp_context = replace(context, global_block_tables=tuple(tables))
+    return result

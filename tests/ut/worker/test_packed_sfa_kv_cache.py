@@ -74,6 +74,7 @@ def test_packed_roles_receive_independent_metadata(capture):
     )
     config = SimpleNamespace(
         model_config=SimpleNamespace(max_model_len=1024),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
         scheduler_config=SimpleNamespace(max_num_seqs=2, max_num_batched_tokens=4),
         compilation_config=SimpleNamespace(cudagraph_capture_sizes=[4]),
         speculative_config=None,
@@ -214,7 +215,7 @@ def make_packed_cache(config, scale_dtype, with_draft=True, local_layers=None, d
             scale_dim=1,
             scale_dtype=scale_dtype,
             cache_sparse_li_c8=True,
-            sfa_dcp_replicated_indexer_size=dcp_size,
+            sfa_dcp_replicated_indexer_size=1,
         )
     for layer in range(3):
         specs[f"model.layers.{layer}.linear_attn"] = MambaSpec(

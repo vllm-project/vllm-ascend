@@ -4808,6 +4808,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
     def test_start_load_kv_puts_replicated_indexer_on_existing_transfer_port(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker._is_hma_required = False
         worker.kv_send_thread = None
         worker.kv_recv_thread = MagicMock()
         worker.pcp_size = 1

@@ -4095,10 +4095,11 @@ class MooncakeConnectorWorker:
 
             remote_req_id = meta.remote_request_id
             prefill_tp_size: int = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
-            (
-                local_block_ids_replicate_k,
-                remote_block_ids_replicate_k,
-            ) = self._get_sfa_replicate_k_block_ids(meta)
+            # Mixed pools transfer each role through group-aware metadata.
+            # Do not expand Kimi's DCP-local indexer as a replicated K cache.
+            local_block_ids_replicate_k, remote_block_ids_replicate_k = (
+                (tuple(), tuple()) if self._is_hma_required else self._get_sfa_replicate_k_block_ids(meta)
+            )
 
             (
                 remote_handshake_port_list,
