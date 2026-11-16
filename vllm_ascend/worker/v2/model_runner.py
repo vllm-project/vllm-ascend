@@ -175,7 +175,9 @@ class NPUModelRunner(GPUModelRunner):
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
             offload_config = vllm_config.offload_config
-            # Prefetch into NZ buffers requires a format conversion that ACL graphs cannot capture.
+            # ND-to-NZ prefetch copies can use ACLop, which torch_npu rejects
+            # during ACL Graph capture. Keep the upstream offloader's ND
+            # prefetch buffers in graph mode.
             if self.model_config.enforce_eager and offload_config.offload_backend == "prefetch":
                 set_offloader(create_offloader(offload_config))
         if self.use_pp:
