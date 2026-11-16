@@ -55,12 +55,19 @@ class DeepseekV41VisionAttention(nn.Module):
             scale=self.head_dim**-0.5,
         )
 
-    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         n = x.size(0)
         q, k, v = (t.view(n, self.n_heads, self.head_dim) for t in self.wqkv(x).chunk(3, dim=-1))
         qk = self.apply_rotary_emb(torch.stack((q, k)), cos.squeeze(1), sin.squeeze(1))
         q, k = qk.unbind()
-        o = self.attn(q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0))
+        o = self.attn(q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0), cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
         return self.wo(o.squeeze(0).reshape(n, -1))
 
 
@@ -83,8 +90,15 @@ class DeepseekV41VisionBlock(nn.Module):
         self.norm2 = RMSNorm(config.vision_dim, eps=1e-6, dtype=torch.float32)
         self.mlp = DeepseekV41VisionMLP(config)
 
-    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        residual = x + self.attn(self.norm1(x), cos, sin)
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        residual = x + self.attn(self.norm1(x), cos, sin, cu_seqlens, max_seqlen)
         return residual + self.mlp(self.norm2(residual))
 
 
@@ -108,6 +122,20 @@ class DeepseekV41ViT(nn.Module):
             x = block(x, cos, sin)
         return self.norm(x)
 
+    def forward_packed(
+        self,
+        patches: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: torch.Tensor,
+    ) -> torch.Tensor:
+        """Tensor-only capture path with precomputed RoPE and image boundaries."""
+        x = self.patch_embed(patches)
+        for block in self.blocks:
+            x = block(x, cos, sin, cu_seqlens, max_seqlen)
+        return self.norm(x)
+
 
 class DeepseekV41Aligner(nn.Module):
     """Spatial merge (downsample_ratio x downsample_ratio) + MLP projector."""
@@ -125,3 +153,15 @@ class DeepseekV41Aligner(nn.Module):
         x = F.pad(x, (0, -n_vit_w % r, 0, -n_vit_h % r))
         x = F.unfold(x.unsqueeze(0), r, stride=r).squeeze(0).transpose(0, 1)
         return self.w2(F.gelu(self.w1(x)))
+
+    def forward_packed(
+        self,
+        x: torch.Tensor,
+        merge_idx: torch.Tensor,
+        merge_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Match unfold's channel-major merge, including odd-grid padding."""
+        rows = merge_idx.shape[0]
+        gathered = (x[merge_idx] * merge_mask).view(rows, self.downsample_ratio**2, -1)
+        gathered = gathered.permute(0, 2, 1).reshape(rows, -1)
+        return self.w2(F.gelu(self.w1(gathered)))
