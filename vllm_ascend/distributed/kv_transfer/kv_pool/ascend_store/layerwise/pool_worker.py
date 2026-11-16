@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from collections.abc import Callable, Generator, Iterable, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import suppress
 from itertools import chain
 from typing import Any, cast
@@ -100,7 +100,6 @@ SAVE_BATCH_FAILURE_POLL_INTERVAL_S = 1.0
 
 
 _LoadGroup = tuple[np.ndarray, list[int], list[str], bool]
-_LoadPlan = tuple[ReqMeta, list[_LoadGroup], dict[str, None]]
 
 
 class LayerwiseKVPoolWorker(BaseKVPoolWorker):
@@ -236,9 +235,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             draft_names = getattr(self, "_dspark_draft_layer_names", ())
             layer_specs = get_layerwise_kv_cache_specs(self.kv_cache_config)
             target_specs = {name: spec for name, spec in layer_specs.items() if name not in draft_names}
-            if layout is not None and layout.draft_entry_names:
-                self.num_layers = base_layers
-                self.layerwise_key_layers = base_layers
             if self.use_layerwise_transfer:
                 if draft_names and layout is None and getattr(self, "_dspark_prefix_keys", None) is None:
                     # Without scratch reuse, retain the original target+draft
@@ -262,7 +258,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         if isinstance(spec, MambaSpec)
                     }
                 effective_num_layers = max(self.num_layers, len(physical_layers))
-                if effective_num_layers != self.num_layers:
+                if layout is None and effective_num_layers != self.num_layers:
                     logger.info(
                         "KVPoolWorker: updated num_layers %d -> %d from cache group layout.",
                         self.num_layers,
@@ -300,7 +296,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
 
         self.next_layer_to_submit = 0
         self.layerwise_offload = False
-        self.independent_layers: list[int] = []
         self.prefetch_layer_map: dict[int, tuple[int, ...]] = {}
         if self.use_layerwise_transfer:
             if layout is None:
@@ -312,23 +307,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     self._extra_config,
                     stage_layers=stage_layers,
                 )
-                self.independent_layers = [
-                    self._global_to_local_layer.get(layer, layer - stage_start)
-                    for layer in cache_layout.independent_layers
-                ]
                 self.num_prefetch_layers = cache_layout.num_prefetch_layers
             else:
-                stage_globals = list(layout.layers)
-                if stage_globals:
-                    self.num_layers = self.layerwise_key_layers = len(stage_globals)
-                    self.prefetch_layer_map, self.independent_layers = self._remap_layout_to_stage_local(
-                        layout.prefetch_layer_map,
-                        layout.independent_layers,
-                        stage_globals,
-                    )
-                else:
-                    self.prefetch_layer_map = layout.prefetch_layer_map
-                    self.independent_layers = layout.independent_layers
+                self.num_layers = self.layerwise_key_layers = len(layout.layers)
+                self.prefetch_layer_map = self._remap_layout_to_stage_local(layout.prefetch_layer_map, layout.layers)
                 self.layerwise_offload = layout.has_layer_reuse
                 self.num_prefetch_layers = layout.num_prefetch_layers
                 for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups):
@@ -373,18 +355,14 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
     @staticmethod
     def _remap_layout_to_stage_local(
         prefetch_layer_map: dict[int, tuple[int, ...]],
-        independent_layers: list[int],
-        stage_globals: list[int],
-    ) -> tuple[dict[int, tuple[int, ...]], list[int]]:
+        stage_globals: Sequence[int],
+    ) -> dict[int, tuple[int, ...]]:
         """Translate a global-indexed reuse layout to stage-local indices."""
         global_to_local = {global_idx: local_idx for local_idx, global_idx in enumerate(stage_globals)}
-        return (
-            {
-                global_to_local[layer]: tuple(global_to_local[source] for source in sources)
-                for layer, sources in prefetch_layer_map.items()
-            },
-            [global_to_local[layer] for layer in independent_layers],
-        )
+        return {
+            global_to_local[layer]: tuple(global_to_local[source] for source in sources)
+            for layer, sources in prefetch_layer_map.items()
+        }
 
     def _build_group_layer_builders(self) -> list[LayerBatchBuilder]:
         builders = []
@@ -830,7 +808,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         group_id: int,
         cached_tokens: int,
         block_hashes: Sequence[BlockHash],
-    ) -> tuple[int, Callable[[int], tuple[str, bool] | None]] | None:
+    ) -> tuple[int, Callable[[int], str | None]] | None:
         reused_groups = getattr(self, "_reused_layers_by_group", None)
         if reused_groups is not None and group_id not in reused_groups:
             # Resident pages remain available for the running request.
@@ -840,23 +818,19 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         uses_align_state = self.group_uses_align_state[group_id]
         snapshot = self._snapshot_keys.get(request.req_id, {}).get(group_id, {})
 
-        def get_saved_key(block_idx: int) -> tuple[str, bool] | None:
+        def get_saved_key(block_idx: int) -> str | None:
             block_end = (block_idx + 1) * block_size
             end = min(block_end, cached_tokens)
-            # An aligned Mamba endpoint uses the single-page transfer slot
-            # even when its complete state is stored under a public key.
-            public_key = None
-            if end == block_end and block_idx < len(block_hashes):
-                public_key = self._make_layerwise_full_key(group_id, block_hash_to_str(block_hashes[block_idx]))
             saved = snapshot.get(block_idx)
             if saved is not None and (saved[0] == end or (not uses_align_state and saved[0] > end)):
-                key = saved[1]
                 # A hash can become available after the preceding save.
-                return key, key == public_key
-            if public_key is None:
-                logger.error("No saved KV page for request %s group %d block %d", request.req_id, group_id, block_idx)
-                return None
-            return public_key, True
+                return saved[1]
+            # An aligned Mamba endpoint uses the single-page transfer slot
+            # even when its complete state is stored under a public key.
+            if end == block_end and block_idx < len(block_hashes):
+                return self._make_layerwise_full_key(group_id, block_hash_to_str(block_hashes[block_idx]))
+            logger.error("No saved KV page for request %s group %d block %d", request.req_id, group_id, block_idx)
+            return None
 
         return (0 if uses_align_state else cached_tokens // block_size), get_saved_key
 
@@ -1848,30 +1822,25 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if not self.use_layerwise_transfer:
             return None
 
-        plans: list[_LoadPlan] = []
         failed = False
         for request in requests:
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
-            plan = self._plan_load_gvas_for_request(request)
-            if plan is None:
+            groups = self._plan_load_gvas_for_request(request)
+            if groups is None:
                 self._fail_load_preparation(request)
                 failed = True
                 continue
-            plans.append((request, *plan))
 
-        # Planning selects the keys, including private snapshots. The lease
-        # policy can batch public keys without changing those selections.
-        lease_loads = getattr(self, "_lease_step_load_gvas", self._lease_group_load_gvas)
-        for (request, groups, _), addresses in zip(plans, lease_loads(plans), strict=True):
-            if addresses is None:
-                self._fail_load_preparation(request)
-                failed = True
-                continue
             group_gvas = []
             load_keys = []
             partial_gvas = []
-            for (gvas, block_indices, keys, has_partial), values in zip(groups, addresses, strict=True):
+            for gvas, block_indices, keys, has_partial in groups:
+                values = self._lease_load_gvas(keys, {len(keys) - 1} if has_partial else None)
+                if values is None or not all(values):
+                    self._fail_load_preparation(request)
+                    failed = True
+                    break
                 if has_partial:
                     gvas[block_indices[:-1]] = values[:-1]
                     partial_gvas.append(values[-1])
@@ -1880,25 +1849,14 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     partial_gvas.append(0)
                 group_gvas.append(gvas)
                 load_keys.extend(keys)
-            if group_gvas:
-                request.load_keys = load_keys
-                request.load_block_gvas_by_group_np = group_gvas
-                request.load_block_gvas_np = group_gvas[0]
-                request.partial_load_gva_per_group = partial_gvas
-                request.load_gva_block_offset = 0
-        return False if failed else None
-
-    def _lease_group_load_gvas(self, plans: list[_LoadPlan]) -> Iterable[list[list[int]] | None]:
-        for _, groups, _ in plans:
-            addresses = []
-            for _, _, keys, has_partial in groups:
-                leases = self._lease_load_gvas(keys, {len(keys) - 1} if has_partial else None)
-                if leases is None or not all(leases):
-                    yield None
-                    break
-                addresses.append(leases)
             else:
-                yield addresses
+                if group_gvas:
+                    request.load_keys = load_keys
+                    request.load_block_gvas_by_group_np = group_gvas
+                    request.load_block_gvas_np = group_gvas[0]
+                    request.partial_load_gva_per_group = partial_gvas
+                    request.load_gva_block_offset = 0
+        return False if failed else None
 
     def _fail_load_preparation(self, request: ReqMeta) -> None:
         logger.error("Memcache load preparation failed for %s", request.req_id)
@@ -1966,7 +1924,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             gvas[key_indices[key]] = address
         return gvas
 
-    def _plan_load_gvas_for_request(self, request: ReqMeta) -> tuple[list[_LoadGroup], dict[str, None]] | None:
+    def _plan_load_gvas_for_request(self, request: ReqMeta) -> list[_LoadGroup] | None:
         assert request.load_spec is not None
         cached_tokens = request.load_spec.kvpool_cached_tokens
         if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
@@ -1982,11 +1940,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         request.load_masks = self._compute_reachable_load_masks(request, cached_tokens)
 
         groups: list[_LoadGroup] = []
-        public_keys: dict[str, None] = {}
-        get_snapshot = None
-        if self.layerwise_offload and request.load_spec.layerwise_previous_step:
-            get_snapshot = getattr(self, "_get_layerwise_load_snapshot", None)
-        get_snapshot_start = getattr(self, "_layerwise_load_snapshot_start", None)
+        restore_previous_step = self.layerwise_offload and request.load_spec.layerwise_previous_step
         for group_id in range(self.num_kv_cache_groups):
             if group_id not in self.cacheable_group_ids:
                 groups.append((np.zeros(0, dtype=np.int64), [], [], False))
@@ -2000,18 +1954,13 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             )
             cached_full_blocks = cached_tokens // effective_block_size
             full_blocks = min(cached_full_blocks, len(group_block_hashes))
-            snapshot_start = None
             get_saved_key = None
-            if get_snapshot is not None:
-                snapshot = get_snapshot(request, group_id, cached_tokens, group_block_hashes)
+            if restore_previous_step:
+                snapshot = self._get_layerwise_load_snapshot(request, group_id, cached_tokens, group_block_hashes)
                 if snapshot is None:
                     groups.append((np.zeros(0, dtype=np.int64), [], [], False))
                     continue
                 full_blocks, get_saved_key = snapshot
-            elif get_snapshot_start is not None:
-                snapshot_start = get_snapshot_start(request, group_id, cached_tokens)
-                if snapshot_start is not None:
-                    full_blocks = cached_full_blocks
 
             block_ids_by_group = (
                 request.block_ids_by_group_np[group_id]
@@ -2070,29 +2019,18 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if partial_block_index is not None:
                 block_indices.append(partial_block_index)
             for block_idx in block_indices:
-                is_partial = block_idx == partial_block_index
                 if get_saved_key is not None:
-                    saved_key = get_saved_key(block_idx)
-                    if saved_key is None:
+                    key = get_saved_key(block_idx)
+                    if key is None:
                         return None
-                    key, is_public = saved_key
-                elif is_partial:
+                elif block_idx == partial_block_index:
                     key = self._make_layerwise_partial_key(request, group_id, block_idx, partial_end_token)
-                    is_public = False
-                elif snapshot_start is not None and block_idx >= snapshot_start:
-                    snapshot_end_token = getattr(request.load_spec, "layerwise_snapshot_end_token", None)
-                    assert snapshot_end_token is not None
-                    key = self._make_layerwise_partial_key(request, group_id, block_idx, snapshot_end_token)
-                    is_public = False
                 else:
                     block_hash = block_hash_to_str(group_block_hashes[block_idx])
                     key = self._make_layerwise_full_key(group_id, block_hash)
-                    is_public = True
                 keys.append(key)
-                if is_public:
-                    public_keys[key] = None
             groups.append((np.zeros(full_len, dtype=np.int64), block_indices, keys, partial_block_index is not None))
-        return groups, public_keys
+        return groups
 
     def _check_hybrid_load_errors(self) -> None:
         # Memcache reports invalid blocks through the existing scheduler policy.
