@@ -20,9 +20,11 @@ import os
 import sys
 import tempfile
 import unittest
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, call, patch
+
+import pytest
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
@@ -58,9 +60,119 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
     _validate_store_qos,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend import (
+    YuanrongBackend,
     YuanrongConfig,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, MemoryLocation
+
+
+@pytest.mark.parametrize("name,value", [("COPY_L2G", 0), ("COPY_G2L", 1), ("COPY_G2H", 2), ("COPY_H2G", 3)])
+# Verify MmcDirect names and wire values remain bidirectionally consistent.
+def test_memcache_copy_direction_wire_values(name, value):
+    direction = MmcDirect[name]
+    assert direction.value == value
+    assert MmcDirect(value) is direction
+    assert len(MmcDirect) == 4
+
+
+# Verify set_device binds the selected NPU without initializing the store.
+def test_memcache_binds_captured_device_without_initializing_store(monkeypatch):
+    device_id = 1
+    backend = MemcacheBackend.__new__(MemcacheBackend)
+    backend.device_id = device_id
+    device_calls: list[int] = []
+    initialize_calls = []
+    monkeypatch.setattr(memcache_module.torch, "npu", SimpleNamespace(set_device=device_calls.append))
+    with patch.object(MemcacheBackend, "ensure_initialized", side_effect=lambda: initialize_calls.append(True)):
+        backend.set_device()
+    assert device_calls == [device_id]
+    assert initialize_calls == []
+
+
+# Verify fabric-memory setup avoids a private transfer engine in both memory modes.
+def test_mooncake_fabric_setup_never_creates_private_transfer_engine(monkeypatch):
+    contribute_memory = True
+    monkeypatch.setenv("ASCEND_ENABLE_USE_FABRIC_MEM", "1")
+    monkeypatch.setenv("ASCEND_GLOBAL_RESOURCE_CONFIG", "")
+    config = _make_mooncake_store_config(global_segment_size=1024, local_buffer_size=512)
+    store = MagicMock()
+    engine = MagicMock()
+    setup_calls = []
+    transfer_engine_calls = []
+
+    # Bind leaf dependencies at execution time: whole-suite collection may
+    # replace torch.npu or mooncake modules after this file was imported.
+    package, store_module = ModuleType("mooncake"), ModuleType("mooncake.store")
+    package.__dict__.update(__path__=[], store=store_module)
+    store_module.__dict__["MooncakeDistributedStore"] = MagicMock(return_value=store)
+    monkeypatch.setitem(sys.modules, "mooncake", package)
+    monkeypatch.setitem(sys.modules, "mooncake.store", store_module)
+    monkeypatch.setattr(mooncake_module, "global_te", engine)
+    monkeypatch.setattr(mooncake_module, "get_global_rank", lambda: 0)
+    monkeypatch.setattr(mooncake_module, "get_ip", lambda: "10.0.0.7")
+
+    def setup(**kwargs):
+        setup_calls.append(kwargs)
+        return 0
+
+    store.setup.side_effect = setup
+    engine.get_transfer_engine.side_effect = lambda *args, **kwargs: transfer_engine_calls.append((args, kwargs))
+    with (
+        patch.object(MooncakeStoreConfig, "load_from_env", return_value=config),
+        patch.object(
+            mooncake_module.torch,
+            "npu",
+            SimpleNamespace(current_device=lambda: 0, set_device=lambda device_id: None),
+        ),
+    ):
+        backend = MooncakeBackend(MagicMock(), contribute_memory=contribute_memory)
+    assert backend.store is store
+    assert backend._use_fabric_mem
+    assert backend._store_initialized
+    assert len(setup_calls) == 1
+    assert transfer_engine_calls == []
+    kwargs = setup_calls[0]
+    assert kwargs["local_buffer_size"] == 0
+    assert kwargs["global_segment_size"] == (config.global_segment_size if contribute_memory else 0)
+    assert "engine" not in kwargs
+    assert backend.local_seg == "10.0.0.7"
+
+
+@pytest.mark.parametrize(
+    "enable_data_plane,use_layerwise", [(False, True), (False, False)], ids=["layerwise-only", "plain"]
+)
+def test_yuanrong_constructor_initializes_only_required_data_plane(enable_data_plane, use_layerwise):
+    config = YuanrongConfig(
+        worker_addr="127.0.0.1:18000",
+        enable_remote_h2d=True,
+        remote_h2d_transport_backend="HIXL",
+        enable_fabric_mem=False,
+        use_layerwise=use_layerwise,
+        enable_dev_mem_pregister=True,
+    )
+    constructed, initialized = [], []
+    client = SimpleNamespace(init=lambda: initialized.append(True))
+
+    def create_client(host, port, **kwargs):
+        constructed.append((host, port, kwargs))
+        return client
+
+    with (
+        patch.object(YuanrongConfig, "load_from_env", return_value=config),
+        patch.object(sys.modules["yr.datasystem.hetero_client"], "HeteroClient", create_client),
+    ):
+        backend = YuanrongBackend(SimpleNamespace(), enable_data_plane=enable_data_plane)
+    assert backend.store is client
+    assert constructed == [
+        (
+            "127.0.0.1",
+            18000,
+            {"connect_timeout_ms": 9000, "req_timeout_ms": 0, "enable_remote_h2d": enable_data_plane},
+        )
+    ]
+    assert initialized == ([True] if enable_data_plane or use_layerwise else [])
+    assert backend.config is config
+    assert backend.requires_exists_before_put is False
 
 
 def _format_log_call(call):

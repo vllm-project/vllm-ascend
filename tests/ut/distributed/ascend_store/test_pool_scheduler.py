@@ -43,7 +43,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.serial_utils import MsgpackEncoder
 from zmq.constants import RCVTIMEO, REP
-from zmq.error import ZMQError
+from zmq.error import Again, ZMQError
 from zmq.sugar.context import Context
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
@@ -2667,3 +2667,238 @@ def test_layerwise_partial_tail_preserves_zero_external_load(pool_hit_tokens):
     assert load_spec.vllm_cached_tokens == aligned_local_tokens
     assert load_spec.kvpool_cached_tokens == pool_hit_tokens
     assert load_spec.can_load
+
+
+# Verify RPC transport failures close resources and prevent a second send on a failed client.
+@pytest.mark.parametrize(
+    "stage,timeout", [("send_multipart", True), ("recv", False)], ids=["send-timeout", "recv-error"]
+)
+def test_lookup_transport_failure_closes_and_short_circuits(stage, timeout):
+    module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key"
+    with patch(f"{module}.zmq.Context"), patch(f"{module}.make_zmq_socket") as make_socket:
+        client = LookupKeyClient(make_config())
+        client.encoder = MagicMock()
+        client.encoder.encode.side_effect = [[b"hash"], [b"group"]]
+        socket = make_socket.return_value
+        sent = []
+        received = []
+        closed = []
+        terminated = []
+
+        def send_multipart(*args, **kwargs):
+            sent.append((args, kwargs))
+            if stage == "send_multipart":
+                raise Again() if timeout else ZMQError("transport failed")
+
+        def recv(*args):
+            received.append(args)
+            if stage == "recv":
+                raise Again() if timeout else ZMQError("transport failed")
+            return MsgpackEncoder().encode((0, ()))
+
+        socket.send_multipart.side_effect = send_multipart
+        socket.recv_multipart.side_effect = recv
+        socket.close.side_effect = lambda **kwargs: closed.append(kwargs)
+        client.ctx.term.side_effect = lambda: terminated.append(True)
+        assert client.lookup(32, [b"a"]) == StoreLookupResult(0)
+        assert client.closed
+        assert client.lookup(32, [b"a"]) == StoreLookupResult(0)
+        client.close()
+        assert len(sent) == 1
+        assert len(received) == (stage == "recv")
+        assert closed == [{"linger": 0}]
+        assert terminated == [True]
+
+
+# Verify unsigned wire values are validated before sending.
+@pytest.mark.parametrize("field,value", [("token_len", -1)])
+def test_lookup_rejects_invalid_uint32_before_send(field, value, request):
+    module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key"
+    with patch(f"{module}.zmq.Context"), patch(f"{module}.make_zmq_socket"):
+        client = LookupKeyClient(make_config())
+        client.encoder = MagicMock()
+        client.encoder.encode.side_effect = [[b"hash"], [b"group"]]
+        sent = []
+        received = []
+        client.socket.send_multipart.side_effect = lambda *args: sent.append(args)
+        client.socket.recv_multipart.side_effect = lambda: received.append(True)
+        request.addfinalizer(client.close)
+        kwargs = {"token_len": 32, "hbm_hit_tokens": 0, field: value}
+        with pytest.raises(OverflowError):
+            client.lookup(block_hashes=[b"a"], **kwargs)
+        assert sent == []
+        assert received == []
+
+
+# Verify a preempted request rebuilds its full block table, then appends only running deltas.
+def test_preempt_resume_rebuilds_table_before_running_delta():
+    with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient"):
+        config = make_config()
+        config.use_v2_model_runner = True
+        scheduler = KVPoolScheduler(config, use_layerwise=False, kv_cache_config=make_resolved_cache_config(config))
+        request = SimpleNamespace(
+            request_id="resumed",
+            num_computed_tokens=0,
+            num_prompt_tokens=32,
+            prompt_token_ids=list(range(32)),
+            all_token_ids=list(range(32)),
+            block_hashes=[b"a", b"b"],
+        )
+        scheduler.update_state_after_alloc(request, MagicMock(), 0)
+        scheduler._request_trackers["resumed"] = RequestTracker(
+            "resumed",
+            token_len=16,
+            allocated_block_ids=[1],
+            num_saved_tokens=16,
+        )
+        output = SimpleNamespace(
+            finished_req_ids=set(),
+            preempted_req_ids={"resumed"},
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+            num_scheduled_tokens={},
+            kv_connector_block_state=KVConnectorBlockState(
+                req_ids={"resumed"}, resolve_block_ids=lambda _: ([10, 11],), boundary_state_offloads={}
+            ),
+        )
+        assert scheduler.build_connector_meta(output).preempted_req_ids == {"resumed"}
+        scheduler.update_state_after_alloc(request, MagicMock(), 0)
+        output.preempted_req_ids = set()
+        output.num_scheduled_tokens = {"resumed": 16}
+        output.scheduled_new_reqs = [
+            SimpleNamespace(
+                req_id="resumed",
+                num_computed_tokens=0,
+                block_ids=([10, 11],),
+                prompt_token_ids=list(range(32)),
+                prefill_token_ids=None,
+            )
+        ]
+        metadata = scheduler.build_connector_meta(output)
+        req_meta = metadata.requests[0]
+        assert req_meta.block_ids == [10, 11]
+        assert req_meta.block_hashes == [b"a", b"b"]
+        assert list(zip(req_meta.block_hashes, req_meta.block_ids)) == [(b"a", 10), (b"b", 11)]
+        assert req_meta.save_start_token == 0
+        request.num_computed_tokens = 16
+        output.scheduled_new_reqs = []
+        output.scheduled_cached_reqs = SimpleNamespace(
+            req_ids=["resumed"],
+            new_block_ids=[([12],)],
+            num_computed_tokens=[16],
+        )
+        output.kv_connector_block_state = KVConnectorBlockState(
+            req_ids={"resumed"}, resolve_block_ids=lambda _: ([10, 11, 12],), boundary_state_offloads={}
+        )
+        metadata = scheduler.build_connector_meta(output)
+        req_meta = metadata.requests[0]
+        assert req_meta.block_ids == [10, 11, 12]
+        assert req_meta.block_hashes == [b"a", b"b"]
+        assert list(zip(req_meta.block_hashes, req_meta.block_ids)) == [(b"a", 10), (b"b", 11)]
+        assert req_meta.save_start_token == 16
+
+
+@pytest.mark.parametrize(
+    "phase,save_decode_cache", [("chunked", True), ("decode", False)], ids=["chunked-save", "decode-skip"]
+)
+def test_cached_request_metadata_preserves_delta_and_decode_save_policy(phase, save_decode_cache):
+    with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient"):
+        config = make_config(extra_config={"save_decode_cache": save_decode_cache})
+        scheduler = KVPoolScheduler(config, False, kv_cache_config=make_resolved_cache_config(config))
+    prompt_tokens = 64 if phase == "chunked" else 32
+    request = SimpleNamespace(
+        request_id="cached",
+        num_computed_tokens=32,
+        num_prompt_tokens=prompt_tokens,
+        prompt_token_ids=list(range(prompt_tokens)),
+        all_token_ids=list(range(64)),
+        block_hashes=[b"a", b"b", b"c", b"d"],
+    )
+    scheduler.update_state_after_alloc(request, MagicMock(), 0)
+    scheduler._request_trackers[request.request_id] = RequestTracker(
+        request.request_id,
+        token_len=32,
+        allocated_block_ids=[5, 7],
+        num_saved_tokens=32,
+        num_prompt_tokens=prompt_tokens,
+        prefill_end_tokens=prompt_tokens,
+    )
+    output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[request.request_id], new_block_ids=[([9],)], num_computed_tokens=[32]
+        ),
+        num_scheduled_tokens={request.request_id: 16},
+        kv_connector_block_state=KVConnectorBlockState(
+            req_ids={request.request_id}, resolve_block_ids=lambda _: ([5, 7, 9],), boundary_state_offloads={}
+        ),
+    )
+    metadata = scheduler.build_connector_meta(output)
+    if phase == "decode" and not save_decode_cache:
+        assert metadata.requests == []
+    else:
+        assert len(metadata.requests) == 1
+        result = metadata.requests[0]
+        assert result.req_id == request.request_id
+        assert result.block_ids == [5, 7, 9]
+        assert result.block_hashes[:3] == [b"a", b"b", b"c"]
+        assert (result.save_start_token, result.save_end_token) == (32, 48)
+        assert result.target_token_len == 48
+        assert result.can_save
+
+
+@pytest.fixture
+def contiguous_review_scheduler():
+    config = make_config(extra_config={"backend": "memcache"})
+    scheduler = create_kv_pool_scheduler(config, use_layerwise=True, kv_cache_config=make_resolved_cache_config(config))
+    scheduler.cache_coordinator = None
+    scheduler.layerwise_max_transfer_blocks = 0
+    return scheduler
+
+
+@pytest.mark.parametrize("entry", ["_lookup_layerwise_contiguous", "_lookup_block_key_contiguous"])
+def test_review_contiguous_hit_stops_before_hit_after_hole(contiguous_review_scheduler, entry):
+    scheduler = contiguous_review_scheduler
+    scheduler.layerwise_offload = False
+    request = SimpleNamespace(request_id="hole", block_hashes=[b"a", b"b", b"c"])
+    readable = set()
+    for block_hash in (b"a", b"c"):
+        readable.update(scheduler._make_layerwise_hit_check_keys(0, block_hash.hex()))
+    scheduler.store_scheduler = SimpleNamespace(batch_is_readable=lambda keys: [key in readable for key in keys])
+
+    assert getattr(scheduler, entry)(request, 48, 0) == 16
+
+
+def test_review_layer_reuse_rechecks_evicted_early_prefix(contiguous_review_scheduler):
+    scheduler = contiguous_review_scheduler
+    scheduler.layerwise_offload = True
+    scheduler.cache_coordinator = AscendStoreCoordinator(
+        [
+            KVCacheGroupSpec(
+                ["layer.0"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
+            )
+        ],
+        scheduler_block_size=16,
+        hash_block_size=16,
+        group_block_sizes=[16],
+        group_cache_families=["default"],
+    )
+    local_tokens = 16
+    request = SimpleNamespace(request_id="reused", block_hashes=[b"a", b"b", b"c"])
+    # Later blocks exist, but block zero was evicted despite local progress.
+    readable = set()
+    for block_hash in (b"b", b"c"):
+        readable.update(scheduler._make_layerwise_hit_check_keys(0, block_hash.hex()))
+    scheduler.store_scheduler = SimpleNamespace(batch_is_readable=lambda keys: [key in readable for key in keys])
+
+    assert scheduler._get_layerwise_hit_tokens(request, 48, local_tokens) == 0
+
+
+def test_review_readability_count_mismatch_raises(contiguous_review_scheduler):
+    scheduler = contiguous_review_scheduler
+    scheduler.store_scheduler = SimpleNamespace(batch_is_readable=lambda keys: [True])
+
+    with pytest.raises(RuntimeError, match="invalid results"):
+        scheduler._query_layerwise_block_hits([["a"], ["b"], ["c"]])
