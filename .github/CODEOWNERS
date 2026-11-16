@@ -96,6 +96,7 @@
 
 # ops
 /vllm_ascend/ops @zzzzwwjj
+/vllm_ascend/ops/dsa.py @zzzzwwjj @lcfenglinwan @GDzhu01 @linfeng-yuan
 /vllm_ascend/ops/linear_op.py @xuchi-0808
 /vllm_ascend/ops/vocab_parallel_embedding.py @xuchi-0808
 /vllm_ascend/ops/triton @AuroraEmiya @ZT-AIA @yiz-liu
@@ -238,5 +239,6 @@
 /vllm_ascend/model_loader/rfork/ @yangsonglin13
 
 # Files/modules not owned by any person(No need to be approved)
+# SKIP(owner): /tests/deepseek_v41_utils.py
 # SKIP(owner): /tests/ut/
 # SKIP(owner): /tests/e2e/pull_request/
