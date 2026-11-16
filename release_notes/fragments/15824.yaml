@@ -1,0 +1,4 @@
+pr: 15824
+entries:
+  - category: bugfix
+    text: Restored DSpark rotation alignment for checkpoints that publish only the legacy QuaRot matrix.
