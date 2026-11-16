@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Batch independent DCP rows while keeping DCP rank accumulation sequential.
 
-Eight D=512 rows use 16 KiB for the FP32 accumulator. The rank dimension
-is streamed, so it does not multiply the accumulator size.
+The combine kernel's eight D=512 rows use 16 KiB for the FP32 accumulator.
+Its rank dimension is streamed, so it does not multiply the accumulator size.
 """
 
 from vllm.triton_utils import tl, triton
@@ -34,73 +34,6 @@ def _encode_lse_fields(lse):
 
 
 @triton.jit
-def _pack_dcp_output_lse_rectangular_kernel(
-    output_ptr,
-    lse_ptr,
-    sum_ptr,
-    send_ptr,
-    output_stride_t: tl.constexpr,
-    output_stride_h: tl.constexpr,
-    output_stride_d: tl.constexpr,
-    lse_stride_t: tl.constexpr,
-    lse_stride_h: tl.constexpr,
-    sum_stride_t: tl.constexpr,
-    sum_stride_h: tl.constexpr,
-    send_stride_rank: tl.constexpr,
-    send_stride_scatter: tl.constexpr,
-    send_stride_replicated: tl.constexpr,
-    send_stride_d: tl.constexpr,
-    local_scatter_size: tl.constexpr,
-    head_dim: tl.constexpr,
-    num_heads: tl.constexpr,
-    total_rows: tl.constexpr,
-    SCATTER_TOKENS: tl.constexpr,
-    LSE_PACK_DIM: tl.constexpr,
-    FROM_STATS: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-    BLOCK_ROWS: tl.constexpr,
-    OUTPUT_HEAD_MAJOR: tl.constexpr = False,
-):
-    TILE_T: tl.constexpr = 4
-    TILE_H: tl.constexpr = 8
-    T: tl.constexpr = total_rows // num_heads
-    token_tiles: tl.constexpr = triton.cdiv(T, TILE_T)
-    head_tiles: tl.constexpr = triton.cdiv(num_heads, TILE_H)
-    rr = tl.arange(0, TILE_T)
-    hh = tl.arange(0, TILE_H)
-    dd = tl.arange(0, BLOCK_D)
-    for tile in range(tl.program_id(0), token_tiles * head_tiles, tl.num_programs(0)):
-        token = (tile % token_tiles * TILE_T + rr).to(tl.int64)
-        head = (tile // token_tiles * TILE_H + hh).to(tl.int64)
-        row_mask = (token[:, None] < T) & (head[None, :] < num_heads)
-        offsets = (
-            token[:, None, None] * output_stride_t
-            + head[None, :, None] * output_stride_h
-            + dd[None, None, :] * output_stride_d
-        )
-        mask = row_mask[:, :, None] & (dd[None, None, :] < head_dim)
-        values = tl.load(output_ptr + offsets, mask, 0.0)
-        send_base = (head[None, :] * T + token[:, None]) * send_stride_replicated
-        tl.store(send_ptr + send_base[:, :, None] + dd[None, None, :] * send_stride_d, values, mask)
-        lse = tl.load(lse_ptr + token[:, None] * lse_stride_t + head[None, :] * lse_stride_h, row_mask, 0.0).to(
-            tl.float32
-        )
-        if FROM_STATS:
-            total = tl.load(sum_ptr + token[:, None] * sum_stride_t + head[None, :] * sum_stride_h, row_mask, 1.0).to(
-                tl.float32
-            )
-            lse = lse + tl.log(total)
-        if LSE_PACK_DIM == 1:
-            tl.store(send_ptr + send_base + head_dim * send_stride_d, lse.to(send_ptr.dtype.element_ty), row_mask)
-        else:
-            code, hi, mid, lo = _encode_lse_fields(lse)
-            tl.store(send_ptr + send_base + head_dim * send_stride_d, code.to(send_ptr.dtype.element_ty), row_mask)
-            tl.store(send_ptr + send_base + (head_dim + 1) * send_stride_d, hi.to(send_ptr.dtype.element_ty), row_mask)
-            tl.store(send_ptr + send_base + (head_dim + 2) * send_stride_d, mid.to(send_ptr.dtype.element_ty), row_mask)
-            tl.store(send_ptr + send_base + (head_dim + 3) * send_stride_d, lo.to(send_ptr.dtype.element_ty), row_mask)
-
-
-@triton.jit
 def _pack_dcp_output_lse_batched_kernel(
     output_ptr,
     lse_ptr,
@@ -113,97 +46,72 @@ def _pack_dcp_output_lse_batched_kernel(
     lse_stride_h,
     sum_stride_t,
     sum_stride_h,
-    send_stride_rank,
-    send_stride_scatter,
-    send_stride_replicated,
-    send_stride_d,
-    local_scatter_size,
-    head_dim,
+    num_tokens,
     num_heads,
-    total_rows,
-    SCATTER_TOKENS: tl.constexpr,
-    LSE_PACK_DIM: tl.constexpr,
-    FROM_STATS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
     BLOCK_D: tl.constexpr,
-    BLOCK_ROWS: tl.constexpr,
-    OUTPUT_HEAD_MAJOR: tl.constexpr = False,
+    FROM_STATS: tl.constexpr,
 ):
-    program_idx = tl.program_id(0)
-    num_programs = tl.num_programs(0)
-    d_offsets = tl.arange(0, BLOCK_D)[None, :]
-
-    if OUTPUT_HEAD_MAJOR:
-        num_tokens = total_rows // num_heads
-        token_tiles = tl.cdiv(num_tokens, BLOCK_ROWS)
-        tiles = token_tiles * num_heads
-    else:
-        tiles = tl.cdiv(total_rows, BLOCK_ROWS)
-    for tile in range(program_idx, tiles, num_programs):
-        if OUTPUT_HEAD_MAJOR:
-            # Keep each tile inside one head so both copies have affine strides.
-            head_idx = (tile // token_tiles).to(tl.int64)
-            token_idx = (tile % token_tiles) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)[:, None]
-            row_mask = token_idx < num_tokens
-            token_idx = token_idx.to(tl.int64)
-        else:
-            linear_idx = tile * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)[:, None]
-            row_mask = linear_idx < total_rows
-            token_idx = (linear_idx // num_heads).to(tl.int64)
-            head_idx = (linear_idx % num_heads).to(tl.int64)
-
-        if OUTPUT_HEAD_MAJOR:
-            send_base = (head_idx * num_tokens + token_idx) * send_stride_replicated
-        else:
-            if SCATTER_TOKENS:
-                rank_idx = token_idx // local_scatter_size
-                scatter_idx = token_idx % local_scatter_size
-                replicated_idx = head_idx
-            else:
-                rank_idx = head_idx // local_scatter_size
-                scatter_idx = head_idx % local_scatter_size
-                replicated_idx = token_idx
-            send_base = (
-                rank_idx * send_stride_rank
-                + scatter_idx * send_stride_scatter
-                + replicated_idx * send_stride_replicated
+    """Pack BF16 head-scatter rows with one two-token, four-head tile."""
+    # Four wire fields carry FP32 LSE; cap feature tiles to bound strided UB use.
+    LSE_FIELDS: tl.constexpr = 4
+    MAX_FEATURE_TILE: tl.constexpr = 512
+    TILE_T: tl.constexpr = 2
+    TILE_H: tl.constexpr = 4
+    # Bound the feature-strided address and copy working set for wide rows.
+    TILE_D: tl.constexpr = min(BLOCK_D, MAX_FEATURE_TILE)
+    token_tiles = tl.cdiv(num_tokens, TILE_T)
+    head_tiles = tl.cdiv(num_heads, TILE_H)
+    token_offsets = tl.arange(0, TILE_T)
+    head_offsets = tl.arange(0, TILE_H)
+    feature_offsets = tl.arange(0, TILE_D)
+    program = tl.program_id(0)
+    programs = tl.num_programs(0)
+    tiles = token_tiles * head_tiles
+    quotient = tiles // programs
+    remainder = tiles % programs
+    first = program * quotient + tl.minimum(program, remainder)
+    count = quotient + (program < remainder).to(tl.int32)
+    token_start = first % token_tiles * TILE_T
+    head_start = first // token_tiles * TILE_H
+    # Consecutive intervals cover each tile once; carry replaces per-tile div/rem.
+    for _ in range(count):
+        token = (token_start + token_offsets).to(tl.int64)
+        head = (head_start + head_offsets).to(tl.int64)
+        row_mask = (token[:, None] < num_tokens) & (head[None, :] < num_heads)
+        # The caller allocates contiguous [rank, local_head, token, D + 4].
+        send_base = (head[None, :] * num_tokens + token[:, None]) * (HEAD_DIM + LSE_FIELDS)
+        for feature_start in range(0, HEAD_DIM, TILE_D):
+            feature = feature_start + feature_offsets
+            output_offsets = (
+                token[:, None, None] * output_stride_t
+                + head[None, :, None] * output_stride_h
+                + feature[None, None, :] * output_stride_d
             )
-        output_offsets = token_idx * output_stride_t + head_idx * output_stride_h + d_offsets * output_stride_d
-        d_mask = (d_offsets < head_dim) & row_mask
-        output = tl.load(output_ptr + output_offsets, mask=d_mask, other=0.0)
-        tl.store(send_ptr + send_base + d_offsets * send_stride_d, output, mask=d_mask)
-
-        lse = tl.load(lse_ptr + token_idx * lse_stride_t + head_idx * lse_stride_h, mask=row_mask, other=0.0).to(
+            mask = row_mask[:, :, None] & (feature[None, None, :] < HEAD_DIM)
+            output = tl.load(output_ptr + output_offsets, mask, 0.0)
+            tl.store(
+                send_ptr + send_base[:, :, None] + feature[None, None, :],
+                output,
+                mask,
+            )
+        lse = tl.load(lse_ptr + token[:, None] * lse_stride_t + head[None, :] * lse_stride_h, row_mask, 0.0).to(
             tl.float32
         )
         if FROM_STATS:
-            total = tl.load(sum_ptr + token_idx * sum_stride_t + head_idx * sum_stride_h, mask=row_mask, other=1.0).to(
+            total = tl.load(sum_ptr + token[:, None] * sum_stride_t + head[None, :] * sum_stride_h, row_mask, 1.0).to(
                 tl.float32
             )
             lse = lse + tl.log(total)
-        if LSE_PACK_DIM == 1:
-            tl.store(send_ptr + send_base + head_dim * send_stride_d, lse.to(send_ptr.dtype.element_ty), mask=row_mask)
-        else:
-            exponent_code, significand_hi, significand_mid, significand_lo = _encode_lse_fields(lse)
-            tl.store(
-                send_ptr + send_base + head_dim * send_stride_d,
-                exponent_code.to(send_ptr.dtype.element_ty),
-                mask=row_mask,
-            )
-            tl.store(
-                send_ptr + send_base + (head_dim + 1) * send_stride_d,
-                significand_hi.to(send_ptr.dtype.element_ty),
-                mask=row_mask,
-            )
-            tl.store(
-                send_ptr + send_base + (head_dim + 2) * send_stride_d,
-                significand_mid.to(send_ptr.dtype.element_ty),
-                mask=row_mask,
-            )
-            tl.store(
-                send_ptr + send_base + (head_dim + 3) * send_stride_d,
-                significand_lo.to(send_ptr.dtype.element_ty),
-                mask=row_mask,
-            )
+        exponent_code, significand_hi, significand_mid, significand_lo = _encode_lse_fields(lse)
+        tl.store(send_ptr + send_base + HEAD_DIM, exponent_code, row_mask)
+        tl.store(send_ptr + send_base + HEAD_DIM + 1, significand_hi, row_mask)
+        tl.store(send_ptr + send_base + HEAD_DIM + 2, significand_mid, row_mask)
+        tl.store(send_ptr + send_base + HEAD_DIM + 3, significand_lo, row_mask)
+        token_start += TILE_T
+        carry = token_start >= num_tokens
+        token_start = tl.where(carry, 0, token_start)
+        head_start += tl.where(carry, TILE_H, 0)
 
 
 @triton.jit

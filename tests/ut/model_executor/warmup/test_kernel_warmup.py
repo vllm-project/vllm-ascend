@@ -185,6 +185,9 @@ def test_v2_initialize_kv_cache_upstream_holds_registry_window():
 
 @pytest.fixture(autouse=True)
 def dcp_kernel_signatures(monkeypatch):
+    # The metadata-only Triton shim also needs the launch constructor's integer helper.
+    if not hasattr(dcp_warmup.triton, "next_power_of_2"):
+        monkeypatch.setattr(dcp_warmup.triton, "next_power_of_2", lambda n: 1 << (n - 1).bit_length(), raising=False)
     # The no-Triton shim returns plain functions; emulate only JIT signature metadata.
     for owner in dcp_warmup._DCP_KERNELS:
         if not hasattr(owner.kernel, "arg_names"):
