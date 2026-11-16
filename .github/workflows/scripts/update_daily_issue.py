@@ -158,10 +158,12 @@ def publish_failure(client: GitHubClient, inputs: dict, server_url: str) -> int:
     if len(matches) > 1:
         raise ValueError("Multiple Issues already belong to this Daily round; resolve duplicates before retrying")
     run_url = f"{server_url}/{client.repository}/actions/runs/{run_id}"
+    started_at = datetime.fromisoformat(root["run_started_at"]).astimezone(ISSUE_TIMEZONE)
+    title = f"Daily test failure on {started_at:%Y-%m-%d %H:%M} - run {run_id} - please check"
+    workflow_name = safe_text(root.get("name") or "Schedule Daily Tests")
+    header = f"## {workflow_name}\n\n[Run #{run_id}]({run_url})"
     if not matches:
-        started_at = datetime.fromisoformat(root["run_started_at"]).astimezone(ISSUE_TIMEZONE)
-        title = f"Daily test failure on {started_at:%Y-%m-%d %H:%M} - please check"
-        body = append_grouped_failure(f"{marker}\n[Daily run]({run_url})", inputs, run_url)
+        body = append_grouped_failure(f"{marker}\n\n{header}", inputs, run_url)
         # Creation is not blindly retried: a timeout may have created the Issue.
         # Re-running this writer first lists Issues again to discover that write.
         issue = client.request(
@@ -173,12 +175,14 @@ def publish_failure(client: GitHubClient, inputs: dict, server_url: str) -> int:
         return issue["number"]
     issue = matches[0]
     previous_body = issue.get("body") or ""
-    body = append_grouped_failure(marker_pattern.sub(marker, previous_body, count=1), inputs, run_url)
-    if body == previous_body:
+    body = marker_pattern.sub(marker, previous_body, count=1)
+    body = re.sub(rf"(?m)^\[Daily run\]\({re.escape(run_url)}(?:/attempts/[1-9][0-9]*)?\)$", header, body, count=1)
+    body = append_grouped_failure(body, inputs, run_url)
+    if body == previous_body and issue.get("title") == title:
         return issue["number"]
     if len(body) > MAX_BODY_LENGTH:
         raise ValueError("Daily Issue body limit reached")
-    client.request("PATCH", f"issues/{issue['number']}", {"body": body})
+    client.request("PATCH", f"issues/{issue['number']}", {"title": title, "body": body})
     return issue["number"]
 
 
