@@ -29,6 +29,11 @@ import zhconv
 from openai import AsyncOpenAI
 from polib import POEntry, pofile
 
+# OpenCode Console exposes an OpenAI-compatible endpoint. The same shared
+# account token also authenticates the `opencode` CLI used by other workflows.
+DEFAULT_BASE_URL = "https://opencode.ai/inference/openai/v1"
+DEFAULT_MODEL = "deepseek-v4.1-flash"
+
 SYSTEM_PROMPT = (
     "You are a professional technical documentation translator specializing in "
     "translating MkDocs markdown documentation from English to Simplified Chinese (简体中文). "
@@ -161,6 +166,15 @@ CRITICAL RULES — violations will cause the translation to be rejected:
 _SIMPLIFIED_CONVERSION_PROTECTED_TERMS = ("昇腾",)
 
 
+def normalize_model(model: str) -> str:
+    """Return the model ID used by the OpenAI-compatible endpoint.
+
+    Workflows may pass either the CLI form used by ``opencode run``
+    (``opencode/<model>``) or the raw HTTP model ID (``<model>``).
+    """
+    return model.strip().removeprefix("opencode/")
+
+
 def _normalize_msgid(text: str) -> str:
     """Normalize a msgid for fuzzy comparison.
 
@@ -199,8 +213,15 @@ def _convert_po_to_simplified(po):
 
 
 class POTranslator:
-    def __init__(self, api_key: str, max_concurrent: int = 5):
-        self.client = AsyncOpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = DEFAULT_BASE_URL,
+        model: str = DEFAULT_MODEL,
+        max_concurrent: int = 5,
+    ):
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self.model = normalize_model(model)
         self.max_concurrent = max_concurrent
 
     async def _call_api(self, content: str, chunk_info: str = "") -> str | None:
@@ -209,7 +230,7 @@ class POTranslator:
         if chunk_info:
             system = f"{SYSTEM_PROMPT} ({chunk_info})"
         response = await self.client.chat.completions.create(
-            model="deepseek-chat",
+            model=self.model,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
@@ -564,10 +585,12 @@ def validate_coverage(files_arg: str, ignore_error: bool = False) -> int:
 
 
 async def async_main():
-    parser = argparse.ArgumentParser(description="PO File Translator (DeepSeek)")
+    parser = argparse.ArgumentParser(description="PO File Translator (OpenCode/OpenAI-compatible)")
     parser.add_argument("--files", required=True, help="Comma-separated PO file paths")
     parser.add_argument("--output-json", default=os.getenv("OUTPUT_JSON", "/tmp/translation_results.json"))
-    parser.add_argument("--api-key", default=os.getenv("DEEPSEEK_API_KEY"))
+    parser.add_argument("--api-key", default=os.getenv("OPENCODE_API_KEY"))
+    parser.add_argument("--base-url", default=os.getenv("TRANSLATE_BASE_URL", DEFAULT_BASE_URL))
+    parser.add_argument("--model", default=os.getenv("TRANSLATE_MODEL", DEFAULT_MODEL))
     parser.add_argument("--max-concurrent", type=int, default=5)
     parser.add_argument(
         "--validate-only",
@@ -585,15 +608,24 @@ async def async_main():
     if args.validate_only:
         return validate_coverage(args.files, ignore_error=args.ignore_validation_error)
 
-    api_key = args.api_key or os.getenv("DEEPSEEK_API_KEY")
+    api_key = args.api_key or os.getenv("OPENCODE_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
-        print("Error: DEEPSEEK_API_KEY not set")
+        print("Error: OPENCODE_API_KEY not set")
         return 1
 
+    model = normalize_model(args.model)
     file_list = [f.strip() for f in args.files.split(",") if f.strip()]
-    print(f"Translating {len(file_list)} file(s), max_concurrent={args.max_concurrent}")
+    print(
+        f"Translating {len(file_list)} file(s) with model '{model}' @ {args.base_url}, "
+        f"max_concurrent={args.max_concurrent}"
+    )
 
-    translator = POTranslator(api_key=api_key, max_concurrent=args.max_concurrent)
+    translator = POTranslator(
+        api_key=api_key,
+        base_url=args.base_url,
+        model=model,
+        max_concurrent=args.max_concurrent,
+    )
     success_files = []
 
     for fp in file_list:

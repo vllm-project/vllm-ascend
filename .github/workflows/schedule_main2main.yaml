@@ -24,9 +24,9 @@ on:
         required: false
         default: ''
       model:
-        description: 'opencode model name (default: deepseek/deepseek-flash)'
+        description: 'opencode model name (default: opencode/deepseek-v4.1-flash)'
         required: false
-        default: 'deepseek/deepseek-flash'
+        default: 'opencode/deepseek-v4.1-flash'
       runner:
         description: 'A3 16-card NPU runner label (linux-aarch64-a3-16-sh-001 or linux-aarch64-a3-800i-16)'
         required: false
@@ -44,7 +44,7 @@ defaults:
 
 env:
   UPSTREAM_REPO: vllm-project/vllm-ascend
-  MAIN2MAIN_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.model || 'deepseek/deepseek-flash' }}
+  MAIN2MAIN_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.model || 'opencode/deepseek-v4.1-flash' }}
   RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
   RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
   RUNS_ON_S3_FORCE_PATH_STYLE: "false"
@@ -319,6 +319,9 @@ jobs:
       - name: Install opencode + main2main-flow
         env:
           NODE_VERSION: 24.18.0
+          # Shared OpenCode account token. The built-in `opencode` provider
+          # reads OPENCODE_API_KEY directly, so no auth.json is needed.
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         run: |
           set -euxo pipefail
 
@@ -343,30 +346,6 @@ jobs:
             --prefix "$HOME/.opencode" \
             --registry https://repo.huaweicloud.com/repository/npm/ \
             opencode-ai
-          # configure opencode auth
-          # DeepSeek official platform; MAIN2MAIN_API_KEY must hold a DeepSeek key.
-          mkdir -p ~/.local/share/opencode
-          cat > ~/.local/share/opencode/auth.json <<EOF
-          {
-            "deepseek": {
-              "type": "api",
-              "key": "${{ secrets.MAIN2MAIN_API_KEY }}"
-            }
-          }
-          EOF
-          # extend opencode's model catalog: models.dev does not list deepseek-flash yet
-          mkdir -p ~/.config/opencode
-          cat > ~/.config/opencode/opencode.json <<EOF
-          {
-            "provider": {
-              "deepseek": {
-                "models": {
-                  "deepseek-flash": {}
-                }
-              }
-            }
-          }
-          EOF
 
           # ensure opencode is on PATH within this step
           export PATH="$HOME/.opencode/bin:$PATH"
@@ -550,6 +529,9 @@ jobs:
         working-directory: ${{ github.workspace }}
         env:
           RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: True
+          # Same shared OpenCode account token used by the install step; the
+          # main2main flow spawns `opencode` and inherits this environment.
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         run: |
           set -euo pipefail
           export PATH="$HOME/.opencode/bin:$PATH"
