@@ -119,14 +119,7 @@ def has_shared_kv_sources(vllm_config: Any) -> bool:
     sources = getattr(config, "kv_source_layer_ids", None)
     if not isinstance(sources, (list, tuple)) or not sources:
         return False
-    count = getattr(config, "num_hidden_layers", 0)
-    if (
-        type(count) is not int
-        or any(type(source) is not int or not 0 <= source < count for source in sources)
-        or any(left >= right for left, right in zip(sources, sources[1:]))
-    ):
-        raise ValueError("Invalid kv_source_layer_ids for the model's layer count")
-    return len(sources) < count
+    return len(sources) < config.num_hidden_layers
 
 
 def get_layerwise_reuse_config(kv_transfer_config: Any, *, vllm_config: Any = None) -> dict[str, Any] | None:

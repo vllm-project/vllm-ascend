@@ -5,8 +5,6 @@ import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
-import pytest
-
 from tests.ut.attention.test_mla_layerwise_load_cpu import load
 
 PUSH = "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/push_worker.py"
@@ -51,20 +49,6 @@ def test_composite_owner_is_early_ready_but_component_and_draft_are_not():
         "model.layers.2.long": 32,
         "model.layers.2.swa": 32,
     }
-
-
-@pytest.mark.parametrize(
-    "names",
-    [
-        ("missing",),
-        ("model.layers.2.long",),
-        ("model.layers.2.long", "model.layers.2.long"),
-        ("model.layers.2.long", "draft"),
-    ],
-)
-def test_invalid_ownership_fails_registration(names):
-    with pytest.raises(ValueError):
-        load(PUSH, "_register_composite_layer_aliases", {}, OWNER)(worker(names))
 
 
 def test_external_prefix_is_not_marked_ready_before_model_load_hook():

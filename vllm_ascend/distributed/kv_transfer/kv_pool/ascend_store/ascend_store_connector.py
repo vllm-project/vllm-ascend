@@ -407,11 +407,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         # then let each cache owner copy its own recurrent state before use.
         layer = self.connector_worker._extract_physical_layer_index(layer_name)
         if self._loaded_layer != layer:
-            worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
-            if getattr(worker, "has_shared_kv", False) is True:
-                worker.wait_for_layer_load(layer_name)
-            else:
-                worker.wait_for_layer_load()
+            cast(LayerwiseKVPoolWorker, self.connector_worker).wait_for_layer_load()
             self._loaded_layer = layer
         # Mamba state copy must run AFTER this layer's load finishes,
         # otherwise the copy would race with the in-flight layerwise load and
@@ -449,11 +445,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             # A load-only consumer does not publish KV.
             return
         assert self.connector_worker is not None
-        worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
-        if getattr(worker, "has_shared_kv", False) is True:
-            worker.save_kv_layer(self._get_connector_metadata(), layer_name)
-        else:
-            worker.save_kv_layer(self._get_connector_metadata())
+        cast(LayerwiseKVPoolWorker, self.connector_worker).save_kv_layer(self._get_connector_metadata())
 
     def wait_for_save(self):
         if not self.can_put:

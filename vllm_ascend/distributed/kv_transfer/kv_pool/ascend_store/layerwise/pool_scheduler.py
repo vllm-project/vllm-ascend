@@ -16,7 +16,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     build_layerwise_reuse_layout,
     get_layerwise_kv_cache_specs,
     get_layerwise_reuse_config,
-    has_shared_kv_sources,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
@@ -48,7 +47,6 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             )
         self.use_block_key_layerwise = use_layerwise and self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = use_layerwise and self.layerwise_data_plane == "gva"
-        self.has_shared_kv = self.use_layerwise_transfer and has_shared_kv_sources(vllm_config)
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         super().__init__(vllm_config, use_layerwise, kv_cache_config)

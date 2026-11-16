@@ -18,7 +18,10 @@ import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
 from tests.ut.distributed.ascend_store import test_pool_worker
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_worker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
+    AscendStoreConnector,
+    create_kv_pool_worker,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata, LoadSpec, ReqMeta
 
@@ -110,38 +113,10 @@ class MemoryGVAStore:
         return 0
 
 
-class BoundsCheckingGVAStore(MemoryGVAStore):
-    """Reject copies beyond the allocated object instead of growing the buffer."""
-
-    def batch_copy(self, gvas, addrs, sizes, direction):
-        for gva, size in zip(gvas, sizes, strict=True):
-            if not any(base <= gva and gva + size <= base + length for base, length in self.objects.values()):
-                raise RuntimeError("GVA copy exceeds its allocated object")
-        return super().batch_copy(gvas, addrs, sizes, direction)
-
-
-def make_shared_worker(
-    test,
-    *,
-    bounded=False,
-    draft=False,
-    mode="NONE",
-    sources=(2, 8),
-    num_layers=12,
-    global_num_layers=None,
-    method=None,
-    architecture="DeepseekV41DSparkModel",
-    use_v2=True,
-    segmented=False,
-    pcp_size=1,
-    pcp_rank=0,
-    tp_size=1,
-    tp_rank=0,
-    use_mla=False,
-    extra_config=None,
-    store=None,
-):
+def make_shared_worker(test, *, bounded=False, draft=False):
     """Register real CPU cache views with the production GVA worker and queue threads."""
+    num_layers = 12
+    sources = (2, 8)
     names = [
         name
         for source in sources
@@ -161,15 +136,12 @@ def make_shared_worker(
     )
 
     def create(config, use_layerwise, kv_cache_config):
-        if global_num_layers is not None:
-            config.model_config.get_layers_start_end_indices.return_value = (0, num_layers)
-            config.model_config.get_total_num_hidden_layers.return_value = global_num_layers
         config.kv_transfer_config.kv_connector_extra_config["use_layerwise"] = True
         config.model_config.hf_config = config.model_config.hf_text_config = SimpleNamespace(
             num_hidden_layers=num_layers, kv_source_layer_ids=list(sources), compress_ratios=[2] * num_layers
         )
-        config.model_config.enforce_eager = False
-        config.compilation_config.cudagraph_mode = SimpleNamespace(name=mode)
+        config.model_config.enforce_eager = True
+        config.compilation_config.cudagraph_mode = SimpleNamespace(name="NONE")
         config.compilation_config.static_forward_context = {
             str(layer): SimpleNamespace(
                 layer_idx=layer, kv_transfer_cache_names=(f"model.layers.{layer}.attn.swa_cache",)
@@ -178,12 +150,8 @@ def make_shared_worker(
         }
         config.parallel_config.use_ubatching = config.parallel_config.use_sequence_parallel_moe = False
         config.cache_config.swa_bounded_replay = bounded
-        config.use_v2_model_runner = use_v2
-        config.speculative_config = (
-            None
-            if method is None
-            else SimpleNamespace(method=method, draft_model_config=SimpleNamespace(architectures=[architecture]))
-        )
+        config.use_v2_model_runner = True
+        config.speculative_config = None
         return create_kv_pool_worker(config, use_layerwise, kv_cache_config)
 
     with (
@@ -198,29 +166,21 @@ def make_shared_worker(
             use_layerwise=True,
             num_layers=num_layers,
             num_hidden_layers=num_layers,
-            extra_config={"backend": "memcache", **(extra_config or {})},
+            extra_config={"backend": "memcache"},
             kv_cache_config=cache_config,
-            pcp_size=pcp_size,
-            pcp_rank=pcp_rank,
-            tp_size=tp_size,
-            tp_rank=tp_rank,
-            use_mla=use_mla,
         )
-    store = MemoryGVAStore() if store is None else store
+    store = MemoryGVAStore()
     worker.m_store = store
     worker.cache_coordinator = worker.token_database.cache_coordinator = None
     all_names = sum(groups, [])
     alignment = 2 * 1024 * 1024
-    slot_bytes = 128 if segmented else 64
+    slot_bytes = 64
     backing = torch.empty(alignment + len(all_names) * slot_bytes, dtype=torch.uint8)
     start = -backing.data_ptr() % alignment
     caches = {
         name: backing[start + index * slot_bytes : start + index * slot_bytes + 64].reshape(4, 16, 1).fill_(index + 1)
         for index, name in enumerate(all_names)
     }
-    if segmented:
-        physical = backing[start : start + slot_bytes].reshape(8, 16, 1).fill_(165)
-        caches[all_names[0]] = physical[:, :8, :].fill_(1)
 
     def close():
         store.resume.set()
@@ -249,13 +209,9 @@ def metadata(worker, *, load=False, save=True):
     return result
 
 
-def forward_layer(worker, meta, layer):
-    base_layers = worker.hf_config.num_hidden_layers
-    name = (
-        f"model.layers.{layer}.v41_attn" if layer < base_layers else f"model.mtp.layers.{layer - base_layers}.v41_attn"
-    )
-    worker.wait_for_layer_load(name)
-    worker.save_kv_layer(meta, name)
+def forward_layer(worker, meta):
+    worker.wait_for_layer_load()
+    worker.save_kv_layer(meta)
 
 
 def save_prefix(worker):
@@ -263,7 +219,7 @@ def save_prefix(worker):
     worker.prepare_layerwise_step(meta)
     worker.start_load_kv(meta)
     for layer in range(worker.num_layers):
-        forward_layer(worker, meta, layer)
+        forward_layer(worker, meta)
     worker.get_finished(set(), meta)
 
 
@@ -292,7 +248,7 @@ class TestSharedSourceLayerwise(unittest.TestCase):
                 worker.prepare_layerwise_step(meta)
                 worker.start_load_kv(meta)
                 for layer in range(worker.num_layers):
-                    forward_layer(worker, meta, layer)
+                    forward_layer(worker, meta)
                 worker.get_finished(set(), meta)
                 for name, cache in caches.items():
                     torch.testing.assert_close(cache[1], expected[name][1])
@@ -305,23 +261,29 @@ class TestSharedSourceLayerwise(unittest.TestCase):
         store.published.clear()
         store.finish_calls.clear()
         meta = metadata(worker)
-        worker.prepare_layerwise_step(meta)
+        conn = AscendStoreConnector.__new__(AscendStoreConnector)
+        conn.use_layerwise = conn.can_put = True
+        conn.connector_worker = worker
+        conn._mamba_state = None
+        conn.bind_connector_metadata(meta)
         for layer in range(8):
-            forward_layer(worker, meta, layer)
+            name = f"model.layers.{layer}.v41_attn"
+            conn.wait_for_layer_load(name)
+            conn.save_kv_layer(name, [], None)
         cut_name = "model.layers.8.v41_attn"
-        worker.wait_for_layer_load(cut_name)  # full-batch cache-only boundary
+        conn.wait_for_layer_load(cut_name)
         self.assertEqual(worker.current_layer, 8)
-        self.assertNotIn(8, worker._attention_saved_layers)
-        worker.wait_for_layer_load(cut_name)  # compact replay of the same layer
+        conn.wait_for_layer_load(cut_name)
         cut = caches["model.layers.8.attn.long_kv_cache"]
         cut[1].fill_(77)
-        worker.save_kv_layer(meta, cut_name)
+        conn.save_kv_layer(cut_name, [], None)
         worker.kv_send_thread.request_queue.join()
-        self.assertIn(8, worker._attention_saved_layers)
         self.assertTrue(any(cut[1].data_ptr() in addrs for direction, addrs in store.copies if direction == 0))
         self.assertEqual(worker.current_layer, 9)
         for layer in range(9, 12):
-            forward_layer(worker, meta, layer)
+            name = f"model.layers.{layer}.v41_attn"
+            conn.wait_for_layer_load(name)
+            conn.save_kv_layer(name, [], None)
         self.assertTrue(store.published)
 
     def test_failed_load_reaches_consumer_and_never_publishes(self):
@@ -333,7 +295,7 @@ class TestSharedSourceLayerwise(unittest.TestCase):
         worker.start_load_kv(meta)
         with self.assertRaises(RuntimeError):
             for layer in range(12):
-                forward_layer(worker, meta, layer)
+                forward_layer(worker, meta)
 
     def test_load_uses_adopted_hit_not_unrecomputed_tail(self):
         worker, store, _ = make_shared_worker(self, bounded=True)
@@ -344,11 +306,6 @@ class TestSharedSourceLayerwise(unittest.TestCase):
         self.assertEqual(meta.requests[0].load_spec.kvpool_store_skip_tokens, 32)
         self.assertEqual(worker.layer_load_tasks[2][0].block_ranges[0].end_block, 1)
 
-    def test_graph_replay_modes_cannot_skip_python_transfer_hooks(self):
-        for mode in ("FULL", "FULL_DECODE_ONLY", "PIECEWISE", "FULL_AND_PIECEWISE"):
-            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, "enforce-eager"):
-                make_shared_worker(self, mode=mode)
-
     def test_transfer_failure_cannot_be_reset_by_next_bind(self):
         worker, store, _ = make_shared_worker(self, bounded=True)
         save_prefix(worker)
@@ -357,7 +314,7 @@ class TestSharedSourceLayerwise(unittest.TestCase):
         store.fail_copy = True
         with self.assertRaises(RuntimeError):
             for layer in range(12):
-                forward_layer(worker, meta, layer)
+                forward_layer(worker, meta)
         with self.assertRaises(RuntimeError):
             worker.prepare_layerwise_step(metadata(worker))
 
@@ -383,26 +340,16 @@ class TestSharedSourceLayerwise(unittest.TestCase):
         worker.prepare_layerwise_step(meta)
         self.assertEqual(set(counts.values()), {1})
         for layer in range(12):
-            forward_layer(worker, meta, layer)
+            forward_layer(worker, meta)
         worker.get_finished(set(), meta)
         self.assertEqual(set(counts.values()), {0})
-
-    def test_incompatible_object_size_fails_before_copy(self):
-        worker, store, _ = make_shared_worker(self, bounded=True)
-        save_prefix(worker)
-        for key, (gva, size) in list(store.objects.items()):
-            store.objects[key] = (gva, size - 1)
-        store.copies.clear()
-        with self.assertRaises(RuntimeError):
-            worker.prepare_layerwise_step(metadata(worker, load=True, save=False))
-        self.assertFalse(store.copies)
 
     def test_draft_layer_save_blocks_publication_until_final_copy(self):
         worker, store, caches = make_shared_worker(self, bounded=True, draft=True)
         meta = metadata(worker)
         worker.prepare_layerwise_step(meta)
         for layer in range(12):
-            forward_layer(worker, meta, layer)
+            forward_layer(worker, meta)
         draft = caches["model.mtp.layers.0.attn.kv_cache"]
         draft[1].fill_(99)  # draft cache write before its save hook
         store.block_address = draft[1].data_ptr()
@@ -412,7 +359,7 @@ class TestSharedSourceLayerwise(unittest.TestCase):
 
         def save():
             try:
-                forward_layer(worker, meta, worker.hf_config.num_hidden_layers)
+                forward_layer(worker, meta)
             except Exception as exc:
                 errors.append(exc)
             finally:
@@ -435,8 +382,8 @@ class TestSharedSourceLayerwise(unittest.TestCase):
         meta = metadata(worker, load=True, save=False)
         worker.prepare_layerwise_step(meta)
         for layer in range(12):
-            forward_layer(worker, meta, layer)
-        forward_layer(worker, meta, worker.hf_config.num_hidden_layers)
+            forward_layer(worker, meta)
+        forward_layer(worker, meta)
         torch.testing.assert_close(draft[1], torch.full_like(draft[1], 99))
 
     def test_failed_draft_save_never_publishes_partial_prefix(self):
@@ -444,8 +391,8 @@ class TestSharedSourceLayerwise(unittest.TestCase):
         meta = metadata(worker)
         worker.prepare_layerwise_step(meta)
         for layer in range(12):
-            forward_layer(worker, meta, layer)
+            forward_layer(worker, meta)
         store.fail_copy = True
         with self.assertRaises(RuntimeError):
-            forward_layer(worker, meta, worker.hf_config.num_hidden_layers)
+            forward_layer(worker, meta)
         self.assertFalse(store.published)

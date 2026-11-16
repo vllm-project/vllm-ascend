@@ -270,26 +270,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             cache_names = getattr(layer, "kv_transfer_cache_names", None)
             if cache_names is None:
                 continue
-            if (
-                not isinstance(cache_names, (tuple, list))
-                or not cache_names
-                or any(not isinstance(name, str) for name in cache_names)
-            ):
-                raise ValueError(f"Invalid cache ownership declaration for {alias!r}")
-            declared_names = set(cache_names)
-            if len(declared_names) != len(cache_names):
-                raise ValueError(f"Duplicate cache ownership declaration for {alias!r}")
-            missing = declared_names.difference(self._layer_indices)
-            if missing:
-                raise ValueError(f"Composite layer {alias!r} has unregistered caches: {sorted(missing)}")
-            indices = {self._layer_index_by_name[name] for name in cache_names}
-            if len(indices) != 1:
-                raise ValueError(f"Composite layer {alias!r} spans multiple physical layer namespaces")
-            layer_index = next(iter(indices))
-            if declared_names != set(self._layer_names_by_index[layer_index]):
-                raise ValueError(f"Composite layer {alias!r} must own its complete physical cache group")
-            if alias in self._layer_index_by_name or layer_index in self._declared_layer_indices:
-                raise ValueError(f"Conflicting physical cache alias: {alias!r}")
+            layer_index = self._layer_index_by_name[cache_names[0]]
             self._layer_index_by_name[alias] = layer_index
             self._composite_kv_aliases.add(alias)
             self._declared_layer_indices.add(layer_index)

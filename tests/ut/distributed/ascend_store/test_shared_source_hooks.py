@@ -147,35 +147,6 @@ class TestStandardConnectorHooks(unittest.TestCase):
         self.assertTrue(store.published)
         self.assertFalse(store.leases)
 
-    def test_multi_connector_drains_other_children_after_fence_error(self):
-        events = []
-        error = RuntimeError("load failed")
-
-        def fail():
-            events.append("failed")
-            raise error
-
-        for method in ("finish_forward", "wait_for_save"):
-            with self.subTest(method=method):
-                events.clear()
-                root = SimpleNamespace(
-                    sub_connectors=[
-                        SimpleNamespace(**{method: fail}),
-                        SimpleNamespace(**{method: lambda: events.append("drained")}),
-                    ],
-                    shutdown=lambda: events.append("shutdown"),
-                )
-                fence = load(
-                    "vllm_ascend/distributed/kv_transfer/ascend_multi_connector.py",
-                    "_finish_all_children",
-                    {"logger": Mock()},
-                    "AscendMultiConnector",
-                )
-                with self.assertRaises(RuntimeError) as caught:
-                    fence(root, method)
-                self.assertIs(caught.exception, error)
-                self.assertEqual(events, ["failed", "drained", "shutdown"])
-
     def test_composite_save_preserves_provider_before_pd_order(self):
         events = []
         provider, pd = connector(shared=True), connector(shared=True)

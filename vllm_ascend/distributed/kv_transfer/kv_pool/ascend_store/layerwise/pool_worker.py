@@ -123,13 +123,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_prefix_cache: DSparkPrefixCache | None = None
         if getattr(self, "has_shared_kv", False):
-            mode = vllm_config.compilation_config.cudagraph_mode
-            if not vllm_config.use_v2_model_runner or (
-                not vllm_config.model_config.enforce_eager and getattr(mode, "name", str(mode)) != "NONE"
-            ):
-                raise ValueError("Shared-source layerwise requires Model Runner V2 with --enforce-eager")
-            if self.pp_size != 1 or self.dcp_size != 1 or self.use_kvpp:
-                raise ValueError("Shared-source layerwise supports TP/PCP without PP/DCP/KVPP")
             self.load_async = False
         self._init_layerwise_config()
 
@@ -508,9 +501,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         return super()._global_group_alloc_size(group_id)
 
     def _start_kv_transfer_threads(self) -> None:
-        if getattr(self, "has_shared_kv", False):
-            # Single-group registration counts storage owners, not execution layers.
-            self.num_layers = len(self._global_to_local_layer)
         if self.use_layerwise_transfer:
             self.m_store.ensure_initialized()
         elif self.use_block_key_layerwise:
@@ -594,9 +584,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 invalid_block_ids=self._invalid_block_ids,
                 invalid_block_ids_lock=self._invalid_block_ids_lock,
                 load_abort_event=self._layer_load_aborted,
-                raise_on_transfer_failure=self.layerwise_offload
-                or getattr(self, "has_shared_kv", False)
-                or self.num_kv_cache_groups > 1,
+                raise_on_transfer_failure=self.layerwise_offload or self.num_kv_cache_groups > 1,
             )
         else:
             self.kv_recv_thread = KVCacheStoreKeyLayerRecvingThread(
@@ -716,7 +704,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if self.use_layerwise_transfer and self.layerwise_offload and self.tp_size > 1:
             get_tp_group().barrier()
         self.current_layer = 0
-        self._loaded_layers: set[int] = set()
         self.layerwise_retrievers: list[Any] = []
         self.next_layer_to_submit = 0
         reset_attention_compute_start_gate()
@@ -2051,10 +2038,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         key_indices.setdefault(key, []).append(index)
                     pinned_gvas: dict[str, int] = {}
                     for key, info in zip(leased_keys, leased_infos, strict=True):
-                        if getattr(self, "has_shared_kv", False) and (
-                            info is None or info.size() != self._global_group_alloc_size(group_id)
-                        ):
-                            return False
                         pinned_gvas[key] = (
                             next((address for address in info.gva_list() if address > 0), 0) if info is not None else 0
                         )
@@ -2374,14 +2357,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 raise RuntimeError("Layerwise load aborted before KVPP broadcast")
         self.kv_recv_thread.raise_if_failed()
 
-    def wait_for_layer_load(self, layer_name: str | None = None) -> None:
-        if getattr(self, "has_shared_kv", False) and layer_name is not None:
-            layer_id = self._extract_physical_layer_index(layer_name)
-            self._check_hybrid_load_errors()
-            if layer_id in self._loaded_layers:
-                return  # cache-only cut write followed by the same layer's forward
-            if layer_id != self.current_layer:
-                raise RuntimeError(f"Missing layerwise hook before model layer {layer_id}")
+    def wait_for_layer_load(self) -> None:
         if self.current_layer >= self.num_layers:
             return
         assert self.layer_load_finished_events is not None
@@ -2425,8 +2401,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if getattr(self, "use_block_key_layerwise", False):
                 self._finish_current_layerwise_load_sessions()
             raise
-        if getattr(self, "has_shared_kv", False):
-            self._loaded_layers.add(self.current_layer)
         # KVPP can observe completion after attention; reset at the next bind.
         if not self.use_kvpp:
             self.layer_load_finished_events[self.current_layer].clear()
@@ -2444,13 +2418,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if hasattr(self, "kv_role") and not is_kv_save_role(self.kv_role, getattr(self, "consumer_is_to_put", False)):
             self.current_layer += 1
 
-    def save_kv_layer(self, connector_metadata: AscendConnectorMetadata, layer_name: str | None = None) -> None:
-        if getattr(self, "has_shared_kv", False) and layer_name is not None:
-            layer_id = self._extract_physical_layer_index(layer_name)
-            if layer_id < self.current_layer:
-                return
-            if layer_id != self.current_layer:
-                raise RuntimeError(f"Missing layerwise save hook before model layer {layer_id}")
+    def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
         # Match process_layer_data(), including stage-local draft layers.
         if not self.use_block_key_layerwise and getattr(self, "pp_size", 1) > 1:
             num_local = getattr(self, "layerwise_key_layers", 0) or self.num_layers
@@ -2466,7 +2434,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if getattr(self, "has_shared_kv", False):
             self._check_hybrid_load_errors()
         if self.current_layer not in self._attention_saved_layers:
-            self._attention_saved_layers.add(self.current_layer)
             self.sync_save_events[self.current_layer].record()
             if self.layer_save_tasks[self.current_layer]:
                 for task in self.layer_save_tasks[self.current_layer]:
