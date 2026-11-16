@@ -64,8 +64,8 @@
 # /vllm_ascend/attention/attention_mask.py
 # /vllm_ascend/attention/attention_v1.py
 /vllm_ascend/attention/dsa*.py @weijinqian0 @lcfenglinwan @GDzhu01 @linfeng-yuan
-/vllm_ascend/attention/fa_v1.py @jiajinzhu2
-/vllm_ascend/attention/fa3_v1.py @Ronald1995
+/vllm_ascend/attention/fa_v1.py @jiajinzhu2 @CXY-Katrina
+/vllm_ascend/attention/fa3_v1.py @Ronald1995 @CXY-Katrina
 # /vllm_ascend/attention/flashmla.py
 /vllm_ascend/attention/indexer.py @weijinqian0 @lijiahang226
 /vllm_ascend/attention/indexer_kpool.py @weijinqian0 @lijiahang226
@@ -84,9 +84,11 @@
 /vllm_ascend/device_allocator @weijinqian0 @Ronald1995
 
 # distributed
-/vllm_ascend/distributed @LCAIZJ
+/vllm_ascend/distributed @LCAIZJ @zzzzwwjj @weijinqian0
+/vllm_ascend/distributed/ec_transfer @weijinqian0
 /vllm_ascend/distributed/eplb @freyfwt
 /vllm_ascend/distributed/weight_transfer @Ronald1995 @Annarine
+/vllm_ascend/distributed/kv_transfer @weijinqian0
 /vllm_ascend/distributed/kv_transfer/kv_pool @weijinqian0 @HF-001
 /vllm_ascend/distributed/kv_transfer/kv_p2p @wangxiaoteng888 @nwpu-zxr
 /vllm_ascend/distributed/kv_transfer/sparse_kv_offload @weiguihua2 @zhangsicheng5 @zhenwenqi2024 @pisceskkk @weijinqian0
@@ -96,11 +98,13 @@
 
 # ops
 /vllm_ascend/ops @zzzzwwjj
+/vllm_ascend/ops/dsa.py @zzzzwwjj @lcfenglinwan @GDzhu01 @linfeng-yuan
 /vllm_ascend/ops/linear_op.py @xuchi-0808
 /vllm_ascend/ops/vocab_parallel_embedding.py @xuchi-0808
 /vllm_ascend/ops/triton @AuroraEmiya @ZT-AIA @yiz-liu
 /vllm_ascend/ops/triton/eplb.py @freyfwt
 /vllm_ascend/ops/triton/batch_invariant @Ronald1995
+/vllm_ascend/ops/triton/msa @CXY-Katrina
 /vllm_ascend/ops/triton/kda/recoverssm.py @drslark
 /vllm_ascend/ops/fused_moe @weijinqian0 @Tflowers-0129 @ZT-AIA @zhenwenqi2024 @linfeng-yuan
 /vllm_ascend/ops/fused_moe/eplb.py @freyfwt
@@ -109,7 +113,7 @@
 /vllm_ascend/ops/kimi_mla.py @Dawn952
 
 # quantization
-/vllm_ascend/quantization @kunpengW-code @menogrey @Tflowers-0129 @lcfenglinwan
+/vllm_ascend/quantization @kunpengW-code @menogrey @Tflowers-0129 @lcfenglinwan @earthmanylf
 
 /vllm_ascend/worker/v2/sample @realliujiaxu @zouzy5137 @zhenwenqi2024
 
@@ -146,6 +150,8 @@
 /vllm_ascend/patch @wxsIcey
 /vllm_ascend/patch/platform/patch_eplb.py @freyfwt
 /vllm_ascend/patch/worker/patch_kimi_k25.py @Dawn952
+/vllm_ascend/patch/worker/patch_minimax_m2.py @CXY-Katrina
+/vllm_ascend/patch/worker/patch_step3p5.py @earthmanylf
 
 # Worker base
 /vllm_ascend/worker/dcp_utils.py @weiguihua2 @zhenwenqi2024 @pisceskkk
@@ -168,7 +174,7 @@
 /vllm_ascend/worker/v2/kvpp.py @recky-c
 /vllm_ascend/worker/v2/model_runner.py @yiz-liu @zzzzwwjj @xuchi-0808 @zhenwenqi2024 @drslark
 /vllm_ascend/worker/v2/pcp_manager.py @weiguihua2 @pisceskkk
-# /vllm_ascend/worker/v2/pp_transport.py
+/vllm_ascend/worker/v2/pp_transport.py @LostFox11
 /vllm_ascend/worker/v2/states.py @yiz-liu @zzzzwwjj
 /vllm_ascend/worker/v2/utils.py @zzzzwwjj
 
@@ -177,13 +183,15 @@
 # /vllm_ascend/models/common/
 # /vllm_ascend/models/layer/
 # /vllm_ascend/models/qwen4_exp/
-/vllm_ascend/models/minimax_m3 @realliujiaxu
+/vllm_ascend/models/minimax_m3 @realliujiaxu @CXY-Katrina
 /vllm_ascend/models/deepseek_v4 @lcfenglinwan @GDzhu01 @linfeng-yuan
 /vllm_ascend/models/deepseek_v41 @lcfenglinwan @GDzhu01 @linfeng-yuan
 /vllm_ascend/models/deepseek_mtp.py @lcfenglinwan @GDzhu01 @linfeng-yuan
 /vllm_ascend/models/glm5next @lijiahang226
+/vllm_ascend/models/glm5next/kda.py @drslark
 /vllm_ascend/models/glm5_dspark.py @lijiahang226
 /vllm_ascend/models/kimi_k3 @Dawn952
+/vllm_ascend/models/kimi_k3/recoverssm_metadata.py @drslark
 # /vllm_ascend/models/d3.py
 # /vllm_ascend/models/gemma4_mm.py
 # /vllm_ascend/models/llama_eagle3.py
@@ -238,5 +246,6 @@
 /vllm_ascend/model_loader/rfork/ @yangsonglin13
 
 # Files/modules not owned by any person(No need to be approved)
+# SKIP(owner): /tests/deepseek_v41_utils.py
 # SKIP(owner): /tests/ut/
 # SKIP(owner): /tests/e2e/pull_request/
