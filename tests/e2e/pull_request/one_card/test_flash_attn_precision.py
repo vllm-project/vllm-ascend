@@ -7,14 +7,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch_npu  # noqa: F401
-
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.compilation.updatable_graph import UpdatableGraph
+
+from vllm_ascend.attention import fa_v1
 from vllm_ascend.attention.fa_v1 import (
     AscendFlashAttentionBackend,
     AscendFlashAttentionImpl,
     AscendFlashAttentionMetadataBuilder,
 )
-from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 
 
 def golden(query, key, value, block_table, lengths, window, query_len, causal):
@@ -47,7 +48,7 @@ def golden(query, key, value, block_table, lengths, window, query_len, causal):
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("head_dim", [128, 192])
 @pytest.mark.parametrize("execution_mode", ["eager", "graph"])
-def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, head_dim, execution_mode):
+def test_strided_paged_flash_attn_matches_golden(monkeypatch, dtype, window, layout, causal, head_dim, execution_mode):
     torch.npu.set_device(0)
     torch.manual_seed(42)
     device = "npu"
@@ -88,7 +89,7 @@ def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, 
     k_view, v_view = (key, value) if layout == "PA_BBND" else (key.transpose(1, 2), value.transpose(1, 2))
     impl = AscendFlashAttentionImpl.__new__(AscendFlashAttentionImpl)
     impl.key_cache, impl.value_cache = k_view, v_view
-    impl.num_heads, impl.num_kv_heads = 8, 1
+    impl.num_heads, impl.num_kv_heads, impl.head_size = 8, 1, head_dim
     impl.scale, impl.sliding_window = head_dim**-0.5, window
     impl.use_bnsd_kv_cache, impl.sinks = layout == "PA_BNBD", None
     output = torch.empty_like(query)
@@ -96,10 +97,16 @@ def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, 
     # iteration's subtraction result or a host mirror of accepted lengths.
     common.seq_lens = torch.empty_like(optimistic)
     captured_metadata = builder.build(0, common)
+    builder.vllm_config = None
+    builder.layer_names = ["draft"]
+    layers = {"draft": SimpleNamespace(impl=impl)}
+    monkeypatch.setattr(fa_v1, "get_layers_from_vllm_config", lambda *_args: layers)
 
     def run():
         common.seq_lens.copy_(optimistic - rejected)
         metadata = captured_metadata if execution_mode == "graph" else builder.build(0, common)
+        if execution_mode == "graph":
+            builder.update_draft_decode_metadata(metadata)
         for _ in range(6):
             result = impl.forward_impl(query, None, None, (k_view, v_view), metadata, output)
         return result
@@ -116,6 +123,7 @@ def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, 
         graph = UpdatableGraph()
         with torch.npu.graph(graph, stream=stream):
             run()
+        assert len(captured_metadata.captured_flash_attn_plans) == 1
 
         def execute():
             graph.replay()
