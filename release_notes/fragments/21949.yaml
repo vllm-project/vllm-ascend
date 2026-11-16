@@ -1,0 +1,12 @@
+pr: 21949
+entries:
+  - category: feature
+    text: >-
+      Added DeepSeek V4.1 Memcache layerwise pooling through the existing GVA
+      transfer path, including shared-source KV, draft caches, and Mooncake V2
+      composite push readiness. Requires Model Runner V2 and eager execution.
+    model: deepseek-v4.1
+  - category: bugfix
+    text: >-
+      Fixed Ascend connector registration when upstream vLLM has already
+      registered MooncakeLayerwiseConnector.
