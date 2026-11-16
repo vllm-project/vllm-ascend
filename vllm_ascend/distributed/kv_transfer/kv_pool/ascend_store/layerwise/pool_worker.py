@@ -211,6 +211,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         layout = getattr(self, "_layerwise_reuse_layout", None)
         self._reused_layers_by_group: dict[int, set[int]] = {}
         self._recurrent_layers: set[int] = set()
+        if layout is not None and layout.layers:
+            # ModelConfig's DP x PP x TP rank formula omits PCP. The reuse
+            # planner derives global layer ids from this worker's actual
+            # cache entries, so they remain authoritative with PP x PCP.
+            self.pp_layer_offset = min(layout.layers)
+            self.num_layers = len(layout.layers)
         stage_num_layers = self.num_layers
         base_layers = getattr(self.hf_config, "num_hidden_layers", stage_num_layers)
         # Defaults for partial initialization (unit tests construct the worker
