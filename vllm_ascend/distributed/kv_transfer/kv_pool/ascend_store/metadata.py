@@ -811,7 +811,7 @@ class RequestTracker:
     allocated_block_ids_by_group: list[list[int]]
 
     # Namespace for request-scoped snapshots; renewed after preemption/reuse.
-    layerwise_request_id: str | None = None
+    snapshot_run_id: str | None = None
 
     # The number of tokens that has been savd
     num_saved_tokens: int = 0
@@ -937,8 +937,8 @@ class ReqMeta:
     block_ids_by_group: list[list[int]]
 
     block_hashes: list[BlockHash]
-    layerwise_request_id: str | None = None
-    needs_private_snapshot: bool = True
+    snapshot_run_id: str | None = None
+    save_private_snapshot: bool = True
 
     # First token that has not been saved before this metadata was built.
     save_start_token: int = 0
@@ -1006,14 +1006,14 @@ class ReqMeta:
         load_key_block_offset: int = 0,
         load_last_block_key: str | None = None,
         load_keys: list[str] | None = None,
-        layerwise_request_id: str | None = None,
-        needs_private_snapshot: bool = True,
+        snapshot_run_id: str | None = None,
+        save_private_snapshot: bool = True,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
         self.req_id = req_id
-        self.layerwise_request_id = layerwise_request_id
-        self.needs_private_snapshot = needs_private_snapshot
+        self.snapshot_run_id = snapshot_run_id
+        self.save_private_snapshot = save_private_snapshot
         self.token_len_chunk = token_len_chunk
         self.save_end_token = token_len_chunk if save_end_token is None else save_end_token
         self.target_token_len = token_len_chunk if target_token_len is None else target_token_len
@@ -1198,7 +1198,7 @@ class ReqMeta:
         logger.debug("request:%s, meta save spec:%s, meta load spec:%s", tracker.req_id, not skip_save, load_spec)
         return ReqMeta(
             req_id=tracker.req_id,
-            layerwise_request_id=tracker.layerwise_request_id,
+            snapshot_run_id=tracker.snapshot_run_id,
             token_len_chunk=num_tokens_to_save,
             save_end_token=num_tokens_to_save,
             target_token_len=target_token_len,

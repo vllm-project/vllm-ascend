@@ -812,7 +812,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         assert self.layerwise_backend is not None
         return self.layerwise_backend.make_partial_key(
             self.model_name,
-            request.layerwise_request_id or request.req_id,
+            request.snapshot_run_id or request.req_id,
             group_id,
             block_index,
             end_token,
@@ -1202,7 +1202,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 save_start_block = max(save_start_block, hit_full_blocks)
             if partial_block_index is None:
                 partial_block_index = request.partial_block_index
-            if self.layerwise_offload and not request.needs_private_snapshot:
+            if self.layerwise_offload and not request.save_private_snapshot:
                 partial_block_index = None
                 save_end_block = min(save_end_block, len(group_block_hashes))
             num_allocated_blocks = (
@@ -1376,7 +1376,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 if block_ids_by_group is None:
                     raise RuntimeError(f"Block IDs are not initialized for request {request.req_id}")
                 save_owner = self._is_layerwise_save_owner(group_id)
-                keep_snapshot = self.layerwise_offload and request.needs_private_snapshot
+                keep_snapshot = self.layerwise_offload and request.save_private_snapshot
                 if group_id not in self.cacheable_group_ids or (not save_owner and not keep_snapshot):
                     all_group_gvas.append(np.zeros(len(block_ids_by_group), dtype=np.int64))
                     all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
@@ -1412,7 +1412,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 end_limit = min(save_end_block, len(block_ids_by_group))
                 if not (
                     self.layerwise_offload
-                    and request.needs_private_snapshot
+                    and request.save_private_snapshot
                     and not self.group_uses_align_state[group_id]
                 ):
                     end_limit = min(end_limit, len(group_block_hashes))

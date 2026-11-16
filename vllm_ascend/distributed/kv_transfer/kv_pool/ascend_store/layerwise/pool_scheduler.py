@@ -29,12 +29,12 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         if self.layerwise_offload and request_tuple is not None:
             # Verifier rows have no corresponding input KV/state to snapshot.
             request_tracker.token_len = min(request_tracker.token_len, len(request_tuple[0].all_token_ids))
-        if self.layerwise_offload and request_tracker.layerwise_request_id is None:
-            request_tracker.layerwise_request_id = uuid4().hex
+        if self.layerwise_offload and request_tracker.snapshot_run_id is None:
+            request_tracker.snapshot_run_id = uuid4().hex
         meta = super()._build_req_meta(request_tracker, *args, **kwargs)
         if meta is not None and self.layerwise_offload and request_tuple is not None:
             request = request_tuple[0]
-            meta.needs_private_snapshot = not (
+            meta.save_private_snapshot = not (
                 meta.target_token_len == meta.num_prompt_tokens
                 and not request.resumable
                 and request.num_output_tokens + 1 + (request.num_output_placeholders > 0) >= request.max_tokens
