@@ -1,3 +1,5 @@
+# Temporary nightly rerun for DeepSeek_V4_Flash_K15_dspark_A5.
+# Keep runtime settings unchanged while validating both K15 DSpark cases on A5.
 # ==========================================
 # ACTUAL TEST CASES
 # ==========================================
