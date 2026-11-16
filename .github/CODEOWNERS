@@ -106,10 +106,11 @@
 /vllm_ascend/ops/triton/batch_invariant @Ronald1995
 /vllm_ascend/ops/triton/msa @CXY-Katrina
 /vllm_ascend/ops/triton/kda/recoverssm.py @drslark
+/vllm_ascend/ops/triton/docs/kda_recoverssm.md @drslark
 /vllm_ascend/ops/fused_moe @weijinqian0 @Tflowers-0129 @ZT-AIA @zhenwenqi2024 @linfeng-yuan
 /vllm_ascend/ops/fused_moe/eplb.py @freyfwt
 /vllm_ascend/ops/fused_moe/force_eplb.py @freyfwt
-/vllm_ascend/ops/kimi_kda.py @Dawn952
+/vllm_ascend/ops/kimi_kda.py @Dawn952 @drslark
 /vllm_ascend/ops/kimi_mla.py @Dawn952
 
 # quantization
@@ -195,6 +196,7 @@
 /vllm_ascend/models/glm5next/recoverssm_metadata.py @drslark
 /vllm_ascend/models/glm5_dspark.py @lijiahang226
 /vllm_ascend/models/kimi_k3 @Dawn952
+/vllm_ascend/models/kimi_k3/recoverssm_config.py @drslark
 /vllm_ascend/models/kimi_k3/recoverssm_metadata.py @drslark
 # /vllm_ascend/models/d3.py
 # /vllm_ascend/models/gemma4_mm.py
@@ -220,6 +222,12 @@
 /tests/ @wenjun91
 /tests/e2e/nightly @wenjun91
 /tests/e2e/nightly/single_node/ops @Foriv
+/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_recoverssm_npu.py @drslark
+/tests/ut/models/test_glm5next_recoverssm_config.py @drslark
+/tests/ut/models/test_glm5next_recoverssm_metadata.py @drslark
+/tests/ut/models/test_kimi_recoverssm_config.py @drslark
+/tests/ut/models/test_kimi_recoverssm_metadata.py @drslark
+/tests/ut/ops/test_kimi_kda_recoverssm.py @drslark
 
 # EPLB
 /vllm_ascend/eplb @freyfwt
