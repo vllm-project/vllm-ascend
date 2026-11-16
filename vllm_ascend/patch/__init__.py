@@ -1115,6 +1115,39 @@
 #       patch Qwen3_5GatedDeltaNet._forward_core to use triton ops like `fused_recurrent_gated_delta_rule`.
 #    Future Plan:
 #       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
+#   2. `vllm.model_executor.models.qwen3_5.Qwen3_5DecoderLayer.__init__` and
+#      `vllm.model_executor.models.qwen3_5.Qwen3_5DecoderLayer.forward`
+#    Why:
+#       Upstream gates sequence parallelism on `use_sequence_parallel_moe`, so
+#       dense Qwen3.5-family checkpoints (Qwen3.5/3.6/3.8-27B dense,
+#       model_type `qwen3_5_text`) cannot run sequence parallel at all. On
+#       Ascend the FlashComm switch (`additional_config.enable_flashcomm1`)
+#       also covers the dense family: hidden states and the residual stay
+#       sequence-sharded across the decoder stack, attention (full and GDN)
+#       gathers before / reduce-scatters after its sequence-parallel output
+#       projection, and the dense MLP gathers around its TP-sharded weights.
+#    How:
+#       `__init__`: after the upstream constructor, raise
+#       `use_attn_reduce_scatter_for_moe` for the dense family when dense SP
+#       is active (this module's `enable_dense_sp` resolves the FlashComm
+#       switch), and flip `o_proj` / GDN `out_proj` / dense `down_proj`
+#       to `reduce_results=False`. Reusing the upstream flag keeps
+#       Qwen3NextModel's entry chunk / exit all-gather and the MTP head's
+#       chunk / gather working unchanged.
+#       `forward`: replicate the upstream layout and, for dense MLPs, wrap
+#       gate_up/down with `sp_all_gather` / `sp_reduce_scatter` (MiniMax-M3 /
+#       DeepSeek-V4 pattern); MoE blocks keep the upstream
+#       `already_sequence_parallel=True` contract.
+#       The module-level patch applications are guarded by
+#       `STANDARD_WORKER_PATCHES` (mirroring `patch/worker/__init__.py`) so
+#       the lazy import from `utils.enable_sp` stays side-effect-free on
+#       devices that exclude this patch (310P).
+#    Related PR (if no, explain why):
+#       No, upstream has no dense-model sequence-parallel switch.
+#    Future Plan:
+#       Contribute the dense-MLP gather/scatter layout upstream once vLLM
+#       grows a dense sequence-parallelism config; until then the patch is
+#       gated on the FlashComm switch and the `qwen3_5_text` model type.
 #
 # ** 15. File: worker/patch_qwen3_dflash.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1529,8 +1562,8 @@
 # ** 25. File: worker/patch_eagle_speculator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator.SpeculatorCudaGraphManager`
-#       (named `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator` before
-#       upstream vLLM #60335; both supported lanes use the new path).
+#   2. `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.SpeculatorCudaGraphManager`
+#       (vLLM main #60989 constructs the decode manager in the shared AR base).
 #    Why:
 #       The shared v2 autoregressive speculative-decoding path (Eagle/MTP) uses
 #       an upstream CUDA graph manager, which is not usable on Ascend.
@@ -1655,6 +1688,8 @@
 #       before device filtering. Preserve the original dictionary and container
 #       types for model bindings and connector registration; remove the old
 #       first-tensor wrapper in patch_attn_utils.py.
+#       Preserve #55688's ReplaySSM tracker collection for inherited scheduler
+#       block copies when the supported upstream exports that collector.
 #    Related PR (if no, explain why):
 #       No upstream PR linked; this adapts Ascend multi-tensor allocations.
 #    Future Plan:

@@ -27,7 +27,7 @@ multiple cache groups, see [Mooncake Layerwise Hybrid Attention](mooncake_hybrid
 | --- | --- |
 | Software | Requires a Mooncake NPU client with session and range transfer APIs; use Mooncake 0.3.14 or later. Required interfaces are checked at startup. |
 | Deployment | Use the corresponding producer/consumer role on each P/D node. Decode pool reads and writes are controlled separately by `consumer_is_to_load` and `consumer_is_to_put`. |
-| Parallelism | Instances sharing layerwise objects must use matching TP, PP, and PCP sizes and the same PP layer partition. DCP greater than `1` and TP mismatch are not supported. |
+| Parallelism | Instances sharing layerwise objects must use matching TP, PP, PCP, and DCP sizes and the same PP layer partition. PCP and DCP cannot be enabled together. TP mismatch is not supported. |
 | PP | Uneven layer partitions are supported, but each stage must own layers in every cache group. Empty stage-local cache groups are not supported. |
 | Cache layout | Readers and writers must agree on model weights, cache format, block sizes, and transfer mode. Use separate pool namespaces for incompatible configurations. |
 | Buffer reuse | Mooncake layerwise transfer does not enable cross-layer reuse of NPU cache buffers. |
@@ -158,6 +158,27 @@ The `recompute` policy above applies to non-hybrid models. For hybrid models,
 use `fail` as shown in the [hybrid attention guide](mooncake_hybrid_attention.md#usage).
 Select model, parallelism, token-budget, and execution-mode options according
 to the corresponding model deployment guide.
+
+### Decode Context Parallelism (DCP)
+
+Mooncake block-key layerwise pooling supports standalone DCP
+(`prefill_context_parallel_size=1`, `decode_context_parallel_size>1`) with the
+same TP/PP/DCP topology and PP layer partition on both sides. See the
+[Context Parallel Guide](context_parallel.md#decode-context-parallel) for the
+topology constraints. Keys append `@dcp_size:N@dcp_rank:R`; DCP=1 keys are
+unchanged. A block is a hit only after every PP stage and DCP rank committed it.
+
+PCP and DCP cannot be combined. Every cache group must be DCP-sharded;
+sliding-window, recurrent/align-state, circular-buffer and other non-DCP-scaled
+groups must keep DCP disabled. The smallest cacheable block size must divide
+the others; `--prefix-match-unit` must be unset with DCP.
+GQA/MQA also requires `tensor_parallel_size // num_key_value_heads >=
+decode_context_parallel_size`.
+
+In P/D disaggregation both sides must use the same DCP size; set
+`prefill_dcp_size` / `decode_dcp_size` in `kv_connector_extra_config` so the
+worker can verify it. See the
+[hybrid guide](mooncake_hybrid_attention.md#decode-context-parallelism-dcp).
 
 ### Use Cached Prefixes
 

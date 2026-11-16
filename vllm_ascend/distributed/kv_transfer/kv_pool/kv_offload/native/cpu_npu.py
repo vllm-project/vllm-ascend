@@ -8,6 +8,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 from vllm.logger import logger
@@ -24,6 +25,11 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.cpu.gpu_worker import compute_sub_block_ptrs
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+
+from vllm_ascend.utils import vllm_version_is
+
+if TYPE_CHECKING:
+    from vllm.v1.kv_offload.base import DevicePointers
 
 # Direction codes shared with csrc/torch_binding.cpp::swap_blocks_batch.
 DIRECTION_H2D = 0
@@ -107,6 +113,58 @@ class SingleDirectionNPUOffloadingHandler:
         src_spec: LoadStoreSpec,
         dst_spec: LoadStoreSpec,
     ) -> bool:
+        if vllm_version_is("0.33.0"):
+            batch_src, batch_dst, batch_sizes, num_copy_ops, num_transfer_bytes = self._legacy_descriptors(
+                src_spec, dst_spec
+            )
+        else:
+            device_ptrs = src_spec if self.npu_to_cpu else dst_spec
+            cpu_spec = dst_spec if self.npu_to_cpu else src_spec
+            batch_src, batch_dst, batch_sizes, num_copy_ops, num_transfer_bytes = self._pointer_descriptors(
+                device_ptrs, cpu_spec
+            )
+        src = batch_src[:num_copy_ops]
+        dst = batch_dst[:num_copy_ops]
+        sizes = batch_sizes[:num_copy_ops]
+
+        stream = self._stream_pool.pop() if self._stream_pool else torch.npu.Stream()
+        start_event = self._event_pool.pop() if self._event_pool else torch.npu.Event(enable_timing=True)
+        end_event = self._event_pool.pop() if self._event_pool else torch.npu.Event(enable_timing=True)
+
+        if self.npu_to_cpu:
+            # KV writes happen on the model stream. D2H must not observe a
+            # partially written block.
+            stream.wait_stream(torch.npu.current_stream())
+        if self._transfers:
+            stream.wait_event(self._transfers[-1].end_event)
+
+        with torch.npu.stream(stream):
+            start_event.record(stream)
+            if num_copy_ops > 0:
+                torch.ops._C_ascend.swap_blocks_batch(
+                    src,
+                    dst,
+                    sizes,
+                    self.direction,
+                )
+            end_event.record(stream)
+
+        self._transfer_events[job_id] = end_event
+        self._transfers.append(
+            Transfer(
+                job_id=job_id,
+                stream=stream,
+                start_event=start_event,
+                end_event=end_event,
+                num_bytes=num_transfer_bytes,
+                batch_src=batch_src,
+                batch_dst=batch_dst,
+                batch_sizes=batch_sizes,
+            )
+        )
+        return True
+
+    def _legacy_descriptors(self, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec):
         assert isinstance(src_spec, BlockIDsLoadStoreSpec)
         assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
 
@@ -193,42 +251,59 @@ class SingleDirectionNPUOffloadingHandler:
         assert dst_offset == len(dst_blocks)
         assert op_idx == num_copy_ops
 
-        stream = self._stream_pool.pop() if self._stream_pool else torch.npu.Stream()
-        start_event = self._event_pool.pop() if self._event_pool else torch.npu.Event(enable_timing=True)
-        end_event = self._event_pool.pop() if self._event_pool else torch.npu.Event(enable_timing=True)
+        return batch_src, batch_dst, batch_sizes, num_copy_ops, num_transfer_bytes
 
-        if self.npu_to_cpu:
-            # KV writes happen on the model stream. D2H must not observe a
-            # partially written block.
-            stream.wait_stream(torch.npu.current_stream())
-        if self._transfers:
-            stream.wait_event(self._transfers[-1].end_event)
+    def _pointer_descriptors(self, device_ptrs: DevicePointers, cpu_spec: LoadStoreSpec):
+        """Translate #56076's resolved device addresses into NPU DMA descriptors.
 
-        with torch.npu.stream(stream):
-            start_event.record(stream)
-            if num_copy_ops > 0:
-                torch.ops._C_ascend.swap_blocks_batch(
-                    src,
-                    dst,
-                    sizes,
-                    self.direction,
-                )
-            end_event.record(stream)
-
-        self._transfer_events[job_id] = end_event
-        self._transfers.append(
-            Transfer(
-                job_id=job_id,
-                stream=stream,
-                start_event=start_event,
-                end_event=end_event,
-                num_bytes=num_transfer_bytes,
-                batch_src=batch_src,
-                batch_dst=batch_dst,
-                batch_sizes=batch_sizes,
-            )
+        Keep group/ref/block order, including empty groups and partial chunks.
+        CPU chunks retain the original physical stride; copy sizes are unpadded.
+        """
+        assert isinstance(cpu_spec, BlockIDsLoadStoreSpec)
+        cpu_blocks = cpu_spec.block_ids
+        num_copy_ops = len(device_ptrs.ptrs)
+        batch_src, batch_dst, batch_sizes = (
+            self._buffer_pool.pop() if self._buffer_pool else _new_descriptor_buffers(num_copy_ops)
         )
-        return True
+        if batch_src.numel() < num_copy_ops:
+            batch_src, batch_dst, batch_sizes = _new_descriptor_buffers(num_copy_ops)
+        all_src = batch_src[:num_copy_ops].numpy()
+        all_dst = batch_dst[:num_copy_ops].numpy()
+        all_sizes = batch_sizes[:num_copy_ops].numpy()
+        npu_out, cpu_out = (all_src, all_dst) if self.npu_to_cpu else (all_dst, all_src)
+        npu_out[:] = device_ptrs.ptrs
+        all_sizes[:] = device_ptrs.sizes
+        blocks_per_chunk = self.dst_blocks_per_chunk if self.npu_to_cpu else self.src_blocks_per_chunk
+        cpu_offset = 0
+        op_offset = 0
+        assert len(device_ptrs.group_block_counts) == len(self.kv_cache_groups_data_refs)
+        for group_size, n_refs, block_idx, refs in zip(
+            device_ptrs.group_block_counts,
+            device_ptrs.group_data_ref_counts,
+            device_ptrs.block_indices,
+            self.kv_cache_groups_data_refs,
+        ):
+            assert n_refs == len(refs)
+            if group_size == 0:
+                continue
+            skip = block_idx % blocks_per_chunk
+            num_chunks = cdiv(group_size + skip, blocks_per_chunk)
+            group_blocks = cpu_blocks[cpu_offset : cpu_offset + num_chunks]
+            assert len(group_blocks) == num_chunks
+            for ref in refs:
+                end = op_offset + group_size
+                compute_sub_block_ptrs(
+                    group_blocks,
+                    blocks_per_chunk,
+                    cpu_out[op_offset:end],
+                    (self.dst_tensors if self.npu_to_cpu else self.src_tensors)[ref.tensor_idx],
+                    skip_count=skip,
+                )
+                op_offset = end
+            cpu_offset += num_chunks
+        assert cpu_offset == len(cpu_blocks)
+        assert op_offset == num_copy_ops
+        return batch_src, batch_dst, batch_sizes, num_copy_ops, int(device_ptrs.sizes.sum())
 
     def get_finished(self) -> list[TransferResult]:
         results: list[TransferResult] = []
@@ -359,21 +434,21 @@ class NPUOffloadingWorker(OffloadingWorker):
     def submit_store(
         self,
         job_id: int,
-        src_spec: GPULoadStoreSpec,
+        device_ptrs: DevicePointers | GPULoadStoreSpec,
         dst_spec: LoadStoreSpec,
     ) -> bool:
-        return self._store_handler.transfer_async(job_id, src_spec, dst_spec)
+        return self._store_handler.transfer_async(job_id, device_ptrs, dst_spec)
 
     def submit_load(
         self,
         job_id: int,
         src_spec: LoadStoreSpec,
-        dst_spec: GPULoadStoreSpec,
+        device_ptrs: DevicePointers | GPULoadStoreSpec,
         expedited: bool = False,
     ) -> bool:
         # vLLM main submits step-synchronous loads with `expedited=True`; this
         # worker keeps a single load path and honours the same contract.
-        return self._load_handler.transfer_async(job_id, src_spec, dst_spec)
+        return self._load_handler.transfer_async(job_id, src_spec, device_ptrs)
 
     def get_finished(self) -> list[TransferResult]:
         return self._store_handler.get_finished() + self._load_handler.get_finished()

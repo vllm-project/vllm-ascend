@@ -170,6 +170,14 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 "is not supported with layerwise KV transfer (use_layerwise=True). "
                 "The layerwise threads do not implement TP-mismatch handling."
             )
+        if self.dcp_size > 1 and self.pcp_size == 1:
+            expected_dcp_rank = self.tp_rank % self.dcp_size
+            if expected_dcp_rank != self.dcp_rank:
+                raise ValueError(
+                    f"Layerwise DCP rank mapping mismatch: tp_rank={self.tp_rank}, "
+                    f"dcp_size={self.dcp_size} maps to dcp_rank={expected_dcp_rank}, "
+                    f"but the DCP group reports {self.dcp_rank}."
+                )
         # Both PD sides must derive the same GVA shard layout.
         if self.kv_role in ("kv_producer", "kv_consumer") and infer_dcp_mismatch_info(
             self.kv_role, self._extra_config, self.dcp_size, self.pcp_size
@@ -767,7 +775,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         """Use the backend-bound layout shared with scheduler hit checks."""
         assert self.layerwise_keys is not None
         return self.layerwise_keys.make_full_key(
-            group_id, block_hash_hex, self.metadata[group_id].head_or_tp_rank, self.pp_rank, self.pcp_rank
+            group_id,
+            block_hash_hex,
+            self.metadata[group_id].head_or_tp_rank,
+            self.pp_rank,
+            self.pcp_rank,
+            self.dcp_rank,
         )
 
     def _make_layerwise_partial_key(
