@@ -1,12 +1,12 @@
 """CPU compatibility checks for the per-rank redundant Slot count rename."""
+
 import ast
 import importlib.util
 import os
+import unittest
 from pathlib import Path
 from types import SimpleNamespace
-import unittest
 from unittest.mock import Mock, patch
-
 
 ROOT = Path(__file__).resolve().parents[3]
 OLD = "MOONEP_B"
@@ -20,24 +20,32 @@ class RedundantSlotCountTests(unittest.TestCase):
         spec.loader.exec_module(self.envs)
         comm = ROOT / "vllm_ascend/ops/fused_moe/moonep_comm.py"
         tree = ast.parse(comm.read_text())
-        function = next(n for n in tree.body
-                        if isinstance(n, ast.FunctionDef) and n.name == "_moonep_slot_count")
+        function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_moonep_slot_count")
         namespace = {"envs": self.envs}
         exec(compile(ast.Module(body=[function], type_ignores=[]), str(comm), "exec"), namespace)
         self.buffer_count = lambda epn: namespace["_moonep_slot_count"](256, epn)
 
         balance = ROOT / "vllm_ascend/ops/fused_moe/moonep_balance.py"
         tree = ast.parse(balance.read_text())
-        layout = next(n for n in tree.body
-                      if isinstance(n, ast.FunctionDef) and n.name == "_layer_weight_layout")
-        end = next(i for i, n in enumerate(layout.body) if isinstance(n, ast.Assign)
-                   and any(isinstance(t, ast.Name) and t.id == "F" for t in n.targets))
+        layout = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_layer_weight_layout")
+        end = next(
+            i
+            for i, n in enumerate(layout.body)
+            if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "F" for t in n.targets)
+        )
         layout.body = layout.body[:end] + [ast.Return(value=ast.Name(id="B", ctx=ast.Load()))]
         layer_namespace = {"envs": self.envs, "_LayerWeightLayout": object}
-        exec(compile(ast.fix_missing_locations(ast.Module(
-            body=[layout], type_ignores=[])), str(balance), "exec"), layer_namespace)
+        exec(
+            compile(ast.fix_missing_locations(ast.Module(body=[layout], type_ignores=[])), str(balance), "exec"),
+            layer_namespace,
+        )
         self.layer_count = lambda epn: layer_namespace["_layer_weight_layout"](
-            SimpleNamespace(w13_weight=SimpleNamespace(shape=(epn, 4, 8))), 256, 4)
+            SimpleNamespace(
+                w13_weight=SimpleNamespace(shape=(epn, 4, 8)), w2_weight=SimpleNamespace(shape=(epn, 8, 4))
+            ),
+            256,
+            4,
+        )
         self.readers = {"buffer": self.buffer_count, "layer": self.layer_count}
 
     def values(self, environment, epn=8):
@@ -78,27 +86,32 @@ class RedundantSlotCountTests(unittest.TestCase):
 
     def test_invalid_new_value_cannot_fall_back_to_old_name(self):
         for name, reader in self.readers.items():
-            with self.subTest(reader=name), patch.dict(os.environ, {NEW: "", OLD: "8"}, clear=True):
-                with self.assertRaises(ValueError):
-                    reader(8)
+            with (
+                self.subTest(reader=name),
+                patch.dict(os.environ, {NEW: "", OLD: "8"}, clear=True),
+                self.assertRaises(ValueError),
+            ):
+                reader(8)
 
     def test_range_errors_identify_the_new_name(self):
         for value in ("0", "-1", "9"):
             for name, reader in self.readers.items():
-                with self.subTest(value=value, reader=name), patch.dict(
-                    os.environ, {NEW: value}, clear=True
+                with (
+                    self.subTest(value=value, reader=name),
+                    patch.dict(os.environ, {NEW: value}, clear=True),
+                    self.assertRaisesRegex(ValueError, NEW + " must be"),
                 ):
-                    with self.assertRaisesRegex(ValueError, NEW + " must be"):
-                        reader(8)
+                    reader(8)
 
     def test_malformed_integers_remain_errors_at_both_read_sites(self):
         for value in ("", "invalid", "1.5"):
             for name, reader in self.readers.items():
-                with self.subTest(value=value, reader=name), patch.dict(
-                    os.environ, {NEW: value}, clear=True
+                with (
+                    self.subTest(value=value, reader=name),
+                    patch.dict(os.environ, {NEW: value}, clear=True),
+                    self.assertRaises(ValueError),
                 ):
-                    with self.assertRaises(ValueError):
-                        reader(8)
+                    reader(8)
 
     def test_both_runtime_sites_use_the_central_accessor(self):
         getter = Mock(return_value="4")
@@ -117,10 +130,13 @@ class RedundantSlotCountTests(unittest.TestCase):
     def test_old_name_has_no_runtime_registration_read_or_alias(self):
         for relative in ("envs.py", "ops/fused_moe/moonep_comm.py", "ops/fused_moe/moonep_balance.py"):
             tree = ast.parse((ROOT / "vllm_ascend" / relative).read_text())
-            self.assertFalse(any(isinstance(n, ast.Constant) and isinstance(n.value, str)
-                                 and OLD == n.value for n in ast.walk(tree)), relative)
-            self.assertFalse(any(isinstance(n, ast.Attribute) and n.attr == OLD
-                                 for n in ast.walk(tree)), relative)
+            self.assertFalse(
+                any(
+                    isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value == OLD for n in ast.walk(tree)
+                ),
+                relative,
+            )
+            self.assertFalse(any(isinstance(n, ast.Attribute) and n.attr == OLD for n in ast.walk(tree)), relative)
 
 
 if __name__ == "__main__":

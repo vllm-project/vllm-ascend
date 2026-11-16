@@ -1,23 +1,28 @@
 """CPU regressions for load-observer removal; native routing and EPLB remain."""
+
 import ast
-from contextlib import ExitStack
 import importlib.util
 import os
-from pathlib import Path
-from types import SimpleNamespace
 import sys
 import unittest
-from unittest.mock import Mock, patch
+from contextlib import ExitStack
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
-import torch
 import test_moonep_no_host_sync as dispatch_cases
-
+import torch
 
 ROOT = Path(__file__).resolve().parents[3]
 SDK = ROOT.parent / "ascend-moonep"
-REMOVED = ("VLLM_ASCEND_MOE_PAR_STATS", "VLLM_ASCEND_MOE_PAR_STATS_DIR",
-           "VLLM_ASCEND_MOE_PAR_STATS_TAG", "VLLM_ASCEND_MOE_PAR_FLUSH_EVERY",
-           "MOONEP_BALANCE_STATS", "MOONEP_BALANCE_STATS_EVERY")
+REMOVED = (
+    "VLLM_ASCEND_MOE_PAR_STATS",
+    "VLLM_ASCEND_MOE_PAR_STATS_DIR",
+    "VLLM_ASCEND_MOE_PAR_STATS_TAG",
+    "VLLM_ASCEND_MOE_PAR_FLUSH_EVERY",
+    "MOONEP_BALANCE_STATS",
+    "MOONEP_BALANCE_STATS_EVERY",
+)
 FUSED = ("routed_experts.py",)
 
 
@@ -25,19 +30,28 @@ def environment(value):
     return {**dict.fromkeys(REMOVED, value), "MOONEP_SLOT_STATS": "0"}
 
 
-def run_eplb(filename, values, group_type=1, *, enabled=True, heat=True,
-             multi_stage=False, iterations=1):
+def run_eplb(filename, values, group_type=1, *, enabled=True, heat=True, multi_stage=False, iterations=1):
     path = ROOT / "vllm_ascend/ops/fused_moe" / filename
     tree = ast.parse(path.read_text())
-    node = next(n for n in ast.walk(tree) if isinstance(n, ast.If)
-                and ast.unparse(n.test) ==
-                "self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status")
-    layer = SimpleNamespace(dynamic_eplb=enabled, multi_stage=multi_stage,
-                            moe_load=torch.zeros((2, 4) if multi_stage else (4,), dtype=torch.int32 if multi_stage else torch.int64),
-                            load_counter=torch.tensor([0], dtype=torch.int64), num_iter=2)
-    ns = {"torch": torch, "self": layer,
-          "_EXTRA_CTX": SimpleNamespace(eplb_heat_collection_status=heat),
-          "fused_experts_results": SimpleNamespace(expert_tokens=values, group_list_type=group_type)}
+    node = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.If)
+        and ast.unparse(n.test) == "self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status"
+    )
+    layer = SimpleNamespace(
+        dynamic_eplb=enabled,
+        multi_stage=multi_stage,
+        moe_load=torch.zeros((2, 4) if multi_stage else (4,), dtype=torch.int32 if multi_stage else torch.int64),
+        load_counter=torch.tensor([0], dtype=torch.int64),
+        num_iter=2,
+    )
+    ns = {
+        "torch": torch,
+        "self": layer,
+        "_EXTRA_CTX": SimpleNamespace(eplb_heat_collection_status=heat),
+        "fused_experts_results": SimpleNamespace(expert_tokens=values, group_list_type=group_type),
+    }
     code = compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), str(path), "exec")
     for _ in range(iterations):
         exec(code, ns)
@@ -57,8 +71,15 @@ class NoLoadDiagnosticsTests(unittest.TestCase):
 
     def test_collector_histogram_callbacks_and_imports_are_removed_from_runtime(self):
         self.assertFalse((ROOT / "vllm_ascend/ops/fused_moe/moe_par_stats.py").exists())
-        forbidden = {"_route_histogram", "_note_route_counts", "_note_compute_load",
-                     "_dump_balance_stats", "_BALANCE_STATS_ON", "_BALANCE_STATS", "_BALANCE_EVERY"}
+        forbidden = {
+            "_route_histogram",
+            "_note_route_counts",
+            "_note_compute_load",
+            "_dump_balance_stats",
+            "_BALANCE_STATS_ON",
+            "_BALANCE_STATS",
+            "_BALANCE_EVERY",
+        }
         for source in (ROOT / "vllm_ascend").rglob("*.py"):
             text = source.read_text()
             self.assertNotIn("moe_par_stats", text, str(source))
@@ -77,9 +98,11 @@ class NoLoadDiagnosticsTests(unittest.TestCase):
             name = "dispatch_mxfp8" if transport == "mxfp8" else "dispatch"
             original = getattr(buffer, name)
             captured = []
-            def launch(*args, **kwargs):
-                captured.append(args)
-                return original(*args, **kwargs)
+
+            def launch(*args, _captured=captured, _original=original, **kwargs):
+                _captured.append(args)
+                return _original(*args, **kwargs)
+
             setattr(buffer, name, launch)
             compat = fn.__globals__["_scratch_for"]()["tpe_compat"]
             old_weights = inputs.topk_weights.clone()
@@ -152,17 +175,31 @@ class NoLoadDiagnosticsTests(unittest.TestCase):
         cls = next(n for n in source.body if isinstance(n, ast.ClassDef) and n.name == "PlanningOp")
         method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "compute")
         records, launches = [], []
-        ns = {"torch": torch, "_collect_inputs": lambda *a, **kw: records.append(kw),
-              "launch_planning_op": lambda *a: launches.append(a),
-              "_num_valid_tokens": lambda ctx: ctx["num_valid_tokens"]}
+        ns = {
+            "torch": torch,
+            "_collect_inputs": lambda *a, **kw: records.append(kw),
+            "launch_planning_op": lambda *a: launches.append(a),
+            "_num_valid_tokens": lambda ctx: ctx["num_valid_tokens"],
+        }
         exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"), ns)
-        ctx = dict(rank=0, R=2, S=2, K=2, E=4, B=2, NvS=4,
-                   planning_workspace=torch.zeros(8, dtype=torch.int32), num_valid_tokens=1)
-        plan = SimpleNamespace(dst=torch.empty(4, dtype=torch.int32),
-                               experts_to_copy=torch.empty(2, 2, dtype=torch.int32),
-                               dup_groups=torch.empty(4, 3, dtype=torch.int32),
-                               dup_loffs=torch.empty(4, dtype=torch.int32),
-                               dup_counts=torch.empty(2, dtype=torch.int32))
+        ctx = dict(
+            rank=0,
+            R=2,
+            S=2,
+            K=2,
+            E=4,
+            B=2,
+            NvS=4,
+            planning_workspace=torch.zeros(8, dtype=torch.int32),
+            num_valid_tokens=1,
+        )
+        plan = SimpleNamespace(
+            dst=torch.empty(4, dtype=torch.int32),
+            experts_to_copy=torch.empty(2, 2, dtype=torch.int32),
+            dup_groups=torch.empty(4, 3, dtype=torch.int32),
+            dup_loffs=torch.empty(4, dtype=torch.int32),
+            dup_counts=torch.empty(2, dtype=torch.int32),
+        )
         op = SimpleNamespace(sym_workspace=lambda: SimpleNamespace(addr=123, length=456), num_sms=8)
         topk = torch.tensor([0, 0, 1, 2], dtype=torch.int32)
         cu = torch.empty(6, dtype=torch.int32)
@@ -180,15 +217,21 @@ class NoLoadDiagnosticsTests(unittest.TestCase):
     def test_generic_launchers_remove_load_controls_and_keep_official_profiling(self):
         service = ROOT / "scripts/dsv4flash_service/service"
         for name in ("start_service_mode.sh", "start_service_mode_dp4.sh"):
+            service = ROOT / "scripts/dsv4flash_service/service"
             text = (service / name).read_text()
+            if name.endswith("_dp4.sh"):
+                self.assertIn("export DP_SIZE=${DP_SIZE:-4}", text)
+                self.assertIn('exec "$HERE/start_service_mode.sh" "$@"', text)
+                text = (service / "start_service_mode.sh").read_text()
             for key in REMOVED:
                 self.assertNotIn(key, text)
             for marker in ("$DUMP_DIR", "$BALANCE", "$MOE_PAR", "moe-par-ledger", "moonep-balance"):
                 self.assertNotIn(marker, text)
             self.assertIn("--profiler-config", text)
-            self.assertIn('vllm serve "$MODEL"', text)
-            self.assertIn("ASCEND_RT_VISIBLE_DEVICES", text)
-            self.assertIn('tee -a "$LOG_FILE"', text)
+            self.assertIn('-m vllm.entrypoints.cli.main serve "$MODEL"', text)
+            self.assertIn('exec "$VLLM_PYTHON" -I -B', text)
+            self.assertIn('--data-parallel-size "${DP_SIZE:-8}"', text)
+            self.assertIn('tee -a -- "$LOG_FILE"', text)
 
 
 if __name__ == "__main__":

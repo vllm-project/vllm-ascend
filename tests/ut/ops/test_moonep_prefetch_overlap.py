@@ -200,7 +200,7 @@ class PrefetchOverlapTests(unittest.TestCase):
 
     def test_no_old_runtime_key_or_numeric_mode(self):
         for path in [ROOT / "vllm_ascend/envs.py", self.source,
-                     ROOT / "vllm_ascend/worker/model_runner_v1.py"]:
+                     ROOT / "vllm_ascend/worker/v2/model_runner.py"]:
             tree = ast.parse(path.read_text())
             self.assertFalse(any(isinstance(n, ast.Constant) and isinstance(n.value, str)
                                  and OLD in n.value for n in ast.walk(tree)), str(path))

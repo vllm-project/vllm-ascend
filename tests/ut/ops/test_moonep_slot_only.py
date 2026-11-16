@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU contracts for the Slot-only MoonEP service and independent native paths."""
+
 import ast
 import importlib.util
 import os
@@ -12,7 +13,6 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
-
 from test_moonep_real_tokens import Metadata, load_method
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -38,8 +38,9 @@ class SlotOnlyForwardTests(unittest.TestCase):
         state = object()
         tls = SimpleNamespace(state=None)
         metadata = SimpleNamespace(state=state, buffer=object(), plan=object())
-        dispatch_output = SimpleNamespace(combine_metadata=metadata,
-                                         group_list=torch.tensor([2, 1, 1, 0]), group_list_type=1)
+        dispatch_output = SimpleNamespace(
+            combine_metadata=metadata, group_list=torch.tensor([2, 1, 1, 0]), group_list_type=1
+        )
         output = object()
 
         def dispatch(value):
@@ -60,19 +61,26 @@ class SlotOnlyForwardTests(unittest.TestCase):
             return output
 
         namespace = {
-            "_SLOT_TLS": tls, "FusedExpertsResult": SimpleNamespace,
+            "_SLOT_TLS": tls,
+            "FusedExpertsResult": SimpleNamespace,
             "torch": SimpleNamespace(npu=SimpleNamespace(current_stream=lambda: SimpleNamespace(record_event=object))),
             "_MOONEP_RUNTIME": SimpleNamespace(_state_by_w13={} if missing_state else {id(weight): state}),
         }
         node = function_node(COMM, "fused_experts", "MoonEPCommImpl")
         forward = load_function(node, namespace)
-        obj = SimpleNamespace(token_dispatcher=SimpleNamespace(token_dispatch=dispatch, token_combine=combine),
-                              use_fusion_ops=False, moe_config=object())
+        obj = SimpleNamespace(
+            token_dispatcher=SimpleNamespace(token_dispatch=dispatch, token_combine=combine),
+            use_fusion_ops=False,
+            moe_config=object(),
+        )
         inputs = SimpleNamespace(layer=SimpleNamespace(w13_weight=weight), lora_context=None)
         modules = {
-            "vllm_ascend.ops.fused_moe.moonep_balance": SimpleNamespace(run_slot_forward=mlp, select_prefetch_layer=lambda layer: None),
+            "vllm_ascend.ops.fused_moe.moonep_balance": SimpleNamespace(
+                run_slot_forward=mlp, select_prefetch_layer=lambda layer: None
+            ),
             "vllm_ascend.ops.fused_moe.dataclass.token_dispatcher": SimpleNamespace(
-                build_token_dispatch_input=lambda **kwargs: object()),
+                build_token_dispatch_input=lambda **kwargs: object()
+            ),
         }
         return forward, obj, inputs, modules, events, tls, output
 
@@ -96,10 +104,11 @@ class SlotOnlyForwardTests(unittest.TestCase):
         self.assertEqual(events, [])
 
     def test_fused_weight_list_remains_unsupported(self):
-        forward, obj, inputs, modules, events, _, _ = self.make_forward(fused_weights=True)
-        with patch.dict(sys.modules, modules), self.assertRaisesRegex(NotImplementedError, "single"):
-            forward(obj, inputs, quant_method=object())
-        self.assertEqual(events, [])
+        path = COMM.with_name("moonep_mlp.py")
+        node = function_node(path, "apply_slot_mlp")
+        forward = load_function(node, {"MoEMlpComputeInput": object})
+        with self.assertRaisesRegex(NotImplementedError, "split"):
+            forward(SimpleNamespace(layer=object()), SimpleNamespace(use_expert_weight_list=True))
 
     def test_slot_tls_is_cleared_after_mlp_failure(self):
         forward, obj, inputs, modules, events, tls, _ = self.make_forward(fail_mlp=True)
@@ -110,21 +119,26 @@ class SlotOnlyForwardTests(unittest.TestCase):
 
     def test_combine_rejects_missing_source_weights(self):
         owner_combine = Mock(side_effect=AssertionError("No owner combine fallback"))
-        namespace = {"torch": torch, "time": SimpleNamespace(perf_counter=lambda: 0),
-                     "MoonEPCombineMetadata": Metadata}
+        namespace = {"torch": torch, "time": SimpleNamespace(perf_counter=lambda: 0), "MoonEPCombineMetadata": Metadata}
         combine = load_method("token_combine", namespace)
-        meta = Metadata(num_tokens=1, source_topk_weights_sk=None,
-                        buffer=SimpleNamespace(combine=owner_combine))
+        meta = Metadata(num_tokens=1, source_topk_weights_sk=None, buffer=SimpleNamespace(combine=owner_combine))
         with self.assertRaisesRegex(ValueError, "source-rank route weights"):
             combine(SimpleNamespace(), torch.ones(1, 4), meta)
         owner_combine.assert_not_called()
 
     def test_runtime_creates_slot_states_without_legacy_flag(self):
         method = function_node(COMM, "_initialize_locked", "_MoonEPRuntime")
-        start = next(i for i, n in enumerate(method.body) if isinstance(n, ast.ImportFrom)
-                     and any(a.name == "_build_slot_states" for a in n.names))
-        end = next(i for i, n in enumerate(method.body) if isinstance(n, ast.Assign)
-                   and any(isinstance(t, ast.Attribute) and t.attr == "_state_by_w13" for t in n.targets))
+        start = next(
+            i
+            for i, n in enumerate(method.body)
+            if isinstance(n, ast.ImportFrom) and any(a.name == "_build_slot_states" for a in n.names)
+        )
+        end = next(
+            i
+            for i, n in enumerate(method.body)
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Attribute) and t.attr == "_state_by_w13" for t in n.targets)
+        )
         layer = SimpleNamespace(w13_weight=object())
         entries = [dict(layer=layer, E=256, H=4096), dict(layer=layer, E=256, H=4096), dict(layer=None)]
 
@@ -137,14 +151,19 @@ class SlotOnlyForwardTests(unittest.TestCase):
                 namespace = {
                     "torch": SimpleNamespace(npu=SimpleNamespace(current_device=lambda: 0)),
                     "get_ep_group": lambda: SimpleNamespace(rank_in_group=0),
-                    "_registry_lock": threading.Lock(), "_moonep_layer_registry": entries, "self": runtime,
+                    "_registry_lock": threading.Lock(),
+                    "_moonep_layer_registry": entries,
+                    "self": runtime,
                 }
                 module = SimpleNamespace(_build_slot_states=builder)
-                with patch.dict(os.environ, {"MOONEP_SLOT_MODE": legacy}), patch.dict(
-                    sys.modules, {"vllm_ascend.ops.fused_moe.moonep_balance": module}
+                with (
+                    patch.dict(os.environ, {"MOONEP_SLOT_MODE": legacy}),
+                    patch.dict(sys.modules, {"vllm_ascend.ops.fused_moe.moonep_balance": module}),
                 ):
-                    exec(compile(ast.Module(body=method.body[start:end + 1], type_ignores=[]), str(COMM), "exec"),
-                         namespace)
+                    exec(
+                        compile(ast.Module(body=method.body[start : end + 1], type_ignores=[]), str(COMM), "exec"),
+                        namespace,
+                    )
                 builder.assert_called_with(entries, 0, 0)
                 self.assertEqual(len(runtime._states), 1)
                 self.assertEqual(runtime._states[0].layer_index, 0)
@@ -178,19 +197,24 @@ class NativeSelectionTests(unittest.TestCase):
             MC2 = auto()
             FUSED_MC2 = auto()
             SHMEM = auto()
+
         for enabled in (False, True):
             with self.subTest(enabled=enabled):
                 methods = {}
-                namespace = {"_MoECommMethods": methods, "MoECommType": Comm,
-                             "_moe_config_key": lambda kind, config: (kind, ()),
-                             "get_ascend_config": lambda: SimpleNamespace(enable_moonep=enabled)}
+                namespace = {
+                    "_MoECommMethods": methods,
+                    "MoECommType": Comm,
+                    "_moe_config_key": lambda kind, config: (kind, ()),
+                    "get_ascend_config": lambda enabled=enabled: SimpleNamespace(enable_moonep=enabled),
+                }
                 for name in ("AlltoAllCommImpl", "AllGatherCommImpl", "MC2CommImpl", "FusedMC2CommImpl"):
                     namespace[name] = lambda config: object()
                 node = function_node(ROOT / "vllm_ascend/ops/fused_moe/moe_comm_method.py", "setup_moe_comm_method")
                 setup = load_function(node, namespace)
                 shmem = Mock(return_value=object())
-                with patch.dict(sys.modules, {"vllm_ascend.ops.fused_moe.moonep_comm":
-                                               SimpleNamespace(MoonEPCommImpl=shmem)}):
+                with patch.dict(
+                    sys.modules, {"vllm_ascend.ops.fused_moe.moonep_comm": SimpleNamespace(MoonEPCommImpl=shmem)}
+                ):
                     setup(SimpleNamespace(ep_size=8))
                 self.assertEqual((Comm.SHMEM, ()) in methods, enabled)
                 self.assertEqual(shmem.call_count, int(enabled))
@@ -202,20 +226,34 @@ class NativeSelectionTests(unittest.TestCase):
             FUSED_MC2 = auto()
             ALLTOALL = auto()
             SHMEM = auto()
+
         path = ROOT / "vllm_ascend/ascend_forward_context.py"
-        blocks = [n for n in ast.walk(ast.parse(path.read_text())) if isinstance(n, ast.If)
-                  and isinstance(n.test, ast.Attribute) and n.test.attr == "enable_moonep"
-                  and any(isinstance(x, ast.Name) and x.id == "keep_mc2" for x in ast.walk(n))]
+        blocks = [
+            n
+            for n in ast.walk(ast.parse(path.read_text()))
+            if isinstance(n, ast.If)
+            and isinstance(n.test, ast.Name)
+            and n.test.id == "moonep_enabled"
+            and any(isinstance(x, ast.Name) and x.id == "keep_mc2" for x in ast.walk(n))
+        ]
         self.assertEqual(len(blocks), 1)
-        cases = [(False, False, Comm.MC2, Comm.MC2), (True, True, Comm.MC2, Comm.MC2),
-                 (True, True, Comm.FUSED_MC2, Comm.FUSED_MC2),
-                 (True, False, Comm.MC2, Comm.SHMEM), (True, True, Comm.ALLTOALL, Comm.SHMEM)]
+        cases = [
+            (False, False, Comm.MC2, Comm.MC2),
+            (True, True, Comm.MC2, Comm.MC2),
+            (True, True, Comm.FUSED_MC2, Comm.FUSED_MC2),
+            (True, False, Comm.MC2, Comm.SHMEM),
+            (True, True, Comm.ALLTOALL, Comm.SHMEM),
+        ]
         for enabled, keep, initial, expected in cases:
             with self.subTest(enabled=enabled, keep=keep, initial=initial):
-                namespace = {"get_ascend_config": lambda: SimpleNamespace(enable_moonep=enabled),
-                             "get_moonep_tokens_capacity": lambda: 4096,
-                             "envs": SimpleNamespace(MOONEP_KEEP_MC2=keep), "MoECommType": Comm,
-                             "moe_comm_type": initial, "num_tokens": 16}
+                namespace = {
+                    "moonep_enabled": enabled,
+                    "get_moonep_tokens_capacity": lambda: 4096,
+                    "envs": SimpleNamespace(MOONEP_KEEP_MC2=keep),
+                    "MoECommType": Comm,
+                    "moe_comm_type": initial,
+                    "num_tokens": 16,
+                }
                 exec(compile(ast.Module(body=blocks, type_ignores=[]), str(path), "exec"), namespace)
                 self.assertIs(namespace["moe_comm_type"], expected)
 

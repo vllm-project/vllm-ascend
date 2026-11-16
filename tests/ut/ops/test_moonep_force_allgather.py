@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU policy checks for native A5 selection without a forced AllGather mode."""
+
 import ast
 import os
 import unittest
@@ -36,26 +37,45 @@ class NormalSelectionTests(unittest.TestCase):
         self.shmem_capacity = 4096
         self.config = SimpleNamespace(
             model_config=SimpleNamespace(hf_text_config=SimpleNamespace(num_experts_per_tok=6)),
-            parallel_config=SimpleNamespace(enable_expert_parallel=True, world_size_across_dp=8),
+            parallel_config=SimpleNamespace(enable_expert_parallel=True, world_size_across_dp=8, pipeline_parallel_size=1),
         )
         self.a2 = Mock(return_value=Comm.ALLGATHER)
         self.a3 = Mock(return_value=Comm.FUSED_MC2)
         self.envs = SimpleNamespace(MOONEP_KEEP_MC2=False)
         namespace = {
-            "os": os, "VllmConfig": SimpleNamespace, "MoECommType": Comm,
-            "AscendDeviceType": Device, "logger": SimpleNamespace(debug=Mock()),
-            "envs": self.envs, "is_moe_model": lambda config: self.is_moe,
+            "os": os,
+            "VllmConfig": SimpleNamespace,
+            "MoECommType": Comm,
+            "AscendDeviceType": Device,
+            "logger": SimpleNamespace(debug=Mock()),
+            "envs": self.envs,
+            "is_moe_model": lambda config: self.is_moe,
             "get_ascend_config": lambda: SimpleNamespace(enable_moonep=self.enabled, enable_fused_mc2=0),
             "get_ep_group": lambda: SimpleNamespace(world_size=self.ep_world_size),
             "get_mc2_tokens_capacity": lambda: 256,
             "get_moonep_tokens_capacity": lambda: self.shmem_capacity,
             "get_ascend_device_type": lambda: self.soc,
-            "_select_a2_moe_comm_method": self.a2, "_select_a3_moe_comm_method": self.a3,
+            "QuantType": SimpleNamespace(NONE=object()),
         }
-        names = {"_select_a5_moe_comm_method", "select_moe_comm_method"}
-        functions = [n for n in ast.parse(SOURCE.read_text()).body
-                     if isinstance(n, ast.FunctionDef) and n.name in names]
+        policies = {device: object() for device in Device}
+
+        def hardware_profile():
+            if self.soc not in policies:
+                raise ValueError("Unsupported soc_version")
+            return SimpleNamespace(moe_comm_policy=policies[self.soc])
+
+        namespace["get_current_hardware_profile"] = hardware_profile
+        namespace["MoECommPolicy"] = SimpleNamespace(ALLGATHER=policies[Device._310P])
+        names = {"_select_capacity_and_world_size_moe_comm_method", "select_moe_comm_method"}
+        functions = [
+            n for n in ast.parse(SOURCE.read_text()).body if isinstance(n, ast.FunctionDef) and n.name in names
+        ]
         exec(compile(ast.Module(body=functions, type_ignores=[]), str(SOURCE), "exec"), namespace)
+        namespace["_MOE_COMM_SELECTORS"] = {
+            policies[Device.A5]: namespace["_select_capacity_and_world_size_moe_comm_method"],
+            policies[Device.A2]: self.a2,
+            policies[Device.A3]: self.a3,
+        }
         self.select_method = namespace["select_moe_comm_method"]
 
     def select(self, tokens, legacy="1"):
@@ -118,17 +138,17 @@ class NormalSelectionTests(unittest.TestCase):
         for keep in (False, True):
             with self.subTest(keep=keep):
                 self.keep_mc2 = keep
-                with self.assertRaisesRegex(RuntimeError, "static SHMEM capacity"):
+                with self.assertRaisesRegex(RuntimeError, "SHMEM capacity"):
                     self.select(4097)
 
     def test_moonep_invalid_expert_parallel_still_raises(self):
         self.enabled = True
         self.config.parallel_config.enable_expert_parallel = False
-        with self.assertRaisesRegex(RuntimeError, "needs expert parallel"):
+        with self.assertRaisesRegex(RuntimeError, "requires expert parallel"):
             self.select(128)
         self.config.parallel_config.enable_expert_parallel = True
         self.ep_world_size = 1
-        with self.assertRaisesRegex(RuntimeError, "needs expert parallel"):
+        with self.assertRaisesRegex(RuntimeError, "requires expert parallel"):
             self.select(128)
 
     def test_other_device_selection_helpers_remain_independent(self):

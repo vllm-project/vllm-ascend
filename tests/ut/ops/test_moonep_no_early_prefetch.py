@@ -157,7 +157,7 @@ class NoEarlyPrefetchTests(unittest.TestCase):
                    "take_predicted_plan", "finish_speculative_prefetch", "_pf_shell_plan",
                    "_pf_stats_init", "_dump_early_pf_stats", "_EARLY_PF", "_EARLY_PF_DEV"}
         for relative in ["ops/fused_moe/moonep_balance.py", "ops/fused_moe/moonep_comm.py",
-                         "worker/model_runner_v1.py", "envs.py"]:
+                         "worker/v2/model_runner.py", "envs.py"]:
             tree = ast.parse((ROOT / "vllm_ascend" / relative).read_text())
             strings = {n.value for n in ast.walk(tree) if isinstance(n, ast.Constant)
                        and isinstance(n.value, str)}

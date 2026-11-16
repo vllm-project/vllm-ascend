@@ -292,13 +292,12 @@ class MoonEPIntegrationContractTest(unittest.TestCase):
     def test_no_shared_experts_and_no_overlap_omit_events(self):
         self.check_stage_events(shared=False, multistream=False)
 
-    def test_both_runners_initialize_runtime_before_prefetch_hooks(self):
-        for name in ("worker/model_runner_v1.py", "worker/v2/model_runner.py"):
-            path = ROOT / "vllm_ascend" / name
-            fn = method(path, "NPUModelRunner", "load_model")
-            calls = [n.func.id for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
-            self.assertLess(calls.index("ensure_runtime_initialized"), calls.index("maybe_install_pf_stream"))
-            self.assertIn("set_moonep_tokens_capacity", path.read_text())
+    def test_runner_initializes_runtime_before_prefetch_hooks(self):
+        path = ROOT / "vllm_ascend/worker/v2/model_runner.py"
+        fn = method(path, "NPUModelRunner", "load_model")
+        calls = [n.func.id for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+        self.assertLess(calls.index("ensure_runtime_initialized"), calls.index("maybe_install_pf_stream"))
+        self.assertIn("set_moonep_tokens_capacity", path.read_text())
 
 
 if __name__ == "__main__":

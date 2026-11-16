@@ -1,16 +1,16 @@
 """CPU integration checks for MoonEP transport selection, without loading NPU operators."""
+
 import ast
-from contextlib import redirect_stdout
 import importlib.util
 import io
 import os
-from pathlib import Path
 import sys
 import threading
-from types import SimpleNamespace
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
-
 
 ROOT = Path(__file__).resolve().parents[3]
 COMM = ROOT / "vllm_ascend/ops/fused_moe/moonep_comm.py"
@@ -23,13 +23,18 @@ class TransportTypeTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("transport_envs", ROOT / "vllm_ascend/envs.py")
         self.envs = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.envs)
-        cls = next(n for n in ast.parse(COMM.read_text()).body
-                   if isinstance(n, ast.ClassDef) and n.name == "_MoonEPRuntime")
-        self.methods = [n for n in cls.body if isinstance(n, ast.FunctionDef)
-                        and n.name in ("_initialize_locked", "_ensure_initialized")]
+        cls = next(
+            n for n in ast.parse(COMM.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "_MoonEPRuntime"
+        )
+        self.methods = [
+            n
+            for n in cls.body
+            if isinstance(n, ast.FunctionDef) and n.name in ("_initialize_locked", "_ensure_initialized")
+        ]
         balance = ast.parse((ROOT / "vllm_ascend/ops/fused_moe/moonep_balance.py").read_text())
-        self.overlap_fn = next(n for n in balance.body if isinstance(n, ast.FunctionDef)
-                               and n.name == "udma_prefetch_overlap_requested")
+        self.overlap_fn = next(
+            n for n in balance.body if isinstance(n, ast.FunctionDef) and n.name == "udma_prefetch_overlap_requested"
+        )
 
     def harness(self, mode="dispatch", effective=None, capability_error=False, ep=8, capacity=4096):
         # Execute the complete real initializer against host-only Buffer/SHMEM
@@ -37,35 +42,53 @@ class TransportTypeTests(unittest.TestCase):
         events, contexts = [], []
         group = SimpleNamespace(device_group=object(), world_size=ep, rank_in_group=0)
         state = SimpleNamespace(_w13_src=object(), publish=Mock(side_effect=lambda: events.append("publish")))
+
         def buffer(*args, **kwargs):
             events.append("buffer")
-            flags = dict(planning=False, dispatch=kwargs.get("use_udma", False),
-                         combine=kwargs.get("use_udma", False), prefetch=kwargs.get("use_udma", False))
+            flags = dict(
+                planning=False,
+                dispatch=kwargs.get("use_udma", False),
+                combine=kwargs.get("use_udma", False),
+                prefetch=kwargs.get("use_udma", False),
+            )
             if effective is not None:
                 flags.update(effective)
             ctx = {f"_{name}_use_udma": value for name, value in flags.items()}
             contexts.append(ctx)
             return SimpleNamespace(_require_ctx=lambda: ctx)
+
         constructor = Mock(side_effect=buffer)
         init_ipport = Mock(side_effect=lambda **kw: events.append("ipport"))
         init_uid = Mock(side_effect=lambda **kw: events.append("uid"))
         validate = Mock(side_effect=RuntimeError("direct-mode required") if capability_error else None)
         ready = Mock(return_value=(3, 2, 2))
-        shmem = SimpleNamespace(is_initialized=lambda: False, init_with_ip_port=init_ipport,
-                                init_with_buffer=init_uid, validate_udma_prefetch_overlap=validate,
-                                require_udma_prefetch_overlap=ready)
+        shmem = SimpleNamespace(
+            is_initialized=lambda: False,
+            init_with_ip_port=init_ipport,
+            init_with_buffer=init_uid,
+            validate_udma_prefetch_overlap=validate,
+            require_udma_prefetch_overlap=ready,
+        )
         ns = {
-            "os": os, "envs": self.envs,
-            "get_ep_group": lambda: group, "get_moonep_tokens_capacity": lambda: capacity,
+            "os": os,
+            "envs": self.envs,
+            "get_ep_group": lambda: group,
+            "get_moonep_tokens_capacity": lambda: capacity,
             "_registry_keys": lambda: [(256, 6, 4096, 32)],
             "_moonep_pool_capacities": lambda *a, **kw: [128, 4096],
             "_moonep_slot_count": lambda *a: 32,
-            "_registry_lock": threading.Lock(), "_moonep_layer_registry": [object()],
+            "_registry_lock": threading.Lock(),
+            "_moonep_layer_registry": [object()],
             "_warmup_aicpu_custom_scheduler": lambda: events.append("warmup"),
             "torch": SimpleNamespace(
-                zeros=Mock(return_value=object()), bfloat16=object(), float32=object(), int32=object(),
-                npu=SimpleNamespace(current_device=lambda: 0, empty_cache=Mock(),
-                                    mem_get_info=lambda dev: (2**30, 2**31))),
+                zeros=Mock(return_value=object()),
+                bfloat16=object(),
+                float32=object(),
+                int32=object(),
+                npu=SimpleNamespace(
+                    current_device=lambda: 0, empty_cache=Mock(), mem_get_info=lambda dev: (2**30, 2**31)
+                ),
+            ),
         }
         exec(compile(ast.Module(body=self.methods, type_ignores=[]), str(COMM), "exec"), ns)
         overlap_ns = {"_PREFETCH_OVERLAP": mode}
@@ -73,26 +96,47 @@ class TransportTypeTests(unittest.TestCase):
         modules = {
             "ascend_moonep": SimpleNamespace(Buffer=constructor, ShmemRuntime=shmem),
             "ascend_moonep.buffer_c": SimpleNamespace(symmetric_descriptors=lambda: []),
-            "vllm.config": SimpleNamespace(get_current_vllm_config=lambda: SimpleNamespace(
-                parallel_config=SimpleNamespace(data_parallel_master_ip="127.0.0.1",
-                                                data_parallel_size=8, data_parallel_size_local=8))),
+            "vllm.config": SimpleNamespace(
+                get_current_vllm_config=lambda: SimpleNamespace(
+                    parallel_config=SimpleNamespace(
+                        data_parallel_master_ip="127.0.0.1", data_parallel_size=8, data_parallel_size_local=8
+                    )
+                )
+            ),
             "vllm_ascend.ops.fused_moe.moonep_balance": SimpleNamespace(
                 _build_slot_states=lambda *a: [state],
-                udma_prefetch_overlap_requested=overlap_ns["udma_prefetch_overlap_requested"]),
+                udma_prefetch_overlap_requested=overlap_ns["udma_prefetch_overlap_requested"],
+            ),
         }
         runtime = SimpleNamespace(_buffers={}, _pads={}, _lock=threading.Lock(), _ready=False, _fail=None)
         runtime._initialize_locked = lambda: ns["_initialize_locked"](runtime)
+
         def run(environment, ensured=False):
             output = io.StringIO()
-            with patch.dict(os.environ, environment, clear=True), patch.dict(sys.modules, modules), redirect_stdout(output):
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch.dict(sys.modules, modules),
+                redirect_stdout(output),
+            ):
                 if ensured:
                     ns["_ensure_initialized"](runtime)
                 else:
                     runtime._initialize_locked()
             return output.getvalue()
-        return SimpleNamespace(run=run, events=events, constructor=constructor, contexts=contexts,
-                               ipport=init_ipport, uid=init_uid, validate=validate, ready=ready,
-                               state=state, runtime=runtime, torch=ns["torch"])
+
+        return SimpleNamespace(
+            run=run,
+            events=events,
+            constructor=constructor,
+            contexts=contexts,
+            ipport=init_ipport,
+            uid=init_uid,
+            validate=validate,
+            ready=ready,
+            state=state,
+            runtime=runtime,
+            torch=ns["torch"],
+        )
 
     def test_default_mte_is_central_and_old_name_is_not_registered(self):
         self.assertIn(NEW, self.envs.env_variables)
@@ -177,9 +221,11 @@ class TransportTypeTests(unittest.TestCase):
         h.state.publish.assert_called_once_with()
 
     def test_effective_backend_mismatch_is_rejected_before_publish(self):
-        for transport, effective in (("udma", {"dispatch": False}),
-                                     ("mte", {"prefetch": True}),
-                                     ("udma", {"planning": True})):
+        for transport, effective in (
+            ("udma", {"dispatch": False}),
+            ("mte", {"prefetch": True}),
+            ("udma", {"planning": True}),
+        ):
             with self.subTest(transport=transport, effective=effective):
                 h = self.harness(effective=effective)
                 with self.assertRaisesRegex(RuntimeError, "MoonEP backend mismatch"):
@@ -216,17 +262,23 @@ class TransportTypeTests(unittest.TestCase):
 
     def test_one_central_read_and_no_old_runtime_alias(self):
         tree = ast.parse(COMM.read_text())
-        reads = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute)
-                 and isinstance(n.value, ast.Name) and n.value.id == "envs" and n.attr == NEW]
+        reads = [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "envs" and n.attr == NEW
+        ]
         self.assertEqual(len(reads), 1)
         for path in (COMM, ROOT / "vllm_ascend/envs.py"):
-            strings = {n.value for n in ast.walk(ast.parse(path.read_text()))
-                       if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+            strings = {
+                n.value
+                for n in ast.walk(ast.parse(path.read_text()))
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            }
             self.assertNotIn(OLD, strings)
 
-    def test_generic_launcher_pins_mte_and_drops_old_transport_entry(self):
+    def test_generic_launcher_defaults_mte_and_drops_old_transport_entry(self):
         script = (ROOT / "scripts/dsv4flash_service/service/start_service_mode.sh").read_text()
-        self.assertIn("export MOONEP_TRANSPORT_TYPE=mte", script)
+        self.assertIn("export MOONEP_TRANSPORT_TYPE=${MOONEP_TRANSPORT_TYPE:-mte}", script)
         self.assertNotIn(OLD, script)
 
 

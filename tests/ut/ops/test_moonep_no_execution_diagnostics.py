@@ -223,7 +223,8 @@ class NoTimingMlpTests(unittest.TestCase):
                                 apply_gmm1_act_quant=gmm1, apply_gmm2=gmm2)
         ns = dict(torch=SimpleNamespace(npu=SimpleNamespace(
             current_stream=lambda: SimpleNamespace(record_event=lambda: event))))
-        load_functions("moe_mlp.py", {"apply_moe_mlp"}, ns)
+        ns["get_ascend_config"] = lambda: SimpleNamespace(multistream_overlap_shared_expert=True)
+        load_functions("moe_mlp.py", {"apply_moe_mlp", "maybe_record_event"}, ns)
         for value in ("0", "1", "invalid"):
             calls.clear()
             with patch.dict(os.environ, environment(value)):
