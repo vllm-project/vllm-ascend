@@ -56,6 +56,7 @@ _STANDARD_CAPABILITIES = frozenset(
 _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A2: _STANDARD_CAPABILITIES
     | {
+        HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.MINIMAX_ECOSYSTEM_FA3,
         HardwareCapability.POOL_KEY_INDEXER_INT8,

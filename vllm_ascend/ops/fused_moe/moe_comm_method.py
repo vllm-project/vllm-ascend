@@ -23,6 +23,7 @@ import torch
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
+from vllm_ascend.a2_mega_moe import a2_prefill_enabled
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -54,7 +55,13 @@ def _moe_config_key(
     moe_comm_type: MoECommType | None, moe_config: FusedMoEConfig | None
 ) -> tuple[MoECommType | None, tuple[int, ...]]:
     """Return the execution shape that owns mutable MoE comm state."""
-    _CONFIG_KEY_FIELDS = ("num_experts", "num_local_experts")
+    _CONFIG_KEY_FIELDS = (
+        "num_experts",
+        "num_local_experts",
+        "hidden_dim",
+        "intermediate_size_per_partition",
+        "experts_per_token",
+    )
     return (moe_comm_type, tuple(int(getattr(moe_config, field, 0) or 0) for field in _CONFIG_KEY_FIELDS))
 
 
@@ -421,7 +428,7 @@ class FusedMC2CommImpl(MoECommMethod):
             num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank),
         )
 
-        if is_decode_only_node:
+        if is_decode_only_node or a2_prefill_enabled(get_ascend_config()):
             max_recv_token_num = absolute_safe_max_recv_token_num
         else:
             # P nodes and PD-mixed nodes use the configured value. This keeps
@@ -502,6 +509,8 @@ class FusedMC2CommImpl(MoECommMethod):
         )
 
         if self.mega_moe_symm_buffer is None:
+            if a2_prefill_enabled(get_ascend_config()) and torch.npu.is_current_stream_capturing():
+                raise RuntimeError("A2 prefill MegaMoE requires eager buffer initialization")
             self.mega_moe_symm_buffer = self._init_mega_moe_symm_buffer(
                 dispatch_quant_mode,
                 dispatch_quant_out_dtype,

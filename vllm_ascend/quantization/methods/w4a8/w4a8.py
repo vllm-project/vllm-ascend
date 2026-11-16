@@ -24,6 +24,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
+from vllm_ascend.a2_mega_moe import a2_prefill_enabled
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -142,6 +143,10 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         self.use_expert_weight_list = self.dynamic_eplb or (
             vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
         )
+        # A2 prefill switches back to ordinary MC2/GMM for other phases. Use
+        # the existing TensorList layout for both backends rather than deleting
+        # the ordinary payload or retaining a second complete execution copy.
+        self.use_expert_weight_list |= a2_prefill_enabled(get_ascend_config()) and use_cann_megamoe(vllm_config)
         if self.quant_method == ASCEND_QUANTIZATION_METHOD and self.tp_size > _MODELSLIM_SCALE_BIAS_PARTITIONS:
             raise ValueError(f"The current weight does not support moe part tp>{_MODELSLIM_SCALE_BIAS_PARTITIONS}.")
 

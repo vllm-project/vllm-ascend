@@ -10,6 +10,8 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
+from vllm_ascend.a2_mega_moe import a2_prefill_enabled, prefill_vote, select_prefill_from_votes
+from vllm_ascend.a2_mega_moe import is_draft_model as is_a2_draft_model
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
@@ -99,6 +101,9 @@ def get_mrv2_in_profile_run() -> bool:
 
 
 def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
+    if get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY:
+        if not a2_prefill_enabled(get_ascend_config()) or is_a2_draft_model(vllm_config):
+            return False
     # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
     return (
         is_mega_moe_supported()
@@ -109,6 +114,23 @@ def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
         and 1 < get_ep_group().world_size <= 64
         and getattr(vllm_config, "lora_config", None) is None
     )
+
+
+def select_a2_mega_moe_prefill(metadata: Any, *, in_profile_run: bool, graph_enabled: bool) -> bool:
+    """Agree once per forward, including idle PCP/DP peers, over the CPU group.
+
+    Local request phases must never select different collective kernels. This
+    small Gloo vote does not copy a device tensor or synchronize the NPU stream.
+    """
+    if graph_enabled:
+        return False
+    if in_profile_run:
+        return True
+    from vllm_ascend.distributed.parallel_state import get_mc2_group
+
+    votes = torch.tensor(prefill_vote(metadata), dtype=torch.int32, device="cpu")
+    torch.distributed.all_reduce(votes, op=torch.distributed.ReduceOp.MAX, group=get_mc2_group().cpu_group)
+    return select_prefill_from_votes(*votes.tolist())
 
 
 @contextmanager
@@ -169,6 +191,9 @@ def set_ascend_forward_context(
             vllm_config,
             is_draft_model=is_draft_model,
             draft_moe_quant_type=draft_moe_quant_type,
+            attn_metadata=attn_metadata,
+            in_profile_run=in_profile_run,
+            graph_enabled=aclgraph_runtime_mode != CUDAGraphMode.NONE,
         )
 
         forward_context.moe_comm_type = moe_comm_type
@@ -279,7 +304,8 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     # keep the num_tokens_per_tp_rank less than fused_mc2 (mega_moe) tokens per rank limit
     if ascend_config.enable_fused_mc2:
         if use_mega_moe:
-            num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _MEGA_MOE_TOKENS_PER_RANK_LIMIT)
+            if not a2_prefill_enabled(ascend_config):
+                num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _MEGA_MOE_TOKENS_PER_RANK_LIMIT)
         else:
             num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT)
 
@@ -403,6 +429,10 @@ def select_moe_comm_method(
     vllm_config: VllmConfig,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
+    *,
+    attn_metadata: Any = None,
+    in_profile_run: bool = False,
+    graph_enabled: bool = False,
 ) -> MoECommType | None:
     """Select the MoE communication method from the active hardware policy,
     parallel settings, and token count.
@@ -420,6 +450,19 @@ def select_moe_comm_method(
         return None
 
     mc2_tokens_capacity = get_mc2_tokens_capacity()
+    if a2_prefill_enabled(get_ascend_config()):
+        if (
+            not is_draft_model
+            and use_cann_megamoe(vllm_config)
+            and select_a2_mega_moe_prefill(attn_metadata, in_profile_run=in_profile_run, graph_enabled=graph_enabled)
+        ):
+            logger.debug("A2 MegaMoE selected for DeepSeek V4.1 P prefill (profile=%s)", in_profile_run)
+            return MoECommType.FUSED_MC2
+        # MegaMoE's sender reservation is larger than ordinary MC2's supported
+        # per-rank capacity. Preserve the original fallback selection threshold.
+        mc2_tokens_capacity = min(
+            mc2_tokens_capacity, _MC2_TOKENS_PER_RANK_LIMIT * vllm_config.parallel_config.tensor_parallel_size
+        )
     moe_comm_policy = get_current_hardware_profile().moe_comm_policy
     lora_config = getattr(vllm_config, "lora_config", None)
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
@@ -467,6 +510,7 @@ class _ExtraForwardContextProxy:
         "padded_length",
         "num_tokens_across_dp",
         "mc2_mask",
+        "a2_mega_moe_prefill",
         "is_draft_model",
         "is_draft_model_prefill",
         "draft_moe_quant_type",

@@ -1,5 +1,8 @@
 # DeepSeek-V4.1-Flash
 
+For the experimental 16-device A2 DP2/TP1/PCP8 P-only W4A8 backend, see
+[A2 prefill MegaMoE](../../user_guide/feature_guide/deepseek_v41_a2_megamoe.md).
+
 ## 1 Introduction
 
 !!! note

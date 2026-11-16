@@ -32,6 +32,7 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
+from vllm_ascend.a2_mega_moe import a2_prefill_enabled
 from vllm_ascend.ascend_config import KVPPConfig, StairConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
@@ -743,6 +744,9 @@ class NPUPlatform(Platform):
         moe_comm_type = select_moe_comm_method(
             max_tokens_across_dp,
             vllm_config,
+            attn_metadata=attn_metadata,
+            in_profile_run=in_profile_run,
+            graph_enabled=cudagraph_runtime_mode != CUDAGraphMode.NONE,
         )
         moe_comm_method = get_moe_comm_method(moe_comm_type)
 
@@ -769,6 +773,7 @@ class NPUPlatform(Platform):
             "max_tokens_across_dp": max_tokens_across_dp,
             "max_tokens_across_pcp": max_tokens_across_pcp,
             "mc2_mask": mc2_mask,
+            "a2_mega_moe_prefill": a2_prefill_enabled(get_ascend_config()),
             "is_draft_model": is_draft_model,
             "is_draft_model_prefill": is_draft_model_prefill,
             "in_profile_run": in_profile_run,

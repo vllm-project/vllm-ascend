@@ -29,6 +29,8 @@ from vllm.model_executor.layers.fused_moe.layer import MoERunner
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared, _unpack
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.a2_mega_moe import DEEPSEEK_V41_ROUTED_EXPERTS, a2_prefill_enabled
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
@@ -41,6 +43,7 @@ from vllm_ascend.ops.fused_moe.shared_experts import (
     SharedExpertParallelMode,
     SubmittedSharedExpertGateUp,
 )
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 def _ascend_moe_forward_shared_sp_fake(
@@ -114,6 +117,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         self.hidden_size = moe_config.hidden_dim
 
         self.quant_type = routed_experts.quant_type
+        if (
+            a2_prefill_enabled(get_ascend_config())
+            and moe_config.num_experts == DEEPSEEK_V41_ROUTED_EXPERTS
+            and self.quant_type != QuantType.W4A8
+        ):
+            raise ValueError("DeepSeek A2 prefill MegaMoE requires dynamic INT8/INT4 W4A8 routed experts")
         self.routed_experts.router = router
 
         self.moe_config.tp_group = get_tp_group()
