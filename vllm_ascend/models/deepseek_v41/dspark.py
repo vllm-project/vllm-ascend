@@ -218,8 +218,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
             quant_method = vllm_config.quant_config.get_name()
         main_proj_quant_config = (
             vllm_config.quant_config
-            if DeviceOperator.get_dsv41_packed_cache_ops() is not None
-            and quant_method in ("fp8", "ascend")
+            if DeviceOperator.get_dsv41_packed_cache_ops() is not None and quant_method in ("fp8", "ascend")
             else None
         )
         self.main_proj = ColumnParallelLinear(

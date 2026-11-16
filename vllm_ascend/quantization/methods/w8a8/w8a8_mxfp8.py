@@ -298,9 +298,8 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         if not hasattr(layer, "_mxfp8_weight_buf"):
             # First call: allocate the persistent transformed buffers.
             layer._mxfp8_weight_buf = transposed_weight
-            if (
-                not getattr(layer, "_fused_preprocess_managed", False)
-                and not getattr(layer, "skip_weight_nz_conversion", False)
+            if not getattr(layer, "_fused_preprocess_managed", False) and not getattr(
+                layer, "skip_weight_nz_conversion", False
             ):
                 layer._mxfp8_weight_buf = maybe_trans_nz(layer._mxfp8_weight_buf, **mxfp8_nz().cast_kwargs())
             layer._mxfp8_scale_buf = target_scale.contiguous()
@@ -356,7 +355,10 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             )
             scale = layer.weight_scale.data
             layer.weight_scale.data = (
-                scale.transpose(1, 2).reshape(scale.shape[0] * scale.shape[2], scale.shape[1], 2).transpose(0, 1).contiguous()
+                scale.transpose(1, 2)
+                .reshape(scale.shape[0] * scale.shape[2], scale.shape[1], 2)
+                .transpose(0, 1)
+                .contiguous()
             )
 
         if getattr(layer, "_mxfp8_gmm_nz_layout", False):
