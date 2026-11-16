@@ -1511,14 +1511,60 @@ class TestUpstreamConfigCompatibility(TestBase):
 
         model_config.architectures = ["Qwen3_5MoeForConditionalGeneration"]
         self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
-        # The intermediate-size check is a plain range + alignment rule now, so
-        # 6144-wide first projections are accepted for every architecture.
+        # The intermediate-size check is a plain minimum + alignment rule now,
+        # so 6144-wide first projections are accepted for every architecture.
         text_config.moe_intermediate_size = 3072
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
-        text_config.moe_intermediate_size = 4608
-        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
         text_config.moe_intermediate_size = 1024
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_a5_megamoe_accepts_any_aligned_expert_width(self, _mock_profile):
+        """A5 bounds the token width, not the expert FFN width.
+
+        The operator never receives the expert width as a scalar; it derives it
+        from the weight shapes, and nothing in its host checks or arch35 tiling
+        caps it. Only the kernel's hiddenDim%256 constraint survives, which is
+        this value aligned to 128.
+        """
+        text_config = SimpleNamespace(hidden_size=6144, moe_intermediate_size=6144, num_experts_per_tok=4)
+        model_config = SimpleNamespace(
+            architectures=["MistralLarge4ForCausalLM"],
+            hf_text_config=text_config,
+            get_num_experts=lambda: 128,
+        )
+        parallel_config = SimpleNamespace(world_size_across_dp=16, pipeline_parallel_size=1)
+        vc = SimpleNamespace(model_config=model_config, parallel_config=parallel_config)
+
+        for width in (256, 4096, 4608, 6144, 8192):
+            with self.subTest(accepted=width), patch.object(text_config, "moe_intermediate_size", width):
+                self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+        # The minimum and the 128 alignment still bind.
+        for width in (128, 255, 6000):
+            with self.subTest(rejected=width), patch.object(text_config, "moe_intermediate_size", width):
+                self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_a3_megamoe_keeps_its_expert_width_ceiling(self, _mock_profile):
+        """arch22 was not re-read, so A3 keeps the bound it already had."""
+        text_config = SimpleNamespace(hidden_size=6144, moe_intermediate_size=3072, num_experts_per_tok=4)
+        model_config = SimpleNamespace(
+            architectures=["Qwen3_5MoeForConditionalGeneration"],
+            hf_text_config=text_config,
+            get_num_experts=lambda: 128,
+        )
+        parallel_config = SimpleNamespace(world_size_across_dp=16, pipeline_parallel_size=1)
+        vc = SimpleNamespace(model_config=model_config, parallel_config=parallel_config)
+
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+        text_config.moe_intermediate_size = 6144
+        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
 
     @patch(
         "vllm_ascend.ascend_config.get_current_hardware_profile",
@@ -1609,7 +1655,9 @@ class TestUpstreamConfigCompatibility(TestBase):
                 # K3-specific fields must not change the legacy decision.
                 self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
                 for field, value in (
-                    ("moe_intermediate_size", 4608),
+                    # 4608 used to stand in for "over the ceiling"; A5 has no
+                    # ceiling, so this uses a misaligned width instead.
+                    ("moe_intermediate_size", 4600),
                     ("moe_intermediate_size", None),
                     ("num_experts_per_tok", 33),
                 ):

@@ -1,0 +1,9 @@
+pr: 0
+entries:
+  - category: bugfix
+    text: >-
+      Removed the MegaMoe expert FFN width ceiling on Ascend 950. The operator bounds only the
+      token width and derives the expert width from the weight shapes, so models whose
+      moe_intermediate_size exceeds 4096 were being refused the fused MoE path for no reason.
+      The 128 alignment and the A3 ceiling are unchanged.
+    hardware: [Ascend 950]

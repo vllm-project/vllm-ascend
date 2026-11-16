@@ -1193,15 +1193,35 @@ class AscendConfig:
             moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
         if moe_intermediate_size is None:
             return False
-        # intermediate_hidden (the post-activation intermediate width) must be in
-        # [256, 4096] and aligned to 128.
-        # Actual operator bounds: A5 supports [256, 4096] aligned to 128; the A3
-        # operator only supports [512, 3072] aligned to 256. The unified A5-style
-        # bound is kept here; tighten per-platform if A3 rejects a passing model.
+        # The 128 alignment is the kernel's own constraint, expressed on the
+        # post-activation width: arch35 tiling requires its ``hiddenDim`` (the
+        # GMM1 output width, i.e. twice this value) to be a multiple of 256.
+        #
+        # There is no upper bound on A5. The operator's host contract bounds
+        # only the token width: ``hidden`` in [1024, 8192], where ``hidden`` is
+        # ``x.sizes()[1]``. It never receives the expert FFN width as a scalar,
+        # inferring it from the weight shapes instead, and neither the host
+        # checks, the arch35 tiling, the TBE entry point nor the op-info JSON
+        # constrains it. The 8192 that appears throughout the arch35 tiling
+        # budgets is that same token width (MAX_H), which sizes the dispatch,
+        # combine and unpermute UB slots; the GMM1 output lives in global
+        # workspace and scales linearly instead of competing for UB.
+        #
+        # A3 (arch22) is a different kernel and was not re-read, so its bound
+        # stays until someone verifies that contract the same way.
         moe_intermediate_size = int(moe_intermediate_size)
-        if not (256 <= moe_intermediate_size <= 4096) or moe_intermediate_size % 128 != 0:
+        if moe_intermediate_size < 256 or moe_intermediate_size % 128 != 0:
             logger.warning(
-                "MegaMoe requires moe_intermediate_size in [256, 4096] aligned to 128; got %s.",
+                "MegaMoe requires moe_intermediate_size >= 256 aligned to 128; got %s.",
+                moe_intermediate_size,
+            )
+            return False
+        if (
+            not get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_UNBOUNDED_INTERMEDIATE)
+            and moe_intermediate_size > 4096
+        ):
+            logger.warning(
+                "MegaMoe on this platform requires moe_intermediate_size <= 4096; got %s.",
                 moe_intermediate_size,
             )
             return False
