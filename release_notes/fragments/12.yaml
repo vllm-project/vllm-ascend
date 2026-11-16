@@ -1,0 +1,6 @@
+pr: 12
+entries:
+  - category: performance
+    text: >-
+      Added opt-in FlashMLA metadata and KV writer optimizations for Mistral Large 4 DSpARK,
+      and an opt-in FP8 Indexer query preparation fusion for Mistral Large 4 on Ascend.
