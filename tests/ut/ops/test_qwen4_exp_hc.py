@@ -24,17 +24,19 @@ class _KernelRecorder:
 
 
 @pytest.mark.parametrize(
-    ("rows", "row_block_supported", "expected_kernel"),
+    ("rows", "row_block_supported", "min_rows", "expected_kernel"),
     (
-        (2047, True, "legacy"),
-        (2048, True, "row_block"),
-        (2049, True, "row_block"),
-        (1024, False, "legacy"),
+        (2047, True, 2048, "legacy"),
+        (2048, True, 2048, "row_block"),
+        (2049, True, 2048, "row_block"),
+        (1024, True, 1024, "row_block"),
+        (1024, False, 1024, "legacy"),
     ),
 )
 def test_hc_gate_mix_row_block_dispatch_is_scoped_by_capability(
     rows: int,
     row_block_supported: bool,
+    min_rows: int,
     expected_kernel: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -46,7 +48,10 @@ def test_hc_gate_mix_row_block_dispatch_is_scoped_by_capability(
         requested_capabilities.append(capability)
         return row_block_supported
 
-    profile = SimpleNamespace(supports=supports)
+    profile = SimpleNamespace(
+        supports=supports,
+        qwen4exp_hc_gate_mix_row_block_min_rows=min_rows,
+    )
     monkeypatch.setattr(hc, "_hc_gate_mix_kernel", legacy)
     monkeypatch.setattr(hc, "_hc_gate_mix_row_block_kernel", row_block)
     monkeypatch.setattr(hc, "get_current_hardware_profile", lambda: profile)
@@ -56,7 +61,7 @@ def test_hc_gate_mix_row_block_dispatch_is_scoped_by_capability(
     output = hc._hc_gate_mix(x, gate, 4)
 
     assert output.shape == (rows, 10)
-    if rows < hc._HC_GATE_MIX_ROW_BLOCK_MIN_ROWS:
+    if rows < min_rows:
         assert requested_capabilities == []
     else:
         assert requested_capabilities == [HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK]
@@ -115,7 +120,10 @@ def test_hc_gate_mix_detects_wide_offsets_for_all_tensors(
 
 def test_hc_gate_mix_passes_wide_offset_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     row_block = _KernelRecorder()
-    profile = SimpleNamespace(supports=lambda _: True)
+    profile = SimpleNamespace(
+        supports=lambda _: True,
+        qwen4exp_hc_gate_mix_row_block_min_rows=2048,
+    )
     monkeypatch.setattr(hc, "_hc_gate_mix_row_block_kernel", row_block)
     monkeypatch.setattr(hc, "_hc_gate_mix_needs_wide_offsets", lambda *_: True)
     monkeypatch.setattr(hc, "get_current_hardware_profile", lambda: profile)

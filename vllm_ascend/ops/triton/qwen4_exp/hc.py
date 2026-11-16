@@ -185,7 +185,6 @@ def _hc_gate_mix_kernel(
 
 _HC_GATE_MIX_BLOCK_SIZE = 512
 _HC_GATE_MIX_ROWS_PER_BLOCK = 8
-_HC_GATE_MIX_ROW_BLOCK_MIN_ROWS = 2048
 _INT32_MAX = torch.iinfo(torch.int32).max
 
 
@@ -274,7 +273,8 @@ def _hc_gate_mix(
     group_dim = dim // hc_count
     output = x.new_empty((rows, group_dim))
     block_size = _HC_GATE_MIX_BLOCK_SIZE
-    if rows >= _HC_GATE_MIX_ROW_BLOCK_MIN_ROWS and get_current_hardware_profile().supports(
+    profile = get_current_hardware_profile()
+    if rows >= profile.qwen4exp_hc_gate_mix_row_block_min_rows and profile.supports(
         HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK
     ):
         wide_offsets = _hc_gate_mix_needs_wide_offsets(

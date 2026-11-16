@@ -173,7 +173,7 @@ class HardwareCapability(Enum):
     PAGED_ATTENTION = auto()
     # Use eight-row Qwen4Exp HC gate-mix tiles for large prefill batches.
     # A2, A3, and A5 validated parity and a performance benefit at the
-    # 2048-row dispatch threshold; other profiles retain one-row dispatch.
+    # family-specific dispatch threshold; other profiles retain one-row dispatch.
     QWEN4EXP_HC_GATE_MIX_ROW_BLOCK = auto()
     # Inspect PCIe topology to distinguish 310P Root-Complex and endpoint deployments.
     RC_DEVICE_DISCOVERY = auto()
@@ -326,6 +326,9 @@ class HardwareProfile:
     # query length to work around native operator numerical failures. None
     # retains native dispatch; this is a stack workaround, not a silicon limit.
     gdn_fixed_spec_recurrent_fallback_min_query_len: int | None = None
+    # First row count where the integrated Qwen4Exp HC gate-mix wrapper is
+    # faster than the one-row kernel on this hardware family.
+    qwen4exp_hc_gate_mix_row_block_min_rows: int = 2048
 
     def supports(self, capability: HardwareCapability) -> bool:
         """Return whether the exact documented ``capability`` contract is available."""
@@ -477,6 +480,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             # TODO: Route Step5 back to CANN flash_attn and remove this exception
             # once CANN supports Step5 and the integration is validated.
             flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.STEP5}),
+            qwen4exp_hc_gate_mix_row_block_min_rows=1024,
             requires_2d_nz_linear_input=True,
             minimax_m3_gbsa_bf16_softmax_precision=1,
             attention_backend_family=AttentionBackendFamily.STANDARD,

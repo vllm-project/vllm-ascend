@@ -278,6 +278,20 @@ def test_gdn_fixed_spec_recurrent_fallback_policy(device_type, expected_min_quer
 
 
 @pytest.mark.parametrize(
+    "device_type,expected_min_rows",
+    [
+        (AscendDeviceType.A2, 2048),
+        (AscendDeviceType.A3, 2048),
+        (AscendDeviceType.A5, 1024),
+        (AscendDeviceType._310P, 2048),
+    ],
+)
+def test_qwen4exp_hc_gate_mix_row_block_threshold(device_type, expected_min_rows):
+    profile = get_hardware_profile(device_type)
+    assert profile.qwen4exp_hc_gate_mix_row_block_min_rows == expected_min_rows
+
+
+@pytest.mark.parametrize(
     "device_type,expected_precision",
     [
         (AscendDeviceType.A2, 0),
