@@ -147,9 +147,9 @@ def packed_sfa_cache_groups(config, specs):
     return groups
 
 
-def packed_sfa_cache_config(config, groups, available_memory, override_blocks=may_override_num_blocks):
+def packed_sfa_cache_config(config, groups, available_memory):
     row_bytes = packed_sfa_row_bytes(groups)
-    num_blocks = override_blocks(config, available_memory // row_bytes)
+    num_blocks = may_override_num_blocks(config, available_memory // row_bytes)
     tensors = []
     offset = 0
     for name, spec in _attention_specs(groups).items():

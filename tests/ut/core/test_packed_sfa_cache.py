@@ -142,7 +142,7 @@ def test_row_is_derived_from_actual_draft_specs(draft_layers):
     assert sum(len(g.layer_names) for g in groups[1:]) == 69
     assert all(g.kv_cache_spec.page_size_padded is None for g in groups[1:])
     assert all(len(g.layer_names) * g.kv_cache_spec.page_size_bytes <= row for g in groups[1:])
-    plan = packed_sfa_cache_config(packed_config(), groups, row * 2, lambda _, n: n)
+    plan = packed_sfa_cache_config(packed_config(), groups, row * 2)
     assert plan.num_blocks == 2
     assert {t.size for t in plan.kv_cache_tensors} == {row * 2}
     assert {t.block_stride for t in plan.kv_cache_tensors} == {row}
@@ -229,7 +229,7 @@ def test_views_and_metadata_address_the_same_bytes(draft_layers):
     specs = make_packed_specs(256, draft_layers, 0, state_heads=1)
     groups = packed_sfa_cache_groups(config, specs)
     row = packed_sfa_row_bytes(groups)
-    plan = packed_sfa_cache_config(config, groups, 3 * row, lambda _, n: n)
+    plan = packed_sfa_cache_config(config, groups, 3 * row)
     raw = torch.zeros(3 * row, dtype=torch.int8)
     inputs = PackedCommonMetadata(
         torch.tensor([[0, 1, 2, 3, 4, 5]], dtype=torch.int32),

@@ -79,7 +79,9 @@ def test_preempt_packed_pool_budget_and_conv_restore(draft_layers):
         use_v2_model_runner=True,
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k31")),
         speculative_config=SimpleNamespace(num_speculative_tokens=3),
-        cache_config=SimpleNamespace(prefix_cache_retention_interval=None, kv_cache_layout="BLNHC"),
+        cache_config=SimpleNamespace(
+            prefix_cache_retention_interval=None, kv_cache_layout="BLNHC", num_gpu_blocks_override=None
+        ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
     )
@@ -107,7 +109,7 @@ def test_preempt_packed_pool_budget_and_conv_restore(draft_layers):
     )
     groups = packed_sfa_cache_groups(config, specs)
     row_bytes = packed_sfa_row_bytes(groups)
-    plan = packed_sfa_cache_config(config, groups, 3 * row_bytes, lambda _, n: n)
+    plan = packed_sfa_cache_config(config, groups, 3 * row_bytes)
     rows = torch.zeros((3, row_bytes), dtype=torch.int8)
     caches = {}
     for desc in plan.kv_cache_tensors:
