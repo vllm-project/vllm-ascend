@@ -110,11 +110,39 @@ def runtime_guard_idle_step(dummy_batch_fn):
 
 
 def _peek_sample_pre_state(runner: Any) -> tuple[Any, Any]:
-    """Peek ephemeral execute_model_state before parent ``sample_tokens`` pops it."""
+    """Peek ephemeral execute_model_state before parent ``sample_tokens`` pops it.
+
+    ``finished_req_ids`` only lives on this pre-pop state. The peeked
+    ``input_batch`` may still be the PCP **local** partition; sampling uses the
+    restored global batch after ``restore_for_sampling`` on last-PP.
+    """
     state = getattr(runner, "execute_model_state", None)
     input_batch = getattr(state, "input_batch", None) if state is not None else None
     finished_req_ids = getattr(state, "finished_req_ids", None) if state is not None else None
     return input_batch, finished_req_ids
+
+
+def _resolve_sampling_input_batch(runner: Any, peeked_batch: Any) -> Any:
+    """Return the batch that matches sample / logits row order.
+
+    On last-PP with PCP, ``restore_for_sampling`` runs *after*
+    ``execute_model_state`` is cleared and stashes the sampling view on
+    ``pcp_manager`` (``_sampling_global_batch`` / ``global_batch``). Prefer that
+    over the pre-pop local partition so detectors attribute the correct req rows.
+    """
+    pcp = getattr(runner, "pcp_manager", None)
+    if pcp is None:
+        return peeked_batch
+    sampling = getattr(pcp, "_sampling_global_batch", None)
+    if sampling is not None:
+        return sampling
+    try:
+        global_batch = getattr(pcp, "global_batch", None)
+    except Exception:
+        global_batch = None
+    if global_batch is not None:
+        return global_batch
+    return peeked_batch
 
 
 def _build_sample_phase_result(runner: Any, output: Any, input_batch: Any, finished_req_ids: Any) -> SamplePhaseResult:
@@ -154,20 +182,20 @@ def runtime_guard_sample_tokens(sample_tokens_fn):
         if guard.is_fully_off():
             return sample_tokens_fn(self, grammar_output)
         note_postprocess_sampled(self, None, None)  # clear prior-step stash
-        # Peek before the method pops execute_model_state (inside the parent
-        # sample_tokens). The method's PCP swap rewrites input_batch on
-        # non-last-PP ranks only; the detection rank (last-PP TP0) — the only
-        # consumer of these fields — is unaffected, so peeking before the
-        # method is equivalent to peeking after the swap.
-        input_batch, finished_req_ids = _peek_sample_pre_state(self)
+        # Peek finished ids before parent pops execute_model_state. Do **not**
+        # freeze the peeked local PCP batch for detection: last-PP
+        # restore_for_sampling replaces it with the global sampling batch
+        # after the pop (see `_resolve_sampling_input_batch`).
+        peeked_batch, finished_req_ids = _peek_sample_pre_state(self)
 
         def sample_fn() -> SamplePhaseResult:
             logits_ctx = (
-                wrap_compute_logits_for_pre_sample(self, input_batch) if need_pre_sample_hook(guard) else nullcontext()
+                wrap_compute_logits_for_pre_sample(self, peeked_batch) if need_pre_sample_hook(guard) else nullcontext()
             )
             with logits_ctx, wrap_postprocess_sampled(self):
                 output = sample_tokens_fn(self, grammar_output)
-            return _build_sample_phase_result(self, output, input_batch, finished_req_ids)
+            sampling_batch = _resolve_sampling_input_batch(self, peeked_batch)
+            return _build_sample_phase_result(self, output, sampling_batch, finished_req_ids)
 
         speculative_config = getattr(self, "speculative_config", None)
         result = guard.run_sample_phase(
@@ -250,13 +278,17 @@ def _safe_check_after_sample(runner: Any, output: Any) -> None:
 
 
 @contextmanager
-def wrap_compute_logits_for_pre_sample(runner: Any, input_batch: Any) -> Iterator[None]:
+def wrap_compute_logits_for_pre_sample(runner: Any, peeked_batch: Any) -> Iterator[None]:
     """Wrap ``model.compute_logits`` so ``check_before_sample`` runs once before grammar.
 
     Parent ``sample`` has no mid-hook between logits and grammar; wrapping the
     bound method inserts the check without copying upstream ``sample()``.
     Restored in ``finally``. Fires once per context (v2 calls ``compute_logits``
     twice per step).
+
+    ``peeked_batch`` is the pre-pop batch (may be PCP-local). At fire time —
+    after ``restore_for_sampling`` on last-PP — resolve the sampling batch so
+    row→req attribution matches logits.
     """
     model = runner.model
     # Prefer deleting the instance override so the class method is restored.
@@ -270,7 +302,9 @@ def wrap_compute_logits_for_pre_sample(runner: Any, input_batch: Any) -> Iterato
         logits = orig(hidden_states, *args, **kwargs)
         if not fired:
             fired = True
-            batch = input_batch if input_batch is not None else getattr(runner, "input_batch", None)
+            batch = _resolve_sampling_input_batch(runner, peeked_batch)
+            if batch is None:
+                batch = getattr(runner, "input_batch", None)
             check_before_sample_from_batch(guard, logits, batch)
         return logits
 
