@@ -215,7 +215,7 @@ def test_begin_wave_dump_only_uses_wave_head(tmp_path: Path):
     """Detectors off and dump on: wave-head bus via refresh; not fully off.
 
     Hot-reload off still delivers dump jobs through refresh → merged due bus
-    (or local stash when tp<=1). skip_wave_head_bus is only for fully idle.
+    (or local stash when tp<=1). Detector-only skips the collective.
     """
     cfg = _cfg(tmp_path, reload=0.0)
     cfg._data["dump"]["auto_max_times"] = 1
@@ -238,6 +238,54 @@ def test_begin_wave_dump_only_uses_wave_head(tmp_path: Path):
         # stash lives inside refresh/wave_head; refresh is mocked so stash stays idle.
         stash.assert_not_called()
     RuntimeGuardProcessor.reset_for_tests()
+
+
+def test_begin_wave_detector_only_skips_empty_bus(tmp_path: Path):
+    """Detector on, hot-reload/dump off: keep hooks path, skip empty collective.
+
+    Both bus lanes are disabled, so ``wave_head_sync`` would only pay an empty
+    due-broadcast. Prompt cache / finish / reap must still run for detect.
+    """
+    from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
+
+    cfg = _cfg(tmp_path, reload=0.0)
+    cfg._data["detector"]["token_repeat"]["enabled"] = True
+    cfg._invalidate_hot_path_gates()
+    assert cfg.needs_sample_phase_hooks() is True
+    assert cfg.dump_enabled() is False
+    assert cfg.hot_reload_enabled is False
+    assert cfg.is_fully_off() is False
+
+    so = SimpleNamespace(
+        scheduled_new_reqs=[
+            SimpleNamespace(req_id="det-only", prompt_token_ids=[1, 2, 3]),
+        ],
+        finished_req_ids=None,
+        total_num_scheduled_tokens=3,
+    )
+    RequestGuardStore.reset_for_tests()
+    try:
+        with (
+            patch.object(RuntimeGuardProcessor, "wave_head_sync") as refresh,
+            patch.object(RuntimeGuardProcessor, "_drop_pending_dump_jobs") as drop,
+            patch.object(RuntimeGuardProcessor, "_reap_finished_requests") as reap,
+            patch(
+                "vllm_ascend.observability.runtime_guard.processor.get_pp_group",
+                side_effect=Exception("no pp"),
+            ),
+        ):
+            proc = _bind(cfg)
+            proc._kv_dump_jobs = []
+            proc.begin_wave(has_scheduled_tokens=True, scheduler_output=so)
+            refresh.assert_not_called()
+            drop.assert_not_called()
+            reap.assert_called_once()
+        st = RequestGuardStore.get().get_state("det-only")
+        assert st is not None
+        assert st.prompt_token_ids == [1, 2, 3]
+    finally:
+        RequestGuardStore.reset_for_tests()
+        RuntimeGuardProcessor.reset_for_tests()
 
 
 def test_begin_wave_refreshes_when_reload_on_without_detectors(tmp_path: Path):
