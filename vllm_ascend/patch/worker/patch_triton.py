@@ -1,5 +1,3 @@
-from importlib import import_module
-
 import vllm.model_executor.layers.mamba.ops.causal_conv1d as _cc1d
 import vllm.third_party.flash_linear_attention.ops as fla_ops
 import vllm.third_party.flash_linear_attention.ops.layernorm_guard as fla_layernorm_guard
@@ -178,7 +176,7 @@ def patch_suffix_kernels() -> None:
     """
     module_name = "vllm.v1.worker.gpu.spec_decode.suffix.speculator"
     try:
-        suffix_speculator = import_module(module_name)
+        import vllm.v1.worker.gpu.spec_decode.suffix.speculator as suffix_speculator
     except ModuleNotFoundError as exc:
         if exc.name in ("vllm.v1.worker.gpu.spec_decode.suffix", module_name):
             return
