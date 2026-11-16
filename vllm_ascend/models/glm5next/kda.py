@@ -2,9 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash KDA layer with separate convolutions and a bounded safe gate."""
 
-from collections.abc import Callable
-from functools import partial
-
 import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
@@ -273,7 +270,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.pcp_rank = self.pcp_group.rank_in_group
         self.use_pcp_head_sharding = self.tp_size == 1 and self.pcp_size > 1
         column_linear = ColumnParallelLinear
-        merged_linear: Callable[..., MergedColumnParallelLinear] = _Glm5NextMergedColumnParallelLinear
+        merged_linear = _Glm5NextMergedColumnParallelLinear
         row_linear = RowParallelLinear
         if self.use_pcp_head_sharding:
             self.tp_size = get_kda_parallel_size(vllm_config.parallel_config)
@@ -291,13 +288,15 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         projection_size = self.head_dim * self.num_heads
         self.local_projection_size = divide(projection_size, self.tp_size)
         projection_tp_size = self.tp_size
+        merged_linear_kwargs = {}
         self.projection_tp: KDAInputProjectionTP | None = None
         qkv_iproj_tp_size = get_ascend_config().finegrained_tp_config.qkv_iproj_tensor_parallel_size
         if qkv_iproj_tp_size > 1:
             group = get_qkv_iproj_tp_group()
             projection_tp_size = group.world_size
             self.projection_tp = KDAInputProjectionTP(group, self.num_heads, self.head_dim)
-            merged_linear = partial(PCPGlm5NextMergedColumnParallelLinear, tp_group=group)
+            merged_linear = PCPGlm5NextMergedColumnParallelLinear
+            merged_linear_kwargs["tp_group"] = group
 
         # Merge q, k, v, b, f_a, g_a projections into one GEMM (6→1 launches).
         # Order matches checkpoint's fused_qkvbfg_a_proj convention.
@@ -317,6 +316,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             bias=False,
             quant_config=self.quant_config,
             prefix=f"{prefix}.in_proj_qkvbfg_a",
+            **merged_linear_kwargs,
         )
 
         self.f_b_proj = column_linear(
