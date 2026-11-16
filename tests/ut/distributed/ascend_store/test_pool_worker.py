@@ -703,6 +703,48 @@ class TestKVPPPoolWorker(unittest.TestCase):
             self.assertTrue(all(f"@pp_rank:{shard // 4}@" in key for key in shard_keys))
             self.assertTrue(all(f"@head_or_tp_rank:{shard % 4}@" in key for key in shard_keys))
 
+    def test_pp_group_ownership_fallbacks(self):
+        worker = make_worker(self, pp_size=2, pp_partition=[1, 1])
+        worker.num_kv_cache_groups = 2
+        worker.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(layer_names=["layer.0"]),
+                SimpleNamespace(layer_names=[]),
+            ]
+        )
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
+        with patch(f"{module}.get_pp_group", return_value=SimpleNamespace(cpu_group=object())):
+            for manifest in ([(True, False), (True,)], [(True, False), (True, False)]):
+                with self.subTest(manifest=manifest):
+
+                    def gather(gathered, local_presence, *, group, manifest=manifest):
+                        gathered[:] = manifest
+
+                    with patch.object(torch.distributed, "all_gather_object", side_effect=gather):
+                        self.assertIsNone(worker._collect_pp_group_owners())
+
+            with patch.object(torch.distributed, "all_gather_object", side_effect=RuntimeError("collective failed")):
+                self.assertIsNone(worker._collect_pp_group_owners())
+
+        with patch(f"{module}.get_pp_group", return_value=SimpleNamespace()):
+            self.assertIsNone(worker._collect_pp_group_owners())
+        worker.pp_size = 1
+        with patch.object(torch.distributed, "all_gather_object") as gather:
+            self.assertIsNone(worker._collect_pp_group_owners())
+            gather.assert_not_called()
+
+    def test_pp_lookup_falls_back_to_all_ranks(self):
+        worker = make_worker(self, pp_size=2, pp_partition=[1, 1])
+        worker.group_uses_align_state = [False, False]
+        key = "model@pp_rank:0@group:0@"
+        for owners, group_id in ((None, 0), (((0,),), -1), (((0,),), 1)):
+            with self.subTest(owners=owners, group_id=group_id):
+                worker._pp_group_owners = owners
+                self.assertEqual(
+                    worker._expand_lookup_keys_by_rank([key], group_id),
+                    [key, "model@pp_rank:1@group:0@"],
+                )
+
     def test_pp_hybrid_lookup_requires_only_group_owners(self):
         worker = make_worker(self, pp_size=2, pp_partition=[1, 1])
         worker.kv_cache_config = SimpleNamespace(
