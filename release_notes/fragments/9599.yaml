@@ -1,0 +1,5 @@
+pr: 9599
+entries:
+  - category: bugfix
+    text: Fixed CPU affinity and IRQ board lookup for 310P systems with physical NPU IDs outside the logical device ID space.
+    hardware: [310P]
