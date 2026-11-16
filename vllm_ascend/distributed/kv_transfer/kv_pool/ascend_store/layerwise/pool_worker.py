@@ -711,12 +711,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._save_disabled.clear()
         if self.kv_recv_thread is not None:
             self.kv_recv_thread.load_disabled.clear()
-        if getattr(self, "has_shared_kv", False):
-            for request in metadata.requests:
-                request.block_ids_by_group_np = [
-                    np.asarray(blocks, dtype=np.int64) for blocks in request.block_ids_by_group
-                ]
-                request.block_ids_np = request.block_ids_by_group_np[0]
         self.process_layer_data(metadata.requests)
 
     def _is_layerwise_save_leader(self) -> bool:

@@ -14,6 +14,7 @@ from unittest.mock import patch
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 
 # isort: split
+import numpy as np
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
@@ -201,6 +202,8 @@ def metadata(worker, *, load=False, save=True):
             num_prompt_tokens=32,
             block_hashes=[b"h"],
             block_ids_by_group=[[1] for _ in worker.grouped_block_size],
+            block_ids_np=np.asarray([1], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([1], dtype=np.int64) for _ in worker.grouped_block_size],
             kv_cache_group_ids=list(worker.cacheable_group_ids),
             can_save=save,
             load_spec=LoadSpec(0, 16, True) if load else None,
