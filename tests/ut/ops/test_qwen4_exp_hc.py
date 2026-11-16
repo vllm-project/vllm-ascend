@@ -69,5 +69,59 @@ def test_hc_gate_mix_row_block_dispatch_is_scoped_by_capability(
         assert grid == ((rows + hc._HC_GATE_MIX_ROWS_PER_BLOCK - 1) // hc._HC_GATE_MIX_ROWS_PER_BLOCK, 1)
         assert kwargs["EVEN_ROWS"] is (rows % hc._HC_GATE_MIX_ROWS_PER_BLOCK == 0)
         assert kwargs["EVEN_BLOCK"] is False
+        assert kwargs["WIDE_OFFSETS"] is False
     else:
         assert grid == (rows, 1)
+
+
+@pytest.mark.parametrize(
+    ("rows", "stride", "expected"),
+    (
+        (209_715, 10_240, False),
+        (209_716, 10_240, True),
+    ),
+)
+def test_hc_gate_mix_int32_offset_boundary(rows: int, stride: int, expected: bool) -> None:
+    assert hc._row_major_offset_exceeds_int32(rows, 10_240, stride) is expected
+
+
+@pytest.mark.parametrize(
+    ("stride_x_row", "stride_gate_row", "stride_output_row", "expected"),
+    (
+        (10_240, 10_240, 2_560, False),
+        (hc._INT32_MAX, 10_240, 2_560, True),
+        (10_240, hc._INT32_MAX, 2_560, True),
+        (10_240, 10_240, hc._INT32_MAX, True),
+    ),
+)
+def test_hc_gate_mix_detects_wide_offsets_for_all_tensors(
+    stride_x_row: int,
+    stride_gate_row: int,
+    stride_output_row: int,
+    expected: bool,
+) -> None:
+    assert (
+        hc._hc_gate_mix_needs_wide_offsets(
+            2,
+            10_240,
+            2_560,
+            stride_x_row,
+            stride_gate_row,
+            stride_output_row,
+        )
+        is expected
+    )
+
+
+def test_hc_gate_mix_passes_wide_offset_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    row_block = _KernelRecorder()
+    profile = SimpleNamespace(supports=lambda _: True)
+    monkeypatch.setattr(hc, "_hc_gate_mix_row_block_kernel", row_block)
+    monkeypatch.setattr(hc, "_hc_gate_mix_needs_wide_offsets", lambda *_: True)
+    monkeypatch.setattr(hc, "get_current_hardware_profile", lambda: profile)
+
+    x = torch.empty((1024, 40), dtype=torch.bfloat16)
+    hc._hc_gate_mix(x, torch.empty_like(x), 4)
+
+    _, _, kwargs = row_block.launches[0]
+    assert kwargs["WIDE_OFFSETS"] is True

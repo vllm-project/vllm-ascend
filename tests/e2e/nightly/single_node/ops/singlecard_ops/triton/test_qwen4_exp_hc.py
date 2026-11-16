@@ -8,7 +8,9 @@ from vllm.triton_utils import HAS_TRITON, triton
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.qwen4_exp.hc import (
     _HC_GATE_MIX_BLOCK_SIZE,
+    _HC_GATE_MIX_ROWS_PER_BLOCK,
     _hc_gate_mix_kernel,
+    _hc_gate_mix_row_block_kernel,
     hc_gate_mix,
 )
 
@@ -57,6 +59,32 @@ def _legacy_gate_mix(x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
     return output
 
 
+def _wide_row_block_gate_mix(x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+    output = x.new_empty((x.shape[0], GROUP_DIM))
+    _hc_gate_mix_row_block_kernel[
+        (
+            triton.cdiv(x.shape[0], _HC_GATE_MIX_ROWS_PER_BLOCK),
+            triton.cdiv(GROUP_DIM, _HC_GATE_MIX_BLOCK_SIZE),
+        )
+    ](
+        x,
+        gate,
+        output,
+        x.shape[0],
+        x.stride(0),
+        gate.stride(0),
+        output.stride(0),
+        GROUP_DIM=GROUP_DIM,
+        HC_COUNT=HC_COUNT,
+        ROWS_PER_BLOCK=_HC_GATE_MIX_ROWS_PER_BLOCK,
+        BLOCK_SIZE=_HC_GATE_MIX_BLOCK_SIZE,
+        EVEN_ROWS=x.shape[0] % _HC_GATE_MIX_ROWS_PER_BLOCK == 0,
+        EVEN_BLOCK=GROUP_DIM % _HC_GATE_MIX_BLOCK_SIZE == 0,
+        WIDE_OFFSETS=True,
+    )
+    return output
+
+
 @pytest.mark.parametrize(
     ("rows", "row_strided"),
     (
@@ -99,3 +127,16 @@ def test_hc_gate_mix_row_block_npugraph_replay() -> None:
         graph.replay()
         torch.npu.synchronize()
         torch.testing.assert_close(captured, expected, atol=0, rtol=0)
+
+
+@torch.inference_mode()
+def test_hc_gate_mix_row_block_wide_offsets_matches_legacy() -> None:
+    rows = 1025
+    x = _make_input(rows, HYPER_HIDDEN_SIZE, row_strided=True)
+    gate = _make_input(rows, HYPER_HIDDEN_SIZE, row_strided=True)
+
+    actual = _wide_row_block_gate_mix(x, gate)
+    legacy = _legacy_gate_mix(x, gate)
+    torch.npu.synchronize()
+
+    torch.testing.assert_close(actual, legacy, atol=0, rtol=0)
