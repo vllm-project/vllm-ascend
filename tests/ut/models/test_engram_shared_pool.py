@@ -453,7 +453,7 @@ def test_model_construction_rolls_back_first_layer_when_second_attach_fails(pool
     assert owner.closed
 
 
-def test_merged_model_initializes_rotation_and_registers_replay():
+def test_merged_model_initializes_rotation_and_replay():
     path = Path(__file__).resolve().parents[3] / "vllm_ascend/models/deepseek_v41/model.py"
     model = next(
         n for n in ast.parse(path.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "DeepseekV41Model"
@@ -528,7 +528,9 @@ def test_merged_model_initializes_rotation_and_registers_replay():
     exec(compile(tree, str(path), "exec"), ns)
     torch.testing.assert_close(model_obj.engram_rotation, rotation)
     assert model_obj.engram_hash == "hash" and model_obj.decoder_replay_layers is replay
-    assert context == {"model.decoder_replay": replay}
+    # Replay dispatch is outside the compiled model, so it no longer needs
+    # an opaque custom-op entry in static_forward_context.
+    assert context == {}
 
 
 def test_shutdown_retry_after_model_deletion_releases_tcp_lease(pool_module, owner):
