@@ -50,7 +50,7 @@ from typing import Any, cast
 import torch
 from torch import nn
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_ep_group
 from vllm.logger import logger
@@ -74,8 +74,10 @@ from vllm.models.mistral.mistral_large4.amd.dspark import (
 from vllm.models.mistral.mistral_large4.amd.model import (
     MistralLarge4ForCausalLM,
 )
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
 
+from vllm_ascend import envs
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
 from vllm_ascend.ops.rotary_embedding import (
@@ -83,6 +85,7 @@ from vllm_ascend.ops.rotary_embedding import (
     _record_cos_sin_cache,
     gather_mla_rope,
 )
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 __all__ = [
     "AscendMistralIndexerBackend",
@@ -411,11 +414,25 @@ class AscendMistralIndexerBackend(AscendSFAIndexerBackend):
         # that holds the step's log positions before the Ascend impl takes
         # over. The Ascend indexer signature has nowhere to carry them.
         self.log_positions: torch.Tensor | None = None
+        self._enable_indexer_query_fusion = (
+            envs.VLLM_ASCEND_MISTRAL_INDEXER_Q_FUSION
+            and HAS_TRITON
+            and self.enable_sparse_li_c8
+            and self.c8_k_cache_dtype == torch.float8_e4m3fn
+            and self.qk_rope_head_dim == 64
+            and self.ssmax is not None
+            and not self.ssmax.fused
+            and not self.use_pcp
+            and get_current_vllm_config().parallel_config.decode_context_parallel_size == 1
+            and get_ascend_device_type() == AscendDeviceType.A5
+        )
 
     def mistral_q(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """``q_input_norm``, then ``wq_b``, then SSMax — upstream's order."""
         q = self.wq_b(self.q_input_norm(hidden_states))[0]
-        q = q.view(-1, self.n_head, self.head_dim)
+        return self._scale_indexer_query(q.view(-1, self.n_head, self.head_dim))
+
+    def _scale_indexer_query(self, q: torch.Tensor) -> torch.Tensor:
         if self.ssmax is None:
             return q
         if self.log_positions is None:
@@ -436,6 +453,25 @@ class AscendMistralIndexerBackend(AscendSFAIndexerBackend):
     ) -> torch.Tensor:
         del q_c
         return self.apply_indexer_rope(self.mistral_q(hidden_states), cos, sin)
+
+    def _project_query_and_weights(
+        self,
+        q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        hidden_states: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        weights: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self._enable_indexer_query_fusion or self.ssmax is None or self.log_positions is None:
+            return self.project_query(q_c, hidden_states, cos, sin), weights
+
+        from vllm_ascend.ops.triton.mistral_indexer_q import try_fused_indexer_query
+
+        q = self.wq_b(self.q_input_norm(hidden_states))[0].view(-1, self.n_head, self.head_dim)
+        fused = try_fused_indexer_query(q, weights, self.log_positions, self.ssmax.s, self.ssmax.b, cos, sin)
+        if fused is not None:
+            return fused
+        return self.apply_indexer_rope(self._scale_indexer_query(q), cos, sin), weights
 
 
 def prepare_indexer_for_ascend(indexer: nn.Module, config: Any) -> nn.Module:
@@ -798,4 +834,5 @@ class AscendMistralLarge4DSparkForCausalLM(MistralLarge4DSparkForCausalLM):
                 sin,
                 kv_cache,
                 slots,
+                is_draft_context=True,
             )

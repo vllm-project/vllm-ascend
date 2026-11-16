@@ -69,14 +69,32 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
+    # Use the CANN strided KV writer for BF16 DSpARK FlashMLA. 1 enables it,
+    # 0 (default) disables it. Contains no sensitive information.
+    "VLLM_ASCEND_MISTRAL_FLASHMLA_STRIDED_KV_WRITER": lambda: (
+        os.getenv("VLLM_ASCEND_MISTRAL_FLASHMLA_STRIDED_KV_WRITER", "0") == "1"
+    ),
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Mistral Large 4 FP8 Indexer Q and weights fusion on A5. 1 enables it, 0
+    # disables it (default). This switch does not contain sensitive information.
+    "VLLM_ASCEND_MISTRAL_INDEXER_Q_FUSION": lambda: os.getenv("VLLM_ASCEND_MISTRAL_INDEXER_Q_FUSION", "0") == "1",
     # Opt-in Mistral Large 4 decode fusions. Set each to 1 to enable it.
     # Defaults to 0 and does not contain sensitive information.
     "VLLM_ASCEND_MISTRAL_MLA_Q_FUSION": lambda: os.getenv("VLLM_ASCEND_MISTRAL_MLA_Q_FUSION", "0") == "1",
     "VLLM_ASCEND_MISTRAL_MLA_K_ROPE_FUSION": lambda: os.getenv("VLLM_ASCEND_MISTRAL_MLA_K_ROPE_FUSION", "0") == "1",
     "VLLM_ASCEND_MISTRAL_SHARED_SWIGLU_MX": lambda: os.getenv("VLLM_ASCEND_MISTRAL_SHARED_SWIGLU_MX", "0") == "1",
+    # Fuse the DSpARK FlashMLA metadata inputs. 1 enables it; 0 (default)
+    # preserves the native preparation. Contains no sensitive information.
+    "VLLM_ASCEND_MISTRAL_FLASHMLA_METADATA_FUSION": lambda: (
+        os.getenv("VLLM_ASCEND_MISTRAL_FLASHMLA_METADATA_FUSION", "0") == "1"
+    ),
+    # Skip unused DSpARK FlashMLA metadata builds on FULL replay. 1 enables it,
+    # 0 (default) disables it. Contains no sensitive information.
+    "VLLM_ASCEND_MISTRAL_FLASHMLA_SKIP_UNUSED_METADATA": lambda: (
+        os.getenv("VLLM_ASCEND_MISTRAL_FLASHMLA_SKIP_UNUSED_METADATA", "0") == "1"
+    ),
 }
 
 # end-env-vars-definition

@@ -33,6 +33,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_layers_from_config
 
+from vllm_ascend import envs
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
@@ -47,6 +48,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
 )
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs_factory
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
@@ -260,10 +262,71 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 self.attn_architecture = "GQA"
             else:
                 self.attn_architecture = None
+            self._configure_flashmla_metadata_builds(target_attn_groups)
             dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(  # type: ignore[call-arg]
                 self.vllm_config.cache_config.block_size,
                 block_tables,
             )
+
+    def _configure_flashmla_metadata_builds(self, target_attn_groups) -> None:
+        self._flashmla_replay_builds_metadata = False
+        self.model_state._flashmla_target_graph_groups = None
+        if (
+            not envs.VLLM_ASCEND_MISTRAL_FLASHMLA_SKIP_UNUSED_METADATA
+            or self.use_dcp
+            or self.replicated_pcp
+            or self.vllm_config.kv_transfer_config is not None
+        ):
+            return
+        draft_groups = [group for groups in self.attn_groups for group in groups]
+        if not draft_groups or any(
+            getattr(group.get_metadata_builder(0), "flashmla_state", None) is None for group in draft_groups
+        ):
+            return
+
+        self._flashmla_replay_builds_metadata = True
+        target_only_groups = [
+            [
+                group
+                for group in groups
+                if not (
+                    self.draft_attn_layer_names.issuperset(group.layer_names)
+                    and getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
+                )
+            ]
+            for groups in target_attn_groups
+        ]
+        # Keep KV group IDs and the original groups for capture. Draft inputs
+        # still need the same block tables and slot mappings.
+        self.model_state._flashmla_target_graph_groups = (target_attn_groups, target_only_groups)
+
+    def _build_uniform_attn_metadata(
+        self,
+        batch_desc: BatchExecutionDescriptor,
+        num_reqs: int,
+        num_query_per_req: int,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
+        causal: bool | Mapping[int, bool] = True,
+        dcp_local_seq_lens: torch.Tensor | None = None,
+    ) -> dict[str, Any] | None:
+        if (
+            batch_desc.cg_mode == CUDAGraphMode.FULL
+            and getattr(self, "_flashmla_replay_builds_metadata", False)
+            and isinstance(self.query_cudagraph_manager, DFlashAclGraphManager)
+        ):
+            # DFlash.propose only uses this metadata for eager forward. The
+            # Ascend manager refreshes FlashMLA's bound buffers before replay.
+            return None
+        return super()._build_uniform_attn_metadata(
+            batch_desc=batch_desc,
+            num_reqs=num_reqs,
+            num_query_per_req=num_query_per_req,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+            step=step,
+            causal=causal,
+            dcp_local_seq_lens=dcp_local_seq_lens,
+        )
 
     def _prepare_draft_dcp_metadata_inputs(
         self, num_reqs: int, num_reqs_padded: int, step: int
@@ -318,7 +381,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 num_tokens=num_tokens_padded,
                 num_reqs=num_reqs_padded,
             )
-            attn_metadata = self._build_uniform_attn_metadata(
+            attn_metadata = super()._build_uniform_attn_metadata(
                 num_reqs=num_reqs,
                 batch_desc=batch_desc,
                 num_query_per_req=self.num_query_per_req,

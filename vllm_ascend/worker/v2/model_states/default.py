@@ -413,6 +413,20 @@ class AscendModelState(DefaultModelState):
             return prepare_engram_graph_inputs(num_tokens)
         return {}
 
+    def _target_attn_groups_for_step(self, attn_groups, input_batch, cudagraph_mode, for_capture):
+        flashmla_groups = getattr(self, "_flashmla_target_graph_groups", None)
+        if (
+            flashmla_groups is not None
+            and attn_groups is flashmla_groups[0]
+            and cudagraph_mode == CUDAGraphMode.FULL
+            and not for_capture
+            and not input_batch.is_dummy
+            and self.pcp_manager is None
+            and getattr(self, "_offload_req_ids", None) is None
+        ):
+            return flashmla_groups[1]
+        return attn_groups
+
     def prepare_attn(
         self,
         input_batch: AscendInputBatch,
@@ -527,7 +541,7 @@ class AscendModelState(DefaultModelState):
             build_metadata = partial(self.device_metadata.run_build, build_attn_metadata)
         self._decoder_replay_common_metadata = {}
         self.attn_metadata = build_metadata(
-            attn_groups=attn_groups,
+            attn_groups=self._target_attn_groups_for_step(attn_groups, input_batch, cudagraph_mode, for_capture),
             num_reqs=num_reqs,
             num_actual_reqs=num_actual_reqs,
             num_tokens=num_input_tokens,

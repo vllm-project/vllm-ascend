@@ -15,8 +15,10 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
+from vllm_ascend import envs
 from vllm_ascend.attention.utils import MLA_FLASH_SUPPORTED_Q_HEADS, get_flashmla_ops
 from vllm_ascend.ops.rotary_embedding import gather_mla_rope, get_cos_and_sin_mla
 
@@ -377,6 +379,7 @@ class FlashMLAMetadataBuilder:
         self.max_num_reqs = max_num_reqs
         self.buffers: dict[tuple, FlashMLADecode] = {}
         self.attn_mask = attn_mask
+        self.fuse_draft_metadata = HAS_TRITON and envs.VLLM_ASCEND_MISTRAL_FLASHMLA_METADATA_FUSION
 
     def _allocate(self, tokens: int, rows: int, columns: int, causal: bool) -> FlashMLADecode:
         ints = {"dtype": torch.int32, "device": self.device}
@@ -477,41 +480,52 @@ class FlashMLAMetadataBuilder:
                 flash = cached_flash
 
         def refresh():
-            # The extra zero-used request owns physical graph/SP padding.
-            flash.cu.fill_(tokens)
-            flash.cu[: num_decodes + 1].copy_(common.query_start_loc[: num_decodes + 1].clamp_max(num_decode_tokens))
-            flash.used_q.zero_()
-            flash.used_q[:num_decodes].copy_(flash.cu[1 : num_decodes + 1] - flash.cu[:num_decodes])
-            flash.used_q[:num_decodes].masked_fill_(common.seq_lens[:num_decodes] <= 0, 0)
-            flash.cache_lens.zero_()
-            lengths = common.seq_lens[:num_decodes]
-            if flash.current is not None:
-                # Remove the query globally before interleave-aware sharding.
-                # Ordinary decode and noncausal draft see the entire local sequence.
-                lengths = (lengths - flash.used_q[:num_decodes]).clamp_min(0)
-            if self.dcp_size > 1:
-                lengths = get_dcp_local_seq_lens(
-                    lengths,
-                    dcp_size=self.dcp_size,
-                    dcp_rank=self.dcp_rank_tensor,
-                    cp_kv_cache_interleave_size=self.cp_interleave,
+            fused = False
+            if self.fuse_draft_metadata and flash.draft_window is not None and not has_prefill:
+                from vllm_ascend.ops.triton.flashmla_draft_metadata import try_prepare_flashmla_draft
+
+                assert self.window_size is not None
+                fused = try_prepare_flashmla_draft(
+                    flash, common, num_decodes, num_decode_tokens, self.window_size, FLASHMLA_BLOCK_SIZE
                 )
-            flash.cache_lens[:num_decodes].copy_(lengths)
-            flash.cache_lens.masked_fill_(flash.used_q == 0, 0)
-            flash.block_table.zero_()
-            flash.block_table[:num_decodes].copy_(common.block_table_tensor[:num_decodes])
-            flash.slots.fill_(-1)
-            slots = common.slot_mapping[:num_decode_tokens]
-            flash.slots[: slots.numel()].copy_(slots)
-            flash.live_boundaries.zero_()
-            live = (flash.used_q > 0).to(torch.int32)
-            flash.live_boundaries.scatter_add_(0, flash.cu[:-1].long(), live)
-            flash.live_boundaries.scatter_add_(0, (flash.cu[:-1] + flash.used_q).long(), -live)
-            flash.token_live.copy_(flash.live_boundaries.cumsum(0)[:tokens] > 0)
-            flash.slots.masked_fill_(~flash.token_live, -1)
-            flash.positions.zero_()
-            positions = common.positions[:num_decode_tokens]
-            flash.positions[: positions.numel()].copy_(positions)
+            if not fused:
+                # The extra zero-used request owns physical graph/SP padding.
+                flash.cu.fill_(tokens)
+                flash.cu[: num_decodes + 1].copy_(
+                    common.query_start_loc[: num_decodes + 1].clamp_max(num_decode_tokens)
+                )
+                flash.used_q.zero_()
+                flash.used_q[:num_decodes].copy_(flash.cu[1 : num_decodes + 1] - flash.cu[:num_decodes])
+                flash.used_q[:num_decodes].masked_fill_(common.seq_lens[:num_decodes] <= 0, 0)
+                flash.cache_lens.zero_()
+                lengths = common.seq_lens[:num_decodes]
+                if flash.current is not None:
+                    # Remove the query globally before interleave-aware sharding.
+                    # Ordinary decode and noncausal draft see the entire local sequence.
+                    lengths = (lengths - flash.used_q[:num_decodes]).clamp_min(0)
+                if self.dcp_size > 1:
+                    lengths = get_dcp_local_seq_lens(
+                        lengths,
+                        dcp_size=self.dcp_size,
+                        dcp_rank=self.dcp_rank_tensor,
+                        cp_kv_cache_interleave_size=self.cp_interleave,
+                    )
+                flash.cache_lens[:num_decodes].copy_(lengths)
+                flash.cache_lens.masked_fill_(flash.used_q == 0, 0)
+                flash.block_table.zero_()
+                flash.block_table[:num_decodes].copy_(common.block_table_tensor[:num_decodes])
+                flash.slots.fill_(-1)
+                slots = common.slot_mapping[:num_decode_tokens]
+                flash.slots[: slots.numel()].copy_(slots)
+                flash.live_boundaries.zero_()
+                live = (flash.used_q > 0).to(torch.int32)
+                flash.live_boundaries.scatter_add_(0, flash.cu[:-1].long(), live)
+                flash.live_boundaries.scatter_add_(0, (flash.cu[:-1] + flash.used_q).long(), -live)
+                flash.token_live.copy_(flash.live_boundaries.cumsum(0)[:tokens] > 0)
+                flash.slots.masked_fill_(~flash.token_live, -1)
+                flash.positions.zero_()
+                positions = common.positions[:num_decode_tokens]
+                flash.positions[: positions.numel()].copy_(positions)
             if self.use_rope:
                 assert flash.cos is not None and flash.sin is not None
                 if self.rope_metadata_source is None:
@@ -520,7 +534,7 @@ class FlashMLAMetadataBuilder:
                     cos, sin = gather_mla_rope(self.rope_metadata_source.cos_sin_cache, flash.positions)
                 flash.cos.copy_(cos)
                 flash.sin.copy_(sin)
-            if flash.draft_window is not None:
+            if flash.draft_window is not None and not fused:
                 assert self.window_size is not None
                 flash.draft_window.refresh(flash, self.window_size)
             inputs = flash.draft_window or flash

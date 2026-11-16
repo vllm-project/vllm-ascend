@@ -28,6 +28,7 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -1094,6 +1095,19 @@ class AscendMLAImpl(MLAAttentionImpl):
         self._mlapo_uses_native_weights = False
         self.use_flashmla: bool = self._can_use_flashmla()
         self._flashmla_writer_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+        self._flashmla_strided_kv_writer = self._enable_flashmla_strided_kv_writer()
+
+    def _enable_flashmla_strided_kv_writer(self) -> bool:
+        return (
+            envs.VLLM_ASCEND_MISTRAL_FLASHMLA_STRIDED_KV_WRITER
+            and self.use_flashmla
+            and self.is_draft_model
+            and getattr(self.speculative_config, "method", None) == "dspark"
+            and self.dtype == torch.bfloat16
+            and self.use_mla_rope
+            and not (self.use_pcp or self.use_dcp)
+            and self.kv_a_layernorm is not None
+        )
 
     def _can_use_flashmla(self) -> bool:
         config = self.vllm_config
@@ -1861,7 +1875,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         slots: torch.Tensor,
         return_current_kv: bool = False,
     ):
-        if self._uses_strided_kv_adapter() and any(not cache.is_contiguous() for cache in kv_cache):
+        if self._should_use_strided_kv_writer(kv_cache, slots, kv_no_split.shape[0]):
             current_k_pe, current_k_nope = self._exec_strided_kv_writer(kv_no_split, cos, sin, kv_cache, slots)
             if return_current_kv:
                 return kv_cache[1], kv_cache[0], current_k_pe, current_k_nope
@@ -1991,18 +2005,51 @@ class AscendMLAImpl(MLAAttentionImpl):
             self._uses_strided_kv_adapter() and getattr(self, "_strided_kv_workspace", None) is not None
         )
 
+    def _should_use_strided_kv_writer(
+        self, kv_cache, slots: torch.Tensor, num_tokens: int, *, allow_flashmla: bool = True
+    ) -> bool:
+        if self._uses_strided_kv_adapter():
+            return any(not cache.is_contiguous() for cache in kv_cache)
+        if not allow_flashmla or not getattr(self, "_flashmla_strided_kv_writer", False):
+            return False
+        workspace = self._strided_kv_workspace
+        if (
+            workspace is None
+            or num_tokens > workspace[2].numel()
+            or slots.dtype not in (torch.int32, torch.int64)
+            or len(kv_cache) != 2
+        ):
+            return False
+        nope, rope = kv_cache
+        return (
+            nope.ndim == rope.ndim == 4
+            and nope.shape[:3] == rope.shape[:3]
+            and nope.shape[2:] == (1, self.kv_lora_rank)
+            and rope.shape[-1] == self.qk_rope_head_dim
+            and nope.dtype == rope.dtype == self.dtype
+            and nope.stride(0) == rope.stride(0)
+            and self._is_token_fused_mla_cache(nope, rope)
+        )
+
     def _prepare_strided_kv_workspace(self) -> None:
         """Allocate during weight loading, before KV sizing, and retain graph addresses."""
-        if not self._uses_strided_kv_adapter() or getattr(self, "_strided_kv_workspace", None) is not None:
+        if getattr(self, "_strided_kv_workspace", None) is not None:
             return
-        assert self.fused_qkv_a_proj is not None
+        if self._uses_strided_kv_adapter():
+            assert self.fused_qkv_a_proj is not None
+            device = self.fused_qkv_a_proj.weight.device
+        elif getattr(self, "_flashmla_strided_kv_writer", False):
+            # Mistral uses a separate KV-A projection. W_UV is on the layer's
+            # execution device by the time the weight-loading hook runs.
+            device = self.W_UV.device
+        else:
+            return
         capacity = max(
             self.vllm_config.scheduler_config.max_num_batched_tokens,
             max(self.vllm_config.compilation_config.cudagraph_capture_sizes or [0]),
         )
         block_size = self.vllm_config.cache_config.block_size
         shape = (cdiv(capacity, block_size), block_size, self.num_kv_heads)
-        device = self.fused_qkv_a_proj.weight.device
         self._strided_kv_workspace = (
             torch.empty((*shape, self.kv_lora_rank), dtype=self.dtype, device=device),
             torch.empty((*shape, self.qk_rope_head_dim), dtype=self.dtype, device=device),
@@ -2300,21 +2347,19 @@ class AscendMLAImpl(MLAAttentionImpl):
                 f"rope shape={tuple(rope_cache.shape)} stride={tuple(rope_cache.stride())}."
             )
 
+        if not self._is_token_fused_mla_cache(nope_cache, rope_cache):
+            self._validate_context_prolog_v3_cache(kv_cache)
+        return True
+
+    def _is_token_fused_mla_cache(self, nope_cache: torch.Tensor, rope_cache: torch.Tensor) -> bool:
         fused_dim = self.kv_lora_rank + self.qk_rope_head_dim
-        same_storage = nope_cache.untyped_storage().data_ptr() == rope_cache.untyped_storage().data_ptr()
-        fused_offset_gap = rope_cache.storage_offset() - nope_cache.storage_offset()
-        token_interleaved = (
-            same_storage
-            and fused_offset_gap == self.kv_lora_rank
+        return (
+            nope_cache.untyped_storage().data_ptr() == rope_cache.untyped_storage().data_ptr()
+            and rope_cache.storage_offset() - nope_cache.storage_offset() == self.kv_lora_rank
             and nope_cache.stride(3) == rope_cache.stride(3) == 1
             and nope_cache.stride(2) == rope_cache.stride(2) == fused_dim
             and nope_cache.stride(1) == rope_cache.stride(1) == fused_dim
         )
-        if token_interleaved:
-            return True
-
-        self._validate_context_prolog_v3_cache(kv_cache)
-        return True
 
     def _cache_requires_prolog_v3_writer(self, kv_cache: tuple[torch.Tensor, ...] | torch.Tensor) -> bool:
         """Whether the legacy RMSNorm/RoPE cache writer is unsafe for this cache.
@@ -2689,6 +2734,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         slots: torch.Tensor,
         *,
         attn_metadata: AscendMLAMetadata | None = None,
+        is_draft_context: bool = False,
     ):
         pcp_local_range = None
         if self.use_pcp:
@@ -2728,7 +2774,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         if not self.use_mla_rope:
             k_pe, k_nope = self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
-        elif self._uses_strided_kv_adapter() and any(not cache.is_contiguous() for cache in kv_cache):
+        elif self._should_use_strided_kv_writer(kv_cache, slots, kv_no_split.shape[0], allow_flashmla=is_draft_context):
             k_pe, k_nope = self._exec_strided_kv_writer(kv_no_split, cos, sin, kv_cache, slots)
         else:
             assert self.kv_a_layernorm is not None
