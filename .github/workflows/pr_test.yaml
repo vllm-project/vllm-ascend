@@ -882,7 +882,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # Maximum time (seconds) a review-event ci-gate waits for the latest
       # pull_request CI run to complete before giving up.
-      GATE_WAIT_SECONDS: "21600"
+      GATE_WAIT_SECONDS: "7200"
     steps:
       - name: Check all required jobs
         id: check
