@@ -88,6 +88,7 @@ from vllm_ascend.core.kv_cache_placement import (
     register_kvpp_draft_layers,
 )
 from vllm_ascend.cpu_binding import bind_cpus
+from vllm_ascend.device.device_config import is_310p
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
@@ -1410,8 +1411,19 @@ class NPUWorker(WorkerBase):
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
         init_batch_invariance()
+        # Keep world control traffic on Gloo to avoid an extra HCCL domain on
+        # 310P. TP and MoE DP tensor collectives still require HCCL subgroups.
+        world_backend = "hccl"
+        mp_backend: str | None = None
+        if is_310p() and self.parallel_config.data_parallel_size > 1:
+            world_backend = "gloo"
+            mp_backend = "hccl"
         init_distributed_environment(
-            self.parallel_config.world_size, self.rank, self.distributed_init_method, self.local_rank, "hccl"
+            self.parallel_config.world_size,
+            self.rank,
+            self.distributed_init_method,
+            self.local_rank,
+            world_backend,
         )
         group_config = self.vllm_config
         if group_config.engram_config is not None and self.parallel_config.prefill_context_parallel_size > 1:
@@ -1426,6 +1438,7 @@ class NPUWorker(WorkerBase):
                 self.parallel_config.pipeline_parallel_size,
                 self.parallel_config.prefill_context_parallel_size,
                 self.parallel_config.decode_context_parallel_size,
+                backend=mp_backend,
             )
         init_ascend_model_parallel(self.parallel_config, self.vllm_config.engram_config)
         ensure_ec_transfer_initialized(self.vllm_config)

@@ -2,6 +2,9 @@
 # VSCode
 .vscode/
 
+# Local run artifacts (config snapshots and profiling reports)
+runtime/
+
 # MkDocs build output
 site/
 

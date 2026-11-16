@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
@@ -225,3 +226,58 @@ def test_factory_composes_custom_routed_experts_with_ascend_contract():
     assert kwargs["routed_experts_args"]["n_shared_experts"] == 2
     assert patch_fused_moe._adapt_routed_experts_cls(_CustomRoutedExperts) is adapted_cls
     assert patch_fused_moe._adapt_routed_experts_cls(AscendRoutedExperts) is AscendRoutedExperts
+
+
+@pytest.mark.parametrize(
+    ("on_310p", "expected"),
+    [
+        # (tp_size, tp_rank, dp_size, dp_rank)
+        (True, (2, 1, 1, 0)),
+        (False, (4, 3, 2, 1)),
+    ],
+)
+def test_moe_parallel_config_resolves_310p_full_replicas(on_310p, expected):
+    """Call the real constructor so flattened TP/DP ranks are asserted."""
+    from vllm.model_executor.layers.fused_moe import config as moe_config
+
+    parallel_config = SimpleNamespace(
+        enable_expert_parallel=False,
+        enable_eplb=False,
+        all2all_backend="standard",
+        data_parallel_size=2,
+    )
+
+    with (
+        patch.object(moe_config, "get_dp_group", return_value=SimpleNamespace(rank_in_group=1)),
+        patch.object(moe_config, "get_pcp_group", return_value=SimpleNamespace(rank_in_group=0)),
+        patch.object(moe_config, "get_tensor_model_parallel_rank", return_value=1),
+        patch.object(patch_fused_moe, "is_310p", return_value=on_310p),
+    ):
+        result = patch_fused_moe._make_310p_moe_parallel_config(2, 1, 2, 1, parallel_config)
+
+    assert (result.tp_size, result.tp_rank, result.dp_size, result.dp_rank) == expected
+    assert result.ep_size == 1
+    # The engine-wide DP configuration is untouched.
+    assert parallel_config.data_parallel_size == 2
+
+
+def test_moe_parallel_config_keeps_expert_parallel_dp():
+    from vllm.model_executor.layers.fused_moe import config as moe_config
+
+    parallel_config = SimpleNamespace(
+        enable_expert_parallel=True,
+        enable_eplb=False,
+        all2all_backend="standard",
+        data_parallel_size=2,
+    )
+
+    with (
+        patch.object(moe_config, "get_dp_group", return_value=SimpleNamespace(rank_in_group=1)),
+        patch.object(moe_config, "get_pcp_group", return_value=SimpleNamespace(rank_in_group=0)),
+        patch.object(moe_config, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(patch_fused_moe, "is_310p", return_value=True),
+    ):
+        result = patch_fused_moe._make_310p_moe_parallel_config(2, 1, 2, 1, parallel_config)
+
+    assert (result.dp_size, result.dp_rank) == (2, 1)
+    assert result.ep_size == 4

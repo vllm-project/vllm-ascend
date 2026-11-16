@@ -32,17 +32,28 @@ class NullHandle:
 
 def communication_adaptation_310p():
     def broadcast310p_wrapper(fn):
-        def broadcast310p(tensor, src=0, group=None, async_op=False, group_src=None):
-            root = group_src if group_src is not None else src
+        def broadcast310p(tensor, src=None, group=None, async_op=False, group_src=None):
+            if tensor.device.type == "cpu":
+                return fn(tensor, src=src, group=group, async_op=async_op, group_src=group_src)
+            if (src is None) == (group_src is None):
+                raise ValueError("Specify exactly one of src and group_src.")
+            c10d = torch.distributed.distributed_c10d
+            if group == c10d.GroupMember.NON_GROUP_MEMBER:
+                return None
+            if group is None:
+                group = c10d.group.WORLD
+            if group_src is None:
+                group_src = c10d.get_group_rank(group, src)
+            else:
+                # Validate the group-local root even on the all-gather fallback.
+                c10d.get_global_rank(group, group_src)
 
-            if tensor.device == torch.device("cpu"):
-                return fn(tensor, src=root, group=group, async_op=async_op)
-            rank = torch.distributed.get_rank(group)
             world_size = torch.distributed.get_world_size(group)
+            # HCCL does not guarantee that all_gather may write into the input
+            # tensor, so keep every gathered slot in its own buffer.
             tensor_list = [torch.empty_like(tensor) for _ in range(world_size)]
-            tensor_list[rank] = tensor
             torch.distributed.all_gather(tensor_list, tensor, group=group)
-            tensor[...] = tensor_list[src]
+            tensor[...] = tensor_list[group_src]
             if async_op:
                 return NullHandle()
             else:

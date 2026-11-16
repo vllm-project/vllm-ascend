@@ -15,11 +15,13 @@
 # This file is a part of the vllm-ascend project.
 #
 import gc
+import os
 
 import psutil
 import torch
 import torch_npu
 from vllm.logger import logger
+from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
@@ -27,9 +29,15 @@ from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 # KV-cache planning lives in kv_cache_planning on both supported versions.
 from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
 
+from vllm_ascend import envs
 from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
 from vllm_ascend.utils import is_rc_device
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
+
+# HCCL reserves this many consecutive host ports per engine-core process.
+_HCCL_PORTS_PER_DP_REPLICA = 32
+_MIN_HCCL_PORT = 1024
+_MAX_HCCL_PORT = 65535
 
 
 class NPUWorker310(NPUWorker):
@@ -56,6 +64,10 @@ class NPUWorker310(NPUWorker):
         return model_runner
 
     def init_device(self):
+        from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
+
+        # Reject unsupported model/parallel settings before allocating NPU resources.
+        NPUModelRunner310V2._validate_config(self.vllm_config)
         self.device = self._init_device()
         torch_npu.npu.set_compile_mode(jit_compile=False)
 
@@ -143,8 +155,62 @@ class NPUWorker310(NPUWorker):
         # 310p device do not support torch_npu._npu_matmul_add_fp32 atb ops
         logger.info_once("Skip warm-up atb ops for 310P device.")
 
+    def _configure_parallel_device(self):
+        parallel_config = self.parallel_config
+        assigned_devices = parallel_config.assigned_physical_gpu_ids
+        if assigned_devices is None:
+            # Single-node non-Ray launch: each engine core restarts its local
+            # rank at 0, so apply the DP offset the upstream CUDA worker uses.
+            self.local_rank = parallel_config.get_local_gpu_index(self.local_rank)
+            visible_count = torch.npu.device_count()
+        else:
+            # vLLM already sliced --device-ids per DP rank for this process
+            # (vllm/v1/engine/utils.py: needs_device_env_isolation is true for
+            # non-CUDA/XPU platforms) and published the slice as the config.
+            # local_rank is therefore an index into this replica's own shard;
+            # applying the DP offset again would run past the shard.
+            from vllm.platforms.interface import set_assigned_physical_gpu_ids
+
+            set_assigned_physical_gpu_ids(assigned_devices)
+            visible_count = len(assigned_devices)
+        if not 0 <= self.local_rank < visible_count:
+            raise ValueError(f"310P local rank {self.local_rank} is outside {visible_count} visible devices.")
+
+        if parallel_config.data_parallel_size > 1:
+            dp_local_rank = parallel_config.data_parallel_rank_local
+            if dp_local_rank is None:
+                dp_local_rank = parallel_config.data_parallel_index
+            base_port = envs.HCCL_IF_BASE_PORT
+            last_port = base_port + parallel_config.data_parallel_size * _HCCL_PORTS_PER_DP_REPLICA - 1
+            if base_port < _MIN_HCCL_PORT or last_port > _MAX_HCCL_PORT:
+                raise ValueError(
+                    f"HCCL_IF_BASE_PORT={base_port} cannot reserve "
+                    f"{parallel_config.data_parallel_size} DP port ranges of "
+                    f"{_HCCL_PORTS_PER_DP_REPLICA} ports: the range "
+                    f"[{base_port}, {last_port}] must stay within "
+                    f"[{_MIN_HCCL_PORT}, {_MAX_HCCL_PORT}]."
+                )
+            os.environ["HCCL_IF_BASE_PORT"] = str(base_port + dp_local_rank * _HCCL_PORTS_PER_DP_REPLICA)
+            logger.info(
+                "310P DP mapping: rank=%s local_rank=%s dp_local_rank=%s HCCL_IF_BASE_PORT=%s",
+                self.rank,
+                self.local_rank,
+                dp_local_rank,
+                os.environ["HCCL_IF_BASE_PORT"],
+            )
+
     def _init_device(self):
-        device = torch.device(f"npu:{self.local_rank}")
+        self._configure_parallel_device()
+        device_index = current_platform.logical_device_id_to_visible_device_id(self.local_rank)
+        if self.parallel_config.data_parallel_size > 1:
+            logger.info(
+                "310P DP device: rank=%s local_rank=%s visible=%s assigned=%s",
+                self.rank,
+                self.local_rank,
+                device_index,
+                self.parallel_config.assigned_physical_gpu_ids,
+            )
+        device = torch.device(f"npu:{device_index}")
         torch.npu.set_device(device)
 
         # This lazy import avoids torch_npu re-initialization in patch

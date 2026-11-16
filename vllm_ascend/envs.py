@@ -48,7 +48,19 @@ def _bool_env(name: str, default: bool) -> bool:
 # begin-env-vars-definition
 
 
+def _h_ccl_if_base_port() -> int:
+    raw = os.getenv("HCCL_IF_BASE_PORT", "60000")
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"HCCL_IF_BASE_PORT must be an integer, got {raw!r}.") from exc
+
+
 env_variables: dict[str, Callable[[], Any]] = {
+    # Host NIC base port for HCCL; 310P DP reserves 32 ports per replica.
+    # Default: 60000. The complete range must stay within 1024..65535.
+    # Sensitive: no.
+    "HCCL_IF_BASE_PORT": _h_ccl_if_base_port,
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

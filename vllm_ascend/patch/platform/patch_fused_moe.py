@@ -37,9 +37,12 @@ import torch
 import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
 import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
 from vllm.config import get_current_vllm_config
+from vllm.logger import logger
+from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.device.device_config import is_310p
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops.fused_moe.eplb import use_allgather_eplb
 from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router
@@ -206,3 +209,37 @@ for module_name, module in list(sys.modules.items()):
         continue
     if module.__dict__.get("FusedMoEFactory") is _original_FusedMoE:
         module.__dict__["FusedMoEFactory"] = _ascend_FusedMoE
+
+# ---------------------------------------------------------------------------
+# 310P data parallelism keeps every DP replica self-contained.
+#
+# Without expert parallelism, upstream flattens dp into the MoE tensor-parallel
+# group, so a replica owns only 1/(dp*tp) of each expert and runs two all-gathers
+# plus one reduce-scatter across the DP group on every MoE layer. In our tested
+# 310P environment this failed FULL_DECODE_ONLY capture with "The event
+# resources are insufficient" once those cross-DP HCCL collectives recorded
+# capture events. Restricting the MoE parallel config to the TP group removes
+# them and makes each replica a complete model replica, so ACL graph decode
+# works; the cost is replicated expert weights (less KV cache).
+_original_moe_parallel_config_make = FusedMoEParallelConfig.make
+
+
+def _make_310p_moe_parallel_config(
+    tp_size_: int,
+    pcp_size_: int,
+    dp_size_: int,
+    sp_size_: int,
+    vllm_parallel_config,
+) -> FusedMoEParallelConfig:
+    if dp_size_ > 1 and is_310p() and not vllm_parallel_config.enable_expert_parallel:
+        logger.info_once(
+            "310P data parallel: sharding MoE weights over the TP group only "
+            "(dp_size=%d is not folded into the MoE tensor parallel group) so "
+            "that ACL graph decode does not need cross-DP collectives.",
+            dp_size_,
+        )
+        dp_size_ = 1
+    return _original_moe_parallel_config_make(tp_size_, pcp_size_, dp_size_, sp_size_, vllm_parallel_config)
+
+
+FusedMoEParallelConfig.make = staticmethod(_make_310p_moe_parallel_config)

@@ -644,7 +644,6 @@ def test_finished_requests_synchronize_before_reusing_layout(finished_req_ids, s
     "setting",
     [
         "pipeline_parallel_size",
-        "data_parallel_size",
         "decode_context_parallel_size",
         "prefill_context_parallel_size",
     ],

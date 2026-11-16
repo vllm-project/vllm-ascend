@@ -74,3 +74,34 @@ INFO:     Application shutdown complete.
 ```
 
 Finally, press `Ctrl+D` to exit the container.
+
+### Native data parallelism on 310P
+
+For example, add `--data-parallel-size 2 --tensor-parallel-size 2` to use
+four visible NPUs. Every DP replica is a complete model replica: the MoE
+parallel config is restricted to the TP group, so the MoE forward pass issues
+no cross-DP tensor collectives (CPU-side DP coordination and the Gloo world
+group are unchanged). In our tested 310P environment, capturing a FULL graph
+for that path failed with an exhausted capture event pool while cross-DP HCCL
+collectives were recorded; removing them made graph capture succeed. Each
+replica also holds its own copy of the expert weights, which reduces the KV
+cache capacity per device.
+Pipeline, context, and expert parallelism remain unsupported by the 310P v2
+model runner.
+
+vLLM slices preassigned device lists per DP rank before starting each engine
+core, so workers index into that slice and must not apply a second DP offset.
+Ray and external launchers keep their own rank assignment.
+For DP, `HCCL_IF_BASE_PORT` is the base of a contiguous allocation of 32
+host ports per replica (default base: 60000), following the
+[HCCL host-port allocation](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/hcclug/hcclenvref_07_0019.html). The entire allocation must
+fit in ports 1024 through 65535. Set different, nonoverlapping base ranges
+for multiple instances on the same host. Port allocation does not probe or
+reserve sockets against other applications.
+
+MoE DP still performs CPU-side coordination. Before this change the MoE
+forward path sharded experts across the DP group and ran device all-gather
+and reduce-scatter on every layer; with the complete-replica layout those
+cross-DP tensor collectives are gone. Gloo is used for the world control
+group while model-parallel subgroups retain HCCL, so native DP performance
+still differs from two independent services at the same tensor-parallel size.
