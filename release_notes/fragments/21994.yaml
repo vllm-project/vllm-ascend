@@ -1,0 +1,4 @@
+pr: 21994
+entries:
+  - category: bugfix
+    text: Fixed KV Pool previous-save waits silently returning after a fatal transfer-thread error, including when no previous save batch remains.
