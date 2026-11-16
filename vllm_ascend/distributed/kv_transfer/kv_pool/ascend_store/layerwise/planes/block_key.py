@@ -54,9 +54,6 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
         self._prepare_single_group_sessions(requests)
         return {}
 
-    def prepare_gvas(self, requests: list[ReqMeta]) -> None:
-        """The block-key plane addresses pool objects, not worker GVAs."""
-
     def finish_current_load_sessions(self) -> None:
         worker = self._worker
         if worker._layer_load_aborted.is_set():

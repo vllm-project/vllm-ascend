@@ -25,19 +25,12 @@ class LayerwiseDataPlane(ABC):
 
     @abstractmethod
     def prepare_sessions(self, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:
-        """Open pool sessions for the step, before the per-layer save loop.
+        """Prepare the step's transfers before the per-layer save loop.
 
+        Implementations open pool sessions and/or resolve backend transfer
+        targets here, holding their own internal ordering invariants.
         Returns the per-group request views the save/load loops consume; an
         empty dict means the loops keep the requests unchanged.
-        """
-
-    @abstractmethod
-    def prepare_gvas(self, requests: list[ReqMeta]) -> None:
-        """Prepare the step's GVA transfer targets once the save loop is planned.
-
-        One window with a fixed internal order: load targets are prepared
-        before save targets are allocated, so a trailing partial block's data
-        address is read before its key is repointed at a fresh snapshot.
         """
 
     @abstractmethod

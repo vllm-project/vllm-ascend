@@ -32,16 +32,16 @@ class GvaDataPlane(LayerwiseDataPlane):
         self._worker = worker
 
     def prepare_sessions(self, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:
-        """GVA opens no pool-side sessions before the save loop."""
-        return {}
+        """GVA opens no pool sessions; resolve the transfer targets instead.
 
-    def prepare_gvas(self, requests: list[ReqMeta]) -> None:
-        # Protect the previous partial before allocating the next snapshot:
-        # load preparation queries the pool-registered GVA of the previous
-        # step's snapshot, so it must complete before save allocation
-        # repoints the partial key at a fresh one.
+        Protect the previous partial before allocating the next snapshot:
+        load preparation queries the pool-registered GVA of the previous
+        step's snapshot, so it must complete before save allocation
+        repoints the partial key at a fresh one.
+        """
         self._worker._prepare_load_gvas(requests)
         self._worker._alloc_gvas_for_save(requests)
+        return {}
 
     def finish_current_load_sessions(self) -> None:
         """GVA loads read through worker-held addresses, not pool sessions."""
