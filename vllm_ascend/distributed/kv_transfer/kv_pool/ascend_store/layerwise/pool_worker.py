@@ -1221,22 +1221,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
     def _layerwise_save_full_end(
         self, request: ReqMeta, group_id: int, block_size: int, partial_block_index: int | None
     ) -> int:
-        """Unhashed full blocks use normal GVA slots; the tail keeps its partial slot."""
+        """Return the exclusive end of the group's full-block save range."""
         end = request.save_end_token // block_size
-        if self.use_layerwise_transfer and self.layerwise_offload and not self.group_uses_align_state[group_id]:
+        if self.use_layerwise_transfer and self.layerwise_offload:
             end = request.target_token_len // block_size
-            if partial_block_index is not None:
+            if partial_block_index is not None and not self.group_uses_align_state[group_id]:
                 end = min(end, partial_block_index)
-        elif self.use_layerwise_transfer and self.layerwise_offload:
-            # A group can complete pages before the transfer LCM boundary.
-            # Persist those pages before another layer overwrites the slot.
-            end = max(
-                end,
-                min(
-                    request.target_token_len // block_size,
-                    len(request.block_hashes) * self.hash_block_size // block_size,
-                ),
-            )
         return end
 
     def _pool_keys_missing(self, keys: list[str], *, fail_open: bool = True) -> set[str]:
