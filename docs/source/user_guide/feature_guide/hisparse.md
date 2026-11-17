@@ -4,8 +4,9 @@
 
 HiSparse keeps a Host mirror of sparse MLA KV rows and refills only the missing
 rows selected by attention. This reduces the NPU cache capacity needed for long
-contexts. The experimental Ascend backend requires a SIMT-capable CANN 9.2
-toolchain on Ascend 950.
+contexts. The experimental Ascend backend supports A2/A3 through the arch22
+resolver and A5 through the SIMT resolver. A5 requires a SIMT-capable CANN 9.2
+toolchain; build the custom operators for the target architecture.
 
 ### Working Principle
 
@@ -20,15 +21,18 @@ together before evicting Hot rows.
 ### Usage Scenarios
 
 Use HiSparse with Model Runner V2 for sparse RoPE MLA/SFA models serving long
-contexts. BF16 KV and native Ascend 950 C8 (E4M3FN values with FP32 scales) are
-supported, with independent Main and Indexer KV dtype selection.
+contexts. A2/A3 support INT8 C8 KV: Main KV stores INT8 values, BF16 RoPE and
+FP32 scales; Indexer KV stores INT8 values with FP16 scales. A5 retains BF16 KV
+and native C8 (E4M3FN values with FP32 scales), with independent Main and
+Indexer KV dtype selection. The A2/A3 extension does not add a BF16 HiSparse
+serving path or change the existing non-HiSparse BF16 path.
 
 ### Constraints and Limitations
 
 | Category | Constraint |
 | --- | --- |
-| Hardware and software | Ascend 950 with a SIMT-capable CANN 9.2 toolchain. |
-| Cache formats | C4, TurboQuant and INT8-format C8 are outside the current support scope. |
+| Hardware and software | A2/A3 with the arch22 custom operators, or A5 with a SIMT-capable CANN 9.2 toolchain. |
+| Cache formats | A2/A3: INT8 C8. A5: BF16 or native E4M3FN C8. C4 and TurboQuant are outside the current support scope. |
 | Parallelism and transport | Context parallelism and external P/D transport are outside the current support scope. |
 | Host storage | Use private Host pools per tensor-parallel rank and Core eager Host mirroring. |
 | TopK | The existing SFA requirement of divisibility by 128 applies. |
@@ -39,7 +43,7 @@ supported, with independent Main and Indexer KV dtype selection.
 ### Usage Example
 
 Set `MODEL_PATH` to a compatible sparse MLA model and start the server with
-Model Runner V2:
+Model Runner V2. The following example uses BF16 KV on A5:
 
 ```bash
 VLLM_USE_V2_MODEL_RUNNER=1 vllm serve "$MODEL_PATH" \
@@ -55,6 +59,17 @@ For native A5 C8, replace the two dtype options with:
 --kv-cache-dtype fp8 \
 --attention-config '{"indexer_kv_dtype":"fp8","hisparse_config":{"eager_host_mirror":true}}'
 ```
+
+For A2/A3 INT8 C8, use a compatible INT8 KV model and replace the two dtype
+options with:
+
+```bash
+--kv-cache-dtype int8 \
+--attention-config '{"indexer_kv_dtype":"int8","hisparse_config":{"eager_host_mirror":true}}'
+```
+
+These options select KV-cache quantization independently of model-weight
+quantization; keep the weight-quantization options required by the model.
 
 ### Verifying the Feature
 
