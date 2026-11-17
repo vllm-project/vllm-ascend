@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Ascend Kimi K3 delta attention with TP x PCP head-sharded state."""
 
-from functools import wraps
-
 import torch
 import torch_npu
 from einops import rearrange
@@ -18,7 +16,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization.modelopt import ModelOptMixedPrecisionConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.utils import replace_parameter
 from vllm.models.kimi_k3.nvidia.kda import (
     KimiK3DeltaAttention,
     _make_decode_conv1d_weight_loader,
@@ -264,28 +261,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         self.o_norm.eps = config.rms_norm_eps
         # vLLM keeps the checkpoint-compatible FP32 [3C, 1, W] weight, while
         # fla_npu causal_conv1d consumes an activation-dtype [W, 3C]
-        # tensor. Materialize that kernel layout once after weight loading.
-        self.register_parameter(
-            _PACKED_CONV_WEIGHT_NAME,
-            nn.Parameter(
-                torch.empty(
-                    self.conv_size,
-                    3 * self.local_projection_size,
-                    dtype=self.model_config.dtype,
-                    device=self.conv1d.weight.device,
-                ),
-                requires_grad=False,
-            ),
-        )
-        original_process_weights = self.conv1d.quant_method.process_weights_after_loading
-
-        @wraps(original_process_weights)
-        def process_weights_and_pack(*args, **kwargs):
-            result = original_process_weights(*args, **kwargs)
-            self._pack_conv_weights()
-            return result
-
-        self.conv1d.quant_method.process_weights_after_loading = process_weights_and_pack
+        # tensor. Materialize that kernel layout after each complete weight load.
+        # This is derived runtime state, absent from the checkpoint. Creating it
+        # in the deferred attention hook also keeps it out of the checkpoint
+        # restoration metadata recorded before the first post-load pass.
+        self.register_buffer(_PACKED_CONV_WEIGHT_NAME, None, persistent=False)
 
     def _init_pcp_projections(self, vllm_config, prefix: str) -> None:
         """Bind every KDA head parameter and cache to the same TP x PCP shard."""
@@ -549,23 +529,29 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             out=output,
         )
 
-    @torch.no_grad()
-    def _pack_conv_weights(self) -> None:
+    @torch.inference_mode()
+    def process_weights_after_loading(self, act_dtype: torch.dtype | None = None) -> None:
+        """Repack after projection reloads, preserving captured graph storage.
+
+        vLLM defers attention hooks until child projections are finalized. A
+        conv1d quant-method hook runs too early: the parent KDA tensors may still
+        be on meta and their subsequent restoration discards the packed values.
+        """
         if self.conv1d.weight.is_meta:
             return
-        packed_param = self.get_parameter(_PACKED_CONV_WEIGHT_NAME)
+        if act_dtype is None:
+            act_dtype = self.model_config.dtype
         packed_weight = (
             self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
             .transpose(0, 1)
-            .to(device=packed_param.device, dtype=packed_param.dtype)
+            .to(dtype=act_dtype)
             .contiguous()
         )
-        # replace_parameter preserves the parameter object on both supported versions.
-        replace_parameter(
-            self,
-            _PACKED_CONV_WEIGHT_NAME,
-            packed_weight,
-        )
+        packed_buffer = self.get_buffer(_PACKED_CONV_WEIGHT_NAME)
+        if packed_buffer is None:
+            self.register_buffer(_PACKED_CONV_WEIGHT_NAME, packed_weight, persistent=False)
+        else:
+            packed_buffer.copy_(packed_weight)
 
     def _run_recurrent(
         self,
@@ -689,7 +675,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             )
 
         conv_state, recurrent_state = self.kv_cache
-        conv_weights_t = self.get_parameter(_PACKED_CONV_WEIGHT_NAME)
+        conv_weights_t = self.get_buffer(_PACKED_CONV_WEIGHT_NAME)
+        assert conv_weights_t is not None, "KDA convolution weights must be processed before forward"
         spec_masks = attn_metadata.spec_sequence_masks
         spec_token_indices = attn_metadata.spec_token_indx
         non_spec_token_indices = attn_metadata.non_spec_token_indx

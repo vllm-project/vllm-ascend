@@ -505,16 +505,13 @@ def test_kda_conv_weight_is_packed_once_in_kernel_layout():
     attention.conv1d = nn.Module()
     source = torch.arange(18 * 4, dtype=torch.float32).reshape(18, 1, 4)
     attention.conv1d.weight = nn.Parameter(source)
-    attention.register_parameter(
-        _PACKED_CONV_WEIGHT_NAME,
-        nn.Parameter(torch.empty(4, 18, dtype=torch.bfloat16), requires_grad=False),
-    )
-    original = attention.get_parameter(_PACKED_CONV_WEIGHT_NAME)
+    attention.register_buffer(_PACKED_CONV_WEIGHT_NAME, torch.empty(4, 18, dtype=torch.bfloat16), persistent=False)
+    original = attention.get_buffer(_PACKED_CONV_WEIGHT_NAME)
     original_ptr = original.data_ptr()
 
-    attention._pack_conv_weights()
+    attention.process_weights_after_loading(torch.bfloat16)
 
-    packed = attention.get_parameter(_PACKED_CONV_WEIGHT_NAME)
+    packed = attention.get_buffer(_PACKED_CONV_WEIGHT_NAME)
     assert packed.data_ptr() == original_ptr
     assert packed.dtype == torch.bfloat16
     assert packed.is_contiguous()
@@ -587,7 +584,7 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode, source_layout):
         num_spec=3,
         use_recoverssm=False,
         kv_cache=(torch.zeros(1), state),
-        get_parameter=lambda name: torch.empty(1),
+        get_buffer=lambda name: torch.empty(1),
         _run_causal_conv1d=lambda x, *args, **kwargs: x,
         _run_recurrent=recurrent,
         o_norm=SimpleNamespace(forward_oot=norm_into),
@@ -672,7 +669,7 @@ def test_recoverssm_dispatches_without_spec_mask_and_sigmoids_beta_once(mixed):
         dt_bias=torch.zeros(dim),
         gate_lower_bound=-5.0,
         kv_cache=(torch.empty(1), torch.empty(1)),
-        get_parameter=lambda _name: torch.empty(1),
+        get_buffer=lambda _name: torch.empty(1),
         _run_causal_conv1d=lambda x, *_args, **_kwargs: x,
         _run_recurrent=native,
         o_norm=SimpleNamespace(forward_oot=norm_into),
@@ -736,7 +733,7 @@ def test_kda_prefill_direct_norm_and_idle_output(mode, recover):
         use_recoverssm=recover,
         head_dim=dim,
         kv_cache=(torch.empty(1), torch.empty(1)),
-        get_parameter=lambda name: torch.empty(1),
+        get_buffer=lambda name: torch.empty(1),
         _run_causal_conv1d=lambda x, *args, **kwargs: x,
         _run_prefill=MagicMock(return_value=core),
         o_norm=SimpleNamespace(forward_oot=norm),

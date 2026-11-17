@@ -101,7 +101,11 @@ class FixedRandomWeightSource(WeightSource):
         self._case = case
         meta_config = getattr(config, case.meta_config_attribute) if case.meta_config_attribute else config
         with torch.device("meta"):
-            meta_model = AutoModelForCausalLM.from_config(meta_config, trust_remote_code=True)
+            meta_model = (
+                case.meta_model_factory(meta_config)
+                if case.meta_model_factory is not None
+                else AutoModelForCausalLM.from_config(meta_config, trust_remote_code=True)
+            )
 
         # Two distinct steps: ``_checkpoint_name`` applies the namespace prefix
         # to the raw meta-model name (once), then the checkpoint rename map runs
