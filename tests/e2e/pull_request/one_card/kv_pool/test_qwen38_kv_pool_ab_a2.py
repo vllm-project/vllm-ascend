@@ -104,6 +104,7 @@ import time
 from contextlib import ExitStack, contextmanager
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -246,6 +247,32 @@ PERF_ATTEMPTS = int(os.environ.get("QWEN38_POOL_PERF_ATTEMPTS", "2"))
 # initialization failed". Keep the memcache scenarios opt-in so such a slice
 # reports a skip with the reason instead of a failure.
 ENABLE_MEMCACHE = os.environ.get("QWEN38_POOL_ENABLE_MEMCACHE", "0") == "1"
+# memcache reports its init failures as an opaque "Engine core initialization
+# failed" while the reason (hybm / driver mf capability) only appears on stderr.
+# "error" keeps CI logs small; "debug" adds the configuration and start-up trace.
+# The service rejects anything outside debug|info|warn|error by exiting 0 with
+# "Invalid value for <ock.mmc.log_level>", which surfaces as
+# "service exited before becoming ready with code 0" - so validate it here.
+MEMCACHE_LOG_LEVEL = os.environ.get("QWEN38_POOL_MEMCACHE_LOG_LEVEL", "error")
+if MEMCACHE_LOG_LEVEL not in {"debug", "info", "warn", "error"}:
+    raise ValueError(
+        f"QWEN38_POOL_MEMCACHE_LOG_LEVEL={MEMCACHE_LOG_LEVEL!r} is rejected by the memcache "
+        "service; use one of debug, info, warn, error"
+    )
+
+# hybm reads the driver version before it enables "mf"; when the container cannot
+# see the version file the pool fails with "read version is empty" and
+# "the current version of ascend driver does not support mf". Probe the file so a
+# slice without it skips with that reason instead of failing.
+DRIVER_VERSION_INFO = Path(os.environ.get("KV_POOL_DRIVER_VERSION_INFO", "/usr/local/Ascend/driver/version.info"))
+
+
+def _driver_reports_mf_capable_driver() -> bool:
+    try:
+        return "Version=" in DRIVER_VERSION_INFO.read_text(errors="ignore")
+    except OSError:
+        return False
+
 
 AB_MODE = os.environ.get("KV_POOL_AB_MODE", "gate")
 # The mooncake-layerwise scenario runs without a version gate: the official
@@ -389,14 +416,14 @@ def _mooncake_pool_config(tier_ssd: bool, case_name: str) -> MooncakeKVPoolConfi
 
 def _memcache_pool_config(tier_ssd: bool) -> MemcacheKVPoolConfig:
     local: dict[str, Any] = {
-        "ock.mmc.log_level": "error",
+        "ock.mmc.log_level": MEMCACHE_LOG_LEVEL,
         "ock.mmc.local_service.world_size": 256,
         # Official A2 recommendation (KV pool guide): device_rdma (RoCE).
         "ock.mmc.local_service.protocol": "device_rdma",
         "ock.mmc.local_service.dram.size": DRAM_TIER,
     }
     meta: dict[str, Any] = {
-        "ock.mmc.log_level": "error",
+        "ock.mmc.log_level": MEMCACHE_LOG_LEVEL,
         # The meta service also starts an HTTP metrics endpoint. Pin it to a
         # free port: the default 8000 collides with host services under
         # --network=host.
@@ -853,13 +880,15 @@ def test_qwen38_kv_pool_ab_a2(backend: str, use_layerwise: bool):
                 "without them on A2.",
                 flush=True,
             )
-    if backend == "memcache" and not ENABLE_MEMCACHE:
+    if backend == "memcache" and not ENABLE_MEMCACHE and not _driver_reports_mf_capable_driver():
         pytest.skip(
             "memcache_hybrid allocates its local-service buffers through the Ascend "
             "memory-fabric (mf) path, and this runner's driver answers 'the current version "
             "of ascend driver does not support mf' (hybm_init fails, then 'Failed to init "
-            "smem bm'), so the pool cannot start here. Set QWEN38_POOL_ENABLE_MEMCACHE=1 on "
-            "a host whose driver provides mf to run the memcache scenarios."
+            "smem bm'), so the pool cannot start here. This check probes "
+            f"{DRIVER_VERSION_INFO} (override with KV_POOL_DRIVER_VERSION_INFO) and runs the "
+            "memcache scenarios automatically when it is readable; "
+            "QWEN38_POOL_ENABLE_MEMCACHE=1 forces them on regardless."
         )
     if backend == "memcache" and tier_ssd and not os.path.exists(MEMCACHE_UBSIO_DISK):
         pytest.skip(
