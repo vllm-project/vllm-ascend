@@ -35,10 +35,8 @@ class CollectiveWorld:
                     call["sources"][rank] = source.clone()
                     if kind == "gather":
                         shape = (source.shape[0] * world.size, *source.shape[1:])
-                    elif kind == "scatter":
-                        shape = (source.shape[0] // world.size, *source.shape[1:])
                     else:
-                        shape = source.shape
+                        shape = (source.shape[0] // world.size, *source.shape[1:])
                     output = source.new_empty(shape)
                     world.condition.notify_all()
 
@@ -48,10 +46,8 @@ class CollectiveWorld:
                         sources = [call["sources"][peer] for peer in range(world.size)]
                         if kind == "gather":
                             value = torch.cat(sources)
-                        elif kind == "scatter":
-                            value = torch.stack(sources).sum(0).chunk(world.size)[rank]
                         else:
-                            value = torch.cat([value[rank : rank + 1] for value in sources])
+                            value = torch.stack(sources).sum(0).chunk(world.size)[rank]
                         output.copy_(value)
 
                 return tp.PendingTensor(output, SimpleNamespace(wait=wait), source)
@@ -61,9 +57,6 @@ class CollectiveWorld:
 
             def scatter(self, source, group):
                 return self.submit("scatter", source)
-
-            def exchange(self, source, group):
-                return self.submit("exchange", source)
 
         return Communication()
 
@@ -76,7 +69,7 @@ def cpu_streams(monkeypatch):
 
 @pytest.mark.parametrize("capacity", [1, 3, 8])
 @pytest.mark.parametrize("size", [2, 4])
-@pytest.mark.parametrize("component", ["embedding", "mlp", "lmhead"])
+@pytest.mark.parametrize("component", ["embedding", "mlp"])
 def test_chunked_collectives_preserve_owner_rows(monkeypatch, capacity, size, component):
     world = CollectiveWorld(size)
     monkeypatch.setattr(tp, "projection_capacity", lambda hidden: capacity)
@@ -105,7 +98,7 @@ def test_chunked_collectives_preserve_owner_rows(monkeypatch, capacity, size, co
             layer = SimpleNamespace(_lookup_partition=lookup)
             expected = weight[ids][:rows]
             execute = lambda: executor.forward(layer, ids)[:rows]
-        elif component == "mlp":
+        else:
             executor = tp.ChunkedMLPTP(group)
             begin, end = rank * 2, (rank + 1) * 2
             # Bias on the down projection must be contributed only once.
@@ -119,23 +112,13 @@ def test_chunked_collectives_preserve_owner_rows(monkeypatch, capacity, size, co
             layer = SimpleNamespace(gate_up_proj=up, down_proj=down, _prepare_down_input=torch.relu)
             expected = torch.relu(owner[:rows] @ up_weight) @ down_weight + bias
             execute = lambda: executor.forward(layer, owner[:rows])
-        else:
-            executor = tp.ChunkedLMHeadTP(group)
-            shard = vocab // size
-            processor = SimpleNamespace(
-                org_vocab_size=vocab - 1,
-                _apply_head=lambda head, x, bias: x @ weight[rank * shard : (rank + 1) * shard].T,
-            )
-            expected = (owner @ weight.T)[:, : vocab - 1]
-            execute = lambda: executor.forward(processor, owner, None, None)
         executor.communication = communication
         torch.testing.assert_close(execute(), expected)
 
     with ThreadPoolExecutor(max_workers=size) as pool:
         list(pool.map(run, range(size)))
-    suffix = "exchange" if component == "lmhead" else "scatter"
     chunks = min(capacity, 2)
-    assert [world.calls[index]["kind"] for index in sorted(world.calls)] == ["gather"] * chunks + [suffix] * chunks
+    assert [world.calls[index]["kind"] for index in sorted(world.calls)] == ["gather"] * chunks + ["scatter"] * chunks
 
 
 def test_pending_buffers_follow_actual_consumer(monkeypatch):

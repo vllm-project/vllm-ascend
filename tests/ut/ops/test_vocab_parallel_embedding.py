@@ -655,7 +655,6 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_quant_method.apply = MagicMock(return_value=torch.randn(2, self.vocab_size))
         self.mock_all_to_all_single = MagicMock(side_effect=lambda out, inp, **kwargs: out.copy_(inp))
         self.patches = [
-            patch("vllm_ascend.ops.vocab_parallel_embedding.uses_aiv_communication", return_value=True),
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group", return_value=self.mock_group),
             patch("vllm_ascend.ops.vocab_parallel_embedding.lmhead_tp_enable", return_value=True),
             patch(
@@ -702,16 +701,6 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_all_to_all_single.assert_called_once()
         # [N/P, V] after redistribution, then truncated to org_vocab_size.
         self.assertEqual(logits.shape, (1, self.vocab_size))
-
-    def test_lmhead_pipeline_selection_does_not_require_a_model_schema(self):
-        from vllm_ascend.ops.finegrained_tp import ChunkedLMHeadTP
-
-        for aiv in (False, True):
-            with patch("vllm_ascend.ops.vocab_parallel_embedding.uses_aiv_communication", return_value=aiv):
-                head = AscendParallelLMHead(16, 4, prefix="lm_head")
-            assert (head._lmhead_pipeline is None) is aiv
-            if not aiv:
-                assert isinstance(head._lmhead_pipeline, ChunkedLMHeadTP)
 
     def test_get_logits_replicated_head_takes_normal_path(self):
         """A replicated head (tp_size==1, e.g. the DSpark Markov w2) must not
@@ -780,9 +769,8 @@ class TestAscendLogitsProcessor(unittest.TestCase):
 
 
 @pytest.mark.parametrize("model_type", ["kimi_linear", "glm5_next", "other"])
-def test_tied_embedding_without_head_pipeline_uses_serial_exchange(monkeypatch, model_type):
+def test_tied_embedding_uses_lmhead_exchange(monkeypatch, model_type):
     layer, _ = _exchange_embedding(monkeypatch, VocabParallelMode.FINE_GRAINED, model_type=model_type, aiv=True)
-    assert not hasattr(layer, "_lmhead_pipeline")
     group = SimpleNamespace(world_size=2, device_group=None, all_gather=lambda hidden, dim: torch.cat((hidden, hidden)))
     module = "vllm_ascend.ops.vocab_parallel_embedding"
     monkeypatch.setattr(f"{module}.get_lmhead_tp_group", lambda: group)

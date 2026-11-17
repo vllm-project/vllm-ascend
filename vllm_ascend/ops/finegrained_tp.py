@@ -333,25 +333,3 @@ class ChunkedMLPTP:
             outputs.append(self.communication.scatter(partial, self.group))
         # AG0, AG1, RS0, RS1 are launched in the same order on every rank.
         return _restore_owner_chunks(outputs, rows)
-
-
-class ChunkedLMHeadTP:
-    def __init__(self, group):
-        self.group = group
-        self.communication = TPCommunication()
-
-    def forward(self, processor, hidden, head, bias):
-        # The runner has padded sampled rows to one common capacity already.
-        chunks = hidden.tensor_split(2) if hidden.shape[0] > 1 else (hidden,)
-        gathered = [self.communication.gather(chunk.contiguous(), self.group) for chunk in chunks]
-        outputs = []
-        for pending in gathered:
-            logits = processor._apply_head(head, pending.wait(), bias)
-            source = logits.contiguous().view(self.group.world_size, -1, logits.shape[-1])
-            outputs.append(self.communication.exchange(source, self.group))
-        # Each chunk independently restores owner rows and the full vocabulary.
-        result = [
-            p.wait().permute(1, 0, 2).reshape(p.tensor.shape[1], self.group.world_size * p.tensor.shape[2])
-            for p in outputs
-        ]
-        return torch.cat(result, dim=0)[..., : processor.org_vocab_size]
