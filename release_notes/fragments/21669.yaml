@@ -1,6 +1,10 @@
 pr: 21669
 entries:
   - category: performance
+    text: Reduced block-max gather overhead in long-context MiniMax-M3 indexer DCP decode with a larger fixed page tile.
+    model: MiniMax-M3.1-Flash
+    hardware: [A3]
+  - category: performance
     text: Added optional MiniMax-M3 indexer DCP decode overlap that hides query AllGather behind independent main QKV preparation and consumes gathered queries without a reorder copy. Enable enable_minimax_m3_indexer_dcp_overlap alongside indexer DCP for separate-projection BF16 decode; the default remains disabled.
     model: MiniMax-M3.1-Flash
     hardware: [A3]
