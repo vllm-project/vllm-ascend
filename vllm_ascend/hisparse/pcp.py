@@ -9,15 +9,15 @@ from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 
-def prepare_pcp_query_metadata(metadata, states, valid_rows, local_states, world_size):
+def prepare_pcp_query_metadata(metadata, states, local_states, world_size):
     """Keep graph inputs at fixed addresses across capture and real steps."""
     states.fill_(-1)
     states[: local_states.numel()].copy_(local_states)
     count = metadata.num_input_tokens * world_size
-    valid_rows.fill_(count)
     metadata.hisparse_request_state_indices = states
     metadata.hisparse_num_write_tokens = count
-    metadata.hisparse_num_valid_write_rows = valid_rows
+    # Gathered slots already mark padding with -1; scatter needs no row counter.
+    metadata.hisparse_num_valid_write_rows = None
     metadata.hisparse_write_has_prefill = metadata.pcp_has_global_prefill
 
 

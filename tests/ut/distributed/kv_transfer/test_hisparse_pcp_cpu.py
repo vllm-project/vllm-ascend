@@ -175,23 +175,63 @@ def test_capture_and_real_forward_keep_query_and_scatter_input_addresses():
     local.num_tokens_after_padding = 8
     meta.req_id_per_token = torch.tensor([0, 1, 1, 0, 0, 0, 0, 0], dtype=torch.int32)
     states = torch.empty(8, dtype=torch.int32)
-    valid_rows = torch.empty(1, dtype=torch.int32)
-    prepare_pcp_query_metadata(meta, states, valid_rows, torch.zeros(2, dtype=torch.int64), 1)
+    prepare_pcp_query_metadata(meta, states, torch.zeros(2, dtype=torch.int64), 1)
     cache._prepare_for_batch(meta)
     prepare_pcp_query_states(cache, meta)
     captured_states = cache.runtime.request_state_indices
     captured_slots = cache.slot_mapping
-    prepare_pcp_query_metadata(meta, states, valid_rows, local.idx_mapping, 1)
+    prepare_pcp_query_metadata(meta, states, local.idx_mapping, 1)
     scheduler = NS(kv_connector_metadata=object(), has_sync_kv_loads=True)
     connector.pre_forward(scheduler, local, {"layer0": meta, "indexer": NS()})
     assert captured_states is meta.hisparse_request_state_indices
     assert captured_states.tolist() == [7, 9, -1, -1, -1, -1, -1, -1]
-    assert valid_rows is meta.hisparse_num_valid_write_rows
-    assert valid_rows.tolist() == [8]
+    assert meta.hisparse_num_valid_write_rows is None
     assert meta.hisparse_write_req_id_per_token is meta.req_id_per_token
     assert cache.slot_mapping[:8].tolist() == [100, 101, 102, -1, -1, -1, -1, -1]
     assert connector._pending_load_kwargs["num_tokens"] == 8
     assert captured_slots.data_ptr() == cache.slot_mapping.data_ptr()
+
+
+def test_pcp_builder_reuses_state_input_without_per_draft_buffers(monkeypatch):
+    from vllm_ascend.attention import sfa_hisparse
+    from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
+
+    def init(builder, *args, **kwargs):
+        builder.device = torch.device("cpu")
+        builder.use_pcp = True
+        builder.is_pcp_decode_sharded = False
+
+    def build(builder, common, draft_index, context):
+        return NS(
+            query_start_loc=common.query_start_loc_cpu,
+            num_input_tokens=4,
+            num_prefills=0,
+            pcp_has_global_prefill=context is not None,
+        )
+
+    monkeypatch.setattr(AscendSFAMetadataBuilder, "__init__", init)
+    monkeypatch.setattr(AscendSFAMetadataBuilder, "_build", build)
+    monkeypatch.setattr(sfa_hisparse, "get_pcp_group", lambda: NS(world_size=2))
+    monkeypatch.setattr(sfa_hisparse, "needs_pcp_kv_gather", lambda *args: True)
+    monkeypatch.setattr(sfa_hisparse, "compute_token_to_req_indices", lambda q, out, n, size: out[:size].zero_())
+    config = NS(
+        scheduler_config=NS(max_num_seqs=2, max_num_batched_tokens=8),
+        compilation_config=NS(max_cudagraph_capture_size=8),
+        parallel_config=NS(prefill_context_parallel_size=2),
+    )
+    builder = sfa_hisparse.AscendHiSparseMetadataBuilder(None, [], config, torch.device("cpu"))
+    common = NS(num_reqs=3, query_start_loc_cpu=torch.tensor([0, 2, 3, 4], dtype=torch.int32))
+    capture = builder._build(common, pcp_context=NS(local_request_state_indices=torch.zeros(3, dtype=torch.int64)))
+    states = capture.hisparse_request_state_indices
+    real = builder._build(common, pcp_context=NS(local_request_state_indices=torch.tensor([7, 7, 9])))
+    assert real.hisparse_request_state_indices is states
+    assert states.dtype == torch.int32 and states.tolist() == [7, 7, 9, -1, -1]
+    assert real.hisparse_num_write_tokens == 8 and real.hisparse_num_valid_write_rows is None
+    draft = builder._build(common, draft_index=1)
+    assert not hasattr(draft, "hisparse_request_state_indices")
+    assert states.tolist() == [7, 7, 9, -1, -1]
+    builder._build(common, pcp_context=NS(local_request_state_indices=torch.tensor([9])))
+    assert states.tolist() == [9, -1, -1, -1, -1]
 
 
 def test_empty_query_rank_still_prepares_host_mirror(monkeypatch):
@@ -231,14 +271,12 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     prepare_pcp_query_metadata(
         meta,
         torch.empty(2, dtype=torch.int32),
-        torch.empty(1, dtype=torch.int32),
         impl.hisparse_cache.runtime.request_state_indices,
         pcp_world_size,
     )
     meta.hisparse_for_capture = capture
     num_write_rows = meta.num_input_tokens * pcp_world_size
     meta.hisparse_num_write_tokens = num_write_rows
-    meta.hisparse_num_valid_write_rows.fill_(num_write_rows)
     meta.hisparse_write_req_id_per_token = torch.zeros(num_write_rows, dtype=torch.int32)
     impl.hisparse_cache._prepare_for_batch(meta)
     impl.hisparse_cache.submit_layer_mirror = Mock()
@@ -266,7 +304,7 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
 
     def scatter(payload, rope, destination, mapping, valid):
         assert payload[:, 0].tolist() == [10 * rank + row for rank in range(pcp_world_size) for row in (1, 2, 3)]
-        assert valid.tolist() == [num_write_rows]
+        assert valid is None
         for row, slot in enumerate(mapping.tolist()):
             if slot >= 0:
                 destination[slot - 10].fill_(int(payload[row, 0]))
