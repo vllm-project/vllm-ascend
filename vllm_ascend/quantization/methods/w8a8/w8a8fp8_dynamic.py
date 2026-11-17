@@ -38,7 +38,6 @@ class AscendW8A8FP8DynamicLinearMethod(AscendW8A8DynamicLinearMethod):
     and FP8 per-channel quantization for weights.
     """
 
-    quant_type: QuantType = QuantType.W8A8FP
     act_quant_type: torch.dtype = torch.float8_e4m3fn
     supports_weight_switch = False
 
