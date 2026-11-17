@@ -369,6 +369,11 @@ class AscendStoreCoordinator:
         logger.debug("%s: token_len=%d hit_tokens=%d", log_context, token_len, hit_length)
         return hit_length
 
+    def block_hashes_for_spec(self, block_hashes: Sequence[BlockHash], spec: KVCacheSpec) -> BlockHashList:
+        # Managers accept lazy sequences and preserve their terminal hashes
+        # when resolving each group's block-size view.
+        return cast(BlockHashList, block_hashes)
+
     def _find_hit_blocks(
         self,
         block_hashes: Sequence[BlockHash],
@@ -381,7 +386,7 @@ class AscendStoreCoordinator:
         alignment_tokens = self.hash_block_size if self.enable_partial_hash_hits else self.lcm_block_size
         if len(self.attention_groups) == 1:
             spec, group_ids, manager_cls = self.attention_groups[0]
-            hashes = cast(BlockHashList, block_hashes)
+            hashes = self.block_hashes_for_spec(block_hashes, spec)
             hit_blocks, hit_length = _find_longest_cache_hit(
                 manager_cls,
                 block_hashes=hashes,
@@ -420,7 +425,7 @@ class AscendStoreCoordinator:
                 if drop_eagle_block and not isinstance(spec, MambaSpec):
                     margin = self.eagle_proof_margin_by_group.get(first_group_id, spec.block_size)
                     max_group_length = min(curr_hit_length + margin, len(block_hashes) * self.hash_block_size)
-                hashes = cast(BlockHashList, block_hashes)
+                hashes = self.block_hashes_for_spec(block_hashes, spec)
                 hit_blocks, new_hit_length = _find_longest_cache_hit(
                     manager_cls,
                     block_hashes=hashes,
