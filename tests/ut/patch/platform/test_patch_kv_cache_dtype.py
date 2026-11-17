@@ -15,6 +15,7 @@ The patch widens both, so both gates are exercised here where they exist.
 import typing
 
 import pytest
+import torch
 from pydantic import ValidationError
 from vllm.config import cache as cache_mod
 from vllm.config.cache import CacheConfig
@@ -84,3 +85,52 @@ class TestMirrorListWidening:
         before = list(cache_mod.KV_CACHE_DTYPES)
         _apply_kv_cache_dtype_int8_patch()
         assert before == cache_mod.KV_CACHE_DTYPES
+
+
+@pytest.mark.skipif(
+    not hasattr(cache_mod, "register_kv_cache_dtype"),
+    reason="runtime kv-cache-dtype registration only exists on newer vLLM main",
+)
+class TestRuntimeRegisteredDtypes:
+    """Dtypes registered after the platform patch ran must still validate.
+
+    ``register_kv_cache_dtype`` appends to the live ``KV_CACHE_DTYPES`` list
+    and upstream's field validator accepts any string found there. Rebuilding
+    ``CacheConfig`` with a bare Literal (instead of ``CacheDType | str``)
+    rejects those strings with a pydantic ``literal_error`` before the
+    validator can run.
+    """
+
+    @staticmethod
+    def _register_test_dtype():
+        from vllm.config.cache import KVQuantMode, register_kv_cache_dtype
+
+        @register_kv_cache_dtype("test-c8")
+        class _TestC8Handler:
+            name = "test-c8"
+
+            def torch_dtype(self):
+                return torch.int8
+
+            def quant_mode(self):
+                return KVQuantMode.CUSTOM
+
+        return _TestC8Handler
+
+    def test_registered_dtype_constructs(self):
+        self._register_test_dtype()
+        try:
+            config = CacheConfig(block_size=32, cache_dtype="test-c8")
+            assert config.cache_dtype == "test-c8"
+        finally:
+            cache_mod.KV_CACHE_DTYPES.remove("test-c8")
+            cache_mod.STR_DTYPE_TO_TORCH_DTYPE.pop("test-c8", None)
+            cache_mod._KV_CACHE_DTYPE_HANDLERS.pop("test-c8", None)
+
+    def test_field_type_keeps_the_str_branch(self):
+        args = typing.get_args(CacheConfig.__dataclass_fields__["cache_dtype"].type)
+        assert str in args
+
+    def test_unregistered_dtype_reports_the_registry_error(self):
+        with pytest.raises(ValidationError, match="Invalid kv_cache_dtype"):
+            CacheConfig(block_size=32, cache_dtype="not-a-dtype")

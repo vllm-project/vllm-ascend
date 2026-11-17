@@ -100,9 +100,22 @@ def _apply_kv_cache_dtype_int8_patch() -> None:
     # (PEP 646 starred subscripts are 3.11+).
     widened = typing.Literal[existing_args + missing]  # type: ignore[valid-type]
 
+    # Upstream accepts ``CacheDType | str`` and validates the string against
+    # the mutable ``KV_CACHE_DTYPES`` registry in ``_validate_cache_dtype``,
+    # which is what lets ``register_kv_cache_dtype`` accept dtypes registered
+    # at runtime by platform backends. Keep that ``str`` branch when the
+    # schema is rebuilt: replacing the annotation with a bare Literal makes
+    # pydantic reject every runtime-registered dtype with a ``literal_error``
+    # before the validator runs. Releases that gate on the Literal alone have
+    # no registry, so they keep the bare Literal.
+    if hasattr(_cache_mod, "is_known_kv_cache_dtype"):
+        cache_dtype_annotation = widened | str
+    else:
+        cache_dtype_annotation = widened
+
     _cache_mod.CacheDType = widened
-    CacheConfig.__annotations__["cache_dtype"] = widened
-    CacheConfig.__dataclass_fields__["cache_dtype"].type = widened
+    CacheConfig.__annotations__["cache_dtype"] = cache_dtype_annotation
+    CacheConfig.__dataclass_fields__["cache_dtype"].type = cache_dtype_annotation
 
     # Rebuild the pydantic dataclass schema so the new Literal is enforced.
     # ``_parent_namespace_depth=1`` makes pydantic resolve types against this

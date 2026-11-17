@@ -926,6 +926,9 @@ class TestNPUPlatform(TestBase):
         self.assertIn("int8", dtype_action.choices)
         self.assertIn("mxfp8", dtype_action.choices)
         self.assertEqual(dtype_action.choices.count("auto"), 1)
+        # The widened field keeps upstream's ``CacheDType | str`` branch; the
+        # ``str`` type itself must not leak into the argparse choices.
+        self.assertNotIn(str, dtype_action.choices)
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.configs.modelslim_config.AscendModelSlimConfig")

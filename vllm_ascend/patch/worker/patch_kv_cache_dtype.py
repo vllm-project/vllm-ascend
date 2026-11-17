@@ -113,9 +113,17 @@ def _widen_cache_dtype_literal_for_worker() -> None:
         # on Python 3.10 (PEP 646 starred subscripts are 3.11+).
         widened = typing.Literal[existing_args + missing]  # type: ignore[valid-type]
 
+        # Keep upstream's ``CacheDType | str`` shape when the registry-based
+        # validator is present: a bare Literal here would reject dtypes that
+        # platform backends register at runtime via ``register_kv_cache_dtype``.
+        if hasattr(_cache_mod, "is_known_kv_cache_dtype"):
+            cache_dtype_annotation = widened | str
+        else:
+            cache_dtype_annotation = widened
+
         _cache_mod.CacheDType = widened
-        CacheConfig.__annotations__["cache_dtype"] = widened
-        CacheConfig.__dataclass_fields__["cache_dtype"].type = widened
+        CacheConfig.__annotations__["cache_dtype"] = cache_dtype_annotation
+        CacheConfig.__dataclass_fields__["cache_dtype"].type = cache_dtype_annotation
 
         _pdc.rebuild_dataclass(
             CacheConfig,

@@ -410,9 +410,14 @@ class NPUPlatform(Platform):
             if dtype_action and hasattr(dtype_action, "choices") and dtype_action.choices:
                 from vllm.config.cache import CacheConfig
 
-                for dtype in get_args(CacheConfig.__dataclass_fields__["cache_dtype"].type):
-                    if dtype not in dtype_action.choices:
-                        dtype_action.choices.append(dtype)
+                # The field type is ``Literal[...]`` on older vLLM and
+                # ``Literal[...] | str`` where the runtime dtype registry
+                # exists, so unwrap each union member and skip the ``str``
+                # branch: only literal members are fixed CLI choices.
+                for arg in get_args(CacheConfig.__dataclass_fields__["cache_dtype"].type):
+                    for dtype in get_args(arg) or (arg,):
+                        if isinstance(dtype, str) and dtype not in dtype_action.choices:
+                            dtype_action.choices.append(dtype)
 
         if get_current_hardware_profile().quantization_backend_family is QuantizationBackendFamily.STANDARD:
             from vllm_ascend.quantization import (  # noqa: F401
