@@ -358,6 +358,9 @@ def _qwen3_draft_case(method: str, architecture: str) -> DraftWeightUpdateCase:
 
 QWEN3_EAGLE3_CASE = _qwen3_draft_case("eagle3", "Eagle3Qwen3ForCausalLM")
 QWEN3_DFLASH_CASE = _qwen3_draft_case("dflash", "DFlashDraftModel")
+# Transformers aliases intermediate_size to moe_intermediate_size, so the
+# HF config's legacy value (18432) overwrites the expert width (2048).
+# Set both fields to 2048 to match the generated checkpoint weights.
 DEEPSEEK_V4_DSPARK_CASE = DraftWeightUpdateCase(
     id="deepseek-v4-flash-dspark",
     method="dspark",
@@ -367,7 +370,13 @@ DEEPSEEK_V4_DSPARK_CASE = DraftWeightUpdateCase(
         DEEPSEEK_V4_CASE,
         id="deepseek-v4-flash-dspark-target",
         skip_reason=None,
-        hf_overrides={"num_hidden_layers": 4, "n_routed_experts": 8, "compress_ratios": [0, 0, 4, 128]},
+        hf_overrides={
+            "num_hidden_layers": 4,
+            "n_routed_experts": 8,
+            "intermediate_size": 2048,
+            "moe_intermediate_size": 2048,
+            "compress_ratios": [0, 0, 4, 128],
+        },
     ),
     draft=replace(
         DEEPSEEK_V4_CASE,
@@ -377,6 +386,8 @@ DEEPSEEK_V4_DSPARK_CASE = DraftWeightUpdateCase(
         hf_overrides={
             "num_hidden_layers": 4,
             "n_routed_experts": 8,
+            "intermediate_size": 2048,
+            "moe_intermediate_size": 2048,
             "num_hash_layers": 0,
             "mlp_layer_types": ["moe"] * 4,
             "compress_ratios": [0] * 5,
