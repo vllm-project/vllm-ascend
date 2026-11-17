@@ -1,0 +1,4 @@
+pr: 22209
+entries:
+  - category: bugfix
+    text: Fixed a startup error when combining HiSparse KV offloading with speculative decoding on Ascend.
