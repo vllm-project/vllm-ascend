@@ -3,6 +3,7 @@
 """GDN accepted-prefix commit using stock transferable conv/SSM pages."""
 
 import logging
+from typing import Any
 
 import torch
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
@@ -20,6 +21,20 @@ class GDNRecoverSSMCommitContext:
     indexed by source page and overwritten on every verify, so they never
     have to cross the P/D connector.
     """
+
+    layers: tuple[Any, ...]
+    bindings: tuple[tuple[torch.Tensor, ...], ...]
+    states: tuple[torch.Tensor, ...]
+    convs: tuple[torch.Tensor, ...]
+    replays: list[torch.Tensor]
+    spec_query_len: int
+    max_num_reqs: int
+    conv_history_len: int
+    replay_bytes: int
+    state_table: torch.Tensor
+    conv_tables: tuple[torch.Tensor, ...]
+    plan: tuple[torch.Tensor, ...]
+    commit_steps: int
 
     @classmethod
     def create(cls, layers, *, spec_query_len: int, max_num_reqs: int):
@@ -132,7 +147,10 @@ class GDNRecoverSSMCommitContext:
         )
         compact_conv_state(
             self.convs[0],
-            *self.conv_tables,
+            self.conv_tables[0],
+            self.conv_tables[1],
+            self.conv_tables[2],
+            self.conv_tables[3],
             state_indices,
             lens,
             final,
