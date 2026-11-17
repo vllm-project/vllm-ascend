@@ -1861,20 +1861,3 @@
 #       Remove the verifier override once native Kimi defaults dispatch through
 #       the platform's attention/cache configuration interface.
 #
-# ** File: worker/patch_spec_decode_310.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   `vllm_ascend.worker.v2.spec_decode.init_speculator`
-#    Why:
-#       Route regular MTP to the existing 310P implementation, while keeping
-#       Gemma4 and Step3.5 on their existing fallback paths. Native #63373
-#       removes use_step3p5_mtp from main's SpeculativeConfig with MRv1.
-#    How:
-#       Share uses_step3p5_mtp with the main Ascend router: explicit v0.33.0
-#       uses the native predicate; main reads the same draft HF model_type.
-#       No native method is reinstalled and constructor behavior is unchanged.
-#    Related PR:
-#       https://github.com/vllm-project/vllm/pull/63373
-#    Future Plan:
-#       Remove the compatibility predicate when supported native versions
-#       expose a common model-routing capability or share one MTP route.
-#
