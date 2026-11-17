@@ -731,9 +731,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
+            # Keep the same normalization and activation rounding in ordinary
+            # and compact-state verification, including scalar/vector lowering.
+            query_spec = l2norm_fwd(query_spec)
+            key_spec = l2norm_fwd(key_spec)
             if hasattr(attn_metadata, "gdn_recoverssm_context"):
-                # The verify kernel normalizes Q/K and computes GDN's scalar
-                # gates from raw a/b. Its checkpoint remains untouched until
+                # The verify kernel computes GDN's scalar gates from raw a/b.
+                # Its checkpoint remains untouched until
                 # rejection sampling supplies the accepted-prefix length.
                 if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                     a_spec, b_spec = a, b
@@ -753,10 +757,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     query_start_loc=spec_causal_conv1d_meta.query_start_loc,
                     state_indices=attn_metadata.gdn_recoverssm_state_indices,
                     spec_query_len=self.num_spec + 1,
+                    use_qk_l2norm_in_kernel=False,
                 )
             else:
-                query_spec = l2norm_fwd(query_spec)
-                key_spec = l2norm_fwd(key_spec)
                 use_upstream_recurrent = attn_metadata.spec_decode_metadata.use_upstream_recurrent or (
                     spec_state_indices_tensor.ndim == 2
                     and spec_state_indices_tensor.shape[1] > _MAX_RECURRENT_GDN_TOKENS

@@ -13,6 +13,15 @@ RECOVERSSM_LARGE_TILE_MIN_PROGRAMS = 96
 
 
 @triton.jit
+def _round_bfloat16_scalar(value):
+    # Ascend's scalar BF16 -> FP32 round trip can be eliminated during
+    # lowering. Match a BF16 store/load with explicit round-to-nearest-even.
+    bits = value.to(tl.uint32, bitcast=True)
+    rounded = (bits + 0x7FFF + ((bits >> 16) & 1)) & 0xFFFF0000
+    return rounded.to(tl.float32, bitcast=True)
+
+
+@triton.jit
 def _gdn_recoverssm_verify_kernel(
     A_log_ptr,
     a_ptr,
@@ -143,9 +152,14 @@ def _gdn_recoverssm_verify_kernel(
         )
         gdn_gate = neg_A * softplus_x
         beta = tl.sigmoid(tl.load(b_ptr + token * stride_b_token + pid_h * stride_b_head).to(tl.float32))
+        # The ordinary path materializes sigmoid(b) in b's activation dtype.
+        if b_ptr.dtype.element_ty == tl.bfloat16:
+            beta = _round_bfloat16_scalar(beta)
+        else:
+            beta = beta.to(b_ptr.dtype.element_ty).to(tl.float32)
         if USE_QK_L2NORM:
-            q = q * tl.rsqrt(tl.sum(q * q, axis=0) + 1e-6)
-            k = k * tl.rsqrt(tl.sum(k * k, axis=0) + 1e-6)
+            q = (q * tl.rsqrt(tl.sum(q * q, axis=0) + 1e-6)).to(q_ptr.dtype.element_ty).to(tl.float32)
+            k = (k * tl.rsqrt(tl.sum(k * k, axis=0) + 1e-6)).to(k_ptr.dtype.element_ty).to(tl.float32)
         q = q * scale
 
         # Store the same FP32 decay that is multiplied into the state.

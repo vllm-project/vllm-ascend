@@ -9,6 +9,11 @@ entries:
       full-model accuracy, and performance remain unverified.
   - category: bugfix
     text: >-
+      Preserved ordinary GDN activation rounding for Q/K normalization and
+      sigmoid beta during Qwen RecoverSSM verification, avoiding output and
+      recovered-state drift from retaining FP32 intermediates.
+  - category: bugfix
+    text: >-
       Fixed Qwen4Exp MTP startup compatibility with the upstream num_mtp_layers
       argument and allowed W4A8 users to select separate GMM and SwiGLU operations
       with ascend_fusion_config.fusion_ops_gmmswigluquant=false. This switch keeps
