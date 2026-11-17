@@ -1927,10 +1927,10 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         self.model.retire_engram_lookups(reset_events=reset_events)
 
     def get_model_state_cls(self):
-        """V2 runner states read token_lookback_depth and drive engram inputs."""
-        from vllm_ascend.models.deepseek_v41.engram.model_state import EngramModelState
+        """Own V4.1 indexer graph selection and Engram inputs in the model state."""
+        from vllm_ascend.models.deepseek_v41.model_state import DeepSeekV41ModelState
 
-        return EngramModelState
+        return DeepSeekV41ModelState
 
     @property
     def supports_engram_graph_producer(self) -> bool:

@@ -282,6 +282,11 @@ class AscendPCPManager(PCPManager):
             and global_batch.num_draft_tokens == 0
         )
 
+    @property
+    def min_local_num_tokens(self) -> int:
+        """Smallest real PCP partition in the current batch, before graph padding."""
+        return self._min_local_num_tokens
+
     def _build_batch_layout(
         self,
         num_scheduled_tokens: np.ndarray,

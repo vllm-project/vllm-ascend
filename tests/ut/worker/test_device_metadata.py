@@ -16,7 +16,6 @@
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 import torch
 from vllm.forward_context import BatchDescriptor
@@ -488,7 +487,6 @@ def test_capture_preparation_failure_retires_metadata(state, monkeypatch):
     manager = aclgraph_utils.ModelAclGraphManager.__new__(aclgraph_utils.ModelAclGraphManager)
     manager.model_runner = SimpleNamespace()
     manager._capture_descs = {}
-    manager._v41_sharded_descs = {}
     monkeypatch.setattr(aclgraph_utils, "communicator_switch", nullcontext)
 
     def fail(*args, **kwargs):
@@ -501,98 +499,3 @@ def test_capture_preparation_failure_retires_metadata(state, monkeypatch):
     prepare(state, Builder(), full=True)
     state.finish()
     assert state.executor.calls == []
-
-
-def test_v41_full_decode_replays_the_graph_matching_indexer_metadata(monkeypatch):
-    from vllm.config.compilation import CUDAGraphMode
-    from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-
-    from vllm_ascend.attention.dsa_v41_indexer_shard import V41_FULL_INDEXER_SHARD
-    from vllm_ascend.worker.v2 import aclgraph_utils
-    from vllm_ascend.worker.v2.model_states import default as model_state_module
-
-    short = BatchExecutionDescriptor(CUDAGraphMode.FULL, 8, 8, uniform_token_count=1)
-    dspark = BatchExecutionDescriptor(CUDAGraphMode.FULL, 24, 4, uniform_token_count=6)
-    small = BatchExecutionDescriptor(CUDAGraphMode.FULL, 4, 4, uniform_token_count=1)
-
-    def init(self, vllm_config, *args, **kwargs):
-        self.vllm_config = vllm_config
-        self.graphs = {}
-        self._capture_descs = {CUDAGraphMode.FULL: [dspark, short, small]}
-
-    def capture(self, *_args, **_kwargs):
-        for desc in self._capture_descs[CUDAGraphMode.FULL]:
-            assert desc not in self.graphs
-            self.graphs[desc] = V41_FULL_INDEXER_SHARD.get()
-
-    monkeypatch.setattr(aclgraph_utils.ModelCudaGraphManager, "__init__", init)
-    monkeypatch.setattr(aclgraph_utils.ModelCudaGraphManager, "capture", capture)
-    monkeypatch.setattr(aclgraph_utils, "set_graph_params", lambda _sizes: None)
-    monkeypatch.setattr(aclgraph_utils, "communicator_switch", nullcontext)
-    monkeypatch.setattr(aclgraph_utils, "set_current_vllm_config", lambda _config: nullcontext())
-    monkeypatch.setattr(aclgraph_utils, "_get_graph_update_backend", lambda _groups: None)
-    monkeypatch.setattr(aclgraph_utils, "use_updatable_graph", lambda _backend: False)
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v41")),
-        parallel_config=SimpleNamespace(
-            tensor_parallel_size=4, decode_context_parallel_size=1, prefill_context_parallel_size=2
-        ),
-        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY),
-        lora_config=None,
-    )
-    config.model_config.hf_text_config = SimpleNamespace(index_topk=512)
-    config.model_config.max_model_len = 8192
-    model_state = model_state_module.AscendModelState.__new__(model_state_module.AscendModelState)
-    model_state.vllm_config = config
-    model_state.model_config = config.model_config
-    model_state.decoder_replay = None
-    global_batch = SimpleNamespace(num_reqs=2, is_dummy=False)
-    pcp_context = SimpleNamespace(global_batch=global_batch, min_local_num_tokens=0)
-    model_state.pcp_manager = SimpleNamespace(
-        is_target_attn_groups=lambda _groups: True,
-        build_attention_context=lambda *args: pcp_context,
-    )
-    monkeypatch.setattr(model_state_module, "get_ascend_config", SimpleNamespace)
-    monkeypatch.setattr(
-        model_state_module, "build_attn_metadata", lambda **_kwargs: {"sharded": V41_FULL_INDEXER_SHARD.get()}
-    )
-    runner = SimpleNamespace(model_state=model_state, attn_groups=[], update_stream=object())
-    manager = aclgraph_utils.ModelAclGraphManager(
-        config, torch.device("cpu"), CUDAGraphMode.FULL_DECODE_ONLY, 6, runner
-    )
-    manager.capture(torch.nn.Identity(), model_state, None, None, None, [], None)
-    assert manager.capture_sizes == [4, 8, 24]
-    assert len(manager.graphs) == 5
-    assert V41_FULL_INDEXER_SHARD.get() is None
-
-    replayed = []
-    monkeypatch.setattr(manager, "_graph_relay", lambda _backend, desc, _num_tokens, _metadata: replayed.append(desc))
-    batch = SimpleNamespace(
-        num_reqs=1,
-        num_tokens=0,
-        num_computed_tokens_np=np.zeros(1, dtype=np.int32),
-        query_start_loc_np=np.zeros(2, dtype=np.int32),
-        query_start_loc=torch.zeros(2, dtype=torch.int32),
-        is_prefilling_np=np.zeros(1, dtype=np.bool_),
-        num_scheduled_tokens=torch.zeros(1, dtype=torch.int32),
-        seq_lens=torch.zeros(1, dtype=torch.int32),
-        seq_lens_np=np.zeros(1, dtype=np.int32),
-        positions=torch.empty(0, dtype=torch.int64),
-        dcp_local_seq_lens=None,
-        attn_state=None,
-        is_dummy=False,
-    )
-    for desc in (short, dspark, small):
-        batch.num_tokens_after_padding = desc.num_tokens
-        batch.num_reqs_after_padding = desc.num_reqs
-        for hist, min_rows in ((128, desc.num_tokens), (8192, desc.num_tokens), (8192, 0)):
-            global_batch.num_computed_tokens_np = np.array([hist, hist], dtype=np.int32)
-            pcp_context.min_local_num_tokens = min_rows
-            batch.num_tokens = min_rows
-            expected = hist == 8192 and min_rows > 0 and desc is not small
-            model_state.prepare_attn(batch, CUDAGraphMode.FULL, (), None, [], None)
-            manager.run_fullgraph(desc)
-            replay_desc = replayed[-1]
-            assert replay_desc.num_tokens == desc.num_tokens
-            assert replay_desc.uniform_token_count == desc.uniform_token_count
-            assert manager.graphs[replay_desc] is model_state.attn_metadata["sharded"] is expected

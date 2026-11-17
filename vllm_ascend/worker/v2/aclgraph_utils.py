@@ -18,8 +18,6 @@
 #
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, fields
-from functools import partial
 from typing import Any
 
 import torch
@@ -39,11 +37,6 @@ from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.attention.dsa_v41_indexer_shard import (
-    MIN_PCP_INDEXER_ROWS_PER_TP_RANK,
-    uses_v41_full_indexer_variants,
-    v41_full_indexer_sharding,
-)
 from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
@@ -88,11 +81,6 @@ def _get_graph_update_backend(
     raise RuntimeError("No executable attention backend is available for full-graph parameter updates.")
 
 
-@dataclass(frozen=True)
-class _ShardedV41DecodeDescriptor(BatchExecutionDescriptor):
-    """Separate graph cache key for the sharded variant of a decode bucket."""
-
-
 class ModelAclGraphManager(ModelCudaGraphManager):
     """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
@@ -124,20 +112,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         self.model_runner = model_runner
         self.update_stream = self.model_runner.update_stream
         expert_offload.prepare_graph_capture(self, super().needs_capture)
-        self._v41_sharded_descs: dict[BatchExecutionDescriptor, BatchExecutionDescriptor] = {}
-        if cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY and uses_v41_full_indexer_variants(vllm_config):
-            parallel = vllm_config.parallel_config
-            min_bucket_rows = parallel.tensor_parallel_size
-            if parallel.prefill_context_parallel_size > 1:
-                min_bucket_rows *= MIN_PCP_INDEXER_ROWS_PER_TP_RANK
-            full_descs = self._capture_descs.get(CUDAGraphMode.FULL, [])
-            self._v41_sharded_descs = {
-                desc: _ShardedV41DecodeDescriptor(**{field.name: getattr(desc, field.name) for field in fields(desc)})
-                for desc in full_descs
-                if desc.num_tokens >= min_bucket_rows
-            }
-            # Include both variants in the upstream graph memory estimate.
-            full_descs.extend(self._v41_sharded_descs.values())
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
         if super().needs_capture():
             set_graph_params(self.capture_sizes)
@@ -148,9 +122,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
-        model_state = self.model_runner.model_state
-        if getattr(model_state, "v41_full_indexer_sharded", False):
-            desc = self._v41_sharded_descs[desc]
         num_tokens = desc.num_tokens
         assert self.update_stream is not None
         with set_current_vllm_config(self.vllm_config):
@@ -249,44 +220,23 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         metadata = getattr(model_state, "device_metadata", None)
         model = ModelWithContext(model, device_metadata=metadata)
         legacy_kwargs = {"has_lora": has_lora} if vllm_version_is("0.33.0") else {}
-        capture_graphs = partial(
-            super().capture,
-            model,
-            model_state,
-            input_buffers,
-            intermediate_tensors,
-            block_tables,
-            attn_groups,
-            kv_cache_config,
-            pcp_manager=pcp_manager,
-            **legacy_kwargs,
-            use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
-            lora_capture_hook=lora_capture_hook,
-            progress_bar_desc=progress_bar_desc,
-        )
-        capture_descs = self._capture_descs
         try:
             with communicator_switch():
-                if not self._v41_sharded_descs:
-                    capture_graphs()
-                    return
-
-                self._capture_descs = {
-                    **capture_descs,
-                    CUDAGraphMode.FULL: [
-                        desc
-                        for desc in capture_descs[CUDAGraphMode.FULL]
-                        if not isinstance(desc, _ShardedV41DecodeDescriptor)
-                    ],
-                }
-                with v41_full_indexer_sharding(False):
-                    capture_graphs()
-
-                self._capture_descs = {CUDAGraphMode.FULL: list(self._v41_sharded_descs.values())}
-                with v41_full_indexer_sharding(True):
-                    capture_graphs()
+                return super().capture(
+                    model,
+                    model_state,
+                    input_buffers,
+                    intermediate_tensors,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    pcp_manager=pcp_manager,
+                    **legacy_kwargs,
+                    use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
+                    lora_capture_hook=lora_capture_hook,
+                    progress_bar_desc=progress_bar_desc,
+                )
         finally:
-            self._capture_descs = capture_descs
             # Input preparation can fail before ModelWithContext.forward runs.
             if metadata is not None:
                 metadata.finish()

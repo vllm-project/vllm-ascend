@@ -37,12 +37,6 @@ from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.dsa_v41_indexer_shard import (
-    V41_FULL_INDEXER_SHARD,
-    should_shard_v41_full_decode,
-    uses_v41_full_indexer_variants,
-    v41_full_indexer_sharding,
-)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import CopySfaRequestStates
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import RequestIdentityRegistry
@@ -85,7 +79,6 @@ class AscendModelState(DefaultModelState):
     kvpp_runtime: "KVPPRuntime | None" = None
     kvpp_is_dummy_run: bool = False
     device_metadata: "TargetDeviceMetadata | None" = None
-    v41_full_indexer_sharded: bool = False
 
     def finish_execution(self, *, failed: bool) -> None:
         """Join auxiliary metadata work even if input preparation failed."""
@@ -546,76 +539,51 @@ class AscendModelState(DefaultModelState):
         self.slot_mappings = slot_mappings
         self.kv_cache_config = kv_cache_config
         self.pcp_context = pcp_context
-        shard_indexer = V41_FULL_INDEXER_SHARD.get()
-        if (
-            shard_indexer is None
-            and cudagraph_mode == CUDAGraphMode.FULL
-            and uses_v41_full_indexer_variants(self.vllm_config)
-        ):
-            # Use the global history and the smallest real PCP group so all
-            # ranks choose the same graph variant.
-            batch = pcp_context.global_batch if pcp_context is not None else input_batch
-            model_config = self.vllm_config.model_config
-            assert model_config is not None
-            parallel = self.vllm_config.parallel_config
-            pcp_min_query_rows = None
-            if parallel.prefill_context_parallel_size > 1:
-                pcp_min_query_rows = pcp_context.min_local_num_tokens if pcp_context is not None else 0
-            shard_indexer = not batch.is_dummy and should_shard_v41_full_decode(
-                num_input_tokens,
-                parallel.tensor_parallel_size,
-                batch.num_computed_tokens_np[: batch.num_reqs],
-                int(model_config.hf_text_config.index_topk),
-                pcp_min_query_rows=pcp_min_query_rows,
-            )
-        self.v41_full_indexer_sharded = shard_indexer is True
-
         build_metadata: Callable[..., Any] = build_attn_metadata
         if self.device_metadata is not None:
             build_metadata = partial(self.device_metadata.run_build, build_attn_metadata)
         self._decoder_replay_common_metadata = {}
         xlite_cfg: XliteGraphConfig | None = getattr(get_ascend_config(), "xlite_graph_config", None)
-        with v41_full_indexer_sharding(shard_indexer):
-            self.attn_metadata = build_metadata(
-                attn_groups=attn_groups,
-                num_reqs=num_reqs,
-                num_actual_reqs=num_actual_reqs,
-                num_tokens=num_input_tokens,
-                num_actual_tokens=num_actual_tokens,
-                num_input_tokens=num_input_tokens,
-                is_prefilling=is_prefilling,
-                query_start_loc_gpu=input_batch.query_start_loc,
-                query_start_loc_cpu=query_start_loc_cpu,
-                max_query_len=max_query_len,
-                seq_lens=input_batch.seq_lens,
-                max_seq_len=self.max_model_len,
-                block_tables=block_tables,
-                slot_mappings=slot_mappings,
-                kv_cache_config=kv_cache_config,
-                dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
-                parallel_config=self.vllm_config.parallel_config,
-                # extra attributes for ascend npus.
-                seq_lens_np=input_batch.seq_lens_np,
-                positions=input_batch.positions,
-                attn_state=input_batch.attn_state,
-                pcp_context=pcp_context,
-                for_cudagraph_capture=for_capture,
-                # Same wiring as model_runner_v1
-                full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
-                model_specific_attn_metadata=model_specific_attn_metadata,
-                req_ids_tensor=offload_req_ids.gpu[:num_reqs] if offload_req_ids is not None else None,
-                token_to_req=offload_token_to_req.gpu[:num_input_tokens] if offload_token_to_req is not None else None,
-                offload_dummy=getattr(input_batch, "is_dummy", False),
-                req_topk_buffer_slots=pool_slots.cpu[:num_reqs] if pool_slots is not None else None,
-                req_topk_buffer_active=pool_active.cpu[:num_reqs] if pool_active is not None else None,
-                copy_sfa_restore_tails=restore_copy_sfa_tails,
-                draft_layer_names=getattr(self, "_offload_draft_layer_names", None),
-                common_metadata_callback=(
-                    lambda group_id, common: self._decoder_replay_common_metadata.__setitem__(group_id, common)
-                )
-                if self.decoder_replay is not None or (xlite_cfg is not None and xlite_cfg.enabled)
-                else None,
+        self.attn_metadata = build_metadata(
+            attn_groups=attn_groups,
+            num_reqs=num_reqs,
+            num_actual_reqs=num_actual_reqs,
+            num_tokens=num_input_tokens,
+            num_actual_tokens=num_actual_tokens,
+            num_input_tokens=num_input_tokens,
+            is_prefilling=is_prefilling,
+            query_start_loc_gpu=input_batch.query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            max_query_len=max_query_len,
+            seq_lens=input_batch.seq_lens,
+            max_seq_len=self.max_model_len,
+            block_tables=block_tables,
+            slot_mappings=slot_mappings,
+            kv_cache_config=kv_cache_config,
+            dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+            parallel_config=self.vllm_config.parallel_config,
+            # extra attributes for ascend npus.
+            seq_lens_np=input_batch.seq_lens_np,
+            positions=input_batch.positions,
+            attn_state=input_batch.attn_state,
+            pcp_context=pcp_context,
+            for_cudagraph_capture=for_capture,
+            # Same wiring as model_runner_v1
+            full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
+            model_specific_attn_metadata=model_specific_attn_metadata,
+            req_ids_tensor=offload_req_ids.gpu[:num_reqs] if offload_req_ids is not None else None,
+            token_to_req=offload_token_to_req.gpu[:num_input_tokens] if offload_token_to_req is not None else None,
+            offload_dummy=getattr(input_batch, "is_dummy", False),
+            req_topk_buffer_slots=pool_slots.cpu[:num_reqs] if pool_slots is not None else None,
+            req_topk_buffer_active=pool_active.cpu[:num_reqs] if pool_active is not None else None,
+            copy_sfa_restore_tails=restore_copy_sfa_tails,
+            draft_layer_names=getattr(self, "_offload_draft_layer_names", None),
+            common_metadata_callback=(
+                lambda group_id, common: self._decoder_replay_common_metadata.__setitem__(group_id, common)
             )
+            if self.decoder_replay is not None or (xlite_cfg is not None and xlite_cfg.enabled)
+            else None,
+        )
         self._prepare_decoder_replay(input_batch, cudagraph_mode, attn_groups, kv_cache_config)
         if restore_copy_sfa_tails:
             manager = get_sparse_kv_offload_manager()
