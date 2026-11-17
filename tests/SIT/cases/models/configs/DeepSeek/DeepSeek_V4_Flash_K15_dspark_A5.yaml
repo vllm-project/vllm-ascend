@@ -6,6 +6,7 @@ _envs: &envs
   VLLM_USE_V2_MODEL_RUNNER: "1"
   SERVER_PORT: "DEFAULT_PORT"
   PYTHONHASHSEED: "0"   # 池化哈希一致性要求, 全实例统一
+  VLLM_ENGINE_READY_TIMEOUT_S: "36000"
 
 _kv_pool: &kv_pool
   type: "memcache"
