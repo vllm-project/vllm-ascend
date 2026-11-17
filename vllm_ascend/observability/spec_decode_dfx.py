@@ -17,9 +17,13 @@ diagnostics must not take down the sampler.
 import logging
 
 import torch
-from vllm.logger import init_logger
+from vllm.logger import logger as _vllm_logger
 
-_logger = init_logger(__name__)
+# Reuse the shared 'vllm' namespace logger: vllm's handler tree only
+# covers that namespace, so init_logger(__name__) inside vllm_ascend
+# would create an unhandled logger whose output is silently dropped
+# (enforced by the repository logger-convention check).
+_logger = _vllm_logger
 
 _NAN_ROW_FMT_LIMIT = 8
 
