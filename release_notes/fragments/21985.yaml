@@ -1,6 +1,0 @@
-pr: 21985
-entries:
-  - category: bugfix
-    text: >-
-      Reuse the PCP-local startup profiling token budget for prefill MC2 and
-      MegaMoe communication-buffer capacity to reduce excessive reservation.
