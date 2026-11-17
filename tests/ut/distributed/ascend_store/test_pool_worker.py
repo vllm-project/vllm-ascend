@@ -3379,7 +3379,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
                         )
                         worker.kv_send_thread = send_thread
                         worker.m_store = MagicMock()
-                        worker.m_store.put.side_effect = lambda keys, addrs, sizes: [True] * len(keys)
+                        worker.m_store.put.side_effect = lambda keys, addrs, sizes, session_ids=None: [True] * len(keys)
                         req = ReqMeta(
                             req_id="r1",
                             token_len_chunk=8,
@@ -3396,6 +3396,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
                         if expected_blocks:
                             keys = worker.m_store.put.call_args.args[0]
                             self.assertEqual(len(keys), 2 * len(expected_blocks))
+                            self.assertEqual(worker.m_store.put.call_args.args[3], ["r1"] * len(keys))
                             written.extend(keys)
                             events = worker.kv_send_thread.update_kv_event.call_args.args[0]
                             self.assertEqual(len(events), len(expected_blocks))

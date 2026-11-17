@@ -616,6 +616,7 @@ class KVCacheStoreKeyLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
         key_list = []
         addr_list = []
         size_list = []
+        session_id_list = []
         req_ids = []
         is_last_chunks = []
 
@@ -661,6 +662,9 @@ class KVCacheStoreKeyLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
 
             for index, key in enumerate(keys):
                 key_list.append(key.to_string())
+                # Request-affinity placement: one session id per key so
+                # MemCache co-locates each request's KV cache on one machine.
+                session_id_list.append(request.req_id)
                 addr, size, _ = self.token_database.prepare_value_layer(
                     starts[index],
                     ends[index],
@@ -678,9 +682,10 @@ class KVCacheStoreKeyLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
             keys_to_put = [key_list[index] for index in missing_indices]
             addrs_to_put = [addr_list[index] for index in missing_indices]
             sizes_to_put = [size_list[index] for index in missing_indices]
+            session_ids_to_put = [session_id_list[index] for index in missing_indices]
             if keys_to_put:
                 self.sync_save_events[layer_id].synchronize()
-                self.m_store.put(keys_to_put, addrs_to_put, sizes_to_put)
+                self.m_store.put(keys_to_put, addrs_to_put, sizes_to_put, session_ids_to_put)
 
         if layer_id == self.final_layer_id:
             for req_id, is_last_chunk in zip(req_ids, is_last_chunks):

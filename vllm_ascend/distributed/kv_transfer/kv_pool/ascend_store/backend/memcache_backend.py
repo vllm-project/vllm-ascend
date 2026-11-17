@@ -141,6 +141,21 @@ def _inject_device_ub_qos(extra_config: dict[str, Any] | None) -> None:
     logger.info("Injected MF_DEVICE_UB_QOS=%d from kv_connector_extra_config.", qos)
 
 
+def _make_session_replicate_config(session_ids: list[str]) -> Any:
+    """Build a MemCache ReplicateConfig for request-affinity placement.
+
+    ``sessionIds`` is a per-key list; keys whose session id is non-empty are
+    placed on the node chosen for that session, co-locating the KV cache of
+    one request on the same machine. ``replicaNum`` and
+    ``preferredLocalServiceIDs`` keep their defaults (1 and empty).
+    """
+    from memcache_hybrid import ReplicateConfig  # type: ignore
+
+    config = ReplicateConfig()
+    config.sessionIds = list(session_ids)
+    return config
+
+
 class MemcacheBackend(Backend):
     layerwise_data_plane = "gva"
 
@@ -483,11 +498,25 @@ class MemcacheBackend(Backend):
         key: list[str],
         addr: list[list[int]],
         size: list[list[int]],
+        session_ids: list[str] | None = None,
     ) -> list[bool] | bool:
+        """Store a batch, optionally co-locating keys of the same request.
+
+        ``session_ids`` carries one session id per key (typically the request
+        id). When provided, MemCache places keys sharing a session id on the
+        same node so a request's KV cache is read back from one machine. It
+        must be ``None`` or match ``key`` in length; reads never need it.
+        """
+        if session_ids is not None and len(session_ids) != len(key):
+            raise ValueError(f"session_ids must have the same length as keys: {len(session_ids)} != {len(key)}")
         self.ensure_initialized()
         assert self.store is not None
         try:
-            res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
+            if session_ids is not None:
+                config = _make_session_replicate_config(session_ids)
+                res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value, config)
+            else:
+                res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
             failed_codes = [int(value) for value in res if value != 0]
             failed_count = len(failed_codes)
             if failed_count:

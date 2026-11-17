@@ -31,7 +31,7 @@ class _FakeStore:
         # Return exact number of states for requested keys.
         return self.exists_result[: len(keys)]
 
-    def put(self, keys, addrs, sizes):
+    def put(self, keys, addrs, sizes, session_ids=None):
         self.put_calls.append((list(keys), list(addrs), list(sizes)))
 
 

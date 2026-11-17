@@ -207,7 +207,7 @@ class TestGLM53Store(unittest.TestCase):
                 stored: dict[str, list[bytes]] = {}
                 workers = []
 
-                def put(keys, addresses, sizes, stored=stored):
+                def put(keys, addresses, sizes, session_ids=None, *, stored=stored):
                     for key, row, lengths in zip(keys, addresses, sizes):
                         stored[key] = [ctypes.string_at(address, length) for address, length in zip(row, lengths)]
                     return [True] * len(keys)

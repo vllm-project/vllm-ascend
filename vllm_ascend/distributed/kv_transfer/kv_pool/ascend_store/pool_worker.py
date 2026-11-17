@@ -1751,7 +1751,7 @@ class KVPoolWorker(BaseKVPoolWorker):
             len(missing_keys),
             missing_keys[:3],
         )
-        put_result = self.m_store.put(missing_keys, missing_addrs, missing_sizes)
+        put_result = self.m_store.put(missing_keys, missing_addrs, missing_sizes, [req_id] * len(missing_keys))
         if isinstance(put_result, list):
             if len(put_result) != len(missing_keys):
                 logger.error(

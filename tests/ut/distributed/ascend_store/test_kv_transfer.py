@@ -58,6 +58,7 @@ class FakeStore:
         self.requires_exists_before_put = True
         self.exists_result = exists_result or []
         self.put_calls = []
+        self.put_session_ids = []
         self.get_calls = []
 
     def set_device(self):
@@ -66,8 +67,9 @@ class FakeStore:
     def exists(self, keys):
         return self.exists_result[: len(keys)]
 
-    def put(self, keys, addrs, sizes):
+    def put(self, keys, addrs, sizes, session_ids=None):
         self.put_calls.append((list(keys), list(addrs), list(sizes)))
+        self.put_session_ids.append(list(session_ids) if session_ids is not None else None)
 
     def get(self, keys, addrs, sizes):
         self.get_calls.append((list(keys), list(addrs), list(sizes)))
@@ -692,6 +694,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
         keys, _, _ = store.put_calls[0]
         self.assertEqual(len(keys), 2)
+        self.assertEqual(store.put_session_ids[0], ["r1", "r1"])
         store.exists.assert_not_called()
 
     def test_handle_request_keeps_exists_check_for_kv_events(self):
@@ -1122,6 +1125,7 @@ class TestKVCacheStoreKeyLayerSendingThread(unittest.TestCase):
 
         keys, _, _ = store.put_calls[0]
         self.assertEqual(len(keys), 2)
+        self.assertEqual(store.put_session_ids[0], ["r1", "r1"])
         mock_exists.assert_not_called()
         sync_event.synchronize.assert_called_once()
 
