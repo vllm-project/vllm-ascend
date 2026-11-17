@@ -384,6 +384,18 @@ class TestUnquantizedFusedMoEMethod(unittest.TestCase):
         method._lora_routing = None
         return method
 
+    def test_get_mlp_weights_returns_moe_weights(self):
+        method = self._make_method()
+        w1 = torch.randn(2, 8, 16)
+        w2 = torch.randn(2, 16, 8)
+        layer = SimpleNamespace(w13_weight=w1, w2_weight=w2)
+
+        weights = method.get_mlp_weights(layer)
+
+        self.assertIsInstance(weights, MoEWeights)
+        self.assertIs(weights.w1, w1)
+        self.assertIs(weights.w2, w2)
+
     def test_apply_gmm1_transposes_and_runs_grouped_matmul(self):
         method = self._make_method()
         layer = SimpleNamespace(
@@ -556,7 +568,7 @@ class TestApplyMoeMlp(unittest.TestCase):
 class TestUnifiedApplyActivation(unittest.TestCase):
     def _quant_method(self):
         quant_method = MagicMock()
-        quant_method.get_mlp_weights.return_value = (torch.randn(2, 8, 16), torch.randn(2, 16, 8))
+        quant_method.get_mlp_weights.return_value = MoEWeights(w1=torch.randn(2, 8, 16), w2=torch.randn(2, 16, 8))
         return quant_method
 
     def test_gelu_matches_torch_reference(self):

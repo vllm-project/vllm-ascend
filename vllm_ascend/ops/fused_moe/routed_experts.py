@@ -209,12 +209,12 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_scale_bias=w2_scale_bias,
         )
 
-    def get_mlp_weights(self, layer):
+    def get_mlp_weights(self, layer) -> MoEWeights:
         w13_weight_list = getattr(layer, "w13_weight_list", None)
         w2_weight_list = getattr(layer, "w2_weight_list", None)
         w1 = w13_weight_list if isinstance(w13_weight_list, list) else layer.w13_weight
         w2 = w2_weight_list if isinstance(w2_weight_list, list) else layer.w2_weight
-        return w1, w2
+        return MoEWeights(w1=w1, w2=w2)
 
     def _maybe_transpose(self, weight, need_trans: bool):
         if not need_trans:
@@ -226,7 +226,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
         layer = mlp_compute_input.layer
         assert layer is not None
-        w1, _ = self.get_mlp_weights(layer)
+        weights = self.get_mlp_weights(layer)
+        w1 = weights.w1
         w1 = self._maybe_transpose(w1, mlp_compute_input.need_trans)
         hidden_states = mlp_compute_input.hidden_states
         w1_bias = layer.w13_bias if self.moe.has_bias else None
@@ -289,7 +290,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def apply_gmm2(self, mlp_compute_input: MoEMlpComputeInput, hidden_states, act_out_scale):
         layer = mlp_compute_input.layer
         assert layer is not None
-        _, w2 = self.get_mlp_weights(layer)
+        weights = self.get_mlp_weights(layer)
+        w2 = weights.w2
         w2 = self._maybe_transpose(w2, mlp_compute_input.need_trans)
         w2_bias = layer.w2_bias if self.moe.has_bias else None
         silu_out = hidden_states
