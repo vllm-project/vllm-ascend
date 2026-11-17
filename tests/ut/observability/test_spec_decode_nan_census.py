@@ -104,8 +104,8 @@ def test_whole_row_nan(capture):
 
 
 def test_multiple_rows_nan(capture):
-    t = _with_nan(_clean_target(), 2, 3)   # req 0, step 2
-    t = _with_nan(t, 7, 5)                 # req 1, step 1
+    t = _with_nan(_clean_target(), 2, 3)  # req 0, step 2
+    t = _with_nan(t, 7, 5)  # req 1, step 1
     dfx.log_nan_census(t, None, K)
     recs = _target_records(capture)
     assert len(recs) == 1, recs
@@ -117,7 +117,7 @@ def test_multiple_rows_nan(capture):
 
 def test_draft_logits_nan(capture):
     draft = torch.zeros(4, K, V)
-    draft[1, 3, :7] = float("nan")         # slot 1, step 3
+    draft[1, 3, :7] = float("nan")  # slot 1, step 3
     dfx.log_nan_census(_clean_target(), draft, K)
     recs = _draft_records(capture)
     assert len(recs) == 1, recs
@@ -136,7 +136,7 @@ def test_draft_logits_none_no_crash(capture):
 
 
 def test_info_level_silent(capture_info):
-    t = _with_nan(_clean_target(), 6, V)   # poisoned, but gate closed
+    t = _with_nan(_clean_target(), 6, V)  # poisoned, but gate closed
     dfx.log_nan_census(t, torch.zeros(4, K, V), K)
     assert capture_info.records == [], f"INFO must stay silent, got {_messages(capture_info)}"
 
@@ -157,7 +157,7 @@ def test_accept0_normal_silent(capture):
 
 def test_census_never_raises(capture):
     """Malformed input must not take down the sampler (never-raise guard)."""
-    dfx.log_nan_census(torch.zeros(0, V), None, K)          # zero rows
-    dfx.log_nan_census(torch.zeros(3, 0), None, K)          # zero vocab
+    dfx.log_nan_census(torch.zeros(0, V), None, K)  # zero rows
+    dfx.log_nan_census(torch.zeros(3, 0), None, K)  # zero vocab
     dfx.log_accept0_census(torch.zeros(0, dtype=torch.int32), 0)
     # no exception escaped; failures would surface as census-failed DEBUGs
