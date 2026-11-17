@@ -10,23 +10,20 @@ import torch
 import torch.nn.functional as F
 from vllm.config import get_layers_from_vllm_config
 from vllm.model_executor.layers.attention import Attention
+
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
     AscendMetadata,
 )
-from vllm_ascend.compilation.updatable_graph import get_capture_resource
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 
 
 @dataclass
 class AscendFlashAttentionMetadata(AscendMetadata):
     flash_attn_mask: torch.Tensor | None = None
-    # Eager plans belong to one attention group and draft step.
     flash_attn_plans: dict = field(default_factory=dict)
-    flash_attn_lengths: tuple[torch.Tensor, torch.Tensor] | None = None
-    captured_flash_attn_plans: dict = field(default_factory=dict)
 
 
 class AscendFlashAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
@@ -34,10 +31,6 @@ class AscendFlashAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
     supports_draft_decode_metadata_update = True
 
     def update_draft_decode_metadata(self, metadata: AscendFlashAttentionMetadata) -> None:
-        # Warmup uses the eager path. Only attach plans produced inside capture.
-        if not torch.npu.is_current_stream_capturing():
-            return
-
         layers = get_layers_from_vllm_config(self.vllm_config, Attention, self.layer_names)
         num_tokens = metadata.num_actual_tokens
         lengths = AscendFlashAttentionImpl._build_lengths(metadata, num_tokens)
@@ -46,12 +39,20 @@ class AscendFlashAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
             impl = cast(AscendFlashAttentionImpl, layer.impl)
             head_size = AscendFlashAttentionBackend.get_padded_head_size(impl.head_size)
             plan_key = impl._plan_key(metadata, head_size)
-            key = (num_tokens, plan_key)
-            if key not in plans:
-                plans[key] = impl._build_plan(plan_key, lengths)
-        metadata.captured_flash_attn_plans = plans
+            if plan_key not in plans:
+                plans[plan_key] = impl._build_plan(plan_key, lengths)
+        metadata.flash_attn_plans = plans
 
     def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+        metadata = self._build_metadata(common_attn_metadata)
+        self.update_draft_decode_metadata(metadata)
+        return metadata
+
+    def build_for_cudagraph_capture(self, common_attn_metadata):
+        # The capture callback prepares plans inside the graph from the live buffers.
+        return self._build_metadata(common_attn_metadata)
+
+    def _build_metadata(self, common_attn_metadata):
         """Build from exact device lengths; CPU mirrors may be stale after rejection."""
         num_tokens = common_attn_metadata.num_actual_tokens
         num_reqs = common_attn_metadata.num_reqs
@@ -164,28 +165,6 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
         )
         return flash_attn_metadata(num_heads, num_kv_heads, head_size, **attrs), attrs
 
-    def _get_plan(self, metadata, num_tokens, head_size):
-        plan_key = self._plan_key(metadata, head_size)
-        if torch.npu.is_current_stream_capturing():
-            captured_plan = metadata.captured_flash_attn_plans.get((num_tokens, plan_key))
-            if captured_plan is not None:
-                return captured_plan
-            # Mixed-backend graphs can skip the builder hook altogether.
-            lengths = get_capture_resource(
-                ("flash_attn.lengths", id(metadata), num_tokens),
-                lambda: self._build_lengths(metadata, num_tokens),
-            )
-            return get_capture_resource(
-                ("flash_attn.plan", id(metadata), num_tokens, plan_key),
-                lambda: self._build_plan(plan_key, lengths),
-            )
-
-        if metadata.flash_attn_lengths is None:
-            metadata.flash_attn_lengths = self._build_lengths(metadata, num_tokens)
-        if plan_key not in metadata.flash_attn_plans:
-            metadata.flash_attn_plans[plan_key] = self._build_plan(plan_key, metadata.flash_attn_lengths)
-        return metadata.flash_attn_plans[plan_key]
-
     def forward_impl(self, query, key, value, kv_cache, attn_metadata, output):
         from cann_ops_transformer.ops import flash_attn
 
@@ -193,7 +172,7 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
         output_head_size = query.shape[-1]
         query = self._pad_head(query)
         metadata = attn_metadata
-        plan, attrs = self._get_plan(metadata, query.shape[0], query.shape[-1])
+        plan, attrs = metadata.flash_attn_plans[self._plan_key(metadata, query.shape[-1])]
 
         with attention_transfer_window():
             result, _ = flash_attn(

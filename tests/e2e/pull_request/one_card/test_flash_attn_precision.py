@@ -7,15 +7,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch_npu  # noqa: F401
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 
 from vllm_ascend.attention import fa_v1
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.fa_v1 import (
     AscendFlashAttentionBackend,
     AscendFlashAttentionImpl,
     AscendFlashAttentionMetadataBuilder,
 )
+from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 
 
 def golden(query, key, value, block_table, lengths, window, query_len, causal):
@@ -96,7 +96,7 @@ def test_strided_paged_flash_attn_matches_golden(monkeypatch, dtype, window, lay
     # Capture must retain views of the persistent buffers, not a particular
     # iteration's subtraction result or a host mirror of accepted lengths.
     common.seq_lens = torch.empty_like(optimistic)
-    captured_metadata = builder.build(0, common)
+    captured_metadata = builder.build_for_cudagraph_capture(common)
     builder.vllm_config = None
     builder.layer_names = ["draft"]
     layers = {"draft": SimpleNamespace(impl=impl)}
@@ -123,7 +123,7 @@ def test_strided_paged_flash_attn_matches_golden(monkeypatch, dtype, window, lay
         graph = UpdatableGraph()
         with torch.npu.graph(graph, stream=stream):
             run()
-        assert len(captured_metadata.captured_flash_attn_plans) == 1
+        assert len(captured_metadata.flash_attn_plans) == 1
 
         def execute():
             graph.replay()

@@ -4,6 +4,7 @@
 """Exercise metadata update negotiation through the real DFlash2 propose path."""
 
 import sys
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -16,16 +17,17 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.utils import AttentionGroup
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
-from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
-from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import AscendDFlash2Speculator
 
 from vllm_ascend.attention import fa_v1
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import (
     AscendFlashAttentionBackend,
     AscendFlashAttentionImpl,
     AscendFlashAttentionMetadata,
 )
+from vllm_ascend.worker.v2.spec_decode.dflash import aclgraph
+from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
+from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import AscendDFlash2Speculator
 
 
 def _make_speculator(backends):
@@ -96,9 +98,13 @@ def _make_speculator(backends):
     return speculator
 
 
-def test_flash_attn_graph_forward_prepares_plan_for_attention(monkeypatch):
-    speculator = _make_speculator([AscendFlashAttentionBackend])
-    assert speculator.supports_decode_metadata_update
+@pytest.mark.parametrize("mixed_backends", [False, True])
+def test_flash_attn_graph_forward_prepares_plan_for_attention(monkeypatch, mixed_backends):
+    backends = (
+        [AscendFlashAttentionBackend, AscendAttentionBackend] if mixed_backends else [AscendFlashAttentionBackend]
+    )
+    speculator = _make_speculator(backends)
+    assert speculator.supports_decode_metadata_update is (not mixed_backends)
     builder = speculator.attn_groups[0][0].get_metadata_builder()
     builder.layer_names = ["draft.0", "draft.1"]
     builder.vllm_config = speculator.vllm_config
@@ -115,7 +121,6 @@ def test_flash_attn_graph_forward_prepares_plan_for_attention(monkeypatch):
     impl.scale, impl.key_cache, impl.value_cache = 128**-0.5, None, None
     layers = {name: SimpleNamespace(impl=impl) for name in builder.layer_names}
     monkeypatch.setattr(fa_v1, "get_layers_from_vllm_config", lambda *_args: layers)
-    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: True)
     plan = torch.empty(16, dtype=torch.int32)
     query = torch.zeros(16, 8, 128)
     ops = SimpleNamespace(
@@ -126,15 +131,40 @@ def test_flash_attn_graph_forward_prepares_plan_for_attention(monkeypatch):
     seq_lens = metadata.seq_lens_gpu
     speculator.input_buffers.seq_lens.copy_(torch.tensor([197, 99, 0, 0], dtype=torch.int32))
 
-    speculator._prepare_graph_forward(4, {"draft.0": metadata, "draft.1": metadata})
+    def forward():
+        ops.flash_attn_metadata.assert_called_once()
+        assert metadata.seq_lens_gpu is seq_lens
+        for _ in layers:
+            impl.forward_impl(query, None, None, None, metadata, torch.empty_like(query))
+
+    metadata_by_layer = {"draft.0": metadata}
+    if mixed_backends:
+        manager = speculator.query_cudagraph_manager
+
+        def capture(_self, forward_fn, *_args, prepare_forward, **_kwargs):
+            prepare_forward(4, metadata_by_layer)
+            forward_fn()
+
+        monkeypatch.setattr(aclgraph, "communicator_switch", nullcontext)
+        monkeypatch.setattr(aclgraph, "model_capture_wrapper", lambda *_args: nullcontext())
+        monkeypatch.setattr(aclgraph.DFlashCudaGraphManager, "capture", capture)
+        manager.capture(
+            forward,
+            speculator.input_buffers,
+            speculator.block_tables,
+            speculator.attn_groups,
+            speculator.kv_cache_config,
+            1024,
+            prepare_forward=speculator._prepare_graph_forward,
+        )
+    else:
+        speculator._prepare_graph_forward(4, metadata_by_layer)
+        forward()
+
     ops.flash_attn_metadata.assert_called_once()
-    assert metadata.seq_lens_gpu is seq_lens
     torch.testing.assert_close(
         ops.flash_attn_metadata.call_args.kwargs["seqused_kv"], torch.tensor([197, 99, 1, 1], dtype=torch.int32)
     )
-    for _ in layers:
-        impl.forward_impl(query, None, None, None, metadata, torch.empty_like(query))
-    ops.flash_attn_metadata.assert_called_once()
     assert ops.flash_attn.call_count == len(layers)
     assert all(call.kwargs["metadata"] is plan for call in ops.flash_attn.call_args_list)
 

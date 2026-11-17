@@ -159,6 +159,7 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
     from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
+    from vllm_ascend.attention import fa_v1
     from vllm_ascend.attention.fa_v1 import AscendFlashAttentionImpl, AscendFlashAttentionMetadataBuilder
 
     num_query = 6
@@ -195,9 +196,11 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
         flash_attn=MagicMock(side_effect=lambda query, *_args, **_kwargs: (query, None)),
     )
     monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
-    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)
     impl = AscendFlashAttentionImpl.__new__(AscendFlashAttentionImpl)
-    impl.num_heads, impl.num_kv_heads, impl.sliding_window = 8, 1, None
+    impl.num_heads, impl.num_kv_heads, impl.head_size, impl.sliding_window = 8, 1, 128, None
+    builder.layer_names, builder.vllm_config = layer_names, speculator.vllm_config
+    layers = {name: SimpleNamespace(impl=impl) for name in layer_names}
+    monkeypatch.setattr(fa_v1, "get_layers_from_vllm_config", lambda *_args: layers)
     impl.use_bnsd_kv_cache, impl.sinks, impl.scale = True, None, 128**-0.5
     impl.key_cache = impl.value_cache = torch.empty(0)
     upper_bounds = torch.tensor([110, 210, 0, 0], dtype=torch.int32)
