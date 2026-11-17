@@ -73,7 +73,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
-from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec, supports_component_major_mla_pd
+from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
@@ -1371,6 +1371,8 @@ class NPUModelRunner(GPUModelRunner):
 
         draft_architectures = spec.draft_model_config.architectures or ()
         use_flashmla = getattr(self.speculator, "use_flashmla", False)
+        # Backend selection already checked the PD cache layout. Only the
+        # initialized target consumers remain to be checked here, as on A5.
         use_a3_mla_sink = getattr(self.speculator, "use_a3_mla_sink", False)
         a3_device_lengths = use_a3_mla_sink and a3_target_device_lengths_ready(
             self.model_state, self.attn_groups, self.speculator.draft_attn_layer_names
@@ -1413,10 +1415,6 @@ class NPUModelRunner(GPUModelRunner):
             and (parallel_config.decode_context_parallel_size == 1 or kimi_k31_device_lengths)
             and not self.ascend_config.sparse_kv_offload_config.enabled
             and not spec.enable_adaptive_verification
-            # Mooncake pull uses scheduler-owned transfer boundaries and waits
-            # for loaded KV before forward, as on A5. It does not consume the
-            # runner's exact CPU length mirror. Other connectors retain it.
-            and (not use_a3_mla_sink or supports_component_major_mla_pd(self.vllm_config))
         )
 
     def postprocess_sampled(

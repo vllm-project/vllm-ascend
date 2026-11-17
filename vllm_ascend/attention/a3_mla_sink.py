@@ -4,6 +4,8 @@
 
 The existing FlashMLA batch builder owns buffers and stream ordering. This
 adapter translates its normalized inputs without imposing the A5 cache ABI.
+Each packed Q segment is wholly live or wholly padding; the builder sets
+padding KV lengths to zero before either operator consumes them.
 """
 
 import math
@@ -89,9 +91,6 @@ class A3MLAAdapter:
     config: A3MLAConfig
     attention_op: Any
     metadata_op: Any
-    # Bootstrap from zero-length device tensors once per graph capacity;
-    # the provider owns the metadata buffer's shape and byte layout.
-    metadata_requires_device_inputs: bool = True
 
     def allocate_cache(self, pages: int, *, device):
         """Keep both A3 components packed inside each page, including DCP KV."""
@@ -142,16 +141,11 @@ class A3MLAAdapter:
             raise ValueError("native A3 MLA requires NPU tensors")
         return batch
 
-    @staticmethod
-    def _effective_lengths(cache_seqlens, seqused_q):
-        if seqused_q is None:
-            return cache_seqlens
-        return torch.where(seqused_q > 0, cache_seqlens, torch.zeros_like(cache_seqlens))
-
     def build_metadata(self, cache_seqlens, cu_seqlens_q, seqused_q=None):
+        # FlashMLAMetadataBuilder zeros dummy-request lengths once per batch.
+        # Both operators consume that same tensor; do not remask it per layer.
         batch = self._check_lengths(cache_seqlens, cu_seqlens_q, seqused_q)
         cfg = self.config
-        lengths = self._effective_lengths(cache_seqlens, seqused_q)
         metadata = self.metadata_op(
             batch,
             cfg.max_seqlen_q,
@@ -159,7 +153,7 @@ class A3MLAAdapter:
             cfg.num_heads,
             1,
             ROPE_DIM,
-            lengths,
+            cache_seqlens,
             qkv_dtype=cfg.dtype,
             headdim_v=LATENT_DIM,
             cu_seqlens_q=cu_seqlens_q,
@@ -200,13 +194,12 @@ class A3MLAAdapter:
                 raise ValueError("A3 attention inputs must share one device")
         if v_cache.dtype != cfg.dtype or rope_cache.dtype != cfg.dtype:
             raise ValueError("A3 Query and KV dtype must match")
-        lengths = self._effective_lengths(cache_seqlens, seqused_q)
         result = self.attention_op(
             q[..., LATENT_DIM:].contiguous(),
             rope_cache,
             v_cache,
             qv=q[..., :LATENT_DIM].contiguous(),
-            cache_seqlens=lengths,
+            cache_seqlens=cache_seqlens,
             page_table=block_table,
             cu_seqlens_q=cu_seqlens_q,
             max_seqlen_q=cfg.max_seqlen_q,
@@ -227,16 +220,14 @@ class A3MLAAdapter:
         if q.shape[0]:
             token = torch.arange(q.shape[0], device=q.device, dtype=torch.int32)
             request = torch.searchsorted(cu_seqlens_q[1:].contiguous(), token, right=True).long()
-            offset = token - cu_seqlens_q[request]
-            live = lengths[request] > 0
-            if seqused_q is not None:
-                live &= offset < seqused_q[request]
+            live = cache_seqlens[request] > 0
             if cfg.mask_mode == 3:
                 # Right-aligned causal attention can mask an entire query row
                 # when Q is longer than KV. Normalize the provider's +inf LSE
                 # sentinel so that DCP merging gives this row zero weight.
                 query_lengths = cu_seqlens_q[request + 1] - cu_seqlens_q[request]
-                live &= lengths[request] - query_lengths + offset >= 0
+                offset = token - cu_seqlens_q[request]
+                live &= cache_seqlens[request] - query_lengths + offset >= 0
             output = output.masked_fill(~live[:, None, None], 0)
             lse = lse.masked_fill(~live[None, :], -torch.inf)
         # Existing MLA V-up and DCP adaptation consume NTD output and NT LSE.

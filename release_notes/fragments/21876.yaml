@@ -6,5 +6,7 @@ entries:
       DSpark configurations, reusing the FlashMLA metadata, graph-buffer,
       and DCP execution paths, including Mooncake V2 pull PD disaggregation
       and single-child MultiConnector wrappers for supported pull connectors.
+      Pass normalized device lengths to both operators without per-layer
+      remasking or redundant runner-side connector checks.
       Keep FIA for unavailable or unsupported paths
       and retain host-length synchronization for unsupported consumers.

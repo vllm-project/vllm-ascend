@@ -162,6 +162,7 @@ def runtime(monkeypatch):
         return values, -values
 
     install("vllm_ascend.ops.rotary_embedding", get_cos_and_sin_mla=rope)
+    load("vllm_ascend.attention.a3_mla_sink", "vllm_ascend/attention/a3_mla_sink.py")
     api = load("vllm_ascend.attention.flashmla", "vllm_ascend/attention/flashmla.py")
 
     def schedule(lengths, *, cu_seqlens_q, seqused_q, **kwargs):

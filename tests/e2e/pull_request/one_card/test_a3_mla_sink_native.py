@@ -192,7 +192,7 @@ def test_native_production_builder_refreshes_padded_batch(sink):
         or isinstance(node, ast.Assign)
         and any(isinstance(target, ast.Name) and target.id in names for target in node.targets)
     ]
-    scope = dict(torch=torch, dataclass=dataclass, replace=replace, FlashMLAImpl=object)
+    scope = dict(torch=torch, dataclass=dataclass, replace=replace, FlashMLAImpl=object, A3MLAAdapter=sink.A3MLAAdapter)
     exec(compile(ast.Module(nodes, type_ignores=[]), str(path), "exec"), scope)
     adapter, data, oracle = make_case(sink, torch.bfloat16, (2, 1), (257, 33), False, padded=True)
     impl = SimpleNamespace(

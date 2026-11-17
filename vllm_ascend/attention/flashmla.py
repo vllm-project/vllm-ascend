@@ -17,6 +17,7 @@ import numpy as np
 import torch
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
+from vllm_ascend.attention.a3_mla_sink import A3MLAAdapter
 from vllm_ascend.attention.utils import MLA_FLASH_SUPPORTED_Q_HEADS, get_flashmla_ops
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 
@@ -276,7 +277,7 @@ class FlashMLAImpl:
 class FlashMLACurrent:
     """Replicated current chunk, independent of persistent KV and prefix pages."""
 
-    adapter: FlashMLAImpl
+    adapter: FlashMLAImpl | A3MLAAdapter
     query: torch.Tensor
     schedule: torch.Tensor
     cache: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
@@ -287,7 +288,7 @@ class FlashMLACurrent:
 
 @dataclass
 class FlashMLADecode:
-    adapter: FlashMLAImpl
+    adapter: FlashMLAImpl | A3MLAAdapter
     query: torch.Tensor
     schedule: torch.Tensor
     cu: torch.Tensor
@@ -336,29 +337,34 @@ class FlashMLAMetadataBuilder:
         self.buffers: dict[tuple, FlashMLADecode] = {}
         self.attn_mask = attn_mask
 
-    def _allocate(self, tokens: int, rows: int, columns: int, causal: bool) -> FlashMLADecode:
-        ints = {"dtype": torch.int32, "device": self.device}
-        adapter = self.adapters[causal]
-        if hasattr(adapter, "for_capacity"):
+    def _allocate_schedule(self, adapter, tokens, columns, lengths, cu, used):
+        if isinstance(adapter, A3MLAAdapter):
             adapter = adapter.for_capacity(columns, tokens)
-        cu = torch.zeros(rows + 1, **ints)
-        used = torch.zeros(rows, **ints)
-        lengths = torch.zeros(rows, **ints)
-        if getattr(adapter, "metadata_requires_device_inputs", False):
-            schedule_meta = adapter.build_metadata(lengths, cu, used)
+            # A3 has no Meta implementation. Bootstrap once from empty device
+            # sequences; the operator owns the opaque schedule's byte layout.
+            schedule = adapter.build_metadata(lengths, cu, used)
         else:
             schedule_meta = adapter.build_metadata(
                 torch.empty_like(lengths, device="meta"),
                 torch.empty_like(cu, device="meta"),
                 torch.empty_like(used, device="meta"),
             )
+            schedule = torch.empty_like(schedule_meta, device=self.device)
+        return adapter, schedule
+
+    def _allocate(self, tokens: int, rows: int, columns: int, causal: bool) -> FlashMLADecode:
+        ints = {"dtype": torch.int32, "device": self.device}
+        cu = torch.zeros(rows + 1, **ints)
+        used = torch.zeros(rows, **ints)
+        lengths = torch.zeros(rows, **ints)
+        adapter, schedule = self._allocate_schedule(self.adapters[causal], tokens, columns, lengths, cu, used)
         rope_shape = (tokens, 1, 1, FLASHMLA_QK_DIM - FLASHMLA_V_DIM)
         flash = FlashMLADecode(
             adapter=adapter,
             query=torch.empty(
                 (tokens, adapter.config.num_heads, FLASHMLA_QK_DIM), dtype=self.dtype, device=self.device
             ),
-            schedule=torch.empty_like(schedule_meta, device=self.device),
+            schedule=schedule,
             cu=cu,
             used_q=used,
             cache_lens=lengths,
@@ -375,17 +381,9 @@ class FlashMLAMetadataBuilder:
             # As in split DCP attention, each rank retains every current row.
             # Only persistent history writes use the runner's rank-owned slots.
             block_columns = (tokens + FLASHMLA_BLOCK_SIZE - 1) // FLASHMLA_BLOCK_SIZE
-            current_adapter = self.current_adapter
-            if hasattr(current_adapter, "for_capacity"):
-                current_adapter = current_adapter.for_capacity(block_columns, tokens)
-            if getattr(current_adapter, "metadata_requires_device_inputs", False):
-                current_schedule = current_adapter.build_metadata(used, cu, used)
-            else:
-                current_schedule = current_adapter.build_metadata(
-                    torch.empty_like(used, device="meta"),
-                    torch.empty_like(cu, device="meta"),
-                    torch.empty_like(used, device="meta"),
-                )
+            current_adapter, current_schedule = self._allocate_schedule(
+                self.current_adapter, tokens, block_columns, used, cu, used
+            )
             flash.current = FlashMLACurrent(
                 adapter=current_adapter,
                 query=torch.empty(
@@ -393,10 +391,10 @@ class FlashMLAMetadataBuilder:
                     dtype=self.dtype,
                     device=self.device,
                 ),
-                schedule=torch.empty_like(current_schedule, device=self.device),
+                schedule=current_schedule,
                 cache=(
                     current_adapter.allocate_cache(block_columns + rows, device=self.device)
-                    if hasattr(current_adapter, "allocate_cache")
+                    if isinstance(current_adapter, A3MLAAdapter)
                     else torch.empty(
                         (block_columns + rows, FLASHMLA_BLOCK_SIZE, 1, FLASHMLA_QK_DIM),
                         dtype=self.dtype,

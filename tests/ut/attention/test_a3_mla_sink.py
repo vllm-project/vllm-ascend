@@ -11,6 +11,7 @@ import importlib.util
 import math
 import sys
 from contextlib import nullcontext
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -212,12 +213,122 @@ def test_cpu_inputs_cannot_execute_native_metadata():
         adapter.build_metadata(torch.empty(0, dtype=torch.int32), torch.zeros(1, dtype=torch.int32))
 
 
-def test_padding_masks_lengths_without_reading_host_values():
-    lengths = torch.tensor([17, 29, 0], dtype=torch.int32)
-    used = torch.tensor([2, 0, 0], dtype=torch.int32)
-    assert sink.A3MLAAdapter._effective_lengths(lengths, used).tolist() == [17, 0, 0]
-    assert sink.A3MLAAdapter._effective_lengths(lengths, None) is lengths
-    assert lengths.tolist() == [17, 29, 0]
+@pytest.mark.parametrize("causal", [False, True])
+def test_two_operator_boundary_reuses_lengths_and_normalizes_empty_rows(monkeypatch, causal):
+    # CPU ABI instrumentation only: device rejection is tested above; this does
+    # not simulate or validate the native attention kernel's arithmetic.
+    monkeypatch.setattr(sink.A3MLAAdapter, "_check_lengths", lambda self, lengths, cu, used: lengths.numel())
+    lengths = torch.tensor([1, 0], dtype=torch.int32)
+    cu = torch.tensor([0, 2, 4], dtype=torch.int32)
+    used = torch.tensor([2, 0], dtype=torch.int32)
+    calls = []
+
+    def metadata_op(*args, **kwargs):
+        assert args[6] is lengths
+        assert kwargs["cu_seqlens_q"] is cu
+        calls.append("metadata")
+        return torch.zeros(32, dtype=torch.uint8)
+
+    def attention_op(q, rope, content, **kwargs):
+        assert kwargs["cache_seqlens"] is lengths
+        assert kwargs["cu_seqlens_q"] is cu
+        assert kwargs["scheduler_metadata"] is metadata
+        assert q.shape == (4, 8, 64) and q.is_contiguous()
+        assert kwargs["qv"].shape == (4, 8, 512) and kwargs["qv"].is_contiguous()
+        calls.append("attention")
+        return torch.ones(4, 8, 512, dtype=q.dtype), torch.full((8, 4), torch.inf), None, None
+
+    adapter = sink.A3MLAAdapter(sink.A3MLAConfig(8, 0.125, mask_mode=3 if causal else 0), attention_op, metadata_op)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("the adapter must not read host values or remask normalized lengths")
+
+    with monkeypatch.context() as context:
+        for name in ("cpu", "item", "tolist"):
+            context.setattr(torch.Tensor, name, forbidden)
+        context.setattr(torch, "where", forbidden)
+        metadata = adapter.build_metadata(lengths, cu, used)
+        output, lse = adapter.attention(
+            torch.zeros(4, 8, 576, dtype=torch.bfloat16),
+            adapter.allocate_cache(2, device="cpu"),
+            block_table=torch.zeros(2, 1, dtype=torch.int32),
+            cache_seqlens=lengths,
+            cu_seqlens_q=cu,
+            seqused_q=used,
+            metadata=metadata,
+        )
+    assert calls == ["metadata", "attention"]
+    assert torch.all(output[:, 2:] == 0) and torch.isneginf(lse[:, 2:]).all()
+    assert torch.all(output[:, 1] == 1)
+    assert torch.all(output[:, 0] == (0 if causal else 1))
+    if causal:
+        assert torch.isneginf(lse[:, 0]).all()
+
+
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("dcp_size", [1, 2])
+def test_a3_builder_normalizes_once_and_reuses_schedule_storage(monkeypatch, causal, dcp_size):
+    monkeypatch.setattr(sink.A3MLAAdapter, "_check_lengths", lambda self, lengths, cu, used: lengths.numel())
+    calls = []
+
+    def metadata_op(*args, **kwargs):
+        lengths, cu = args[6], kwargs["cu_seqlens_q"]
+        assert lengths.device.type == "cpu"  # A3 must not use Meta shape inference.
+        calls.append((args[1], args[2], lengths, cu))
+        return torch.cat((lengths, cu)).to(torch.uint8)
+
+    names = {
+        "FLASHMLA_QK_DIM",
+        "FLASHMLA_V_DIM",
+        "FLASHMLA_BLOCK_SIZE",
+        "FlashMLACurrent",
+        "FlashMLADecode",
+        "FlashMLAMetadataBuilder",
+    }
+    scope = dict(
+        torch=torch,
+        dataclass=dataclass,
+        replace=replace,
+        FlashMLAImpl=type("UnusedA5", (), {}),
+        A3MLAAdapter=sink.A3MLAAdapter,
+        get_dcp_local_seq_lens=lambda lengths, **kwargs: (lengths + 1) // 2,
+    )
+    ast_symbols("vllm_ascend/attention/flashmla.py", names, scope)
+    impl = SimpleNamespace(
+        a3_mla_adapter=sink.A3MLAAdapter(sink.A3MLAConfig(8, 0.125), None, metadata_op),
+        num_heads=8,
+        scale=0.125,
+        dtype=torch.bfloat16,
+        use_mla_rope=False,
+        dcp_size=dcp_size,
+        dcp_rank=0,
+        vllm_config=SimpleNamespace(
+            speculative_config=object(),
+            parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1),
+        ),
+    )
+    builder = scope["FlashMLAMetadataBuilder"](impl, torch.device("cpu"), 4, torch.empty(0))
+    inputs = common()
+    inputs.causal = causal
+    first = builder.build(inputs, 2, 3, False, retain_for_graph=True)
+    schedule_ptr = first.schedule.data_ptr()
+    current_ptr = first.current.schedule.data_ptr() if first.current else None
+    split = causal and dcp_size > 1
+    assert first.cache_lens.tolist() == (
+        [7, 3, 0, 0, 0] if split else [8, 4, 0, 0, 0] if dcp_size > 1 else [15, 7, 0, 0, 0]
+    )
+    assert all(tokens == 8 and capacity == 128 for tokens, capacity, _, _ in calls)
+    assert calls[0][2] is first.cache_lens  # Keep the builder's length buffer.
+    inputs.seq_lens.copy_(torch.tensor([1, 0], dtype=torch.int32))
+    second = builder.build(inputs, 2, 3, False)
+    assert second is first and second.schedule.data_ptr() == schedule_ptr
+    assert second.used_q.tolist() == [2, 0, 0, 0, 0]
+    assert second.cache_lens.tolist() == ([0, 0, 0, 0, 0] if split else [1, 0, 0, 0, 0])
+    torch.testing.assert_close(second.schedule, torch.cat((second.cache_lens, second.cu)).to(torch.uint8))
+    if split:
+        assert second.current.schedule.data_ptr() == current_ptr
+        assert isinstance(second.current.cache, tuple)
+        torch.testing.assert_close(second.current.schedule, torch.cat((second.used_q, second.cu)).to(torch.uint8))
 
 
 def test_current_and_persistent_caches_preserve_packed_components():
@@ -272,7 +383,6 @@ def runner(ready=True):
         is_deepseek_v41=lambda cfg: False,
         AscendFlashAttentionBackend=backend,
         a3_target_device_lengths_ready=sink.a3_target_device_lengths_ready,
-        supports_component_major_mla_pd=supports_component_major_mla_pd,
     )
     path = "vllm_ascend/worker/v2/model_runner.py"
     fn = ast_method(path, "NPUModelRunner", "_can_skip_spec_cpu_length_sync", scope)
@@ -344,6 +454,9 @@ def test_pd_selection_and_length_sync_share_a5_transfer_gate(role, connector, mo
     )
     instance, _ = runner()
     instance.vllm_config.kv_transfer_config = transfer
+    instance.speculator.use_a3_mla_sink = sink.supports_a3_mla(
+        impl, is_a3=True, is_draft=True, pd_supported=supports_component_major_mla_pd(impl.vllm_config)
+    )
     assert instance._can_skip_spec_cpu_length_sync() is expected
 
 
@@ -382,6 +495,9 @@ def test_single_child_multi_pd_selection_and_sync(role, children, module, expect
     )
     instance, _ = runner()
     instance.vllm_config.kv_transfer_config = transfer
+    instance.speculator.use_a3_mla_sink = sink.supports_a3_mla(
+        impl, is_a3=True, is_draft=True, pd_supported=supports_component_major_mla_pd(impl.vllm_config)
+    )
     assert instance._can_skip_spec_cpu_length_sync() is expected
     # Inspecting child capability must not replace the user's connector config.
     assert transfer.kv_connector == "MultiConnector"
@@ -406,12 +522,13 @@ def test_mooncake_layerwise_retains_legacy_layout_and_sync(wrapped, layerwise):
     ) is (not layerwise)
     instance, _ = runner()
     instance.vllm_config.kv_transfer_config = transfer
+    instance.speculator.use_a3_mla_sink = sink.supports_a3_mla(
+        impl, is_a3=True, is_draft=True, pd_supported=supports_component_major_mla_pd(impl.vllm_config)
+    )
     assert instance._can_skip_spec_cpu_length_sync() is (not layerwise)
 
 
-@pytest.mark.parametrize(
-    "reason", ["unknown", "no_groups", "only_draft", "pp", "pcp", "offload", "adaptive", "pd", "fia"]
-)
+@pytest.mark.parametrize("reason", ["unknown", "no_groups", "only_draft", "pp", "pcp", "offload", "adaptive", "fia"])
 def test_sync_fallback_for_every_unsupported_consumer(reason):
     instance, _ = runner()
     if reason == "unknown":
@@ -428,8 +545,6 @@ def test_sync_fallback_for_every_unsupported_consumer(reason):
         instance.ascend_config.sparse_kv_offload_config.enabled = True
     elif reason == "adaptive":
         instance.speculative_config.enable_adaptive_verification = True
-    elif reason == "pd":
-        instance.vllm_config.kv_transfer_config = object()
     else:
         instance.speculator.use_a3_mla_sink = False
     assert instance._can_skip_spec_cpu_length_sync() is False
