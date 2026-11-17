@@ -46,7 +46,8 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     DyntraLBPolicyMixin,
     print_scheduler_summary,
 )
-from vllm_ascend.utils import get_ascend_config
+from vllm_ascend.core.scheduler_output import make_cached_request_data
+from vllm_ascend.utils import get_ascend_config, vllm_version_is
 
 
 def _normalize_encoder_schedule_result(
@@ -905,7 +906,7 @@ class RecomputeScheduler(Scheduler):
         new_request_kwargs = {
             "uses_mrope": self.model_uses_mrope,
         }
-        if self.use_v2_model_runner:
+        if not vllm_version_is("0.33.0") or self.use_v2_model_runner:
             scheduled_new_reqs.extend(scheduled_resumed_reqs)
             scheduled_resumed_reqs.clear()
             new_reqs_data = [
@@ -928,16 +929,20 @@ class RecomputeScheduler(Scheduler):
             ]
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
-            cached_reqs_data = self._make_cached_request_data(
+            cached_reqs_data, schedule_metadata = make_cached_request_data(
+                self,
                 scheduled_running_reqs,
                 scheduled_resumed_reqs,
                 num_scheduled_tokens,
                 scheduled_spec_decode_tokens,
                 req_to_new_blocks,
+                new_reqs_data,
+                scheduled_encoder_inputs,
+                encoder_compute_budget,
             )
 
         # Record the request ids that were scheduled in this step (MRV1-only).
-        if not self.use_v2_model_runner:
+        if vllm_version_is("0.33.0") and not self.use_v2_model_runner:
             self.prev_step_scheduled_req_ids.clear()
             self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
@@ -969,9 +974,11 @@ class RecomputeScheduler(Scheduler):
         if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[len(num_scheduled_tokens)]
 
-        scheduled_encoder_input_stats = None
-        if self.log_stats and self.observability_config.enable_logging_iteration_details:
-            scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(scheduled_encoder_inputs)
+        if vllm_version_is("0.33.0"):
+            scheduled_encoder_input_stats = None
+            if self.log_stats and self.observability_config.enable_logging_iteration_details:
+                scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(scheduled_encoder_inputs)
+            schedule_metadata["scheduled_encoder_input_stats"] = scheduled_encoder_input_stats
 
         scheduler_output = RecomputeSchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
@@ -980,7 +987,7 @@ class RecomputeScheduler(Scheduler):
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
-            scheduled_encoder_input_stats=scheduled_encoder_input_stats,
+            **schedule_metadata,
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
@@ -991,7 +998,11 @@ class RecomputeScheduler(Scheduler):
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             kv_cache_block_copies=pending_kv_cache_block_copies,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
-            ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
+            **(
+                {"ec_manager_metadata": self.encoder_cache_manager.get_manager_metadata()}
+                if vllm_version_is("0.33.0")
+                else {}
+            ),
             recomputed_reqs=self._recomputed_reqs or None,
             has_sync_kv_loads=has_sync_kv_loads,
             kv_connector_block_state=kv_connector_block_state,
