@@ -12,7 +12,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, KVCacheBlock
-from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
+from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager, SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -217,6 +217,20 @@ class AscendStoreCoordinator:
             apply_eagle=False,
         )
         return masks
+
+    def continuation_block_range(self, group_id: int, token_len: int) -> tuple[int, int] | None:
+        """Pages needed by the next query, without prefix-hit alignment.
+
+        A private step snapshot can end between public prefix checkpoints.
+        Use the ordinary sliding-window manager's retention rule directly;
+        other manager families retain their existing snapshot policy. Round
+        outwards to whole pages, including a trailing partially written page.
+        """
+        spec = self.group_effective_specs[group_id]
+        if _get_manager_class(spec) is not SlidingWindowManager:
+            return None
+        first_token = max(0, token_len - spec.sliding_window + 1 - spec.extra_retained_tokens)
+        return first_token // spec.block_size, cdiv(token_len, spec.block_size)
 
     def _reachable_masks(
         self,

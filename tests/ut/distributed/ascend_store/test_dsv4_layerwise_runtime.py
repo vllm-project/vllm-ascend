@@ -278,7 +278,7 @@ def test_released_swa_ids_never_become_readable_keys():
 
 def test_private_restore_does_not_apply_external_prefix_lookup_mask():
     worker = make_worker()
-    worker.cache_coordinator = object()
+    worker.cache_coordinator = SimpleNamespace(continuation_block_range=lambda group, end: None)
     worker.token_database = SimpleNamespace(load_mask=Mock(return_value=([False, False, False, True],)))
     private = request_meta(386, [0, 0, 9, 12], cached=385)
     assert worker._compute_reachable_load_masks(private, 385) == ([False, False, True, True],)
@@ -290,7 +290,7 @@ def test_private_restore_does_not_apply_external_prefix_lookup_mask():
 
 def test_private_save_keeps_live_state_before_shared_slot_is_overwritten():
     worker = make_worker()
-    worker.cache_coordinator = object()
+    worker.cache_coordinator = SimpleNamespace(continuation_block_range=lambda group, end: None)
     worker.token_database = SimpleNamespace(store_mask=Mock(return_value=([False] * 31 + [True],)))
     meta = request_meta(4096, [0] * 30 + [9, 12])
     assert worker._compute_reachable_store_masks(meta) == ([False] * 30 + [True, True],)

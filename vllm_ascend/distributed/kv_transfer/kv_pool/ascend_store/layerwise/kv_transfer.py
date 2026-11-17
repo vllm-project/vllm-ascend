@@ -1363,10 +1363,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             logger.debug("Layer load event set: layer %d", layer_id)
             return True
 
-        if attention_start_gate is not None:
-            if not self._wait_for_event(attention_start_gate):
-                return False
-
         all_req_ids: set[str] = set()
         last_chunk_req_ids: set[str] = set()
         all_gvas = []
@@ -1381,10 +1377,15 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             all_addrs.append(req_meta.addr_array)
             all_sizes.append(req_meta.size_array)
 
-        self._stagger_h2d_submit(layer_id)
         gvas_array = np.concatenate(all_gvas) if len(all_gvas) > 1 else all_gvas[0]
         addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
         size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
+        # Assemble host-only metadata before the compute boundary opens. The
+        # gate protects device access, not this immutable address arithmetic.
+        if attention_start_gate is not None:
+            if not self._wait_for_event(attention_start_gate):
+                return False
+        self._stagger_h2d_submit(layer_id)
         if self.external_slot_release_waiter is not None:
             self.external_slot_release_waiter(layer_id)
         res = self._batch_copy_with_limits(

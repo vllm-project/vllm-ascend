@@ -55,6 +55,14 @@ The adapter adds the following contracts:
   can be removed when upstream provides a connector-local-lookup hook.
 - A continuation restores its previous-step private snapshots. Those pages
   follow current request ownership, rather than the public-prefix load mask.
+- For ordinary sliding-window groups, private continuation retains the final
+  window, extended by the spec's `extra_retained_tokens` and rounded outwards
+  to whole pages. Public checkpoint pages follow the coordinator's existing
+  retention policy. Their union is saved; private-only tails are not also
+  published as public prefixes. Full compressed history remains intact.
+  Speculative decoding, context parallelism, and other manager families keep
+  the conservative snapshot policy. Terminal-only public retention no longer
+  gains extra intermediate checkpoints as a side effect of private snapshots.
 - NULL block IDs are never copied. Released window pages are removed from the
   request's snapshot index; that index is distinct from public Memcache keys.
 - A5 indexer data and scale views are transferred once. The overlapping full-page
@@ -76,6 +84,11 @@ The adapter adds the following contracts:
 
 The adapter reuses the common planner, allocation, transfer threads, and reuse
 fences. It does not bypass save completion or enable speculative overwrite.
+For Memcache Prefill, the attention event is still recorded before the kernel,
+but transfer threads are notified after the host has submitted attention. This
+keeps the device dependency while preventing a transfer call from being started
+before the work it should overlap has been enqueued. Backends with pre-attention
+callbacks keep their established ordering. Decode keeps the immediate policy.
 
 ## Validation and merge gates
 
@@ -88,6 +101,10 @@ pytest -q \
   tests/ut/distributed/ascend_store/test_dsv4_prefix_offload.py \
   tests/ut/distributed/ascend_store/test_dsv4_transfer_registration.py \
   tests/ut/distributed/ascend_store/test_layerwise_save_batching.py \
+  tests/ut/distributed/ascend_store/test_window_snapshot_ranges.py \
+  tests/ut/distributed/ascend_store/test_window_snapshot_integration.py \
+  tests/ut/distributed/ascend_store/test_attention_enqueue_gate.py \
+  tests/ut/distributed/ascend_store/test_receiver_submission_order.py \
   tests/ut/distributed/ascend_store/test_reuse_snapshot_blocks.py \
   tests/ut/distributed/ascend_store/test_pool_worker.py
 ```

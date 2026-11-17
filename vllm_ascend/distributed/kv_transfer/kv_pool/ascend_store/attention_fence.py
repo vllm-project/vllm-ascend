@@ -49,6 +49,10 @@ class AttentionComputeStartGate:
         stream = stream or torch.npu.current_stream()
         event = torch.npu.Event()
         event.record(stream)
+        self.publish(event)
+
+    def publish(self, event: torch.npu.Event) -> None:
+        """Make a recorded boundary visible without recording a later event."""
         with self._condition:
             if self._event is None:
                 self._event = event
@@ -104,21 +108,40 @@ def record_attention_compute_start() -> None:
 
 
 @contextmanager
-def attention_transfer_window():
+def attention_transfer_window(*, defer_transfer_start: bool = False):
     """Run the configured transfer completion policy after attention submission.
 
-    The event is recorded after cache writes and any preceding collectives. The
-    host then submits the attention kernel. The registered connector callback
-    decides whether to drain, bound, or retain its asynchronous transfer work.
+    The event is recorded after cache writes and any preceding collectives.
+    With ``defer_transfer_start``, publish that same event only after the host
+    has submitted attention. A transfer thread can otherwise enter a blocking
+    backend call before the compute thread has enqueued the work it should
+    overlap. Waiting for the pre-attention event still protects earlier cache
+    writes/collectives; no wait for attention completion is added.
+
+    Other callers retain their existing immediate publication policy. The
+    connector callback decides whether to drain or retain transfer work.
     """
     with _lock:
         gate = _attention_compute_start_gate
     if gate is None:
         yield
         return
+    boundary = None
     try:
-        gate.record()
+        # Some backends use on_start to record their save-ready event before
+        # attention. Keep that established policy; postponing that callback
+        # would inadvertently make their saves wait for attention completion.
+        if defer_transfer_start and gate.on_start is None:
+            boundary = torch.npu.Event()
+            boundary.record(torch.npu.current_stream())
+        else:
+            gate.record()
         yield
     finally:
+        # Also release waiters when operator submission raises. The enclosing
+        # execution path handles the failure; leaving a gate closed strands
+        # teardown. Preserve the event recorded before submission, not after it.
+        if boundary is not None:
+            gate.publish(boundary)
         if gate.on_finish is not None:
             gate.on_finish()

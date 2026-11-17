@@ -1380,7 +1380,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 request.can_save = False
                 request.save_keys = []
 
-    def _plan_save_group(self, request: ReqMeta, group_id: int) -> _SaveGroupPlan:
+    def _plan_save_group(
+        self, request: ReqMeta, group_id: int, publication_mask: Sequence[bool] | None = None
+    ) -> _SaveGroupPlan:
         """Select snapshot/public targets without issuing any pool RPCs."""
         block_ids_by_group = (
             request.block_ids_by_group_np[group_id]
@@ -1439,9 +1441,15 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 block_hash = block_hash_to_str(group_block_hashes[block_idx])
                 key = self._make_layerwise_full_key(group_id, block_hash)
                 if keep_snapshot and (
-                    self.group_uses_align_state[group_id] or self._uses_execution_full_key(request, group_id, block_idx)
+                    publication_mask is not None
+                    or self.group_uses_align_state[group_id]
+                    or self._uses_execution_full_key(request, group_id, block_idx)
                 ):
-                    publication_keys[block_idx] = key
+                    # Execution-only window tails are not public checkpoints.
+                    # Retain every public page selected by the coordinator,
+                    # but do not duplicate the private continuation tail.
+                    if publication_mask is None or (block_idx < len(publication_mask) and publication_mask[block_idx]):
+                        publication_keys[block_idx] = key
                     key = self._layerwise_execution_full_key(request, group_id, block_idx, block_hash)
                 else:
                     candidate_public_keys.add(key)
@@ -1552,7 +1560,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 continue
             request.partial_save_gva_per_group = [0] * self.num_kv_cache_groups
             request.public_save_blocks = {}
-            plans = [self._plan_save_group(request, group_id) for group_id in range(self.num_kv_cache_groups)]
+            publication_masks = self._window_publication_masks(request)
+            plans = [
+                self._plan_save_group(request, group_id, publication_masks.get(group_id))
+                for group_id in range(self.num_kv_cache_groups)
+            ]
             addresses = self._allocate_save_groups(plans, public_allocated)
             if addresses is None:
                 return False
@@ -1652,14 +1664,57 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         result = []
         for group_id, block_ids in enumerate(request.block_ids_by_group):
             mask = masks[group_id] if masks is not None and group_id < len(masks) else None
-            result.append(
-                [
-                    block_id != 0 and (mask is None or mask[index])
-                    for index, block_id in enumerate(block_ids)
-                    if mask is None or index < len(mask)
-                ]
-            )
+            # Long window tables retain leading NULL entries. Intersect in
+            # NumPy rather than visiting every historical token in Python.
+            count = len(block_ids) if mask is None else min(len(block_ids), len(mask))
+            allocated = np.asarray(block_ids[:count], dtype=np.int64) != 0
+            if mask is not None:
+                allocated &= np.asarray(mask[:count], dtype=np.bool_)
+            result.append(allocated.tolist())
         return tuple(result)
+
+    def _continuation_ranges(self, token_len: int) -> dict[int, tuple[int, int]]:
+        """Bound ordinary window snapshots without changing other protocols.
+
+        Public prefix masks round to a checkpoint and cannot describe an
+        arbitrary private step endpoint. Context-parallel and speculative
+        replay keep the existing conservative policy until their retention
+        contracts have separate coverage.
+        """
+        if (
+            not self.layerwise_offload
+            or not self.use_layerwise_transfer
+            or self.cache_coordinator is None
+            or getattr(self, "dcp_size", 1) != 1
+            or getattr(self, "pcp_size", 1) != 1
+            or getattr(getattr(self, "vllm_config", None), "speculative_config", None) is not None
+        ):
+            return {}
+        ranges = {}
+        for group_id in range(self.num_kv_cache_groups):
+            bounds = self.cache_coordinator.continuation_block_range(group_id, token_len)
+            if bounds is not None:
+                ranges[group_id] = bounds
+        return ranges
+
+    def _window_publication_masks(self, request: ReqMeta) -> dict[int, Sequence[bool]]:
+        """Keep the same public checkpoints as the non-reuse layout."""
+        if not request.needs_private_snapshot:
+            return {}
+        ranges = self._continuation_ranges(request.target_token_len)
+        if not ranges:
+            return {}
+        if request.save_end_token == 0:
+            return dict.fromkeys(ranges, ())
+        if request.save_end_token % self.cache_transfer_granularity:
+            return {}
+        try:
+            masks = self.token_database.store_mask(request.save_end_token, request.num_prompt_tokens)
+        except AssertionError:
+            return {}
+        if masks is None:
+            return {}
+        return {group_id: masks[group_id] for group_id in ranges if masks[group_id] is not None}
 
     def _compute_reachable_store_masks(
         self,
@@ -1690,17 +1745,24 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 masks = None
         align_groups = getattr(self, "group_uses_align_state", [])
         if self.layerwise_offload and request.needs_private_snapshot:
-            # Paged continuation needs every live page. Aligned recurrent
-            # state retains its existing endpoint/checkpoint protocol below.
-            masks = tuple(
-                masks[group_id]
-                if masks is not None
-                and group_id < len(masks)
-                and group_id < len(align_groups)
-                and align_groups[group_id]
-                else None
-                for group_id in range(self.num_kv_cache_groups)
-            )
+            ranges = self._continuation_ranges(request.target_token_len)
+            selected: list[Sequence[bool] | None] = []
+            for group_id, block_ids in enumerate(request.block_ids_by_group):
+                public_mask = masks[group_id] if masks is not None and group_id < len(masks) else None
+                if group_id < len(align_groups) and align_groups[group_id]:
+                    selected.append(public_mask)
+                elif group_id in ranges and (public_mask is not None or request.save_end_token == 0):
+                    start, end = ranges[group_id]
+                    window_mask = np.zeros(len(block_ids), dtype=np.bool_)
+                    if public_mask is not None:
+                        count = min(len(public_mask), len(block_ids))
+                        window_mask[:count] = public_mask[:count]
+                    window_mask[start:end] = True
+                    selected.append(window_mask.tolist())
+                else:
+                    # Full history and unknown window policies remain dense.
+                    selected.append(None)
+            masks = tuple(selected)
         if not any(align_groups):
             return self._mask_allocated_blocks(request, masks)
         # Mamba align slots can be null even when their token range is
@@ -2274,6 +2336,22 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             except AssertionError:
                 if getattr(self, "block_key_hybrid", False):
                     raise
+        if previous_step:
+            # Restore only the retained history needed by the next query.
+            # This is a private endpoint, so do not apply public prefix-hit
+            # rounding. The separate partial-page path keeps the final page.
+            ranges = self._continuation_ranges(cached_tokens)
+            if ranges:
+                selected: list[Sequence[bool] | None] = []
+                for group_id, block_ids in enumerate(request.block_ids_by_group):
+                    if group_id not in ranges:
+                        selected.append(None)
+                        continue
+                    start, end = ranges[group_id]
+                    window_mask = np.zeros(len(block_ids), dtype=np.bool_)
+                    window_mask[start:end] = True
+                    selected.append(window_mask.tolist())
+                masks = tuple(selected)
         reused_state_groups = [
             group_id
             for group_id, uses_align in enumerate(self.group_uses_align_state)

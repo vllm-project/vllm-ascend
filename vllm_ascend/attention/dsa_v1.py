@@ -43,7 +43,6 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     attention_transfer_window,
-    record_attention_compute_start,
 )
 from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
@@ -2836,7 +2835,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         notify_kv_cache_written(layer_name)
         wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(common_metadata.sas_metadata))
-        record_attention_compute_start()
         kv_plan = self.get_kv_plan()
         attn_op = kv_plan.get_dsa_sparse_attn_op()
         attn_kwargs = kv_plan.get_dsa_sparse_attn_base_kwargs()
@@ -2883,6 +2881,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         if self.turboquant is not None:
             q = self.turboquant.forward(q)
-        with attention_transfer_window():
+        # Queue Prefill attention before waking transfer threads. The window
+        # keeps its event before the kernel, so DMA can overlap its execution.
+        with attention_transfer_window(defer_transfer_start=has_prefill):
             result = attn_op(q, **attn_kwargs)[0]
         return self.turboquant.inverse(result) if self.turboquant is not None else result

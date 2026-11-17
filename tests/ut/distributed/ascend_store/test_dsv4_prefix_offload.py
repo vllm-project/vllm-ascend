@@ -135,17 +135,22 @@ class PrefixPool:
             load_spec=load_spec,
         )
 
-    def transfers(self, group, *, save):
+    def transfer_pairs(self, group, *, save):
         builder = LayerBatchBuilder.__new__(LayerBatchBuilder)
         builder.group_id = group
         builder._block_ids_buf = builder._block_gvas_buf = None
         tasks = self.worker.layer_save_tasks[1] if save else self.worker.layer_load_tasks[1]
-        result = {}
+        result = []
         for task in tasks:
             if task.group_id == group:
                 data = builder.build_shared(task, is_save=save)
-                result.update(zip(data.block_ids_arr.tolist(), data.block_gvas_arr.tolist()))
+                # One HBM page can have both a private continuation object
+                # and a public checkpoint. Preserve both copy destinations.
+                result.extend(zip(data.block_ids_arr.tolist(), data.block_gvas_arr.tolist()))
         return result
+
+    def transfers(self, group, *, save):
+        return dict(self.transfer_pairs(group, save=save))
 
     def save(self, start, end, *, private=True, publish=True):
         worker = self.worker
@@ -158,7 +163,7 @@ class PrefixPool:
         transferred_gvas = set()
         for group, table in enumerate(request.block_ids_by_group):
             logical_indices = {block_id: index for index, block_id in enumerate(table) if block_id}
-            for block_id, gva in self.transfers(group, save=True).items():
+            for block_id, gva in self.transfer_pairs(group, save=True):
                 transferred_gvas.add(gva)
                 for name in self.groups[group].layer_names:
                     self.payloads[gva, name] = f"{name}:{logical_indices[block_id]}".encode()
@@ -322,12 +327,12 @@ def test_new_request_with_divergent_suffix_hits_only_shared_prefix(model):
 
 
 @pytest.mark.parametrize("model", ["flash", "pro"])
-def test_continuation_can_publish_more_windows_than_terminal_retention(model):
+def test_private_continuation_obeys_public_terminal_retention(model):
     pool = PrefixPool(model, retention=0)
     pool.save(0, 8192, private=True)
-    # Continuation saves every live page; hashed full pages may be public.
-    # Sparse public retention is not a strict limit for this private path.
-    assert pool.hit(4097) == 4096
+    # Private continuation does not publish extra intermediate checkpoints
+    # when the user selected terminal-only public retention.
+    assert pool.hit(4097) == 0
     assert pool.hit(8193) == 8192
 
 

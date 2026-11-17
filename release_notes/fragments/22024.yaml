@@ -9,6 +9,11 @@ entries:
       experimental cache objects.
       Save preparation batches pool queries and mixed-size allocations across
       cache groups while preserving snapshot ownership and publication fences.
+      Ordinary sliding-window continuation saves retained windows and configured
+      public checkpoints instead of every live Prefill page. Memcache Prefill
+      queues attention before notifying transfer threads, while retaining the
+      pre-attention device dependency. End-to-end speedups require hardware
+      validation; no latency improvement is claimed from CPU tests.
     model: deepseek-v4
   - category: bugfix
     text: >-

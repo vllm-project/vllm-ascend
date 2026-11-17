@@ -1156,6 +1156,7 @@ def test_forward_attention_routes_unified_req_metadata(
 
     assert actual is attention_output
     assert events == ["wait", "record", "attention"]
+    transfer_window.assert_called_once_with(defer_transfer_start=bool(num_prefills))
     mla_call = mla_prolog.call_args
     assert torch.equal(mla_call.args[0], hidden_states)
     assert torch.equal(mla_call.args[1], cos[:3])
