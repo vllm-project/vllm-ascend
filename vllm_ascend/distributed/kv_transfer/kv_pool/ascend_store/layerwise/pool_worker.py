@@ -1263,7 +1263,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             return
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
             return
-        public_allocated: set[str] | None = set() if self.layerwise_offload else None
         for request in requests:
             if self._save_disabled.is_set():
                 break
@@ -1271,7 +1270,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 continue
             if self.layerwise_offload and (request.load_spec is None or not request.load_spec.layerwise_previous_step):
                 self._snapshot_keys.pop(request.req_id, None)
-            if self._alloc_gvas_for_save_for_request([request], public_allocated=public_allocated) is False:
+            if self._alloc_gvas_for_save_for_request([request]) is False:
                 logger.error("Memcache save preparation failed for %s", request.req_id)
                 self._save_disabled.set()
         if self._save_disabled.is_set():
@@ -1284,9 +1283,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 request.can_save = False
                 request.save_keys = []
 
-    def _alloc_gvas_for_save_for_request(
-        self, requests: list[ReqMeta], public_allocated: set[str] | None
-    ) -> bool | None:
+    def _alloc_gvas_for_save_for_request(self, requests: list[ReqMeta]) -> bool | None:
         """Allocate per-group GVA on the worker side right before batch_copy.
 
         For multi-group models, iterates all KV cache groups and allocates
@@ -1360,15 +1357,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     if group_store_mask is None or block_idx >= len(group_store_mask) or group_store_mask[block_idx]
                 ]
                 candidate_keys: list[str] = []
-                candidate_public_keys: set[str] = set()
                 for block_idx in candidate_blocks:
                     if block_idx >= len(group_block_hashes):
                         key = self._make_layerwise_partial_key(request, group_id, block_idx, request.target_token_len)
                     else:
                         block_hash = block_hash_to_str(group_block_hashes[block_idx])
                         key = self._make_layerwise_full_key(group_id, block_hash)
-                        if public_allocated is not None:
-                            candidate_public_keys.add(key)
                     candidate_keys.append(key)
                 partial_key = None
                 if (
@@ -1398,8 +1392,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 # SSD) does not need re-saving, and the load path rewarms
                 # SSD blocks on read.
                 missing_keys = self._pool_keys_missing(candidate_keys)
-                if public_allocated is not None:
-                    missing_keys.difference_update(public_allocated)
                 transfer_blocks = [
                     block_idx for block_idx, key in zip(candidate_blocks, candidate_keys) if key in missing_keys
                 ]
@@ -1432,8 +1424,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     for key, gva in zip(transfer_keys, block_gvas):
                         if gva > 0:
                             all_group_save_keys.append(key)
-                            if public_allocated is not None and key in candidate_public_keys:
-                                public_allocated.add(key)
                     if self.layerwise_offload and any(gva <= 0 for gva in transfer_gvas):
                         return False
 
