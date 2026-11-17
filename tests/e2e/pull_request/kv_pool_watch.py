@@ -191,7 +191,7 @@ def build_pool_accuracy_prompt(
     """Long natural-language prompt; the fact sits in the cached prefix."""
     padding = "This paragraph is padding for a long context test. "
     fact = f"The secret number is {secret}. "
-    question = "\nQuestion: What is the secret number? answer:$ANSWER"
+    question = "\nQuestion: What is the secret number? The secret number is"
     unit = len(tokenizer.encode(padding, add_special_tokens=False))
     repeats = max(1, target_tokens // (2 * unit))
     while True:

@@ -157,6 +157,17 @@ a3:
         config_file_path: GLM-5.1-W8A8C8-A3_128k_90_50.yaml
         config_base_path: tests/SIT/cases/models/configs/GLM
         size: 2
+  single_node:
+    test_config:
+      - name: kv-pool-n3-dsv4-multiprefix-mooncake-smoke
+        os: linux-aarch64-a3-800i-16
+        tests: tests/SIT/cases/features/kv_pool/test_pool_nightly_smoke.py::test_nightly_dsv4_multiprefix_mooncake_smoke
+      - name: kv-pool-n6-dsv4-dsa-pcp-dspark-smoke
+        os: linux-aarch64-a3-800i-8
+        tests: tests/SIT/cases/features/kv_pool/test_pool_nightly_smoke.py::test_nightly_dsv4_dsa_pcp_dspark_memcache_smoke
+      - name: kv-pool-n7-qwen38-mtp-align-smoke
+        os: linux-aarch64-a3-800i-4
+        tests: tests/SIT/cases/features/kv_pool/test_pool_nightly_smoke.py::test_nightly_qwen38_mtp_align_memcache_smoke
 
 a3-560t:
   single_node:
@@ -246,18 +257,6 @@ a3-560t:
       - name: qwen3-30b-acc
         os: linux-aarch64-a3-800i-4
         tests: tests/SIT/cases/features/kv_pool/test_qwen3_30b_acc.py
-      - name: kv-pool-n3-dsv4-multiprefix-mooncake-smoke
-        os: linux-aarch64-a3-800i-16
-        tests: tests/SIT/cases/features/kv_pool/test_pool_nightly_smoke.py::test_nightly_dsv4_multiprefix_mooncake_smoke
-        testcase_timeout: 60
-      - name: kv-pool-n6-dsv4-dsa-pcp-dspark-smoke
-        os: linux-aarch64-a3-800i-8
-        tests: tests/SIT/cases/features/kv_pool/test_pool_nightly_smoke.py::test_nightly_dsv4_dsa_pcp_dspark_memcache_smoke
-        testcase_timeout: 60
-      - name: kv-pool-n7-qwen38-mtp-align-smoke
-        os: linux-aarch64-a3-800i-4
-        tests: tests/SIT/cases/features/kv_pool/test_pool_nightly_smoke.py::test_nightly_qwen38_mtp_align_memcache_smoke
-        testcase_timeout: 60
       # YAML-driven tests
       - name: Qwen3.5-27B-w8a8-A3
         os: linux-aarch64-a3-800i-2
