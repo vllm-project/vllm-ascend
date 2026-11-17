@@ -44,6 +44,24 @@ def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_
     assert model.decoder_replay_start == 1
 
 
+def test_decoder_replay_disabled_without_kv_source():
+    model = SimpleNamespace(
+        config=SimpleNamespace(kv_source_layer_ids=[]),
+        end_layer=3,
+        decoder_replay_start=3,
+    )
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(swa_bounded_replay=True),
+        parallel_config=SimpleNamespace(),
+        speculative_config=None,
+    )
+
+    replay = replay_mod.make_decoder_replay(model, config)
+
+    assert replay is None
+    assert model.decoder_replay_start == model.end_layer
+
+
 def test_packed_replay_compacts_sparse_lengths_with_indices(monkeypatch):
     buffers = [torch.arange(6) + offset for offset in (0, 10, 20, 30)]
     model = SimpleNamespace(
@@ -105,13 +123,18 @@ def test_cut_layer_trim_writes_full_batch_before_replay():
     assert events == [("write_kv", [0, 1, 2, 3]), "replay_context", ("replay", [2, 3])]
 
 
-def test_factory_trims_cut_source_outputs_that_replay_regenerates():
+@pytest.mark.parametrize(
+    ("compress_ratio", "expected_replay_start", "trim_cut_layer"),
+    [(1, 1, True), (2, 2, False)],
+)
+def test_factory_only_trims_uncompressed_cut_source(compress_ratio, expected_replay_start, trim_cut_layer):
     cut_writer = lambda *states: None
     first_swa_prefix = "model.layers.1.self_attn.swa_cache"
     buffers = [torch.empty(8, 2) for _ in range(4)]
     model = SimpleNamespace(
         config=SimpleNamespace(
             kv_source_layer_ids=[1],
+            compress_ratios=[0, compress_ratio, 0, 0],
             index_source_layer_ids=[1],
             candidate_source_layer_id=1,
             engram_layer_ids=[],
@@ -151,10 +174,16 @@ def test_factory_trims_cut_source_outputs_that_replay_regenerates():
     replay = replay_mod.make_decoder_replay(model, config)
 
     assert replay is not None
-    assert model.decoder_replay_start == 1
-    assert replay.write_batch_kv is cut_writer
-    assert replay.first_swa_prefix == first_swa_prefix
-    assert replay.row_buffers == []
+    assert model.decoder_replay_start == expected_replay_start
+    if trim_cut_layer:
+        assert replay.write_batch_kv is cut_writer
+        assert replay.first_swa_prefix == first_swa_prefix
+        assert replay.row_buffers == []
+    else:
+        assert replay.write_batch_kv is None
+        assert replay.first_swa_prefix is None
+        assert len(replay.row_buffers) == len(buffers)
+        assert all(actual is expected for actual, expected in zip(replay.row_buffers, buffers))
 
 
 def test_replay_scatter_preserves_row_zero_with_padding(monkeypatch):
@@ -224,7 +253,24 @@ def test_untrimmed_replica_enters_decoder_context_without_gathering():
     assert torch.equal(buffer, torch.arange(6))
 
 
-def test_model_replays_only_layers_after_kv_sources(monkeypatch):
+@pytest.mark.parametrize(
+    ("compress_ratio", "expected_replay_start", "expected_seen"),
+    [
+        (
+            1,
+            1,
+            [(0, [0, 1, 2, 3]), ("write_kv_1", [0, 1, 2, 3]), (1, [2, 3]), (2, [2, 3])],
+        ),
+        (
+            2,
+            2,
+            [(0, [0, 1, 2, 3]), ("write_compressed_kv_1", [0, 1, 2, 3]), (1, [0, 1, 2, 3]), (2, [2, 3])],
+        ),
+    ],
+)
+def test_model_replay_forward_respects_cut_compression(
+    monkeypatch, compress_ratio, expected_replay_start, expected_seen
+):
     seen = []
 
     class Layer:
@@ -232,8 +278,13 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch):
 
         def __init__(self, index):
             self.layer_idx = index
+            self.self_attn = SimpleNamespace(
+                v41_impl=SimpleNamespace(swa_prefix=f"model.layers.{index}.self_attn.swa_cache")
+            )
 
         def __call__(self, positions, hidden, mix, unused, input_ids):
+            if self.layer_idx == 1 and compress_ratio > 1:
+                seen.append(("write_compressed_kv_1", positions.tolist()))
             seen.append((self.layer_idx, positions.tolist()))
             return hidden + 1, mix
 
@@ -251,16 +302,42 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch):
     model._mtp_hidden_buffer = None
     model.shared_attention_state = SimpleNamespace(reset=lambda: None)
     model.layers = [Layer(i) for i in range(3)]
+    model.config = SimpleNamespace(
+        kv_source_layer_ids=[1],
+        compress_ratios=[0, compress_ratio, 0],
+        index_source_layer_ids=[],
+        candidate_source_layer_id=-1,
+        engram_layer_ids=[],
+        sliding_window=2,
+    )
+    model.topk_indices_buffer = torch.zeros(4, 2)
+    model.candidate_indices_buffer = torch.zeros(4, 2)
+    model.candidate_lengths_buffer = torch.zeros(4)
+    model.topk_lengths_buffer = torch.zeros(4)
     model.norm = lambda hidden: hidden
     model.end_layer = 3
     model.start_layer = 0
     model.needs_moe_input_ids = False
-    model.decoder_replay_start = 1
+    model.decoder_replay_start = model.end_layer
     model.aux_hidden_state_layers = (1, 3)
     model.decoder_replay_layer_name = "decoder_replay"
-    replay = replay_mod.AscendDecoderReplayLayers(
-        2, model._run_replay_layers, [], write_batch_kv=model.layers[1].write_kv
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(swa_bounded_replay=True),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            use_ubatching=False,
+        ),
+        speculative_config=None,
+        lora_config=None,
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
     )
+
+    replay = replay_mod.make_decoder_replay(model, config)
+
+    assert replay is not None
+    assert model.decoder_replay_start == expected_replay_start
     replay.rows = torch.tensor([2, 3])
     replay.num_actual_rows = 2
     replay.context_factory = nullcontext
@@ -281,7 +358,7 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch):
         engram_lookups={},
         engram_mask=torch.empty(0, dtype=torch.bool),
     )
-    assert seen == [(0, [0, 1, 2, 3]), ("write_kv_1", [0, 1, 2, 3]), (1, [2, 3]), (2, [2, 3])]
+    assert seen == expected_seen
     assert output[:, 0].tolist() == [0, 0, 4, 4]
     assert aux[0][:, 0].tolist() == [1, 1, 1, 1]
     assert aux[1][:, 0].tolist() == [0, 0, 3, 3]

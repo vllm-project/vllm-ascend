@@ -150,8 +150,8 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
     draft_hf_config = getattr(draft_config, "hf_config", None)
     draft_window = getattr(draft_hf_config, "sliding_window", None)
     draft_layer_types = getattr(draft_hf_config, "layer_types", None) or ()
-    cut = max(model.config.kv_source_layer_ids)
-    if cut >= model.end_layer - 1:
+    cut = max(model.config.kv_source_layer_ids, default=None)
+    if cut is None or cut >= model.end_layer - 1:
         return None
     if (
         model.use_sequence_parallel
@@ -186,6 +186,7 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
             and parallel.prefill_context_parallel_size == 1
             and not model.use_sequence_parallel
             and cut not in getattr(model.config, "engram_layer_ids", ())
+            and model.config.compress_ratios[cut] <= 1
         )
         replay_start = cut if trim_cut_layer else cut + 1
         model.decoder_replay_start = replay_start
