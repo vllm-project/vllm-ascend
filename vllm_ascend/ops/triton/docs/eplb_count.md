@@ -6,7 +6,8 @@ the existing Torch reference. Inputs are INT32/INT64 physical expert IDs [T,K],
 a BOOL token mask [T], and the nonnegative local start and positive count C.
 Output is a fresh INT64 [C] tensor: `out[e] = sum(mask[t] and ids[t,j] == start+e)`.
 Repeated routes count separately; masked, negative and nonlocal routes count zero.
-Strided inputs and empty T/K are supported.
+NPU physical IDs must be contiguous; noncontiguous IDs raise ValueError rather
+than being copied implicitly. Strided token masks and empty T/K are supported.
 
 The output is zero-initialized. Fixed 512-route tiles are balanced across a grid
 bounded by the Vector Core count from the shared capability helper. Each program
@@ -16,6 +17,9 @@ of C, with a minimum of two: the A5 backend failed to lower a one-element
 loop-carried tensor, including an attempted sum reduction. Padding resolves that
 case without changing the 128-bin main case. The caller selects the current NPU,
 following the normal worker convention.
+
+IDs use `ids_ptr + offsets` directly. This preserves contiguous access in the
+compiler IR instead of reconstructing offsets with division and remainder.
 
 No host reads of tensor values or global intermediate index/mask tensors are
 introduced. The 128-bin logical accumulator is 1 KiB. Saved compiler IR confirms
@@ -27,6 +31,29 @@ load accumulation. This is the existing 0/1 route-count contract, not a general
 weighted scatter API.
 
 ## Validation
+
+### Current contiguous-ID implementation (2026-11-17)
+
+A3 and A5 each passed 82/82 tests, including noncontiguous-ID rejection and
+mutable Graph replay. IDs lower to contiguous `memref.copy` in adapter IR;
+token-mask scalar loads remain. This change does not vectorize the entire kernel.
+Tile size 512, histogram, grid policy and explicit SIMD mode are unchanged.
+Same-device alternating Graph measurements against pre-change commit `814f16c81`
+(20 full calls/replay, 10 samples, median microseconds):
+
+| Device | Distribution | Previous us | Contiguous IDs us |
+| --- | --- | ---: | ---: |
+| A3 | uniform | 651.93 | 611.73 |
+| A3 | hot | 641.64 | 595.52 |
+| A3 | mixed | 633.70 | 593.70 |
+| A5 | uniform | 1060.19 | 1034.15 |
+| A5 | hot | 1049.89 | 1024.99 |
+| A5 | mixed | 1053.79 | 1029.78 |
+
+The address change improves this measured range but does not explain the full
+A3/A5 latency gap. Model-level integration and full repository CI are pending.
+
+### Historical compiler-mode and algorithm trials
 
 The current launch explicitly sets `compile_mode="simd"` on Ascend 950.
 A2/A3 already use SIMD under the default hybrid mode. See the

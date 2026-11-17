@@ -35,15 +35,20 @@ def test_exact(dtype, t, k, c, pattern):
     elif pattern == "all_valid":
         mask.fill_(True)
     expected = reference(ids, mask, start, c)
-    # Exercise strided IDs and mask without changing their logical values.
-    storage = torch.empty((t, k * 2), dtype=dtype, device="npu")
-    view = storage[:, ::2]
-    view.copy_(ids)
+    # IDs are contiguous by contract; the token mask may still be strided.
+    device_ids = ids.npu()
     mask_storage = torch.empty(t * 2, dtype=torch.bool, device="npu")
     mask_view = mask_storage[::2]
     mask_view.copy_(mask)
-    actual = count_allgather_tokens_triton(view, mask_view, start, c)
+    actual = count_allgather_tokens_triton(device_ids, mask_view, start, c)
     torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+
+
+def test_reject_noncontiguous_ids():
+    ids = torch.zeros((4, 16), dtype=torch.int64, device="npu")[:, ::2]
+    mask = torch.ones(4, dtype=torch.bool, device="npu")
+    with pytest.raises(ValueError, match="contiguous physical IDs"):
+        count_allgather_tokens_triton(ids, mask, 0, 128)
 
 
 def test_mutable_graph_replay():

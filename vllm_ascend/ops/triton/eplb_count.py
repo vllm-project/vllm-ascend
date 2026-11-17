@@ -17,8 +17,6 @@ def _count_allgather_kernel(
     num_assignments,
     local_start,
     local_count,
-    ID_ROW_STRIDE: tl.constexpr,
-    ID_COL_STRIDE: tl.constexpr,
     MASK_STRIDE: tl.constexpr,
     TOPK: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -35,11 +33,8 @@ def _count_allgather_kernel(
     for tile in range(first, first + count):
         offsets = tile.to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         rows = offsets // TOPK
-        cols = offsets % TOPK
         in_bounds = offsets < num_assignments
-        physical_ids = tl.load(ids_ptr + rows * ID_ROW_STRIDE + cols * ID_COL_STRIDE, mask=in_bounds, other=-1).to(
-            tl.int64
-        )
+        physical_ids = tl.load(ids_ptr + offsets, mask=in_bounds, other=-1).to(tl.int64)
         valid_token = tl.load(mask_ptr + rows * MASK_STRIDE, mask=in_bounds, other=0).to(tl.int1)
         local_ids = physical_ids - local_start.to(tl.int64)
         eligible = in_bounds & valid_token & (local_ids >= 0) & (local_ids < local_count)
@@ -66,6 +61,8 @@ def count_allgather_tokens_triton(
         raise TypeError("Expected INT32/INT64 IDs and BOOL mask")
     if topk_ids.device.type != "npu" or token_mask.device != topk_ids.device:
         raise ValueError("Inputs must be on the same NPU")
+    if not topk_ids.is_contiguous():
+        raise ValueError("Expected contiguous physical IDs [T,K]")
     if local_expert_start < 0 or local_expert_count <= 0:
         raise ValueError("Expected nonnegative local start and positive local expert count")
     counts = torch.zeros(local_expert_count, dtype=torch.int64, device=topk_ids.device)
@@ -82,8 +79,6 @@ def count_allgather_tokens_triton(
         num_assignments,
         local_expert_start,
         local_expert_count,
-        ID_ROW_STRIDE=topk_ids.stride(0),
-        ID_COL_STRIDE=topk_ids.stride(1),
         MASK_STRIDE=token_mask.stride(0),
         TOPK=topk_ids.shape[1],
         BLOCK_SIZE=ASSIGNMENTS_PER_TILE,
