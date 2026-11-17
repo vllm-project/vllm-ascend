@@ -35,6 +35,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.attention.utils import get_effective_prefill_flags, has_effective_prefill
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -269,25 +270,6 @@ class AscendPCPManager(PCPManager):
         """
         self._dispatch_prefill_runs_as_decode_np = getattr(batch_state, "prefill_runs_as_decode_np", None)
 
-    @staticmethod
-    def _effective_is_prefilling(input_batch: InputBatch) -> np.ndarray:
-        """Return the compute-path phase without mutating lifecycle state."""
-        is_prefilling = np.asarray(input_batch.is_prefilling_np, dtype=np.bool_)
-        prefill_runs_as_decode = getattr(input_batch, "prefill_runs_as_decode_np", None)
-        if prefill_runs_as_decode is None:
-            return is_prefilling
-        prefill_runs_as_decode = np.asarray(prefill_runs_as_decode, dtype=np.bool_)
-        if prefill_runs_as_decode.shape != is_prefilling.shape:
-            raise RuntimeError(
-                "PCP prefill-as-decode mask must match the request phase mask: "
-                f"{prefill_runs_as_decode.shape} != {is_prefilling.shape}."
-            )
-        return is_prefilling & ~prefill_runs_as_decode
-
-    @classmethod
-    def _has_compute_prefill(cls, input_batch: InputBatch) -> bool:
-        return bool(cls._effective_is_prefilling(input_batch).any())
-
     @property
     def max_num_local_reqs(self) -> int:
         """Request-row capacity already reserved by PCP partitioning."""
@@ -383,7 +365,7 @@ class AscendPCPManager(PCPManager):
         token, so their request metadata is kept at the request extent instead.
         """
         return (
-            not self._has_compute_prefill(global_batch)
+            not has_effective_prefill(global_batch)
             and self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
             and global_batch.num_draft_tokens == 0
         )
@@ -394,7 +376,7 @@ class AscendPCPManager(PCPManager):
         batch_desc: BatchExecutionDescriptor,
     ) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
-        effective_is_prefilling = self._effective_is_prefilling(input_batch)
+        effective_is_prefilling = get_effective_prefill_flags(input_batch)
         partition_input = input_batch
         if not np.array_equal(effective_is_prefilling, input_batch.is_prefilling_np):
             # Upstream PCP accepts only one phase mask. Give it the compute-path
@@ -472,7 +454,7 @@ class AscendPCPManager(PCPManager):
             local_batch.seq_lens_np = actual_seq_lens_np
         # Preserve the global attention state for decode-only batches, including
         # empty ranks, before upstream clears local draft metadata.
-        if not self._has_compute_prefill(global_batch):
+        if not has_effective_prefill(global_batch):
             return local_batch
 
         local_batch.attn_state = build_attn_state(
@@ -520,7 +502,7 @@ class AscendPCPManager(PCPManager):
     ) -> AscendInputBatch:
         """Pad a replicated decode batch to the fixed FULL-graph layout."""
         graph_num_tokens = global_batch.num_tokens_after_padding
-        is_decode_only = not self._has_compute_prefill(global_batch)
+        is_decode_only = not has_effective_prefill(global_batch)
         # FULL_DECODE_ONLY graphs capture one token for every padded request.
         # Other graph modes may pad tokens without padding request metadata.
         is_full_decode_graph = self._full_decode_requests_are_token_sized(global_batch)
@@ -822,7 +804,7 @@ class AscendPCPManager(PCPManager):
         assert hidden_restore_idx is not None
         global_block_table_num_blocks = None
         local_to_global_req_indices = None
-        if self.dcp_world_size > 1 and self._has_compute_prefill(global_batch):
+        if self.dcp_world_size > 1 and has_effective_prefill(global_batch):
             global_block_table_num_blocks = torch.from_numpy(
                 self._block_tables.num_blocks.np[:, global_batch.idx_mapping_np[: global_batch.num_reqs]]
             ).to(device=self.device, non_blocking=True)
