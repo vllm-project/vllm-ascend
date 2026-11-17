@@ -177,6 +177,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         prefix: str = "",
         *,
         disable_tp: bool = False,
+        quant_method: QuantizeMethodBase | None = None,
     ):
         nn.Module.__init__(self)
         self.disable_tp = disable_tp
@@ -220,8 +221,12 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             self.tp_size,
         )
         self.embedding_dim = embedding_dim
-        quant_method = None
-        if quant_config is not None:
+        # Mirror the upstream attribute surface: online-quantized lm_head
+        # copies derive their own head from these source attributes.
+        self.prefix = prefix
+        # Keep a preselected method (e.g. an online-quantized lm_head copy)
+        # instead of overriding it with the generic config-based dispatch.
+        if quant_method is None and quant_config is not None:
             quant_method = quant_config.get_quant_method(self, prefix=prefix)
         if quant_method is None:
             quant_method = UnquantizedEmbeddingMethod()
@@ -252,6 +257,12 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         self.num_added_embeddings_per_partition = (
             self.shard_indices.added_vocab_end_index - self.shard_indices.added_vocab_start_index
         )
+        # Mirror the upstream linear-metadata surface: online-quantized
+        # lm_head copies read these from the layer after construction.
+        self.input_size = self.input_size_per_partition = self.embedding_dim
+        self.output_size = self.num_embeddings_padded
+        self.output_size_per_partition = self.num_embeddings_per_partition
+        self.output_partition_sizes = [self.output_size_per_partition]
 
         self.quant_method.create_weights(
             self,
@@ -433,6 +444,7 @@ class AscendParallelLMHead(ParallelLMHead):
         prefix: str = "",
         *,
         disable_tp: bool = False,
+        quant_method: QuantizeMethodBase | None = None,
     ):
         AscendVocabParallelEmbedding.__init__(
             self,
@@ -444,6 +456,7 @@ class AscendParallelLMHead(ParallelLMHead):
             quant_config,
             prefix,
             disable_tp=disable_tp,
+            quant_method=quant_method,
         )
         self.quant_config = quant_config
         if bias:
