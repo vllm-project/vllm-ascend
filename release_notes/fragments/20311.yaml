@@ -12,7 +12,7 @@ entries:
       path, avoiding Q/K NaNs and restoring draft acceptance.
   - category: bugfix
     text: >-
-      Fixed Mamba state copies in reordered or sparse PP+SP request batches by
+      Fixed Mamba state copies in reordered request batches by
       using persistent request-slot indexing and rebuilding the cache context
       after profiling, preventing cross-request SSM and convolution state
       corruption.
