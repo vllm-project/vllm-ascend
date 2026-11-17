@@ -7,7 +7,7 @@ from vllm.triton_utils import tl, triton
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 ASSIGNMENTS_PER_TILE = 512
-MAX_BINS_PER_REDUCE = 128
+PARTIALS_PER_REDUCE_TILE = 10
 
 
 @triton.jit(do_not_specialize=["num_assignments", "local_start", "local_count"])
@@ -52,17 +52,21 @@ def _reduce_allgather_counts_kernel(
     NUM_PROGRAMS: tl.constexpr,
     NUM_BINS: tl.constexpr,
     LOCAL_COUNT: tl.constexpr,
-    REDUCE_SIZE: tl.constexpr,
-    BLOCK_BINS: tl.constexpr,
+    ROWS_PER_TILE: tl.constexpr,
+    BLOCK_ROWS: tl.constexpr,
 ):
-    programs = tl.arange(0, REDUCE_SIZE)
-    bins = tl.program_id(0) * BLOCK_BINS + tl.arange(0, BLOCK_BINS)
-    partial_counts = tl.load(
-        partial_counts_ptr + programs[:, None] * NUM_BINS + bins[None, :],
-        mask=(programs[:, None] < NUM_PROGRAMS) & (bins[None, :] < NUM_BINS),
-        other=0,
-    )
-    counts = tl.sum(partial_counts, axis=0)
+    rows = tl.arange(0, BLOCK_ROWS)
+    bins = tl.arange(0, NUM_BINS)
+    counts = tl.full((NUM_BINS,), 0, tl.int64)
+    # Read complete contiguous rows and bound the live reduction tile.
+    for first_row in range(0, NUM_PROGRAMS, ROWS_PER_TILE):
+        programs = first_row + rows
+        partial_counts = tl.load(
+            partial_counts_ptr + programs[:, None] * NUM_BINS + bins[None, :],
+            mask=(rows[:, None] < ROWS_PER_TILE) & (programs[:, None] < NUM_PROGRAMS),
+            other=0,
+        )
+        counts += tl.sum(partial_counts, axis=0)
     tl.store(counts_ptr + bins, counts, mask=bins < LOCAL_COUNT)
 
 
@@ -110,16 +114,14 @@ def count_allgather_tokens_triton(
         NUM_BINS=num_bins,
         compile_mode="simd",
     )
-    # Bound the INT64 reduction matrix to fit A3 UB for larger expert counts.
-    block_bins = min(num_bins, MAX_BINS_PER_REDUCE)
-    _reduce_allgather_counts_kernel[(triton.cdiv(num_bins, block_bins),)](
+    _reduce_allgather_counts_kernel[(1,)](
         partial_counts,
         counts,
         NUM_PROGRAMS=programs,
         NUM_BINS=num_bins,
         LOCAL_COUNT=local_expert_count,
-        REDUCE_SIZE=triton.next_power_of_2(programs),
-        BLOCK_BINS=block_bins,
+        ROWS_PER_TILE=PARTIALS_PER_REDUCE_TILE,
+        BLOCK_ROWS=triton.next_power_of_2(PARTIALS_PER_REDUCE_TILE),
         compile_mode="simd",
     )
     return counts
