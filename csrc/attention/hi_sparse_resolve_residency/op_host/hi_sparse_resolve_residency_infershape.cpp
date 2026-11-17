@@ -14,10 +14,8 @@ void set_output_shape(gert::InferShapeContext* context, size_t idx, const gert::
 }  // namespace
 
 // The resolve launch binds every output from the framework, so infershape
-// only acknowledges the inputs and pins the stats output shape. The
-// error_rows input stays unbound (empty) in resolve launches, so it is never
-// inspected here. Invalidation runs as a Triton kernel without touching this
-// aclnn op.
+// only acknowledges the inputs and pins the stats output shape. Invalidation
+// runs as a Triton kernel without touching this aclnn op.
 static ge::graphStatus InferShape4HiSparseResolveResidency(gert::InferShapeContext* context) {
     if (context == nullptr) return ge::GRAPH_FAILED;
     if (context->GetInputShape(0) == nullptr) return ge::GRAPH_FAILED;

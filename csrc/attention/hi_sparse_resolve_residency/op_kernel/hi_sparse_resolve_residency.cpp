@@ -18,7 +18,6 @@ extern "C" __global__ __aicore__ void hi_sparse_resolve_residency(
     GM_ADDR source,
     GM_ADDR resident,
     GM_ADDR valid_rows,
-    GM_ADDR error_rows,
     GM_ADDR tags,
     GM_ADDR lru,
     GM_ADDR physical,
@@ -35,7 +34,6 @@ extern "C" __global__ __aicore__ void hi_sparse_resolve_residency(
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
     GET_TILING_DATA(tilingData, tiling);
     (void)workspace;
-    (void)error_rows;
 
     HiSparseArch22Descriptor descriptor{};
     descriptor.pointers[0] = reinterpret_cast<uintptr_t>(logical);
@@ -99,7 +97,6 @@ extern "C" __global__ __aicore__ void hi_sparse_resolve_residency(
     GM_ADDR source,
     GM_ADDR resident,
     GM_ADDR valid_rows,
-    GM_ADDR error_rows,
     GM_ADDR tags,
     GM_ADDR lru,
     GM_ADDR physical,
@@ -116,7 +113,6 @@ extern "C" __global__ __aicore__ void hi_sparse_resolve_residency(
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
     GET_TILING_DATA(tilingData, tiling);
     (void)workspace;
-    (void)error_rows;
 
     // Allocate the SIMT scratch dynamically through the standard UB interface;
     // the tiling stage derives the byte budget from GetCoreMemSize. The

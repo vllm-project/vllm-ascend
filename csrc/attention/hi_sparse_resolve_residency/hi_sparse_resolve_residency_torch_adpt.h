@@ -90,15 +90,12 @@ inline void resolve_residency(
     const int64_t attention_stride = attention ? attention->stride(0) : topk;
     const int64_t counts_stride = counts ? counts->stride(0) : 1;
     const int64_t miss_mask_bytes = static_cast<int64_t>(miss_mask.has_value() && miss_mask->element_size() == 1);
-    // Unbound optional inputs convert to nullptr inside EXEC_NPU_CMD.
-    const at::Tensor empty;
     EXEC_NPU_CMD(
         aclnnHiSparseResolveResidency,
         logical, hot_table,
         requests_t, states_t,
         source_t, resident_t,
         valid_rows_t,
-        empty,
         host_rows, hot_block_size, source_block_size, resident_block_size,
         resident_null_block, attention_block_stride, union_rows, attention_capacity,
         logical_stride, source_stride,

@@ -25,8 +25,6 @@ public:
             .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32}).Format(formats).UnknownShapeFormat(formats).IgnoreContiguous();
         Input("valid_rows").ParamType(OPTIONAL)
             .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32}).Format(formats).UnknownShapeFormat(formats).IgnoreContiguous();
-        Input("error_rows").ParamType(OPTIONAL)
-            .DataType({ge::DT_INT32}).Format(formats).UnknownShapeFormat(formats).IgnoreContiguous();
         Attr("hostRows").AttrType(REQUIRED).Int();
         Attr("hotBlockSize").AttrType(REQUIRED).Int();
         Attr("sourceBlockSize").AttrType(REQUIRED).Int();
