@@ -119,8 +119,10 @@ def check_invariants(logits, row_starts, row_ends, topk, indices):
                 break
         if 0 < n_valid == topk < length:
             sel = set(int(x) - s for x in row[:n_valid])
-            rest = [logits[r, s + i] for i in range(length) if i not in sel]
-            rest = np.asarray(rest, dtype=np.float32)
+            rest = np.asarray(
+                [logits[r, s + i] for i in range(length) if i not in sel],
+                dtype=np.float32,
+            )
             rest = rest[~np.isnan(rest)]
             if rest.size and np.nanmax(rest) > vals[-1]:
                 problems.append(f"row {r}: missed a larger value")

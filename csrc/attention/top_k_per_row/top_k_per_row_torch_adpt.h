@@ -12,13 +12,13 @@
 namespace vllm_ascend {
 
 namespace detail {
-inline at::Tensor ensure_row_major(const at::Tensor& t, const char* what)
+inline at::Tensor ensure_row_major(const at::Tensor& t)
 {
-    if (t.stride(-1) == 1 && t.is_contiguous()) {
+    if (t.is_contiguous()) {
         return t;
     }
-    TORCH_CHECK(t.scalar_type() != at::kFloat || t.is_contiguous(),
-                what, " must be contiguous for the Ascend TopKPerRow kernel");
+    // vLLM hands the indexer whatever layout the projection produced; fold it
+    // into a row-major copy for every dtype instead of rejecting fp32 only.
     return t.contiguous();
 }
 
@@ -52,7 +52,7 @@ inline void top_k_per_row_prefill(const at::Tensor& logits, const at::Tensor& cu
                 "cu_seqlen_ks/cu_seqlen_ke must have num_rows elements");
     (void)stride0;
     (void)stride1;
-    const at::Tensor l = detail::ensure_row_major(logits, "logits");
+    const at::Tensor l = detail::ensure_row_major(logits);
     EXEC_NPU_CMD(aclnnTopKPerRow, l, cu_seqlen_ks, cu_seqlen_ke, topk, indices);
 }
 
@@ -71,20 +71,25 @@ inline void top_k_per_row_decode(const at::Tensor& logits, int64_t next_n, const
     (void)stride0;
     (void)stride1;
 
-    const at::Tensor l = detail::ensure_row_major(logits, "logits");
+    const at::Tensor l = detail::ensure_row_major(logits);
     at::Tensor row_starts;
     at::Tensor row_ends;
     if (seq_lens.numel() == num_rows) {
         row_starts = at::zeros({num_rows}, seq_lens.options());
         row_ends = seq_lens.reshape({num_rows});
     } else {
-        const int64_t batch = seq_lens.numel() / next_n;
+        // seq_lens holds one length per request (shape (B,) or (B, 1)), the same
+        // layout upstream's IndexerTopK._row_ends() consumes: expand each request
+        // length into its next_n rows instead of dividing the element count.
+        TORCH_CHECK(next_n > 0, "next_n must be > 0");
+        const int64_t batch = seq_lens.numel();
+        TORCH_CHECK(batch * next_n == num_rows, "seq_lens (", batch, ") x next_n (", next_n,
+                    ") does not match num_rows (", num_rows, ")");
         auto offsets = at::arange(next_n, seq_lens.options());
         row_ends = (seq_lens.reshape({batch, 1}) - next_n + 1 + offsets.reshape({1, next_n}))
                        .clamp_min(0)
-                       .reshape({batch * next_n});
-        row_starts = at::zeros({batch * next_n}, seq_lens.options());
-        TORCH_CHECK(batch * next_n == num_rows, "seq_lens/next_n do not match num_rows");
+                       .reshape({num_rows});
+        row_starts = at::zeros({num_rows}, seq_lens.options());
     }
     EXEC_NPU_CMD(aclnnTopKPerRow, l, row_starts, row_ends, topk, indices);
 }

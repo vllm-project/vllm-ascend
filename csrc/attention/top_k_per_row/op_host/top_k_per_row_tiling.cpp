@@ -29,7 +29,7 @@ constexpr uint32_t K_ALIGN = 32;           // TopK/Sort work on 32-element group
 constexpr uint32_t K_TOPK_MAX = 2048;
 constexpr uint64_t RESERVED_UB_BYTES = 2048;
 constexpr uint32_t K_MAX_CHUNKS = 4;       // merge width, 4 keeps the merge row small
-constexpr uint32_t MIN_CHUNK = 256;
+constexpr uint32_t K_MAX_CHUNK_WIDTH = 32768;
 
 uint32_t CeilAlign(uint32_t v, uint32_t a)
 {
@@ -90,7 +90,7 @@ ge::graphStatus Tiling4TopKPerRow(gert::TilingContext* context)
     while (maxChunks >= 1) {
         probeTmp = 0;
         const uint32_t mergeInner = (maxChunks + 1) * topkPad;  // +1 slot for the running candidates
-        if (AscendC::TopKTilingFunc(platform, mergeInner, 1, topk, sizeof(float), true,
+        if (AscendC::TopKTilingFunc(platform, mergeInner, 1, topk, sizeof(float), false,
                                     AscendC::TopKMode::TOPK_NORMAL, true, tiling.topk_tiling_merge)) {
             uint32_t hi = 0;
             uint32_t lo = 0;
@@ -106,18 +106,22 @@ ge::graphStatus Tiling4TopKPerRow(gert::TilingContext* context)
                 return ge::GRAPH_FAILED);
     tmpSize = probeTmp;
 
-    // Largest chunk that still fits UB together with the merge level.
-    uint32_t chunkMax = std::min(width, 32768U);
-    chunkMax = chunkMax / K_ALIGN * K_ALIGN;
-    const uint32_t chunkFloor = std::max(MIN_CHUNK, topkPad);  // a chunk must hold one full top-k
-    uint32_t chunk = (chunkMax < chunkFloor) ? 0U : chunkMax;
+    // Largest chunk that still fits UB together with the merge level. A chunk
+    // must be able to hold one full top-k (so one TopK call over the chunk is
+    // well defined) and be K_ALIGN wide. Rows narrower than MIN_CHUNK -- down to
+    // the single-column case -- are legal input, so the physical chunk is padded
+    // up to K_ALIGN rather than rejected: LoadChunkToFp32 already pads every
+    // chunk with -FLT_MAX up to chunk_size.
+    uint32_t chunkMax = CeilAlign(std::min(width, K_MAX_CHUNK_WIDTH), K_ALIGN);
+    const uint32_t chunkFloor = std::max(K_ALIGN, topkPad);
+    uint32_t chunk = (chunkMax < chunkFloor) ? chunkFloor : chunkMax;
     bool chunkOk = false;
     while (chunk >= chunkFloor && chunk != 0U) {
         const uint64_t need = UbNeed(chunk, topkPad, maxChunks, dtypeSize, tmpSize);
         if (need <= ubBudget) {
             uint32_t hi = 0;
             uint32_t lo = 0;
-            if (AscendC::TopKTilingFunc(platform, chunk, 1, std::min(topk, chunk), sizeof(float), true,
+            if (AscendC::TopKTilingFunc(platform, chunk, 1, std::min(topk, chunk), sizeof(float), false,
                                         AscendC::TopKMode::TOPK_NORMAL, true, tiling.topk_tiling_chunk) &&
                 AscendC::GetTopKMaxMinTmpSize(platform, chunk, 1, false, true,
                                               AscendC::TopKMode::TOPK_NORMAL, true, sizeof(float), hi, lo)) {

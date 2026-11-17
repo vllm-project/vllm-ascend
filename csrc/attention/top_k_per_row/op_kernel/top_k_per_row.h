@@ -172,7 +172,9 @@ private:
         LocalTensor<int32_t> mergeIdx = mergeIdxBuf_.Get<int32_t>();
 
         if (len == 0U) {
-            WriteOut(row, curIdx, 0U);
+            Duplicate(curIdx, static_cast<int32_t>(-1), topkPad_);
+            PipeBarrier<PIPE_V>();
+            WriteOut(row, curIdx);
             return;
         }
 
@@ -213,18 +215,17 @@ private:
             Duplicate(curIdx[validOut], static_cast<int32_t>(-1), topkPad_ - validOut);
             PipeBarrier<PIPE_V>();
         }
-        WriteOut(row, curIdx, validOut);
+        WriteOut(row, curIdx);
     }
 
-    __aicore__ inline void WriteOut(uint32_t row, LocalTensor<int32_t> idx, uint32_t validOut)
+    // The output row is exactly `topk_` entries wide, and every entry is
+    // initialized before this call: the selection itself, then the -1 padding
+    // up to topk_pad (>= topk). Rows shorter than topk must therefore write the
+    // full padded row -- writing only `validOut` entries would leave the tail of
+    // `indices` holding whatever the caller's buffer already contained.
+    __aicore__ inline void WriteOut(uint32_t row, LocalTensor<int32_t> idx)
     {
-        if (validOut == 0U) {
-            Duplicate(idx, static_cast<int32_t>(-1), topkPad_);
-            PipeBarrier<PIPE_V>();
-            validOut = topkPad_;  // write the whole padded row of -1
-        }
-        // clamp: never write more than the requested topk entries
-        const uint32_t count = (validOut > topk_) ? topk_ : validOut;
+        const uint32_t count = topk_;
         event_t syncV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
         SetFlag<HardEvent::V_MTE3>(syncV);
         WaitFlag<HardEvent::V_MTE3>(syncV);

@@ -79,8 +79,11 @@ extern "C" aclnnStatus aclnnTopKPerRowGetWorkspaceSize(
 
     // The kernel reads one window per row; the row layout itself is described
     // by the view shape (strides are irrelevant, we index by row * width).
-    const aclTensor* tensors[] = {logits, rowStarts, rowEnds, indices};
-    for (const auto* tensor : tensors) {
+    // SetOriginalShape is a non-const accessor, so the input views are cast here
+    // rather than making the whole launcher take non-const tensors.
+    aclTensor* tensors[] = {const_cast<aclTensor*>(logits), const_cast<aclTensor*>(rowStarts),
+                            const_cast<aclTensor*>(rowEnds), indices};
+    for (auto* tensor : tensors) {
         tensor->SetOriginalShape(tensor->GetViewShape());
     }
 
