@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm.config import ParallelConfig
 from vllm.v1.worker import cp_utils
 
 from vllm_ascend.attention import mla_v1
@@ -16,7 +17,9 @@ from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 def test_mla_target_and_draft_accept_target_interleave(monkeypatch, is_draft, pcp, dcp):
     draft = SimpleNamespace(
         model_config=SimpleNamespace(runner_type="draft" if is_draft else "generate", dtype=torch.bfloat16),
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp, decode_context_parallel_size=dcp),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=dcp, prefill_context_parallel_size=pcp, decode_context_parallel_size=dcp
+        ),
         cache_config=SimpleNamespace(cache_dtype="bfloat16"),
         speculative_config=None,
     )

@@ -56,8 +56,6 @@ import vllm_ascend.patch.platform.patch_fused_moe  # noqa
 # The Ascend Engram adapter requires `vllm.config.engram` (vLLM main/v0.31.0+).
 import vllm_ascend.patch.platform.patch_engram_config  # noqa
 
-import vllm_ascend.patch.platform.patch_indexer_kv_dtype  # noqa
-import vllm_ascend.patch.platform.patch_kv_cache_dtype  # noqa
 import vllm_ascend.patch.platform.patch_example_connector  # noqa
 
 # ** File: platform/patch_example_connector.py **
