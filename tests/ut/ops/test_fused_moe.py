@@ -1727,6 +1727,7 @@ def test_linear_wrapper_preserves_prequantized_activation_for_down_proj(monkeypa
     [SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL],
 )
 def test_k3_w4a8_mxfp_multistream_schedule_on_a3_and_a5(monkeypatch, parallel_mode, device_type):
+    """Verify shared quantization and matmuls follow routed milestones on A3/A5."""
     quantized_input = torch.ones(4, 4, dtype=torch.float8_e4m3fn)
     input_scale = torch.ones(4, 1)
     gate_up_out = torch.randn(4, 4, dtype=torch.bfloat16)
