@@ -34,7 +34,7 @@ permissions:
 jobs:
   authorize:
     name: Check user authorization
-    runs-on: linux-amd64-cpu-4-hk
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     outputs:
@@ -541,7 +541,7 @@ jobs:
     name: Build presmoke images
     needs: [authorize]
     if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'presmoke'
-    runs-on: linux-amd64-cpu-4-hk
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     outputs:
@@ -610,7 +610,7 @@ jobs:
     name: Trigger Nightly-A2
     needs: [authorize]
     if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a2 == 'true'
-    runs-on: linux-amd64-cpu-4-hk
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     outputs:
@@ -659,7 +659,7 @@ jobs:
     name: Trigger Nightly-A3
     needs: [authorize]
     if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a3 == 'true'
-    runs-on: linux-amd64-cpu-4-hk
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     outputs:
@@ -708,7 +708,7 @@ jobs:
     name: Trigger Nightly-A3-560T
     needs: [authorize]
     if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a3_560t == 'true'
-    runs-on: linux-amd64-cpu-4-hk
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     outputs:
@@ -757,7 +757,7 @@ jobs:
     name: Trigger Nightly-A5
     needs: [authorize]
     if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a5 == 'true'
-    runs-on: linux-amd64-cpu-4-hk
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     outputs:
@@ -806,7 +806,7 @@ jobs:
     name: Trigger Nightly-310P
     needs: [authorize]
     if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_310p == 'true'
-    runs-on: linux-amd64-cpu-4-hk
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     outputs:
@@ -853,7 +853,7 @@ jobs:
     name: Trigger Weekly-A2
     needs: [authorize]
     if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'weekly' && needs.authorize.outputs.dispatch_a2 == 'true'
-    runs-on: linux-amd64-cpu-4-hk
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     outputs:
@@ -895,7 +895,7 @@ jobs:
     name: Trigger Weekly-A3
     needs: [authorize]
     if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'weekly' && needs.authorize.outputs.dispatch_a3 == 'true'
-    runs-on: linux-amd64-cpu-4-hk
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     outputs:
@@ -939,7 +939,7 @@ jobs:
     name: Trigger Weekly-A3-560T
     needs: [authorize]
     if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'weekly' && needs.authorize.outputs.dispatch_a3_560t == 'true'
-    runs-on: linux-amd64-cpu-4-hk
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     outputs:
@@ -983,7 +983,7 @@ jobs:
     name: Trigger Weekly-310P
     needs: [authorize]
     if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'weekly' && needs.authorize.outputs.dispatch_310p == 'true'
-    runs-on: linux-amd64-cpu-4-hk
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     outputs:

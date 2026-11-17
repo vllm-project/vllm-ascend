@@ -344,7 +344,7 @@ jobs:
         needs.pre-commit.result == 'success' &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise')
       }}
-    runs-on: linux-amd64-cpu-4-hk
+    runs-on: linux-amd64-cpu-2-hk
     outputs:
       coverage_paths: ${{ steps.export-paths.outputs.coverage_paths }}
     env:
