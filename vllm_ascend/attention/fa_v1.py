@@ -53,6 +53,24 @@ class AscendFlashAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
         ):
             raise ValueError("CANN FlashAttn requires the same sliding window within each attention group.")
 
+        self.plan_buffer: torch.Tensor | None = None
+        if vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            from cann_ops_transformer.ops import flash_attn_metadata
+
+            max_reqs = vllm_config.scheduler_config.max_num_seqs
+            # Use CANN's Meta implementation to size the buffer before capture.
+            plan_meta = flash_attn_metadata(
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_size,
+                cu_seqlens_q=torch.empty(max_reqs + 1, dtype=torch.int32, device="meta"),
+                seqused_kv=torch.empty(max_reqs, dtype=torch.int32, device="meta"),
+                layout_q="TND",
+                layout_kv=self.layout_kv,
+                layout_out="TND",
+            )
+            self.plan_buffer = torch.empty_like(plan_meta, device=device)
+
     def update_draft_decode_metadata(self, metadata: AscendFlashAttentionMetadata) -> None:
         from cann_ops_transformer.ops import flash_attn_metadata
 
@@ -78,6 +96,10 @@ class AscendFlashAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
             layout_out="TND",
         )
         plan = flash_attn_metadata(self.num_heads, self.num_kv_heads, self.head_size, **attrs)
+        if self.plan_buffer is not None:
+            stored_plan = self.plan_buffer[: plan.numel()]
+            stored_plan.copy_(plan)
+            plan = stored_plan
         metadata.flash_attn_plan = plan, attrs
 
     def build(self, common_prefix_len, common_attn_metadata, fast_build=False):

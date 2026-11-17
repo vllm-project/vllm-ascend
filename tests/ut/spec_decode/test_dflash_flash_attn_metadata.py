@@ -103,7 +103,8 @@ def test_flash_attn_graph_forward_prepares_plan_for_attention(monkeypatch):
     impl.scale, impl.key_cache, impl.value_cache = 128**-0.5, None, None
     builder.num_heads, builder.num_kv_heads, builder.head_size = 8, 1, 128
     builder.sliding_window, builder.layout_kv = None, "PA_BBND"
-    plan = torch.empty(16, dtype=torch.int32)
+    builder.plan_buffer = torch.empty(16, dtype=torch.int32)
+    plan = torch.arange(16, dtype=torch.int32)
     query = torch.zeros(16, 8, 128)
     ops = SimpleNamespace(
         flash_attn_metadata=MagicMock(return_value=plan),
@@ -124,7 +125,10 @@ def test_flash_attn_graph_forward_prepares_plan_for_attention(monkeypatch):
         ops.flash_attn_metadata.call_args.kwargs["seqused_kv"], torch.tensor([197, 99, 1, 1], dtype=torch.int32)
     )
     assert ops.flash_attn.call_count == 2
-    assert all(call.kwargs["metadata"] is plan for call in ops.flash_attn.call_args_list)
+    stored_plan, _ = metadata.flash_attn_plan
+    assert stored_plan.data_ptr() == builder.plan_buffer.data_ptr()
+    torch.testing.assert_close(stored_plan, plan)
+    assert all(call.kwargs["metadata"] is stored_plan for call in ops.flash_attn.call_args_list)
 
 
 @pytest.mark.parametrize(

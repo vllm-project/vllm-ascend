@@ -7,7 +7,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch_npu  # noqa: F401
+from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 
+from vllm_ascend.attention import fa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.fa_v1 import (
     AscendFlashAttentionBackend,
@@ -47,7 +50,7 @@ def golden(query, key, value, block_table, lengths, window, query_len, causal):
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("head_dim", [128, 192])
 @pytest.mark.parametrize("execution_mode", ["eager", "graph"])
-def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, head_dim, execution_mode):
+def test_strided_paged_flash_attn_matches_golden(monkeypatch, dtype, window, layout, causal, head_dim, execution_mode):
     torch.npu.set_device(0)
     torch.manual_seed(42)
     device = "npu"
@@ -70,11 +73,6 @@ def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, 
     optimistic = torch.tensor([4096, 3072, 0], dtype=torch.int32, device=device)
     rejected = torch.tensor([0, 2, 0], dtype=torch.int32, device=device)
     mask = torch.triu(torch.ones(2048, 2048, dtype=torch.int8, device=device), diagonal=1)
-    builder = AscendFlashAttentionMetadataBuilder.__new__(AscendFlashAttentionMetadataBuilder)
-    builder.model_config = SimpleNamespace(runner_type="draft")
-    builder.attn_mask_builder = SimpleNamespace(
-        get_splitfuse_attn_mask=lambda: mask,
-    )
     common = SimpleNamespace(
         num_reqs=3,
         num_actual_tokens=query.shape[0],
@@ -91,8 +89,19 @@ def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, 
     impl.num_heads, impl.num_kv_heads, impl.head_size = 8, 1, head_dim
     impl.scale, impl.sliding_window = head_dim**-0.5, window
     impl.use_bnsd_kv_cache, impl.sinks = layout == "PA_BNBD", None
-    builder.num_heads, builder.num_kv_heads, builder.head_size = 8, 1, physical_dim
-    builder.sliding_window, builder.layout_kv = window, layout
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(runner_type="draft", max_model_len=4096),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+        scheduler_config=SimpleNamespace(max_num_seqs=4, enable_chunked_prefill=True),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.FULL if execution_mode == "graph" else CUDAGraphMode.NONE
+        ),
+        speculative_config=None,
+    )
+    kv_spec = FullAttentionSpec(block_size=block_size, num_kv_heads=1, head_size=physical_dim, dtype=dtype)
+    monkeypatch.setattr(fa_v1, "get_layers_from_vllm_config", lambda *_args: {"draft": SimpleNamespace(impl=impl)})
+    builder = AscendFlashAttentionMetadataBuilder(kv_spec, ["draft"], config, torch.device(device))
+    builder.attn_mask_builder = SimpleNamespace(get_splitfuse_attn_mask=lambda: mask)
     output = torch.empty_like(query)
     # Capture must retain views of the persistent buffers, not a particular
     # iteration's subtraction result or a host mirror of accepted lengths.
@@ -120,7 +129,7 @@ def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, 
         graph = UpdatableGraph()
         with torch.npu.graph(graph, stream=stream):
             run()
-        assert captured_metadata.flash_attn_plan is not None
+        assert captured_metadata.flash_attn_plan[0].data_ptr() == builder.plan_buffer.data_ptr()
 
         def execute():
             graph.replay()

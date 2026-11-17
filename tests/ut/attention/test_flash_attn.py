@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -23,7 +24,7 @@ from vllm_ascend.models.minimax_m3 import msa_m3
 from vllm_ascend.worker.v2 import attn_utils
 
 
-def make_builder(monkeypatch, *impls):
+def make_builder(monkeypatch, *impls, graph_mode=CUDAGraphMode.NONE):
     layers = {f"draft.{i}": SimpleNamespace(impl=impl) for i, impl in enumerate(impls)}
     first = impls[0]
     kv_spec = FullAttentionSpec(
@@ -32,7 +33,11 @@ def make_builder(monkeypatch, *impls):
     with monkeypatch.context() as patches:
         patches.setattr(fa_v1.AscendAttentionMetadataBuilder, "__init__", lambda *_args: None)
         patches.setattr(fa_v1, "get_layers_from_vllm_config", Mock(return_value=layers))
-        return AscendFlashAttentionMetadataBuilder(kv_spec, list(layers), None, torch.device("cpu"))
+        config = SimpleNamespace(
+            compilation_config=SimpleNamespace(cudagraph_mode=graph_mode),
+            scheduler_config=SimpleNamespace(max_num_seqs=4),
+        )
+        return AscendFlashAttentionMetadataBuilder(kv_spec, list(layers), config, torch.device("cpu"))
 
 
 @pytest.mark.parametrize("head_size", [64, 72, 128, 192, 256])
@@ -451,7 +456,7 @@ def test_metadata_builder_slices_request_extent():
     assert metadata.query_start_loc_gpu.data_ptr() == common.query_start_loc.data_ptr()
 
 
-def test_capture_records_fresh_lengths_and_tiling_after_warmup(monkeypatch):
+def test_capture_refreshes_the_preallocated_plan_after_warmup(monkeypatch):
     from vllm_ascend.attention.fa_v1 import AscendFlashAttentionMetadata
 
     query = torch.zeros(12, 8, 128, dtype=torch.bfloat16)
@@ -465,25 +470,30 @@ def test_capture_records_fresh_lengths_and_tiling_after_warmup(monkeypatch):
         causal=False,
     )
     ops = SimpleNamespace(
-        flash_attn_metadata=Mock(side_effect=lambda *args, **kwargs: torch.empty(16, dtype=torch.int32)),
+        flash_attn_metadata=Mock(
+            side_effect=lambda *args, **kwargs: (
+                torch.empty(32, dtype=torch.int32, device="meta")
+                if kwargs["cu_seqlens_q"].is_meta
+                else kwargs["seqused_kv"][:1].repeat(16)
+            )
+        ),
         flash_attn=Mock(return_value=(query, None)),
     )
     monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
     metadata.num_actual_tokens = query.shape[0]
-    builder = make_builder(monkeypatch, impl)
+    builder = make_builder(monkeypatch, impl, graph_mode=CUDAGraphMode.FULL)
+    assert builder.plan_buffer.numel() == 32
+    assert ops.flash_attn_metadata.call_args.kwargs["cu_seqlens_q"].is_meta
+    plan_address = builder.plan_buffer.data_ptr()
     builder.update_draft_decode_metadata(metadata)
     impl.forward_impl(query, None, None, None, metadata, output)
-    eager_plan, _ = metadata.flash_attn_plan
+    assert metadata.flash_attn_plan[0].data_ptr() == plan_address
     ops.flash_attn_metadata.reset_mock()
     ops.flash_attn.reset_mock()
 
     def forbid_host_read(*args, **kwargs):
         raise AssertionError("captured draft lengths must stay on device")
 
-    # Reuse the same metadata for independent captures, including a padded
-    # request disappearing after rejection. No producer may come from warmup
-    # or from the preceding capture.
-    previous_plans = {id(eager_plan)}
     for boundaries, lengths in (([0, 4, 8, -1], [253, 251, 0]), ([0, 4, 4, -1], [250, 0, 0])):
         tiling_start = ops.flash_attn_metadata.call_count
         metadata.query_start_loc_gpu.copy_(torch.tensor(boundaries, dtype=torch.int32))
@@ -501,10 +511,11 @@ def test_capture_records_fresh_lengths_and_tiling_after_warmup(monkeypatch):
         for call in calls:
             torch.testing.assert_close(call.kwargs["cu_seqlens_q"], expected_boundaries)
             torch.testing.assert_close(call.kwargs["seqused_kv"], expected_lengths)
-        captured_plans = {id(call.kwargs["metadata"]) for call in ops.flash_attn.call_args_list[-6:]}
-        assert len(captured_plans) == 1
-        assert captured_plans.isdisjoint(previous_plans)
-        previous_plans.update(captured_plans)
+        plan, _ = metadata.flash_attn_plan
+        assert plan.shape == (16,)
+        assert plan.data_ptr() == plan_address
+        torch.testing.assert_close(plan, torch.full((16,), lengths[0], dtype=torch.int32))
+        assert all(call.kwargs["metadata"] is plan for call in ops.flash_attn.call_args_list[-6:])
     assert ops.flash_attn.call_count == 12
 
 
