@@ -1,0 +1,6 @@
+pr: 20470
+entries:
+  - category: bugfix
+    text: >-
+      Fixed wait-mode pauses and sleeps hanging when Ascend-specific schedulers
+      had requests holding KV blocks for asynchronous loads.
