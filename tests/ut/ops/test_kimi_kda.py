@@ -828,7 +828,7 @@ def test_projection_communication_mode_honors_pg_override(monkeypatch, env_mode,
 
 @pytest.mark.parametrize("aiv", [True, False])
 def test_kda_g_precedes_quant_and_aiv_exchanges_join_before_vector(monkeypatch, aiv):
-    trace = []
+    trace: list[str] = []
     main = _RecordingStream("main", ["owner_ready", "input_ready"], trace)
     aux = _RecordingStream("aux", ["forget_ready", "beta_ready"], trace)
     group = SimpleNamespace(world_size=2)

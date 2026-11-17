@@ -570,9 +570,12 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
 
     impl.indexer = MagicMock(side_effect=indexer)
     impl._get_indexcache_topk_indices = MagicMock(return_value=indices)
-    impl._execute_sparse_flash_attention_process = MagicMock(
-        side_effect=lambda *args: (trace.append("SFA"), torch.ones(4, 2))[1]
-    )
+
+    def sparse_attention(*args):
+        trace.append("SFA")
+        return torch.ones(4, 2)
+
+    impl._execute_sparse_flash_attention_process = MagicMock(side_effect=sparse_attention)
     gate_work = MagicMock()
     gate_work.wait.side_effect = lambda: trace.append("join-G")
     if gate_aiv is not None:

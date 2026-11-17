@@ -122,7 +122,7 @@ def test_chunked_collectives_preserve_owner_rows(monkeypatch, capacity, size, co
 
 
 def test_pending_buffers_follow_actual_consumer(monkeypatch):
-    trace = []
+    trace: list[str | tuple[str, object]] = []
     consumer = object()
     monkeypatch.setattr(torch.npu, "current_stream", lambda: consumer)
     source = SimpleNamespace(record_stream=lambda stream: trace.append(("source", stream)))
@@ -153,7 +153,6 @@ def test_restore_copies_first_chunk_before_joining_tail(monkeypatch):
 
 def test_communication_reuses_stream_and_orders_producer_consumer(monkeypatch):
     trace = []
-    current = [None]
 
     class Stream:
         def __init__(self, name):
@@ -167,7 +166,7 @@ def test_communication_reuses_stream_and_orders_producer_consumer(monkeypatch):
             trace.append(f"{self.name}:wait:{event}")
 
     main, communication = Stream("main"), Stream("communication")
-    current[0] = main
+    current = [main]
     created = []
 
     def create_stream():

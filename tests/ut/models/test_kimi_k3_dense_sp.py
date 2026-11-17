@@ -54,7 +54,7 @@ def test_dense_adapter_preserves_token_rows(rank, sequence_parallel):
 @pytest.mark.parametrize("aiv", [False, True])
 def test_dense_finegrained_pipeline_uses_ccu_only(monkeypatch, aiv):
     group = SimpleNamespace(world_size=2, rank_in_group=0)
-    context = {}
+    context: dict[str, kimi_k3.AscendKimiMLP] = {}
 
     def init(module, **kwargs):
         nn.Module.__init__(module)
