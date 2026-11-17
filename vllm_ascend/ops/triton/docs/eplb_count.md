@@ -103,10 +103,10 @@ The expanded shapes are synthetic interface/boundary cases. The task's original
 
 ## Performance
 
-The measured candidate is `dda67fd5e`, merged through main `776d8f084`.
+The measured candidate is `744847056`, merged through main `776d8f084`.
 The baseline is main `3ae9de590`; its `tensor_ops.py` is byte-identical in
 `776d8f084`. Kernel SHA256:
-`578169f556f9f8baa549c711e7e6332ec45e2b97038e2eca5f4600981ab3f948`.
+`8ee968a3079ae1f52a627a6634e5f4fed595c84b27394d0d293fc10bf55f2818`.
 
 Graph-only measurement covers the complete public wrapper, including fresh
 output/scratch allocation in capture. Each Graph captures 20 calls, performs
@@ -120,8 +120,8 @@ three distributions: 141 points/device. All failures and regressions are retaine
 
 | Platform | Exact tests | Graph exact checks | Faster medians | Regressions | Speedup range |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| A3 | 455/455 | 141/141 | 117/141 | 24/141 | 0.581x–1.983x |
-| A5 | NOT RUN | NOT RUN | — | — | — |
+| A3 | 455/455 | 141/141 | 117/141 | 24/141 | 0.574x–1.953x |
+| A5 | 455/455 | 141/141 | 118/141 | 23/141 | 0.237x–910.690x |
 
 A3 uses Ascend910_9362 / NpuArch2201, 40 vector cores and driver 26.2.rc1.b081.
 The target was healthy and no other process on that target was observed in
@@ -130,76 +130,84 @@ host measurement, not a reservation. CANN is 9.2.1, Torch 2.10.0+cpu, Torch-NPU
 2.10.0.post7, Triton 3.6.0 and Triton-Ascend 3.6.0.post2. The compiler SHA256 is
 `69b9402f711ccdcd21c6f951b5e211bb2abd397f1f5ff06dd4dc7a88c6f974bc`.
 
-Current A5 validation is NOT RUN: replacement targets were occupied or the
-isolated runtime failed initialization with DCMI `ret=-8020` before a kernel
-test. A5 rows contain null timing data and NOT_RUN status. Earlier candidate
-measurements are not validation of this source.
+A5 uses Ascend950DT_9582 / NpuArch3510, 64 vector cores and driver 26.2.rc1.b088. CANN, Torch, Torch-NPU, Triton, Triton-Ascend and the compiler binary hash match the A3 versions above. Periodic ownership checks found the target healthy and observed no other process on it. The shared host had Alarm on device 0 and Warning on devices 2/3/6/7; device 1 also had residual HBM allocations without another listed process. These conditions are retained with the raw run and do not establish an isolated hardware comparison between A3 and A5.
 
 For INT64 IDs, contiguous masks and uniform local routes, shapes are
 `(T,K,local_expert_count)` and times are microseconds per call:
 
 | Shape | A3 main | A3 two-stage | A3 speedup | A5 main | A5 two-stage | A5 speedup |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| (1, 1, 1) | 43.22 | 71.23 | 0.607x | — | — | — |
-| (1, 8, 128) | 101.11 | 76.73 | 1.318x | — | — | — |
-| (32, 2, 8) | 90.77 | 73.87 | 1.229x | — | — | — |
-| (64, 4, 32) | 105.47 | 84.35 | 1.250x | — | — | — |
-| (65, 8, 17) | 107.68 | 94.79 | 1.136x | — | — | — |
-| (128, 3, 64) | 107.45 | 90.48 | 1.188x | — | — | — |
-| (256, 8, 64) | 127.89 | 101.65 | 1.258x | — | — | — |
-| (511, 1, 128) | 115.73 | 93.56 | 1.237x | — | — | — |
-| (512, 1, 128) | 111.03 | 93.69 | 1.185x | — | — | — |
-| (513, 1, 129) | 116.13 | 106.21 | 1.093x | — | — | — |
-| (512, 8, 128) | 146.43 | 120.94 | 1.211x | — | — | — |
-| (2048, 8, 128) | 312.69 | 191.16 | 1.636x | — | — | — |
-| (10240, 1, 128) | 183.81 | 187.76 | 0.979x | — | — | — |
-| (10240, 4, 128) | 510.24 | 374.33 | 1.363x | — | — | — |
-| (10240, 8, 32) | 591.43 | 403.70 | 1.465x | — | — | — |
-| (10240, 8, 64) | 603.45 | 453.40 | 1.331x | — | — | — |
-| (10240, 8, 128) | 614.89 | 550.74 | 1.116x | — | — | — |
-| (10240, 8, 256) | 619.46 | 568.17 | 1.090x | — | — | — |
-| (10240, 16, 128) | 1418.81 | 905.81 | 1.566x | — | — | — |
-| (32768, 8, 128) | 2186.41 | 1350.03 | 1.620x | — | — | — |
-| (2, 1, 1) | 44.62 | 72.26 | 0.618x | — | — | — |
-| (16, 2, 16) | 93.68 | 73.44 | 1.276x | — | — | — |
-| (127, 8, 127) | 121.52 | 103.29 | 1.176x | — | — | — |
-| (129, 8, 129) | 121.38 | 122.09 | 0.994x | — | — | — |
-| (1024, 2, 128) | 131.23 | 108.19 | 1.213x | — | — | — |
-| (1024, 8, 128) | 209.27 | 144.47 | 1.449x | — | — | — |
-| (2559, 8, 128) | 277.64 | 285.37 | 0.973x | — | — | — |
-| (2560, 8, 128) | 284.01 | 285.27 | 0.996x | — | — | — |
-| (2561, 8, 128) | 271.60 | 370.24 | 0.734x | — | — | — |
-| (4095, 8, 128) | 394.65 | 372.00 | 1.061x | — | — | — |
-| (4096, 8, 128) | 447.40 | 372.02 | 1.203x | — | — | — |
-| (4097, 8, 128) | 451.43 | 372.07 | 1.213x | — | — | — |
-| (8192, 8, 128) | 684.16 | 548.49 | 1.247x | — | — | — |
-| (16384, 8, 128) | 1176.30 | 815.61 | 1.442x | — | — | — |
-| (65536, 8, 128) | 4283.53 | 2505.28 | 1.710x | — | — | — |
-| (131072, 8, 128) | 6364.25 | 4813.39 | 1.322x | — | — | — |
-| (10240, 2, 128) | 284.27 | 284.38 | 1.000x | — | — | — |
-| (10240, 32, 128) | 2702.06 | 1616.57 | 1.671x | — | — | — |
-| (10240, 8, 16) | 585.73 | 377.40 | 1.552x | — | — | — |
-| (10240, 8, 512) | 624.90 | 611.39 | 1.022x | — | — | — |
-| (960, 8, 512) | 176.56 | 297.37 | 0.594x | — | — | — |
-| (1024, 8, 512) | 211.46 | 294.74 | 0.717x | — | — | — |
-| (1088, 8, 512) | 186.72 | 306.51 | 0.609x | — | — | — |
+| (1, 1, 1) | 42.62 | 71.22 | 0.598x | 10.46 | 35.57 | 0.294x |
+| (1, 8, 128) | 102.12 | 76.65 | 1.332x | 13.86 | 35.86 | 0.387x |
+| (32, 2, 8) | 91.01 | 73.95 | 1.231x | 27.92 | 38.87 | 0.718x |
+| (64, 4, 32) | 105.50 | 83.29 | 1.267x | 44.12 | 37.59 | 1.174x |
+| (65, 8, 17) | 104.72 | 94.85 | 1.104x | 146.16 | 50.72 | 2.882x |
+| (128, 3, 64) | 105.56 | 90.40 | 1.168x | 35.11 | 38.64 | 0.909x |
+| (256, 8, 64) | 124.53 | 100.61 | 1.238x | 135.43 | 39.59 | 3.421x |
+| (511, 1, 128) | 115.25 | 93.55 | 1.232x | 28.85 | 35.59 | 0.811x |
+| (512, 1, 128) | 112.27 | 93.76 | 1.197x | 28.55 | 35.51 | 0.804x |
+| (513, 1, 129) | 115.74 | 105.07 | 1.102x | 29.08 | 35.74 | 0.814x |
+| (512, 8, 128) | 144.99 | 119.81 | 1.210x | 140.64 | 40.05 | 3.512x |
+| (2048, 8, 128) | 305.60 | 190.30 | 1.606x | 453.31 | 41.33 | 10.968x |
+| (10240, 1, 128) | 180.33 | 186.59 | 0.966x | 288.13 | 36.84 | 7.822x |
+| (10240, 4, 128) | 499.65 | 373.37 | 1.338x | 1094.25 | 47.35 | 23.108x |
+| (10240, 8, 32) | 591.23 | 404.08 | 1.463x | 7642.23 | 50.28 | 151.989x |
+| (10240, 8, 64) | 595.53 | 453.23 | 1.314x | 4358.33 | 53.46 | 81.520x |
+| (10240, 8, 128) | 611.73 | 551.08 | 1.110x | 2195.50 | 51.50 | 42.635x |
+| (10240, 8, 256) | 619.00 | 568.18 | 1.089x | 1195.69 | 67.07 | 17.827x |
+| (10240, 16, 128) | 1413.95 | 905.93 | 1.561x | 4336.93 | 60.64 | 71.518x |
+| (32768, 8, 128) | 2151.83 | 1349.65 | 1.594x | 6925.28 | 84.41 | 82.039x |
+| (2, 1, 1) | 43.52 | 71.28 | 0.611x | 10.70 | 45.22 | 0.237x |
+| (16, 2, 16) | 88.83 | 72.48 | 1.226x | 19.38 | 35.75 | 0.542x |
+| (127, 8, 127) | 120.38 | 102.68 | 1.172x | 41.98 | 39.96 | 1.050x |
+| (129, 8, 129) | 121.02 | 121.14 | 0.999x | 41.44 | 40.05 | 1.035x |
+| (1024, 2, 128) | 132.53 | 108.29 | 1.224x | 75.45 | 39.90 | 1.891x |
+| (1024, 8, 128) | 207.81 | 143.52 | 1.448x | 238.35 | 40.31 | 5.912x |
+| (2559, 8, 128) | 274.60 | 284.23 | 0.966x | 552.52 | 42.37 | 13.041x |
+| (2560, 8, 128) | 279.08 | 284.55 | 0.981x | 560.77 | 42.48 | 13.200x |
+| (2561, 8, 128) | 270.02 | 370.25 | 0.729x | 564.13 | 43.05 | 13.103x |
+| (4095, 8, 128) | 392.16 | 372.09 | 1.054x | 892.73 | 42.88 | 20.819x |
+| (4096, 8, 128) | 444.09 | 372.29 | 1.193x | 893.61 | 43.08 | 20.743x |
+| (4097, 8, 128) | 451.36 | 372.11 | 1.213x | 881.59 | 57.48 | 15.338x |
+| (8192, 8, 128) | 683.45 | 548.58 | 1.246x | 1741.42 | 47.69 | 36.518x |
+| (16384, 8, 128) | 1155.31 | 815.50 | 1.417x | 3449.59 | 56.33 | 61.236x |
+| (65536, 8, 128) | 4243.71 | 2504.06 | 1.695x | 13757.96 | 120.21 | 114.452x |
+| (131072, 8, 128) | 6288.70 | 4812.46 | 1.307x | 27441.73 | 185.47 | 147.958x |
+| (10240, 2, 128) | 281.56 | 284.75 | 0.989x | 552.47 | 42.99 | 12.851x |
+| (10240, 32, 128) | 2655.72 | 1615.86 | 1.644x | 8596.93 | 93.20 | 92.241x |
+| (10240, 8, 16) | 587.28 | 377.30 | 1.557x | 14301.91 | 55.81 | 256.277x |
+| (10240, 8, 512) | 618.46 | 610.65 | 1.013x | 842.63 | 61.52 | 13.696x |
+| (960, 8, 512) | 174.15 | 296.33 | 0.588x | 121.08 | 43.59 | 2.778x |
+| (1024, 8, 512) | 209.93 | 293.97 | 0.714x | 131.68 | 43.30 | 3.041x |
+| (1088, 8, 512) | 184.88 | 305.57 | 0.605x | 134.18 | 46.82 | 2.866x |
 
 The original 81920-route/128-bin workload, with local start 7:
 
 | Device / distribution | Main (us) | Two-stage (us) | Speedup |
 | --- | ---: | ---: | ---: |
-| A3 / uniform | 614.89 | 550.74 | 1.116x |
-| A3 / hot | 717.44 | 529.34 | 1.355x |
-| A3 / mixed | 619.11 | 527.73 | 1.173x |
+| A3 / uniform | 611.73 | 551.08 | 1.110x |
+| A3 / hot | 716.41 | 529.54 | 1.353x |
+| A3 / mixed | 613.08 | 526.83 | 1.164x |
+| A5 / uniform | 2195.50 | 51.50 | 42.635x |
+| A5 / hot | 13636.53 | 62.90 | 216.797x |
+| A5 / mixed | 2317.06 | 51.95 | 44.600x |
 
-A3 has 24 regressions. Its lowest ratio is 0.581x at `(1, 1, 1)`, `mixed`, int64, mask stride 1. The implementation is not faster than main at every shape. One reducer tile still pays the output zeroing, INT64 reduction and atomic merge costs; these costs can outweigh the smaller input scan.
+A3 has 24 regressions. Its lowest ratio is 0.574x at `(2, 1, 1)`, `mixed`, int64, mask stride 1. The implementation is not faster than main at every shape. One reducer tile still pays the output zeroing, INT64 reduction and atomic merge costs; these costs can outweigh the smaller input scan.
+
+The regressions include tiny inputs, 512-bin inputs with only 15/16/17 partial
+rows, and the 40-to-41 producer-tile transition. At `(2560,8,128)`, 40 programs
+each scan one 512-route tile. At `(2561,8,128)`, one program scans two tiles;
+its second histogram still has 512 lanes for eight valid routes. This imbalance
+creates a latency step. Splitting reducer tiles does not remove that producer
+cost, and the 15/16-row cases still have only one reducer program.
+
+A5 also has 23 regressions. Its lowest ratio is 0.237x at `(2, 1, 1)`, `uniform`, int64, mask stride 1. Large-shape gains do not establish an all-shape speedup.
 
 Every point, status, median, observed min/max, ten raw samples per path and
 source identity is in the [A3 CSV](eplb_count_graph_a3.csv) and
 [A5 CSV](eplb_count_graph_a5.csv). Missing results have empty numeric fields.
 Model accuracy, serving performance and startup/serving compilation counts
-have not been measured by these standalone tests. An earlier A5 multi-Graph
-failure has no established root cause and is retained in the local history.
+have not been measured by these standalone tests.
 
 ### Reproduce
 
