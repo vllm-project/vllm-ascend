@@ -55,6 +55,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
     KVPoolScheduler,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker, KVPoolWorker
+from vllm_ascend.distributed.kv_transfer.mamba_slot import MambaTerminalSlotView
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
@@ -344,6 +345,13 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
+
+    def publish_mamba_terminal_slot_view(self, view: MambaTerminalSlotView) -> None:
+        """Forward Ascend execution-time Mamba slot metadata to the pool."""
+        assert self.connector_worker is not None
+        publish = getattr(self.connector_worker, "publish_mamba_terminal_slot_view", None)
+        if callable(publish):
+            publish(view)
 
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
         """Fence the previous save before this step can reuse KV blocks.

@@ -40,6 +40,7 @@ from vllm.v1.worker.mamba_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.distributed.kv_transfer.mamba_slot import MambaTerminalSlotView
 from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer, vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
@@ -296,6 +297,18 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             BLOCK_SIZE=_PREPROCESS_BLOCK_SIZE,
             MAMBA_BLOCK_SIZE=mamba_spec.block_size,
         )
+        if has_kv_transfer_group():
+            publish = getattr(get_kv_transfer_group(), "publish_mamba_terminal_slot_view", None)
+            if callable(publish):
+                publish(
+                    MambaTerminalSlotView(
+                        req_ids=tuple(input_batch.req_ids[:num_reqs]),
+                        idx_mapping=input_batch.idx_mapping[:num_reqs],
+                        state_indices=self._mamba_state_idx_gpu,
+                        group_ids=tuple(mamba_group_ids),
+                        block_tables=tuple(block_tables[group_id] for group_id in mamba_group_ids),
+                    )
+                )
         if self._prepare_layerwise_mamba_copy(ctx, num_reqs, input_batch.idx_mapping, kv_cache_config):
             # Per-layer copies are executed by the connector right after each
             # layer's KV load finishes (do_mamba_copy_for_layer).

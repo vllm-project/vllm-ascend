@@ -53,6 +53,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     ReqMeta,
 )
+from vllm_ascend.distributed.kv_transfer.mamba_slot import MambaTerminalSlotView
 
 
 class TestDSparkPrefixRegistration(unittest.TestCase):
@@ -789,6 +790,51 @@ class _SparseSWAHitManager:
 
 class TestKVPoolWorkerHelpers(unittest.TestCase):
     """Test the pure helper methods on KVPoolWorker without full init."""
+
+    def test_materialize_mamba_terminal_slots_uses_exact_runtime_columns(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        worker = KVPoolWorker.__new__(KVPoolWorker)
+        worker._mamba_terminal_slot_view = MambaTerminalSlotView(
+            req_ids=("r0", "r1"),
+            # Batch rows map to persistent request-state rows 2 and 0.
+            idx_mapping=torch.tensor([2, 0], dtype=torch.int64),
+            # Their final circular columns are 1 and 2 respectively.
+            state_indices=torch.tensor([2, 0, 1], dtype=torch.int64),
+            group_ids=(1,),
+            # Block tables are compacted in batch order by the Mamba kernels.
+            block_tables=(torch.tensor([[10, 11, 12], [20, 21, 22]], dtype=torch.int64),),
+        )
+        metadata = AscendConnectorMetadata(set())
+        requests = [ReqMeta("r0", can_save=True), ReqMeta("r1", can_save=True)]
+        for request in requests:
+            metadata.add_request(request)
+
+        worker._materialize_mamba_terminal_slots(metadata)
+
+        self.assertEqual(int(requests[0].mamba_terminal_block_ids[1]), 11)
+        self.assertEqual(int(requests[1].mamba_terminal_block_ids[1]), 22)
+        self.assertIsNone(worker._mamba_terminal_slot_view)
+
+    def test_materialize_mamba_terminal_slots_skips_when_no_request_can_save(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        worker = KVPoolWorker.__new__(KVPoolWorker)
+        block_table = MagicMock()
+        worker._mamba_terminal_slot_view = MambaTerminalSlotView(
+            req_ids=("r0",),
+            idx_mapping=torch.tensor([0], dtype=torch.int64),
+            state_indices=torch.tensor([0], dtype=torch.int64),
+            group_ids=(0,),
+            block_tables=(block_table,),
+        )
+        metadata = AscendConnectorMetadata(set())
+        metadata.add_request(ReqMeta("r0", can_save=False))
+
+        worker._materialize_mamba_terminal_slots(metadata)
+
+        block_table.index_select.assert_not_called()
+        self.assertIsNone(worker._mamba_terminal_slot_view)
 
     def _make_worker_class(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker

@@ -144,6 +144,13 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
     def finish_mamba_state_copy(self) -> None:
         self._mamba_state = None
 
+    def publish_mamba_terminal_slot_view(self, view: Any) -> None:
+        """Forward worker-local Mamba slot metadata to interested children."""
+        for connector in self._connectors:
+            publish = getattr(connector, "publish_mamba_terminal_slot_view", None)
+            if callable(publish):
+                publish(view)
+
     def save_kv_layer(
         self,
         layer_name: str,

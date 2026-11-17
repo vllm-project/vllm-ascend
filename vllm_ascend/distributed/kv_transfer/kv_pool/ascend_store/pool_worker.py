@@ -66,6 +66,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
 )
+from vllm_ascend.distributed.kv_transfer.mamba_slot import MambaTerminalSlotView
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
@@ -107,6 +108,7 @@ class BaseKVPoolWorker(ABC):
         self._init_backend(parallel_config, extra_config)
         self._init_kv_events(vllm_config)
         self._previous_save_batch: KVCacheStoreBatch | None = None
+        self._mamba_terminal_slot_view: MambaTerminalSlotView | None = None
         self.physical_layer_to_group_layers: dict[int, list[tuple[int, int]]] = {}
         self._global_to_local_layer: dict[int, int] = {}
         self.kv_send_thread: KVTransferThread | None = None
@@ -1551,6 +1553,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 f"Non-layerwise KV save requires KVCacheStoreSendingThread, but got {type(send_thread).__name__}"
             )
         requests: list[ReqMeta] = []
+        self._materialize_mamba_terminal_slots(connector_metadata)
 
         for request in connector_metadata.requests:
             can_save = request.can_save
@@ -1568,6 +1571,49 @@ class KVPoolWorker(BaseKVPoolWorker):
         # Complete queued PUTs before the next prefill chunk can reuse SWA slots.
         send_thread.request_queue.join()
         send_thread.raise_if_failed()
+
+    def publish_mamba_terminal_slot_view(self, view: MambaTerminalSlotView) -> None:
+        """Publish the exact execution-time slot view for the current step."""
+        self._mamba_terminal_slot_view = view
+
+    def _materialize_mamba_terminal_slots(self, metadata: AscendConnectorMetadata) -> None:
+        """Resolve logical Mamba terminals from the live execution state."""
+        view = self._mamba_terminal_slot_view
+        self._mamba_terminal_slot_view = None
+        if view is None or not metadata.requests:
+            return
+
+        request_by_id = {request.req_id: request for request in metadata.requests}
+        eligible_requests = [
+            (batch_index, request_by_id[req_id])
+            for batch_index, req_id in enumerate(view.req_ids)
+            if req_id in request_by_id and request_by_id[req_id].can_save is True
+        ]
+        if not eligible_requests:
+            return
+
+        num_reqs = len(view.req_ids)
+        if view.idx_mapping.numel() < num_reqs:
+            raise RuntimeError("Mamba terminal slot view has fewer request indices than request ids")
+
+        batch_indices = torch.tensor(
+            [batch_index for batch_index, _ in eligible_requests],
+            dtype=torch.long,
+            device=view.idx_mapping.device,
+        )
+        request_state_rows = view.idx_mapping.index_select(0, batch_indices).to(dtype=torch.long)
+        state_columns = view.state_indices.index_select(0, request_state_rows).to(dtype=torch.long)
+
+        for group_id, block_table in zip(view.group_ids, view.block_tables, strict=True):
+            eligible_block_rows = block_table.index_select(0, batch_indices)
+            physical_ids = torch.gather(eligible_block_rows, 1, state_columns.unsqueeze(1)).squeeze(1)
+            physical_ids_cpu = physical_ids.to(device="cpu", non_blocking=True)
+            for eligible_index, (_, request) in enumerate(eligible_requests):
+                if request.mamba_terminal_block_ids is None:
+                    request.mamba_terminal_block_ids = {}
+                # Keep the scalar tensor alive. The save event recorded after
+                # this method orders the asynchronous D2H before sender use.
+                request.mamba_terminal_block_ids[group_id] = physical_ids_cpu[eligible_index]
 
     def _make_sub_key_str(self, base_key: str, effective_rank: int) -> str:
         """Rewrite ``@head_or_tp_rank:<local>`` in serialized ``base_key`` to ``<effective_rank>``.

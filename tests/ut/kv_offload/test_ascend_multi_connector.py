@@ -155,6 +155,17 @@ def test_nested_dspark_prefix_provider_keeps_exact_metadata_route():
     assert nested._requests_to_connector == {request.request_id: 1}
 
 
+def test_mamba_terminal_slot_view_is_forwarded_only_to_capable_children():
+    connector = AscendMultiConnector.__new__(AscendMultiConnector)
+    receiver = SimpleNamespace(publish_mamba_terminal_slot_view=MagicMock())
+    connector._connectors = [SimpleNamespace(), receiver]
+    view = object()
+
+    connector.publish_mamba_terminal_slot_view(view)
+
+    receiver.publish_mamba_terminal_slot_view.assert_called_once_with(view)
+
+
 def test_dspark_prefix_provider_must_be_unique():
     connector = AscendMultiConnector.__new__(AscendMultiConnector)
     connector._connectors = [

@@ -600,6 +600,49 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             [["h1"], ["h0", "h2"]],
         )
 
+    def test_save_uses_explicit_terminal_block_without_slot_scan(self):
+        thread, _ = self._make_thread()
+        thread.token_database = MaskedFakeTokenDatabase(masks=([False, True],))
+        thread.group_uses_align_state = [True]
+        thread._prepare_value = MagicMock(return_value=([1007], [16], 7))
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids_by_group=[[0, 0]],
+            block_ids_by_group_np=[np.asarray([0, 0], dtype=np.int64)],
+            block_hashes=["h0", "h1"],
+            skip_null_blocks_by_group=[True],
+            mamba_terminal_block_ids={0: 7},
+        )
+
+        thread.add_stored_request(request)
+        thread.request_queue.put(request)
+        thread._handle_request(request)
+
+        thread._prepare_value.assert_called_once()
+        self.assertEqual(thread._prepare_value.call_args.kwargs["block_id"], 7)
+        self.assertEqual(request.block_ids_by_group, [[0, 0]])
+
+    def test_save_rejects_invalid_explicit_terminal_block(self):
+        thread, _ = self._make_thread()
+        thread.token_database = MaskedFakeTokenDatabase(masks=([False, True],))
+        thread.group_uses_align_state = [True]
+        thread._prepare_value = MagicMock()
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids_by_group=[[0, 0]],
+            block_hashes=["h0", "h1"],
+            skip_null_blocks_by_group=[True],
+            mamba_terminal_block_ids={0: 0},
+        )
+
+        with self.assertLogs("vllm", level="ERROR"):
+            succeeded = thread._handle_stored_request(request)
+
+        self.assertFalse(succeeded)
+        thread._prepare_value.assert_not_called()
+
     def test_pcp_head_shards_save_every_checkpoint(self):
         hashes = [f"h{i}" for i in range(4)]
         for pcp_rank in range(2):

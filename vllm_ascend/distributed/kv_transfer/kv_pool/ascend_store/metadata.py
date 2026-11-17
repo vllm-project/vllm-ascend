@@ -978,6 +978,7 @@ class ReqMeta:
     # operation cannot update the save progress of a new request generation
     # that happens to reuse the same req_id.
     store_job_id: int | None = None
+    mamba_terminal_block_ids: dict[int, Any] | None = None
 
     def __init__(
         self,
@@ -1019,6 +1020,7 @@ class ReqMeta:
         load_key_block_offset: int = 0,
         load_last_block_key: str | None = None,
         load_keys: list[str] | None = None,
+        mamba_terminal_block_ids: dict[int, Any] | None = None,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -1061,6 +1063,7 @@ class ReqMeta:
         self.load_key_block_offset = load_key_block_offset
         self.load_last_block_key = load_last_block_key
         self.load_keys = [] if load_keys is None else list(load_keys)
+        self.mamba_terminal_block_ids = mamba_terminal_block_ids
 
     @property
     def block_ids(self) -> list[int]:
