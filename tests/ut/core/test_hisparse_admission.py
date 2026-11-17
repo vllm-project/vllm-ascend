@@ -30,7 +30,7 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.request import Request
 
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
-from vllm_ascend.hisparse.binding import align_hisparse_slab_views, reserve_hisparse_slab_alignment
+from vllm_ascend.hisparse.binding import prepare_hisparse_cache_views, reserve_hisparse_slab_alignment
 
 BLOCK_SIZE = 16
 
@@ -62,6 +62,7 @@ def _cache_configs(
     hisparse=True,
     store=True,
     host_blocks=None,
+    device_blocks=14,
     max_model_blocks=8,
     in_flight_blocks=2,
     block_size=BLOCK_SIZE,
@@ -83,7 +84,7 @@ def _cache_configs(
         ),
         parallel_config=SimpleNamespace(tensor_parallel_size=1, world_size=1),
         cache_config=SimpleNamespace(
-            num_gpu_blocks_override=14,
+            num_gpu_blocks_override=device_blocks,
             prefix_cache_retention_interval=None,
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
         ),
@@ -110,7 +111,7 @@ def _cache_configs(
     )
     builder = AscendKVCacheConfigBuilder()
     groups = builder.get_kv_cache_groups(config, specs)
-    cache = builder.get_kv_cache_config_from_groups(config, groups, num_blocks=14)
+    cache = builder.get_kv_cache_config_from_groups(config, groups, num_blocks=device_blocks)
     if host_blocks is not None:
         # Model the number of usable Host pages left after other requests.
         cache.hisparse_host_num_blocks = host_blocks
@@ -198,7 +199,7 @@ def test_resident_admission_counts_existing_pages_before_partial_import(window, 
 def test_ascendstore_slab_alignment_requires_reservation():
     _, cache = _cache_configs()
     with pytest.raises(RuntimeError, match="active slab alignment reservation"):
-        align_hisparse_slab_views(cache, {})
+        prepare_hisparse_cache_views(cache, {}, {})
 
 
 @pytest.mark.parametrize("device_sizes", [(), (128, 256)], ids=["no-device-tensors", "unequal-device-sizes"])
@@ -228,10 +229,10 @@ def test_slab_reservation_restores_runner_config_on_failed_binding():
         core_cache = deepcopy(cache)
         assert core_cache.kv_cache_tensors[1].size > device_tensor.size
         name = device_tensor.layers[0]
-        align_hisparse_slab_views(core_cache, {name: torch.empty(device_tensor.size, dtype=torch.int8)})
+        prepare_hisparse_cache_views(core_cache, {name: torch.empty(device_tensor.size, dtype=torch.int8)}, {})
     assert cache.kv_cache_tensors is tensors
     with pytest.raises(RuntimeError, match="active slab alignment reservation"):
-        align_hisparse_slab_views(cache, {})
+        prepare_hisparse_cache_views(cache, {}, {})
 
 
 @pytest.mark.parametrize(
@@ -299,3 +300,53 @@ def test_scheduler_cache_manager_admits_partial_import(store, host_blocks, admit
         assert resident[0].is_null and not resident[1].is_null
     else:
         assert result is None
+
+
+def test_failed_resident_import_releases_reservation_and_can_retry_with_another_request():
+    block = 128
+    config, cache = _cache_configs(block_size=block, host_blocks=24, device_blocks=32)
+    manager = _cache_manager(config, cache)
+    coordinator = get_hisparse_coordinator(manager)
+    (resident,) = coordinator.resident_managers
+    host = coordinator.host_manager
+    assert host is not None
+    device_free = manager.block_pool.get_num_free_blocks()
+    host_free = host.block_pool.get_num_free_blocks()
+    requests = [Request(req_id, list(range(4 * block)), SamplingParams(max_tokens=1), None) for req_id in ("a", "b")]
+
+    for request in requests:
+        assert (
+            manager.allocate_slots(
+                request,
+                num_new_tokens=0,
+                num_external_computed_tokens=2 * block,
+                delay_cache_blocks=True,
+                full_sequence_must_fit=True,
+            )
+            is not None
+        )
+    assert coordinator.reserved_import_pages > 0
+    first, second = requests
+    coordinator.finish_host_import(first.request_id, failed=True)
+    manager.free(first)
+    assert first.request_id not in host.req_to_blocks
+    assert first.request_id not in resident.req_to_blocks
+    assert coordinator.reserved_import_pages > 0
+    assert second.request_id in host.req_to_blocks
+
+    for computed in (0, block):
+        first.num_computed_tokens = computed
+        assert manager.allocate_slots(first, num_new_tokens=block, full_sequence_must_fit=True) is not None
+        assert sum(not page.is_null for page in resident.get_residency_row(first.request_id)) <= (
+            resident.max_admission_blocks_per_request
+        )
+
+    coordinator.finish_host_import(second.request_id, failed=True)
+    for request in requests:
+        manager.free(request)
+        assert request.request_id not in coordinator.request_states
+        assert request.request_id not in host.req_to_blocks
+        assert request.request_id not in resident.req_to_blocks
+    assert coordinator.reserved_import_pages == 0
+    assert host.block_pool.get_num_free_blocks() == host_free
+    assert manager.block_pool.get_num_free_blocks() == device_free

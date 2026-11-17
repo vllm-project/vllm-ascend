@@ -187,12 +187,21 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             for group in getattr(kv_cache_config, "kv_cache_groups", ())
         )
         if has_hisparse:
+            incompatibilities = []
             if self.use_layerwise or self.backend_name != "memcache" or self.kv_role != "kv_both":
-                raise ValueError("HiSparse with AscendStore requires bulk MemCache transfers with kv_role=kv_both.")
+                incompatibilities.append("requires bulk MemCache transfers with kv_role=kv_both")
             if not extra_config.get("load_async", False):
                 # HiSparse publishes imported Host Source pages on receive completion.
-                raise ValueError("HiSparse with AscendStore requires load_async=true.")
-            require_hisparse_host_tcp()
+                incompatibilities.append("requires load_async=true")
+            if self.backend_name == "memcache":
+                try:
+                    require_hisparse_host_tcp()
+                except (ValueError, OSError) as error:
+                    incompatibilities.append(str(error))
+            if incompatibilities:
+                raise ValueError(
+                    "HiSparse with AscendStore has incompatible configuration:\n- " + "\n- ".join(incompatibilities)
+                )
         self.backend_class = get_backend_class(self.backend_name) if self.use_layerwise else None
         self.layerwise_data_plane = self.backend_class.layerwise_data_plane if self.backend_class is not None else None
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"

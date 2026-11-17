@@ -4,4 +4,6 @@ entries:
     text: >-
       Added experimental bulk AscendStore prefix reuse with colocated HiSparse
       on A5 using MemCache host_tcp and asynchronous loading (load_async=true).
+      The combination requires kv_role=kv_both and rejects layerwise transfers,
+      other Store backends and other MemCache protocols at startup.
     hardware: [A5]

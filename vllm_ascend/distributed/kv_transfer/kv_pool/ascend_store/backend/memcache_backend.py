@@ -183,6 +183,7 @@ class MemcacheBackend(Backend):
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
         self._pending_buffers: tuple[list[int], list[int], bool] | None = None
+        self._checked_buffer_sizes: dict[int, int] = {}
 
         if not self._lazy_init:
             self.store = self._setup_store()
@@ -193,6 +194,7 @@ class MemcacheBackend(Backend):
             self.store.close()
             self.store = None
             self._store_initialized = False
+            self._checked_buffer_sizes.clear()
 
     def ensure_initialized(self):
         if self._store_initialized:
@@ -317,7 +319,9 @@ class MemcacheBackend(Backend):
             return
         assert self.store is not None
         for ptr, size in zip(ptrs, sizes):
-            self.store.unregister_buffer(ptr, size)
+            result = self.store.unregister_buffer(ptr, size)
+            if result == 0 and self._checked_buffer_sizes.get(ptr) == size:
+                del self._checked_buffer_sizes[ptr]
 
     def _register_buffers_if_needed(self):
         if self._pending_buffers is None or not self._store_initialized:
@@ -330,24 +334,36 @@ class MemcacheBackend(Backend):
             self._pending_buffers = None
             return
 
-        registered: list[tuple[int, int]] = []
+        # An SDK success can mean the same range was already registered. Keep
+        # earlier successful registrations out of this call's rollback set.
+        registered: dict[int, int] = {}
         try:
             for ptr, size in zip(ptrs, sizes, strict=True):
+                previous_size = registered.get(ptr, self._checked_buffer_sizes.get(ptr))
+                if previous_size == size:
+                    continue
+                if previous_size is not None:
+                    raise RuntimeError(
+                        f"HiSparse MemCache buffer registration failed: already registered with size={previous_size}, "
+                        f"requested size={size}."
+                    )
                 result = self.store.register_buffer(ptr, size)
                 if result != 0:
                     raise RuntimeError(f"HiSparse MemCache buffer registration failed: size={size}, result={result}.")
-                registered.append((ptr, size))
+                registered[ptr] = size
         except Exception:
-            for ptr, size in reversed(registered):
+            for ptr, size in reversed(registered.items()):
                 try:
                     result = self.store.unregister_buffer(ptr, size)
                     if result != 0:
                         logger.error("HiSparse MemCache buffer rollback failed: size=%s, result=%s", size, result)
                 except Exception:
                     logger.exception("HiSparse MemCache buffer rollback failed: size=%s", size)
-            self._pending_buffers = None
             raise
-        self._pending_buffers = None
+        else:
+            self._checked_buffer_sizes.update(registered)
+        finally:
+            self._pending_buffers = None
 
     def exists(self, keys: list[str]) -> list[int]:
         if self._lazy_init and not self._store_initialized:

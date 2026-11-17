@@ -25,7 +25,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_b
     MmcDirect,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-from vllm_ascend.hisparse.binding import align_hisparse_slab_views, reserve_hisparse_slab_alignment
+from vllm_ascend.hisparse.binding import prepare_hisparse_cache_views, reserve_hisparse_slab_alignment
 
 SLAB_ALIGNMENT = 2 * 1024 * 1024
 
@@ -43,6 +43,7 @@ def memcache_backend() -> MemcacheBackend:
     backend._store_initialized = True
     backend._lazy_init = False
     backend._pending_buffers = None
+    backend._checked_buffer_sizes = {}
     return backend
 
 
@@ -154,9 +155,8 @@ def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool,
     worker.dcp_size = 1
     worker.token_database = Mock()
     worker.m_store = Mock()
-    worker._start_kv_transfer_threads = Mock()
-
-    worker.register_kv_caches(caches)
+    with patch.object(worker, "_start_kv_transfer_threads"):
+        worker.register_kv_caches(caches)
     assert worker.group_block_len[0] == [32768]
     assert worker.group_block_stride[0] == [32768]
     assert worker.group_block_len[1] == ([16384, 512] if indexer_c8 else [32768])
@@ -200,12 +200,42 @@ def test_hisparse_alignment_is_scoped_to_the_padded_allocation():
     config = KVCacheConfig(1, [tensor], [])
     original = torch.zeros(128, dtype=torch.int8)
     caches = {"cache": original}
-    align_hisparse_slab_views(config, caches)
+    prepare_hisparse_cache_views(config, caches, {})
     assert caches["cache"] is original
     with pytest.raises(ValueError, match="reserved alignment padding"), reserve_hisparse_slab_alignment(config):
-        align_hisparse_slab_views(config, caches)
-    align_hisparse_slab_views(config, caches)
+        prepare_hisparse_cache_views(config, caches, {})
+    prepare_hisparse_cache_views(config, caches, {})
     assert caches["cache"] is original
+
+
+@pytest.mark.parametrize("wrong_storage", [False, True], ids=["bad-indexer-shape", "bad-slab-owner"])
+def test_hisparse_late_view_failure_leaves_all_bindings_untouched(wrong_storage):
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+
+    names = ["indexer.0", "indexer.1", "indexer.2"]
+    size = 3 * 128 * 128 * torch.bfloat16.itemsize
+    padded_size = size + SLAB_ALIGNMENT - 1
+    spec = AscendSFAIndexerCacheSpec(
+        block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16, cache_role=SparseCacheRole.INDEXER
+    )
+    tensors = [KVCacheTensor(size, names[:2], 32768, size), KVCacheTensor(size, names[2:], 32768, size)]
+    config = KVCacheConfig(1, tensors, [KVCacheGroupSpec(names, spec)])
+    slab = torch.zeros(padded_size, dtype=torch.int8)
+    typed = slab[:size].view(torch.bfloat16).view(3, 1, 1, 128, 128)
+    original = dict(zip(names, typed.unbind(), strict=True))
+    original[names[-1]] = original[names[-1]].clone() if wrong_storage else original[names[-1]].flatten()
+    caches = original.copy()
+    context = {name: SimpleNamespace(hisparse_block_stride=99) for name in names}
+    message = "share one backing allocation" if wrong_storage else "Unexpected HiSparse indexer cache shape"
+
+    with reserve_hisparse_slab_alignment(config):
+        with pytest.raises(ValueError, match=message):
+            prepare_hisparse_cache_views(config, caches, context)
+        assert all(caches[name] is original[name] for name in names)
+        assert [tensor.size for tensor in config.kv_cache_tensors] == [padded_size, padded_size]
+        assert all(layer.hisparse_block_stride == 99 for layer in context.values())
+    assert config.kv_cache_tensors is tensors
+    assert [tensor.size for tensor in tensors] == [size, size]
 
 
 def test_memcache_splits_host_and_device_batches_without_reordering(memcache_backend, caplog) -> None:
@@ -312,11 +342,33 @@ def test_hisparse_requires_async_store_load(extra_config):
         AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
 
 
+def test_hisparse_reports_all_incompatible_bulk_store_options(monkeypatch, tmp_path):
+    path = tmp_path / "mmc-local.conf"
+    path.write_text("ock.mmc.local_service.protocol=device_sdma\n", encoding="utf-8")
+    monkeypatch.setenv("MMC_LOCAL_CONFIG_PATH", str(path))
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(),
+        kv_transfer_config=SimpleNamespace(
+            kv_role="kv_consumer",
+            kv_connector_extra_config={"backend": "memcache", "use_layerwise": True, "load_async": False},
+        ),
+    )
+    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role="hisparse_source", layer_names=[])])
+    with pytest.raises(ValueError) as error:
+        AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
+    message = str(error.value)
+    assert "requires bulk MemCache transfers with kv_role=kv_both" in message
+    assert "requires load_async=true" in message
+    assert "ock.mmc.local_service.protocol=host_tcp" in message
+    assert "device_sdma" in message
+
+
 @pytest.mark.parametrize(
     ("has_hisparse", "protocol", "error"),
     [
         (True, "host_tcp", None),
         (True, "host_shm", "requires .*host_tcp.*host_shm"),
+        (True, "host_tcp # inline comment", "requires .*host_tcp.*inline comment"),
         (True, "device_sdma", "requires .*host_tcp.*device_sdma"),
         (True, "device_urma", "requires .*host_tcp.*device_urma"),
         (True, "", "requires .*host_tcp"),
@@ -414,3 +466,26 @@ def test_memcache_hisparse_registration_rejects_mismatched_arguments(memcache_ba
         backend.register_buffer([100, 200], [10], check_result=True)
     backend.store.register_buffer.assert_not_called()
     assert backend._pending_buffers is None
+
+
+def test_memcache_hisparse_rollback_keeps_earlier_registration_and_allows_retry(memcache_backend):
+    backend = memcache_backend
+    backend.store.register_buffer.side_effect = [0, 0, -7, 0, 0]
+    backend.store.unregister_buffer.return_value = 0
+    backend.register_buffer([100, 100], [10, 10], check_result=True)
+
+    with pytest.raises(RuntimeError, match="result=-7"):
+        backend.register_buffer([100, 200, 300], [10, 20, 30], check_result=True)
+    backend.store.unregister_buffer.assert_called_once_with(200, 20)
+    backend.register_buffer([100, 200], [10, 20], check_result=True)
+    with pytest.raises(RuntimeError, match="already registered with size=10, requested size=11"):
+        backend.register_buffer([100], [11], check_result=True)
+    backend.unregister_buffer([100], [10])
+    backend.register_buffer([100], [11], check_result=True)
+    assert backend.store.register_buffer.call_args_list == [
+        call(100, 10),
+        call(200, 20),
+        call(300, 30),
+        call(200, 20),
+        call(100, 11),
+    ]

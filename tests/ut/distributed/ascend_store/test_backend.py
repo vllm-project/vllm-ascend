@@ -1617,6 +1617,7 @@ class TestMemcacheBackendMethods(unittest.TestCase):
             backend._lazy_init = False
             backend._store_initialized = True
             backend._pending_buffers = None
+            backend._checked_buffer_sizes = {}
             return backend
 
     def test_ssd_load_rewarms_via_registered_full_sized_npu_read(self):

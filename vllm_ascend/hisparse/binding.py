@@ -3,7 +3,7 @@
 """Bind shared-slab views while retaining Core HiSparse allocation."""
 
 import math
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import replace
@@ -15,6 +15,7 @@ from vllm.v1.kv_cache_interface import (
     HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheSpec,
+    KVCacheTensor,
     UniformTypeKVCacheSpecs,
 )
 
@@ -46,7 +47,9 @@ def reserve_hisparse_slab_alignment(kv_cache_config: KVCacheConfig) -> Iterator[
         kv_cache_config.kv_cache_tensors = original_tensors
 
 
-def align_hisparse_slab_views(kv_cache_config: KVCacheConfig, kv_caches: dict[str, Any]) -> None:
+def _align_hisparse_slab_views(
+    kv_cache_config: KVCacheConfig, kv_caches: dict[str, Any]
+) -> tuple[list[KVCacheTensor], int] | None:
     """Rebase Core's device views onto one aligned slice, without allocating or copying KV."""
     size = _slab_size.get()
     if size is None:
@@ -57,7 +60,7 @@ def align_hisparse_slab_views(kv_cache_config: KVCacheConfig, kv_caches: dict[st
             for group in kv_cache_config.kv_cache_groups
         ):
             raise RuntimeError("HiSparse AscendStore device views require an active slab alignment reservation.")
-        return
+        return None
     device_tensors = [tensor for tensor in kv_cache_config.kv_cache_tensors if not tensor.host_resident]
     first_view = kv_caches[device_tensors[0].layers[0]]
     owner = first_view.untyped_storage()
@@ -79,7 +82,21 @@ def align_hisparse_slab_views(kv_cache_config: KVCacheConfig, kv_caches: dict[st
                 kv_caches[name] = view.new_empty(0).set_(
                     aligned_storage, view.storage_offset(), view.size(), view.stride()
                 )
-        tensor.size = size
+    return device_tensors, size
+
+
+def prepare_hisparse_cache_views(
+    kv_cache_config: KVCacheConfig, kv_caches: dict[str, Any], forward_context: dict[str, Any]
+) -> None:
+    """Publish the aligned slab and indexer views only after every view is valid."""
+    prepared_caches = kv_caches.copy()
+    alignment = _align_hisparse_slab_views(kv_cache_config, prepared_caches)
+    _bind_indexer_views(prepared_caches, get_hisparse_indexer_specs(kv_cache_config), forward_context)
+    kv_caches.update(prepared_caches)
+    if alignment is not None:
+        device_tensors, size = alignment
+        for tensor in device_tensors:
+            tensor.size = size
 
 
 def align_hisparse_indexer_specs(
@@ -131,6 +148,15 @@ def get_hisparse_indexer_specs(
                 indexer_specs[name] = spec
 
     return indexer_specs
+
+
+def hisparse_indexer_transfer_views(caches: Sequence[torch.Tensor], layer: Any) -> tuple[torch.Tensor, ...]:
+    """Recover logical pages from the dense Indexer alias used by attention."""
+    stride = getattr(layer, "hisparse_block_stride", 1)
+    if stride > 1:
+        (dense_cache,) = caches
+        return (dense_cache[::stride],)
+    return tuple(caches)
 
 
 def _validate_indexer_spec(spec: AscendSFAIndexerCacheSpec) -> None:
@@ -221,6 +247,7 @@ def write_hisparse_indexer_c8(key, scale, values, scales, slots) -> None:
 def _bind_indexer_views(
     kv_caches: dict[str, Any], indexer_specs: dict[str, AscendSFAIndexerCacheSpec], forward_context: dict[str, Any]
 ) -> None:
+    block_strides = {}
     for name, spec in indexer_specs.items():
         cache = kv_caches[name]
         # The indexer kernels address dense pages. Expand the view over the
@@ -229,7 +256,7 @@ def _bind_indexer_views(
             raise ValueError(f"Unexpected HiSparse indexer cache shape for {name}: {tuple(cache.shape)}")
         if spec.cache_sparse_li_c8:
             kv_caches[name] = _quantized_indexer_views(cache, spec)
-            forward_context[name].hisparse_block_stride = 1
+            block_strides[name] = 1
             continue
         block_size = cache.shape[2]
         page_elements = block_size * spec.num_kv_heads * spec.head_size
@@ -242,5 +269,7 @@ def _bind_indexer_views(
             size=(physical_blocks, block_size, spec.num_kv_heads, spec.head_size),
             stride=(page_elements, spec.num_kv_heads * spec.head_size, spec.head_size, 1),
         )
-        forward_context[name].hisparse_block_stride = block_stride
+        block_strides[name] = block_stride
         kv_caches[name] = (indexer_cache,)
+    for name, block_stride in block_strides.items():
+        forward_context[name].hisparse_block_stride = block_stride
