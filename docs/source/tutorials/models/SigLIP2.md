@@ -300,7 +300,7 @@ import numpy as np
 from PIL import Image
 from vllm import LLM
 
-TEXT_TEMPLATE = "This is a photo of {}."
+TEXT_TEMPLATE = "This is a photo of a {}."
 TOKEN_KWARGS = {"padding": "max_length", "max_length": 64}
 
 MODEL_PATH = "<YOUR_MODEL_PATH>"  # Replace with the path recorded in Section 3.1
