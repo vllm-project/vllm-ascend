@@ -75,7 +75,12 @@ def test_sfa_k31_identity_in_registered_inner_model_context(tmp_path, monkeypatc
             limit_mm_per_prompt={"image": 0, "video": 0},
         )
     )
-    ascend_config = SimpleNamespace(enable_sparse_sfa_c8=False, enable_sparse_sfa_turboquant=False, enable_mlapo=False)
+    ascend_config = SimpleNamespace(
+        enable_sparse_sfa_c8=False,
+        enable_sparse_sfa_turboquant=False,
+        enable_mlapo=False,
+        sparse_kv_offload_config=SimpleNamespace(enabled=False),
+    )
     monkeypatch.setattr("vllm_ascend.attention.sfa_v1.get_ascend_config", lambda: ascend_config)
     monkeypatch.setattr("vllm_ascend.attention.sfa_v1.get_tensor_model_parallel_world_size", lambda: 8)
     monkeypatch.setattr("vllm_ascend.attention.sfa_v1.is_pcp_decode_sharding_enabled", lambda _: False)
