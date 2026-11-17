@@ -3,9 +3,7 @@
 """Bind shared-slab views while retaining Core HiSparse allocation."""
 
 import math
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
-from contextvars import ContextVar
+from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -19,53 +17,28 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
-
-_SLAB_ALIGNMENT = 2 * 1024 * 1024
-# The runner reserves padding before Core copies the config. The backend hook
-# consumes the logical size within that same synchronous initialization call.
-_slab_size: ContextVar[int | None] = ContextVar("hisparse_device_slab_size", default=None)
-
-
-@contextmanager
-def reserve_hisparse_slab_alignment(kv_cache_config: KVCacheConfig) -> Iterator[None]:
-    """Leave room to align the single device allocation made by Core."""
-    original_tensors = kv_cache_config.kv_cache_tensors
-    device_sizes = {tensor.size for tensor in original_tensors if not tensor.host_resident}
-    if len(device_sizes) != 1:
-        raise ValueError(f"HiSparse alignment requires one shared device slab size, got {sorted(device_sizes)}.")
-    (size,) = device_sizes
-    kv_cache_config.kv_cache_tensors = [
-        tensor if tensor.host_resident else replace(tensor, size=size + _SLAB_ALIGNMENT - 1)
-        for tensor in original_tensors
-    ]
-    token = _slab_size.set(size)
-    try:
-        yield
-    finally:
-        _slab_size.reset(token)
-        kv_cache_config.kv_cache_tensors = original_tensors
+from vllm_ascend.core.kv_cache_interface import AlignedKVCacheTensor, AscendSFAIndexerCacheSpec
 
 
 def _align_hisparse_slab_views(
     kv_cache_config: KVCacheConfig, kv_caches: dict[str, Any]
 ) -> tuple[list[KVCacheTensor], int] | None:
     """Rebase Core's device views onto one aligned slice, without allocating or copying KV."""
-    size = _slab_size.get()
-    if size is None:
-        from .admission import AscendStoreHiSparseResidentSpec
-
+    device_tensors = [t for t in kv_cache_config.kv_cache_tensors if not t.host_resident]
+    geometry = {(t.logical_size, t.alignment) for t in device_tensors if isinstance(t, AlignedKVCacheTensor)}
+    if not geometry:
         if any(
-            isinstance(group.kv_cache_spec, AscendStoreHiSparseResidentSpec)
-            for group in kv_cache_config.kv_cache_groups
+            getattr(g.kv_cache_spec, "requires_aligned_device_slab", False) for g in kv_cache_config.kv_cache_groups
         ):
-            raise RuntimeError("HiSparse AscendStore device views require an active slab alignment reservation.")
+            raise RuntimeError("HiSparse AscendStore device views require a slab alignment reservation.")
         return None
-    device_tensors = [tensor for tensor in kv_cache_config.kv_cache_tensors if not tensor.host_resident]
+    if len(geometry) != 1 or not all(isinstance(t, AlignedKVCacheTensor) for t in device_tensors):
+        raise ValueError("HiSparse device views require a consistent slab alignment reservation.")
+    ((size, alignment),) = geometry
     first_view = kv_caches[device_tensors[0].layers[0]]
     owner = first_view.untyped_storage()
-    start = -owner.data_ptr() % _SLAB_ALIGNMENT
-    if owner.nbytes() != size + _SLAB_ALIGNMENT - 1:
+    start = -owner.data_ptr() % alignment
+    if owner.nbytes() != size + alignment - 1:
         raise ValueError("HiSparse device slab is missing its reserved alignment padding.")
 
     # Core binds Resident and Hot using offsets from the storage base. Use

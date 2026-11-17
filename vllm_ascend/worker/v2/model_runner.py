@@ -519,19 +519,20 @@ class NPUModelRunner(GPUModelRunner):
                 if sparse_cfg.use_fused_copy_sfa
                 else set()
             )
-        slab_alignment: AbstractContextManager[None] = nullcontext()
+        allocation_config = kv_cache_config
         transfer = self.vllm_config.kv_transfer_config
         if (
             getattr(kv_cache_config, "hisparse_host_num_blocks", None) is not None
             and transfer is not None
             and transfer.has_connector("AscendStoreConnector")
         ):
-            from vllm_ascend.hisparse.binding import reserve_hisparse_slab_alignment
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import (
+                with_aligned_hisparse_slab,
+            )
 
-            slab_alignment = reserve_hisparse_slab_alignment(kv_cache_config)
+            allocation_config = with_aligned_hisparse_slab(kv_cache_config)
         with graph_manager_wrapper(self):
-            with slab_alignment:
-                self._initialize_kv_cache_upstream(kv_cache_config, kv_cache_allocation_context)
+            self._initialize_kv_cache_upstream(allocation_config, kv_cache_allocation_context)
             # PCP owns the local-row capacity; FIA may append one padding
             # request for either target or draft metadata.
             max_metadata_reqs = (

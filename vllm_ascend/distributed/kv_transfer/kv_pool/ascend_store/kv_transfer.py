@@ -14,9 +14,6 @@ from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionLoadGate
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
-    MemcacheBackend,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     ReqMeta,
@@ -69,7 +66,7 @@ class KVTransferThread(threading.Thread):
         self.load_disabled = threading.Event()
 
     def _mark_failed_requests(self, requests: list[ReqMeta], *, finish_receiving: bool = False) -> None:
-        logger.error("Memcache transfer failed for requests=%s", [request.req_id for request in requests])
+        logger.error("KV pool transfer failed for requests=%s", [request.req_id for request in requests])
         for request in requests:
             request.can_save = False
         self.save_disabled.set()
@@ -1086,9 +1083,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if current_event is not None:
                 current_event.synchronize()
             put_result: bool | list[bool] | None
-            if group_id in self.host_resident_groups:
-                assert isinstance(self.m_store, MemcacheBackend)
-                put_result = self.m_store.put(keys, addrs, sizes, host=True)
+            if self.host_resident_groups:
+                put_result = self.m_store.put_bulk(keys, addrs, sizes, host=group_id in self.host_resident_groups)
+                if put_result is None:
+                    logger.error("KV store returned no bulk PUT status for request %s", req_id)
+                    return False
             else:
                 put_result = self.m_store.put(keys, addrs, sizes)
             if isinstance(put_result, list):
@@ -1262,9 +1261,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             if host_keys is None:
                 ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
             else:
-                assert isinstance(self.m_store, MemcacheBackend)
                 rotation = self.tp_rank % len(host_keys)
-                ret = self.m_store.get(
+                ret = self.m_store.get_bulk(
                     key_list_c, addr_list_c, size_list_c, host_keys=host_keys[rotation:] + host_keys[:rotation]
                 )
             if self._record_operation_cb is not None:
@@ -1273,7 +1271,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     time.perf_counter() - load_get_start,
                     len(key_list_c),
                 )
-            if (isinstance(self.m_store, MemcacheBackend) or len(req_meta.block_ids_by_group) > 1) and (
+            if (host_keys is not None or getattr(self.m_store, "strict_bulk_get", False) is True) and (
                 ret is None or len(ret) != len(key_list_c) or any(r != 0 for r in ret)
             ):
                 self._mark_failed_requests([req_meta], finish_receiving=True)

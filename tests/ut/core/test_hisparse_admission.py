@@ -30,7 +30,8 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.request import Request
 
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
-from vllm_ascend.hisparse.binding import prepare_hisparse_cache_views, reserve_hisparse_slab_alignment
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import with_aligned_hisparse_slab
+from vllm_ascend.hisparse.binding import prepare_hisparse_cache_views
 
 BLOCK_SIZE = 16
 
@@ -135,7 +136,7 @@ def test_registry_changes_only_the_resident_spec(other_connector):
     _, original = _cache_configs(store=False, hot_units=2, other_connector=other_connector)
     _, combined = _cache_configs(hot_units=2)
     _, store_only = _cache_configs(hisparse=False)
-    from vllm_ascend.hisparse.admission import AscendStoreHiSparseResidentSpec
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import AscendStoreHiSparseResidentSpec
 
     assert not any(isinstance(group.kv_cache_spec, HiSparseResidentSpec) for group in store_only.kv_cache_groups)
     assert original.kv_cache_tensors == combined.kv_cache_tensors
@@ -161,7 +162,7 @@ def test_registry_changes_only_the_resident_spec(other_connector):
 @pytest.mark.parametrize(("window", "sizing_pages"), [(0, 1), (2, 3), (8, 8), (12, 8)])
 def test_registry_shares_the_spec_window_and_sizes_for_the_import_tail(window, sizing_pages):
     config, cache = _cache_configs(in_flight_blocks=window)
-    from vllm_ascend.hisparse.admission import AscendStoreHiSparseResidentManager
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import AscendStoreHiSparseResidentManager
 
     (manager,) = get_hisparse_coordinator(_cache_manager(config, cache)).resident_managers
     assert type(manager) is AscendStoreHiSparseResidentManager
@@ -198,7 +199,7 @@ def test_resident_admission_counts_existing_pages_before_partial_import(window, 
 
 def test_ascendstore_slab_alignment_requires_reservation():
     _, cache = _cache_configs()
-    with pytest.raises(RuntimeError, match="active slab alignment reservation"):
+    with pytest.raises(RuntimeError, match="slab alignment reservation"):
         prepare_hisparse_cache_views(cache, {}, {})
 
 
@@ -209,29 +210,23 @@ def test_slab_reservation_requires_one_shared_device_size(device_sizes):
         KVCacheTensor(size, [f"cache{index}"], 0, 128) for index, size in enumerate(device_sizes)
     ]
     cache = KVCacheConfig(1, tensors, [])
-    with (
-        pytest.raises(ValueError, match="requires one shared device slab size"),
-        reserve_hisparse_slab_alignment(cache),
-    ):
-        pytest.fail("Invalid device tensors should be rejected before allocation")
+    with pytest.raises(ValueError, match="requires one shared device slab size"):
+        with_aligned_hisparse_slab(cache)
     assert cache.kv_cache_tensors is tensors
 
 
-def test_slab_reservation_restores_runner_config_on_failed_binding():
+def test_slab_reservation_preserves_runner_config_on_failed_binding():
     _, cache = _cache_configs()
     tensors = cache.kv_cache_tensors
     device_tensor = next(tensor for tensor in tensors if not tensor.host_resident)
-    with (
-        pytest.raises(ValueError, match="missing its reserved alignment padding"),
-        reserve_hisparse_slab_alignment(cache),
-    ):
-        # The Core runner deep-copies its config and binds the views on that copy.
-        core_cache = deepcopy(cache)
+    # The Core runner deep-copies its config and binds the views on that copy.
+    core_cache = deepcopy(with_aligned_hisparse_slab(cache))
+    with pytest.raises(ValueError, match="missing its reserved alignment padding"):
         assert core_cache.kv_cache_tensors[1].size > device_tensor.size
         name = device_tensor.layers[0]
         prepare_hisparse_cache_views(core_cache, {name: torch.empty(device_tensor.size, dtype=torch.int8)}, {})
     assert cache.kv_cache_tensors is tensors
-    with pytest.raises(RuntimeError, match="active slab alignment reservation"):
+    with pytest.raises(RuntimeError, match="slab alignment reservation"):
         prepare_hisparse_cache_views(cache, {}, {})
 
 
@@ -275,7 +270,7 @@ def test_registered_resident_admission(tokens, computed, local, admission, tail_
 )
 def test_scheduler_cache_manager_admits_partial_import(store, host_blocks, admitted):
     config, cache = _cache_configs(store=store, host_blocks=host_blocks)
-    from vllm_ascend.hisparse.admission import AscendStoreHiSparseResidentManager
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import AscendStoreHiSparseResidentManager
 
     manager = _cache_manager(config, cache)
     (resident_manager,) = get_hisparse_coordinator(manager).resident_managers
@@ -350,3 +345,11 @@ def test_failed_resident_import_releases_reservation_and_can_retry_with_another_
     assert coordinator.reserved_import_pages == 0
     assert host.block_pool.get_num_free_blocks() == host_free
     assert manager.block_pool.get_num_free_blocks() == device_free
+
+
+def test_hisparse_slab_padding_is_idempotent():
+    _, cache = _cache_configs()
+    aligned = with_aligned_hisparse_slab(cache)
+    repeated = with_aligned_hisparse_slab(aligned)
+    assert [t.size for t in repeated.kv_cache_tensors] == [t.size for t in aligned.kv_cache_tensors]
+    assert [t.size for t in cache.kv_cache_tensors] != [t.size for t in aligned.kv_cache_tensors]

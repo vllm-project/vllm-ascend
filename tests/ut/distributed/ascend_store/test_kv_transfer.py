@@ -1524,7 +1524,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
             db = ChunkedTokenDatabase([KeyMetadata("m", rank, 0, 0, group) for group in (0, 1)], [16, 16], None)
             db.set_group_buffers({0: [1000], 1: [2000]}, {0: [16], 1: [32]}, {0: [16], 1: [32]})
             store = MagicMock(spec=MemcacheBackend)
-            store.get.return_value = result
+            store.get_bulk.return_value = result
             thread = KVCacheStoreRecvingThread(store, db, 16, rank, tp_size=2, host_resident_groups=frozenset({0}))
 
             worker = KVPoolWorker.__new__(KVPoolWorker)
@@ -1614,11 +1614,11 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         result = poll(ranks)
         assert result.finished_recving is None
         assert not result.failed_recving
-        assert first_store.get.call_args.kwargs["host_keys"] == [True, False]
-        keys, addrs, sizes = delayed_store.get.call_args.args
+        assert first_store.get_bulk.call_args.kwargs["host_keys"] == [True, False]
+        keys, addrs, sizes = delayed_store.get_bulk.call_args.args
         assert ["@group:1" in key for key in keys] == [True, False]
         assert (addrs, sizes) == ([[2096], [1032]], [[32], [16]])
-        assert delayed_store.get.call_args.kwargs["host_keys"] == [False, True]
+        assert delayed_store.get_bulk.call_args.kwargs["host_keys"] == [False, True]
 
     def test_receive_drain_discards_preempted_results_and_retains_unpolled_results(self):
         thread = KVCacheStoreRecvingThread(FakeStore(), FakeTokenDatabase(), 16, tp_rank=0)

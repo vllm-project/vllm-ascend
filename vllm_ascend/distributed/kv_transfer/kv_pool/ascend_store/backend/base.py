@@ -75,6 +75,28 @@ class Backend(ABC):
     layerwise_data_plane: str | None = None
     # Whether the connector must filter existing keys before calling put().
     requires_exists_before_put: bool = True
+    strict_bulk_get: bool = False
+
+    @classmethod
+    def validate_mixed_bulk_config(cls) -> None:
+        """Opt in to whole-block transfer of both DDR and device buffers."""
+        raise ValueError(f"{cls.__name__} does not support mixed Host/Device bulk transfers")
+
+    def register_bulk_buffers(self, ptrs: list[int], lengths: list[int], *, host_ranges: dict[int, int]) -> None:
+        """Register all bulk buffers, or fail initialization."""
+        raise NotImplementedError
+
+    def get_bulk(
+        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host_keys: list[bool]
+    ) -> list[int] | None:
+        """Return one status per key (zero on complete read)."""
+        raise NotImplementedError
+
+    def put_bulk(
+        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool
+    ) -> list[bool] | bool | None:
+        """Write one homogeneous batch; report success per key."""
+        raise NotImplementedError
 
     @abstractmethod
     def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False):

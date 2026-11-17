@@ -133,7 +133,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
 
         from vllm.v1.kv_cache_interface import HiSparseResidentSpec
 
-        from vllm_ascend.hisparse.admission import AscendStoreHiSparseResidentSpec
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import AscendStoreHiSparseResidentSpec
 
         for i, group in enumerate(groups):
             spec = group.kv_cache_spec

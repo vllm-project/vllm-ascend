@@ -70,7 +70,7 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             and getattr(kv_cache_config, "hisparse_host_num_blocks", None) is not None
             and vllm_config.speculative_config is not None
         ):
-            self._configure_hisparse_host_save_fence()
+            self._configure_bulk_save_fence()
         # Handle to the (V2) mamba hybrid model state while its per-layer
         # align pre-copy is deferred behind a layerwise child connector.
         self._mamba_state: Any = None
@@ -87,12 +87,12 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             getattr(connector, "requires_mamba_state_copy_after_load", False) for connector in self._connectors
         )
 
-    def _configure_hisparse_host_save_fence(self) -> None:
+    def _configure_bulk_save_fence(self) -> None:
         from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
 
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import finish_draft_host_mirror_for_save
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-        from vllm_ascend.hisparse.host_mirror import finish_draft_host_mirror_for_save
 
         source = next((child for child in self._connectors if isinstance(child, HiSparseConnector)), None)
         if source is None:
@@ -102,7 +102,7 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         fence = partial(finish_draft_host_mirror_for_save, owner)
         for store in self._connectors:
             if isinstance(store, AscendStoreConnector) and isinstance(store.connector_worker, KVPoolWorker):
-                store.connector_worker.set_hisparse_host_save_fence(fence)
+                store.connector_worker.set_bulk_save_fence(fence)
 
     def configure_dspark_prefix_cache(self, vllm_config: "VllmConfig") -> bool:
         """Select a store that restores both target and persistent draft KV."""

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import hashlib
 import importlib
-import json
 import math
 import threading
 import time
@@ -35,9 +33,11 @@ from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
-    AscendStoreCoordinator,
-    ExternalCachedBlockPool,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import (
+    HiSparseStoreViews,
+    hisparse_layout_id,
+    plan_hisparse_store_views,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreBatch,
@@ -363,7 +363,9 @@ class BaseKVPoolWorker(ABC):
         model_name = model_config.model.rstrip("/").split("/")[-1]
         if getattr(self.kv_cache_config, "hisparse_host_num_blocks", None) is not None:
             # Earlier keys may contain draft pages exported before their Host mirror.
-            model_name = f"{model_name}:hisparse-v3:{model_config.dtype}:{self._hisparse_layout_id()}"
+            assert self.kv_cache_config is not None
+            layout_id = hisparse_layout_id(self.kv_cache_config, self.dcp_size, self.cache_transfer_granularity)
+            model_name = f"{model_name}:hisparse-v3:{model_config.dtype}:{layout_id}"
         self.metadata: list[KeyMetadata] = []
         for group_id in range(self.num_kv_cache_groups):
             # the mamba kv_heads is not same with the full attention, can't share the cache data
@@ -386,44 +388,6 @@ class BaseKVPoolWorker(ABC):
         )
         self.cache_coordinator = self._build_cache_coordinator()
         self.token_database.cache_coordinator = self.cache_coordinator
-
-    def _hisparse_layout_id(self) -> str:
-        # Hash planned page geometry, never addresses or pool capacity. Bump
-        # the key version for any serialization change outside these fields.
-        kv_cache_config = self.kv_cache_config
-        assert kv_cache_config is not None
-        groups = []
-        layers = set()
-        for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
-            if not group.enable_kv_transfer:
-                continue
-            group_layers = []
-            for name in sorted(group.layer_names):
-                spec = group.kv_cache_spec
-                if isinstance(spec, UniformTypeKVCacheSpecs):
-                    spec = spec.kv_cache_specs[name]
-                group_layers.append(
-                    (
-                        name,
-                        str(getattr(spec, "dtype", getattr(spec, "dtypes", None))),
-                        spec.block_size,
-                        spec.page_size_bytes,
-                        getattr(spec, "head_size", None),
-                        getattr(spec, "num_kv_heads", None),
-                        getattr(spec, "scale_dim", 0),
-                        str(getattr(spec, "scale_dtype", None)),
-                    )
-                )
-                layers.add(name)
-            groups.append((group_id, group.role, group.host_resident, group_layers))
-        block_strides = sorted(
-            (name, tensor.block_stride)
-            for tensor in kv_cache_config.kv_cache_tensors
-            for name in tensor.layers
-            if name in layers
-        )
-        identity = (self.dcp_size, self.cache_transfer_granularity, groups, block_strides)
-        return hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()[:24]
 
     def _init_backend(self, parallel_config, extra_config) -> None:
         backend = backend_map.get(self.backend.lower())
@@ -661,9 +625,7 @@ class BaseKVPoolWorker(ABC):
         group_block_strides: list[int] = []
         group_cache_entry_segments: list[tuple[int, int]] = []
         layer_names_by_physical: dict[int, list[str]] = {}
-        num_blocks = (
-            getattr(self, "_hisparse_host_num_blocks_by_layer", {}).get(layer_names[0]) if layer_names else None
-        )
+        num_blocks = self._host_block_count(layer_names[0]) if layer_names else None
         for layer_name in layer_names:
             phys = self._extract_physical_layer_index(layer_name)
             phys = self._global_to_local_layer.get(phys, phys)
@@ -718,7 +680,7 @@ class BaseKVPoolWorker(ABC):
             return
         alignment = 2 * 1024 * 1024
         for storage_key in registered_regions:
-            if storage_key in getattr(self, "_hisparse_host_storage_keys", set()):
+            if self._transfer_layout is not None and storage_key in self._transfer_layout.host_storage_keys:
                 continue
             start, end = registered_regions[storage_key]
             new_start = start // alignment * alignment
@@ -755,37 +717,28 @@ class BaseKVPoolWorker(ABC):
                 result[name] = caches[:num_states]
         return result
 
+    _transfer_layout: HiSparseStoreViews | None = None
+
+    def _host_block_count(self, name: str) -> int | None:
+        layout = self._transfer_layout
+        return layout.host_num_blocks if layout is not None and name in layout.host_layers else None
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         if self.use_recoverssm:
             kv_caches = self._recoverssm_store_caches(kv_caches)
         excluded_layer_names = None
-        self._hisparse_host_num_blocks_by_layer: dict[str, int] = {}
-        self._hisparse_host_storage_keys: set[int] = set()
-        host_resident_groups = set()
-        kv_cache_config = self.kv_cache_config
-        host_num_blocks: int | None = getattr(kv_cache_config, "hisparse_host_num_blocks", None)
-        if kv_cache_config is not None and host_num_blocks is not None:
-            from vllm_ascend.hisparse.binding import hisparse_indexer_transfer_views
-
-            excluded_layer_names = set()
-            normalized_caches = {}
-            context = self.vllm_config.compilation_config.static_forward_context
-            for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
-                if not group.enable_kv_transfer:
-                    excluded_layer_names.update(group.layer_names)
-                    continue
-                if group.host_resident:
-                    host_resident_groups.add(group_id)
-                for name in group.layer_names:
-                    parts = self._as_cache_tuple(kv_caches[name])
-                    if group.role == "hisparse_indexer":
-                        parts = hisparse_indexer_transfer_views(parts, context[name])
-                    normalized_caches[name] = parts
-                    if group.host_resident:
-                        self._hisparse_host_num_blocks_by_layer[name] = host_num_blocks
-                        self._hisparse_host_storage_keys.update(self._get_storage_key(part) for part in parts)
-            kv_caches = normalized_caches
-        self._hisparse_host_resident_groups = frozenset(host_resident_groups)
+        self._transfer_layout = None
+        if (
+            self.kv_cache_config is not None
+            and getattr(self.kv_cache_config, "hisparse_host_num_blocks", None) is not None
+        ):
+            self._transfer_layout, kv_caches, excluded_layer_names = plan_hisparse_store_views(
+                self.kv_cache_config,
+                kv_caches,
+                self.vllm_config.compilation_config.static_forward_context,
+                self._as_cache_tuple,
+                self._get_storage_key,
+            )
         self._set_num_blocks(kv_caches)
         if excluded_layer_names is None:
             self._register_kv_caches(kv_caches)
@@ -812,8 +765,7 @@ class BaseKVPoolWorker(ABC):
         logger.info("num_blocks: %s", self.num_blocks)
         self.block_len = []
         self.block_stride = []
-        host_num_blocks_by_layer = getattr(self, "_hisparse_host_num_blocks_by_layer", {})
-        num_blocks = host_num_blocks_by_layer.get(first_name)
+        num_blocks = self._host_block_count(first_name)
         for cache in first_kv_cache_tuple:
             block_len, block_stride, _, _ = self._get_cache_block_metadata(cache, num_blocks=num_blocks)
             logger.info("block_shape: %s", cache.shape[1:])
@@ -851,7 +803,7 @@ class BaseKVPoolWorker(ABC):
         registered_regions: dict[int, tuple[int, int]] = {}
         registration_caches = {**kv_caches, **auxiliary_caches} if auxiliary_caches else kv_caches
         for layer_name, cache_or_caches in registration_caches.items():
-            num_blocks = host_num_blocks_by_layer.get(layer_name)
+            num_blocks = self._host_block_count(layer_name)
             for cache in self._as_cache_tuple(cache_or_caches):
                 base_addr = cache.data_ptr()
                 _, _, region_len, _ = self._get_cache_block_metadata(cache, num_blocks=num_blocks)
@@ -922,8 +874,13 @@ class BaseKVPoolWorker(ABC):
             )
 
         # Register buffers before starting the transfer threads.
-        if getattr(self, "_hisparse_host_resident_groups", ()):
-            self.m_store.register_buffer(ptrs, lengths, check_result=True)
+        if self._transfer_layout is not None:
+            host_ranges = {
+                start: end - start
+                for key, (start, end) in registered_regions.items()
+                if key in self._transfer_layout.host_storage_keys
+            }
+            self.m_store.register_bulk_buffers(ptrs, lengths, host_ranges=host_ranges)
         else:
             self.m_store.register_buffer(ptrs, lengths)
         self._start_kv_transfer_threads()
@@ -1496,11 +1453,11 @@ class KVPoolWorker(BaseKVPoolWorker):
         kv_cache_config: KVCacheConfig | None = None,
     ) -> None:
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
-        self._hisparse_host_save_fence: Callable[[], None] | None = None
+        self._bulk_save_fence: Callable[[], None] | None = None
         self._init_cache_layout()
 
-    def set_hisparse_host_save_fence(self, fence: Callable[[], None]) -> None:
-        self._hisparse_host_save_fence = fence
+    def set_bulk_save_fence(self, fence: Callable[[], None]) -> None:
+        self._bulk_save_fence = fence
 
     def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> bool:
         return False
@@ -1533,7 +1490,9 @@ class KVPoolWorker(BaseKVPoolWorker):
     def _start_kv_transfer_threads(self) -> None:
         if self._transfer_threads_started:
             return
-        host_resident_groups: frozenset[int] = getattr(self, "_hisparse_host_resident_groups", frozenset())
+        host_resident_groups: frozenset[int] = (
+            self._transfer_layout.host_groups if self._transfer_layout is not None else frozenset()
+        )
 
         if self.can_put:
             ready_event_sending = threading.Event()
@@ -1751,8 +1710,8 @@ class KVPoolWorker(BaseKVPoolWorker):
             )
         requests = [request for request in connector_metadata.requests if request.can_save]
         if requests:
-            if self._hisparse_host_save_fence is not None:
-                self._hisparse_host_save_fence()
+            if self._bulk_save_fence is not None:
+                self._bulk_save_fence()
             current_event = torch.npu.Event()
             current_event.record()
             for request in requests:
