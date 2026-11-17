@@ -36,6 +36,7 @@ All speculative decoding methods are configured through the `speculative_config`
 - **`model`** (str, optional): Path or HF repo ID for the draft model. Required for `eagle`, `eagle3`, `dflash`, `medusa`, and `draft_model`. Automatically resolved for `mtp` (reuses target model), `ngram`, and `extract_hidden_states`.
 - **`draft_tensor_parallel_size`** (int, optional): Tensor parallelism size for the draft model. Can only be `1` or the same as the target model's tensor parallel size.
 - **`disable_padded_drafter_batch`** (bool, default: `False`): Disable input padding for speculative decoding. If set to `True`, speculative input batches can contain sequences of different lengths, which may only be supported by certain attention backends. **Note:** Only effective with `eagle`, `eagle3`, `mtp`, `dflash`, `draft_model`, and `extract_hidden_states` methods.
+- **`draft_lm_head_quantization`** (str, optional): Online quantization format for the drafter's private copy of a shared target LM head (`eagle`, `eagle3`, `mtp`, and DeepSeek DSpark). The target still verifies with its own unquantized head, so only the acceptance length can change. Ascend formats: `"mxfp8"` (per-group MXFP8, A5-class devices), `"int8"` (per-channel INT8, A2/A3-class devices). The upstream `"fp8"`/`"nvfp4"` formats are rejected with a pointer to the Ascend formats; 310P is not supported. Requires Model Runner V2.
 
 **Offline inference** — pass `speculative_config` as a Python dict to `LLM()`:
 
@@ -219,6 +220,20 @@ MTP (Multi-Token Prediction) boosts inference performance by parallelizing the p
     Due to the fact that only a single layer of weights is exposed in DeepSeek's MTP, accuracy and performance are not effectively guaranteed in scenarios where `num_speculative_tokens > 1` (especially ≥ 3).
 
     In the fullgraph mode with `num_speculative_tokens > 1`, the capture size of each ACLGraph must be an integer multiple of `(num_speculative_tokens + 1)`.
+
+### Quantizing the draft LM head copy
+
+When the MTP head shares the target's unquantized LM head, adding `"draft_lm_head_quantization"` to `--speculative-config` gives the drafter a private online-quantized copy of that head instead of a bf16 copy. The target still verifies with its own unquantized head, so outputs are unchanged; only the acceptance length can move. Requires Model Runner V2.
+
+```shell
+vllm serve /path/to/Qwen3.8-27B \
+  --tensor-parallel-size 1 \
+  --max-model-len 32768 \
+  --trust-remote-code \
+  --speculative-config '{"method": "mtp", "num_speculative_tokens": 3, "draft_lm_head_quantization": "mxfp8"}'
+```
+
+Use `"mxfp8"` on A5-class devices and `"int8"` on A2/A3-class devices. The upstream `"fp8"`/`"nvfp4"` formats are rejected with a pointer to the Ascend formats; 310P is not supported.
 
 ## Speculating using DFlash
 
