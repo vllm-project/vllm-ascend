@@ -954,10 +954,7 @@ Removing `--use-replayssm` selects the native KDA path.
 Kimi K3 and K3.1 can use the Ascend KDA RecoverSSM path with DSpark speculative
 decoding. It keeps one recurrent checkpoint per request and writes compact,
 request-indexed verification records, then reconstructs the accepted state
-after sampling. RecoverSSM is disabled by default. This path requires Model
-Runner V2 and does not support adaptive verification or stochastic rounding.
-Use Mamba cache mode `align` with prefix caching enabled and `none` with prefix
-caching disabled; the hybrid cache configuration normally selects the mode.
+after sampling. RecoverSSM is disabled by default.
 
 Add the following options to your existing Kimi serving command, replacing the
 path with a compatible DSpark draft model. Keep the parallelism, quantization,
@@ -967,6 +964,10 @@ KV-cache dtype and memory settings appropriate for the model and devices:
 --use-replayssm \
 --speculative-config '{"method": "dspark", "model": "/path/to/dspark", "num_speculative_tokens": 3}'
 ```
+
+Requirements:
+
+- Adaptive verification and stochastic rounding are unsupported.
 
 For experimental prefill/decode separation, use `MooncakeConnectorV2` or
 `MooncakePullConnector` and enable `--use-replayssm` on both Prefill and Decode.
@@ -978,16 +979,12 @@ settings.
 
 !!! warning
 
-    This feature is experimental. On 950DT Products, a Kimi K3.1 P/D functional
-    test used PP4/TP8 on Prefill and DP4/TP8/DCP8 on Decode with PCP=1, using an
-    experimental image with modified parallelism checks. A separate prefill-focused
-    Kimi K3.1 experts8 run with PP4/TP1/PCP8, DSpark, eager execution, and prefix
-    caching disabled completed 2,016 requests, each with 16,384 input tokens and
-    one output token. These tests do not establish multi-token speculative-decoding
-    correctness, output equivalence, or the correctness of other configurations.
-    Earlier A3 operator tests do not establish Kimi K3 or K3.1 end-to-end
-    functionality on A3; end-to-end functionality on 950PR Products also remains
-    unverified. Assess the risks and validate your configuration before use.
+    This feature is experimental. An A5 P/D functional test with PP4/TP8 on
+    Prefill and DP4/TP8/DCP8 on Decode passed with PCP=1, using an experimental
+    image with modified parallelism checks. This does not establish correctness
+    for the unmodified PR, PCP greater than 1, or other parallel configurations.
+    End-to-end P/D output equivalence remains unverified, including when prefix
+    caching is enabled.
 
 ## Synthetic Rejection Sampling
 
