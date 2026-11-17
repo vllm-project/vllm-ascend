@@ -240,7 +240,7 @@ def test_shared_page_rejects_noncontiguous_blocks() -> None:
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
     worker.num_blocks = 4
 
-    assert worker._get_shared_page_metadata(caches) is None
+    assert worker._get_shared_page_metadata(caches, worker.num_blocks) is None
 
 
 def test_shared_page_handles_mixed_dtype_views() -> None:
@@ -250,7 +250,12 @@ def test_shared_page_handles_mixed_dtype_views() -> None:
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
     worker.num_blocks = 4
 
-    assert worker._get_shared_page_metadata((k_cache, scale_cache)) == (raw_cache.data_ptr(), 64, (48,), 1)
+    assert worker._get_shared_page_metadata((k_cache, scale_cache), worker.num_blocks) == (
+        raw_cache.data_ptr(),
+        64,
+        (48,),
+        1,
+    )
 
 
 def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(monkeypatch) -> None:
@@ -324,7 +329,7 @@ def test_shared_storage_is_not_enough_to_identify_a_packed_page() -> None:
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
     worker.num_blocks = 4
 
-    assert worker._get_shared_page_metadata((k_cache, v_cache)) is None
+    assert worker._get_shared_page_metadata((k_cache, v_cache), worker.num_blocks) is None
 
 
 @pytest.mark.parametrize("replication_size", [1, 2])

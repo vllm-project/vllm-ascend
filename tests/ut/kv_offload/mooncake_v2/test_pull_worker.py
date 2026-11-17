@@ -1799,9 +1799,9 @@ def test_register_kv_caches_starts_receiving_thread_only_for_consumer(
         fake_register,
     )
     monkeypatch.setattr(
-        pull_worker,
-        "MooncakePullRecvingThread",
-        fake_thread,
+        pull_worker.MooncakePullConnectorWorker,
+        "receiving_thread_cls",
+        staticmethod(fake_thread),
     )
     monkeypatch.setattr(torch.npu, "current_device", MagicMock(return_value=0))
 

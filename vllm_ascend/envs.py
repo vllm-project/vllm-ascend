@@ -49,6 +49,10 @@ def _bool_env(name: str, default: bool) -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Vendor-defined Mooncake/MemFabric settings; non-sensitive. HiSparse PD
+    # requires MC_USE_TENT=1 and MF_PROTOCOL=device_urma, with no SDMA fallback.
+    "MC_USE_TENT": lambda: os.getenv("MC_USE_TENT", ""),
+    "MF_PROTOCOL": lambda: os.getenv("MF_PROTOCOL", ""),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

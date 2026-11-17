@@ -249,10 +249,24 @@ class MooncakePullConnector(MooncakeBaseConnector):
     ) -> None:
         super().__init__(vllm_config, role, kv_cache_config)
 
+        extra = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
+        transport = extra.get("mooncake_transport", "ascend")
+        worker_cls = MooncakePullConnectorWorker
+        if transport == "memfabric":
+            from vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd import (
+                _HiSparsePDWorker,
+                validate_hisparse_pd_config,
+            )
+
+            validate_hisparse_pd_config(vllm_config.kv_transfer_config, kv_cache_config)
+            worker_cls = _HiSparsePDWorker
+        elif transport != "ascend":
+            raise ValueError(f"Unsupported mooncake_transport: {transport!r}; expected ascend or memfabric")
+
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = MooncakePullConnectorScheduler(vllm_config, str(self.engine_id), kv_cache_config)
         elif role == KVConnectorRole.WORKER:
-            self.connector_worker = MooncakePullConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
+            self.connector_worker = worker_cls(vllm_config, str(self.engine_id), kv_cache_config)
         else:
             raise ValueError(f"Unsupported KVConnectorRole: {role}")
 

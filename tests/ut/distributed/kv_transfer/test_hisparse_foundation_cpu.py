@@ -135,6 +135,33 @@ def test_failed_unregister_retains_host_owner_for_safe_retry(monkeypatch):
     assert events == ["close", "close"]
 
 
+def test_hisparse_memfabric_allocation_uses_single_mapped_host_pool(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    allocated = []
+    configs = []
+    offload = SimpleNamespace(
+        OffloadConfig=SimpleNamespace,
+        Scene=SimpleNamespace(LOCAL="local"),
+        OFFLOAD_FLAG_GIANT_PAGE=4096,
+        initialize=lambda config: configs.append(config) or 0,
+        empty=lambda shape, **kwargs: allocated.append(shape[0]) or torch.empty(shape, dtype=kwargs["dtype"]),
+        get_dva=lambda ptr: ptr,
+    )
+    monkeypatch.setitem(sys.modules, "memfabric_hybrid", SimpleNamespace(offload=offload))
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(current_device=lambda: 0), raising=False)
+    monkeypatch.setattr(host_pool, "MappedHostTensor", lambda tensor, **kwargs: SimpleNamespace(tensor=tensor))
+
+    result = host_pool.allocate_mapped_host((4096,), torch.uint8, memfabric=True)
+
+    assert len(allocated) == 1
+    assert getattr(configs[0], "flags", None) == offload.OFFLOAD_FLAG_GIANT_PAGE
+    assert allocated[0] == configs[0].alloc_size == configs[0].reserve_size == 1024**3
+    assert result.data_ptr() % 4096 == 0
+    assert result._hisparse_registration.tensor.data_ptr() <= result.data_ptr()
+
+
 def test_private_host_allocator_keeps_other_backends_on_core_path(monkeypatch):
     from vllm.v1.hisparse import backend as core_backend
     from vllm.v1.hisparse import runtime
@@ -150,6 +177,7 @@ def test_private_host_allocator_keeps_other_backends_on_core_path(monkeypatch):
     monkeypatch.setattr(core_backend, "get_hisparse_backend", lambda: backend)
     # Restore the process-wide binding when this test exits.
     monkeypatch.setattr(runtime, "allocate_pinned_host_pool", runtime.allocate_pinned_host_pool)
+    monkeypatch.setattr(runtime, "allocate_hisparse_host_pools", runtime.allocate_hisparse_host_pools)
     install()
     installed = runtime.allocate_pinned_host_pool
     install()

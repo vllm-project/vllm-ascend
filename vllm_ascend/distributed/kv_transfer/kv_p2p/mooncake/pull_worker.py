@@ -1324,6 +1324,8 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
 class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
     """Worker-side framework for Mooncake pull transfers."""
 
+    receiving_thread_cls = MooncakePullRecvingThread
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1343,7 +1345,7 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
             if not isinstance(self.xfer_handshake_metadata, MooncakeTransferMetadata):
                 raise RuntimeError("Mooncake KV caches were registered without transfer metadata")
             ready_event = threading.Event()
-            self._recving_thread = MooncakePullRecvingThread(
+            self._recving_thread = self.receiving_thread_cls(
                 engine=self.engine,
                 vllm_config=self.vllm_config,
                 kv_cache_config=self.kv_cache_config,

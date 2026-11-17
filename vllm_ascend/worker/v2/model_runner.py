@@ -27,7 +27,7 @@ from typing import Any
 import numpy as np
 import torch
 from vllm.compilation import breakable_cudagraph
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.parallel_state import get_pp_group
@@ -496,7 +496,7 @@ class NPUModelRunner(GPUModelRunner):
                 if sparse_cfg.use_fused_copy_sfa
                 else set()
             )
-        with graph_manager_wrapper(self):
+        with graph_manager_wrapper(self), set_current_vllm_config(self.vllm_config):
             self._initialize_kv_cache_upstream(kv_cache_config, kv_cache_allocation_context)
             self._target_uses_flashmla = self._has_target_flashmla_attention()
             if self.pcp_manager is not None:

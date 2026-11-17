@@ -99,6 +99,25 @@ def test_collect_register_regions_handles_independent_storages() -> None:
     }
 
 
+def test_collect_register_regions_can_select_transfer_layers() -> None:
+    source = torch.empty(32, dtype=torch.uint8)
+    resident = torch.empty(48, dtype=torch.uint8)
+    config = SimpleNamespace(
+        kv_cache_tensors=[
+            make_kv_cache_tensor(layers=["source"], layer_stride=32, block_stride=32, offset=0, size=32),
+            make_kv_cache_tensor(layers=["resident"], layer_stride=48, block_stride=48, offset=0, size=48),
+        ]
+    )
+
+    regions = collect_configured_register_regions(
+        config, {"source": source, "resident": resident}, included_layer_names={"source"}
+    )
+
+    assert regions.ptrs == [source.data_ptr()]
+    assert regions.lengths == [source.nbytes]
+    assert regions.logical_tensor_count == 1
+
+
 def test_collect_register_regions_recovers_aligned_backing_before_view() -> None:
     alignment = 2 * 1024 * 1024
     backing_size = 2 * alignment

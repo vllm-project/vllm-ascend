@@ -99,6 +99,7 @@ def test_connector_selects_implementation_by_role(connector_cls, prefix) -> None
     config = MagicMock()
     config.kv_transfer_config.engine_id = "engine"
     config.kv_transfer_config.kv_role = "kv_producer"
+    config.kv_transfer_config.kv_connector_extra_config = {}
     kv_cache_config = MagicMock()
 
     def initialize_base(self, *_args, **_kwargs) -> None:
@@ -131,3 +132,34 @@ def test_connector_selects_implementation_by_role(connector_cls, prefix) -> None
     worker_cls.assert_called_once_with(config, "engine", kv_cache_config)
     scheduler_connector.shutdown()
     scheduler_cls.return_value.shutdown.assert_called_once_with()
+
+
+def test_pull_memfabric_selects_hisparse_worker_without_changing_public_connector():
+    config = MagicMock()
+    config.kv_transfer_config.kv_connector_extra_config = {"mooncake_transport": "memfabric"}
+    config.kv_transfer_config.is_kv_consumer = False
+    cache = MagicMock()
+    cache.hisparse_host_num_blocks = None
+
+    def initialize_base(self, *_args, **_kwargs):
+        self.engine_id = "engine"
+        self.kv_transfer_config = config.kv_transfer_config
+        self.connector_worker = self.connector_scheduler = None
+
+    with (
+        patch.object(MooncakeBaseConnector, "__init__", initialize_base),
+        patch("vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd._HiSparsePDWorker") as worker,
+    ):
+        connector = MooncakePullConnector(config, KVConnectorRole.WORKER, cache)
+    assert connector.connector_worker is worker.return_value
+    worker.assert_called_once_with(config, "engine", cache)
+
+
+def test_pull_rejects_unknown_transport():
+    config = MagicMock()
+    config.kv_transfer_config.kv_connector_extra_config = {"mooncake_transport": "unknown"}
+    with (
+        patch.object(MooncakeBaseConnector, "__init__", return_value=None),
+        pytest.raises(ValueError, match="mooncake_transport"),
+    ):
+        MooncakePullConnector(config, KVConnectorRole.WORKER, MagicMock())

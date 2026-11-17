@@ -177,6 +177,7 @@ def _get_tensor_span_nbytes(tensor: torch.Tensor) -> int:
 def collect_configured_register_regions(
     kv_cache_config: "KVCacheConfig",
     kv_caches: dict[str, Any],
+    included_layer_names: set[str] | None = None,
 ) -> RegisterRegions:
     """Collect one registration range per configured backing storage."""
     ranges_by_storage: dict[int, tuple[int, int]] = {}
@@ -198,6 +199,8 @@ def collect_configured_register_regions(
 
     for tensor_config in kv_cache_config.kv_cache_tensors:
         layer_names = get_kv_cache_tensor_layers(tensor_config)
+        if included_layer_names is not None:
+            layer_names = [name for name in layer_names if name in included_layer_names]
         if not layer_names:
             continue
 
