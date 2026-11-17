@@ -219,10 +219,13 @@ gate run.
 
 Unlike `/rerun`, which only retries jobs that already failed inside an existing run,
 `/run` starts a fresh run against the current head commit. The test scope follows the
-labels the PR currently carries (`ready-precise`, `ready-all`, `ready-a5`,
+labels the PR currently carries (`ready-precise`, `ready-a5`,
 `main2main`); without any of them only `pre-commit` and `cpu-ut` run, which is the
 same scope a push used to get. If a run for the same commit is already queued or in
 progress, `/run` is a no-op.
+
+`/run` requests tests, so the CODEOWNERS approval gate is not evaluated in its
+runs; it is evaluated when reviews are submitted instead.
 
 **Examples:**
 
