@@ -47,7 +47,9 @@ from ..base import (
     AscendMoEScheme,
     PreparedLinearInput,
     QuantType,
+    WeightSwitchConfig,
     WeightSwitchGatherSpec,
+    WeightSwitchRepeatSpec,
 )
 from ..registry import register_scheme
 
@@ -71,6 +73,13 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         WeightSwitchGatherSpec("weight", gather_dim=1),
         WeightSwitchGatherSpec("weight_scale", gather_dim=1),
     )
+    # DSA wo_a post-processing places PCP-sharded groups on dim 0:
+    # weight [n_local_groups, hidden, o_lora_rank],
+    # weight_scale [n_local_groups, k_packed, o_lora_rank, 2].
+    _wo_a_3d_output_gather_specs = (
+        WeightSwitchGatherSpec("weight", gather_dim=0),
+        WeightSwitchGatherSpec("weight_scale", gather_dim=0),
+    )
     supports_weight_switch = True
     supports_unaligned_tp_groups = True
 
@@ -79,6 +88,22 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
         self.group_size = quant_description.get("group_size", 32)
         self.dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
+
+    def _get_weight_switch_specs(
+        self,
+        layer: torch.nn.Module,
+        config: WeightSwitchConfig,
+    ) -> tuple[
+        tuple[WeightSwitchGatherSpec, ...],
+        tuple[WeightSwitchRepeatSpec, ...],
+        str,
+    ]:
+        gather_specs, repeat_specs, shard_axis = super()._get_weight_switch_specs(layer, config)
+        # Ordinary transposed 2D output shards stay on dim 1. The 3D wo_a
+        # layout moves those groups to dim 0, matching the native DS path.
+        if shard_axis == "output" and getattr(layer, "dsa_wo_a_3d_layout", False):
+            return self._wo_a_3d_output_gather_specs, repeat_specs, shard_axis
+        return gather_specs, repeat_specs, shard_axis
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.float8_e4m3fn)}

@@ -18,6 +18,7 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicLinearMethod,
 )
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
+from vllm_ascend.weight_switch import WeightSwitchConfig
 
 
 class TestAscendW8A8MXFP8LinearMethod(TestBase):
@@ -210,6 +211,85 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
             self.assertEqual(layer.weight_scale.data.data_ptr(), scale_ptr)
             torch.testing.assert_close(layer.weight.float(), expected_weight.float(), rtol=0, atol=0)
             torch.testing.assert_close(layer.weight_scale, expected_scale)
+
+    def test_output_sharded_full_weight_prefill_gather(self):
+        # Two PCP ranks. 3D wo_a groups live on dim 0 after post-processing, so
+        # a dim-1 gather would expand K ([1, 64, 4] -> [1, 128, 4]) instead of
+        # reconstructing groups ([2, 64, 4]). Ordinary 2D output shards stay on dim 1.
+        hidden = 64
+        local_output = 4
+        group_size = self.scheme.group_size
+        cases = (
+            {
+                "dsa_3d": True,
+                "gather_dim": 0,
+                "full_weight_shape": (2, hidden, local_output),
+                "full_scale_shape": (2, 1, local_output, 2),
+            },
+            {
+                "dsa_3d": False,
+                "gather_dim": 1,
+                "full_weight_shape": (hidden, local_output * 2),
+                "full_scale_shape": (1, local_output * 2, 2),
+            },
+        )
+        for case in cases:
+            with self.subTest(dsa_3d=case["dsa_3d"]):
+                layers = [
+                    self._processed_output_sharded_layer(hidden, local_output, group_size, rank, case["dsa_3d"])
+                    for rank in range(2)
+                ]
+                gather_specs, _, shard_axis = self.scheme._get_weight_switch_specs(
+                    layers[0],
+                    WeightSwitchConfig(group=object(), world_size=2, rank=0),
+                )
+                self.assertEqual(shard_axis, "output")
+                self.assertEqual([spec.gather_dim for spec in gather_specs], [case["gather_dim"], case["gather_dim"]])
+
+                local_weights = [layer.weight.detach().clone() for layer in layers]
+                local_scales = [layer.weight_scale.detach().clone() for layer in layers]
+                self._gather_two_rank_full_weights(layers)
+
+                self.assertEqual(tuple(layers[0].weight.shape), case["full_weight_shape"])
+                self.assertEqual(tuple(layers[0].weight_scale.shape), case["full_scale_shape"])
+                torch.testing.assert_close(
+                    layers[0].weight.float(),
+                    torch.cat(local_weights, dim=case["gather_dim"]).float(),
+                    rtol=0,
+                    atol=0,
+                )
+                torch.testing.assert_close(
+                    layers[0].weight_scale,
+                    torch.cat(local_scales, dim=case["gather_dim"]),
+                )
+
+    def _processed_output_sharded_layer(self, hidden, local_output, group_size, rank, dsa_3d):
+        weight = (torch.arange(local_output * hidden) + rank * 17) % 256
+        weight = weight.to(torch.uint8).reshape(local_output, hidden).to(torch.float8_e4m3fn)
+        scale_k = hidden // group_size
+        scale = (torch.arange(local_output * scale_k) + rank * 17) % 256
+        scale = scale.to(torch.uint8).reshape(local_output, scale_k)
+        layer = nn.Module()
+        layer.weight = nn.Parameter(weight, requires_grad=False)
+        layer.weight_scale = nn.Parameter(scale, requires_grad=False)
+        layer.input_size = hidden
+        layer.input_size_per_partition = hidden
+        layer.output_size = local_output * 2
+        layer.output_size_per_partition = local_output
+        layer.skip_weight_nz_conversion = True
+        if dsa_3d:
+            layer.dsa_wo_a_3d_layout = True
+            layer.o_lora_rank = local_output
+        self.scheme.process_weights_after_loading(layer)
+        return layer
+
+    def _gather_two_rank_full_weights(self, layers):
+        config = WeightSwitchConfig(group=object(), world_size=len(layers), rank=0)
+        states = [self.scheme.enable_weight_switch(layer, config) for layer in layers]
+        for name in ("weight", "weight_scale"):
+            gathered = torch.cat([state.gather_parts[name].gather_input for state in states], dim=0)
+            states[0].gather_parts[name].gather_output.copy_(gathered)
+        self.scheme.switch_weight(layers[0], states[0], use_full_weight=True)
 
     @patch("vllm_ascend.utils._should_trans_nz", return_value=True)
     @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
