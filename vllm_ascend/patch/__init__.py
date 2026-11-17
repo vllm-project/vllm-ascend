@@ -694,6 +694,21 @@
 #       parallelism for non-MoE draft models (upstream #56930) or exposes a
 #       backend-safe draft parallel config selection.
 #
+#   4. `vllm.model_executor.models.config.Qwen4ExpForConditionalGenerationConfig.verify_and_update_config`
+#    Why:
+#       Upstream rejects every Qwen4Exp speculative method except native MTP
+#       and n-gram, before the Ascend DFlash2 drafter can be initialized.
+#    How:
+#       Suppress only that exact rejection for a DFlash2DraftModel draft using
+#       the dflash method. Other drafts and all other validation errors retain
+#       upstream behavior.
+#    Related PR (if no, explain why):
+#       No upstream PR currently exposes a backend-specific speculative-method
+#       extension point for Qwen4Exp.
+#    Future Plan:
+#       Remove this guard once upstream permits backend-registered DFlash2
+#       drafts for Qwen4Exp.
+#
 # ** 20. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`

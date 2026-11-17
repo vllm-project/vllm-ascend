@@ -10,6 +10,10 @@ from transformers import Qwen3Config
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.speculative import SpeculativeConfig
 from vllm.model_executor.layers import rotary_embedding
+from vllm.model_executor.models.config import (
+    Qwen3_5ForConditionalGenerationConfig,
+    Qwen4ExpForConditionalGenerationConfig,
+)
 
 from vllm_ascend.patch.platform.patch_speculative_config import _normalize_kimi_dflash_rope
 
@@ -218,3 +222,61 @@ def test_kimi_dflash_preserves_composed_user_override():
 
     assert normalized is config
     assert _rope_parameters(normalized)["attention_factor"] == 1.0
+
+
+def _qwen4_exp_speculative_config(draft_architecture):
+    return SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(
+                hc_count=2,
+                ple_layer_ids=[],
+                indexer_n_heads=None,
+            ),
+            multimodal_config=None,
+        ),
+        parallel_config=SimpleNamespace(
+            use_sequence_parallel_moe=False,
+            pipeline_parallel_size=1,
+            enable_dbo=False,
+            ubatch_size=1,
+        ),
+        speculative_config=SimpleNamespace(
+            method="dflash",
+            draft_model_config=SimpleNamespace(architectures=[draft_architecture]),
+        ),
+    )
+
+
+def _skip_qwen35_base_verification(monkeypatch):
+    monkeypatch.setattr(
+        Qwen3_5ForConditionalGenerationConfig,
+        "verify_and_update_config",
+        staticmethod(lambda _: None),
+    )
+
+
+def test_qwen4_exp_accepts_dflash2_draft(monkeypatch):
+    _skip_qwen35_base_verification(monkeypatch)
+    config = _qwen4_exp_speculative_config("DFlash2DraftModel")
+
+    Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(config)
+
+    assert config.speculative_config.method == "dflash"
+
+
+def test_qwen4_exp_still_rejects_other_dflash_drafts(monkeypatch):
+    _skip_qwen35_base_verification(monkeypatch)
+    config = _qwen4_exp_speculative_config("DFlashDraftModel")
+
+    with pytest.raises(NotImplementedError, match="supports only its native MTP"):
+        Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(config)
+
+
+def test_qwen4_exp_dflash2_preserves_other_validation_errors(monkeypatch):
+    _skip_qwen35_base_verification(monkeypatch)
+    config = _qwen4_exp_speculative_config("DFlash2DraftModel")
+    config.model_config.hf_text_config.ple_layer_ids = [0]
+    config.parallel_config.enable_dbo = True
+
+    with pytest.raises(NotImplementedError, match="PLE/QSA does not support"):
+        Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(config)

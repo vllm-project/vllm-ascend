@@ -8,6 +8,7 @@ import vllm.config.speculative as speculative_config
 from transformers import DeepseekV2Config, PretrainedConfig
 from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.model_executor.models.config import Qwen4ExpForConditionalGenerationConfig
 from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 
 from vllm_ascend.utils import is_deepseek_v41, is_gqa_pcp_dcp_config
@@ -346,3 +347,32 @@ ModelConfig.verify_with_parallel_config = _ascend_verify_with_parallel_config
 
 if "glm5_next_mtp" not in get_args(speculative_config.MTPModelTypes):
     speculative_config.MTPModelTypes = Literal[(*get_args(speculative_config.MTPModelTypes), "glm5_next_mtp")]
+
+
+_orig_qwen4_exp_verify_and_update_config = Qwen4ExpForConditionalGenerationConfig.verify_and_update_config
+_QWEN4_EXP_SPECULATIVE_METHOD_ERROR = (
+    "Qwen4Exp speculative decoding supports only its native MTP checkpoint and linear n-gram proposers"
+)
+
+
+def _ascend_qwen4_exp_verify_and_update_config(vllm_config) -> None:
+    spec_config = getattr(vllm_config, "speculative_config", None)
+    draft_model_config = getattr(spec_config, "draft_model_config", None)
+    draft_architectures = getattr(draft_model_config, "architectures", None) or ()
+    is_dflash2 = getattr(spec_config, "method", None) == "dflash" and "DFlash2DraftModel" in draft_architectures
+    if not is_dflash2:
+        _orig_qwen4_exp_verify_and_update_config(vllm_config)
+        return
+
+    try:
+        _orig_qwen4_exp_verify_and_update_config(vllm_config)
+    except NotImplementedError as exc:
+        # This is the final check in the pinned upstream implementation. Match
+        # its full message so newer or unrelated validation failures still fail.
+        if str(exc) != _QWEN4_EXP_SPECULATIVE_METHOD_ERROR:
+            raise
+
+
+Qwen4ExpForConditionalGenerationConfig.verify_and_update_config = staticmethod(
+    _ascend_qwen4_exp_verify_and_update_config
+)
