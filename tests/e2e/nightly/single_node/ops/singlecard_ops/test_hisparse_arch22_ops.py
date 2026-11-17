@@ -24,7 +24,8 @@ def _require_arch22():
     assert hasattr(torch.ops._C_ascend, "hisparse_resolve_residency"), "rebuild the arch22 extension"
 
 
-def reference(topk, requests, states, source, resident, hot_table, dgi, lru, block):
+def _reference_hisparse_resolve_residency(topk, requests, states, source, resident, hot_table, dgi, lru, block):
+    """Compute the HiSparse resolver's expected outputs and cache state on CPU."""
     dgi = dgi.clone()
     lru = lru.clone()
     out = torch.full_like(topk, -1)
@@ -171,7 +172,7 @@ def test_random_request_unions(capture, compact):
                 for slot, host_id in zip(slots.tolist(), selected.tolist()):
                     physical = int(source[request, slot // block])
                     cache_cpu[physical, slot % block] = host[host_id]
-            expected = reference(
+            expected = _reference_hisparse_resolve_residency(
                 indices_cpu, requests_cpu, state_cpu, source, resident_cpu, source, dgi_cpu, lru_cpu, block
             )
             for destination, value in [
@@ -718,7 +719,7 @@ def test_resident_fast_path_dynamic_graph(state_count, mask_dtype, compact, resi
             torch.npu.synchronize()
             live_indices = oracle_indices.clone()
             live_indices[live_rows:] = -1
-            expected = reference(
+            expected = _reference_hisparse_resolve_residency(
                 live_indices,
                 requests_cpu,
                 states_cpu,
