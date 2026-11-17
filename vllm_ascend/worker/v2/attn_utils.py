@@ -44,6 +44,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -1604,6 +1605,21 @@ def _allocate_kv_cache(
     return kv_cache_raw_tensors
 
 
+def _reshape_gdn_cache(
+    pages: torch.Tensor,
+    spec: MambaSpec,
+) -> list[torch.Tensor]:
+    """Unpack the conv and recurrent state views as in upstream MambaBase."""
+    states: list[torch.Tensor] = []
+    offset = 0
+    for shape, dtype in zip(spec.shapes, spec.dtypes, strict=True):
+        state_bytes = math.prod(shape) * get_dtype_size(dtype)
+        state = pages[:, offset : offset + state_bytes].view(dtype)
+        states.append(state.view(pages.shape[0], *shape))
+        offset = _align_up(offset + state_bytes, getattr(spec, "state_alignment", 1))
+    return states
+
+
 def allocate_kv_cache_main(
     kv_cache_config: KVCacheConfig,
     device: torch.device,
@@ -1612,63 +1628,61 @@ def allocate_kv_cache_main(
     *,
     allocate: Callable[[int], torch.Tensor] | None = None,
 ) -> dict[str, Any]:
-    """Allocate Ascend KV cache through vLLM main's #51718 entry point.
-
-    vLLM #51718 replaced ``_allocate_kv_cache`` + ``_reshape_kv_cache`` with
-    ``allocate_kv_cache`` and generic ``[B, H, N, C]`` views. Ascend attention
-    still consumes separate K/V (and backend-specific state) tensors, so keep
-    the Ascend allocation/reshape contract behind the new entry point.
-    """
+    """Allocate upstream pages and expose Ascend views for FullAttention/GDN."""
     if allocate is not None:
         raise NotImplementedError("Extensible KV cache allocation is not supported on Ascend.")
-    del layout
+
+    from vllm.v1.worker.utils import allocate_kv_cache as upstream_allocate_kv_cache
+
     vllm_config = get_current_vllm_config()
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
-    shared_layers = {
-        layer_name: target_layer
-        for layer_name, layer in attn_layers.items()
-        if (target_layer := getattr(layer, "kv_sharing_target_layer_name", None))
-    }
+    if vllm_config.kv_transfer_config is not None:
+        raise NotImplementedError("The vLLM v0.33.0 allocator does not support Ascend KV transfer alignment.")
 
-    raw_tensors = _allocate_kv_cache(
-        kv_cache_config,
-        shared_layers=shared_layers,
-        device=device,
-    )
-
-    attn_groups: list[AttentionGroup] = []
-    for group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-        group_map: dict[tuple[str, KVCacheSpec, int], AttentionGroup] = {}
-        group_order: list[tuple[str, KVCacheSpec, int]] = []
-        for layer_name in kv_cache_group.layer_names:
-            if layer_name in shared_layers:
+    # The release allocator lacks the callback and cannot split padded pages.
+    # It places whole manager pages; the Ascend view splits them below.
+    caches: dict[str, Any] = upstream_allocate_kv_cache(kv_cache_config, device, layout)
+    layer_specs = _get_layer_kv_cache_specs(kv_cache_config)
+    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+        for name in group.layer_names:
+            if name not in caches and getattr(attn_layers[name], "kv_sharing_target_layer_name", None):
                 continue
-            layer = attn_layers[layer_name]
-            layer_spec = kv_cache_group.kv_cache_spec
-            if isinstance(layer_spec, UniformTypeKVCacheSpecs):
-                layer_spec = layer_spec.kv_cache_specs[layer_name]
-            backend = layer.get_attn_backend()
-            key = (backend.full_cls_name(), layer_spec, getattr(layer, "num_heads", 0))
-            if key not in group_map:
-                group_map[key] = AttentionGroup(
-                    backend=backend,
-                    layer_names=[layer_name],
-                    kv_cache_spec=layer_spec,
-                    kv_cache_group_id=group_id,
-                )
-                group_order.append(key)
-            else:
-                group_map[key].layer_names.append(layer_name)
-        attn_groups.extend(group_map[key] for key in group_order)
+            spec = layer_specs[name]
+            cache = caches[name]
+            if type(spec) is MambaSpec and spec.mamba_type == MambaAttentionBackendEnum.GDN_ATTN:
+                caches[name] = _reshape_gdn_cache(cache[:, 0, 0, :], spec)
+                continue
+            if (
+                type(spec) is not FullAttentionSpec
+                or spec.dtype not in (torch.float16, torch.bfloat16)
+                or spec.kv_quant_mode != KVQuantMode.NONE
+                or spec.head_size != spec.head_size_v
+                or spec.tokens_per_state != 1
+                or spec.num_head_slots is not None
+                or spec.state_content_bytes is not None
+            ):
+                raise NotImplementedError(f"Unsupported Ascend KV cache layout for {name}: {spec!r}.")
 
-    return _reshape_kv_cache_v2(
-        attn_groups=attn_groups,
-        kv_cache_raw_tensors=raw_tensors,
-        cache_dtype=vllm_config.cache_config.cache_dtype,
-        kernel_block_sizes=kernel_block_sizes,
-        shared_kv_cache_layers=shared_layers,
-        kv_cache_config=kv_cache_config,
-    )
+            kernel_block_size = kernel_block_sizes[group_id]
+            blocks_per_page, remainder = divmod(spec.block_size, kernel_block_size)
+            page_stride = cache.stride(0) * cache.element_size()
+            if remainder or (blocks_per_page > 1 and page_stride != spec.page_size_bytes):
+                raise ValueError(f"Cannot split the manager page for {name} into kernel blocks.")
+            shape = attn_layers[name].get_attn_backend().get_kv_cache_shape(
+                cache.shape[0] * blocks_per_page,
+                kernel_block_size,
+                spec.num_kv_heads,
+                spec.head_size,
+                (spec.cache_dtype_str or "auto") if spec.is_draft else vllm_config.cache_config.cache_dtype,
+            )
+            caches[name] = _reshape_combined_attention_kv_cache(
+                cache, shape, spec.dtype, page_stride, blocks_per_page
+            )
+
+    for name, layer in attn_layers.items():
+        if target := getattr(layer, "kv_sharing_target_layer_name", None):
+            caches[name] = caches[target]
+    return caches
 
 
 def _reshape_mamba_kv_cache(
