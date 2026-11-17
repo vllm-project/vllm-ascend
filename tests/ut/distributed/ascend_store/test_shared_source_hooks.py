@@ -3,7 +3,7 @@
 """CPU checks of the production attention hooks and standard connector methods."""
 
 import unittest
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
@@ -106,26 +106,64 @@ class TestStandardConnectorHooks(unittest.TestCase):
 
     def test_cut_cache_only_then_normal_forward_saves_once(self):
         events = []
+
+        def prepare_inputs_and_caches(*args):
+            events.append("final-write")
+            return None, None
+
+        layer_metadata = SimpleNamespace(
+            swa=SimpleNamespace(num_actual_tokens=1),
+            positions=torch.zeros(1),
+            rope=lambda *args: (None, None),
+        )
         attn = SimpleNamespace(
-            dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(kv_cache=[])),
+            v41_layer_name="cut",
+            n_local_heads=1,
+            head_dim=1,
+            rotary_emb=SimpleNamespace(layername="rope"),
+            dsa_attn=SimpleNamespace(
+                swa_cache_layer=SimpleNamespace(kv_cache=[]),
+                dsa_attn=SimpleNamespace(impl=SimpleNamespace()),
+            ),
             v41_impl=SimpleNamespace(
-                _get_layer_metadata=lambda _: SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=1)),
+                _get_layer_metadata=lambda _: layer_metadata,
                 _update_caches=lambda *args: events.append("cache-only-write"),
-                forward=lambda *args: events.append("final-write"),
+                _prepare_inputs_and_caches=prepare_inputs_and_caches,
+                _select_sparse_indices=Mock(),
+                _forward_attention=Mock(),
+                _project_output=lambda *args, **kwargs: events.append("project"),
             ),
         )
         ctx = SimpleNamespace(attn_metadata={}, no_compile_layers={"cut": attn})
         scope: dict[str, Any] = dict(
+            torch=torch,
+            AscendDSAV41Impl=SimpleNamespace(_apply_rotary=Mock()),
+            oproj_tp_enable=lambda: False,
             get_forward_context=lambda: ctx,
-            wait_for_kv_layer_from_connector=lambda _: events.append("wait"),
-            maybe_save_kv_layer_to_connector=lambda *args: events.append("save"),
+            wait_for_kv_layer_from_connector=Mock(side_effect=lambda _: events.append("wait")),
+            maybe_save_kv_layer_to_connector=Mock(side_effect=lambda *args: events.append("save")),
         )
+        attn.v41_impl.forward = MethodType(load(ATTENTION, "forward", scope, "AscendDSAV41Impl"), attn.v41_impl)
         load(ATTENTION, "dsa_v41_write_kv", scope)
         load(ATTENTION, "dsa_v41_forward", scope)
         hidden = torch.ones(1)
         scope["dsa_v41_write_kv"](hidden, hidden, "cut")
         scope["dsa_v41_forward"](hidden, hidden, "cut")
-        self.assertEqual(events, ["wait", "cache-only-write", "wait", "final-write", "save"])
+        self.assertEqual(events, ["wait", "cache-only-write", "wait", "final-write", "project", "save"])
+        scope["maybe_save_kv_layer_to_connector"].assert_called_once_with("cut", attn.dsa_attn.swa_cache_layer.kv_cache)
+
+        for num_tokens in (1, 0):
+            with self.subTest(num_tokens=num_tokens):
+                events.clear()
+                layer_metadata.swa.num_actual_tokens = num_tokens
+                attn.v41_impl.forward(attn, None, hidden, hidden)
+                self.assertEqual(events, ["wait", "final-write", "project", "save"])
+                scope["wait_for_kv_layer_from_connector"].assert_called_with("cut")
+
+        events.clear()
+        ctx.attn_metadata = None
+        scope["dsa_v41_forward"](hidden, hidden, "cut")
+        self.assertEqual(events, [])
 
     def test_standard_connector_drives_full_sparse_sequence(self):
         worker, store, _ = make_shared_worker(self, bounded=True, draft=True)

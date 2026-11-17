@@ -66,10 +66,7 @@ def dsa_v41_forward(
     """Execute V4.1 attention behind an explicit graph side-effect boundary."""
     forward_context = get_forward_context()
     attn = forward_context.no_compile_layers[layer_name]
-    wait_for_kv_layer_from_connector(layer_name)
     attn.v41_impl.forward(attn, None, hidden_states, output)
-    # This composite boundary uses registered group descriptors in the connector.
-    maybe_save_kv_layer_to_connector(layer_name, attn.dsa_attn.swa_cache_layer.kv_cache)
 
 
 def dsa_v41_forward_fake(
@@ -802,6 +799,7 @@ class AscendDSAV41Impl:
                 projector._forward_o_proj(o_proj_input, output)
             return output
         metadata = self._get_layer_metadata(forward_context.attn_metadata)
+        wait_for_kv_layer_from_connector(attn.v41_layer_name)
         q, prepared_indexer = self._prepare_inputs_and_caches(
             attn, hidden_states, metadata, forward_context.attn_metadata
         )
@@ -818,6 +816,7 @@ class AscendDSAV41Impl:
             heads = attn.n_local_heads
             attention_output = hidden_states.new_empty((0, heads, attn.head_dim))
         self._project_output(attn, attention_output, hidden_states, projected=output)
+        maybe_save_kv_layer_to_connector(attn.v41_layer_name, attn.dsa_attn.swa_cache_layer.kv_cache)
         return output
 
 
