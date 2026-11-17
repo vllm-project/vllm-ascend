@@ -384,13 +384,8 @@ class AscendModelState(DefaultModelState):
         }
 
     def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor:
-        # MRV2 calls this after DP synchronization, at the same input-preparation
-        # boundary as the real batch's embedding lookup. MM/prompt-embeds dummy
-        # batches otherwise reuse a buffer and miss the cross-DP exchange.
         if embedding_tp_enable():
             if not hasattr(self, "_embedding_tp_dummy_join"):
-                # Resolve after model loading; importing the op lazily also
-                # avoids loading the worker's custom ops during state imports.
                 from vllm_ascend.ops.vocab_parallel_embedding import AscendVocabParallelEmbedding, VocabParallelMode
 
                 self._embedding_tp_dummy_join = None
@@ -402,8 +397,6 @@ class AscendModelState(DefaultModelState):
                     ):
                         capacity = module.embedding_tp_capacity
                         assert capacity is not None
-                        # Match MRV2 InputBuffers.input_ids: collective dtypes
-                        # must agree between real and idle DP ranks.
                         token_ids = torch.zeros(capacity, dtype=torch.int32, device=self.device)
                         self._embedding_tp_dummy_join = (module, token_ids)
                         break
@@ -411,9 +404,6 @@ class AscendModelState(DefaultModelState):
                 module, token_ids = self._embedding_tp_dummy_join
                 module(token_ids)
 
-        # Preserve the upstream buffer, shape and address for graph replay.
-        # Profiling and capture use the same lookup so its allocations and
-        # communicator are prepared before the first real request.
         return super().dummy_inputs_embeds(num_tokens)
 
     def prepare_inputs_embeds(self, scheduled_encoder_inputs, input_batch, req_states) -> torch.Tensor:
