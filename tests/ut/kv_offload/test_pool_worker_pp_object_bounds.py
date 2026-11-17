@@ -8,9 +8,9 @@ import pytest
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 
 
-def _worker(layer_entries, offset=42, total_layers=78, dcp_size=1, dcp_rank=0, block_key=False, kvpp=False):
+def _worker(layer_entries, offset=42, total_layers=78, dcp_size=1, dcp_rank=0, block_key=False, kvpp=False, pp_size=2):
     worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
-    worker.pp_size = 2
+    worker.pp_size = pp_size
     worker.pp_rank = int(offset > 0)
     worker.layerwise_key_layer_offset = offset
     worker.total_layers = total_layers
@@ -38,19 +38,21 @@ def _worker(layer_entries, offset=42, total_layers=78, dcp_size=1, dcp_rank=0, b
 
 
 @pytest.mark.parametrize("rank", range(16))
-@pytest.mark.parametrize("offset", [0, 42])
+@pytest.mark.parametrize(("pp_size", "offset"), [(1, 0), (2, 0), (2, 42)])
 @pytest.mark.parametrize("block_id", [0, 1])
-def test_kvpp_gva_uses_owner_indices_and_payload(rank, offset, block_id):
+def test_kvpp_gva_uses_owner_indices_and_payload(rank, pp_size, offset, block_id):
     count = 4 + int(rank < 14)
     first = rank * 4 + min(rank, 14)
     entries = [[4096, 8192] for _ in range(count)]
-    worker = _worker(entries, offset=offset, total_layers=156, kvpp=True)
+    worker = _worker(entries, offset=offset, total_layers=156, kvpp=True, pp_size=pp_size)
     worker.num_layers = 78
     worker.physical_layer_to_group_layers = {layer: [(0, i)] for i, layer in enumerate(range(first, first + count))}
     builder = worker._build_group_layer_builders()[0]
     allocated = worker._global_group_alloc_size(0)
-    assert allocated == count * 12288
-    assert builder.layer_byte_offset == 0
+    payload_bytes = count * 12288
+    byte_origin = 0 if pp_size == 1 else offset * 12288
+    assert allocated == (payload_bytes if pp_size == 1 else 156 * 12288)
+    assert builder.layer_byte_offset == byte_origin
     assert worker._final_layer_for_transfer(78) == first + count - 1
 
     base = 1_000_000_000
@@ -68,10 +70,10 @@ def test_kvpp_gva_uses_owner_indices_and_payload(rank, offset, block_id):
             worker.group_kv_caches_base_addr[0][start + i] + block_id * worker.group_block_stride[0][start + i]
             for i in range(2)
         ]
-        assert gvas.tolist() == [base + dense * 12288, base + dense * 12288 + 4096]
+        assert gvas.tolist() == [base + byte_origin + dense * 12288, base + byte_origin + dense * 12288 + 4096]
         assert np.all(gvas + sizes <= base + allocated)
         copied_bytes += int(sizes.sum())
-    assert copied_bytes == allocated
+    assert copied_bytes == payload_bytes
 
 
 def test_non_kvpp_gva_keeps_layer_fallback_and_completion():

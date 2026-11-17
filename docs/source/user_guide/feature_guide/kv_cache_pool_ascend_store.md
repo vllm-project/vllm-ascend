@@ -62,16 +62,13 @@ For non-layerwise complete-block transfers, adjacent MLA components sharing one 
 
 This bulk fast path uses physical-page-major object contents instead of the previous component-major segmented contents. A fresh namespace is required even when upgrading from the earlier segmented version of this fix. Writers and readers must agree on transfer mode and cache layout; do not share these objects with layerwise readers or workers using a different component layout.
 
-### Upgrading KVPP Memcache Layerwise Pools
+### KVPP Memcache Layerwise Pools
 
-With KVPP and Memcache `use_layerwise=true`, each owner stores only its registered
-layer payload. Owner rank and PP stage remain separated by their existing pool
-keys. Layers owned by other ranks do not generate transfers.
-
-Upgrade all writers and readers together and use a fresh cache namespace, such as
-a new request `cache_salt`. Existing KVPP objects may use full-model padding and
-PP byte offsets; restarting workers alone does not invalidate those objects.
-Block-key Mooncake pools and transfers with KVPP disabled retain their layouts.
+With KVPP and Memcache `use_layerwise=true`, each rank transfers only the layers
+it owns and completes transfers at its last owned layer. With one pipeline stage
+(`PP=1`), each object's allocation covers only that owner's registered payload.
+Existing cache keys and PP byte origins are preserved; this fix does not require
+changing `cache_salt` or rebuilding the cache namespace.
 
 ### Prefix Cache Retention
 

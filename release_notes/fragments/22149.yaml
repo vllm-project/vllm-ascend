@@ -4,10 +4,5 @@ entries:
     text: >-
       Fixed layer index errors and transfer completion waits when KVPP uses
       Memcache layerwise KV pooling with uneven layer ownership. Each owner now
-      reserves only the cache payload for its own layers.
-  - category: breaking
-    text: >-
-      KVPP Memcache layerwise objects use owner-local payload origins instead of
-      global PP byte offsets. Upgrade all writers and readers together and use
-      a fresh cache namespace, such as a new request cache_salt; restarting
-      workers alone does not invalidate existing objects.
+      reserves only its own layer payload when PP=1. Existing cache keys and PP
+      byte origins are preserved, with no cache namespace migration required.
