@@ -130,7 +130,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
     }'
 ```
 
-embedding / LM head TP are the two knobs that can be combined with standard `tensor_parallel_size` (o_proj / MLP / QKV IProj TP cannot — see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement)). Both now compose their vocabulary sharding with the standard TP grid — each rank holds `vocab / 16` in this example instead of replicating `vocab / 4`, cutting per-card weight memory and per-step weight reads by the TP factor. The dense weights split across TP ranks as usual, giving a standalone instance more KV headroom per card. For decode-throughput production deployments, the recommended topology is still the P/D-disaggregated decode node shown in Scenario 2.
+embedding / LM head TP are the two knobs that can be combined with standard `tensor_parallel_size` (o_proj / MLP / QKV IProj TP cannot — see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement)). Both now compose their vocabulary sharding with the standard TP grid — each rank holds `vocab / (finegrained_size × tp_size)` (`vocab / 16` in this example) instead of replicating `vocab / 4`, cutting per-card weight memory and per-step weight reads by the TP factor. The dense weights split across TP ranks as usual, giving a standalone instance more KV headroom per card. For decode-throughput production deployments, the recommended topology is still the P/D-disaggregated decode node shown in Scenario 2.
 
 #### Scenario 2 — o_proj, MLP, embedding and LM head TP on a P/D-disaggregated decode node
 
