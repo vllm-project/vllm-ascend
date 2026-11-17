@@ -107,7 +107,7 @@ Use the same image version on every node in a deployment.
 === "950DT products"
 
     The official image includes CANN `{{ release_cann_version }}` and the
-    inference runtime. Prepare Ascend HDK `{{ release_hdk_version }}` on each
+    inference runtime. Prepare Ascend HDK `{{ release_hdk_version_a5 }}` on each
     host and verify the driver and firmware with `npu-smi info`; see the
     [validated software stack](../../getting_started/installation.md#installation-hardware-software-stack).
     The command below uses the Ubuntu image. For openEuler, replace its
