@@ -244,3 +244,8 @@ if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
 else()
   install(TARGETS vllm_ascend_C vllm_ascend_kernels DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
 endif()
+
+# rare_feed_native is built as a setuptools Extension in setup.py (always),
+# so it lands in the wheel for both COMPILE_CUSTOM_KERNELS=0 and =1. Keeping a
+# second cmake target would double-compile and still risk omitting the .so
+# from package_data (*.so is gitignored).
