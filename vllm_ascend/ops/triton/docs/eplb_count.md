@@ -2,244 +2,209 @@
 
 ## Description
 
-- **Function:** Count valid physical routes owned by local experts. This shared
-  EPLB utility is called through `distributed/eplb/tensor_ops.py::count_allgather_tokens`
+- **Function:** Count valid physical routes owned by local experts. The shared
+  `distributed/eplb/tensor_ops.py::count_allgather_tokens` wrapper dispatches
   from the all-gather recording path in `eplb_state.py`.
 - **Formula:** `out[e] = sum(mask[t] and ids[t,j] == start + e)`.
   Duplicate routes count separately; masked and nonlocal routes count zero.
-- **Algorithm flow:** The first kernel balances fixed 512-route tiles across
-  `min(vector_cores, ceil(T*K/512))` programs. Each accumulates a private INT64
-  histogram and writes one complete row of `[programs, padded_bins]` scratch.
-  The second kernel uses one program to read complete adjacent scratch rows,
-  reducing the producer dimension in row tiles sized from an element budget.
-  It accumulates an INT64 bin vector and writes the final counts once.
-  No global atomic updates are used. Empty T/K returns zeros.
-- **Supported modes:** Ascend backend with the worker-selected NPU. Tested
-  products are A3 (`Ascend910_9362`) and A5 (`Ascend950DT_9582`). A2 and other
-  product variants are unvalidated.
+- **Algorithm:** Two Triton launches. Producers balance fixed 512-route tiles
+  over `min(vector_cores, ceil(T*K/512))` programs, accumulate private INT64
+  histograms and write complete scratch rows. Producer 0 also zeros the output.
+  Each program in the second kernel reads one adjacent row tile, reduces axis
+  0 and atomically adds its INT64 vector to the output. There is no row loop
+  in the second kernel. Empty T/K returns zeros.
+- **Platform:** Ascend NPU using the worker-selected device and the repository's
+  shared vector-core capability helper. Current validation is reported below.
 
 ## Parameters
 
-All parameters are required. Public implementation wrapper:
+Public kernel wrapper:
 `vllm_ascend.ops.triton.eplb_count.count_allgather_tokens_triton`.
 
-| Parameter | Input/Output/Attribute | Description | Data type | Data format |
+| Parameter | Input/Output/Attribute | Description | Data type | Format |
 | --- | --- | --- | --- | --- |
 | `topk_ids` | Input | Physical expert IDs | INT32/INT64 | Contiguous `[T,K]` |
-| `token_mask` | Input | Whether each token contributes | BOOL | `[T]`, stride supported |
-| `local_expert_start` | Attribute | First locally owned expert | Python int | Nonnegative scalar |
-| `local_expert_count` | Attribute | Local expert count | Python int | Positive scalar |
+| `token_mask` | Input | Whether each token contributes | BOOL | `[T]`, strides supported |
+| `local_expert_start` | Attribute | First local physical expert | Python int | Nonnegative scalar |
+| `local_expert_count` | Attribute | Number of local experts | Python int | Positive scalar |
 | return value | Output | Fresh local route counts | INT64 | `[local_expert_count]` |
 
 ## Constraints
 
 IDs and mask must be on the same NPU with matching T. Noncontiguous IDs are
-rejected without an implicit copy. IDs use direct `ids_ptr + offsets` addressing;
-mask strides are supported. Runtime route count and expert bounds use the
-backend's INT32 scalar domain; IDs and accumulated counts use INT64. Large IDs
-outside the local range are ignored. This is counting, not weighted scatter-add.
+rejected without an implicit copy. IDs use `ids_ptr + offsets`; masks may be
+strided. Route count and expert bounds use the backend's INT32 scalar domain;
+IDs and accumulated counts use INT64. Out-of-range IDs are ignored.
 
-`padded_bins = max(2, next_power_of_2(local_expert_count))`; the minimum two
-keeps the loop-carried accumulator vector-shaped for the backend. Tile size 512
-is shared across devices. The producer grid uses the shared capability helper.
-The reducer has an 8192-element tile budget, equivalent to 64 KiB of INT64
-partial counts. It chooses
-`rows_per_tile = min(programs, max(1, 8192 // padded_bins))` and pads this row
-count to a power of two. It loads complete rows, reduces axis 0 and accumulates
-the result across the loop. Rows beyond the tile or producer count are masked.
-For the tested bin range, the shaped load fits the element budget; the bin
-accumulator and compiler temporaries require additional UB.
+`padded_bins = max(2, next_power_of_2(local_expert_count))`. The minimum of two
+keeps the producer's loop-carried histogram vector-shaped for the backend.
+The producer tile has 512 routes on both devices. The reducer chooses
+`rows_per_tile = min(programs, max(1, 8192 // padded_bins))` and pads the row
+dimension to a power of two for the shaped load. Each reducer program loads
+exactly one row tile, with tail rows masked, and uses a vector atomic add.
 
-| Padded bins | A3 rows per tile / iterations (40 producers) | A5 rows per tile / iterations (64 producers) |
+The budget is 8192 INT64 partial counts (64 KiB); reduction and compiler
+temporaries use additional UB. For the validated expert counts the padded
+load stays within this element budget. Validation covers up to 512 experts.
+
+| Padded bins | A3 rows/tile; reducer programs (40 producers) | A5 rows/tile; reducer programs (64 producers) |
 | ---: | --- | --- |
-| 128 | 40 / 1 | 64 / 1 |
-| 256 | 32 / 2 | 32 / 2 |
-| 512 | 16 / 3 | 16 / 4 |
+| 128 | 40; 1 | 64; 1 |
+| 256 | 32; 2 | 32; 2 |
+| 512 | 16; 3 | 16; 4 |
 
-Scratch takes `8 * programs * padded_bins` bytes: 40 KiB for 40 programs and
-128 bins, or 64 KiB for 64 programs. These are logical allocation sizes, not
-physical UB measurements. This validation covers up to 512 local experts.
-
-Scratch and nonempty output are fresh allocations, fully overwritten each call.
-There is no separate output-clear kernel. The two launches use the same current
-stream; Graph replay must preserve their order. Inputs are not mutated and no
-tensor values are read on the host. All-gather, record-enable state and persistent
-load accumulation remain with the existing caller.
+Scratch takes `8 * programs * padded_bins` bytes: 40 KiB for 40 producers and
+128 bins, or 64 KiB for 64 producers. These are logical allocation sizes.
+Output and scratch are fresh per call. The two launches use the same current
+stream: completion of the first kernel orders both output zeroing and scratch
+writes before all second-kernel atomic updates. There is no extra clear launch.
+Graph replay re-executes this zeroing on every call. Inputs are not mutated,
+and no tensor values are read on the host. The existing caller still owns
+all-gather, record-enable state and persistent load accumulation.
 
 ## Origin and Differences
 
-- **Origin:** The shared count contract in upstream main `3ae9de590`,
-  unchanged in the merged main `8cd3c3762`,
-  `vllm_ascend/distributed/eplb/tensor_ops.py`.
-- **Differences:** Main constructs local IDs, eligibility and clamped indices,
-  zeros the output and invokes Torch `scatter_add_`. The final NPU implementation
-  combines eligibility with local histogram construction, then reduces partial
-  counts. CPU inputs retain main's Torch path. NPU IDs must now be contiguous;
-  token masks may still be strided.
+The origin is the shared count contract in main
+`vllm_ascend/distributed/eplb/tensor_ops.py`. Main constructs local IDs,
+eligibility and clamped indices, zeros the output and invokes Torch
+`scatter_add_`. This implementation combines eligibility and local histogram
+construction, then merges partial counts in a separate kernel. CPU inputs
+retain main's Torch path. NPU IDs must be contiguous; masks may be strided.
 
 ### Compilation and integration
 
 Production callers use the public wrapper. Producer variants depend on pointer
 dtype/alignment, TOPK, mask stride, padded bins, tile and target/compiler options.
-Runtime route count and expert start/count use `do_not_specialize`. Reducer
-variants depend on producer count, padded bins, row tile and valid expert count,
-controlling loop bounds, tensor dimensions and output masking. Changing only
-contents does not create a new variant.
+Route count and expert start/count use `do_not_specialize`. Reducer variants
+depend on producer count, padded bins, row tile and valid expert count. Changing
+only tensor contents does not create a new variant.
 
-Both launches request `compile_mode="simd"`. A5's histogram lowering can still
-produce `parallel_mode="mix_simd_simt"`; the option does not guarantee a purely
-SIMD binary. Warmup integration: N/A; no new registry or runtime configuration
-is introduced. Model startup/serving compilation counts remain unmeasured.
+Both launches request `compile_mode="simd"`; histogram lowering on A5 can still
+generate mixed SIMD/SIMT code. No warmup registration or new runtime setting is
+introduced. Model startup/serving compilation counts remain unmeasured.
 
 ## Test Cases
 
-Reference: main's Torch formula on CPU. INT64 results require exact equality
-(`rtol=0`, `atol=0`). Coverage includes both ID dtypes, empty T/K, 511/512/513
-route boundaries, 40/64-producer grid transitions, up to 1,048,576 routes,
-512 experts, 15/16/17 partial-row reduction boundaries, non-power-of-two bins,
-large/invalid IDs, duplicated routes,
-disabled/strided masks, noncontiguous-ID rejection and mutable Graph replay.
-The large mutable Graph case captures 20 calls and repeatedly changes IDs/masks.
+Reference: main's Torch formula on CPU. INT64 outputs require exact equality
+(`rtol=0`, `atol=0`). There are 455 parameterized tests: 45 shapes x two ID
+dtypes x five distributions, one noncontiguous-ID rejection and four mutable
+Graph regressions. Coverage includes empty T/K, 511/512/513-route boundaries,
+40/64-producer transitions, non-power-of-two bins, up to 1,048,576 routes and
+512 experts, large/nonlocal and duplicate IDs, strided/disabled masks, and
+15/16/17 partial-row boundaries. The mutable Graphs include 20-call capture
+with multiple reducer programs and repeated ID/mask changes.
 
 ```bash
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_eplb_count.py
 ```
 
-The expanded shape set is synthetic interface/boundary coverage. 81920 routes
-and 128 bins preserve the task's original workload; added points are not claimed
-as model-captured shapes. Model accuracy, serving performance and compilation
-counts remain unmeasured.
+The expanded shapes are synthetic interface/boundary cases. The task's original
+81920-route/128-bin workload is included; added shapes are not model captures.
 
-### Performance methodology
+## Performance
 
-Compare main `3ae9de590` directly against the final two-stage implementation.
-Both receive identical inputs and allocate fresh output each call. Full-wrapper
-Graph timing includes main's zeroing and the candidate's reduction. Each graph
-contains 20 calls; five warmup replays precede ten alternating device Event
-samples, divided by 20. Values are medians in microseconds. CPU-oracle checks run
-before capture and after replay. Failures have no numeric speedup. No eager
-measurement is included.
+The measured candidate is `dda67fd5e`, merged through main `776d8f084`.
+The baseline is main `3ae9de590`; its `tensor_ops.py` is byte-identical in
+`776d8f084`. Kernel SHA256:
+`578169f556f9f8baa549c711e7e6332ec45e2b97038e2eca5f4600981ab3f948`.
 
-There are 141 points/device: 43 shapes x three distributions, three extra
-INT32 shapes x three distributions, and one strided-mask shape x three
-distributions. Uniform cycles through local experts; hot uses one expert;
-mixed includes masked tokens and nonlocal routes. Local start is 7.
+Graph-only measurement covers the complete public wrapper, including fresh
+output/scratch allocation in capture. Each Graph captures 20 calls, performs
+five warmup replays and collects ten alternating device Event samples; values
+are median replay time divided by 20. Both implementations are checked against
+the CPU oracle before capture and after replay. There is no eager timing.
 
-### Results
+The matrix has 43 nonempty shapes x three distributions (uniform, hot, mixed),
+three extra INT32 shapes x three distributions, and one strided-mask shape x
+three distributions: 141 points/device. All failures and regressions are retained.
 
-Measured on 2026-11-17 against main `3ae9de590`, using the final implementation
-at `fac549668`, which includes the adaptive row-tiled reducer and main
-`8cd3c3762`. The pinned baseline file is identical in main `3ae9de590` and
-`8cd3c3762`. All source hashes and results below refer to this final reducer.
+| Platform | Exact tests | Graph exact checks | Faster medians | Regressions | Speedup range |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A3 | 455/455 | 141/141 | 117/141 | 24/141 | 0.581x–1.983x |
+| A5 | NOT RUN | NOT RUN | — | — | — |
 
-| Platform | Exact regression tests | Main vs two-stage Graph exact checks | Faster points | Observed speedup range |
-| --- | ---: | ---: | ---: | ---: |
-| A3 | 453/453 passed | 141/141 passed | 115/141 | 0.371x–1.953x |
-| A5 | 453/453 passed | 141/141 passed | Shared-target observation only | Not accepted as controlled performance |
+A3 uses Ascend910_9362 / NpuArch2201, 40 vector cores and driver 26.2.rc1.b081.
+The target was healthy and no other process on that target was observed in
+ownership checks; other host devices had active workloads. This is a shared
+host measurement, not a reservation. CANN is 9.2.1, Torch 2.10.0+cpu, Torch-NPU
+2.10.0.post7, Triton 3.6.0 and Triton-Ascend 3.6.0.post2. The compiler SHA256 is
+`69b9402f711ccdcd21c6f951b5e211bb2abd397f1f5ff06dd4dc7a88c6f974bc`.
 
-Both devices use CANN 9.2.1, Python 3.12.16, Torch 2.10.0+cpu,
-Torch-NPU 2.10.0.post7, Triton 3.6.0 and Triton-Ascend 3.6.0.post2.
-Both `bishengir-compile` binaries have SHA256
-`69b9402f711ccdcd21c6f951b5e211bb2abd397f1f5ff06dd4dc7a88c6f974bc`
-(AscendNPU-IR `f94ebe365e88`, LLVM 19.1.7).
+Current A5 validation is NOT RUN: replacement targets were occupied or the
+isolated runtime failed initialization with DCMI `ret=-8020` before a kernel
+test. A5 rows contain null timing data and NOT_RUN status. Earlier candidate
+measurements are not validation of this source.
 
-| Device | Architecture | Driver | Vector cores |
-| --- | --- | --- | ---: |
-| A3 Ascend910_9362 | NpuArch2201 | 26.2.rc1.b081 | 40 |
-| A5 Ascend950DT_9582 | NpuArch3510 | 26.2.rc1.b088 | 64 |
-
-**A5 timing qualification:** another VLLM process was present on the same
-physical device (141.61.45.109, card 1). That process started at 16:35:16 +0800;
-the Graph matrix ran from 16:38:20 to 16:43:58 +0800 on 2026-11-17. The exact
-checks passed, but these timings are shared-target observations and are not
-accepted as controlled performance results. The A5 CSV retains all observed
-values with `timing_qualification=shared_target_load_observation_only`.
-Available replacement A5 devices were occupied at their pre-launch rechecks;
-a run without another workload on the target remains pending.
-
-A3 used a healthy target with no other target-device process observed in the
-ownership checks; other host devices had active jobs. It has 26 regressions,
-including `(10240,8,512)` uniform: 620.32 us on main versus 1001.70 us here
-(0.619x). The worst measured ratio is 0.371x at `(1088,8,512)`. The implementation
-does not establish a universal speedup. Every observed range and raw sample
-is retained in the CSV; faster-point counts refer to measured medians.
-
-The following table uses INT64 IDs, contiguous masks and uniform local routes.
-Shapes are `(T, K, local_expert_count)`. Latencies are microseconds per call.
-All A5 columns are shared-target observations as qualified above.
+For INT64 IDs, contiguous masks and uniform local routes, shapes are
+`(T,K,local_expert_count)` and times are microseconds per call:
 
 | Shape | A3 main | A3 two-stage | A3 speedup | A5 main | A5 two-stage | A5 speedup |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| (1, 1, 1) | 43.40 | 67.91 | 0.639x | 10.39 | 26.72 | 0.389x |
-| (1, 8, 128) | 102.71 | 70.84 | 1.450x | 16.28 | 15.65 | 1.040x |
-| (32, 2, 8) | 90.37 | 70.21 | 1.287x | 33.11 | 16.50 | 2.006x |
-| (64, 4, 32) | 104.61 | 78.80 | 1.327x | 46.32 | 4.91 | 9.432x |
-| (65, 8, 17) | 107.92 | 90.70 | 1.190x | 138.90 | 11.84 | 11.730x |
-| (128, 3, 64) | 107.64 | 85.42 | 1.260x | 38.12 | 6.42 | 5.934x |
-| (256, 8, 64) | 129.07 | 95.50 | 1.352x | 132.60 | 11.63 | 11.397x |
-| (511, 1, 128) | 116.40 | 87.78 | 1.326x | 31.38 | 22.65 | 1.385x |
-| (512, 1, 128) | 115.28 | 87.83 | 1.312x | 30.52 | 2.63 | 11.595x |
-| (513, 1, 129) | 115.12 | 100.11 | 1.150x | 31.29 | 16.35 | 1.913x |
-| (512, 8, 128) | 144.54 | 114.02 | 1.268x | 142.07 | 7.55 | 18.811x |
-| (2048, 8, 128) | 316.19 | 184.29 | 1.716x | 451.04 | 16.21 | 27.827x |
-| (10240, 1, 128) | 183.32 | 179.97 | 1.019x | 286.50 | 17.18 | 16.680x |
-| (10240, 4, 128) | 505.75 | 367.34 | 1.377x | 1112.89 | 21.15 | 52.628x |
-| (10240, 8, 32) | 586.71 | 398.43 | 1.473x | 7477.25 | 27.22 | 274.696x |
-| (10240, 8, 64) | 597.64 | 447.08 | 1.337x | 4350.55 | 18.03 | 241.336x |
-| (10240, 8, 128) | 614.63 | 545.29 | 1.127x | 2180.00 | 18.65 | 116.862x |
-| (10240, 8, 256) | 620.87 | 770.41 | 0.806x | 1168.81 | 22.94 | 50.955x |
-| (10240, 16, 128) | 1422.07 | 902.58 | 1.576x | 4306.45 | 38.25 | 112.593x |
-| (32768, 8, 128) | 2165.56 | 1347.46 | 1.607x | 6862.35 | 46.48 | 147.646x |
-| (2, 1, 1) | 41.58 | 67.86 | 0.613x | 10.54 | 2.81 | 3.753x |
-| (16, 2, 16) | 92.64 | 70.14 | 1.321x | 30.78 | 6.89 | 4.464x |
-| (127, 8, 127) | 121.66 | 97.95 | 1.242x | 41.59 | 7.16 | 5.809x |
-| (129, 8, 129) | 120.64 | 116.45 | 1.036x | 40.90 | 16.35 | 2.502x |
-| (1024, 2, 128) | 130.84 | 102.54 | 1.276x | 75.93 | 7.98 | 9.512x |
-| (1024, 8, 128) | 209.19 | 137.54 | 1.521x | 236.84 | 17.57 | 13.479x |
-| (2559, 8, 128) | 271.81 | 277.88 | 0.978x | 556.60 | 17.54 | 31.728x |
-| (2560, 8, 128) | 277.54 | 277.92 | 0.999x | 572.26 | 22.00 | 26.017x |
-| (2561, 8, 128) | 268.23 | 364.17 | 0.737x | 562.70 | 9.80 | 57.421x |
-| (4095, 8, 128) | 394.68 | 366.38 | 1.077x | 893.91 | 21.97 | 40.686x |
-| (4096, 8, 128) | 446.48 | 366.33 | 1.219x | 889.06 | 9.78 | 90.917x |
-| (4097, 8, 128) | 455.98 | 366.38 | 1.245x | 884.04 | 21.97 | 40.229x |
-| (8192, 8, 128) | 695.05 | 543.86 | 1.278x | 1732.79 | 14.37 | 120.554x |
-| (16384, 8, 128) | 1178.88 | 812.08 | 1.452x | 3489.18 | 23.57 | 148.013x |
-| (65536, 8, 128) | 4270.75 | 2506.12 | 1.704x | 13757.46 | 76.51 | 179.809x |
-| (131072, 8, 128) | 6310.93 | 4822.89 | 1.309x | 28413.73 | 147.06 | 193.208x |
-| (10240, 2, 128) | 279.58 | 278.08 | 1.005x | 556.52 | 19.46 | 28.604x |
-| (10240, 32, 128) | 2687.91 | 1614.02 | 1.665x | 8645.37 | 49.63 | 174.206x |
-| (10240, 8, 16) | 583.93 | 374.73 | 1.558x | 14040.62 | 28.12 | 499.318x |
-| (10240, 8, 512) | 620.32 | 1001.70 | 0.619x | 839.30 | 29.66 | 28.298x |
-| (960, 8, 512) | 175.57 | 281.39 | 0.624x | 121.56 | 10.98 | 11.075x |
-| (1024, 8, 512) | 216.82 | 279.27 | 0.776x | 125.35 | 10.92 | 11.476x |
-| (1088, 8, 512) | 187.90 | 506.22 | 0.371x | 130.04 | 14.44 | 9.004x |
+| (1, 1, 1) | 43.22 | 71.23 | 0.607x | — | — | — |
+| (1, 8, 128) | 101.11 | 76.73 | 1.318x | — | — | — |
+| (32, 2, 8) | 90.77 | 73.87 | 1.229x | — | — | — |
+| (64, 4, 32) | 105.47 | 84.35 | 1.250x | — | — | — |
+| (65, 8, 17) | 107.68 | 94.79 | 1.136x | — | — | — |
+| (128, 3, 64) | 107.45 | 90.48 | 1.188x | — | — | — |
+| (256, 8, 64) | 127.89 | 101.65 | 1.258x | — | — | — |
+| (511, 1, 128) | 115.73 | 93.56 | 1.237x | — | — | — |
+| (512, 1, 128) | 111.03 | 93.69 | 1.185x | — | — | — |
+| (513, 1, 129) | 116.13 | 106.21 | 1.093x | — | — | — |
+| (512, 8, 128) | 146.43 | 120.94 | 1.211x | — | — | — |
+| (2048, 8, 128) | 312.69 | 191.16 | 1.636x | — | — | — |
+| (10240, 1, 128) | 183.81 | 187.76 | 0.979x | — | — | — |
+| (10240, 4, 128) | 510.24 | 374.33 | 1.363x | — | — | — |
+| (10240, 8, 32) | 591.43 | 403.70 | 1.465x | — | — | — |
+| (10240, 8, 64) | 603.45 | 453.40 | 1.331x | — | — | — |
+| (10240, 8, 128) | 614.89 | 550.74 | 1.116x | — | — | — |
+| (10240, 8, 256) | 619.46 | 568.17 | 1.090x | — | — | — |
+| (10240, 16, 128) | 1418.81 | 905.81 | 1.566x | — | — | — |
+| (32768, 8, 128) | 2186.41 | 1350.03 | 1.620x | — | — | — |
+| (2, 1, 1) | 44.62 | 72.26 | 0.618x | — | — | — |
+| (16, 2, 16) | 93.68 | 73.44 | 1.276x | — | — | — |
+| (127, 8, 127) | 121.52 | 103.29 | 1.176x | — | — | — |
+| (129, 8, 129) | 121.38 | 122.09 | 0.994x | — | — | — |
+| (1024, 2, 128) | 131.23 | 108.19 | 1.213x | — | — | — |
+| (1024, 8, 128) | 209.27 | 144.47 | 1.449x | — | — | — |
+| (2559, 8, 128) | 277.64 | 285.37 | 0.973x | — | — | — |
+| (2560, 8, 128) | 284.01 | 285.27 | 0.996x | — | — | — |
+| (2561, 8, 128) | 271.60 | 370.24 | 0.734x | — | — | — |
+| (4095, 8, 128) | 394.65 | 372.00 | 1.061x | — | — | — |
+| (4096, 8, 128) | 447.40 | 372.02 | 1.203x | — | — | — |
+| (4097, 8, 128) | 451.43 | 372.07 | 1.213x | — | — | — |
+| (8192, 8, 128) | 684.16 | 548.49 | 1.247x | — | — | — |
+| (16384, 8, 128) | 1176.30 | 815.61 | 1.442x | — | — | — |
+| (65536, 8, 128) | 4283.53 | 2505.28 | 1.710x | — | — | — |
+| (131072, 8, 128) | 6364.25 | 4813.39 | 1.322x | — | — | — |
+| (10240, 2, 128) | 284.27 | 284.38 | 1.000x | — | — | — |
+| (10240, 32, 128) | 2702.06 | 1616.57 | 1.671x | — | — | — |
+| (10240, 8, 16) | 585.73 | 377.40 | 1.552x | — | — | — |
+| (10240, 8, 512) | 624.90 | 611.39 | 1.022x | — | — | — |
+| (960, 8, 512) | 176.56 | 297.37 | 0.594x | — | — | — |
+| (1024, 8, 512) | 211.46 | 294.74 | 0.717x | — | — | — |
+| (1088, 8, 512) | 186.72 | 306.51 | 0.609x | — | — | — |
 
-For the original 81920-route/128-bin workload:
+The original 81920-route/128-bin workload, with local start 7:
 
-| Device / distribution | Main (us) | Two-stage (us) | Observed ratio |
+| Device / distribution | Main (us) | Two-stage (us) | Speedup |
 | --- | ---: | ---: | ---: |
-| A3 / uniform | 614.63 | 545.29 | 1.127x |
-| A3 / hot | 715.32 | 523.94 | 1.365x |
-| A3 / mixed | 616.48 | 520.93 | 1.183x |
-| A5 / uniform | 2180.00 | 18.65 | 116.862x |
-| A5 / hot | 13460.52 | 30.17 | 446.088x |
-| A5 / mixed | 2308.05 | 26.14 | 88.295x |
+| A3 / uniform | 614.89 | 550.74 | 1.116x |
+| A3 / hot | 717.44 | 529.34 | 1.355x |
+| A3 / mixed | 619.11 | 527.73 | 1.173x |
 
-All 141 points/device, including regressions, distributions, dtype and
-mask-stride controls, are in the [A3 CSV](eplb_count_graph_a3.csv) and
-[A5 CSV](eplb_count_graph_a5.csv). Each row includes status, median, observed
-range, ten raw samples per implementation, baseline/candidate identities and
-kernel SHA256. Failed points, if any, retain errors and empty numeric fields.
+A3 has 24 regressions. Its lowest ratio is 0.581x at `(1, 1, 1)`, `mixed`, int64, mask stride 1. The implementation is not faster than main at every shape. One reducer tile still pays the output zeroing, INT64 reduction and atomic merge costs; these costs can outweigh the smaller input scan.
 
-An earlier A5 multi-Graph correctness failure remains without an established
-root cause. It did not recur in this matrix or the current mutable-Graph
-regressions. Model accuracy, serving performance and startup/serving compilation
-counts are not measured by these operator tests.
+Every point, status, median, observed min/max, ten raw samples per path and
+source identity is in the [A3 CSV](eplb_count_graph_a3.csv) and
+[A5 CSV](eplb_count_graph_a5.csv). Missing results have empty numeric fields.
+Model accuracy, serving performance and startup/serving compilation counts
+have not been measured by these standalone tests. An earlier A5 multi-Graph
+failure has no established root cause and is retained in the local history.
 
-### Reproduce the Graph matrix
+### Reproduce
 
-Use the same installed dependencies on the selected NPU. From the repository
-root, extract the pinned baseline and run the committed benchmark:
+Extract the pinned main baseline, then run the committed benchmark from the
+repository root with the same NPU dependencies:
 
 ```bash
 mkdir -p /tmp/eplb-main-baseline
@@ -247,7 +212,6 @@ git show 3ae9de5900e181817ad86a0fa936c379a3789c0f:vllm_ascend/distributed/eplb/t
 PYTHONPATH="$PWD:/tmp/eplb-main-baseline:$PYTHONPATH" python benchmarks/eplb_count_graph.py
 ```
 
-The runner saves every point and raw timing sample to `results/expanded-graph.json`,
-including errors with null timings and speedups, and records imported source
-paths and SHA256 hashes in `results/import-identity.json`. It performs Graph
-measurements only. Use separate output directories for different devices/runs.
+The runner writes every point and raw sample to `results/expanded-graph.json`,
+including errors with null timing fields, and saves imported paths and source
+hashes in `results/import-identity.json`. Use separate run directories/devices.
