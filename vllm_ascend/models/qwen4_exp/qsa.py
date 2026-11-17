@@ -32,7 +32,7 @@ from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
     get_dtype_size,
 )
-from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
+from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
@@ -508,7 +508,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         )
 
 
-class AscendQSAImpl:
+class AscendQSAImpl(AttentionImplBase[Any]):
     """Minimal QSA attention implementation independent of FlashAttention."""
 
     supports_dcp = False
