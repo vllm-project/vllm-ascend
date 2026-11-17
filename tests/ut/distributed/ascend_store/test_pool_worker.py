@@ -51,6 +51,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_wor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     LoadSpec,
+    PoolCacheGeometry,
     ReqMeta,
 )
 
@@ -196,7 +197,8 @@ def make_worker(
 
 
 @pytest.mark.parametrize("retention_interval", [None, 0, 4096])
-def test_cache_coordinator_uses_kv_cache_config_retention_interval(retention_interval):
+@pytest.mark.parametrize("partial_hits", [False, True])
+def test_cache_coordinator_uses_kv_cache_config_retention_interval(retention_interval, partial_hits):
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
 
     worker = pool_worker.KVPoolWorker.__new__(pool_worker.KVPoolWorker)
@@ -204,6 +206,16 @@ def test_cache_coordinator_uses_kv_cache_config_retention_interval(retention_int
         kv_cache_groups=[object()], prefix_cache_retention_interval=retention_interval
     )
     worker.use_hybrid = True
+    worker.enable_partial_hash_hits = partial_hits
+    worker.pool_cache_geometry = PoolCacheGeometry(
+        block_sizes=(16,),
+        cacheable_group_ids=(0,),
+        hash_block_size=8 if partial_hits else 16,
+        core_hit_alignment=8 if partial_hits else 16,
+        transfer_granularity=16,
+        groups=tuple(worker.kv_cache_config.kv_cache_groups),
+        retention_interval=retention_interval,
+    )
     worker.cache_transfer_granularity = 16
     worker.hash_block_size = 16
     worker.grouped_block_size = [16]
@@ -216,6 +228,39 @@ def test_cache_coordinator_uses_kv_cache_config_retention_interval(retention_int
 
 
 class TestPCPPoolWorker(unittest.TestCase):
+    def test_partial_hits_follow_core_alignment(self):
+        for alignment, expected in ((32, True), (640, False)):
+            with self.subTest(alignment=alignment):
+                geometry = PoolCacheGeometry(
+                    block_sizes=(640,),
+                    cacheable_group_ids=(0,),
+                    hash_block_size=32,
+                    core_hit_alignment=alignment,
+                    transfer_granularity=640,
+                )
+                self.assertEqual(geometry.partial_hits, expected)
+
+    def test_hash_hits_use_core_geometry_and_keep_physical_pages(self):
+        spec = FullAttentionSpec(block_size=640, num_kv_heads=1, head_size=4, dtype=torch.bfloat16)
+        core_config = SimpleNamespace(
+            kv_cache_groups=[KVCacheGroupSpec(["layer.0"], spec)],
+            hash_block_size=32,
+            cache_hit_alignment_tokens=32,
+            prefix_cache_retention_interval=None,
+        )
+        worker = make_worker(
+            self,
+            cache_block_size=640,
+            prefix_match_unit=16,
+            kv_cache_config=core_config,
+            extra_config={},
+        )
+        self.assertEqual(worker.hash_block_size, 32)
+        self.assertEqual(worker.grouped_block_size, [640])
+        self.assertEqual(worker.cache_transfer_granularity, 640)
+        self.assertTrue(worker.enable_partial_hash_hits)
+        self.assertFalse(worker.load_async)
+
     def test_nonzero_pcp_rank_keeps_dcp_save_leader(self):
         for dcp_size, tp_rank, expected in ((1, 0, False), (2, 1, True), (2, 3, False)):
             with self.subTest(dcp_size=dcp_size, tp_rank=tp_rank):
@@ -473,7 +518,12 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
                     self,
                     num_layers=2,
                     use_layerwise=True,
-                    kv_cache_config=SimpleNamespace(kv_cache_groups=groups, prefix_cache_retention_interval=None),
+                    kv_cache_config=SimpleNamespace(
+                        kv_cache_groups=groups,
+                        hash_block_size=16,
+                        cache_hit_alignment_tokens=16,
+                        prefix_cache_retention_interval=None,
+                    ),
                     pp_rank=1,
                     pp_partition=(2, 2),
                 )
@@ -1090,6 +1140,8 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config.kv_transfer_config.kv_role = kv_role
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {"backend": "mooncake"}
         config.cache_config.block_size = block_size
+        config.cache_config.prefix_match_unit = None
+        config.parallel_config.decode_context_parallel_size = 1
         config.kv_events_config = None
         return config
 
@@ -1341,6 +1393,8 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         config.kv_transfer_config.kv_role = kv_role
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {"backend": "mooncake"}
         config.cache_config.block_size = block_size
+        config.cache_config.prefix_match_unit = None
+        config.parallel_config.decode_context_parallel_size = 1
         config.kv_events_config = None
         return config
 
@@ -3121,6 +3175,8 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         config.kv_transfer_config.kv_role = kv_role
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {"backend": "mooncake"}
         config.cache_config.block_size = 16
+        config.cache_config.prefix_match_unit = None
+        config.parallel_config.decode_context_parallel_size = 1
         config.kv_events_config = None
         return config
 

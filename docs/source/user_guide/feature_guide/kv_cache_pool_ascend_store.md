@@ -1606,7 +1606,8 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `kv_load_failure_policy` | str | fail | No | recompute / fail | Behavior when KV loading fails: `recompute` rolls back and recomputes (does not yet support hybrid attention models like DeepSeekV4, Qwen 3.5), `fail` terminates the request. When using MultiConnector, configure on the top-level `kv-transfer-config`. |
 | `lookup_rpc_port` | str | No default | Yes | Distinct service identifier (e.g., "0", "1") | Local IPC identifier between pooling scheduler and worker processes. DP replicas within a service are isolated automatically; independently launched services sharing the RPC base directory need unique values. The legacy name `mooncake_rpc_port` is deprecated; use `lookup_rpc_port`. |
-| `load_async` | bool | false | No | true / false | Whether to enable asynchronous loading. |
+| `load_async` | bool | false | No | true / false | Whether to enable asynchronous loading, including hash recovery. |
+| `discard_partial_chunks` | bool | true | No | true / false | Existing save policy: discard incomplete ordinary transfer chunks. Non-layerwise hash recovery requires the default `true`; this does not disable hash-boundary checkpoint saves or fine-grained hits. |
 | `backend` | str | mooncake | No | mooncake / memcache / yuanrong | KV Pool storage backend. |
 | `consumer_is_to_put` | bool | false | No | true / false | Whether Decode node puts KV Cache into KV Pool. |
 | `save_decode_cache` | bool | false | No | true / false | Save complete Decode KV blocks. A consumer can enable this without `consumer_is_to_put`, keeping Prefill writes disabled; this consumer mode requires `use_layerwise=false`. |
@@ -1661,6 +1662,104 @@ QoS can be configured through `kv_connector_extra_config`, which is injected int
 | `qos_priority` | int | 0 | No | [0, 4] (integer, larger = higher priority) | Supported by both Mooncake and Memcache backends. Invalid values (non-integer, out of range) cause fast startup failure. |
 
 Values in `kv_connector_extra_config` take precedence over environment variables; a WARN log is emitted on override. For the Mooncake backend, `qos_priority` is merged into existing `ASCEND_GLOBAL_RESOURCE_CONFIG` (other fields preserved). When `ASCEND_GLOBAL_RESOURCE_CONFIG` was not set, configuring `qos_priority` also creates it.
+
+## External hash-boundary recovery
+
+Configure fine-grained prefix matching only with `--prefix-match-unit`.
+AscendStore consumes Core's resolved hash size, hit alignment and cache-group
+geometry. Its existing coordinator, scheduler and worker implement hash-boundary
+recovery when the cache plan permits finer hits than the pool transfer alignment.
+They reuse Core's cache-manager and boundary-state contracts, not the upstream
+Mooncake Store classes. Whole-block and layerwise transfers remain in the same
+connector and retain their existing transfer gates. The requested PMU alone is
+not proof that a model can recover a sub-page boundary. No connector-specific
+granularity or mode option is needed:
+
+```json
+{
+  "kv_connector": "AscendStoreConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "lookup_rpc_port": "1",
+    "backend": "mooncake",
+    "load_async": true
+  }
+}
+```
+
+Partial recovery requires compatible Core cache-geometry resolvers, registered
+cache managers, and the `SchedulerOutput.kv_connector_block_state` handoff,
+including `boundary_state_offloads`. AscendStore does not patch Core. If the
+cache plan has not already supplied the hash size and hit alignment, AscendStore
+uses Core's resolvers; it does not guess them from the command-line PMU. No
+custom module path or legacy prefix-mode, direct-only, or setup-lock option is
+needed. Those old options have no implementation in this connector.
+
+Keep the existing `discard_partial_chunks` setting at its default `true` for
+non-layerwise hash recovery; an explicit value other than `true` is rejected.
+This setting controls incomplete ordinary save chunks, not whether a saved
+checkpoint can be found at a hash boundary. It is not a new PMU switch.
+
+AscendStore owns the scheduler state machine, group recoverability checks,
+pinned checkpoint lifecycle, rank acknowledgements, lookup protocol, and worker
+IO. Core remains responsible for the final local/external hit arbitration and
+for handing off recoverable recurrent checkpoints. The NPU worker adapts
+registration, strided attention descriptors, and completion events. Store objects
+contain complete logical blocks, with no inter-layer padding. Partial-tail keys identify the
+hash boundary up to which each block can be reused. Recurrent objects contain
+the **complete checkpoint at that boundary**, not a proportional slice of the
+state. Fine-grained logical hits do not imply PMU-sized I/O objects. A hash match alone is insufficient:
+Core only advertises a boundary recoverable across all required cache groups.
+Physical page sizes and local APC arbitration are not changed.
+
+Hash recovery uses the existing backend and transfer-thread interfaces rather
+than a separate Mooncake-only worker. This does not establish support for every
+backend, topology, or device layout: validate the intended combination separately.
+Registration and descriptor checks still enforce the actual allocation bounds
+and payload layout. Keep all readers and writers on a compatible key schema and
+payload representation, and use a fresh namespace when upgrading incompatible
+pool objects. Use consistent model weights and configuration across workers
+sharing a pool.
+
+For P/D deployments, place this connector on P (for example, in a
+`MultiConnector` with the P/D transport). External Store recovery on P and KV
+transfer to D are separate operations. Verify both, and do not interpret D's
+transport hits as proof of a fine-grained Store hit on P.
+
+To validate external recovery, seed a prefix whose end is not a physical-page
+boundary, wait for Store writes, reset **local APC only**, and submit a request
+sharing that prefix. Compare counter deltas for
+`vllm:external_prefix_cache_hits` and `vllm:prefix_cache_hits`: the former must
+show a non-page-aligned, hash-aligned hit while the latter remains zero.
+Compare restored output with a cold reference under the same topology and
+sampling settings. A short-output comparison is a functional check, not a full
+model-accuracy or throughput benchmark.
+
+Hash-grained recovery with MTP/EAGLE block dropping or EAGLE-marked cache
+groups is not supported in this revision and is rejected during initialization.
+Use whole-page cache alignment for that combination. Existing whole-page and
+layerwise MTP paths remain available. Mamba boundary-state saving is supported
+without MTP; it is also required by hybrid models without speculative decoding.
+
+Fabric shared-handle self-import is unsupported by CANN: use a separate Store
+provider with capacity and configure inference clients with
+`"mode": "standalone-store"` and `"global_segment_size": "0GB"`
+if the installed SDK routes same-process pool reads through Fabric self-import.
+This deployment choice does not change Core's hash-boundary lookup or local APC.
+
+### Mooncake backend and P/D transport
+
+Hash recovery does not wrap Mooncake in a direct-only adapter, force the native
+`local_buffer_size` to zero, or take over MooncakeConnectorV2 registration.
+`MooncakeBackend` uses its existing setup rules: the normal keyword setup passes
+the process-global transfer engine, while Fabric memory, Store-independent engine
+configuration, and configuration-dictionary setup use their respective existing
+paths. Buffer sizes follow those backend rules, not the requested PMU.
+
+When using `MultiConnector`, keep the Store and native P/D transport configurations
+separate. Check engine mode, memory registration and port compatibility for the
+installed SDK. A successful Store read does not prove P/D transfer succeeded, and
+a successful P/D transfer does not prove an external hash-boundary hit.
 
 ## FAQ
 

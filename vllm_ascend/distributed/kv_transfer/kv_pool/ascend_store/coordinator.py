@@ -11,12 +11,14 @@ from weakref import proxy
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_coordinator import replay_boundaries
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     KVCacheSpec,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -102,6 +104,10 @@ class ExternalCachedBlockPool:
             return [self._present_block] * len(group_ids)
         return None
 
+    def contains(self, group_id: int, block_hash: BlockHash) -> bool:
+        """Check the exact hash key, not merely its containing physical page."""
+        return self._exists is not None and (group_id, block_hash_to_bytes(block_hash)) in self._exists
+
 
 class AscendStoreCoordinator:
     """Hybrid cache-hit/mask coordinator for AscendStore external KV Pool.
@@ -120,6 +126,7 @@ class AscendStoreCoordinator:
         group_cache_families: list[str],
         use_eagle: bool = False,
         retention_interval: int | None = None,
+        enable_partial_hash_hits: bool = False,
     ) -> None:
         assert len(kv_cache_groups) == len(group_block_sizes)
         assert len(kv_cache_groups) == len(group_cache_families)
@@ -132,6 +139,14 @@ class AscendStoreCoordinator:
         self.lcm_block_size = scheduler_block_size
         self.use_eagle = use_eagle
         self.retention_interval = retention_interval
+        # Internal capability resolved from Core's cache plan, never an extra
+        # connector option. IO still addresses physical pages.
+        self.enable_partial_hash_hits = enable_partial_hash_hits
+        self.mamba_group_ids = {
+            group_id
+            for group_id, group in enumerate(kv_cache_groups)
+            if isinstance(_unwrap_spec(group.kv_cache_spec), MambaSpec)
+        }
         self.group_block_sizes = group_block_sizes
         self.group_cache_families = group_cache_families
         self.group_effective_block_sizes = list(group_block_sizes)
@@ -152,6 +167,10 @@ class AscendStoreCoordinator:
         self._cached_reachable_masks = lru_cache(maxsize=_REACHABLE_MASK_CACHE_SIZE)(
             partial(type(self)._reachable_masks, proxy(self))
         )
+
+    def align_lookup_length(self, length: int) -> int:
+        alignment = self.hash_block_size if self.enable_partial_hash_hits else self.lcm_block_size
+        return length // alignment * alignment
 
     def _verify_and_split_kv_cache_groups(self) -> None:
         attention_groups: list[tuple[KVCacheSpec, list[int], type[SingleTypeKVCacheManager]]] = []
@@ -224,16 +243,17 @@ class AscendStoreCoordinator:
         retention_interval: int | None,
         num_prompt_tokens: int | None,
     ) -> list[tuple[int, list[bool] | None]]:
-        assert aligned_token_len % self.lcm_block_size == 0, (
+        alignment = self.hash_block_size if self.enable_partial_hash_hits else self.lcm_block_size
+        assert aligned_token_len % alignment == 0, (
             f"aligned_token_len ({aligned_token_len}) must be a multiple of lcm_block_size ({self.lcm_block_size})"
         )
         # Stores retain the request's replay checkpoint. Lookups must probe
         # every possible checkpoint: a shorter request may have published a
         # boundary that is not the current request's replay/segment boundary.
         reachable_boundaries = (
-            (max(0, num_prompt_tokens - 1),)
+            replay_boundaries(num_prompt_tokens, self.lcm_block_size, use_eagle=bool(self.eagle_reachable_group_ids))
             if num_prompt_tokens is not None
-            else range(self.lcm_block_size, aligned_token_len + 1, self.lcm_block_size)
+            else ()
         )
         masks: list[tuple[int, list[bool] | None]] = []
         for group_id, spec in enumerate(self.group_effective_specs):
@@ -265,7 +285,15 @@ class AscendStoreCoordinator:
         num_prompt_tokens: int | None = None,
     ) -> tuple[list[bool], ...]:
         masks = self._cached_reachable_masks(aligned_token_len, self.retention_interval, num_prompt_tokens)
-        return tuple([True] * num_chunks if mask is None else mask.copy() for num_chunks, mask in masks)
+        result = []
+        for group_id, (num_chunks, mask) in enumerate(masks):
+            if self.enable_partial_hash_hits and group_id in self.mamba_group_ids:
+                # Align-mode recurrent tables are not append-only. Only Core's
+                # pinned boundary-state handoff can identify a saveable state.
+                result.append([False] * num_chunks)
+            else:
+                result.append([True] * num_chunks if mask is None else mask.copy())
+        return tuple(result)
 
     def lookup_mask(
         self,
@@ -273,7 +301,7 @@ class AscendStoreCoordinator:
     ) -> tuple[list[bool] | None, ...]:
         # Probe candidate replay boundaries as well as segment boundaries;
         # find_longest_cache_hit still requires all necessary states to exist.
-        masks = self._cached_reachable_masks(aligned_token_len, self.retention_interval, None)
+        masks = self._cached_reachable_masks(aligned_token_len, None, None)
         for num_chunks, mask in masks:
             if mask is not None:
                 assert len(mask) == num_chunks
@@ -331,11 +359,6 @@ class AscendStoreCoordinator:
         logger.debug("%s: token_len=%d hit_tokens=%d", log_context, token_len, hit_length)
         return hit_length
 
-    def block_hashes_for_spec(self, block_hashes: Sequence[BlockHash], spec: KVCacheSpec) -> BlockHashList:
-        # Managers accept lazy sequences and preserve their terminal hashes
-        # when resolving each group's block-size view.
-        return cast(BlockHashList, block_hashes)
-
     def _find_hit_blocks(
         self,
         block_hashes: Sequence[BlockHash],
@@ -345,9 +368,10 @@ class AscendStoreCoordinator:
         apply_eagle: bool = True,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         eagle_indices = self.eagle_attn_group_indices if apply_eagle else set()
+        alignment_tokens = self.hash_block_size if self.enable_partial_hash_hits else self.lcm_block_size
         if len(self.attention_groups) == 1:
             spec, group_ids, manager_cls = self.attention_groups[0]
-            hashes = self.block_hashes_for_spec(block_hashes, spec)
+            hashes = cast(BlockHashList, block_hashes)
             hit_blocks, hit_length = _find_longest_cache_hit(
                 manager_cls,
                 block_hashes=hashes,
@@ -356,7 +380,7 @@ class AscendStoreCoordinator:
                 block_pool=cast(BlockPool, cached_block_pool),
                 kv_cache_spec=spec,
                 drop_eagle_block=0 in eagle_indices,
-                alignment_tokens=spec.block_size,
+                alignment_tokens=alignment_tokens if self.enable_partial_hash_hits else spec.block_size,
             )
             blocks_by_group: list[list[KVCacheBlock]] = [[] for _ in range(len(self.kv_cache_groups))]
             for group_id, blocks in zip(group_ids, hit_blocks, strict=True):
@@ -385,7 +409,7 @@ class AscendStoreCoordinator:
                 max_group_length = curr_hit_length
                 if drop_eagle_block:
                     max_group_length = min(curr_hit_length + spec.block_size, max_length)
-                hashes = self.block_hashes_for_spec(block_hashes, spec)
+                hashes = cast(BlockHashList, block_hashes)
                 hit_blocks, new_hit_length = _find_longest_cache_hit(
                     manager_cls,
                     block_hashes=hashes,
@@ -394,7 +418,7 @@ class AscendStoreCoordinator:
                     block_pool=cast(BlockPool, cached_block_pool),
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
-                    alignment_tokens=self.lcm_block_size,
+                    alignment_tokens=alignment_tokens,
                 )
                 if drop_eagle_block:
                     eagle_verified.add(index)

@@ -264,6 +264,7 @@ def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
     config.parallel_config.world_size = 1
     config.cache_config.block_size = block_size
     config.cache_config.hash_block_size = block_size
+    config.cache_config.prefix_match_unit = None
     config.cache_config.prefix_cache_retention_interval = None
     config.model_config.model = "org/llama-7b"
     config.model_config.use_mla = False
@@ -429,7 +430,9 @@ class TestKVPoolScheduler(unittest.TestCase):
         config.speculative_config.num_speculative_tokens = 3
         config.scheduler_config.disable_hybrid_kv_cache_manager = False
         scheduler = KVPoolScheduler(
-            config, use_layerwise=False, kv_cache_config=MagicMock(kv_cache_groups=hybrid_groups)
+            config,
+            use_layerwise=False,
+            kv_cache_config=MagicMock(kv_cache_groups=hybrid_groups, hash_block_size=16, cache_hit_alignment_tokens=16),
         )
         self.assertEqual(scheduler.num_speculative_blocks_by_group, {1: 3, 2: 0})
 
@@ -463,7 +466,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         self.assertEqual(scheduler.swa_group_ids, {0})
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.infer_cacheable_group_ids")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata.infer_cacheable_group_ids")
     def test_noncacheable_swa_group_is_not_retained(self, mock_cacheable_groups, mock_client_cls):
         mock_cacheable_groups.return_value = [0]
         groups = [
@@ -786,6 +789,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         config.parallel_config.world_size = 1
         config.cache_config.block_size = block_size
         config.cache_config.hash_block_size = block_size
+        config.cache_config.prefix_match_unit = None
         config.cache_config.prefix_cache_retention_interval = None
         # Concrete model_config values so KVPoolScheduler.__init__ int math
         # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
@@ -1517,6 +1521,18 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         self.assertEqual(tracker.allocated_block_ids_by_group, [[0, 2, 3]])
         scheduler._kv_cache_manager.get_block_ids.assert_called_once_with("r1")
 
+    def test_store_job_pins_mamba_blocks_without_hybrid_lookup(self):
+        scheduler = self._make_scheduler()
+        scheduler.use_hybrid = False
+        scheduler.enable_partial_hash_hits = False
+        scheduler.num_speculative_blocks_by_group = {0: 1}
+        scheduler._block_pool.blocks = [MagicMock() for _ in range(4)]
+        req_meta = ReqMeta("r1", block_ids_by_group=[[0, 1, 2, 3]], can_save=True)
+
+        scheduler.retain_blocks_for_save(req_meta)
+
+        scheduler._block_pool.touch.assert_called_once_with(scheduler._block_pool.blocks[1:3])
+
     def test_store_job_pins_mamba_blocks_until_all_workers_finish(self):
         scheduler = self._make_scheduler()
         scheduler.use_hybrid = True
@@ -1698,6 +1714,7 @@ class TestKVPoolSchedulerMambaGroups(unittest.TestCase):
         config.parallel_config.world_size = 1
         config.cache_config.block_size = 16
         config.cache_config.hash_block_size = 16
+        config.cache_config.prefix_match_unit = None
         # Concrete model_config values so KVPoolScheduler.__init__ int math
         # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
         config.model_config.model = "org/llama-7b"
@@ -2067,10 +2084,47 @@ def test_layerwise_retry_discards_stale_load_spec(second_hit):
     assert load_spec is None or load_spec.kvpool_cached_tokens <= 768
 
 
+@pytest.mark.parametrize(
+    ("local_start", "pool_end", "expected"),
+    [(0, 672, 672), (640, 640, 0), (640, 1312, 672), (640, 1888, 1248), (672, 1888, 1216)],
+)
+@pytest.mark.parametrize("load_async", [None, False, True])
+def test_hash_hit_preserves_subpage_boundary_and_local_apc(local_start, pool_end, expected, load_async):
+    extra_config = {"backend": "memcache"}
+    if load_async is not None:
+        extra_config["load_async"] = load_async
+    config = make_config(block_size=640, extra_config=extra_config)
+    config.cache_config.prefix_match_unit = 16
+    group = KVCacheGroupSpec(
+        ["attn"], FullAttentionSpec(block_size=640, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    )
+    geometry = SimpleNamespace(kv_cache_groups=[group], hash_block_size=32, cache_hit_alignment_tokens=32)
+    scheduler = KVPoolScheduler(config, use_layerwise=False, kv_cache_config=geometry)
+    assert scheduler.hash_block_size == 32
+    assert scheduler.cache_transfer_granularity == 640
+    scheduler._lookup_external_hit_tokens = MagicMock(return_value=pool_end)
+    request = SimpleNamespace(request_id="tail", num_tokens=1920)
+    scheduler.load_specs["tail"] = LoadSpec(640, 1920, True)
+    assert scheduler.load_async is (load_async is True)
+    assert scheduler.get_num_new_matched_tokens(request, local_start) == (expected, expected > 0 and load_async is True)
+    scheduler._lookup_external_hit_tokens.assert_called_once_with(request, local_start)
+    if expected:
+        blocks = MagicMock()
+        blocks.get_block_ids.return_value = (list(range(1, 1 + (local_start + expected) // 640)),)
+        scheduler.update_state_after_alloc(request, blocks, expected)
+        load_spec = scheduler.load_specs["tail"]
+        assert load_spec.vllm_cached_tokens == local_start
+        assert load_spec.kvpool_cached_tokens == local_start + expected
+        assert load_spec.can_load
+    else:
+        assert "tail" not in scheduler.load_specs
+
+
 @pytest.mark.parametrize("early_return", ["consumer", "short_prompt", "local_hit"])
 def test_lookup_early_return_discards_stale_load_spec(early_return):
     scheduler = KVPoolScheduler(make_config(), use_layerwise=False)
     scheduler.load_specs["retry"] = LoadSpec(768, 12288, True)
+    scheduler._lookup_tail_boundaries["retry"] = ((0, 12288),)
     request = SimpleNamespace(request_id="retry", prompt_token_ids=list(range(32)), num_tokens=32)
     local_tokens = 0
     if early_return == "consumer":
@@ -2082,6 +2136,7 @@ def test_lookup_early_return_discards_stale_load_spec(early_return):
         local_tokens = 32
     assert scheduler.get_num_new_matched_tokens(request, local_tokens) == (0, False)
     assert request.request_id not in scheduler.load_specs
+    assert request.request_id not in scheduler._lookup_tail_boundaries
 
 
 @pytest.mark.parametrize("pool_hit_tokens", [832, 896])

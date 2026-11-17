@@ -18,7 +18,7 @@
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 
@@ -36,10 +36,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     KeyMetadata,
     LoadSpec,
+    PoolCacheGeometry,
     PoolKey,
     ReqMeta,
     RequestTracker,
     get_block_hashes,
+    get_engine_transfer_config,
     get_group_block_size,
     get_group_cache_family,
     get_sharded_mamba_group_ids,
@@ -51,6 +53,35 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 
 
 class TestCacheLayoutHelpers(unittest.TestCase):
+    def test_partial_hits_exclude_layerwise_and_whole_page_modes(self):
+        for alignment, layerwise, expected in ((32, False, True), (640, False, False), (32, True, False)):
+            with self.subTest(alignment=alignment, layerwise=layerwise):
+                geometry = PoolCacheGeometry(
+                    block_sizes=(640,),
+                    cacheable_group_ids=(0,),
+                    hash_block_size=32,
+                    core_hit_alignment=alignment,
+                    transfer_granularity=640,
+                    use_layerwise=layerwise,
+                )
+                self.assertEqual(geometry.partial_hits, expected)
+
+    def test_engine_transfer_config_uses_planner_then_core_context_then_child(self):
+        child, engine, planner = object(), object(), object()
+        config = SimpleNamespace(kv_transfer_config=child)
+        current = SimpleNamespace(kv_transfer_config=engine)
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata.get_current_vllm_config_or_none",
+            return_value=current,
+        ):
+            self.assertIs(get_engine_transfer_config(config, SimpleNamespace(kv_transfer_config=planner)), planner)
+            self.assertIs(get_engine_transfer_config(config, SimpleNamespace()), engine)
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata.get_current_vllm_config_or_none",
+            return_value=None,
+        ):
+            self.assertIs(get_engine_transfer_config(config, None), child)
+
     def test_sharded_mamba_groups_exclude_tp_replicas(self):
         mamba_spec = MambaSpec(
             shapes=((4,),),
