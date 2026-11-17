@@ -1,0 +1,4 @@
+pr: 22124
+entries:
+  - category: feature
+    text: Added hash-grained AscendStore prefix recovery for Attention and Mamba hybrid caches without MTP/EAGLE, using the existing prefix-match-unit option. MTP/EAGLE hash recovery is rejected until follow-up support is available; existing whole-page and layerwise paths remain available.
