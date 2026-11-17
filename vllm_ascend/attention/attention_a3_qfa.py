@@ -445,6 +445,7 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
         # this 5-D NZ one). The index constants come from the cached
         # capture-safe set (torch.arange inside capture may host-generate).
         _, idx_n, idx_df = self._capture_safe_constants(pages.device)
+        num_frags = idx_df.numel()  # head_dim // 32, kept in the cached set
         nz_index = (
             pages.view(num_tokens, 1, 1).expand(num_tokens, n_heads, num_frags),
             idx_n.expand(num_tokens, n_heads, num_frags),
