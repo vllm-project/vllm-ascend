@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import pytest
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
+from vllm_ascend import ascend_config
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import AscendDFlash2Speculator
 
@@ -23,9 +24,20 @@ def test_draft_post_process_uses_restored_target_config(monkeypatch, speculator_
     target = object()
     names = {"target.attention"}
     draft = SimpleNamespace()
+    target_ascend_config = SimpleNamespace(ascend_compilation_config=object(), eplb_config=object())
+    draft_ascend_config = SimpleNamespace(ascend_compilation_config=object(), eplb_config=object())
+    monkeypatch.setattr(ascend_config, "_ASCEND_CONFIG", target_ascend_config)
+    monkeypatch.setattr(ascend_config, "_INIT_VLLM_CONFIG", config)
+    monkeypatch.setattr(ascend_config, "_MEGA_MOE_SUPPORTED", True)
+
+    def assert_target_config_restored():
+        assert ascend_config.get_ascend_config() is target_ascend_config
+        assert ascend_config._INIT_VLLM_CONFIG is config
+        assert ascend_config.is_mega_moe_supported()
 
     def post_process(received):
         assert received is config
+        assert_target_config_restored()
         if outcome == "hook_error":
             raise ValueError("post process failed")
 
@@ -37,6 +49,10 @@ def test_draft_post_process_uses_restored_target_config(monkeypatch, speculator_
         assert self is spec
         assert received_target is target
         assert received_names is names
+        # Draft platform validation can replace the singleton and disable MegaMoE.
+        monkeypatch.setattr(ascend_config, "_ASCEND_CONFIG", draft_ascend_config)
+        monkeypatch.setattr(ascend_config, "_INIT_VLLM_CONFIG", object())
+        monkeypatch.setattr(ascend_config, "_MEGA_MOE_SUPPORTED", False)
         if outcome == "load_error":
             raise ValueError("load failed")
         return draft
@@ -49,6 +65,7 @@ def test_draft_post_process_uses_restored_target_config(monkeypatch, speculator_
     else:
         assert spec.load_draft_model(target, names) is draft
 
+    assert_target_config_restored()
     if outcome in ("success", "hook_error"):
         hook.assert_called_once_with(config)
     else:

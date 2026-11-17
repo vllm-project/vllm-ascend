@@ -1890,6 +1890,24 @@ def draft_config_context() -> Iterator[None]:
         _DRAFT_CONFIG_CONTEXT.reset(token)
 
 
+@contextmanager
+def preserve_target_ascend_config() -> Iterator[None]:
+    """Restore the worker's target config after synchronous draft loading."""
+    global _ASCEND_CONFIG, _INIT_VLLM_CONFIG, _MEGA_MOE_SUPPORTED
+    from vllm_ascend.utils import clear_enable_sp
+
+    target_config = _ASCEND_CONFIG
+    target_vllm_config = _INIT_VLLM_CONFIG
+    target_mega_moe_supported = _MEGA_MOE_SUPPORTED
+    try:
+        yield
+    finally:
+        _ASCEND_CONFIG = target_config
+        _INIT_VLLM_CONFIG = target_vllm_config
+        _MEGA_MOE_SUPPORTED = target_mega_moe_supported
+        clear_enable_sp()
+
+
 def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
     """Check whether a config object has essential initialized fields.
 
