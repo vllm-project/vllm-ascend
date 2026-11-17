@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Composite PD readiness executes production methods with CPU events."""
 
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 from tests.ut.attention.test_mla_layerwise_load_cpu import load
@@ -69,26 +68,3 @@ def test_external_prefix_is_not_marked_ready_before_model_load_hook():
     )
     start(obj, meta)
     assert not state.available_layers
-
-
-def test_ascend_registration_replaces_upstream_layerwise_connector(monkeypatch):
-    class Factory:
-        _registry = {"MooncakeLayerwiseConnector": ("upstream", "MooncakeLayerwiseConnector")}
-
-        @classmethod
-        def register_connector(cls, name, module, class_name):
-            if name in cls._registry:
-                raise ValueError(f"duplicate connector: {name}")
-            cls._registry[name] = (module, class_name)
-
-    offloading = ModuleType("vllm.v1.kv_offload.factory")
-    offloading.OffloadingSpecFactory = SimpleNamespace(_registry={}, register_spec=Mock())
-    monkeypatch.setitem(sys.modules, offloading.__name__, offloading)
-    scope = {"KVConnectorFactory": Factory, "logger": Mock()}
-    path = "vllm_ascend/distributed/kv_transfer/__init__.py"
-    load(path, "_register_with_class_name_alias", scope)
-    load(path, "register_connector", scope)()
-    assert Factory._registry["MooncakeLayerwiseConnector"] == (
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector",
-        "MooncakeLayerwiseConnector",
-    )

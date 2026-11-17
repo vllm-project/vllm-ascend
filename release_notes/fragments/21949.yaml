@@ -10,9 +10,5 @@ entries:
     model: deepseek-v4.1
   - category: bugfix
     text: >-
-      Fixed Ascend connector registration when upstream vLLM has already
-      registered MooncakeLayerwiseConnector.
-  - category: bugfix
-    text: >-
       Restored MooncakeConnectorV2 layerwise push selection and full source
       block allocation tracking when combined with KV pooling.
