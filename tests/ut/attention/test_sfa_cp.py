@@ -84,7 +84,13 @@ def test_k31_prolog_v3_route_preserves_other_backends(impl_cls, is_kimi_k31, pcp
     impl.enable_mlapo = False
     impl.has_indexer = True
     impl.indexer = SimpleNamespace(wq_b=SimpleNamespace(weight_scale=torch.ones(1)))
-    with patch.object(impl, "_try_enable_type", return_value=True) as prepare:
+    with (
+        patch.object(impl, "_try_enable_type", return_value=True) as prepare,
+        patch(
+            "vllm_ascend.attention.sfa_v1.get_ascend_config",
+            return_value=SimpleNamespace(sfa_preprocess_mode="auto"),
+        ),
+    ):
         assert impl._resolve_preprocess_type(torch.bfloat16) == expected
     assert prepare.called is (expected == PreprocessType.PROLOG_V3)
 
@@ -1745,7 +1751,8 @@ def test_sfa_dcp_slot_mapping_matches_parallel_layout(pcp_enabled, local_prefill
 
 @pytest.mark.parametrize("is_kv_consumer,sfa_c8", [(False, False), (True, True)])
 @pytest.mark.parametrize("quantized_indexer", [False, True])
-def test_sfa_pcp_keeps_prolog_v3_enabled(is_kv_consumer, sfa_c8, quantized_indexer):
+@pytest.mark.parametrize("preprocess_mode", ["auto", "native"])
+def test_sfa_pcp_preprocess_selection(is_kv_consumer, sfa_c8, quantized_indexer, preprocess_mode):
     impl = AscendSFAImpl.__new__(AscendSFAImpl)
     impl.pcp_enabled = True
     impl.is_pcp_decode_sharded = False
@@ -1764,10 +1771,17 @@ def test_sfa_pcp_keeps_prolog_v3_enabled(is_kv_consumer, sfa_c8, quantized_index
     impl.indexer = SimpleNamespace(
         wq_b=SimpleNamespace(weight_scale=torch.ones(1)) if quantized_indexer else SimpleNamespace()
     )
-    with patch.object(impl, "_try_enable_type", return_value=True) as prepare_weights:
-        expected = PreprocessType.PROLOG_V3 if quantized_indexer else PreprocessType.NATIVE
+    with (
+        patch.object(impl, "_try_enable_type", return_value=True) as prepare_weights,
+        patch(
+            "vllm_ascend.attention.sfa_v1.get_ascend_config",
+            return_value=SimpleNamespace(sfa_preprocess_mode=preprocess_mode),
+        ),
+    ):
+        use_prolog = quantized_indexer and preprocess_mode == "auto"
+        expected = PreprocessType.PROLOG_V3 if use_prolog else PreprocessType.NATIVE
         assert impl._resolve_preprocess_type(torch.bfloat16) == expected
-    if quantized_indexer:
+    if use_prolog:
         prepare_weights.assert_called_once_with(PreprocessType.PROLOG_V3, torch.bfloat16)
     else:
         prepare_weights.assert_not_called()

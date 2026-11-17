@@ -707,6 +707,9 @@ class AscendConfig:
     # keeps the shared expert separate. Internal flag, not user-settable.
     megamoe_shared_expert_fusion: bool = False
     enable_mlapo: bool = True
+    # Select SFA preprocessing before preparing weights. Native bypasses both
+    # PROLOG_V3 and MLAPO while retaining the existing attention/cache backend.
+    sfa_preprocess_mode: Literal["auto", "native"] = "auto"
     # When True, keep MLAPO prefill weights on NPU instead of freeing them
     # on kv_consumer D nodes. Trades NPU memory for stability — D nodes have
     # normal local-prefill paths (recompute / fallback / preempt) that crash

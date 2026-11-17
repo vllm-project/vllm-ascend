@@ -118,6 +118,20 @@ def test_config_modules_do_not_load_vllm_config():
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
+class TestSFAPreprocessConfig(TestBase):
+    def test_default_and_explicit_modes(self):
+        self.assertEqual(AscendConfig(sparse_kv_offload_config={}).sfa_preprocess_mode, "auto")
+        for mode in ("auto", "native"):
+            with self.subTest(mode=mode):
+                config = AscendConfig(sparse_kv_offload_config={}, sfa_preprocess_mode=mode)
+                self.assertEqual(config.sfa_preprocess_mode, mode)
+
+    def test_rejects_invalid_modes(self):
+        for mode in ("prolog_v3", "NATIVE", "", True, None):
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                AscendConfig(sparse_kv_offload_config={}, sfa_preprocess_mode=mode)
+
+
 class TestRlConfig(TestBase):
     def test_defaults_and_explicit_values(self):
         defaults = RlConfig()

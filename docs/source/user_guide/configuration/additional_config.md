@@ -63,6 +63,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `mega_moe_max_tokens`               | int  | `65536` | Reference per-rank token capacity after dispatch in the fused MC2/MegaMoe path. It is passed as `dispatch_ffn_combine`'s `max_output_size` and CANN MegaMoe buffer's `max_recv_token_num`. If a rank's actual MoE load exceeds this value, precision degradation may occur. The absolute safe upper bound is `num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank)`, but using it directly can consume very large device memory. Tune this value based on actual expert load distribution. |
 | `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. The legacy `MSMONITOR_USE_DAEMON` environment variable is no longer supported. |
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). The legacy `VLLM_ASCEND_ENABLE_MLAPO` environment variable is no longer supported. |
+| `sfa_preprocess_mode`               | str | `"auto"` | SFA preprocessing selection at startup: `"auto"` preserves backend selection; `"native"` forces split preprocessing before fused weights are prepared. Applies to SFA target and SFA MTP layers. See [SFA native preprocessing](#sfa-native-preprocessing). |
 | `mlapo_keep_prefill_weights`        | bool | `False` | When True, keep MLAPO prefill weights on NPU instead of freeing them on kv_consumer (decode-only D) nodes. D nodes have normal local-prefill paths (recompute / fallback / preempt) that crash when the weights are freed (issue #11882). Enable this to trade NPU memory for stability. |
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. `0` disables NZ, `1` enables NZ only for quantized weights, and `2` also enables NZ for BF16/FP16 weights when supported. The legacy `VLLM_ASCEND_ENABLE_NZ` environment variable is no longer supported. |
 | `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. `0` disables the fused path, `1` selects dispatch-FFN-combine, and `2` selects CANN MegaMoe when the model and parallel configuration support it. On A5, SiTU models require a CANN MegaMoe wrapper exposing `activation` and `activation_params`; both SiTU parameters are bound from the MoE configuration during initialization. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
@@ -304,6 +305,51 @@ llm = LLM(
 | `--attention-backend FLASH_ATTN` for FA3 consistency mode | `"rl_config": {"enabled": true, "enable_training_consistency": true}` |
 | top-level `"weight_nz_mode": 0` for RL | `"rl_config": {"enabled": true}` |
 | top-level `"enable_sleep_mode_extra_cleanup": true` | `"rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true}` |
+
+### SFA native preprocessing
+
+For a controlled fallback experiment, add `"sfa_preprocess_mode": "native"` to
+the existing `--additional-config` JSON on every worker of the serving instance.
+For example, append this field to the P-node configuration while keeping
+TP1/PCP8, PP, quantization, MTP, and all other settings identical:
+
+```json
+{
+  "enable_flashcomm1": true,
+  "enable_fused_mc2": 2,
+  "enable_shared_expert_dp": true,
+  "multistream_overlap_shared_expert": true,
+  "sfa_preprocess_mode": "native"
+}
+```
+
+This is a startup choice for all SFA forward states, including SFA MTP layers;
+it is not a prefill-only or per-request switch. Restart the server after changing
+the setting. The startup log contains `SFA native preprocessing forced` when
+the override is applied. Omit the field or set it to `"auto"` and restart to
+restore the original selection. Other values are rejected during configuration
+validation. `enable_mlapo=false` alone does not disable `PROLOG_V3`.
+
+The native path uses separate Q/KV projection, normalization, RoPE, and query
+matrix transformation operations. Selection happens before fused weight
+preparation, retaining the projection layers needed by the native path even on
+KV consumers. Non-SFA attention backends are unaffected. A separately launched
+D-node instance retains its own configuration.
+
+This option uses the existing Model Runner V2 and PCP implementation. Under PCP,
+the native path exchanges the unprocessed KV projection and RoPE inputs before
+KV normalization/quantization and cache writing. It does not restore the old
+TP8 DSA-CP backend or move KV quantization ahead of the collective. Indexer,
+Sparse Attention, output projection, and cache layout remain on their existing
+paths. Consequently, selecting native preprocessing does not guarantee a speedup.
+
+Compare `auto` and `native` with the same model, effective token counts, padding,
+prefix-cache hit rate, parallel configuration, and software versions. Check
+attention/cache correctness and MTP output, then measure the complete attention
+stage and end-to-end iteration latency. On the C8/PCP native path, the fused
+`MlaPrologV3` and its `_copy_pcp_kv_cache_kernel` synchronization chain should be
+replaced by split preprocessing and the native KV exchange; PCP communication
+itself remains necessary.
 
 ### Example
 

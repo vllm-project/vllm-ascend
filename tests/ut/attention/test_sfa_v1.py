@@ -1068,6 +1068,7 @@ class TestAscendSFAImpl(TestBase):
         # Default ascend config (non-MLAPO, non-C8)
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_mlapo = False
+        mock_ascend_config.sfa_preprocess_mode = "auto"
         mock_ascend_config.enable_sparse_sfa_c8 = False
         mock_ascend_config.enable_sparse_sfa_turboquant = False
         mock_ascend_config.enable_sparse_li_c8 = False
@@ -1526,6 +1527,39 @@ class TestAscendSFAImpl(TestBase):
         patcher = patch.object(self.impl, "_try_enable_type", return_value=True)
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def test_forced_native_bypasses_fused_weight_preparation(self):
+        for quant_cls in (AscendW8A8DynamicLinearMethod, AscendW8A8MXFP8DynamicLinearMethod, AscendW8A8LinearMethod):
+            for consumer in (False, True):
+                with self.subTest(quant_cls=quant_cls, consumer=consumer):
+                    self._set_quant(quant_cls)
+                    self.mock_ascend_config.sfa_preprocess_mode = "native"
+                    self.impl.enable_mlapo = True
+                    self.impl.enable_sparse_sfa_c8 = quant_cls is not AscendW8A8LinearMethod
+                    self.impl.is_kv_consumer = consumer
+                    self.assertEqual(self.impl._resolve_preprocess_type(torch.bfloat16), PreprocessType.NATIVE)
+                    self.assertIs(self.impl._quant_type, quant_cls)
+                    self.impl._try_enable_type.assert_not_called()
+
+    @patch("vllm_ascend.attention.sfa_v1.maybe_trans_nz", side_effect=lambda x: x)
+    @patch("vllm_ascend.attention.sfa_v1.dispose_layer")
+    @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt: weight)
+    def test_forced_native_keeps_projections_on_kv_consumer(self, _cast, dispose, trans_nz):
+        self._set_quant(AscendW8A8MXFP8DynamicLinearMethod)
+        self.mock_ascend_config.sfa_preprocess_mode = "native"
+        self.impl.is_kv_consumer = True
+        self.impl.enable_sparse_sfa_c8 = True
+        kv_b_proj = self._setup_kv_b_proj()
+        fused_qkv_a_proj, q_proj = self.impl.fused_qkv_a_proj, self.impl.q_proj
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        self.assertEqual(self.impl.preprocess_type, PreprocessType.NATIVE)
+        self.impl._try_enable_type.assert_not_called()
+        dispose.assert_called_once_with(kv_b_proj)
+        trans_nz.assert_called_once()
+        self.assertIs(self.impl.fused_qkv_a_proj, fused_qkv_a_proj)
+        self.assertIs(self.impl.q_proj, q_proj)
 
     def test_resolve_path_w8a8dynamic_c8_goes_prolog_v3(self):
         """W8A8Dynamic + C8 + PD consumer → PROLOG_V3."""

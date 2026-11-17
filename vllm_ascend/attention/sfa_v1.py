@@ -1024,6 +1024,15 @@ class AscendSFAImpl(MLAAttentionImpl):
         quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
         self._quant_type = type(quant_method) if quant_method is not None else None
 
+        # Decide before fused weight preparation can transpose or dispose the
+        # projections needed by NATIVE. This is a startup choice, not a
+        # per-forward fallback; native W_UK_T preparation still runs below.
+        if get_ascend_config().sfa_preprocess_mode == "native":
+            logger.info_once(
+                "SFA native preprocessing forced by sfa_preprocess_mode=native (PROLOG_V3/MLAPO disabled)."
+            )
+            return PreprocessType.NATIVE
+
         pp_type = self._fused_preprocess_type()
         if pp_type is not None and self._try_enable_type(pp_type, act_dtype):
             return pp_type
