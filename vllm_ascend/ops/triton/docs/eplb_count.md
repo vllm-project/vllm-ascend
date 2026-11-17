@@ -1,221 +1,177 @@
 # EPLB all-gather route counting
 
-`count_allgather_tokens_triton(ids, mask, start, count)` implements the NPU path
-of `distributed/eplb/tensor_ops.py::count_allgather_tokens`. CPU inputs retain
-the existing Torch reference. Inputs are INT32/INT64 physical expert IDs [T,K],
-a BOOL token mask [T], and the nonnegative local start and positive count C.
-Output is a fresh INT64 [C] tensor: `out[e] = sum(mask[t] and ids[t,j] == start+e)`.
-Repeated routes count separately; masked, negative and nonlocal routes count zero.
-NPU physical IDs must be contiguous; noncontiguous IDs raise ValueError rather
-than being copied implicitly. Strided token masks and empty T/K are supported.
+## Description
 
-Fixed 512-route tiles are balanced across a grid
-bounded by the Vector Core count from the shared capability helper. Each program
-accumulates a private INT64 histogram across all its tiles, then writes one row
-of a fresh `[programs, num_bins]` INT64 scratch tensor. A second kernel reduces
-the program dimension and writes the fresh output without global atomics.
-Every scratch and output element used is overwritten per call, including Graph
-replay; empty inputs return zeros. Histogram length is the next power of two
-of C, with a minimum of two: the A5 backend failed to lower a one-element
-loop-carried tensor, including an attempted sum reduction. Padding resolves that
-case without changing the 128-bin main case. The caller selects the current NPU,
-following the normal worker convention.
+- **Function:** Count valid physical routes owned by local experts. This shared
+  EPLB utility is called through `distributed/eplb/tensor_ops.py::count_allgather_tokens`
+  from the all-gather recording path in `eplb_state.py`.
+- **Formula:** `out[e] = sum(mask[t] and ids[t,j] == start + e)`.
+  Duplicate routes count separately; masked and nonlocal routes count zero.
+- **Algorithm flow:** The first kernel balances fixed 512-route tiles across
+  `min(vector_cores, ceil(T*K/512))` programs. Each accumulates a private INT64
+  histogram and writes one complete row of `[programs, padded_bins]` scratch.
+  The second kernel sums the program dimension and writes the final counts.
+  No global atomic updates are used. Empty T/K returns zeros.
+- **Supported modes:** Ascend backend with the worker-selected NPU. Tested
+  products are A3 (`Ascend910_9362`) and A5 (`Ascend950DT_9582`). A2 and other
+  product variants are unvalidated.
 
-IDs use `ids_ptr + offsets` directly. This preserves contiguous access in the
-compiler IR instead of reconstructing offsets with division and remainder.
+## Parameters
 
-No host reads of tensor values or global intermediate index/mask tensors are
-introduced. The 128-bin logical accumulator is 1 KiB; partial-count scratch is
-40 KiB for 40 programs or 64 KiB for 64 programs. Final physical UB placement
-and compiler-internal workspace have not been established.
+All parameters are required. Public implementation wrapper:
+`vllm_ascend.ops.triton.eplb_count.count_allgather_tokens_triton`.
 
-The caller still owns gathering/padding, record-enable state and persistent
-load accumulation. This is the existing 0/1 route-count contract, not a general
-weighted scatter API.
+| Parameter | Input/Output/Attribute | Description | Data type | Data format |
+| --- | --- | --- | --- | --- |
+| `topk_ids` | Input | Physical expert IDs | INT32/INT64 | Contiguous `[T,K]` |
+| `token_mask` | Input | Whether each token contributes | BOOL | `[T]`, stride supported |
+| `local_expert_start` | Attribute | First locally owned expert | Python int | Nonnegative scalar |
+| `local_expert_count` | Attribute | Local expert count | Python int | Positive scalar |
+| return value | Output | Fresh local route counts | INT64 | `[local_expert_count]` |
 
-## Validation
+## Constraints
 
-### Upstream integration and compilation scope
+IDs and mask must be on the same NPU with matching T. Noncontiguous IDs are
+rejected without an implicit copy. IDs use direct `ids_ptr + offsets` addressing;
+mask strides are supported. Runtime route count and expert bounds use the
+backend's INT32 scalar domain; IDs and accumulated counts use INT64. Large IDs
+outside the local range are ignored. This is counting, not weighted scatter-add.
 
-The PR incorporates upstream main `3ae9de590` (2026-11-17). The kernel, EPLB
-wrapper, capability helper and regression tests are unchanged from tested
-candidate `8b66715c9`; the merge has local static validation, not a new full
-repository or model-level NPU run.
+`padded_bins = max(2, next_power_of_2(local_expert_count))`; the minimum two
+keeps the loop-carried accumulator vector-shaped for the backend. Tile size 512
+is shared across devices. The producer grid uses the shared capability helper.
+The reducer is one program, with its reduction dimension padded to a power of
+two. Scratch takes `8 * programs * padded_bins` bytes: 40 KiB for 40 programs and
+128 bins, or 64 KiB for 64 programs. These are logical allocation sizes, not
+physical UB measurements.
 
-The shared production entry point is
-`vllm_ascend.distributed.eplb.tensor_ops.count_allgather_tokens`; its NPU branch
-calls the public Triton wrapper. Test entry point:
-`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_eplb_count.py`.
-Integer outputs require exact equality (`rtol=0`, `atol=0`).
+Scratch and nonempty output are fresh allocations, fully overwritten each call.
+There is no separate output-clear kernel. The two launches use the same current
+stream; Graph replay must preserve their order. Inputs are not mutated and no
+tensor values are read on the host. All-gather, record-enable state and persistent
+load accumulation remain with the existing caller.
 
-Producer specialization depends on pointer dtypes/alignment, mask stride,
-TOPK, padded bin count, tile size and compiler target/options. Runtime route
-count, expert start and expert count use `do_not_specialize`; changing tensor
-contents alone does not require another variant. The reducer specializes on
-program count, padded reduction size, padded bins and valid expert count.
-These control its fixed tensor dimensions and output mask. Thus changes in the
-producer grid can also require a reducer variant. No new warmup registry or
-runtime configuration is introduced. Model startup/serving compilation counts,
-model accuracy and model performance remain unmeasured.
+## Origin and Differences
 
-### Two-stage candidate (2026-11-17)
+- **Origin:** The shared count contract in upstream main `3ae9de590`,
+  `vllm_ascend/distributed/eplb/tensor_ops.py`.
+- **Differences:** Main constructs local IDs, eligibility and clamped indices,
+  zeros the output and invokes Torch `scatter_add_`. The final NPU implementation
+  combines eligibility with local histogram construction, then reduces partial
+  counts. CPU inputs retain main's Torch path. NPU IDs must now be contiguous;
+  token masks may still be strided.
 
-A3 and A5 each passed 83/83 exact tests. Mutable Graph coverage includes
-20 calls/capture at [10240,8], with repeated changes to IDs and masks.
-Same-device full-wrapper Graph medians against atomic commit `a75a38f92`:
+### Compilation and integration
 
-| Device | Distribution | Atomic us | Two-stage us |
-| --- | --- | ---: | ---: |
-| A3 | uniform | 625.29 | 545.24 |
-| A3 | hot | 592.72 | 523.85 |
-| A3 | mixed | 595.62 | 521.33 |
-| A5 | uniform | 1034.54 | 308.09 |
-| A5 | hot | 1024.91 | 196.38 |
-| A5 | mixed | 1028.70 | 201.18 |
+Production callers use the public wrapper. Producer variants depend on pointer
+dtype/alignment, TOPK, mask stride, padded bins, tile and target/compiler options.
+Runtime route count and expert start/count use `do_not_specialize`. Reducer
+variants depend on producer count, padded reduction size, padded bins and valid
+expert count, controlling tensor dimensions and output masking. Changing only
+contents does not create a new variant.
 
-Protocol: 20 complete calls/capture, 5 warmup replays, 10 alternating Event
-samples, replay time divided by 20. A5 two-stage timings are unstable: this
-paired run ranges from 148.86 to 400.95 us, while a separate four-way diagnostic
-also observed roughly 18-us samples. Do not report the lowest sample as stable
-performance. The first four-way run failed its final correctness assertion;
-that failure is retained and its cause remains unresolved. Subsequent paired
-and per-replay-checked four-way runs passed. This remains a draft candidate.
+Both launches request `compile_mode="simd"`. A5's histogram lowering can still
+produce `parallel_mode="mix_simd_simt"`; the option does not guarantee a purely
+SIMD binary. Warmup integration: N/A; no new registry or runtime configuration
+is introduced. Model startup/serving compilation counts remain unmeasured.
 
-A separate, repeated A5 control keeps the old atomic code and changes only the
-program limit to match A3's 40 programs:
+## Test Cases
 
-| Distribution | 64 programs us | 40 programs us |
-| --- | ---: | ---: |
-| uniform | 1033.99 | 459.28 |
-| hot | 1025.68 | 457.91 |
-| mixed | 1027.43 | 457.79 |
-
-This reduction in latency was reproduced in the four-way control. Two-stage
-40/64 comparisons remain unstable, so the current candidate keeps the existing
-device-based program policy; the 40-program controls are experiments. Removing
-atomic also enables A5 AutoBlockify in compiler metadata, so the two-stage gain
-cannot be attributed exclusively to atomic contention. No new msprof or model
-integration was performed for this candidate. Ruff check/format and diff checks
-pass; full format.sh ci is blocked by unavailable pre-commit in the Bash environment.
-
-The final four-way repeat used the original timing synchronization protocol
-(no CPU correctness copy between timed replays) and passed pre/post checks:
-
-| Distribution | Atomic64 us | Atomic40 us | Two-stage64 us | Two-stage40 us |
-| --- | ---: | ---: | ---: | ---: |
-| uniform | 1033.80 | 456.68 | 194.67 | 194.53 |
-| hot | 1034.37 | 455.87 | 196.42 | 196.45 |
-| mixed | 1033.27 | 456.55 | 193.90 | 194.24 |
-
-These medians do not remove the earlier failure or the within-run timing
-outliers; they show no material median advantage for 40 producers once the
-global atomic merge is removed in this workload.
-
-### Historical contiguous-ID atomic implementation (2026-11-17)
-
-A3 and A5 each passed 82/82 tests, including noncontiguous-ID rejection and
-mutable Graph replay. IDs lower to contiguous `memref.copy` in adapter IR;
-token-mask scalar loads remain. This change does not vectorize the entire kernel.
-Tile size 512, histogram, grid policy and explicit SIMD mode are unchanged.
-Same-device alternating Graph measurements against pre-change commit `814f16c81`
-(20 full calls/replay, 10 samples, median microseconds):
-
-| Device | Distribution | Previous us | Contiguous IDs us |
-| --- | --- | ---: | ---: |
-| A3 | uniform | 651.93 | 611.73 |
-| A3 | hot | 641.64 | 595.52 |
-| A3 | mixed | 633.70 | 593.70 |
-| A5 | uniform | 1060.19 | 1034.15 |
-| A5 | hot | 1049.89 | 1024.99 |
-| A5 | mixed | 1053.79 | 1029.78 |
-
-The address change improves this measured range but does not explain the full
-A3/A5 latency gap. Model-level integration and full repository CI are pending.
-
-### Historical compiler-mode and algorithm trials
-
-The current launch explicitly sets `compile_mode="simd"` on Ascend 950.
-A2/A3 already use SIMD under the default hybrid mode. See the
-[compiler options reference](https://triton-ascend.readthedocs.io/en/v3.6.0/environment_variable_and_compiler_options_reference.html).
-Candidate `a46145c87` passed all 81 correctness tests on Ascend950DT_9582.
-Metadata confirms `compile_mode="simd"`, but saved adapter IR still lowers
-`tl.histogram` to `__builtin_histogram` with `vf_mode<SIMT>`. This is an IR
-classification, not proof of the final instruction path: upstream AscendNPU-IR
-revision `fbf6d5ecc72c626100c147f7cf600f5945c04e87` includes both SIMT atomics
-and eligible `dhistv2` SIMD paths inside its histogram template. Whether the
-installed CANN binary contains those paths has not been established.
-Paired, alternating Graph measurements on the same card (20 complete calls per
-replay, 10 samples) compare default hybrid versus explicit SIMD:
-
-| Distribution | Default hybrid ms | Explicit SIMD ms | SIMD time increase |
-| --- | ---: | ---: | ---: |
-| uniform | 1.0299 | 1.0587 | 2.80% |
-| hot | 1.0208 | 1.0509 | 2.95% |
-| mixed | 1.0246 | 1.0537 | 2.84% |
-
-This option did not improve performance. A3 has not been rerun with the explicit
-option. The remaining measurements below belong to commit `980f446c2`, before
-this option was added.
-
-A separate custom equality-plus-integer-reduction experiment (128 routes/tile,
-int64 per-program accumulation, final atomic merge) passed 81/81 A5 tests.
-Its 11 saved adapter variants contain no histogram builtin or SIMT VF operation
-and report `parallel_mode="simd"`. Same-card paired Graph timings were:
-
-| Distribution | Default histogram ms | Custom reduction ms | Time increase |
-| --- | ---: | ---: | ---: |
-| uniform | 1.0301 | 1.0707 | 3.95% |
-| hot | 1.0207 | 1.0753 | 5.34% |
-| mixed | 1.0233 | 1.0761 | 5.16% |
-
-The custom implementation was not promoted into this PR kernel because it
-regressed all three measured cases. This experiment changed both the counting
-method and tile size; it does not isolate the hardware SIMD/SIMT throughput.
-
-Both A3 Ascend910_9362 (NpuArch 2201) and A5 Ascend950DT_9582 (NpuArch 3510)
-passed 81 tests with exact integer equality, including mutable-input Graph replay.
-Cases include both ID dtypes, strides, empty inputs, single expert, 511/512/513
-route boundaries, non-power-of-two expert counts, hotspots, disabled tokens,
-nonlocal and large INT64 IDs. The kernel, wrapper and helper import hashes match
-the tested source. The package snapshot was taken from this PR and the final
-minimum-two-bin correction overlaid before both device runs.
-
-Both environments: CANN 9.2.1, Python 3.12.16, Torch 2.10.0+cpu,
-Torch-NPU 2.10.0.post7, Triton 3.6.0 / Triton-Ascend 3.6.0.post2.
-A3 driver: 26.2.rc1.b081; A5 driver: 25.6.rc3.1.
+Reference: main's Torch formula on CPU. INT64 results require exact equality
+(`rtol=0`, `atol=0`). Coverage includes both ID dtypes, empty T/K, 511/512/513
+route boundaries, non-power-of-two bins, large/invalid IDs, duplicated routes,
+disabled/strided masks, noncontiguous-ID rejection and mutable Graph replay.
+The large mutable Graph case captures 20 calls and repeatedly changes IDs/masks.
 
 ```bash
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_eplb_count.py
 ```
 
-For standalone validation, the test file was copied outside the e2e tree to avoid
-unrelated conftest setup, with the tested package first on PYTHONPATH.
+The expanded shape set is synthetic interface/boundary coverage. 81920 routes
+and 128 bins preserve the task's original workload; added points are not claimed
+as model-captured shapes. Model accuracy, serving performance and compilation
+counts remain unmeasured.
 
-## Complete-function Graph performance
+### Performance methodology
 
-Synthetic INT64 IDs [10240,8], output [128], local start 7. Each Graph captures
-20 complete count calls; after 5 warmup replays, 10 samples alternate original
-Torch/candidate execution order. NPU Event replay duration is divided by 20;
-medians are below. Outputs are checked before and after measurement.
+Compare main `3ae9de590` directly against the final two-stage implementation.
+Both receive identical inputs and allocate fresh output each call. Full-wrapper
+Graph timing includes main's zeroing and the candidate's reduction. Each graph
+contains 20 calls; five warmup replays precede ten alternating device Event
+samples, divided by 20. Values are medians in microseconds. CPU-oracle checks run
+before capture and after replay. Failures have no numeric speedup. No eager
+measurement is included.
 
-| Device | Distribution | Torch ms | Histogram ms | Torch / histogram |
-| --- | --- | ---: | ---: | ---: |
-| A3 | uniform | 0.6136 | 0.6401 | 0.959x |
-| A3 | hot | 0.7204 | 0.6174 | 1.167x |
-| A3 | mixed | 0.6192 | 0.6466 | 0.958x |
-| A5 | uniform | 2.2008 | 1.0258 | 2.145x |
-| A5 | hot | 13.9194 | 1.0270 | 13.554x |
-| A5 | mixed | 2.3428 | 1.0272 | 2.281x |
+There are 72 points/device: 20 shapes x three distributions, three extra
+INT32 shapes x three distributions, and one strided-mask shape x three
+distributions. Uniform cycles through local experts; hot uses one expert;
+mixed includes masked tokens and nonlocal routes. Local start is 7.
 
-Uniform IDs cycle start+[0,127]; hot IDs equal start; mixed IDs cycle
-[start-2,start+129], with every third token disabled. These are synthetic operator
-results, not production-model speedups. A3 independent repeat speedups were
-0.923x / 1.136x / 0.968x (uniform / hot / mixed). Its non-hot cases regressed
-in both runs, by about 3-8.3% in latency. This is not an unconditional A3 win.
+### Results
 
-Separate full msprof uniform runs retained 20 calls after 5 warmups. Original
-Torch uses 9 compute kernels/call; the histogram path uses 2. Mean counting-kernel
-durations were 730.851 / 664.864 us (Torch / histogram) on A3 and
-2140.067 / 1002.915 us on A5. These eager task durations are distinct from the
-Graph complete-function timings above. Model/serving validation and repository
-CI remain pending; the PR stays draft for review of the A3 tradeoff.
+Measured on 2026-11-17 against main `3ae9de590`. A3 used the full source
+snapshot at `962225ae5` with the expanded test overlay. The production kernel
+is unchanged in the expanded validation branch.
+
+| Platform | Exact regression tests | Main vs two-stage Graph points | Faster points |
+| --- | ---: | ---: | ---: |
+| A3 | 223/223 passed | 72/72 passed | 67/72 |
+| A5 | Expanded run pending | Not measured in this matrix | N/A |
+
+A3: Ascend910_9362, NpuArch2201, driver 26.2.rc1.b081, 40 vector cores.
+Software: CANN 9.2.1, Python 3.12.16, Torch 2.10.0+cpu,
+Torch-NPU 2.10.0.post7, Triton 3.6.0 / Triton-Ascend 3.6.0.post2.
+This was a single-device run on a shared host; other devices had active jobs.
+
+A3 speedup ranges from 0.665x to 1.896x. Five points regress; the singleton
+case is approximately 0.67x. The two-stage path is not a universal speedup.
+The following table uses INT64 IDs, contiguous masks and uniform local routes.
+Shapes are `(T, K, local_expert_count)`, and latency is microseconds per call.
+
+| Shape | Main (us) | Two-stage (us) | Main / two-stage |
+| --- | ---: | ---: | ---: |
+| (1, 1, 1) | 45.07 | 67.75 | 0.665x |
+| (1, 8, 128) | 106.09 | 70.86 | 1.497x |
+| (32, 2, 8) | 94.96 | 70.08 | 1.355x |
+| (64, 4, 32) | 108.70 | 78.79 | 1.380x |
+| (65, 8, 17) | 109.09 | 90.75 | 1.202x |
+| (128, 3, 64) | 112.92 | 85.49 | 1.321x |
+| (256, 8, 64) | 132.83 | 95.40 | 1.392x |
+| (511, 1, 128) | 118.64 | 87.71 | 1.353x |
+| (512, 1, 128) | 116.75 | 87.74 | 1.331x |
+| (513, 1, 129) | 117.49 | 100.17 | 1.173x |
+| (512, 8, 128) | 148.44 | 114.02 | 1.302x |
+| (2048, 8, 128) | 316.07 | 184.29 | 1.715x |
+| (10240, 1, 128) | 188.89 | 180.55 | 1.046x |
+| (10240, 4, 128) | 511.43 | 366.84 | 1.394x |
+| (10240, 8, 32) | 600.64 | 398.48 | 1.507x |
+| (10240, 8, 64) | 604.91 | 446.73 | 1.354x |
+| (10240, 8, 128) | 621.29 | 545.34 | 1.139x |
+| (10240, 8, 256) | 623.68 | 737.75 | 0.845x |
+| (10240, 16, 128) | 1417.02 | 901.53 | 1.572x |
+| (32768, 8, 128) | 2177.10 | 1347.22 | 1.616x |
+
+All 72 cases, including regressions, distributions, dtype and mask-stride
+controls, are in [the A3 result CSV](eplb_count_graph_a3.csv). Each row includes
+the median and observed sample range. Raw samples are written by the benchmark.
+
+A5 expanded validation is blocked by GitHub transfer through the current
+proxy's untrusted certificate chain. No A5 main-comparison numbers are inferred
+from A3 or from other benchmark protocols. A separate A5 multi-Graph correctness
+failure has not been root-caused; passing subsequent checks does not resolve it.
+
+### Reproduce the Graph matrix
+
+Use the same installed dependencies on the selected NPU. From the repository
+root, extract the pinned baseline and run the committed benchmark:
+
+```bash
+mkdir -p /tmp/eplb-main-baseline
+git show 3ae9de5900e181817ad86a0fa936c379a3789c0f:vllm_ascend/distributed/eplb/tensor_ops.py > /tmp/eplb-main-baseline/baseline_tensor_ops.py
+PYTHONPATH="$PWD:/tmp/eplb-main-baseline:$PYTHONPATH" python benchmarks/eplb_count_graph.py
+```
+
+The runner saves every point and raw timing sample to `results/expanded-graph.json`,
+including errors with null timings and speedups, and records imported source
+paths and SHA256 hashes in `results/import-identity.json`. It performs Graph
+measurements only. Use separate output directories for different devices/runs.

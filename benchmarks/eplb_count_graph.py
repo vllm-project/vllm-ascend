@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 """Main versus final two-stage wrapper, Graph only, synthetic contract cases."""
 
 import gc
