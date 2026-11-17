@@ -225,7 +225,13 @@ else()
   )
 endif()
 
-target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/custom_transformer/op_api/lib")
+# Let CMake handle $ORIGIN escaping for build and installed artifacts.
+set_target_properties(vllm_ascend_C PROPERTIES
+    BUILD_RPATH
+        "$ORIGIN;$ORIGIN/lib;$ORIGIN/_cann_ops_custom/vendors/custom_transformer/op_api/lib"
+    INSTALL_RPATH
+        "$ORIGIN;$ORIGIN/lib;$ORIGIN/_cann_ops_custom/vendors/custom_transformer/op_api/lib"
+)
 
 if(EXISTS "${ASCEND_HOME_PATH}/include/hixl/hixl.h")
   find_library(ENGRAM_HIXL_LIBRARY cann_hixl PATHS ${ASCEND_HOME_PATH}/lib64)
