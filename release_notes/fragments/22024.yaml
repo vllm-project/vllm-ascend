@@ -17,6 +17,9 @@ entries:
       Transfer preparation skips disabled debug-list construction and masked
       history entries, reuses immutable layout offsets, and assembles host
       addresses before waiting for device reuse and save dependencies.
+      Private-window mask preparation reuses the current request's ID arrays.
+      DSV4 Decode also queues attention before publishing the transfer gate;
+      this does not remove cache-write, lease, or shared-slot dependencies.
     model: deepseek-v4
   - category: bugfix
     text: >-

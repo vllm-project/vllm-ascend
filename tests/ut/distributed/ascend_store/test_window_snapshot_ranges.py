@@ -163,7 +163,39 @@ class TestWindowSnapshotRanges(unittest.TestCase):
     def test_reserved_null_pages_remain_unreadable(self):
         worker, request = self.make_case()
         request.block_ids_by_group[0][30] = 0
+        request.block_ids_by_group_np[0][30] = 0
         self.assertEqual(self.selected(worker._compute_reachable_load_masks(request, 64)[0]), [28, 29, 31])
+
+    def test_private_window_uses_step_arrays_without_changing_ownership(self):
+        worker, request = self.make_case()
+
+        class NoSlice(list):
+            def __getitem__(self, index):
+                if isinstance(index, slice):
+                    raise AssertionError("Private windows must not rebuild ID arrays from lists")
+                return super().__getitem__(index)
+
+        request.block_ids_by_group[0] = NoSlice(request.block_ids_by_group[0])
+        before = request.block_ids_by_group_np[0].copy()
+        self.assertEqual(self.selected(worker._compute_reachable_load_masks(request, 64)[0]), [28, 29, 30, 31])
+        self.assertEqual(self.selected(worker._compute_reachable_store_masks(request)[0]), [12, 28, 29, 30, 31])
+        np.testing.assert_array_equal(request.block_ids_by_group_np[0], before)
+
+    def test_private_window_does_not_reuse_previous_request_ids(self):
+        worker, first = self.make_case()
+        _, second = self.make_case()
+        second.req_id = "b"
+        second.block_ids_by_group[0][30] = 0
+        second.block_ids_by_group_np[0][30] = 0
+        self.assertEqual(self.selected(worker._compute_reachable_load_masks(first, 64)[0]), [28, 29, 30, 31])
+        self.assertEqual(self.selected(worker._compute_reachable_load_masks(second, 64)[0]), [28, 29, 31])
+
+    def test_private_window_without_complete_array_falls_back_to_list(self):
+        for arrays in (None, [], [np.array([1])]):
+            with self.subTest(arrays=arrays):
+                worker, request = self.make_case()
+                request.block_ids_by_group_np = arrays
+                self.assertEqual(self.selected(worker._compute_reachable_load_masks(request, 64)[0]), [28, 29, 30, 31])
 
     def test_external_prefix_uses_coordinator_mask(self):
         worker, request = self.make_case()

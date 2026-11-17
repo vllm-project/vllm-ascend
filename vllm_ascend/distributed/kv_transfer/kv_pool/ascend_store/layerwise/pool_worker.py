@@ -1653,7 +1653,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
 
     @staticmethod
     def _mask_allocated_blocks(
-        request: ReqMeta, masks: tuple[Sequence[bool] | None, ...] | None
+        request: ReqMeta, masks: tuple[Sequence[bool] | np.ndarray | None, ...] | None
     ) -> tuple[list[bool], ...]:
         """Intersect transfer ranges with the scheduler's actual ownership.
 
@@ -1667,7 +1667,19 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             # Long window tables retain leading NULL entries. Intersect in
             # NumPy rather than visiting every historical token in Python.
             count = len(block_ids) if mask is None else min(len(block_ids), len(mask))
-            allocated = np.asarray(block_ids[:count], dtype=np.int64) != 0
+            group_arrays = request.block_ids_by_group_np
+            if (
+                isinstance(mask, np.ndarray)
+                and group_arrays is not None
+                and group_id < len(group_arrays)
+                and len(group_arrays[group_id]) >= count
+            ):
+                # Private window masks are already arrays. ReqMeta owns the
+                # matching ID arrays for this step, also used by the address
+                # builder; reuse them without caching IDs across steps.
+                allocated = group_arrays[group_id][:count] != 0
+            else:
+                allocated = np.asarray(block_ids[:count], dtype=np.int64) != 0
             if mask is not None:
                 allocated &= np.asarray(mask[:count], dtype=np.bool_)
             result.append(allocated.tolist())
@@ -1746,7 +1758,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         align_groups = getattr(self, "group_uses_align_state", [])
         if self.layerwise_offload and request.needs_private_snapshot:
             ranges = self._continuation_ranges(request.target_token_len)
-            selected: list[Sequence[bool] | None] = []
+            selected: list[Sequence[bool] | np.ndarray | None] = []
             for group_id, block_ids in enumerate(request.block_ids_by_group):
                 public_mask = masks[group_id] if masks is not None and group_id < len(masks) else None
                 if group_id < len(align_groups) and align_groups[group_id]:
@@ -1758,7 +1770,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         count = min(len(public_mask), len(block_ids))
                         window_mask[:count] = public_mask[:count]
                     window_mask[start:end] = True
-                    selected.append(window_mask.tolist())
+                    selected.append(window_mask)
                 else:
                     # Full history and unknown window policies remain dense.
                     selected.append(None)
@@ -1769,7 +1781,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         # reachable. They do not contain a state snapshot. Do not allocate
         # readable pool keys or copy block zero for these holes; the
         # non-layerwise path applies the same skip_null_blocks rule.
-        result: list[list[bool] | None] = list(masks) if masks is not None else [None] * self.num_kv_cache_groups
+        result: list[Sequence[bool] | np.ndarray | None] = (
+            list(masks) if masks is not None else [None] * self.num_kv_cache_groups
+        )
         for group_id, uses_align in enumerate(align_groups):
             if not uses_align:
                 continue
@@ -2342,7 +2356,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             # rounding. The separate partial-page path keeps the final page.
             ranges = self._continuation_ranges(cached_tokens)
             if ranges:
-                selected: list[Sequence[bool] | None] = []
+                selected: list[Sequence[bool] | np.ndarray | None] = []
                 for group_id, block_ids in enumerate(request.block_ids_by_group):
                     if group_id not in ranges:
                         selected.append(None)
@@ -2350,7 +2364,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     start, end = ranges[group_id]
                     window_mask = np.zeros(len(block_ids), dtype=np.bool_)
                     window_mask[start:end] = True
-                    selected.append(window_mask.tolist())
+                    selected.append(window_mask)
                 masks = tuple(selected)
         reused_state_groups = [
             group_id
@@ -2361,7 +2375,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             return self._mask_allocated_blocks(request, masks)
         # Preserve other groups' reachability masks. An aligned recurrent page
         # represents one endpoint; unaligned state uses the partial GVA path.
-        result: list[Sequence[bool] | None] = list(masks) if masks is not None else [None] * self.num_kv_cache_groups
+        result: list[Sequence[bool] | np.ndarray | None] = (
+            list(masks) if masks is not None else [None] * self.num_kv_cache_groups
+        )
         for group_id in reused_state_groups:
             size = self.grouped_block_size[group_id]
             result[group_id] = [

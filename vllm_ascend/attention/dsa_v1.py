@@ -2881,8 +2881,9 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         if self.turboquant is not None:
             q = self.turboquant.forward(q)
-        # Queue Prefill attention before waking transfer threads. The window
-        # keeps its event before the kernel, so DMA can overlap its execution.
-        with attention_transfer_window(defer_transfer_start=has_prefill):
+        # Queue attention before waking transfer threads, including Decode.
+        # The device event remains before the kernel: this changes host
+        # submission order, not the cache-write dependency or DMA eligibility.
+        with attention_transfer_window(defer_transfer_start=True):
             result = attn_op(q, **attn_kwargs)[0]
         return self.turboquant.inverse(result) if self.turboquant is not None else result
