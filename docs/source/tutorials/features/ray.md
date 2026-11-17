@@ -4,7 +4,7 @@ Multi-node inference is suitable for scenarios where the model cannot be deploye
 
 * **Verify Multi-Node Communication Environment**
 * **Set Up and Start the Ray Cluster**
-* **Start the Online Inference Service on Multi-node**
+* **Start the Online Inference Service on Multi-node scenario**
 
 ## Verify Multi-Node Communication Environment
 
@@ -136,15 +136,22 @@ ray start --address='{head_node_ip}:6379' --node-ip-address={local_ip}
 
 Once the cluster is started on multiple nodes, execute `ray status` and `ray list nodes` to verify the Ray cluster's status. You should see the correct number of nodes and NPUs listed.
 
-After Ray is successfully started, the following content will appear:\
-A local Ray instance has started successfully.\
-Dashboard URL: The access address for the Ray Dashboard (default: <http://localhost:8265>); Node status (CPU/memory resources, number of healthy nodes); Cluster connection address (used for adding multiple nodes).
+After Ray starts successfully, the output includes:
+
+```output
+A local Ray instance has started successfully.
+Dashboard URL: http://localhost:8265
+```
+
+* **Dashboard URL**: the Ray Dashboard address (default: <http://localhost:8265>)
+* **Node status**: CPU/memory resources and the number of healthy nodes
+* **Cluster connection address**: used to add more nodes
 
 ## Start the Online Inference Service on Multi-node scenario
 
 In the container, you can use vLLM as if all NPUs were on a single node. vLLM will utilize NPU resources across all nodes in the Ray cluster.
 
-**You only need to run the vllm command on one node.**
+**You only need to run the vLLM command on one node.**
 
 To set up parallelism, the common practice is to set the `tensor-parallel-size` to the number of NPUs per node, and the `pipeline-parallel-size` to the number of nodes.
 
