@@ -1,4 +1,4 @@
 pr: 22043
 entries:
   - category: performance
-    text: All-gather EPLB route counting on Ascend now uses a two-stage Triton implementation to avoid contended global atomic updates. NPU physical expert IDs must be contiguous; callers providing noncontiguous IDs must make them contiguous before counting. Strided token masks remain supported.
+    text: All-gather EPLB route counting on Ascend now uses Triton histograms followed by a separate reduction. NPU physical expert IDs must be contiguous; callers providing noncontiguous IDs must make them contiguous before counting. Strided token masks remain supported.
