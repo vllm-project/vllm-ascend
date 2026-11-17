@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Ascend KV-cache dtype handlers registered via vLLM's
-``register_kv_cache_dtype`` mechanism (vLLM >= releases/v0.30.0).
+``register_kv_cache_dtype`` mechanism (vLLM >= releases/v0.33.0).
 
 Importing this module eagerly decorates the handlers, which appends each name
 to ``KV_CACHE_DTYPES``, injects the torch dtype into
