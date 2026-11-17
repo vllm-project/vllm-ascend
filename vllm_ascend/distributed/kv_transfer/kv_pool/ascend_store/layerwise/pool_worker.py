@@ -2333,6 +2333,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         first_draft_layer = self._dflash_draft_start_layer
         if first_draft_layer is None:
             return
+        # no_forward also calls finish_forward, without running any layer hooks.
+        if self.current_layer == 0 and self.next_layer_to_submit == 0:
+            return
         if self.current_layer != first_draft_layer:
             raise RuntimeError("Target KV hooks did not reach the DFlash draft layer boundary")
         for layer_id in range(first_draft_layer, self.num_layers):
