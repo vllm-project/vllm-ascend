@@ -541,6 +541,7 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
                 qk_rope_head_dim=64,
                 num_kv_heads=1,
                 num_heads=local_heads,
+                use_quant_flashmla=False,
                 dcp_size=size,
                 dcp_rank=rank,
                 dcp_group=SimpleNamespace(unique_name="cpu-dcp"),
@@ -550,6 +551,7 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
         preprocessed = SimpleNamespace(
             ql_nope=query[..., :512],
             q_pe=query[..., 512:],
+            dequant_scale_q_nope=None,
             current_k_nope=current_kv[..., :512] if split else None,
             current_k_pe=current_kv[..., 512:] if split else None,
         )

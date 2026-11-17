@@ -340,8 +340,22 @@ class FlashMLAMetadataBuilder:
         self.rope_dtype = getattr(getattr(impl.vllm_config, "model_config", None), "dtype", impl.dtype)
         self.use_rope = impl.use_mla_rope
         self.max_num_reqs = max_num_reqs
+        self.quant_max_cache_len = (
+            impl.vllm_config.model_config.max_model_len if getattr(impl, "use_quant_flashmla", False) else None
+        )
         self.buffers: dict[tuple, FlashMLADecode] = {}
         self.attn_mask = attn_mask
+
+    def _metadata_bounds(self, tokens: int, *, current: bool = False) -> dict[str, int]:
+        if self.quant_max_cache_len is None:
+            return {}
+        # With inferred maxima an entirely empty DCP shard produces a zero
+        # tiling extent in QuantFlashMlaMetadata. These are capacity bounds;
+        # cache_lens/used_q still carry the actual lengths, including zero.
+        return {
+            "max_seqlen_q": tokens,
+            "max_seqlen_kv": tokens if current else self.quant_max_cache_len,
+        }
 
     def _allocate(self, tokens: int, rows: int, columns: int, causal: bool) -> FlashMLADecode:
         ints = {"dtype": torch.int32, "device": self.device}
@@ -353,6 +367,7 @@ class FlashMLAMetadataBuilder:
             torch.empty_like(lengths, device="meta"),
             torch.empty_like(cu, device="meta"),
             torch.empty_like(used, device="meta"),
+            **self._metadata_bounds(tokens),
         )
         rope_shape = (tokens, 1, 1, FLASHMLA_QK_DIM - FLASHMLA_V_DIM)
         flash = FlashMLADecode(
@@ -381,6 +396,7 @@ class FlashMLAMetadataBuilder:
                 torch.empty_like(used, device="meta"),
                 torch.empty_like(cu, device="meta"),
                 torch.empty_like(used, device="meta"),
+                **self._metadata_bounds(tokens, current=True),
             )
             flash.current = FlashMLACurrent(
                 adapter=self.current_adapter,
@@ -466,7 +482,9 @@ class FlashMLAMetadataBuilder:
                 cos, sin = get_cos_and_sin_mla(flash.positions)
                 flash.cos.copy_(cos)
                 flash.sin.copy_(sin)
-            flash.schedule.copy_(flash.adapter.build_metadata(flash.cache_lens, flash.cu, flash.used_q))
+            flash.schedule.copy_(
+                flash.adapter.build_metadata(flash.cache_lens, flash.cu, flash.used_q, **self._metadata_bounds(tokens))
+            )
             if flash.current is not None:
                 current = flash.current
                 page_counts = (flash.used_q + FLASHMLA_BLOCK_SIZE - 1) // FLASHMLA_BLOCK_SIZE
@@ -478,7 +496,11 @@ class FlashMLAMetadataBuilder:
                 requests = torch.searchsorted(flash.cu[1:], indices.to(torch.int32), right=True)
                 current.slots.copy_(page_starts[requests] * FLASHMLA_BLOCK_SIZE + indices - flash.cu[requests])
                 current.slots.masked_fill_(~flash.token_live, -1)
-                current.schedule.copy_(current.adapter.build_metadata(flash.used_q, flash.cu, flash.used_q))
+                current.schedule.copy_(
+                    current.adapter.build_metadata(
+                        flash.used_q, flash.cu, flash.used_q, **self._metadata_bounds(tokens, current=True)
+                    )
+                )
 
         # Refresh on the caller's stream before return; captured buffer caching
         # preserves the addresses used by graph replay.

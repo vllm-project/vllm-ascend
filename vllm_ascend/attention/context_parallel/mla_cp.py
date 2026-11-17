@@ -587,6 +587,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             preprocessed.current_k_pe,
             fused_cache.shape[1],
             metadata,
+            q_descale=preprocessed.dequant_scale_q_nope,
         )
 
     def _prepare_dcp_flashmla_current(self, flash, q_nope, q_pe, k_nope, k_pe):
@@ -594,6 +595,8 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         current = flash.current
         assert current is not None
         assert k_nope is not None and k_pe is not None
+        if self.use_quant_flashmla and (k_nope.dtype != current.cache.dtype or k_pe.dtype != current.cache.dtype):
+            raise RuntimeError("QuantFlashMLA DCP current KV must use the writer's quantized FP8 rows")
         torch_npu.npu_scatter_pa_kv_cache(
             key=k_nope.reshape(-1, 1, self.kv_lora_rank).contiguous(),
             value=k_pe.reshape(-1, 1, self.qk_rope_head_dim).contiguous(),
@@ -605,7 +608,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         current.query[..., : self.kv_lora_rank].copy_(q_nope)
         current.query[..., self.kv_lora_rank :].copy_(q_pe)
 
-    def _run_dcp_flashmla_attention(self, flash, q_nope, q_pe, k_nope, k_pe, *, attention_kind):
+    def _run_dcp_flashmla_attention(self, flash, q_nope, q_pe, k_nope, k_pe, *, attention_kind, q_descale=None):
         """Adapt FlashMLA to TND/TN1; current KV/Q must already be staged."""
         if attention_kind is CPKVScope.CURRENT:
             current = flash.current
@@ -619,6 +622,14 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             block_table, cache_lens, attn_mask = flash.block_table, flash.cache_lens, None
             query[..., : self.kv_lora_rank].copy_(q_nope)
             query[..., self.kv_lora_rank :].copy_(q_pe)
+        scale_kwargs = {}
+        if self.use_quant_flashmla:
+            if q_descale is None:
+                raise RuntimeError("QuantFlashMLA DCP requires the query descale for the selected heads")
+            scale_kwargs = {
+                "q_descale": q_descale.reshape(query.shape[0], query.shape[1]).contiguous(),
+                "k_descale": self.fak_descale_float.view(1),
+            }
         output, lse = adapter.attention(
             query,
             cache,
@@ -628,6 +639,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             seqused_q=flash.used_q,
             metadata=schedule,
             attn_mask=attn_mask,
+            **scale_kwargs,
         )
         return output.transpose(0, 1), lse.transpose(0, 1).unsqueeze(-1)
 
@@ -740,6 +752,8 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         current_k_pe: torch.Tensor | None,
         block_size: int,
         attn_metadata: AscendMLAMetadata,
+        *,
+        q_descale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         flash = getattr(attn_metadata, "external_flashmla", None)
         decode_meta = attn_metadata.decode
@@ -752,6 +766,9 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         num_heads = q_nope.size(1)
         q_nope = q_nope.view(num_tokens, num_heads, -1).contiguous()
         q_pe = q_pe.view(num_tokens, num_heads, -1)
+        if self.use_quant_flashmla:
+            if q_descale is None or q_descale.shape != q_nope.shape[:2]:
+                raise ValueError("QuantFlashMLA DCP query descale must match the gathered token/head axes")
         if flash is None:
             assert cache_k_pe is not None
             history_k_nope = cache_k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
@@ -764,6 +781,9 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         if has_current:
             assert current_k_nope is not None and current_k_pe is not None
             current_q_nope, current_q_pe = self._local_decode_query(q_nope, q_pe, num_heads=self.num_heads)
+            current_q_descale = (
+                self._local_decode_query(q_descale, num_heads=self.num_heads)[0] if q_descale is not None else None
+            )
             current_k_nope = current_k_nope.view(num_tokens, self.num_kv_heads, self.kv_lora_rank).contiguous()
             current_k_pe = current_k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim).contiguous()
 
@@ -842,7 +862,13 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             )
         else:
             history_output, history_lse = self._run_dcp_flashmla_attention(
-                flash, q_nope, q_pe, history_k_nope, history_k_pe, attention_kind=CPKVScope.HISTORY
+                flash,
+                q_nope,
+                q_pe,
+                history_k_nope,
+                history_k_pe,
+                attention_kind=CPKVScope.HISTORY,
+                q_descale=q_descale,
             )
 
         # Stage FlashMLA's current KV and Q on the main stream so its AIV
@@ -861,6 +887,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 current_q_pe,
                 current_k_nope,
                 current_k_pe,
+                current_q_descale,
             )
             if flash is None:
                 assert isinstance(decode_meta, AscendMLADCPDecodeMetadata)
@@ -909,6 +936,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                         current_k_nope,
                         current_k_pe,
                         attention_kind=CPKVScope.CURRENT,
+                        q_descale=current_q_descale,
                     )
                 current_attn_done = attn_stream.record_event()
             current_output.record_stream(main_stream)
