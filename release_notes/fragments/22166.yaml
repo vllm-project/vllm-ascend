@@ -1,0 +1,4 @@
+pr: 22166
+entries:
+  - category: bugfix
+    text: Fixed MRV2 hybrid KV-cache initialization for compatible attention layers with non-divisible page sizes, including Qwen3.6-35B-A3B with DFlash2.
