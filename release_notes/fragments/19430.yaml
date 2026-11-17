@@ -1,0 +1,5 @@
+pr: 19430
+entries:
+  - category: bugfix
+    text: Fixed Qwen3.8-Flash-Next startup with a DFlash2 draft so the engine no longer rejects this configuration before model loading.
+    model: qwen3-dflash
