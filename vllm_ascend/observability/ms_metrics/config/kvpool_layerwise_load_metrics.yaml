@@ -1,0 +1,12 @@
+# KV pool. Layerwise AscendStore loads bypass the connector-level
+# vllm:ascend_store_load_get_* metric, so time the receive-thread dispatch of
+# one layer for each of the three load paths. Per-layer histograms are detail.
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer:KVCacheStoreLayerRecvingThread._copy_gva_layers
+  handler: vllm_ascend.observability.ms_metrics.handlers:kvpool_layerwise_gva_load_handler
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer:KVCacheStoreLayerRecvingThread._handle_range_layer_task
+  handler: vllm_ascend.observability.ms_metrics.handlers:kvpool_layerwise_range_load_handler
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer:KVCacheStoreKeyLayerRecvingThread._handle_request
+  handler: vllm_ascend.observability.ms_metrics.handlers:kvpool_layerwise_key_load_handler

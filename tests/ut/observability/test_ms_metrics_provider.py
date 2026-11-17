@@ -82,11 +82,12 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     assert [Path(path).name for path in provider.config_paths] == [
         "base_metrics.yaml",
         "eplb_metrics.yaml",
+        "kvpool_layerwise_load_metrics.yaml",
         "schedule_execute_metrics.yaml",
     ]
     assert all(Path(path).is_file() for path in provider.config_paths)
     config = _load_all_provider_configs(provider.config_paths)
-    assert len(config) == 12
+    assert len(config) == 15
     assert all(item["symbol"].startswith("vllm_ascend.") for item in config)
     assert all("id" not in item for item in config)
     assert all(
@@ -151,6 +152,7 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
         "vllm_ascend.observability.ms_metrics.handlers",
         "vllm_ascend.observability.ms_metrics.handlers.common",
         "vllm_ascend.observability.ms_metrics.handlers.eplb",
+        "vllm_ascend.observability.ms_metrics.handlers.kvpool_layerwise_load",
         "vllm_ascend.observability.ms_metrics.handlers.schedule_execute",
     ):
         monkeypatch.delitem(sys.modules, module_name, raising=False)
@@ -165,7 +167,7 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
 
 def test_provider_yaml_symbols_exist_in_current_vllm_ascend_source():
     config_paths = sorted((_PACKAGE_ROOT / "config").glob("*.yaml"))
-    assert len(config_paths) == 3
+    assert len(config_paths) == 4
     config = _load_all_provider_configs(config_paths)
 
     for item in config:
@@ -449,6 +451,55 @@ def test_symbol_hook_handlers_honor_level_and_labels(monkeypatch):
     common.set_metric_level("basic")
 
     assert handlers.sample_tokens_handler(lambda runner, grammar: "sampled", object(), None) == "sampled"
+    metrics.record_metric.assert_not_called()
+
+
+def test_kvpool_layerwise_handlers_record_one_sample_per_load_path(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kvpool_layerwise_modes", "kvpool_layerwise_load")
+    sys.modules[_COMMON_MODULE].set_metric_level("detail")
+    thread = object()
+
+    def original(obj, *args, **kwargs):
+        return obj, args, kwargs
+
+    assert handlers.kvpool_layerwise_gva_load_handler(original, thread, "layer") == (thread, ("layer",), {})
+    assert handlers.kvpool_layerwise_range_load_handler(original, thread) == (thread, (), {})
+    assert handlers.kvpool_layerwise_key_load_handler(original, thread) == (thread, (), {})
+
+    metrics.get_or_create_metric.assert_called_once_with(
+        metric_name="kvpool:layerwise_load_get_duration_ms",
+        metric_type="histogram",
+        label_names=["mode"],
+    )
+    recorded = [call.kwargs["labels"] for call in metrics.record_metric.call_args_list]
+    assert recorded == [{"mode": "gva"}, {"mode": "range"}, {"mode": "key"}]
+    assert all(call.args[0] == "kvpool:layerwise_load_get_duration_ms" for call in metrics.record_metric.call_args_list)
+    assert all(call.kwargs["value"] >= 0.0 for call in metrics.record_metric.call_args_list)
+
+
+def test_kvpool_layerwise_handlers_stay_dark_at_basic_level(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kvpool_layerwise_basic", "kvpool_layerwise_load")
+    sys.modules[_COMMON_MODULE].set_metric_level("basic")
+
+    assert handlers.kvpool_layerwise_gva_load_handler(lambda thread: "loaded", object()) == "loaded"
+    assert handlers.kvpool_layerwise_range_load_handler(lambda thread: "loaded", object()) == "loaded"
+    assert handlers.kvpool_layerwise_key_load_handler(lambda thread: "loaded", object()) == "loaded"
+
+    metrics.get_or_create_metric.assert_not_called()
     metrics.record_metric.assert_not_called()
 
 

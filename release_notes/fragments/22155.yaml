@@ -1,0 +1,9 @@
+pr: 22155
+entries:
+  - category: feature
+    text: >-
+      Added the layerwise KV pool load metric
+      (kvpool:layerwise_load_get_duration_ms, labeled by transfer mode: gva,
+      range, or key) through MS Service Metric, so layerwise AscendStore loads
+      that bypass the connector-level load metrics are visible on the /metrics
+      endpoint. The histogram is recorded at the detail metric level.
