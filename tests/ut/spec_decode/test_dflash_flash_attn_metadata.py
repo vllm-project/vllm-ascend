@@ -18,7 +18,6 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.attention import fa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import (
     AscendFlashAttentionBackend,
@@ -106,8 +105,6 @@ def test_flash_attn_graph_forward_prepares_plan_for_attention(monkeypatch, mixed
     speculator = _make_speculator(backends)
     assert speculator.supports_decode_metadata_update is (not mixed_backends)
     builder = speculator.attn_groups[0][0].get_metadata_builder()
-    builder.layer_names = ["draft.0", "draft.1"]
-    builder.vllm_config = speculator.vllm_config
     metadata = AscendFlashAttentionMetadata(
         num_actual_tokens=16,
         max_query_len=4,
@@ -119,8 +116,7 @@ def test_flash_attn_graph_forward_prepares_plan_for_attention(monkeypatch, mixed
     impl.num_heads, impl.num_kv_heads, impl.head_size = 8, 1, 128
     impl.sliding_window, impl.use_bnsd_kv_cache, impl.sinks = None, False, None
     impl.scale, impl.key_cache, impl.value_cache = 128**-0.5, None, None
-    layers = {name: SimpleNamespace(impl=impl) for name in builder.layer_names}
-    monkeypatch.setattr(fa_v1, "get_layers_from_vllm_config", lambda *_args: layers)
+    builder.plan_keys = (impl.plan_key,)
     plan = torch.empty(16, dtype=torch.int32)
     query = torch.zeros(16, 8, 128)
     ops = SimpleNamespace(
@@ -134,7 +130,7 @@ def test_flash_attn_graph_forward_prepares_plan_for_attention(monkeypatch, mixed
     def forward():
         ops.flash_attn_metadata.assert_called_once()
         assert metadata.seq_lens_gpu is seq_lens
-        for _ in layers:
+        for _ in range(2):
             impl.forward_impl(query, None, None, None, metadata, torch.empty_like(query))
 
     metadata_by_layer = {"draft.0": metadata}
@@ -165,7 +161,7 @@ def test_flash_attn_graph_forward_prepares_plan_for_attention(monkeypatch, mixed
     torch.testing.assert_close(
         ops.flash_attn_metadata.call_args.kwargs["seqused_kv"], torch.tensor([197, 99, 1, 1], dtype=torch.int32)
     )
-    assert ops.flash_attn.call_count == len(layers)
+    assert ops.flash_attn.call_count == 2
     assert all(call.kwargs["metadata"] is plan for call in ops.flash_attn.call_args_list)
 
 

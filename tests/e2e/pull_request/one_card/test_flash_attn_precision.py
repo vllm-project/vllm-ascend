@@ -8,7 +8,6 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.attention import fa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.fa_v1 import (
     AscendFlashAttentionBackend,
@@ -48,7 +47,7 @@ def golden(query, key, value, block_table, lengths, window, query_len, causal):
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("head_dim", [128, 192])
 @pytest.mark.parametrize("execution_mode", ["eager", "graph"])
-def test_strided_paged_flash_attn_matches_golden(monkeypatch, dtype, window, layout, causal, head_dim, execution_mode):
+def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, head_dim, execution_mode):
     torch.npu.set_device(0)
     torch.manual_seed(42)
     device = "npu"
@@ -92,15 +91,12 @@ def test_strided_paged_flash_attn_matches_golden(monkeypatch, dtype, window, lay
     impl.num_heads, impl.num_kv_heads, impl.head_size = 8, 1, head_dim
     impl.scale, impl.sliding_window = head_dim**-0.5, window
     impl.use_bnsd_kv_cache, impl.sinks = layout == "PA_BNBD", None
+    builder.plan_keys = (impl.plan_key,)
     output = torch.empty_like(query)
     # Capture must retain views of the persistent buffers, not a particular
     # iteration's subtraction result or a host mirror of accepted lengths.
     common.seq_lens = torch.empty_like(optimistic)
     captured_metadata = builder.build_for_cudagraph_capture(common)
-    builder.vllm_config = None
-    builder.layer_names = ["draft"]
-    layers = {"draft": SimpleNamespace(impl=impl)}
-    monkeypatch.setattr(fa_v1, "get_layers_from_vllm_config", lambda *_args: layers)
 
     def run():
         common.seq_lens.copy_(optimistic - rejected)

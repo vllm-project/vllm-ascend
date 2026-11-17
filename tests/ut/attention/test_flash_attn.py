@@ -24,12 +24,11 @@ from vllm_ascend.worker.v2 import attn_utils
 
 
 def make_builder(monkeypatch, *impls):
-    builder = AscendFlashAttentionMetadataBuilder.__new__(AscendFlashAttentionMetadataBuilder)
-    builder.vllm_config = None
     layers = {f"draft.{i}": SimpleNamespace(impl=impl) for i, impl in enumerate(impls)}
-    builder.layer_names = list(layers)
-    monkeypatch.setattr(fa_v1, "get_layers_from_vllm_config", lambda *_args: layers)
-    return builder
+    with monkeypatch.context() as patches:
+        patches.setattr(fa_v1.AscendAttentionMetadataBuilder, "__init__", lambda *_args: None)
+        patches.setattr(fa_v1, "get_layers_from_vllm_config", Mock(return_value=layers))
+        return AscendFlashAttentionMetadataBuilder(None, list(layers), None, torch.device("cpu"))
 
 
 @pytest.mark.parametrize("head_size", [64, 72, 128, 192, 256])
@@ -535,7 +534,9 @@ def test_distinct_attention_geometries_do_not_share_plans(monkeypatch):
         for query, (_, kv_heads, _, window, layout) in zip(queries, geometries)
     ]
     metadata.num_actual_tokens = 6
-    make_builder(monkeypatch, *impls).update_draft_decode_metadata(metadata)
+    builder = make_builder(monkeypatch, *impls, impls[0])
+    assert builder.plan_keys == tuple(impl.plan_key for impl in impls)
+    builder.update_draft_decode_metadata(metadata)
     for _ in range(2):
         for impl, query in zip(impls, queries):
             impl.forward_impl(query, None, None, None, metadata, torch.empty_like(query))

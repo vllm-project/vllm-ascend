@@ -8,8 +8,9 @@ from typing import cast
 
 import torch
 import torch.nn.functional as F
-from vllm.config import get_layers_from_vllm_config
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention import Attention
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
@@ -30,18 +31,25 @@ class AscendFlashAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
     metadata_cls = AscendFlashAttentionMetadata
     supports_draft_decode_metadata_update = True
 
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
+        self.plan_keys = tuple(
+            dict.fromkeys(cast(AscendFlashAttentionImpl, layer.impl).plan_key for layer in layers.values())
+        )
+
     def update_draft_decode_metadata(self, metadata: AscendFlashAttentionMetadata) -> None:
-        layers = get_layers_from_vllm_config(self.vllm_config, Attention, self.layer_names)
-        num_tokens = metadata.num_actual_tokens
-        lengths = AscendFlashAttentionImpl._build_lengths(metadata, num_tokens)
-        plans = {}
-        for layer in layers.values():
-            impl = cast(AscendFlashAttentionImpl, layer.impl)
-            head_size = AscendFlashAttentionBackend.get_padded_head_size(impl.head_size)
-            plan_key = impl._plan_key(metadata, head_size)
-            if plan_key not in plans:
-                plans[plan_key] = impl._build_plan(plan_key, lengths)
-        metadata.flash_attn_plans = plans
+        lengths = AscendFlashAttentionImpl._build_lengths(metadata, metadata.num_actual_tokens)
+        metadata.flash_attn_plans = {
+            key: AscendFlashAttentionImpl._build_plan(key, lengths, metadata.max_query_len, metadata.causal)
+            for key in self.plan_keys
+        }
 
     def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
         metadata = self._build_metadata(common_attn_metadata)
@@ -132,22 +140,21 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
         lengths = metadata.seq_lens_gpu[:num_reqs].int().clamp(min=1)
         return boundaries, lengths
 
-    def _plan_key(self, metadata, head_size):
+    @property
+    def plan_key(self):
         return (
             self.num_heads,
             self.num_kv_heads,
-            head_size,
+            AscendFlashAttentionBackend.get_padded_head_size(self.head_size),
             self.sliding_window,
             "PA_BNBD" if self.use_bnsd_kv_cache else "PA_BBND",
-            metadata.max_query_len,
-            metadata.causal,
         )
 
     @staticmethod
-    def _build_plan(plan_key, lengths):
+    def _build_plan(plan_key, lengths, max_query_len, causal):
         from cann_ops_transformer.ops import flash_attn_metadata
 
-        num_heads, num_kv_heads, head_size, sliding_window, layout_kv, max_query_len, causal = plan_key
+        num_heads, num_kv_heads, head_size, sliding_window, layout_kv = plan_key
         window = sliding_window - 1 if sliding_window is not None else -1
         # Both CANN operators require the same lengths, mask and layout.
         # Mask modes: 0 = unmasked, 3 = causal, 4 = sliding window.
@@ -172,7 +179,7 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
         output_head_size = query.shape[-1]
         query = self._pad_head(query)
         metadata = attn_metadata
-        plan, attrs = metadata.flash_attn_plans[self._plan_key(metadata, query.shape[-1])]
+        plan, attrs = metadata.flash_attn_plans[self.plan_key]
 
         with attention_transfer_window():
             result, _ = flash_attn(
