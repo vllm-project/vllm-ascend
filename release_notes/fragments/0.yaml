@@ -1,0 +1,6 @@
+# Draft fragment: replace 0 and the filename with the assigned PR number.
+pr: 0
+entries:
+  - category: feature
+    text: Added optional FlashAttention NPU MLA decode on A3 with device-generated scheduler metadata and separate NoPE/RoPE KV caches. Prefill continues to use FIA.
+    hardware: [A3]

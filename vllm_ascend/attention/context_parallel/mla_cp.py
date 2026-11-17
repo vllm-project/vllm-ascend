@@ -574,18 +574,20 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
     def _forward_external_flashmla(self, preprocessed, fused_cache, metadata):
         assert metadata.external_flashmla is not None
-        if not isinstance(fused_cache, torch.Tensor):
+        split_cache = getattr(self, "use_flash_attn_npu", False)
+        if not split_cache and not isinstance(fused_cache, torch.Tensor):
             raise RuntimeError("DCP FlashMLA requires the original fused BBND cache")
+        k_nope, k_pe = fused_cache if split_cache else (fused_cache, None)
         record_attention_compute_start()
         # The framework owns stream ordering, exchange, reduction and V-up.
         return self._forward_decode_split_attention(
             preprocessed.ql_nope,
             preprocessed.q_pe,
-            fused_cache,
-            None,
+            k_nope,
+            k_pe,
             preprocessed.current_k_nope,
             preprocessed.current_k_pe,
-            fused_cache.shape[1],
+            k_nope.shape[1],
             metadata,
         )
 
@@ -594,11 +596,16 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         current = flash.current
         assert current is not None
         assert k_nope is not None and k_pe is not None
+        if isinstance(current.cache, tuple):
+            current_nope, current_pe = current.cache
+        else:
+            current_nope = current.cache[..., : self.kv_lora_rank]
+            current_pe = current.cache[..., self.kv_lora_rank :]
         torch_npu.npu_scatter_pa_kv_cache(
             key=k_nope.reshape(-1, 1, self.kv_lora_rank).contiguous(),
             value=k_pe.reshape(-1, 1, self.qk_rope_head_dim).contiguous(),
-            key_cache=current.cache[..., : self.kv_lora_rank],
-            value_cache=current.cache[..., self.kv_lora_rank :],
+            key_cache=current_nope,
+            value_cache=current_pe,
             slot_mapping=current.slots,
             cache_mode="Norm",
         )
@@ -615,6 +622,8 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             block_table, cache_lens, attn_mask = current.block_table, flash.used_q, current.attn_mask
         else:
             query, cache = flash.query, k_nope
+            if getattr(self, "use_flash_attn_npu", False):
+                cache = (k_nope, k_pe)
             adapter, schedule = flash.adapter, flash.schedule
             block_table, cache_lens, attn_mask = flash.block_table, flash.cache_lens, None
             query[..., : self.kv_lora_rank].copy_(q_nope)
@@ -758,7 +767,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             history_k_pe = cache_k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
         else:
             # FlashMLA consumes the original paged cache, including its strides.
-            history_k_nope, history_k_pe = cache_k_nope, None
+            history_k_nope, history_k_pe = cache_k_nope, cache_k_pe
 
         has_current = flash is None or flash.current is not None
         if has_current:
@@ -870,7 +879,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 assert current is not None
                 current_tensors += (
                     current.query,
-                    current.cache,
+                    *(current.cache if isinstance(current.cache, tuple) else (current.cache,)),
                     current.schedule,
                     current.block_table,
                     current.slots,
