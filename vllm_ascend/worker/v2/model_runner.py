@@ -640,9 +640,19 @@ class NPUModelRunner(GPUModelRunner):
         if first_error is not None:
             raise first_error
         self._shared_engram_shutdown_pending = []
-        while getattr(self, "_pending_engram_vmm", None):
-            self._pending_engram_vmm[-1].close_host_offload()
-            self._pending_engram_vmm.pop()
+        if getattr(self, "_pending_engram_vmm", None):
+            from vllm_ascend.models.deepseek_v41.engram.local_shared_vmm import EngramSharedReleaseError
+
+            errors = []
+            for index in range(len(self._pending_engram_vmm) - 1, -1, -1):
+                try:
+                    self._pending_engram_vmm[index].close_host_offload()
+                except EngramSharedReleaseError as exc:
+                    errors.append(str(exc))
+                else:
+                    del self._pending_engram_vmm[index]
+            if errors:
+                raise EngramSharedReleaseError("; ".join(errors))
 
     def _register_sparse_kv_caches(self, kv_caches: dict[str, Any]) -> None:
         """Bind host pools before the V2 KV connector registers its destinations."""

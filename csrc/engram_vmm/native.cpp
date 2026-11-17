@@ -304,14 +304,10 @@ int host_shared_registered_alloc(size_t size, int32_t logical_device, const char
     prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
     prop.memAttr = ACL_MEM_P2P_HUGE1G;
     const bool allow_huge2m_fallback = prop.memAttr == ACL_MEM_P2P_HUGE1G;
-    prop.location.type = ACL_MEM_LOCATION_TYPE_HOST_NUMA;
-    prop.location.id = result->physical_device / 2;
+    // Physical device IDs do not encode a portable host NUMA mapping.
+    prop.location.type = ACL_MEM_LOCATION_TYPE_HOST;
+    prop.location.id = 0;
     ret = aclrtMallocPhysical(&mapping.owner_pa, size, &prop, 0);
-    if (ret != ACL_ERROR_NONE) {
-      prop.location.type = ACL_MEM_LOCATION_TYPE_HOST;
-      prop.location.id = 0;
-      ret = aclrtMallocPhysical(&mapping.owner_pa, size, &prop, 0);
-    }
     if (ret != ACL_ERROR_NONE && allow_huge2m_fallback) {
       prop.memAttr = ACL_MEM_P2P_HUGE;
       ret = aclrtMallocPhysical(&mapping.owner_pa, size, &prop, 0);
@@ -402,7 +398,7 @@ int host_shared_registered_alloc(size_t size, int32_t logical_device, const char
     result->host_observed_location_type = attributes.location.type;
     result->host_observed_location_id = attributes.location.id;
   } else {
-    result->host_observed_location_type = ACL_MEM_LOCATION_TYPE_HOST_NUMA;
+    result->host_observed_location_type = ACL_MEM_LOCATION_TYPE_HOST;
     result->host_observed_location_id = descriptor.owner_numa;
   }
   attributes = {};

@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """Node-local DP sharing for one Engram VMM buffer."""
 
+import ctypes
 import os
 import tempfile
 from datetime import timedelta
 from pathlib import Path
 
+import torch
 import torch.distributed as dist
 from vllm.logger import logger
 
-from .local_vmm_host import MappedHostBuffer, _library, retry_pending_rollbacks
+from .local_vmm_host import CHUNK_ROWS, MappedHostBuffer, _library, retry_pending_rollbacks
 
 _failed_initializations: list["LocalSharedVmmBuffer"] = []
 
@@ -27,6 +29,12 @@ def local_vmm_available(group):
     if any(errors):
         logger.warning("Engram Host VMM unavailable; using HostRegister: %s", errors)
         return False
+    try:
+        probe = LocalSharedVmmBuffer((1, 1), torch.int8, torch.device("npu", torch.npu.current_device()), group)
+    except EngramSharedInitError as exc:
+        logger.warning("Engram Host VMM runtime probe failed; using HostRegister: %s", exc)
+        return False
+    probe.close_collective()
     return True
 
 
@@ -53,6 +61,42 @@ class EngramSharedCleanupError(RuntimeError):
     """VMM rollback failed and further collectives cannot be assumed safe."""
 
 
+class EngramSharedReleaseError(RuntimeError):
+    """Every rank observed a release failure and can continue in order."""
+
+
+class LocalSharedVmmScaleView:
+    """A scale view into the same allocation as the codes."""
+
+    def __init__(self, owner, shape, dtype, offset, device):
+        self.owner = owner
+        self.shape, self.dtype, self.offset = shape, dtype, offset
+        self.row_bytes = shape[1] * torch.empty((), dtype=dtype).element_size()
+        self.tensor = torch.empty(shape, dtype=dtype, device="meta")
+        self.ptrs = torch.tensor(
+            [
+                owner.mapping.allocation.device_ptr + offset + row * self.row_bytes
+                for row in range(0, shape[0], CHUNK_ROWS)
+            ],
+            dtype=torch.int64,
+            device=device,
+        )
+
+    def publish(self, start, source):
+        if not self.owner.owner or self.owner.mapping is None:
+            raise RuntimeError("Only the VMM owner may publish checkpoint rows")
+        if source.device.type != "cpu" or source.dtype != self.dtype or source.ndim != 2:
+            raise ValueError("Publication requires a matching CPU tensor")
+        if source.shape[1] != self.shape[1] or start < 0 or start + len(source) > self.shape[0]:
+            raise ValueError("Publication is outside the scale shape")
+        source = source.contiguous()
+        ctypes.memmove(
+            self.owner.mapping.allocation.host_ptr + self.offset + start * self.row_bytes,
+            source.data_ptr(),
+            source.numel() * source.element_size(),
+        )
+
+
 class LocalSharedVmmBuffer:
     """One creator and per-rank imports; the creator alone publishes rows.
 
@@ -60,14 +104,21 @@ class LocalSharedVmmBuffer:
     consumers before closing the creator.
     """
 
-    def __init__(self, shape, dtype, device, group):
+    def __init__(self, shape, dtype, device, group, *, scales_shape=None, scale_dtype=None):
         self.group = group
         self.mapping = None
         self.view = None
         self.tensor = None
         self.ptrs = None
+        self.scales: LocalSharedVmmScaleView | None = None
         self.directory = None
         self.owner = group.rank_in_group == 0
+        allocation_shape = shape
+        scale_offset = shape[0] * shape[1] * torch.empty((), dtype=dtype).element_size()
+        if scales_shape is not None:
+            assert dtype == torch.int8 and scale_dtype == torch.float32
+            scale_bytes = scales_shape[0] * scales_shape[1] * torch.empty((), dtype=scale_dtype).element_size()
+            allocation_shape = ((scale_offset + scale_bytes + shape[1] - 1) // shape[1], shape[1])
         cpu_group = group.cpu_group
         leader = dist.get_global_rank(cpu_group, 0)
         payload: list[str | None] = [None]
@@ -75,7 +126,14 @@ class LocalSharedVmmBuffer:
             try:
                 self.directory = tempfile.mkdtemp(prefix="engram-vmm-", dir="/dev/shm")
                 owner_path = os.path.join(self.directory, "buffer")
-                self.mapping = MappedHostBuffer(owner_path, shape[0], shape[1], dtype, owner=True, device=device)
+                self.mapping = MappedHostBuffer(
+                    owner_path,
+                    allocation_shape[0],
+                    allocation_shape[1],
+                    dtype,
+                    owner=True,
+                    device=device,
+                )
                 payload[0] = owner_path
             except Exception as exc:  # noqa: BLE001 - propagate to all ranks
                 payload[0] = f"ERROR: {type(exc).__name__}: {exc}"
@@ -92,10 +150,19 @@ class LocalSharedVmmBuffer:
         else:
             try:
                 if not self.owner:
-                    self.mapping = MappedHostBuffer(path, shape[0], shape[1], dtype, owner=False, device=device)
+                    self.mapping = MappedHostBuffer(
+                        path,
+                        allocation_shape[0],
+                        allocation_shape[1],
+                        dtype,
+                        owner=False,
+                        device=device,
+                    )
                 assert self.mapping is not None
-                self.view = self.mapping.view()
+                self.view = self.mapping.view(0, shape[0])
                 self.tensor, self.ptrs = self.view.tensor, self.view.ptrs
+                if scales_shape is not None:
+                    self.scales = LocalSharedVmmScaleView(self, scales_shape, scale_dtype, scale_offset, device)
             except Exception as exc:  # noqa: BLE001 - propagate to all ranks
                 error = f"{type(exc).__name__}: {exc}"
         errors = [None] * group.world_size
@@ -140,7 +207,7 @@ class LocalSharedVmmBuffer:
         dist.all_gather_object(errors, error, group=cpu_group)
         failures = "; ".join(f"rank {rank}: {message}" for rank, message in enumerate(errors) if message)
         if failures:
-            raise RuntimeError(f"Engram VMM consumer release failed: {failures}")
+            raise EngramSharedReleaseError(f"Engram VMM consumer release failed: {failures}")
         if self.owner:
             try:
                 self._close_with_rollbacks(retry_rollbacks)
@@ -150,7 +217,7 @@ class LocalSharedVmmBuffer:
         dist.all_gather_object(errors, error, group=cpu_group)
         failures = "; ".join(f"rank {rank}: {message}" for rank, message in enumerate(errors) if message)
         if failures:
-            raise RuntimeError(f"Engram VMM owner release failed: {failures}")
+            raise EngramSharedReleaseError(f"Engram VMM owner release failed: {failures}")
         if self in _failed_initializations:
             _failed_initializations.remove(self)
 
@@ -165,6 +232,9 @@ class LocalSharedVmmBuffer:
             raise RuntimeError("; ".join(errors))
 
     def close(self):
+        if self.scales is not None:
+            self.scales.tensor = self.scales.ptrs = None
+            self.scales = None
         if self.view is not None:
             self.view.close()
             self.view = None

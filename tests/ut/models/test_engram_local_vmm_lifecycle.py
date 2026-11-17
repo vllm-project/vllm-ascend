@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A missing consumer must not cause the owner to release its backing."""
 
+import ctypes
 import importlib.util
 import sys
 import types
@@ -8,6 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
@@ -38,10 +40,60 @@ def test_backend_selection_requires_library_on_all_ranks(monkeypatch, rank_error
     module = load_module(monkeypatch)
     monkeypatch.setattr(module, "_library", Mock())
     monkeypatch.setattr(
+        module,
+        "torch",
+        types.SimpleNamespace(
+            int8=object(), device=lambda *args: object(), npu=types.SimpleNamespace(current_device=lambda: 0)
+        ),
+    )
+    constructor = Mock()
+    monkeypatch.setattr(module, "LocalSharedVmmBuffer", constructor)
+    monkeypatch.setattr(
         module.dist, "all_gather_object", lambda out, value, group: out.__setitem__(slice(None), rank_errors)
     )
     group = types.SimpleNamespace(cpu_group=object(), world_size=2)
     assert module.local_vmm_available(group) is expected
+    assert constructor.called is expected
+    if expected:
+        constructor.return_value.close_collective.assert_called_once()
+
+
+def test_runtime_probe_fallback_requires_successful_collective_cleanup(monkeypatch):
+    module = load_module(monkeypatch)
+    monkeypatch.setattr(module, "_library", Mock())
+    monkeypatch.setattr(
+        module,
+        "torch",
+        types.SimpleNamespace(
+            int8=object(), device=lambda *args: object(), npu=types.SimpleNamespace(current_device=lambda: 0)
+        ),
+    )
+    monkeypatch.setattr(
+        module.dist, "all_gather_object", lambda out, value, group: out.__setitem__(slice(None), [None, None])
+    )
+    group = types.SimpleNamespace(cpu_group=object(), world_size=2)
+    monkeypatch.setattr(module, "LocalSharedVmmBuffer", Mock(side_effect=module.EngramSharedInitError("probe failed")))
+    assert module.local_vmm_available(group) is False
+    monkeypatch.setattr(
+        module, "LocalSharedVmmBuffer", Mock(side_effect=module.EngramSharedCleanupError("cleanup failed"))
+    )
+    with pytest.raises(module.EngramSharedCleanupError):
+        module.local_vmm_available(group)
+
+
+def test_scale_view_publishes_into_shared_backing(monkeypatch):
+    module = load_module(monkeypatch)
+    backing = (ctypes.c_ubyte * 24)()
+    address = ctypes.addressof(backing)
+    owner = types.SimpleNamespace(
+        owner=True,
+        mapping=types.SimpleNamespace(allocation=types.SimpleNamespace(host_ptr=address, device_ptr=address)),
+    )
+    view = module.LocalSharedVmmScaleView(owner, (2, 1), torch.float32, 16, "cpu")
+    view.publish(0, torch.tensor([[1.5], [2.5]], dtype=torch.float32))
+    assert list((ctypes.c_float * 2).from_buffer(backing, 16)) == [1.5, 2.5]
+    assert bytes(backing[:16]) == bytes(16)
+    assert view.ptrs.tolist() == [address + 16]
 
 
 def test_owner_is_retained_if_consumer_does_not_reach_barrier(monkeypatch):
@@ -127,7 +179,7 @@ def _rollback_worker(rank, rendezvous, directory, log_path, fail_consumer_close,
             def __init__(self, *_args, **_kwargs):
                 pass
 
-            def view(self):
+            def view(self, *_args):
                 if rank == 1:
                     raise RuntimeError("injected view failure")
                 return types.SimpleNamespace(tensor=object(), ptrs=object(), close=lambda: None)

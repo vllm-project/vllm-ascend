@@ -96,7 +96,12 @@ from .engram.embedding import (
     preflight_engram_checkpoint,
 )
 from .engram.layer import AscendEngram
-from .engram.local_shared_vmm import EngramSharedInitError, LocalSharedVmmBuffer, retain_failed_initialization
+from .engram.local_shared_vmm import (
+    EngramSharedInitError,
+    EngramSharedReleaseError,
+    LocalSharedVmmBuffer,
+    retain_failed_initialization,
+)
 from .engram.parallel import gather_engram_hashes, resolve_dp_shared_memory
 from .engram.shared_pool import rollback_shared_engram
 from .engram_lifecycle import close_engram_on_init_failure
@@ -115,14 +120,20 @@ def _retain_local_engram_tables(model):
 
 def _rollback_local_engram_tables(model, error):
     """Close local VMM tables after their sharing group agrees on a failure."""
+    errors = []
     for module in reversed(list(model.modules())):
         if isinstance(module, AscendParallelEngramEmbedding) and module.local_vmm:
             try:
                 module.close_host_offload()
+            except EngramSharedReleaseError as cleanup_error:
+                errors.append(str(cleanup_error))
             except Exception as cleanup_error:
                 _retain_local_engram_tables(model)
                 message = f"{error}; Engram VMM cleanup failed: {cleanup_error}"
                 raise RuntimeError(message) from cleanup_error
+    if errors:
+        _retain_local_engram_tables(model)
+        raise RuntimeError(f"{error}; Engram VMM cleanup failed: {'; '.join(errors)}")
 
 
 def _engram_enabled_for_runtime(config, vllm_config) -> bool:

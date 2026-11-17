@@ -35,8 +35,8 @@ from vllm.models.deepseek_v41.common.engram import ParallelEngramEmbedding
 from .local_shared_vmm import (
     EngramSharedInitError,
     LocalSharedVmmBuffer,
+    LocalSharedVmmScaleView,
     local_vmm_available,
-    retain_failed_initialization,
 )
 from .npu import (
     HostUvaBuffer,
@@ -126,7 +126,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         else:
             self.dp_size = max(get_engram_dp_size(), 1)
         self._codes_uva: HostUvaBuffer | SharedUvaBuffer | HostTableSlice | LocalSharedVmmBuffer | None = None
-        self._scales_uva: HostUvaBuffer | SharedUvaBuffer | HostTableSlice | LocalSharedVmmBuffer | None = None
+        self._scales_uva: HostUvaBuffer | SharedUvaBuffer | HostTableSlice | LocalSharedVmmScaleView | None = None
         # The upstream constructor queries CUDA properties; keep its parameter
         # contract with Ascend storage and device allocation.
         nn.Module.__init__(self)
@@ -238,24 +238,23 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             )
         if self.local_vmm:
             assert self._shared_group is not None
-            codes = LocalSharedVmmBuffer(codes_shape, self.storage_dtype, device, self._shared_group)
-            self._codes_uva = codes
             try:
-                scales = LocalSharedVmmBuffer(scales_shape, self.scale_dtype, device, self._shared_group)
-                self._scales_uva = scales
-            except EngramSharedInitError:
-                try:
-                    codes.close_collective()
-                except Exception:
-                    retain_failed_initialization(codes)
-                    raise
-                raise
-            except Exception:
-                # A local/cleanup failure is not safe to turn into a collective.
-                # Keep the already allocated codes reachable if __init__ fails.
-                retain_failed_initialization(codes)
-                raise
-            return codes.tensor, scales.tensor
+                codes = LocalSharedVmmBuffer(
+                    codes_shape,
+                    self.storage_dtype,
+                    device,
+                    self._shared_group,
+                    scales_shape=scales_shape,
+                    scale_dtype=self.scale_dtype,
+                )
+            except EngramSharedInitError as exc:
+                logger.warning("Engram Host VMM allocation failed; using HostRegister: %s", exc)
+                self.local_vmm = False
+            else:
+                self._codes_uva = codes
+                assert codes.scales is not None
+                self._scales_uva = codes.scales
+                return codes.tensor, codes.scales.tensor
         if self._shared_group is not None:
             # One physical copy of the mapped range, registered by each
             # rank in the sharing group.
@@ -293,6 +292,14 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         if client is not None:
             client.close()
             self._shared_pool_client = None
+            self._codes_uva = self._scales_uva = None
+            self.weight = nn.Parameter(torch.empty(0, dtype=self.storage_dtype, device="meta"), requires_grad=False)
+            self.weight_scale_inv = nn.Parameter(
+                torch.empty(0, dtype=self.scale_dtype, device="meta"), requires_grad=False
+            )
+            return
+        if isinstance(self._codes_uva, LocalSharedVmmBuffer):
+            self._codes_uva.close_collective()
             self._codes_uva = self._scales_uva = None
             self.weight = nn.Parameter(torch.empty(0, dtype=self.storage_dtype, device="meta"), requires_grad=False)
             self.weight_scale_inv = nn.Parameter(
@@ -401,7 +408,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         )
 
     def _store_rows(self, parameter, buffer, offset, source):
-        if isinstance(buffer, LocalSharedVmmBuffer):
+        if isinstance(buffer, (LocalSharedVmmBuffer, LocalSharedVmmScaleView)):
             buffer.publish(offset, source.to(dtype=parameter.dtype))
         else:
             parameter.data[offset : offset + len(source)].copy_(source)

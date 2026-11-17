@@ -16,11 +16,13 @@ vllm serve MODEL_PATH \
 This version has not been validated with Mooncake P/D. Existing `shared_engram`
 configurations use their own backend. Host VMM requires a build with the Host VMM library,
 a compatible CANN/driver stack, and a shared `/dev/shm` namespace for local
-ranks. Each sharing group has one checkpoint writer and separate mappings for
-its codes and scales. This is not cross-node table sharing.
-If the library cannot be loaded on every rank, the group uses the original
-HostRegister backend. If VMM initialization fails after selection, startup
-fails after coordinated cleanup; it does not automatically switch backends.
+ranks. Each sharing group has one checkpoint writer and one shared allocation
+per layer, with separate codes and scales views. This is not cross-node sharing.
+The group probes a 1 GiB aligned allocation, export and import before loading.
+If the probe or a table allocation fails and every rank completes cleanup, the
+group uses the original HostRegister backend. If collective cleanup fails or a
+rank is lost, startup fails without switching backends. The HostRegister path
+may still encounter the original 207001 error.
 
 The timeout settings above were used for the evaluated multi-process shutdown;
 they do not guarantee safe recovery from a lost peer or an unfinished remote

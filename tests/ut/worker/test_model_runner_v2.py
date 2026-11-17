@@ -2083,6 +2083,19 @@ def test_shutdown_does_not_release_vmm_when_parent_teardown_fails():
     assert runner._pending_engram_vmm == [table]
 
 
+def test_shutdown_continues_after_synchronized_vmm_release_failure():
+    from vllm_ascend.models.deepseek_v41.engram.local_shared_vmm import EngramSharedReleaseError
+
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    first = SimpleNamespace(local_vmm=True, close_host_offload=Mock())
+    last = SimpleNamespace(local_vmm=True, close_host_offload=Mock(side_effect=EngramSharedReleaseError("failed")))
+    runner.model = SimpleNamespace(modules=lambda: [first, last])
+    with patch.object(GPUModelRunner, "shutdown"), pytest.raises(EngramSharedReleaseError, match="failed"):
+        runner.shutdown()
+    first.close_host_offload.assert_called_once()
+    assert runner._pending_engram_vmm == [last]
+
+
 def test_shutdown_releases_shared_engram_after_parent_cleanup():
     runner = NPUModelRunner.__new__(NPUModelRunner)
     embedding = MagicMock()
