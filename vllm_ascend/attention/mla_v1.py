@@ -2882,12 +2882,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                     is_draft_model and _uses_unpadded_drafter_batch(self.speculative_config)
                 ),
             )
-            logger.warning(
-                "DEBUG_MLA_REGISTER layer=%s role=%s tokens=%s",
-                self.layer_name,
-                "draft" if _EXTRA_CTX.is_draft_model else "target",
-                num_tokens,
-            )
             register_task(torch_npu.npu_fused_infer_attention_score_v2.out, operation_kwargs, provider)
         else:
             attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(q_nope, k_nope, k_nope, **common_kwargs)
