@@ -155,7 +155,7 @@ configuration rather than the runner input or sampling interface.
 | [qwen4_exp/fia.py](qwen4_exp/fia.py) | Model/attention primitive or shared utility |
 | [qwen4_exp/gbsa.py](qwen4_exp/gbsa.py) | Model/attention primitive or shared utility |
 | [qwen4_exp/hc.py](qwen4_exp/hc.py) | Model/attention primitive or shared utility |
-| [qwen4_exp/lightning_v2_prepare.py](qwen4_exp/lightning_v2_prepare.py) | Native QSA LightningIndexerV2 input preparation; [operator documentation](docs/prepare_qsa_lightning_v2_inputs.md) |
+| [qwen4_exp/lightning_prepare.py](qwen4_exp/lightning_prepare.py) | QSA Indexer input preparation; [operator documentation](docs/lightning_prepare.md) |
 | [qwen4_exp/qsa.py](qwen4_exp/qsa.py) | Model/attention primitive; [compressed-key preparation](docs/qsa_compress_groups_with_ratio.md) |
 | [rms_norm.py](rms_norm.py) | Model/attention primitive or shared utility |
 | [rope.py](rope.py) | Model/attention primitive or shared utility |

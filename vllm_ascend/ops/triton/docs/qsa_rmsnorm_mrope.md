@@ -41,8 +41,7 @@
 
 - `tensor` and `weight` must be BF16. The last dimension of `tensor` and `weight` must match.
 - `tensor` must have three dimensions and contiguous head rows.
-- Without `positions`, `cos_sin` must have two dimensions for RoPE or three dimensions for MRoPE. Gathered MRoPE requires exactly three cache axes.
-- With `positions`, `cos_sin` is always a two-dimensional full table. MRoPE uses three position axes instead of three cache axes. Both MRoPE modes require three section values.
+- `cos_sin` must have two dimensions for RoPE or three dimensions for MRoPE. MRoPE requires exactly three cache axes and three section values.
 - Without `positions`, the token count in `cos_sin` must equal `tensor.shape[0]`.
 - With `positions`, the full cache must be nonempty, BF16, on the input device, and contiguous along rotary width. Position values are clamped to `[0, cache_rows - 1]` inside the kernel. Position token count must match the input.
 - `rope_dim` must be positive, even, and no greater than `head_dim`.
@@ -83,6 +82,16 @@ non-contiguous query rows, strided positions, position clamping and NPUGraph
 replay after updating positions. These tests select A3 only; execution on the
 final PR revision and compatibility on other applicable devices remain pending.
 
+Those historical results cover the original operator, not the direct-position
+extension in PR #22086. New direct-position tests compare with legacy gathered
+inputs using `rtol=0, atol=0`, including empty rows, strided positions, clamping,
+and NPUGraph replay. The new tests currently select A3 only; execution on the
+final PR revision and compatibility on other applicable devices remain pending.
+
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_direct_rope.py
 ```
+
+See [QSA preparation validation and specialization](qsa_preparation_validation.md)
+for the coverage matrix, remaining evidence and JIT analysis.
