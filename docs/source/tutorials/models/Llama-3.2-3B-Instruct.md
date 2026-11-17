@@ -58,6 +58,10 @@ Select an image based on your machine type and start the docker image on your no
 
 It is recommended to use the latest release candidate (rc) version or the latest official version of the `vllm-ascend` image.
 
+!!! note
+
+    In the official image, Python is installed under `/usr/local/python3.12.16` and that is the interpreter which has `vllm`, `torch` and `torch_npu` available. The system `python3` (`/usr/bin/python3`, 3.10) has none of them, so put `/usr/local/python3.12.16/bin` first on `PATH` before running anything (Section 10, Q5 shows the full sequence).
+
 === "Atlas A3 inference products"
 
     ```bash
@@ -65,7 +69,7 @@ It is recommended to use the latest release candidate (rc) version or the latest
 
     docker run --rm \
         --name vllm-ascend-env \
-        --shm-size=1g \
+        --shm-size=10g \
         --net=host \
         --device /dev/davinci0 \
         --device /dev/davinci_manager \
@@ -88,7 +92,7 @@ It is recommended to use the latest release candidate (rc) version or the latest
 
     docker run --rm \
         --name vllm-ascend-env \
-        --shm-size=1g \
+        --shm-size=10g \
         --net=host \
         --device /dev/davinci0 \
         --device /dev/davinci_manager \
@@ -448,7 +452,7 @@ Solution: lower it to `0.8` and retry (this is what Section 5.1 uses). If it sti
 
 Cause: the CANN and ATB runtime is installed in the container but the environment scripts were not sourced, so the dynamic loader cannot find `libhccl.so`, `libatb.so` and their dependencies. The `undefined symbol` form is a downstream symptom: the library that would provide the symbol failed to load first.
 
-Solution: source both environment scripts before starting the service, and make sure the architecture-specific library directory is on the loader path:
+Solution: source both environment scripts before starting the service, and make sure the architecture-specific library directory is on the loader path. The `PATH` line below points at the interpreter shipped in the official image; if you use a different image, replace it with whichever directory contains your `vllm` installation:
 
 ```bash
 export PATH=/usr/local/python3.12.16/bin:$PATH
