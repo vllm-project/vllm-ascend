@@ -1,0 +1,12 @@
+pr: 22194
+entries:
+  - category: bugfix
+    text: >-
+      Ordered DeepSeek V4.1 compact decoder replay metadata on the existing
+      producer stream and joined it before consumption or input-buffer reuse.
+    model: deepseek-v4.1
+  - category: performance
+    text: >-
+      Reused compatible SWA replay visibility within each metadata build
+      without changing the release MLA planner or native operator interface.
+    model: deepseek-v4.1
