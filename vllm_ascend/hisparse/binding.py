@@ -21,28 +21,42 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 
 _SLAB_ALIGNMENT = 2 * 1024 * 1024
+# The runner reserves padding before Core copies the config. The backend hook
+# consumes the logical size within that same synchronous initialization call.
 _slab_size: ContextVar[int | None] = ContextVar("hisparse_device_slab_size", default=None)
 
 
 @contextmanager
 def reserve_hisparse_slab_alignment(kv_cache_config: KVCacheConfig) -> Iterator[None]:
     """Leave room to align the single device allocation made by Core."""
-    (size,) = {tensor.size for tensor in kv_cache_config.kv_cache_tensors if not tensor.host_resident}
+    original_tensors = kv_cache_config.kv_cache_tensors
+    device_sizes = {tensor.size for tensor in original_tensors if not tensor.host_resident}
+    if len(device_sizes) != 1:
+        raise ValueError(f"HiSparse alignment requires one shared device slab size, got {sorted(device_sizes)}.")
+    (size,) = device_sizes
     kv_cache_config.kv_cache_tensors = [
         tensor if tensor.host_resident else replace(tensor, size=size + _SLAB_ALIGNMENT - 1)
-        for tensor in kv_cache_config.kv_cache_tensors
+        for tensor in original_tensors
     ]
     token = _slab_size.set(size)
     try:
         yield
     finally:
         _slab_size.reset(token)
+        kv_cache_config.kv_cache_tensors = original_tensors
 
 
 def align_hisparse_slab_views(kv_cache_config: KVCacheConfig, kv_caches: dict[str, Any]) -> None:
     """Rebase Core's device views onto one aligned slice, without allocating or copying KV."""
     size = _slab_size.get()
     if size is None:
+        from .admission import AscendStoreHiSparseResidentSpec
+
+        if any(
+            isinstance(group.kv_cache_spec, AscendStoreHiSparseResidentSpec)
+            for group in kv_cache_config.kv_cache_groups
+        ):
+            raise RuntimeError("HiSparse AscendStore device views require an active slab alignment reservation.")
         return
     device_tensors = [tensor for tensor in kv_cache_config.kv_cache_tensors if not tensor.host_resident]
     first_view = kv_caches[device_tensors[0].layers[0]]

@@ -24,7 +24,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ge
 _MEMCACHE_PROTOCOL_KEY = "ock.mmc.local_service.protocol"
 
 
-def _get_memcache_protocol() -> str | None:
+def _get_memcache_protocol(*, reject_duplicates: bool = False) -> str | None:
     config_path = os.getenv("MMC_LOCAL_CONFIG_PATH")
     if not config_path:
         raise ValueError("The environment variable 'MMC_LOCAL_CONFIG_PATH' is not set.")
@@ -39,11 +39,14 @@ def _get_memcache_protocol() -> str | None:
                 if protocol is not None:
                     raise ValueError(f"MMC_LOCAL_CONFIG_PATH contains duplicate {_MEMCACHE_PROTOCOL_KEY} entries.")
                 protocol = value.strip()
+                if not reject_duplicates:
+                    # Keep first-match semantics for regular device_sdma lazy initialization.
+                    return protocol
     return protocol
 
 
 def require_hisparse_host_tcp() -> None:
-    protocol = _get_memcache_protocol()
+    protocol = _get_memcache_protocol(reject_duplicates=True)
     if protocol != "host_tcp":
         raise ValueError(
             f"HiSparse with AscendStore requires {_MEMCACHE_PROTOCOL_KEY}=host_tcp "
@@ -288,8 +291,9 @@ class MemcacheBackend(Backend):
         if device_indices:
             get_batch(device_indices, MmcDirect.COPY_G2L)
 
-        # The SDK leases every object in a GET batch until its data copy
-        # finishes. Start a fresh lease for each bounded Host Source batch.
+        # Bound the copy time under a Host Source host_tcp lease. Device GETs
+        # use the G2L path and are outside this Host Source lease budget.
+        # A single key cannot be split, so an oversized key gets its own batch.
         host_indices: list[int] = []
         host_bytes = 0
         for index, is_host in enumerate(host_keys):

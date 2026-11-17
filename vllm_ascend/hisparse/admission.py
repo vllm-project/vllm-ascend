@@ -54,7 +54,7 @@ class AscendStoreHiSparseResidentManager(HiSparseResidentManager):
     manager_class=AscendStoreHiSparseResidentManager,
     uniform_type_base_spec=HiSparseResidentSpec,
 )
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class AscendStoreHiSparseResidentSpec(HiSparseResidentSpec):
     """Keep Core's Resident geometry and prefill-window cap."""
 

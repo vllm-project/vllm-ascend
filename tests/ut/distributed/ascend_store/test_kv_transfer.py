@@ -1077,7 +1077,12 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
 
 class TestKVCacheStoreRecvingThread(unittest.TestCase):
-    def test_hybrid_failure_waits_for_other_rank_and_is_reported_once(self):
+    def test_hybrid_receive_results_wait_for_all_ranks_and_report_once(self):
+        for rank_failures in ((True, False), (True, True), (False, False)):
+            with self.subTest(rank_failures=rank_failures):
+                self._assert_hybrid_receive_results(rank_failures)
+
+    def _assert_hybrid_receive_results(self, rank_failures: tuple[bool, bool]):
         utils = pytest.importorskip("vllm.distributed.kv_transfer.kv_connector.utils")
         outputs = pytest.importorskip("vllm.v1.outputs")
         aggregator = utils.KVOutputAggregator(expected_finished_count=2)
@@ -1128,31 +1133,56 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
                 )
             return aggregator.aggregate(worker_outputs).kv_connector_output
 
-        first, failed_recv, failed_request, failed_store = make_receiver(0, [-3106, 0])
-        second, delayed_recv, delayed_request, delayed_store = make_receiver(1, [0, 0])
+        first_result = [-3106, 0] if rank_failures[0] else [0, 0]
+        second_result = [0, -3106] if rank_failures[1] else [0, 0]
+        first, first_recv, first_request, first_store = make_receiver(0, first_result)
+        second, delayed_recv, delayed_request, delayed_store = make_receiver(1, second_result)
         ranks = (first, second)
         original_poll = first.get_finished
 
-        def fail_during_poll(finished_req_ids):
+        def finish_during_poll(finished_req_ids):
             result = original_poll(finished_req_ids)
-            failed_recv._handle_request(failed_request)
+            first_recv._handle_request(first_request)
+            # Polling failures alone before the atomic drain must not take
+            # ownership of the completed receive's failure notification.
+            assert first.connector_worker.get_failed_requests() == set()
             return result
 
-        with patch.object(first, "get_finished", side_effect=fail_during_poll):
-            assert poll(ranks).finished_recving is None
+        with patch.object(first, "get_finished", side_effect=finish_during_poll):
+            result = poll(ranks)
+            assert result.finished_recving is None
+            assert not result.failed_recving
         assert poll(ranks).finished_recving is None
         assert poll(ranks).finished_recving is None
         delayed_store.get.assert_not_called()
 
         delayed_recv._handle_request(delayed_request)
         result = poll(ranks)
-        assert result.finished_recving == result.failed_recving == {"r1"}
-        assert poll(ranks).finished_recving is None
-        assert failed_store.get.call_args.kwargs["host_keys"] == [True, False]
+        assert result.finished_recving == {"r1"}
+        assert result.failed_recving == ({"r1"} if any(rank_failures) else set())
+        result = poll(ranks)
+        assert result.finished_recving is None
+        assert not result.failed_recving
+        assert first_store.get.call_args.kwargs["host_keys"] == [True, False]
         keys, addrs, sizes = delayed_store.get.call_args.args
         assert ["@group:1" in key for key in keys] == [True, False]
         assert (addrs, sizes) == ([[2096], [1032]], [[32], [16]])
         assert delayed_store.get.call_args.kwargs["host_keys"] == [False, True]
+
+    def test_receive_drain_discards_preempted_results_and_retains_unpolled_results(self):
+        thread = KVCacheStoreRecvingThread(FakeStore(), FakeTokenDatabase(), 16, tp_rank=0)
+        failed = [
+            ReqMeta(req_id=req_id, block_ids_by_group=[[2], [3]]) for req_id in ("preempted", "failed", "waiting")
+        ]
+        thread._mark_failed_requests(failed, finish_receiving=True)
+        thread.set_finished_request("ready")
+
+        assert thread.get_and_clear_receive_results({"preempted", "failed", "ready"}, {"preempted"}) == (
+            {"failed", "ready"},
+            {"failed"},
+        )
+        assert thread.get_and_clear_receive_results({"preempted", "failed", "ready"}, set()) == (set(), set())
+        assert thread.get_and_clear_receive_results({"waiting"}, set()) == ({"waiting"}, {"waiting"})
 
     def test_handle_request(self):
         store = FakeStore()

@@ -14,16 +14,31 @@ if TYPE_CHECKING:
 
 def finish_draft_host_mirror_for_save(worker: HiSparseConnectorWorker) -> None:
     """Make Core's pending draft rows durable before the external Host PUT."""
-    if not worker._draft_mirror_pending:
+    pending = getattr(worker, "_draft_mirror_pending", None)
+    if pending is False:
         return
+    if pending is not True:
+        raise RuntimeError("HiSparse bulk save requires Core's _draft_mirror_pending flag.")
+
+    draft_layers = getattr(worker, "_draft_layers", None)
+    enqueue_row_dma = getattr(worker, "_enqueue_row_dma", None)
+    if not isinstance(draft_layers, tuple) or not draft_layers or not callable(enqueue_row_dma):
+        raise RuntimeError("HiSparse bulk save requires Core's pending draft layers and row DMA hook.")
+    if (
+        not isinstance(getattr(worker, "_dma_submitted", None), bool)
+        or getattr(worker, "host_write_event", None) is None
+    ):
+        raise RuntimeError("HiSparse bulk save requires Core's DMA submission flag and Host write event.")
 
     # Called by the bulk Store during Core's post-draft finalize_step. Core
     # ordinarily defers the draft Host copy until the next start_step, too
-    # late for this step's PUT. Keep its related page transfers queued there.
+    # late for this step's PUT. Consume only the draft-mirror flag so Core's
+    # _finish_previous_step still submits its post-forward page transfers.
+    # Replace this adapter when Core exposes a public draft-row flush hook.
     compute_stream = torch.accelerator.current_stream()
     draft_ready = torch.Event()
     draft_ready.record(compute_stream)
-    worker._enqueue_row_dma(worker._draft_layers, ready_event=draft_ready)
+    enqueue_row_dma(draft_layers, ready_event=draft_ready)
     worker._draft_mirror_pending = False
     if worker._dma_submitted:
         compute_stream.wait_event(worker.host_write_event)
