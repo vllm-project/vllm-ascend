@@ -4,15 +4,17 @@
 ``data_plane_comm: host`` has no global comm domain: the edge and the cloud run
 as separate torch worlds, so link endpoints derive from identity alone --
 ``lwd_config.role``, ``instance_id`` and the per-connection ``LwdDPConnection``
-from ``topology.connections()`` (which carries addr/data_port/dp_idx directly;
-topology ranks are absent in host mode). No global ranks, no
-LwdParallelGroupsSpec, no world collectives.
+from ``lwd_config.connections`` (whose ``connection_id`` carries edge/cloud/dp
+and whose DPs carry addr/data_port; topology ranks are absent in host mode, and
+in edge_share the view spans every logical edge of the shared engine). No
+global ranks, no LwdParallelGroupsSpec, no world collectives.
 
 Link model:
   * per DP connection, TWO UHC1 links (UP/DOWN), each an independent
     LwdUcxChannel with its own UCP endpoint, IO thread and block pool;
-  * the cloud DP binds ONE shared ``LwdUcxListener`` on its ``data_port`` and
-    both links attach via ``serve_via``; the handshake token (blake2b over
+  * the cloud DP binds ONE shared ``LwdUcxListener`` on its ``data_port``,
+    reused by every edge connected to that DP; both links of each connection
+    attach via ``serve_via``; the handshake token (blake2b over
     "edge_id:cloud_id:dp_idx:channel") routes each incoming TCP connection to
     its channel;
   * the edge never listens: its UP/send and DOWN/recv IOs connect out (UHC1 is
@@ -102,8 +104,15 @@ def _my_dp_identity() -> tuple[int, int]:
     """(dp_rank, tp_rank) of this process within its OWN instance world --
     in host comm these are instance-local (the edge and cloud worlds are
     independent), never global LWD ranks."""
-    vllm_config = get_current_vllm_config()
-    dp_rank = getattr(vllm_config.parallel_config, "data_parallel_rank", 0)
+    parallel = get_current_vllm_config().parallel_config
+    # `data_parallel_index` keeps the launched DP rank, while
+    # `data_parallel_rank` is reset to 0 by
+    # `reconfigure_for_independent_dp_rank` in every non-MoE DP engine process.
+    # Reading the reset field would make all cloud DPs claim dp_rank 0 and bind
+    # the same listener port.
+    dp_rank = getattr(parallel, "data_parallel_index", None)
+    if dp_rank is None:
+        dp_rank = getattr(parallel, "data_parallel_rank", 0)
     return int(dp_rank or 0), int(get_tensor_model_parallel_rank())
 
 
@@ -211,11 +220,13 @@ def lwd_init_host_channels() -> None:
     """Create this process's UCX links from its role identity. Idempotent.
 
     Called by ``lwd_channels.lwd_init_channels`` when the topology
-    selects ``data_plane_comm: host``. Identity-driven: an edge instance
-    connects out to every linked cloud DP; a cloud instance binds one
-    listener per its own DP and adopts edges asynchronously. Only the
-    endpoint process (dp_rank == dp_idx, TP rank 0) of a connection creates IO
-    objects.
+    selects ``data_plane_comm: host``. Identity-driven: an edge connects out
+    to every linked cloud DP of every logical edge it serves (in edge_share
+    the shared engine owns them all); a cloud instance binds one
+    listener per its own DP and adopts edges asynchronously. The cloud
+    endpoint process owns the connections of its own DP (dp_rank == dp_idx);
+    the edge owns every connection of its instance. In both cases only TP rank
+    0 creates IO objects.
     """
     global _UCX_CHANNELS_INITIALIZED
     if _UCX_CHANNELS_INITIALIZED:
@@ -223,10 +234,14 @@ def lwd_init_host_channels() -> None:
     lwd_config = get_current_vllm_config().lwd_config
     if lwd_config is None:
         raise RuntimeError("[LWD] the host data plane requires lwd_config")
-    topology = lwd_config.topology
     role = lwd_config.role
     instance_id = lwd_config.instance_id
-    connections = topology.connections(role, instance_id)
+    # The LwdConfig view, not the per-instance topology view: in edge_share
+    # the ONE shared edge engine must own every logical edge's connections,
+    # as the scheduler, control plane and queue consumers do. A per-instance
+    # view here would leave the other frontends' connections without IO and
+    # fail their submits with "no host send IO".
+    connections = lwd_config.connections
     if not connections:
         raise RuntimeError(f"[LWD] no DP connections for role={role} instance={instance_id}")
     dp_rank, tp_rank = _my_dp_identity()
@@ -239,7 +254,13 @@ def lwd_init_host_channels() -> None:
     # Host memory budget gate: every link owns one pool of BLOCKS_PER_CHANNEL
     # blocks (a send direction reuses its channel's pool as D2H staging, no
     # extra arena), so need = links/2 * BLOCKS_PER_CHANNEL * (up + down).
-    endpoint_conns = [conn for conn in connections if conn.dp_idx == dp_rank and tp_rank == 0]
+    #
+    # A cloud engine owns exactly one DP (its own); ONE edge engine serves every
+    # DP connection of its instance, so it holds them all no matter what its own
+    # (always 0) DP index says. TP rank 0 is the endpoint process of each
+    # connection; the other TP ranks own no IO.
+    local_conns = [conn for conn in connections if role == "edge" or conn.connection_id.dp_idx == dp_rank]
+    endpoint_conns = local_conns if tp_rank == 0 else []
     links = 2 * len(endpoint_conns)
     need_mb = _host_memory_need_mb(links, up_block_mb=up_block_mb, down_block_mb=down_block_mb)
     limit_mb = _HOST_MEM_BUDGET_MB
@@ -261,25 +282,39 @@ def lwd_init_host_channels() -> None:
 
     qos = _qos_data_plane()
     for conn in endpoint_conns:
+        connection = conn.connection_id
         if conn.cloud.data_port is None:
             raise RuntimeError(
                 f"[LWD] host data plane requires 'data_port' on the cloud DP "
-                f"(cloud={conn.cloud_id}, dp_idx={conn.dp_idx}); set it in "
+                f"(cloud={connection.cloud_id}, dp_idx={connection.dp_idx}); set it in "
                 "the topology file (edges never listen; ctrl_port is "
                 "control-plane only)"
             )
         addr = conn.cloud.addr
         port = conn.cloud.data_port  # used exactly as configured
-        # Cloud DP: one shared listener per DP connection; both links
-        # (UP recv / DOWN send) attach to it via serve_via, token-routed.
+        # Cloud DP: one listener shared by every connection of that DP;
+        # both links (UP recv / DOWN send) attach to it via serve_via,
+        # token-routed. A second edge of the same DP must REUSE it: the
+        # listener binds in its constructor, so building another one on
+        # the same data_port would fail the bind.
         # Daemon mode is the exception: the listener lives INSIDE the
         # transport daemon (spawned on demand by ucx_port over the ctl
         # socket); the engine-side channels ATTACH there instead, so no
         # engine-side listener may be built (old-branch semantics).
         listener = None
         if role == "cloud" and not _sidecar:
-            listener = LwdUcxListener(addr, port)
-            _UCX_LISTENERS[(conn.cloud_id, conn.dp_idx)] = listener
+            listener_key = (connection.cloud_id, connection.dp_idx)
+            listener = _UCX_LISTENERS.get(listener_key)
+            if listener is None:
+                listener = LwdUcxListener(addr, port)
+                _UCX_LISTENERS[listener_key] = listener
+                logger.info(
+                    "[LWD] host listener bound for cloud=%d dp_idx=%d on %s:%d",
+                    connection.cloud_id,
+                    connection.dp_idx,
+                    addr,
+                    port,
+                )
         for channel in (LwdChannelType.UP, LwdChannelType.DOWN):
             # Edge: UP sender / DOWN receiver, both connect out (the edge
             # never listens -- UHC1 is full-duplex). Cloud: UP receiver /
@@ -290,7 +325,7 @@ def lwd_init_host_channels() -> None:
             else:
                 op = "recv" if channel is LwdChannelType.UP else "send"
                 serve = True
-            _UCX_IOS[(conn.edge_id, conn.cloud_id, conn.dp_idx, channel, op)] = LwdNpuUcxChannelIo(
+            _UCX_IOS[(connection.edge_id, connection.cloud_id, connection.dp_idx, channel, op)] = LwdNpuUcxChannelIo(
                 channel,
                 torch.npu.Stream(priority=-1),
                 LwdNpuUcxChannelIoConfig(
@@ -300,7 +335,7 @@ def lwd_init_host_channels() -> None:
                     host=addr,
                     port=port,
                     serve=serve,
-                    token=_link_token(conn.edge_id, conn.cloud_id, conn.dp_idx, channel),
+                    token=_link_token(connection.edge_id, connection.cloud_id, connection.dp_idx, channel),
                     listener=listener,
                     transport_mode="daemon" if _sidecar else "embedded",
                     traffic_class=qos.traffic_class,

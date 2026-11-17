@@ -76,7 +76,16 @@ class LwdHostTransferQueue(LwdTransferQueue):
         io = getattr(self, "_ucx_io", None)
         if io is None:
             try:
-                io = lwd_get_host_io(self.channel_type, self.dp_idx, self.op)
+                # Resolve the link by the full connection identity: one process
+                # holds several (edge, cloud) pairs on multi-edge/multi-cloud
+                # topologies, and the bare dp_idx lookup is ambiguous there.
+                io = lwd_get_host_io(
+                    self.channel_type,
+                    self.connection.dp_idx,
+                    self.op,
+                    edge_id=self.connection.edge_id,
+                    cloud_id=self.connection.cloud_id,
+                )
             except RuntimeError:
                 # Not an endpoint rank of this connection (or channels not
                 # initialized): leave it unset; _execute would fail loudly.
@@ -96,7 +105,9 @@ class LwdHostTransferQueue(LwdTransferQueue):
         if io is None:
             future = into or LwdTransferFuture(req, [], None)
             future._finalize(
-                error=RuntimeError(f"no host {self.op} IO for channel {self.channel_type.value} dp_idx={self.dp_idx}")
+                error=RuntimeError(
+                    f"no host {self.op} IO for channel {self.channel_type.value} connection={self.connection}"
+                )
             )
             return future
         if req.op == "send":
