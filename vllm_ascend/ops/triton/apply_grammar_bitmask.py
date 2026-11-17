@@ -74,11 +74,11 @@ def _apply_grammar_bitmask_kernel_impl(
         blocked = blocked.reshape(BLOCK_SIZE)
 
         block_offset = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        tl.store(
-            logits_ptr + logits_idx * logits_stride + block_offset,
-            -float("inf"),
-            mask=position_is_active & blocked & (block_offset < vocab_size),
-        )
+        ptrs = logits_ptr + logits_idx * logits_stride + block_offset
+        valid = position_is_active & (block_offset < vocab_size)
+        values = tl.load(ptrs, mask=valid, other=0)
+        negative_inf = tl.full((BLOCK_SIZE,), -float("inf"), values.dtype)
+        tl.store(ptrs, tl.where(blocked, negative_inf, values), mask=valid)
 
 
 class _ApplyGrammarBitmaskKernelLauncher:
@@ -102,6 +102,8 @@ class _ApplyGrammarBitmaskKernelLauncher:
             MASK_STRIDE,
             BLOCK_SIZE,
         ):
+            if num_masks == 0:
+                return None
             # Disable MULTIBUFFER to better utilize the UB buffer, which gives
             # a significant performance improvement on A2/A3. It can be enabled
             # again on A5.

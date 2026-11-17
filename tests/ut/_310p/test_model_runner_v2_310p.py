@@ -64,6 +64,25 @@ def _make_vllm_config(**overrides):
     return config
 
 
+def test_runner_binds_materialized_kv_cache() -> None:
+    from vllm.v1.worker import utils as worker_utils
+
+    from vllm_ascend.patch.worker import patch_attn_utils
+
+    names = ["model.layers.2.self_attn", "model.layers.0.self_attn"]
+    caches = {name: (torch.zeros(2, 4), torch.zeros(2, 4)) for name in names}
+    layers = {name: SimpleNamespace(kv_cache=None) for name in names}
+    runner_caches: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    assert model_runner_module.bind_kv_cache is worker_utils.bind_kv_cache
+    assert model_runner_module.bind_kv_cache is patch_attn_utils.bind_kv_cache
+    model_runner_module.bind_kv_cache(caches, layers, runner_caches)
+
+    assert runner_caches[0] is caches[names[1]]
+    assert runner_caches[1] is caches[names[0]]
+    assert all(layers[name].kv_cache is cache for name, cache in caches.items())
+
+
 def test_config_accepts_prefix_caching() -> None:
     """310P MRv2 supports APC; gate must not reject enable_prefix_caching."""
     config = _make_vllm_config()
@@ -184,6 +203,12 @@ def test_310p_hybrid_model_state_initializes_full_upstream_contract() -> None:
     with (
         patch.object(AscendMambaHybridModelState, "__init__", side_effect=init_parent, autospec=True) as parent_init,
         patch.object(Ascend310PMambaHybridModelState, "_replace_310p_rope_state") as replace_rope,
+        # CPU-only UT never registers PrivateUse1 hooks, so the pinned
+        # staging allocation must be disabled here.
+        patch(
+            "vllm_ascend._310p.worker.v2.model_state.is_pin_memory_available",
+            return_value=False,
+        ),
     ):
         Ascend310PMambaHybridModelState.__init__(state, config, model, encoder_cache, device)
     parent_init.assert_called_once_with(state, config, model, encoder_cache, device)
@@ -517,6 +542,7 @@ def test_postprocess_sampled_keeps_last_token_on_device() -> None:
     runner._sampled_tokens_cpu = sampled_tokens
     runner._num_sampled_cpu = num_sampled
     runner._num_rejected_cpu = num_rejected
+    runner._last_tokens_staging = torch.empty(2, dtype=torch.int64)
 
     with patch.object(model_runner_module, "_post_update_cpu", return_value=num_sampled.cpu()) as post_update:
         runner.postprocess_sampled(
@@ -540,7 +566,8 @@ def test_postprocess_sampled_keeps_last_token_on_device() -> None:
 
 
 @pytest.mark.parametrize("has_rejection_sampler", [False, True])
-def test_sample_without_drafts_updates_cpu_history(has_rejection_sampler):
+@pytest.mark.parametrize("needs_cpu_history", [False, True])
+def test_sample_without_drafts_updates_cpu_history(has_rejection_sampler, needs_cpu_history):
     runner = object.__new__(NPUModelRunner310V2)
     runner.device = torch.device("cpu")
     runner.rejection_sampler = MagicMock() if has_rejection_sampler else None
@@ -548,8 +575,10 @@ def test_sample_without_drafts_updates_cpu_history(has_rejection_sampler):
     runner.model = SimpleNamespace(compute_logits=lambda hidden: hidden)
     tokens = torch.tensor([[11], [22]], dtype=torch.int32)
     runner.sampler = MagicMock(return_value=SimpleNamespace(sampled_token_ids=tokens))
+    runner.sampler.needs_cpu_token_history.return_value = needs_cpu_history
     runner._postprocess_idx_mapping_np = np.array([1, 0], dtype=np.int32)
     runner._postprocess_query_start_loc_np = np.array([0, 2, 4], dtype=np.int32)
+    runner._last_tokens_staging = torch.empty(2, dtype=torch.int64)
     for name, dtype in (
         ("_num_sampled_staging", torch.int32),
         ("_num_rejected_staging", torch.int32),
@@ -577,17 +606,21 @@ def test_sample_without_drafts_updates_cpu_history(has_rejection_sampler):
         logits_indices=torch.tensor([0, 1]),
         seq_lens_np=np.array([2, 1]),
         prefill_len_np=np.array([2, 2]),
+        idx_mapping_np=runner._postprocess_idx_mapping_np,
     )
     output, num_sampled, num_rejected = runner.sample(torch.zeros(2, 3), batch, grammar_output=None)
-    assert runner._sampled_tokens_cpu.device.type == "cpu"
+    if needs_cpu_history:
+        assert runner._sampled_tokens_cpu.device.type == "cpu"
+    else:
+        assert runner._sampled_tokens_cpu is None
     runner.postprocess_sampled(torch.tensor([1, 0]), output.sampled_token_ids, num_sampled, num_rejected)
     # Only the first batch row has completed prefill, and it belongs to slot 1.
-    assert runner.req_states.all_token_ids.cpu[1, 2].item() == 11
+    assert runner.req_states.all_token_ids.cpu[1, 2].item() == (11 if needs_cpu_history else 0)
     assert runner.req_states.all_token_ids.cpu[0, 2].item() == 0
-    assert runner.req_states.total_len.np.tolist() == [2, 3]
-    assert runner.req_states.last_sampled_tokens_cpu[:, 0].tolist() == [0, 11]
+    assert runner.req_states.total_len.np.tolist() == [2, 3 if needs_cpu_history else 2]
+    assert runner.req_states.last_sampled_tokens_cpu[:, 0].tolist() == [0, 11 if needs_cpu_history else 0]
     assert runner.req_states.last_sampled_tokens[:, 0].tolist() == [0, 11]
-    if has_rejection_sampler:
+    if has_rejection_sampler and needs_cpu_history:
         assert runner.rejection_sampler is not None
         runner.rejection_sampler.synchronize_cpu.assert_called_once()
 
@@ -746,6 +779,20 @@ def test_sampler_logprobs_returns_sampled_and_topk() -> None:
     assert out.logprobs_tensors.logprobs.shape == (1, 3)
 
 
+def _init_packed_copy_buffers(
+    rejection: RejectionSampler310V2,
+    max_num_reqs: int,
+    num_spec: int,
+) -> None:
+    """Set up the packed-D2H staging buffers skipped by ``__new__`` construction."""
+    rejection._packed_width = num_spec + 3
+    rejection._packed_dev = torch.empty(max_num_reqs * rejection._packed_width, dtype=torch.int32)
+    rejection._packed_cpu = torch.empty_like(rejection._packed_dev)
+    rejection._chunked_prefill_cpu = torch.empty(max_num_reqs, dtype=torch.bool)
+    rejection._copy_pending = False
+    rejection._pending_num_reqs = 0
+
+
 def test_rejection_sampler_uses_processed_logits_and_raw_logprobs() -> None:
     sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=3)
     _add_request(sampler, 0, 1, SamplingParams(temperature=0, allowed_token_ids=[2], logprobs=1))
@@ -757,7 +804,7 @@ def test_rejection_sampler_uses_processed_logits_and_raw_logprobs() -> None:
     rejection.sampled_tokens_cpu = torch.empty((1, 2), dtype=torch.int32)
     rejection.num_sampled_cpu = torch.empty(1, dtype=torch.int32)
     rejection.num_rejected_cpu = torch.empty(1, dtype=torch.int32)
-    rejection._copy_stream = MagicMock()
+    _init_packed_copy_buffers(rejection, max_num_reqs=1, num_spec=1)
     rejection._copy_event = MagicMock()
     batch = SimpleNamespace(
         num_reqs=1,
@@ -848,7 +895,7 @@ def test_mtp_history_uses_logits_input_rows(num_spec, processor):
     rejection.sampled_tokens_cpu = torch.empty((1, num_spec + 1), dtype=torch.int32)
     rejection.num_sampled_cpu = torch.empty(1, dtype=torch.int32)
     rejection.num_rejected_cpu = torch.empty(1, dtype=torch.int32)
-    rejection._copy_stream = MagicMock()
+    _init_packed_copy_buffers(rejection, max_num_reqs=1, num_spec=num_spec)
     rejection._copy_event = MagicMock()
     # Prefix input tokens do not produce logits; they must not count as drafts.
     batch = SimpleNamespace(
@@ -932,7 +979,7 @@ def test_sampler_min_p_masks_low_probability_tokens() -> None:
 
 
 def test_sampler_min_p_restricts_softmax_mass() -> None:
-    """With temp>0, min_p must zero discarded tokens before inverse-CDF."""
+    """With temp>0, min_p must zero discarded tokens before sampling."""
     import vllm_ascend._310p.worker.v2.sampler as sampler_mod
 
     sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=3)
@@ -946,7 +993,7 @@ def test_sampler_min_p_restricts_softmax_mass() -> None:
         captured["probs"] = probs.detach().cpu().clone()
         return probs.argmax(dim=-1)
 
-    with patch.object(sampler_mod, "_random_sample_310p", side_effect=_capture_and_argmax):
+    with patch.object(sampler_mod, "random_sample", side_effect=_capture_and_argmax):
         out = sampler(logits, _make_sampler_batch())
 
     probs = captured["probs"][0]
@@ -969,9 +1016,9 @@ def test_sampler_accepts_warmup_params_with_empty_history() -> None:
 
     assert sampler.sampling_states.temperature.gpu[0].item() == pytest.approx(0.9)
     assert sampler.sampling_states.min_p.gpu[0].item() == pytest.approx(0.1)
-    # CPU runners lack the NPU pinned-memory allocator used by random sampling.
+    # Mock the NPU sampler to exercise the sampler on CPU.
     with patch(
-        "vllm_ascend._310p.worker.v2.sampler._random_sample_310p",
+        "vllm_ascend._310p.worker.v2.sampler.random_sample",
         side_effect=lambda probs, generators: probs.argmax(dim=-1),
     ) as random_sample:
         output = sampler(torch.zeros((1, 64), dtype=torch.float32), _make_sampler_batch())
@@ -1010,6 +1057,7 @@ def _make_sampler_batch(req_idx: int = 0) -> SimpleNamespace:
     return SimpleNamespace(
         expanded_idx_mapping=torch.tensor([req_idx], dtype=torch.int32),
         idx_mapping_np=np.array([req_idx], dtype=np.int32),
+        cu_num_logits_np=np.array([0, 1], dtype=np.int32),
         num_reqs=1,
         seq_lens=torch.ones(1, dtype=torch.int32),
     )
@@ -1049,10 +1097,10 @@ def test_310p_mrv2_apply_top_k_top_p_masks_logits() -> None:
 
 
 def test_sampler_top_k_restricts_softmax_mass() -> None:
-    """With temp>0, top-k must zero-out discarded tokens before inverse-CDF.
+    """With temp>0, top-k must zero-out discarded tokens before sampling.
 
     vLLM clears top_k/top_p when temperature==0, so exercise the random path
-    with ``_random_sample_310p`` mocked (CPU-safe; mirrors MRV1 CDF unit style).
+    with ``random_sample`` mocked.
     """
     import vllm_ascend._310p.worker.v2.sampler as sampler_mod
 
@@ -1068,7 +1116,7 @@ def test_sampler_top_k_restricts_softmax_mass() -> None:
         captured["probs"] = probs.detach().cpu().clone()
         return probs.argmax(dim=-1)
 
-    with patch.object(sampler_mod, "_random_sample_310p", side_effect=_capture_and_argmax):
+    with patch.object(sampler_mod, "random_sample", side_effect=_capture_and_argmax):
         out = sampler(logits, _make_sampler_batch())
 
     probs = captured["probs"][0]
@@ -1091,7 +1139,7 @@ def test_sampler_top_k_one_matches_argmax_with_temperature() -> None:
         del generators
         return probs.argmax(dim=-1)
 
-    with patch.object(sampler_mod, "_random_sample_310p", side_effect=_argmax_sample):
+    with patch.object(sampler_mod, "random_sample", side_effect=_argmax_sample):
         out = sampler(logits, _make_sampler_batch())
     assert int(out.sampled_token_ids.view(-1)[0].item()) == int(logits.argmax(dim=-1).item())
 
@@ -1111,7 +1159,7 @@ def test_sampler_top_p_restricts_softmax_mass() -> None:
         captured["probs"] = probs.detach().cpu().clone()
         return probs.argmax(dim=-1)
 
-    with patch.object(sampler_mod, "_random_sample_310p", side_effect=_capture_and_argmax):
+    with patch.object(sampler_mod, "random_sample", side_effect=_capture_and_argmax):
         out = sampler(logits, _make_sampler_batch())
 
     probs = captured["probs"][0]
@@ -1371,7 +1419,6 @@ def test_worker_selects_v2_runner_on_310p() -> None:
 
     worker = object.__new__(NPUWorker310)
     worker.vllm_config = SimpleNamespace()
-    worker.use_v2_model_runner = True
     worker.device = torch.device("cpu")
     with patch("vllm_ascend._310p.worker.v2.model_runner.NPUModelRunner310V2") as runner_cls:
         worker.model_runner = worker._create_model_runner()

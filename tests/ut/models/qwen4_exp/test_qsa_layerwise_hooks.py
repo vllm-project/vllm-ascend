@@ -39,7 +39,7 @@ def test_qsa_restores_before_updates_and_opens_prefetch_after_updates(monkeypatc
         def __call__(self, *args, **kwargs):
             order.append("indexer_update")
             selected = torch.zeros(2, self.output_width, dtype=torch.int32)
-            return selected if vllm_version_is("0.32.0") else (selected, None)
+            return selected if vllm_version_is("0.33.0") else (selected, None)
 
     owner = SimpleNamespace(
         layer_name="main",

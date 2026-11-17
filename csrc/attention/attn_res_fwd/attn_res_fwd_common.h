@@ -4,6 +4,7 @@
 #include <ATen/ATen.h>
 #include <c10/util/Optional.h>
 #include <tuple>
+#include "attn_res_fwd_validation.h"
 
 namespace vllm_ascend::detail {
 
@@ -15,32 +16,42 @@ inline std::tuple<at::Tensor, at::Tensor, at::Tensor> attn_res_fwd_impl(
     bool optimize_prefill)
 {
     constexpr const char* op_name = "attn_res_fwd";
+    TORCH_CHECK(AttnResFwd::IsValidNormEpsilon(eps),
+                op_name, ": norm_eps must be finite and positive in float32");
     TORCH_CHECK(prefix.dim() == 2 && blocks.dim() == 3 &&
                 blocks.size(0) == prefix.size(0) && blocks.size(2) == prefix.size(1),
                 op_name, ": invalid prefix/bank shape");
     TORCH_CHECK(proj.dim() == 2 && proj.size(0) == 1 && proj.size(1) == prefix.size(1) &&
                 norm.dim() == 1 && norm.size(0) == prefix.size(1), op_name, ": invalid weights");
-    TORCH_CHECK(valid >= 0 && valid <= blocks.size(1) && write_idx >= -1 &&
-                write_idx < blocks.size(1) && (write_idx < 0 || write_idx >= valid),
+    // Validate extents before any signed capacity * H arithmetic, including
+    // zero-token views whose dimensions can exceed the backing allocation.
+    TORCH_CHECK(AttnResFwd::IsValidBankExtent(prefix.size(0), blocks.size(1), prefix.size(1),
+                                            valid, blocks.stride(0), write_idx),
                 op_name, ": invalid bank extent/write slot");
     const at::Tensor* inputs[] = {&prefix, &blocks, &proj, &norm};
     for (const at::Tensor* tensor : inputs) {
         TORCH_CHECK(tensor->scalar_type() == at::kBFloat16 && tensor->device() == prefix.device(),
                     op_name, ": inputs must be BF16 on the same device");
+        TORCH_CHECK(write_idx < 0 || tensor == &blocks || !blocks.is_alias_of(*tensor),
+                    op_name, ": writable bank must not alias read-only inputs");
     }
     TORCH_CHECK(prefix.is_contiguous() && proj.is_contiguous() && norm.is_contiguous() &&
-                blocks.stride(2) == 1 && blocks.stride(1) == prefix.size(1) &&
-                blocks.stride(0) >= blocks.size(1) * prefix.size(1),
+                blocks.stride(2) == 1 && blocks.stride(1) == prefix.size(1),
                 op_name, ": prefix/weights/individual bank rows must be contiguous");
     if (addend.has_value()) {
         TORCH_CHECK(addend->sizes() == prefix.sizes() && addend->dtype() == prefix.dtype() &&
                     addend->device() == prefix.device() && addend->is_contiguous(),
                     op_name, ": invalid addend");
+        TORCH_CHECK(write_idx < 0 || !blocks.is_alias_of(*addend),
+                    op_name, ": writable bank must not alias read-only inputs");
     }
     if (output_norm.has_value()) {
         TORCH_CHECK(output_norm->sizes() == norm.sizes() && output_norm->dtype() == prefix.dtype() &&
-                    output_norm->device() == prefix.device() && output_norm->is_contiguous() && output_eps > 0,
+                    output_norm->device() == prefix.device() && output_norm->is_contiguous() &&
+                    AttnResFwd::IsValidNormEpsilon(output_eps),
                     op_name, ": invalid output norm");
+        TORCH_CHECK(write_idx < 0 || !blocks.is_alias_of(*output_norm),
+                    op_name, ": writable bank must not alias read-only inputs");
     }
     auto output = at::empty_like(prefix);
     auto raw_prefix = addend.has_value() ? at::empty_like(prefix) : prefix;

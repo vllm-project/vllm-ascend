@@ -420,6 +420,18 @@ def test_dcp_one_keeps_original_single_attention_contract(runtime, causal):
     assert not flash.adapter.config.return_softmax_lse
 
 
+def test_noncausal_draft_metadata_ignores_rejected_cpu_upper_bound(runtime):
+    builder = runtime.builder(size=1)
+    metadata = common([87], [7], causal=False)
+    metadata.seq_lens_cpu_upper_bound = torch.tensor([91], dtype=torch.int32)
+    metadata.seq_lens_cpu = metadata.seq_lens_cpu_upper_bound
+    first = builder.build(metadata, 1, 7, False)
+    assert first.cache_lens[0] == 87
+    metadata.seq_lens_cpu_upper_bound.fill_(9999)
+    second = builder.build(metadata, 1, 7, False)
+    assert second.cache_lens[0] == 87
+
+
 @pytest.mark.parametrize(
     "causal,speculative,interleave,dtype,capturing",
     [

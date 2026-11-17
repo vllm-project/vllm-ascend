@@ -104,11 +104,12 @@ class Ascend310PRopeState:
                     num_new_tokens=query_len,
                 )
 
-        # Keep the extra dummy column in the transfer. Slicing all rows but
-        # only active columns makes a non-contiguous 2D view because storage
-        # width is max_num_tokens + 1. On 310P that copy falls back to costly
-        # strided handling. Copy the complete contiguous buffer.
-        self.positions.copy_(self.positions_cpu, non_blocking=True)
+        # Copy only the active columns: the staging buffer is sized for the full
+        # max_num_tokens, but a decode step stages a handful of tokens. Per-dim
+        # row slices are contiguous, so each copy stays on the fast H2D path.
+        active = num_tokens_after_padding
+        for dim in range(self.num_dims):
+            self.positions[dim, :active].copy_(self.positions_cpu[dim, :active], non_blocking=True)
 
     def get_positions(self, num_tokens: int) -> torch.Tensor:
         return self.positions[:, :num_tokens]

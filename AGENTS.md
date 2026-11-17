@@ -88,7 +88,7 @@ When preparing or reviewing a PR, read the [PR testing requirements](docs/source
 
 ### Naming Conventions
 
-- **Classes**: `PascalCase` (e.g., `NPUModelRunner`, `AscendSampler`, `ACLGraphManager`)
+- **Classes**: `PascalCase` (e.g., `NPUModelRunner`, `ACLGraphManager`)
 - **Functions/Methods**: `snake_case` (e.g., `forward_pass`, `compute_attention`)
 - **Constants**: `ALL_UPPER_CASE`
 - **Variables**: `snake_case` (e.g., `token_ids`, `sequence_lengths`)
@@ -138,7 +138,6 @@ Choose the integration approach that fits the change:
 
 2. **Inheritance**:
     - `NPUModelRunner(GPUModelRunner)` - Extend vLLM model runner with NPU-specific behavior
-    - `AscendSampler` - Extend vLLM sampler with NPU-specific operations
     - Add NPU-specific components via composition (e.g., `AclGraphManager`)
     - Custom Operators - NPU-specific custom operators (e.g., `AscendRMSNorm`)
 
@@ -170,28 +169,46 @@ Reviewers must verify:
 
 **NPU Model Runner Files:**
 
-- `vllm_ascend/worker/v1/model_runner.py` - vLLM v1 model runner (isolated V1 zone, removal-tracked)
 - `vllm_ascend/worker/v2/model_runner.py` - vLLM v2 model runner
-- `vllm_ascend/worker/v1/_310p/model_runner_310p.py` - Ascend 310P model runner (isolated V1 zone, removal-tracked)
 
 ---
 
 ## Release Notes
 
-Every PR with a user-facing change must ship a release note fragment in the same PR.
+Every PR with a user-facing change must ship a release note fragment in the same PR. The
+fragment is written for users of the released wheel or Docker image, not for reviewers:
+a reader who never sees the diff should be able to tell what changed for them and whether
+they need to do anything.
 
-**Required for**: new models, hardware, or operators; new features; changes to user-facing
-APIs, parameters, environment variables, or configuration; breaking changes, deprecations,
-and default behavior changes; dependency and toolchain updates (CANN, torch_npu,
-triton-ascend, vLLM alignment); measurable performance improvements; and important bug fixes.
+**Write a fragment for**: new models, hardware, or operators; new features; changes to
+user-facing APIs, parameters, environment variables, or configuration; breaking changes,
+deprecations, and default behavior changes; dependency and toolchain updates (CANN,
+torch_npu, triton-ascend, vLLM alignment); performance improvements; and bug fixes users
+could have hit (hangs, OOM, wrong outputs, broken metrics).
 
-**Not required for**: internal refactors, tests, CI, build scripts, tooling, and
-documentation edits.
+**Do not write a fragment for**: internal refactors, code moves, logging and typing
+cleanups; tests, CI, build scripts, development tooling; documentation typo fixes and
+small edits (guides for brand-new scenarios are the exception, category `documentation`);
+and plumbing for future features that is still invisible to users. If the only honest
+sentence is "refactored X" or "prepared Y for Z", users cannot observe the change — no
+fragment.
 
-Add `release_notes/fragments/<PR number>.yaml` following `release_notes/TEMPLATE.yaml`. See
-`release_notes/README.md` for the principles and the field rules. When in doubt, add a
-fragment: the release manager drops extra entries at release time. Reviewers confirm the
-fragment together with the code; there is no CI gate.
+**How to write the text** (full rules and examples in
+[release_notes/README.md](release_notes/README.md#writing-the-text)):
+
+- Say what the user gets, not what the code does. Name user-facing switches exactly (env
+  vars, config keys, CLI flags); skip file, class, and kernel-level narration.
+- Performance entries: state the scenario (model, workload, hardware) and the effect
+  (measured metric and magnitude, or the concrete user-visible mechanism). Never invent
+  numbers.
+- Breaking and config entries: old behavior → new behavior, the exact switch, the
+  migration step, and what happens if the user does nothing.
+- Bug fixes: the user-visible symptom and when it occurs, not the internal root cause.
+
+Add `release_notes/fragments/<PR number>.yaml` following `release_notes/TEMPLATE.yaml`. When in
+doubt about whether users can observe the change, add a fragment — the release manager drops
+extra entries, but a missing one is lost. Reviewers confirm the inclusion decision and the
+wording together with the code; there is no CI gate.
 
 ---
 

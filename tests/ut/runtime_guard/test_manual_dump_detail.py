@@ -80,7 +80,7 @@ def test_maybe_fire_manual_local_detail_has_count_and_target():
             return_value=True,
         ),
     ):
-        p._maybe_fire_manual_local(allow_manual_dump=True)
+        p._maybe_fire_manual_local(has_scheduled_tokens=True)
 
     assert cfg.consume_calls == 1
     assert cfg.manual_dumps_done() == 2
