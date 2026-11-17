@@ -1418,10 +1418,7 @@ class BaseKVPoolWorker(ABC):
             if self.enable_partial_hash_hits:
                 completed, failed = self.kv_send_thread.take_save_outcomes()
                 if completed:
-                    rank = self.vllm_config.parallel_config.rank
-                    return AscendStoreKVConnectorWorkerMetadata(
-                        completed, {event: {rank} for event in completed}, failed
-                    )
+                    return AscendStoreKVConnectorWorkerMetadata(completed, failed)
                 return None
             if ce := self.kv_send_thread.get_completed_events():
                 return AscendStoreKVConnectorWorkerMetadata(ce)

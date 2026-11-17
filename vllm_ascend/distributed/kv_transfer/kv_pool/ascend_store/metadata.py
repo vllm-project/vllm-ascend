@@ -1448,7 +1448,6 @@ class AscendConnectorMetadata(KVConnectorMetadata):
 class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
     completed_events: dict[int, int] = field(default_factory=dict)
     """key: event_id, value: completed worker count"""
-    completed_ranks: dict[int, set[int]] = field(default_factory=dict)
     failed_events: set[int] = field(default_factory=set)
 
     def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
@@ -1462,11 +1461,4 @@ class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
                 merged[event_id] = other.completed_events[event_id]
             else:
                 merged[event_id] = merged[event_id] + other.completed_events[event_id]
-        ranks = {event: workers.copy() for event, workers in self.completed_ranks.items()}
-        for event, workers in other.completed_ranks.items():
-            ranks.setdefault(event, set()).update(workers)
-        # Aggregation can include repeated delivery of one rank's ACK. Counts
-        # are authoritative only for legacy workers without rank identities.
-        for event, workers in ranks.items():
-            merged[event] = len(workers)
-        return AscendStoreKVConnectorWorkerMetadata(merged, ranks, self.failed_events | other.failed_events)
+        return AscendStoreKVConnectorWorkerMetadata(merged, self.failed_events | other.failed_events)

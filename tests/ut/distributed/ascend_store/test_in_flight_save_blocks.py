@@ -10,7 +10,11 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import (
     InFlightSaveBlockTracker,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import BoundaryPut, ReqMeta
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendStoreKVConnectorWorkerMetadata,
+    BoundaryPut,
+    ReqMeta,
+)
 
 
 def _pool():
@@ -30,11 +34,10 @@ def test_boundary_and_ordinary_source_take_one_reference():
     pool.touch.assert_called_once_with([2, 5, 1])
     tracker.retain(meta, {1: 1}, pool, retain_all=True)
     assert pool.touch.call_count == 1
-    tracker.complete({meta.event_id: 1}, pool, {meta.event_id: {0}})
-    tracker.complete({meta.event_id: 1}, pool, {meta.event_id: {0}})
+    tracker.complete({meta.event_id: 1}, pool)
     pool.free_blocks.assert_not_called()
     assert tracker.has_pending_work()
-    tracker.complete({meta.event_id: 1}, pool, {meta.event_id: {1}})
+    tracker.complete({meta.event_id: 1}, pool)
     pool.free_blocks.assert_called_once_with([1, 5, 2])
     assert not tracker.has_pending_work()
 
@@ -46,19 +49,36 @@ def test_out_of_order_completion_does_not_release_another_job():
     second = ReqMeta("r", can_save=True, boundary_puts=[BoundaryPut(0, 2, 32)])
     tracker.retain(first, {}, pool)
     tracker.retain(second, {}, pool)
-    tracker.complete({second.event_id: 1}, pool, {second.event_id: {0}})
+    tracker.complete({second.event_id: 1}, pool)
     assert tracker.sending_blocks == {first.event_id: [1]}
-    tracker.complete({first.event_id: 1}, pool, {first.event_id: {0}})
+    tracker.complete({first.event_id: 1}, pool)
     assert not tracker.has_tracked_blocks()
 
 
-def test_invalid_rank_keeps_source_pinned():
+def test_aggregated_worker_counts_release_source_and_preserve_failures():
     tracker = InFlightSaveBlockTracker(2)
     pool = _pool()
     meta = ReqMeta("r", can_save=True, boundary_puts=[BoundaryPut(0, 1, 16)])
     tracker.retain(meta, {}, pool)
-    with pytest.raises(ValueError, match="Invalid completion rank"):
-        tracker.complete({meta.event_id: 1}, pool, {meta.event_id: {2}})
+    first = AscendStoreKVConnectorWorkerMetadata({meta.event_id: 1}, {meta.event_id})
+    second = AscendStoreKVConnectorWorkerMetadata({meta.event_id: 1})
+
+    completed = first.aggregate(second)
+
+    assert completed.completed_events == {meta.event_id: 2}
+    assert completed.failed_events == {meta.event_id}
+    tracker.complete(completed.completed_events, pool)
+    pool.free_blocks.assert_called_once_with([1])
+    assert not tracker.has_pending_work()
+
+
+def test_excess_completions_keep_source_pinned():
+    tracker = InFlightSaveBlockTracker(2)
+    pool = _pool()
+    meta = ReqMeta("r", can_save=True, boundary_puts=[BoundaryPut(0, 1, 16)])
+    tracker.retain(meta, {}, pool)
+    with pytest.raises(ValueError, match="Too many completions"):
+        tracker.complete({meta.event_id: 3}, pool)
     pool.free_blocks.assert_not_called()
     assert tracker.has_pending_work()
 

@@ -12,7 +12,6 @@ class InFlightSaveBlockTracker:
         self.next_event_id = 0
         self.sending_blocks: dict[int, list[int]] = {}
         self.sending_events: dict[int, int] = {}
-        self.completed_ranks: dict[int, set[int]] = {}
 
     def retain(
         self,
@@ -68,7 +67,6 @@ class InFlightSaveBlockTracker:
         self,
         completed_events: dict[int, int],
         block_pool: BlockPool,
-        completed_ranks: dict[int, set[int]] | None = None,
     ) -> None:
         for event_id, count in completed_events.items():
             logger.debug("event %s update with %s", event_id, count)
@@ -76,13 +74,6 @@ class InFlightSaveBlockTracker:
             if total is None:
                 logger.warning("worker reports an invalid event: %s, count %s", event_id, count)
                 continue
-            if completed_ranks is not None and event_id in completed_ranks:
-                ranks = completed_ranks[event_id]
-                if any(rank < 0 or rank >= self.expected_worker_count for rank in ranks):
-                    raise ValueError(f"Invalid completion rank for save event {event_id}")
-                seen = self.completed_ranks.setdefault(event_id, set())
-                count = len(ranks - seen)
-                seen.update(ranks)
             total += count
             if total > self.expected_worker_count:
                 raise ValueError(f"Too many completions for save event {event_id}")
@@ -92,7 +83,6 @@ class InFlightSaveBlockTracker:
 
             block_ids = self.sending_blocks.pop(event_id, [])
             del self.sending_events[event_id]
-            self.completed_ranks.pop(event_id, None)
             if block_ids:
                 logger.debug("event %s free blocks: %s", event_id, block_ids)
                 # Release the tail first so a shared prefix reaches the eviction queue last.
