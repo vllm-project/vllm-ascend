@@ -515,11 +515,11 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             torch.uint8,
         ):
             raise ValueError("Unexpected Mooncake MXFP8 data or scale dtype.")
-        pitches = {cache.stride(0) for cache in caches}
+        pitches = {cache.stride(0) * cache.element_size() for cache in caches}
         storage_keys = {tensor_storage_key(cache) for cache in caches}
         if len(pitches) != 1 or len(storage_keys) != 1:
             raise ValueError("Mooncake MXFP8 cache components must share one backing and page pitch.")
-        pitch = key.stride(0)
+        pitch = key.stride(0) * key.element_size()
         count = key.shape[0]
         if not count or count % self.num_blocks:
             raise ValueError("Invalid Mooncake MXFP8 physical block count.")
@@ -533,9 +533,10 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                 or cache.data_ptr() != key.data_ptr() + offset
             ):
                 raise ValueError("Mooncake MXFP8 packet component has an incompatible layout.")
-            offset += cache[0].numel()
+            offset += cache[0].nbytes
         storage = key.untyped_storage()
-        if offset > pitch or key.storage_offset() + (count - 1) * pitch + offset > storage.nbytes():
+        packet_end = key.storage_offset() * key.element_size() + (count - 1) * pitch + offset
+        if offset > pitch or packet_end > storage.nbytes():
             raise ValueError("Mooncake MXFP8 packet exceeds its registered storage.")
         return key, value, key_scale
 

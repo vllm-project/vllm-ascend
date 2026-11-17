@@ -254,13 +254,13 @@ class MooncakePullConnector(MooncakeBaseConnector):
 
         if is_c8_mxfp_kv_quant(vllm_config):
             parallel = vllm_config.parallel_config
-            if not vllm_envs.VLLM_USE_V2_MODEL_RUNNER or (
-                parallel.tensor_parallel_size,
+            context_and_pipeline_sizes = (
                 parallel.prefill_context_parallel_size,
                 parallel.decode_context_parallel_size,
                 parallel.pipeline_parallel_size,
-            ) != (1, 1, 1, 1):
-                raise ValueError("Mooncake MXFP8 pull transfer requires Model Runner V2 and TP1/PCP1/DCP1/PP1.")
+            )
+            if not vllm_envs.VLLM_USE_V2_MODEL_RUNNER or any(size != 1 for size in context_and_pipeline_sizes):
+                raise ValueError("Mooncake MXFP8 pull transfer requires Model Runner V2 and PCP1/DCP1/PP1.")
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = MooncakePullConnectorScheduler(vllm_config, str(self.engine_id), kv_cache_config)

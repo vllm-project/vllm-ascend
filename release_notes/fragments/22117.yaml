@@ -2,6 +2,7 @@ pr: 22117
 entries:
   - category: bugfix
     text: >-
-      Fixed a startup failure when using MXFP8 KV cache with MooncakeConnectorV2
-      pull-based prefill/decode disaggregation on Model Runner V2 with TP, PCP,
-      DCP, and PP sizes of 1 on both peers.
+      Fixed MXFP8 KV cache registration and transfer in MooncakeConnectorV2
+      pull-based prefill/decode disaggregation on Model Runner V2. The pull
+      path supports matching and compatible unequal TP sizes with PCP, DCP,
+      and PP sizes of 1 and KV parallel disabled.

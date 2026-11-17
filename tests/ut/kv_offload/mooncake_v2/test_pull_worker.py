@@ -1518,13 +1518,95 @@ def test_mxfp8_pull_checks_layout_and_uses_per_peer_strides(matching_layout: boo
 
     if matching_layout:
         thread._append_spec_transfer_addresses(*args)
-        assert src == [4840, 6120]
-        assert dst == [2152, 3304]
+        assert src == [2152, 3304]
+        assert dst == [8840, 10120]
         assert lengths == [512, 512]
     else:
         with pytest.raises(ValueError, match="MXFP8 PA_NZ cache layout mismatch"):
             thread._append_spec_transfer_addresses(*args)
         assert not src and not dst and not lengths
+
+
+@pytest.mark.parametrize(
+    ("producer_tp", "decode_tp", "decode_rank", "heads", "producer_ranks"),
+    [(1, 2, 1, 2, [[0]]), (2, 1, 0, 2, [[0], [1]]), (2, 2, 1, 2, [[1]]), (4, 4, 3, 2, [[3]]), (4, 2, 1, 2, [[2, 3]])],
+)
+def test_mxfp8_rank_mapping(producer_tp, decode_tp, decode_rank, heads, producer_ranks) -> None:
+    thread = make_thread(
+        tp_size=decode_tp,
+        tp_rank=decode_rank,
+        num_key_value_heads=heads,
+        block_shapes=[[(max(1, heads // decode_tp), 1, 16, 32)]],
+    )
+    thread.vllm_config.cache_config = SimpleNamespace(cache_dtype="mxfp8")
+    remote = make_pp_metadata(
+        block_shapes=[[(max(1, heads // producer_tp), 1, 16, 32)]],
+        tp_base_addrs={rank: [[5000 + rank * 1000]] for rank in range(producer_tp)},
+    )
+    groups, _ = thread._build_remote_transfer_layout(make_metadata_groups(tp_size=producer_tp, pp_metadata=remote))
+    assert groups == {0: {(0, 0): producer_ranks}}
+
+
+@pytest.mark.parametrize(
+    ("producer_tp", "use_kv_pp", "match"),
+    [(3, False, "integer ratio"), (4, True, "KV parallel disabled"), (8, False, "KV heads")],
+)
+def test_mxfp8_rejects_incompatible_producer(producer_tp, use_kv_pp, match) -> None:
+    thread = make_thread(tp_size=2, num_key_value_heads=6)
+    thread.vllm_config.cache_config = SimpleNamespace(cache_dtype="mxfp8")
+    with pytest.raises(ValueError, match=match):
+        thread._build_remote_transfer_layout(make_metadata_groups(tp_size=producer_tp, use_kv_pp=use_kv_pp))
+
+
+@pytest.mark.parametrize(
+    ("producer_tp", "decode_tp", "decode_offsets", "producer_offsets"),
+    [(1, 2, [0, 0, 0], [512, 512, 32]), (2, 1, [512, 512, 32], [0, 0, 0])],
+)
+def test_mxfp8_cross_tp_slices_kv_and_dynamic_scales(producer_tp, decode_tp, decode_offsets, producer_offsets) -> None:
+    producer_heads, decode_heads = 2 // producer_tp, 2 // decode_tp
+    head_lengths = [512, 512, 32]
+    local_addrs, remote_addrs = [1000, 2000, 3000], [5000, 6000, 7000]
+    local_shapes = [(decode_heads, 1, 16, 32)] * 2 + [(decode_heads, 1, 16, 1, 2)]
+    remote_shapes = [(producer_heads, 1, 16, 32)] * 2 + [(producer_heads, 1, 16, 1, 2)]
+    thread = make_thread(
+        tp_size=decode_tp,
+        tp_rank=decode_tp - 1,
+        num_key_value_heads=2,
+        kv_caches_base_addr=[local_addrs],
+        block_shapes=[local_shapes],
+        block_strides=[[2304] * 3],
+        block_lens=[[decode_heads * size for size in head_lengths]],
+    )
+    thread.vllm_config.cache_config = SimpleNamespace(cache_dtype="mxfp8")
+    producer_rank = producer_tp - 1
+    remote = make_pp_metadata(
+        block_shapes=[remote_shapes],
+        block_strides=[[2560] * 3],
+        block_lens=[[producer_heads * size for size in head_lengths]],
+        tp_base_addrs={producer_rank: [remote_addrs]},
+    )
+    src, dst, lengths = [], [], []
+    args = (
+        0,
+        0,
+        producer_rank,
+        1,
+        producer_tp,
+        1,
+        {(0, 0): [("request", [1], [2])]},
+        remote,
+        src,
+        dst,
+        lengths,
+    )
+    thread._append_spec_transfer_addresses(*args)
+    assert src == [addr + 2304 + offset for addr, offset in zip(local_addrs, decode_offsets)]
+    assert dst == [addr + 2 * 2560 + offset for addr, offset in zip(remote_addrs, producer_offsets)]
+    assert lengths == head_lengths
+
+    remote_shapes[2] = (producer_heads, 1, 16, 2, 1)
+    with pytest.raises(ValueError, match="MXFP8 per-head layout mismatch"):
+        thread._append_spec_transfer_addresses(*args)
 
 
 @pytest.mark.parametrize("spec", [make_circular_spec(), make_kpool_tail_spec()])

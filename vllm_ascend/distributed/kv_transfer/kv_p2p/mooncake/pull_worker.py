@@ -224,6 +224,25 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             )
         return next(iter(endpoints))
 
+    def _validate_mxfp_topology(self, remote: MooncakeTransferMetadataGroups) -> None:
+        if remote.use_kv_pp or any(size != 1 for size in (remote.pp_size, remote.pcp_size, remote.dcp_size)):
+            raise ValueError("Mooncake MXFP8 requires producer PP1/PCP1/DCP1 and KV parallel disabled.")
+
+        remote_tp = remote.tp_size
+        smaller_tp, larger_tp = sorted((self.tp_size, remote_tp))
+        if smaller_tp <= 0 or larger_tp % smaller_tp:
+            raise ValueError(
+                f"Mooncake MXFP8 requires TP sizes with an integer ratio: local={self.tp_size}, producer={remote_tp}."
+            )
+
+        # Each rank owns an integer number of heads or shares one replicated head.
+        heads = self.num_key_value_heads
+        if heads <= 0 or any(max(heads, tp) % min(heads, tp) for tp in (self.tp_size, remote_tp)):
+            raise ValueError(
+                "Mooncake MXFP8 KV heads must divide or be divisible by each TP size: "
+                f"heads={heads}, local TP={self.tp_size}, producer TP={remote_tp}."
+            )
+
     def _build_remote_transfer_layout(
         self,
         remote_metadata: MooncakeTransferMetadataGroups,
@@ -238,6 +257,8 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         one outer entry per required remote head/TP piece and one inner list of
         replica candidates (DCP=1) or participating DCP shards (DCP>1).
         """
+        if is_c8_mxfp_kv_quant(self.vllm_config):
+            self._validate_mxfp_topology(remote_metadata)
         if remote_metadata.use_kv_pp and remote_metadata.dcp_size != 1:
             raise ValueError("Mooncake producer cannot enable KV parallel and DCP together")
         groups_by_pp_rank: dict[int, dict[tuple[int, int], list[list[int]]]] = {}
@@ -337,22 +358,15 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 remote_tp_size,
             )
 
-        if is_c8_mxfp_kv_quant(self.vllm_config) and type(spec) is FullAttentionSpec:
-            if (self.tp_size, self.pcp_size, self.dcp_size, remote_tp_size, remote_pcp_size, remote_dcp_size) != (
-                1,
-                1,
-                1,
-                1,
-                1,
-                1,
-            ):
-                raise ValueError("Mooncake MXFP8 PA_NZ transfer currently requires TP1/PCP1/DCP1 on both peers.")
-            return [[0]]
+        is_mxfp = is_c8_mxfp_kv_quant(self.vllm_config) and type(spec) is FullAttentionSpec
+        if is_mxfp and self.tp_size == remote_tp_size:
+            return [[self.tp_rank]]
 
         local_dcp_size, remote_dcp_size = self._get_attention_dcp_sizes(
             spec, remote_layer_index, remote_metadata, remote_dcp_size
         )
-        fixed_total_num_kv_heads = None
+        # Shard shapes alone cannot identify the model head count when KV heads are replicated.
+        fixed_total_num_kv_heads = self.num_key_value_heads if is_mxfp else None
         if is_circular_kv_cache_spec(spec) or isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
             local_num_kv_heads = remote_num_kv_heads = 1
             fixed_total_num_kv_heads = 1
@@ -988,7 +1002,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         remote_tp_metadata = remote_metadata.metadata_by_pcp_rank[remote_pcp_rank].metadata_by_tp_rank[remote_tp_rank]
         is_mxfp = is_c8_mxfp_kv_quant(self.vllm_config) and type(spec) is FullAttentionSpec
         transfer_whole_block = (
-            is_mxfp
+            (is_mxfp and self.tp_size == remote_tp_size)
             or is_circular_kv_cache_spec(spec)
             or isinstance(
                 spec,
@@ -1065,7 +1079,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             remote_tp_size=remote_tp_size,
             local_dcp_size=local_attention_dcp_size,
             remote_dcp_size=remote_attention_dcp_size,
-            fixed_total_num_kv_heads=None,
+            fixed_total_num_kv_heads=self.num_key_value_heads if is_mxfp else None,
         )
         local_dcp_tp_size = 1 if local_attention_dcp_size == 1 else local_attention_dcp_size // self.pcp_size
         remote_dcp_tp_size = 1 if remote_attention_dcp_size == 1 else remote_attention_dcp_size // remote_pcp_size
@@ -1107,6 +1121,8 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                     f"Mooncake KV tensor count mismatch for layer {self.layer_names[local_layer_index]!r}: "
                     f"local={len(local_base_addrs)}, remote={len(remote_base_addrs)}"
                 )
+            if is_mxfp and len(local_base_addrs) != 3:
+                raise ValueError("Mooncake MXFP8 expects registered K, V and dynamic K scale views.")
             if self.block_shapes[local_layer_index][0][0] != local_num_heads:
                 raise ValueError(f"Mooncake local head count differs within spec {spec_index}")
             if remote_metadata.block_shapes[remote_layer_index][0][0] != remote_num_heads:
@@ -1122,6 +1138,13 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 if not remote_block_shape or remote_block_shape[0] != remote_num_heads:
                     raise ValueError(
                         f"Mooncake remote K/V head counts differ for layer {self.layer_names[local_layer_index]!r}"
+                    )
+
+                if is_mxfp and local_block_shape[1:] != remote_block_shape[1:]:
+                    raise ValueError(
+                        f"Mooncake MXFP8 per-head layout mismatch for layer "
+                        f"{self.layer_names[local_layer_index]!r}, cache {cache_index}: "
+                        f"local={local_block_shape[1:]}, remote={remote_block_shape[1:]}"
                     )
 
                 local_block_stride = self.block_strides[local_layer_index][cache_index]
@@ -1357,6 +1380,8 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
         kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
     ) -> None:
         """Register caches and start the D-side pull execution thread."""
+        if is_c8_mxfp_kv_quant(self.vllm_config) and self.ascend_config.kvpp_config.size > 1:
+            raise ValueError("Mooncake MXFP8 requires KV parallel disabled.")
         super().register_kv_caches(kv_caches)
         if self.kv_transfer_config.is_kv_consumer:
             if not isinstance(self.xfer_handshake_metadata, MooncakeTransferMetadata):
