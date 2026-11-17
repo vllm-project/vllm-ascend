@@ -1,0 +1,4 @@
+pr: 22125
+entries:
+  - category: feature
+    text: Added MTP/EAGLE support for hash-grained AscendStore prefix recovery, with matching Attention proof and Mamba checkpoint boundaries and role-aware block dropping for P/D deployments.
