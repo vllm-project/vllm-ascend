@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING
 import torch
 from vllm.config import CompilationMode, VllmConfig
 
+from vllm_ascend.utils import vllm_version_is
+
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.states import RequestState
 
@@ -43,10 +45,9 @@ def init_speculator(
     if speculative_config.method == "suffix":
         if req_states is None:
             raise ValueError("MRV2 suffix speculative decoding requires request states")
-        from vllm_ascend.worker.v2.spec_decode.suffix import validate_suffix_runtime
+        if vllm_version_is("0.33.0"):
+            raise ValueError("Ascend MRV2 suffix decoding requires vLLM with PR #60339.")
 
-        validate_suffix_runtime(speculative_config)
-        # Import the subclass only after checking its upstream dependency.
         from vllm_ascend.worker.v2.spec_decode.suffix.speculator import AscendSuffixSpeculator
 
         return AscendSuffixSpeculator(vllm_config, device, req_states)
