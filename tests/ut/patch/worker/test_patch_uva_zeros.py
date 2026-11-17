@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm_ascend.patch.worker.patch_uva import _int64_storage, _zeros_on_npu
+from vllm_ascend.patch.worker.patch_uva import UvaBufferWrapper, _int64_storage, _zeros_on_npu
 
 
 def test_uint64_npu_zeros_view_int64_storage(monkeypatch):
@@ -42,3 +42,26 @@ def test_uint64_int64_storage_keeps_pointer_bits():
 
     assert viewed.tolist() == high_bit.tolist()
     assert _int64_storage(torch.zeros(2, dtype=torch.int32)).dtype == torch.int32
+
+
+def test_pinned_allocation_failure_uses_explicit_npu_copy(monkeypatch):
+    cpu = torch.empty(2, dtype=torch.int32)
+    npu = torch.empty(2, dtype=torch.int32)
+    pin_requests = []
+
+    def zeros(size, dtype, device, pin_memory):
+        pin_requests.append(pin_memory)
+        if pin_memory:
+            raise torch.OutOfMemoryError("pinned host allocation failed")
+        return cpu
+
+    monkeypatch.setattr(torch, "zeros", zeros)
+    monkeypatch.setattr(torch, "zeros_like", lambda tensor, device: npu)
+    monkeypatch.setattr("vllm_ascend.patch.worker.patch_uva.is_uva_available", lambda: False)
+
+    buffer = UvaBufferWrapper(2, torch.int32)
+
+    assert pin_requests == [True, False]
+    assert buffer._cpu is cpu
+    assert buffer._uva is npu
+    assert not buffer._use_real_uva

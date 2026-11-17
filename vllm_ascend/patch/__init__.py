@@ -1639,8 +1639,9 @@
 #       tensor and either maps it for real NPU UVA (when
 #       `pinned_mem_register:True` and a compatible triton-ascend is installed)
 #       or falls back to an independent NPU tensor with explicit dirty-row
-#       copying. It exposes `.cpu` / `.np` / `.uva()` to mimic the upstream
-#       `UvaBuffer` interface.
+#       copying. If pinned-host allocation fails, it uses ordinary host memory
+#       with that explicit-copy fallback. It exposes `.cpu` / `.np` / `.uva()`
+#       to mimic the upstream `UvaBuffer` interface.
 #    Future Plan:
 #       Remove this patch when NPU supports UVA natively.
 #

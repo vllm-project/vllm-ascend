@@ -165,11 +165,20 @@ class UvaBufferWrapper:
     """
 
     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
-        self._cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
+        pinned_allocation = True
+        try:
+            self._cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
+        except torch.OutOfMemoryError:
+            # Large cold buffers can exhaust the driver's pinned-host pool while
+            # ordinary host memory is still available. Keep the existing explicit
+            # H2D path as a fallback instead of failing model initialization.
+            logger.warning("Pinned CPU allocation failed; using unpinned CPU memory and an explicit NPU copy")
+            self._cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=False)
+            pinned_allocation = False
         self._np: np.ndarray = self._cpu.numpy()
         self._modified_indices: set[int] = set()
         self._dirty_prefix_end = 0
-        requested_real_uva = is_uva_available()
+        requested_real_uva = pinned_allocation and is_uva_available()
         if requested_real_uva:
             import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
 
