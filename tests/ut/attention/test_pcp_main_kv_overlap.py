@@ -10,6 +10,7 @@ import torch
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs
 
 import vllm_ascend.attention.context_parallel.sfa_cp as pcp_module
+import vllm_ascend.attention.sfa_hisparse as hisparse_sfa
 import vllm_ascend.attention.sfa_v1 as sparse_mla
 from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
@@ -24,7 +25,7 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
         pytest.param(True, 4, 0, AscendSFAImpl, False, id="rope-prefill"),
         pytest.param(True, 4, 1, pcp_module.AscendSFADCPImpl, False, id="dcp-rope-mixed"),
         pytest.param(False, 2, 1, pcp_module.AscendSFADCPImpl, True, id="dcp-sharded-decode"),
-        pytest.param(False, 4, 1, AscendHiSparseImpl, False, id="hisparse-rank-major"),
+        pytest.param(True, 4, 1, AscendHiSparseImpl, False, id="hisparse-rank-major"),
     ],
 )
 @pytest.mark.parametrize("defer_wait", [False, True])
@@ -58,6 +59,7 @@ def test_main_kv_matches_synchronous_inputs_and_slots(
 
     group = SimpleNamespace(world_size=pcp, all_gather=gather)
     monkeypatch.setattr(sparse_mla, "get_pcp_group", lambda: group)
+    monkeypatch.setattr(hisparse_sfa, "get_pcp_group", lambda: group)
     monkeypatch.setattr("vllm.v1.attention.ops.pcp.get_pcp_group", lambda: group)
 
     def write(self, values, actual_cos, actual_sin, actual_cache, actual_slots, actual_metadata):
@@ -89,6 +91,7 @@ def test_main_kv_matches_synchronous_inputs_and_slots(
         return output, SimpleNamespace(wait=wait)
 
     monkeypatch.setattr(sparse_mla, "all_gather_async", launch)
+    monkeypatch.setattr(hisparse_sfa, "all_gather_async", launch)
     result = impl.exec_kv(inputs, cos, sin, cache, slots, metadata, defer_wait=defer_wait)
     if defer_wait:
         assert callable(result) and len(writes) == 1
