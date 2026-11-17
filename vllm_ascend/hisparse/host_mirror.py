@@ -265,7 +265,7 @@ def overlap_target_host_mirror(runner):
         or not isinstance(worker.backend, AscendHiSparseBackend)
         or worker.shared_host_region is not None
         or not worker.is_host_writer
-        or worker.cache_handles[0].runtime.hot_backing.device.type != "npu"
+        or worker.cache_handles[0].runtime.device.type != "npu"
     ):
         return connector
     sources = _DirectMirrorSources.bind(worker, runner.speculator)
@@ -278,7 +278,7 @@ def overlap_target_host_mirror(runner):
     compute_stream = torch.accelerator.current_stream()
     if (
         output_stream.device != compute_stream.device
-        or compute_stream.device != worker.cache_handles[0].runtime.hot_backing.device
+        or compute_stream.device != worker.cache_handles[0].runtime.device
         or output_stream == compute_stream
     ):
         return connector
