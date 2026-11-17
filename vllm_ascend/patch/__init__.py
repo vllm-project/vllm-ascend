@@ -1332,23 +1332,6 @@
 #
 # ** 21. File: worker/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   Suffix MRV2: `vllm.v1.worker.gpu.spec_decode.suffix.speculator`
-#    Why:
-#       The upstream suffix class launches module-level GPU kernels without
-#       device dispatch. Ascend needs its NPU kernels and observer grid ABI.
-#    How:
-#       `patch_suffix_kernels` persistently binds four launch adapters during
-#       worker initialization. Ops wrappers own stride/grid conversion; the
-#       speculator inherits upstream flow without per-call patches or locks.
-#       Missing suffix modules on older lanes are skipped; unrelated import
-#       failures are propagated. Repeated installation does not wrap adapters.
-#    Related PR:
-#       Upstream vLLM #60339; Ascend RFC #20832 and PR #20854.
-#    Test:
-#       tests/ut/patch/worker/test_patch_suffix.py and suffix NPU fixtures.
-#    Future Plan:
-#       Remove these rebinds when upstream dispatches suffix kernels by device.
-#
 #   1. `vllm.model_executor.layers.mamba.ops`, `vllm.model_executor.layers.fla.ops`,
 #      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
 #    Why:
@@ -1489,6 +1472,17 @@
 #    Future Plan:
 #       Remove this patch when Triton-Ascend can compile and efficiently lower
 #       the upstream kernel, or after an equivalent fix lands upstream.
+#
+#   9. `vllm.v1.worker.gpu.spec_decode.suffix.speculator`
+#    Why:
+#       Upstream suffix directly launches GPU kernels.
+#    How:
+#       Bind four Ascend launch adapters at worker startup, skipping vLLM 0.33.0.
+#    Related PR:
+#       vLLM #60339 and vLLM Ascend #20854.
+#    Future Plan:
+#       Drop the version guard when the release baseline supports suffix.
+#       Remove the bindings when upstream dispatches suffix kernels by device.
 # ** 22. File: worker/patch_attn_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.attn_utils.get_kv_cache_spec`
