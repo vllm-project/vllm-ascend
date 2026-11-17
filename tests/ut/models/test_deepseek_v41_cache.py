@@ -4,7 +4,7 @@
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
@@ -23,6 +23,7 @@ from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 # main; the v0.33.0 lane still ships them in `kv_cache_utils`.
 from vllm.v1.core import kv_cache_planning, kv_cache_utils
 from vllm.v1.kv_cache_interface import CircularBufferSpec
+from vllm.v1.worker.gpu.spec_decode import adaptive_verification
 
 from tests.deepseek_v41_utils import (
     allocate_cache_views,
@@ -50,6 +51,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import (
+    STATE_RING_ROWS,
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
     get_layer_tuples,
@@ -557,6 +559,63 @@ def test_c2_builder_keeps_fixed_rows_for_mixed_parity_and_padding(config, runtim
     assert not idle.c2_complete_mask.any()
 
 
+@pytest.mark.parametrize("plane", ["swa_cache", "long_kv_cache", "indexer.k_cache", "compressor.state_cache"])
+def test_adaptive_v41_cache_planes_follow_device_boundaries(runtime, monkeypatch, plane):
+    monkeypatch.setattr(dsa_v41.DeviceOperator, "get_dsv41_packed_cache_ops", lambda: None)
+    monkeypatch.setattr(dsa_v41, "get_cos_and_sin_dsa", lambda *args, **kwargs: ({}, {}))
+    spec = collect_specs(runtime)[f"model.layers.2.self_attn.{plane}"]
+    builder = AscendDSAV41MetadataBuilder(spec, [], runtime, torch.device("cpu"))
+    pointers = []
+    # Keep the physical graph at 16 rows while changing actual query ownership.
+    # Host scheduling evenly splits the budget; device confidence ranking does not.
+    for lengths, host_lengths in (([6, 1], [4, 3]), ([1, 1], [1, 1]), ([1, 6], [3, 4])):
+        histories = [121, 255]
+        starts = [0, lengths[0], sum(lengths), sum(lengths), sum(lengths)]
+        host_starts = [0, host_lengths[0], sum(lengths), sum(lengths), sum(lengths)]
+        positions = [p for h, n in zip(histories, lengths) for p in range(h, h + n)]
+        live_tokens = len(positions)
+        # Slot mappings follow the common producer's PAD contract. Keep stale
+        # odd positions to verify C2 state updates also respect device lengths.
+        positions += [299] * (16 - live_tokens)
+        slots = [128 * (r + 1) + p % 64 for r, (h, n) in enumerate(zip(histories, lengths)) for p in range(h, h + n)]
+        slots += [-1] * (16 - live_tokens)
+        common = SimpleNamespace(
+            slot_mapping=torch.tensor(slots),
+            block_table_tensor=torch.tensor([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [0] * 5, [0] * 5]),
+            query_start_loc=torch.tensor(starts, dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor(host_starts, dtype=torch.int32),
+            seq_lens=torch.tensor([h + n for h, n in zip(histories, lengths)] + [999, 999], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([h + n for h, n in zip(histories, host_lengths)] + [0, 0], dtype=torch.int32),
+            positions=torch.tensor(positions),
+            num_reqs=4,
+            num_actual_tokens=live_tokens,
+            num_input_tokens=16,
+            max_query_len=6,
+            max_seq_len=512,
+            is_prefilling=torch.zeros(4, dtype=torch.bool),
+        )
+        metadata = builder.build(0, common, num_actual_reqs=2, full_graph_mode=True)
+        assert metadata.max_query_len == 6
+        assert metadata.seq_lens.tolist() == [h + n for h, n in zip(histories, lengths)] + [0, 0]
+        if plane == "compressor.state_cache":
+            assert metadata.c2_ring_metadata[0].tolist() == [121, 255, 0, 0]
+            assert metadata.c2_ring_metadata[1].tolist() == lengths + [0, 0]
+            expected = [p % 2 == 1 for p in positions[:live_tokens]] + [False] * (16 - live_tokens)
+            assert metadata.c2_complete_mask.tolist() == expected
+            pointers.append(metadata.c2_ring_metadata.data_ptr())
+        else:
+            ratio = 1 if plane == "swa_cache" else 2
+            expected_slots = [
+                s // ratio if ratio == 1 or p % 2 == 1 else -1 for s, p in zip(slots[:live_tokens], positions)
+            ]
+            assert metadata.flat_slot_mapping.tolist() == expected_slots + [-1] * (16 - live_tokens)
+            if ratio == 2:
+                assert metadata.cache_seq_lens.tolist() == [(h + n) // 2 for h, n in zip(histories, lengths)] + [0, 0]
+                assert metadata.cmp_residual.tolist() == [(h + n) % 2 for h, n in zip(histories, lengths)] + [0, 0]
+            pointers.append(metadata.flat_slot_mapping.data_ptr())
+    assert len(set(pointers)) == 1
+
+
 @pytest.mark.parametrize("full_graph_mode", [False, True])
 @pytest.mark.parametrize("index_first", [False, True])
 @pytest.mark.parametrize(
@@ -935,6 +994,7 @@ def test_batch_metadata_reuses_work_and_keeps_group_slots_separate(runtime, monk
 
     def native_metadata(*args, **kwargs):
         lengths = kwargs.get("seqused_ori_kv", kwargs.get("seqused_k"))
+        assert lengths is not None
         return torch.full(
             (dsa_v41.V41_METADATA_BUFFER_SIZE,), int(lengths.sum()) + kwargs["cmp_ratio"], dtype=torch.int32
         )
@@ -1610,3 +1670,94 @@ def test_swa_cache_uses_configured_block_size(block_size, monkeypatch):
 
     assert cache.block_size == block_size
     assert cache.get_kv_cache_spec(None).block_size == block_size
+
+
+@pytest.mark.parametrize("rows", [1, 16])
+def test_c2_launch_bounds_do_not_change_graph_metadata(monkeypatch, rows):
+    """A small physical carrier limits only the compressor, not shared metadata."""
+    from vllm_ascend.ops.triton.compressor import compressor_triton
+
+    launch = Mock(side_effect=lambda *args, **kwargs: args[4])
+    monkeypatch.setattr(compressor_triton, "compressor_from_projected", launch)
+    compressor = SimpleNamespace(
+        state_cache=SimpleNamespace(kv_cache=[torch.empty(1, 32, 1, 16)]),
+        _ring_pooled=torch.empty(rows, 8, dtype=torch.bfloat16),
+        _ring_num_cores=1,
+        norm=lambda x: x,
+    )
+    metadata = SimpleNamespace(max_query_len=6, c2_ring_metadata=torch.empty(5, 1, dtype=torch.int32))
+    kv = torch.empty(rows, 8)
+    DeepseekV41Compressor.pool_projected(compressor, kv, kv, metadata, prev_rows=None, prev_row_indices=None)
+    assert launch.call_args.kwargs["max_query_len"] == min(6, rows)
+    assert metadata.max_query_len == 6
+
+
+@pytest.mark.parametrize("method", ["dspark", "mtp"])
+@pytest.mark.parametrize("num_drafts", [5, 7, 15, STATE_RING_ROWS - 1, STATE_RING_ROWS])
+def test_v41_adaptive_real_initialization_gate(num_drafts, method):
+    # All five role backends inherit the bounded graph capability. Exercise the real
+    # upstream checks; only construction of device-side manager buffers is mocked.
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            method=method,
+            enable_adaptive_verification=True,
+            num_speculative_tokens=num_drafts,
+            parallel_drafting=False,
+        ),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
+    )
+    groups = [
+        [
+            SimpleNamespace(
+                backend=getattr(dsa_v41, f"DeepseekV41{role}Backend"),
+                layer_names=[role],
+                kv_cache_spec=object(),
+                get_metadata_builder=lambda index, role=role: getattr(dsa_v41, f"AscendDSAV41{role}MetadataBuilder"),
+            )
+        ]
+        for role in ("SWA", "Attention", "Indexer", "State", "FoldedIndex")
+    ]
+    kwargs = dict(
+        enable_adaptive_verification=True,
+        attn_groups=groups,
+        req_states=SimpleNamespace(num_speculative_steps=num_drafts),
+        query_start_loc=torch.zeros(5, dtype=torch.int32),
+        num_bonus_tokens=1,
+        max_total_logits=128,
+        vllm_config=config,
+    )
+    with patch.object(adaptive_verification, "AdaptiveVerificationManager") as manager:
+        if num_drafts >= STATE_RING_ROWS:
+            with pytest.raises(ValueError, match="per-request query lengths vary"):
+                adaptive_verification.maybe_create_adaptive_verification_manager(**kwargs)
+            manager.assert_not_called()
+            return
+        assert adaptive_verification.maybe_create_adaptive_verification_manager(**kwargs) is manager.return_value
+        manager.assert_called_once()
+        kwargs["req_states"].num_speculative_steps += 1
+        with pytest.raises(ValueError, match="per-request query lengths vary"):
+            adaptive_verification.maybe_create_adaptive_verification_manager(**kwargs)
+        assert manager.call_count == 1
+
+
+@pytest.mark.parametrize("method", ["dspark", "mtp", "dflash"])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("num_drafts,expected", [(None, 1), (5, 6), (STATE_RING_ROWS, STATE_RING_ROWS)])
+def test_v41_query_bound_is_independent_of_adaptive_policy(method, enabled, num_drafts, expected):
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            method=method,
+            enable_adaptive_verification=enabled,
+            num_speculative_tokens=num_drafts,
+            parallel_drafting=False,
+        ),
+        use_v2_model_runner=True,
+    )
+    # No parallel_config is needed to report the backend's query-width bound.
+    # Unsupported CP combinations are rejected at platform config validation.
+    assert AscendDSAV41MetadataBuilder.get_varlen_cudagraph_max_query_len(config, object()) == expected
+
+
+def test_v41_query_bound_without_speculation():
+    config = SimpleNamespace(speculative_config=None)
+    assert AscendDSAV41MetadataBuilder.get_varlen_cudagraph_max_query_len(config, object()) == 1
