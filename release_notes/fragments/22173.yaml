@@ -1,0 +1,4 @@
+pr: 22173
+entries:
+  - category: feature
+    text: Added experimental MooncakeConnectorV2 MemFabric URMA Pull into independent HiSparse Host pools on each Decode TP rank, reusing the Core connector and worker without cross-rank Host synchronization.
