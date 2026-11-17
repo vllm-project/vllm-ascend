@@ -846,8 +846,6 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/v1/executor/test_vllm_net_devices.py
     estimated_time: 20
-  - name: tests/v1/kv_connector/unit/test_nixl_simple_cpu_offload.py
-    estimated_time: 20
   - name: tests/v1/kv_connector/unit/test_transfer_topology_sharded.py
     estimated_time: 20
   - name: tests/v1/kv_connector/unit/test_hma_auto_config.py
@@ -1324,8 +1322,6 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/v1/sample/test_trace_replay_params.py
     estimated_time: 20
-  - name: tests/v1/simple_kv_offload/test_hip_mem_ops.py
-    estimated_time: 20
   - name: tests/v1/spec_decode/test_adaptive_verification.py
     estimated_time: 20
   - name: tests/v1/spec_decode/test_dflash2.py
@@ -1732,10 +1728,6 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/v1/kv_connector/unit/test_moriio_write_done_routing.py
     estimated_time: 20
-  - name: tests/v1/kv_connector/unit/test_simple_cpu_offload_connector.py
-    estimated_time: 20
-  - name: tests/v1/kv_connector/unit/test_simple_cpu_offload_metrics.py
-    estimated_time: 20
   - name: tests/v1/kv_offload/tiering/test_backpressure.py
     estimated_time: 20
   - name: tests/v1/logits_processors/test_loader.py
@@ -1743,8 +1735,6 @@ e2e-upstream_singlecard:
   - name: tests/v1/metrics/test_histogram_buckets.py
     estimated_time: 20
   - name: tests/v1/sample/test_dry.py
-    estimated_time: 20
-  - name: tests/v1/simple_kv_offload/test_kv_events.py
     estimated_time: 20
   - name: tests/v1/spec_decode/test_dflash_profile.py
     estimated_time: 20
@@ -1841,6 +1831,8 @@ e2e-upstream_a2_2:
   - name: tests/watermarking/test_parallel_compatibility.py
     estimated_time: 20
   - name: tests/v1/e2e/spec_decode/test_sharded_sampling.py
+    estimated_time: 20
+  - name: tests/models/language/pooling_mteb_test/test_qwen3_reranker.py
     estimated_time: 20
 e2e-upstream_a2_4:
   - name: tests/v1/distributed/test_hybrid_lb_dp.py

@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 import torch
 import torch_npu
+from vllm.config import ParallelConfig
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
@@ -42,7 +43,7 @@ def _make_builder(
         # DCP fixtures below provide two 128-token columns per rank.
         max_model_len=512,
     )
-    vllm_config.parallel_config = SimpleNamespace(
+    vllm_config.parallel_config = ParallelConfig(
         prefill_context_parallel_size=pcp_size,
         decode_context_parallel_size=dcp_size,
         tensor_parallel_size=max(4, dcp_size),
@@ -82,7 +83,6 @@ def _make_common_metadata() -> SimpleNamespace:
         seq_lens=torch.tensor([5, 6, 7]),
         max_query_len=2,
         is_prefilling=torch.tensor([True, True]),
-        context_parallel_metadata=None,
         block_table_tensor=torch.arange(6).view(3, 2),
     )
 

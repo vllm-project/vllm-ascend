@@ -47,7 +47,7 @@ examples and links together.
 | [sample/thinking_budget.py](sample/thinking_budget.py) | `patch/worker/patch_triton.py` | [thinking_budget.md](docs/thinking_budget.md) |
 | [spec_decode/prepare_dflash_inputs.py](spec_decode/prepare_dflash_inputs.py) | `worker/v2/spec_decode/dflash/speculator.py` | [prepare_dflash_inputs.md](docs/prepare_dflash_inputs.md) |
 | [spec_decode/resample.py](spec_decode/resample.py) | `worker/v2/spec_decode/rejection_sampler_utils.py` | [resample.md](docs/resample.md) |
-| [mamba/gdn_prepare.py](mamba/gdn_prepare.py) | `ops/gdn_attn_builder.py` | [gdn_prepare.md](docs/gdn_prepare.md) |
+| [mamba/gdn_prepare.py](mamba/gdn_prepare.py) | `attention/gdn_attn_builder.py` | [gdn_prepare.md](docs/gdn_prepare.md) |
 | [spec_decode/entropy_verify.py](spec_decode/entropy_verify.py) | `worker/v2/spec_decode/rejection_sampler_utils.py` | [entropy_verify.md](docs/entropy_verify.md) |
 
 ## Shared runner support
@@ -105,6 +105,8 @@ configuration rather than the runner input or sampling interface.
 | [fla/wy_fast.py](fla/wy_fast.py) | Linear attention |
 | [fold_indexer_cache.py](fold_indexer_cache.py) | Model/attention primitive or shared utility |
 | [fused_gdn_gating.py](fused_gdn_gating.py) | Model/attention primitive or shared utility |
+| [gdn/gdn_recoverssm_commit.py](gdn/gdn_recoverssm_commit.py) | GDN RecoverSSM commit. [Operator documentation](docs/gdn_recoverssm_commit.md) |
+| [gdn/gdn_recoverssm_verify.py](gdn/gdn_recoverssm_verify.py) | GDN RecoverSSM verify. [Operator documentation](docs/gdn_recoverssm_verify.md) |
 | [glm5_next_cann_keypool.py](glm5_next_cann_keypool.py) | Model/attention primitive or shared utility |
 | [glm5_next_kpool_tail_compress.py](glm5_next_kpool_tail_compress.py) | Model/attention primitive or shared utility |
 | [glm5_next_lightning_indexer.py](glm5_next_lightning_indexer.py) | Model/attention primitive or shared utility |
@@ -116,9 +118,11 @@ configuration rather than the runner input or sampling interface.
 | [kda/kda.py](kda/kda.py) | KDA computation |
 | [kda/l2norm.py](kda/l2norm.py) | KDA computation |
 | [kda/output_writeback.py](kda/output_writeback.py) | KDA computation |
-| [kda/recoverssm.py](kda/recoverssm.py) | Model state recovery |
+| [kimi_pixel_norm.py](kimi_pixel_norm.py) | Kimi image pixel lookup normalization; see [operator documentation](docs/kimi_pixel_norm.md). |
+| [kda/recoverssm.py](kda/recoverssm.py) | KDA RecoverSSM operators and commit context; [operator documentation](docs/kda_recoverssm.md) |
 | [kda/solve_tril.py](kda/solve_tril.py) | KDA computation |
 | [kda/utils.py](kda/utils.py) | KDA computation |
+| [hisparse.py](hisparse.py) | HiSparse mapped-Host refill, Resident gather, KV packing and invalidation; see [operator documentation](docs/hisparse.md). |
 | [layernorm_gated.py](layernorm_gated.py) | Model/attention primitive or shared utility |
 | [linearnorm/fused_eh_norm.py](linearnorm/fused_eh_norm.py) | Normalization/rotary fusion |
 | [linearnorm/qsa_rmsnorm_mrope.py](linearnorm/qsa_rmsnorm_mrope.py) | Model/attention primitive or shared utility |
@@ -128,7 +132,9 @@ configuration rather than the runner input or sampling interface.
 | [linearnorm/split_qkv_rmsnorm_rope_vnorm.py](linearnorm/split_qkv_rmsnorm_rope_vnorm.py) | Normalization/rotary fusion |
 | [linearnorm/split_qkv_tp_rmsnorm_rope.py](linearnorm/split_qkv_tp_rmsnorm_rope.py) | Normalization/rotary fusion |
 | [mamba/causal_conv1d.py](mamba/causal_conv1d.py) | Model state/attention |
+| [mamba/compact_conv_state.py](mamba/compact_conv_state.py) | [RecoverSSM convolution compaction](docs/compact_conv_state.md) |
 | [mamba/lightning_attn.py](mamba/lightning_attn.py) | Model state/attention |
+| [mamba/prepare_commit_plan.py](mamba/prepare_commit_plan.py) | [RecoverSSM commit planning](docs/prepare_commit_plan.md) |
 | [mamba/state_index.py](mamba/state_index.py) | Model state/attention |
 | [mamba/state_ops.py](mamba/state_ops.py) | Model state/attention |
 | [msa/minimax_qknorm_rope_cache.py](msa/minimax_qknorm_rope_cache.py) | Model sparse attention |
@@ -150,7 +156,7 @@ configuration rather than the runner input or sampling interface.
 | [qwen4_exp/qsa.py](qwen4_exp/qsa.py) | Model/attention primitive or shared utility |
 | [rms_norm.py](rms_norm.py) | Model/attention primitive or shared utility |
 | [rope.py](rope.py) | Model/attention primitive or shared utility |
-| [sfa_indexer_store.py](sfa_indexer_store.py) | Model/attention primitive or shared utility |
+| [sfa_indexer_store.py](sfa_indexer_store.py) | Indexer cache publication; see [operator documentation](docs/sfa_indexer_store.md). |
 | [sparse_index_remap.py](sparse_index_remap.py) | Model/attention primitive or shared utility |
 | [spec_decode/dspark_swa_indices.py](spec_decode/dspark_swa_indices.py) | Model attention indices |
 | [triton_utils.py](triton_utils.py) | Model/attention primitive or shared utility |

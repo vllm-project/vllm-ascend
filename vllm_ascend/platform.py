@@ -65,6 +65,7 @@ from vllm_ascend.utils import (
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
+    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -169,6 +170,10 @@ class NPUPlatform(Platform):
     @classmethod
     def is_pin_memory_available(cls):
         return True
+
+    @classmethod
+    def get_hisparse_backend_cls(cls) -> str:
+        return "vllm_ascend.hisparse.backend.AscendHiSparseBackend"
 
     @classmethod
     def opaque_attention_op(cls) -> bool:
@@ -330,6 +335,9 @@ class NPUPlatform(Platform):
         if not attn_selector_config.use_pcp and _validate_flash_attn_backend(backend_key, attn_selector_config):
             # vLLM resolves this import path to the backend class.
             return "vllm_ascend.attention.fa_v1.AscendFlashAttentionBackend"
+
+        if _validate_flash_attn_npu_3(backend_key, attn_selector_config):
+            return "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
 
         backend_map = {
             (True, False, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
@@ -636,6 +644,8 @@ class NPUPlatform(Platform):
                 if ratios:
                     config.compress_ratios = list(ratios)
 
+        # TODO: Remove this guard once GLM-5.3-Flash DFlash2 supports pipeline parallelism.
+        _validate_glm5next_dflash2_pp_config(vllm_config)
         cls._validate_indexer_pp_config(vllm_config)
 
         _validate_pcp_dcp_config(vllm_config)
@@ -1187,6 +1197,13 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
     # Validate scheduler extension policies (read ascend_config.scheduler_config)
     from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 
+    attention_config = getattr(vllm_config, "attention_config", None)
+    if (
+        getattr(attention_config, "hisparse_config", None) is not None
+        and ascend_config.sparse_kv_offload_config.enabled
+    ):
+        raise ValueError("Sparse KV offload cannot be combined with HiSparse")
+
     additional_config = vllm_config.additional_config
     if additional_config is None:
         vllm_config.additional_config = {}
@@ -1259,8 +1276,6 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
                 "single node; got "
                 f"nnodes_within_dp={parallel_config.nnodes_within_dp}."
             )
-        if scheduler_extension_config.profiling_chunk_config.enabled:
-            raise ValueError("DyntraLB cannot be used with profiling_chunk_config.")
 
     # recompute_scheduler_enable: only supported on PD-disaggregated D nodes
     if scheduler_extension_config.recompute_scheduler_enable:
@@ -1430,6 +1445,18 @@ def _setup_compile_backend(
             set(compilation_config.cudagraph_capture_sizes or []) | {reduced_cg_cap}
         )
         compilation_config.max_cudagraph_capture_size = None
+        # Main resolves separate prefill/decode sizes on the first pass. They
+        # were derived from the truncated grid, so regenerate them alongside
+        # the restored off-stride default rather than mixing two size sets.
+        # Explicit split sizes never receive reduced_cg_cap (see below).
+        if not vllm_version_is("0.33.0"):
+            for name in (
+                "prefill_cudagraph_capture_token_sizes",
+                "max_prefill_cudagraph_capture_tokens",
+                "decode_cudagraph_capture_request_sizes",
+                "max_decode_cudagraph_capture_requests",
+            ):
+                setattr(compilation_config, name, None)
         delattr(compilation_config, "reduced_cg_cap")
 
     # Recompute cudagraph sizes before extending splitting_ops (honors the
@@ -1444,7 +1471,13 @@ def _setup_compile_backend(
         and not vllm_config.model_config.enforce_eager
         and requires_tp_aligned_capture_sizes
     ):
-        original_sizes = compilation_config.cudagraph_capture_sizes
+        # Main V2 resolves prefill tokens and decode requests separately.
+        # The TP token-layout restriction applies to the prefill grid; keep
+        # the resolved decode request grid used by the graph managers intact.
+        prefill_sizes = None
+        if not vllm_version_is("0.33.0"):
+            prefill_sizes = compilation_config.prefill_cudagraph_capture_token_sizes
+        original_sizes = prefill_sizes if prefill_sizes is not None else compilation_config.cudagraph_capture_sizes
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         sp_aclgraph_sizes = [size for size in original_sizes if size % tp_size == 0]
         if not sp_aclgraph_sizes:
@@ -1454,7 +1487,17 @@ def _setup_compile_backend(
                 f"{vllm_config.parallel_config.tensor_parallel_size}"
             )
 
-        if len(sp_aclgraph_sizes) != len(original_sizes):
+        if prefill_sizes is not None:
+            compilation_config.prefill_cudagraph_capture_token_sizes = sp_aclgraph_sizes
+            compilation_config.max_prefill_cudagraph_capture_tokens = sp_aclgraph_sizes[-1]
+            # Re-record the token union from the resolved split grids. Keeping
+            # a legacy-only list (e.g. [4] with one decode request) makes the
+            # engine handshake's config re-entry reject the derived sizes.
+            vllm_config._split_cudagraph_capture_sizes(
+                False, vllm_config.get_decode_cudagraph_query_lens(vllm_config.uniform_decode_query_len)
+            )
+            compilation_config.post_init_cudagraph_sizes()
+        elif len(sp_aclgraph_sizes) != len(original_sizes):
             # Match max_cudagraph_capture_size with the valid max size to avoid
             # initialization error of vllm server.
             compilation_config.max_cudagraph_capture_size = sp_aclgraph_sizes[-1]
@@ -1538,18 +1581,6 @@ def _setup_worker_and_scheduler(
             async_scheduling=vllm_config.scheduler_config.async_scheduling
         )
 
-    # Use ProfilingChunkScheduler when profiling-based chunk sizing is on.
-    if scheduler_config.profiling_chunk_config.enabled:
-        vllm_config.scheduler_config.scheduler_cls = (
-            "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkAsyncScheduler"
-            if vllm_config.scheduler_config.async_scheduling
-            else "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
-        )
-        # Apply the EngineCore.__init__ patch here for the InprocClient (in-process).
-        # And the EngineCore.__init__ patch for EngineCoreProc (the spawned child process)
-        # has been moved to patch_engine_core.py.
-        import vllm_ascend.patch.platform.patch_profiling_chunk  # noqa
-
     # Extend original scheduler_config to use BatchJobAwareScheduler.
     if scheduler_config.batch_job_sched_config.enabled:
         if vllm_config.scheduler_config.async_scheduling:
@@ -1585,8 +1616,6 @@ def _swa_bounded_replay_unsupported_mode(ascend_config) -> str | None:
         return "recompute_scheduler_enable"
     if scheduler_config.dyntra_lb_config.enabled:
         return "dyntra_lb_config"
-    if scheduler_config.profiling_chunk_config.enabled:
-        return "profiling_chunk_config"
     if scheduler_config.enable_balance_scheduling:
         return "enable_balance_scheduling"
     return None
@@ -1766,7 +1795,13 @@ def _validate_flash_attn_backend(backend_key, selector) -> bool:
 
     config = get_current_vllm_config_or_none()
     spec = config.speculative_config if config is not None else None
-    if spec is None or not _is_supported_flash_attn_draft(spec, backends.model_tag):
+    if spec is None or spec.draft_model_config is None:
+        return False
+    if backends.model_tag == "dspark_head" and {"MiniMaxM31FlashA3DSparkModel", "DSparkMiniMaxDraftModel"}.intersection(
+        spec.draft_model_config.architectures or ()
+    ):
+        return _validate_minimax_dspark_flash_attn(config, selector)
+    if not _is_supported_flash_attn_draft(spec, backends.model_tag):
         return False
 
     from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
@@ -1784,6 +1819,100 @@ def _validate_flash_attn_backend(backend_key, selector) -> bool:
             or selector.use_batch_invariant
             or selector.use_per_head_quant_scales
         )
+    )
+
+
+def _validate_minimax_dspark_flash_attn(config, selector) -> bool:
+    """Keep the Flash checkpoint's eager-only guards separate from M3 drafts."""
+    from vllm.v1.attention.backend import AttentionType
+
+    spec = config.speculative_config
+    if spec.method != "dspark":
+        return False
+    if spec.target_model_config.hf_text_config.model_type != "minimax_m3_text":
+        return False
+    parallel = config.parallel_config
+    return (
+        parallel.pipeline_parallel_size == 1
+        and parallel.prefill_context_parallel_size == 1
+        and parallel.decode_context_parallel_size == 1
+        and not getattr(spec, "enable_adaptive_verification", False)
+        and selector.attn_type == AttentionType.DECODER
+        and selector.dtype in (torch.float16, torch.bfloat16)
+        and selector.kv_cache_dtype in (None, "auto", "float16", "bfloat16")
+        and not (
+            getattr(selector, "use_pcp", False)
+            or selector.use_dcp
+            or selector.use_mm_prefix
+            or selector.use_per_head_quant_scales
+            or selector.use_batch_invariant
+            or getattr(selector, "use_rswa", False)
+            or getattr(selector, "use_adaptive_verification", False)
+        )
+    )
+
+
+def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
+    """Select the optional A2/A3 FA3 ABI only for compatible MiniMax attention."""
+    if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
+        HardwareCapability.FLASH_ATTN_NPU_3
+    ):
+        return False
+
+    # Model configuration imports platforms during initialization.
+    from vllm.config import get_current_vllm_config_or_none
+    from vllm.v1.attention.backend import AttentionType
+
+    config = get_current_vllm_config_or_none()
+    spec = config.speculative_config if config is not None else None
+    if spec is None or spec.draft_model_config is None:
+        return False
+    if config is None or config.model_config is None or not _uses_minimax_fa3(config):
+        return False
+    parallel = config.parallel_config
+    return (
+        selector.attn_type == AttentionType.DECODER
+        and selector.dtype in (torch.float16, torch.bfloat16)
+        and selector.kv_cache_dtype in (None, "auto", "float16", "bfloat16")
+        and not any(
+            getattr(selector, flag, False)
+            for flag in (
+                "has_sink",
+                "use_pcp",
+                "use_dcp",
+                "use_mm_prefix",
+                "use_per_head_quant_scales",
+                "use_batch_invariant",
+                "use_adaptive_verification",
+                "use_rswa",
+            )
+        )
+        and parallel.pipeline_parallel_size == 1
+        and parallel.prefill_context_parallel_size == 1
+        and parallel.decode_context_parallel_size == 1
+        and config.cache_config.cache_dtype in ("auto", "float16", "bfloat16")
+        and not getattr(config.quant_config, "enable_c8_quant", False)
+        and not getattr(spec, "enable_adaptive_verification", False)
+        and util.find_spec("flash_attn_npu_3") is not None
+    )
+
+
+def _uses_minimax_fa3(config) -> bool:
+    """Keep unrelated models and drafts on their configured attention backend."""
+    architectures = config.model_config.hf_config.architectures or ()
+    spec = config.speculative_config
+    target = getattr(spec, "target_model_config", None)
+    target_hf = getattr(target, "hf_config", None)
+    draft_architectures = {
+        "DSparkMiniMaxDraftModel",
+        "MiniMaxM31FlashA3DSparkModel",
+        "Qwen3DSparkModel",
+        "Qwen3OmniDSparkModel",
+    }
+    return (
+        getattr(spec, "method", None) in ("dspark",)
+        and bool(draft_architectures.intersection(architectures))
+        and bool(_MINIMAX_M3_ARCHITECTURES.intersection(getattr(target_hf, "architectures", None) or ()))
     )
 
 
@@ -1837,6 +1966,17 @@ def _get_reduced_cg_cap(vllm_config: VllmConfig) -> int | None:
     if compilation_config.max_cudagraph_capture_size is not None:
         return None
     if compilation_config.cudagraph_capture_sizes is not None:
+        return None
+    if not vllm_version_is("0.33.0") and any(
+        getattr(compilation_config, name) is not None
+        for name in (
+            "prefill_cudagraph_capture_token_sizes",
+            "max_prefill_cudagraph_capture_tokens",
+            "decode_cudagraph_capture_request_sizes",
+            "max_decode_cudagraph_capture_requests",
+            "max_decode_cudagraph_capture_tokens",
+        )
+    ):
         return None
 
     scheduler_config = getattr(vllm_config, "scheduler_config", None)
@@ -1912,6 +2052,12 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
         "Qwen4ExpForCausalLM",
         "Qwen4ExpForConditionalGeneration",
     ):
+        if engram_config is not None:
+            if getattr(engram_config, "disk_offload", False):
+                raise ValueError("Qwen PLE disk offload is not supported on Ascend")
+            if engram_config.cpu_offload:
+                if engram_config.embedding_across_dp or engram_config.use_thp:
+                    raise ValueError("Qwen PLE UVA offload requires ETP=TP without THP")
         # Qwen4Exp PLE is managed by its model-specific implementation and the
         # upstream ngram_embedding, which reads engram_config directly. Keep the
         # config flowing to upstream instead of clearing it; model/layer/device
@@ -2063,6 +2209,33 @@ def _validate_deepseek_v4_tp_config(vllm_config: VllmConfig) -> None:
         raise ValueError(f"DeepSeek {variant} supports at most TP{max_tp_size}. Got tp_size={tp_size}.")
 
 
+def _validate_glm5next_dflash2_pp_config(vllm_config: VllmConfig) -> None:
+    parallel_config = vllm_config.parallel_config
+    pp_size = parallel_config.pipeline_parallel_size
+    if pp_size <= 1:
+        return
+
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None or getattr(speculative_config, "method", None) != "dflash":
+        return
+
+    model_config = vllm_config.model_config
+    model_types = {
+        getattr(getattr(model_config, field, None), "model_type", None) for field in ("hf_config", "hf_text_config")
+    }
+    if model_types.isdisjoint({"glm5_next", "glm5_next_text"}):
+        return
+
+    draft_model_config = getattr(speculative_config, "draft_model_config", None)
+    draft_architectures = getattr(draft_model_config, "architectures", None) or ()
+    if "DFlash2DraftModel" not in draft_architectures:
+        return
+
+    raise ValueError(
+        f"GLM-5.3-Flash with DFlash2 currently requires pipeline_parallel_size=1. Got pipeline_parallel_size={pp_size}."
+    )
+
+
 def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> None:
     speculative_config = vllm_config.speculative_config
     if speculative_config is None:
@@ -2084,6 +2257,11 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
 
     draft_model_config = speculative_config.draft_model_config
     if draft_model_config is None:
+        return
+
+    # Upstream DFlashSpeculator runs dense DSpark drafts at DCP=1 and the
+    # target runner marks their KV groups with dcp_sharded=False.
+    if vllm_config.use_v2_model_runner and speculative_config.use_dspark() and not draft_model_config.use_mla:
         return
 
     # MLA draft models do not use the GQA/MQA head-sharding rules below.

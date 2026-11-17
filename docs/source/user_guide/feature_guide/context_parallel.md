@@ -72,7 +72,10 @@ PCP supports MTP with MLA, SFA, and DeepSeek-V4 DSA models, Eagle3 with
 GQA models, and DSpark with SFA, DeepSeek-V4 DSA, and DeepSeek-V4.1 DSA models. The target
 model runs with the configured PCP topology, while the draft model is replicated on every PCP rank
 and runs with a logical PCP size of `1`. Configure PCP only for the target
-model.
+model. DFlash and DFlash2 also use a replicated draft with logical PCP size `1`.
+DFlash2 candidate selection merges the target LM head's vocabulary shards across
+both PCP and TP before computing the global candidate TopK.
+For replicated DFlash/DFlash2 with `TP=1` and `DP=1`, keep EPLB disabled.
 
 For general speculative decoding configuration and model requirements, see [Speculative Decoding](speculative_decoding.md).
 
@@ -111,7 +114,8 @@ For either method, remove `--enforce-eager` and add the following option to use 
 - For PP+PCP, use `MooncakeConnectorV2` on [supported models](pipeline_parallel.md).
 - KV cache pooling with PCP supports only `AscendStoreConnector` with `use_layerwise=false`.
 - PCP speculative decoding supports MTP with MLA, SFA, and DeepSeek-V4 DSA models,
-  Eagle3 with GQA models, and DSpark with SFA, DeepSeek-V4 DSA, and DeepSeek-V4.1 DSA models.
+  Eagle3 with GQA models, DSpark with SFA, DeepSeek-V4 DSA, and DeepSeek-V4.1 DSA models,
+  and replicated DFlash/DFlash2 drafts.
 - PCP does not support `FULL` CUDA graphs; use eager mode, `PIECEWISE`, `FULL_AND_PIECEWISE`, or `FULL_DECODE_ONLY`.
 - Encoder-decoder models and LoRA are not supported with PCP.
 - PCP and DCP can be stacked for MLA, SFA, and GQA. See
@@ -167,5 +171,7 @@ The following constraint applies to both standalone DCP and PCP+DCP:
         --cp-kv-cache-interleave-size 128 \
         --kv-transfer-config '{...}'
     ```
+
+- Mooncake block-key layerwise KV pooling supports standalone DCP when the producer and consumer use the same DCP size. PCP and DCP cannot be enabled together for layerwise pooling, and cache groups whose block size is not scaled by DCP (sliding-window, recurrent/align-state, circular-buffer, ...) are not supported with DCP. The smallest cache-group block size must divide every other group block size, and `--prefix-match-unit` must be unset with DCP. For GQA/MQA, `tensor_parallel_size // num_key_value_heads` must be at least the DCP size. Hybrid DCP support is experimental. See [Mooncake Layerwise KV Cache Pooling](mooncake_layerwise_adaptation_and_optimization.md#decode-context-parallelism-dcp).
 
 For implementation details, see the [Context Parallel design document](../../developer_guide/Design_Documents/context_parallel.md).

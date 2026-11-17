@@ -3,7 +3,6 @@
 import json
 import socket
 import threading
-import time
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -48,6 +47,7 @@ def workers():
             block_shapes=[[(16, 8)]],
             block_size_scales=[[1]],
             indexer_replication_sizes=[0],
+            dcp_sharded=[True],
             local_ip=f"10.0.0.{pp + 1}",
             handshake_port=8000 + pcp * 2 + tp,
         )
@@ -167,7 +167,7 @@ def test_shared_service_preserves_pull_query_and_completion_protocol():
         # Pull clients send the original one-element request.
         groups = msgspec.msgpack.decode(query(thread, (GET_META_MSG,)), type=MooncakeTransferMetadataGroups)
         assert groups.engine_id == "d"
-        thread.add_delayed_request("request", time.time())
+        thread.add_delayed_request("request")
         assert query(thread, (DONE_RECVING_MSG, "request")) == ACK_MSG
         assert "request" not in thread.delayed_free_requests
         assert thread.finished_requests.get_nowait() == "request"

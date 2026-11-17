@@ -14,7 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-FROM quay.io/ascend/cann:9.2.1-910b-ubuntu22.04-py3.12
+FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.3.0_20261113161300-910b-ubuntu22.04-py3.12
 
 WORKDIR /workspace
 
@@ -57,9 +57,16 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
 # Dependency versions used by the vllm-ascend build.
 ARG SOC_VERSION="ascend910b1"
 ENV DEBIAN_FRONTEND=noninteractive
+# Cap opc/c++/rust build parallelism to bound memory on shared buildkitd nodes:
+# the heavy vllm-ascend compile otherwise spawns unbounded jobs and can exhaust
+# a 128Gi node (OOM-killing kubelet). Overridable via --build-arg MAX_JOBS=N.
+ARG MAX_JOBS=32
+ARG CARGO_BUILD_JOBS=32
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
-    OMP_NUM_THREADS=1
+    OMP_NUM_THREADS=1 \
+    MAX_JOBS=$MAX_JOBS \
+    CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS
 COPY . /vllm-workspace/vllm-ascend/
 ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi \
     https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly"
@@ -80,7 +87,7 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/cann/set_env.sh && \
     export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     # Install memfabric_hybrid kernels
-    TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A2 && \
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A2 --install-for-all && \
     # Install flash-linear-attention-npu from the Ascend mirror
     python3 -m pip install "flash-linear-attention-npu-a2===${FLA_VERSION}" --force-reinstall --no-deps && \
     # Keep the CANN env and --no-build-isolation: the isolated build env lacks torch/torch_npu.

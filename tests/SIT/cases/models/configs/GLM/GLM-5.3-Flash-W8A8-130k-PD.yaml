@@ -1,5 +1,5 @@
 # GLM-5.3-Flash W8A8 1010-V2 MooncakeConnectorV2 PD separation testing
-test_name: "GLM-5.3-Flash-W8A8-1010-V2-1M-PD"
+test_name: "GLM-5.3-Flash-W8A8-130k-PD-StaticKernel"
 model: "Eco-Tech/GLM-5.3-Flash-w8a8"
 num_nodes: 2
 npu_per_node: 16
