@@ -1411,6 +1411,13 @@ class AscendGDNFusedAttentionBackend(AscendGDNAttentionBackend):
 
     @staticmethod
     def get_builder_cls() -> type[AscendGDNAttentionMetadataBuilder]:
+        from vllm_ascend.models.qwen4_exp.recoverssm_config import use_qwen_gdn_recoverssm
+
+        config = get_current_vllm_config_or_none()
+        if config is not None and use_qwen_gdn_recoverssm(config):
+            from vllm_ascend.models.qwen4_exp.recoverssm_metadata import AscendGDNRecoverSSMMetadataBuilder
+
+            return AscendGDNRecoverSSMMetadataBuilder
         # Import lazily to avoid the gdn <-> builder import cycle at module
         # initialization.  The probe result is cached by the attention class.
         from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention

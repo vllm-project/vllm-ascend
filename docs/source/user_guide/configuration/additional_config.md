@@ -78,6 +78,26 @@ The following table lists additional configuration options available in vLLM Asc
 
 The details of each configuration option are as follows:
 
+## Experimental Qwen GDN RecoverSSM
+
+| Key | Type | Default | Behavior |
+| --- | --- | --- | --- |
+| `qwen_gdn_recoverssm` | bool | `False` | Enable experimental GDN accepted-prefix state recovery for Qwen4Exp/Flash Next on Model Runner V2. |
+
+Enable with `--additional-config '{"qwen_gdn_recoverssm":true}'` together with
+speculative decoding, `--no-enable-prefix-caching`, and `--mamba-cache-mode none`.
+PP, PCP, and DCP must each be 1; microbatching is unsupported. Do not combine this
+option with `--use-replayssm`, which selects a different state lifecycle.
+
+The standard convolution/SSM cache views remain transferable through the PD
+connector. FP32 replay records are private scratch and consume additional NPU
+memory outside the KV cache budget; reduce `--gpu-memory-utilization` if needed.
+
+This option is disabled by default. Validation currently covers a four-layer
+functional debug model with MTP3 and 1P1D on A3. Token parity with the original
+path and with non-disaggregated execution has not passed; full-model accuracy,
+long-running stability, and performance gains remain unverified.
+
 <span id="runtime_guard"></span>**runtime_guard**
 
 Runtime Guard provides online anomaly detection, structured incident reports, and optional native KV cache dump. See the [Runtime Guard feature guide](../feature_guide/runtime_guard.md) for usage and the [runtime_config reference](./runtime_config.md) for JSON fields.

@@ -59,10 +59,10 @@ def test_draft_config_remaps_modelslim_description(monkeypatch) -> None:
     monkeypatch.setattr(
         mtp,
         "_upstream_make_draft_vllm_config",
-        lambda _config, _start: draft_config,
+        lambda _config, _start, _layers: draft_config,
     )
 
-    actual = mtp._make_draft_vllm_config(target_config, mtp_start_layer_idx=48)
+    actual = mtp._make_draft_vllm_config(target_config, mtp_start_layer_idx=48, num_mtp_layers=1)
 
     assert actual is draft_config
     assert draft_config.quant_config.quant_description == {

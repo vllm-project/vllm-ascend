@@ -50,6 +50,7 @@ from vllm_ascend.ops.gdn_checkpoint import ensure_gdn_checkpoint_workspace, run_
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
+from vllm_ascend.ops.triton.gdn.gdn_recoverssm_verify import gdn_recoverssm_verify
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_varlen, extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
 
@@ -730,46 +731,71 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            query_spec = l2norm_fwd(query_spec)
-            key_spec = l2norm_fwd(key_spec)
-            use_upstream_recurrent = attn_metadata.spec_decode_metadata.use_upstream_recurrent or (
-                spec_state_indices_tensor.ndim == 2 and spec_state_indices_tensor.shape[1] > _MAX_RECURRENT_GDN_TOKENS
-            )
-            if use_upstream_recurrent:
-                # The native packed-index API bounds accepted_prev by the
-                # current query length. Reuse vLLM's strided state-table API
-                # for adaptive graphs and windows wider than the AscendC cap.
-                core_attn_out_spec, _ = fused_recurrent_gated_delta_rule(
-                    q=query_spec,
-                    k=key_spec,
-                    v=value_spec,
-                    g=g_spec,
-                    beta=beta_spec,
-                    scale=key_spec.shape[-1] ** -0.5,
-                    initial_state=ssm_state,
-                    inplace_final_state=True,
-                    cu_seqlens=spec_causal_conv1d_meta.query_start_loc,
-                    ssm_state_indices=spec_state_indices_tensor,
-                    num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens,
+            if hasattr(attn_metadata, "gdn_recoverssm_context"):
+                # The verify kernel normalizes Q/K and computes GDN's scalar
+                # gates from raw a/b. Its checkpoint remains untouched until
+                # rejection sampling supplies the accepted-prefix length.
+                if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
+                    a_spec, b_spec = a, b
+                else:
+                    a_spec = a.index_select(0, spec_token_indx)
+                    b_spec = b.index_select(0, spec_token_indx)
+                core_attn_out_spec = gdn_recoverssm_verify(
+                    self.A_log,
+                    a_spec,
+                    b_spec,
+                    self.dt_bias,
+                    query_spec,
+                    key_spec,
+                    value_spec,
+                    checkpoint_state=ssm_state,
+                    replay_cache=self._qwen_gdn_replay,
+                    query_start_loc=spec_causal_conv1d_meta.query_start_loc,
+                    state_indices=attn_metadata.gdn_recoverssm_state_indices,
+                    spec_query_len=self.num_spec + 1,
                 )
             else:
-                actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
-                core_attn_out_spec = recurrent_gated_delta_rule(
-                    query_spec.squeeze(0),
-                    key_spec.squeeze(0),
-                    value_spec.squeeze(0),
-                    ssm_state,
-                    g=g_spec.squeeze(0),
-                    beta=beta_spec.squeeze(0),
-                    scale=key_spec.shape[-1] ** -0.5,
-                    actual_seq_lengths=actual_seq_lengths,
-                    ssm_state_indices=_flatten_recurrent_state_indices(
-                        spec_state_indices_tensor,
-                        query_spec.shape[1],
-                        spec_causal_conv1d_meta.query_start_loc,
-                    ),
-                    num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
-                ).unsqueeze(0)
+                query_spec = l2norm_fwd(query_spec)
+                key_spec = l2norm_fwd(key_spec)
+                use_upstream_recurrent = attn_metadata.spec_decode_metadata.use_upstream_recurrent or (
+                    spec_state_indices_tensor.ndim == 2
+                    and spec_state_indices_tensor.shape[1] > _MAX_RECURRENT_GDN_TOKENS
+                )
+                if use_upstream_recurrent:
+                    # The native packed-index API bounds accepted_prev by the
+                    # current query length. Reuse vLLM's strided state-table API
+                    # for adaptive graphs and windows wider than the AscendC cap.
+                    core_attn_out_spec, _ = fused_recurrent_gated_delta_rule(
+                        q=query_spec,
+                        k=key_spec,
+                        v=value_spec,
+                        g=g_spec,
+                        beta=beta_spec,
+                        scale=key_spec.shape[-1] ** -0.5,
+                        initial_state=ssm_state,
+                        inplace_final_state=True,
+                        cu_seqlens=spec_causal_conv1d_meta.query_start_loc,
+                        ssm_state_indices=spec_state_indices_tensor,
+                        num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens,
+                    )
+                else:
+                    actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
+                    core_attn_out_spec = recurrent_gated_delta_rule(
+                        query_spec.squeeze(0),
+                        key_spec.squeeze(0),
+                        value_spec.squeeze(0),
+                        ssm_state,
+                        g=g_spec.squeeze(0),
+                        beta=beta_spec.squeeze(0),
+                        scale=key_spec.shape[-1] ** -0.5,
+                        actual_seq_lengths=actual_seq_lengths,
+                        ssm_state_indices=_flatten_recurrent_state_indices(
+                            spec_state_indices_tensor,
+                            query_spec.shape[1],
+                            spec_causal_conv1d_meta.query_start_loc,
+                        ),
+                        num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
+                    ).unsqueeze(0)
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 
