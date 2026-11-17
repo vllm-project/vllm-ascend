@@ -615,6 +615,9 @@ class AscendPCPManager(PCPManager):
         assert self._global_batch_slot_mappings is not None
         num_reqs = self._get_global_graph_num_reqs(input_batch.num_reqs_after_padding, query_len)
         num_tokens = num_reqs * query_len
+        # Captured cache updates read the same permutation buffer as replay.
+        restore_idx = self._hidden_restore_idx_buffer[:num_tokens]
+        torch.arange(num_tokens, out=restore_idx)
         global_batch = AscendInputBatch.make_dummy(
             num_reqs,
             num_tokens,
@@ -629,7 +632,7 @@ class AscendPCPManager(PCPManager):
             local_num_tokens=input_batch.num_tokens_after_padding,
             global_block_tables=self._block_tables.get_dummy_block_tables(num_reqs),
             global_slot_mappings=self._global_batch_slot_mappings[:, :num_tokens].fill_(-1),
-            hidden_restore_idx=torch.arange(num_tokens, device=self.device),
+            hidden_restore_idx=restore_idx,
         )
 
     def build_attention_context(

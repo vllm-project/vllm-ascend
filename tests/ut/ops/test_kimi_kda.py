@@ -8,10 +8,11 @@ import pytest
 import torch
 from torch import nn
 
-from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend, KimiKDARecoverSSMMetadataBackend
 from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
     AscendKimiK3DeltaAttention,
+    KimiKDAHostMetadataBackend,
+    KimiKDARecoverSSMMetadataBackend,
     _KDAFusedBFGLinear,
     _prepare_beta,
 )
