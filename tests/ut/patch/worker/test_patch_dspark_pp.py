@@ -11,15 +11,30 @@ from vllm_ascend.patch.worker import patch_dspark
 
 
 @pytest.mark.parametrize("architecture", ["GlmMoeDsaForCausalLM", "KimiK31ForConditionalGeneration"])
-@pytest.mark.parametrize("inherits_quant", [True, False])
+# inherits_quant follows from the draft architecture and whether it shares the
+# target checkpoint, so it travels with them rather than crossing them.
+@pytest.mark.parametrize(
+    ("draft_architecture", "same_checkpoint", "inherits_quant"),
+    [
+        ("Glm5DSparkForCausalLM", True, True),
+        ("Qwen3DSparkModel", False, False),
+        ("MistralLarge4DSparkModel", True, False),
+    ],
+)
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("fail", [True, False])
-def test_dspark_draft_partition_isolation(monkeypatch, inherits_quant, pp_size, fail, architecture):
+def test_dspark_draft_partition_isolation(
+    monkeypatch, architecture, draft_architecture, same_checkpoint, inherits_quant, pp_size, fail
+):
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
         model_config=SimpleNamespace(model="target", architecture=architecture),
         speculative_config=SimpleNamespace(
-            method="dspark", draft_model_config=SimpleNamespace(model="target" if inherits_quant else "draft")
+            method="dspark",
+            draft_model_config=SimpleNamespace(
+                model="target" if same_checkpoint else "draft",
+                architectures=[draft_architecture],
+            ),
         ),
         quant_config=object(),
     )

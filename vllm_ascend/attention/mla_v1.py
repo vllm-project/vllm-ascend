@@ -45,6 +45,7 @@ from vllm_ascend.attention.flashmla import (
     get_flashmla_ops,
     split_flashmla_requests,
 )
+from vllm_ascend.attention.mla_draft_window import MLADraftWindow
 from vllm_ascend.attention.utils import (
     ATTENTION_UPDATE_MAX_INPUTS,
     MLA_FLASH_SUPPORTED_Q_HEADS,
@@ -74,7 +75,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.paged_mla_cache_read import load_mla_cache_rows_by_slots
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.ops.rotary_embedding import gather_mla_rope, get_cos_and_sin_mla
 from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate, register_flash_attention_gate_warmup
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
@@ -340,9 +341,11 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.nope_zero_rope_cache: dict[tuple, torch.Tensor] | None = {} if self.rope_dim == 0 else None
         static_forward_context = vllm_config.compilation_config.static_forward_context
         # MLA layers are grouped by RoPE mode before metadata builders are created.
-        self.use_mla_rope = static_forward_context[layer_names[0]].impl.use_mla_rope if layer_names else True
-        self.cos_cache = None
-        self.sin_cache = None
+        impl = static_forward_context[layer_names[0]].impl if layer_names else None
+        self.use_mla_rope = impl.use_mla_rope if impl is not None else True
+        self.rope_metadata_source = getattr(impl, "rope_metadata_source", None)
+        self.rope_buffer_capacity = scheduler_config.max_num_batched_tokens
+        self.rope_buffers: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
         self.chunk_seq_lens: torch.Tensor = None
         self.cu_seq_lens_cpu: torch.Tensor = None
@@ -611,10 +614,34 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             if self.is_pcp_decode_sharded:
                 # Decode rows lead the local positions, so a decode-only batch
                 # can refresh the graph-stable RoPE buffer that decode uses.
-                metadata.pcp_cos, metadata.pcp_sin = get_cos_and_sin_mla(
-                    common_attn_metadata.positions.long(), use_cache=self.num_prefills == 0
+                decode_only = self.num_prefills == 0
+                metadata.pcp_cos, metadata.pcp_sin = self._get_metadata_rope(
+                    common_attn_metadata.positions.long(),
+                    kind="decode" if decode_only else "pcp",
+                    use_cache=decode_only,
                 )
         return metadata
+
+    def _get_metadata_rope(
+        self, positions: torch.Tensor, *, kind: str, use_cache: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.rope_metadata_source is None:
+            return get_cos_and_sin_mla(positions, use_cache=use_cache)
+
+        cos, sin = gather_mla_rope(self.rope_metadata_source.cos_sin_cache, positions)
+        num_tokens = positions.numel()
+        if num_tokens > self.rope_buffer_capacity:
+            raise ValueError("Draft RoPE positions exceed the metadata buffer capacity.")
+        buffers = self.rope_buffers.get(kind)
+        if buffers is None:
+            shape = (self.rope_buffer_capacity, *cos.shape[1:])
+            buffers = self.rope_buffers[kind] = (cos.new_empty(shape), sin.new_empty(shape))
+        # Draft prefill can also be captured. Keep stable addresses separate
+        # from the target and from the other metadata parts.
+        cos_out, sin_out = (buffer[:num_tokens] for buffer in buffers)
+        cos_out.copy_(cos)
+        sin_out.copy_(sin)
+        return cos_out, sin_out
 
     def _finalize_pcp_metadata(
         self,
@@ -745,7 +772,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         prefill_input_positions = input_positions[tokens_start:]
         if self.use_mla_rope:
-            cos, sin = get_cos_and_sin_mla(prefill_input_positions)
+            cos, sin = self._get_metadata_rope(prefill_input_positions, kind="prefill")
         else:
             cos = sin = None
         prefill_query_lens = self.query_lens[reqs_start:].to(torch.int32)
@@ -832,7 +859,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 )
 
         if self.use_mla_rope:
-            cos, sin = get_cos_and_sin_mla(input_positions, use_cache=True)
+            cos, sin = self._get_metadata_rope(input_positions, kind="decode", use_cache=True)
             cos = cos[: self.num_decode_tokens, ...]
             sin = sin[: self.num_decode_tokens, ...]
         else:
@@ -950,6 +977,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
         self.kv_cache_dtype = kv_cache_dtype
+        self.sliding_window = sliding_window
 
         # MLA Args
         self.q_lora_rank = kwargs["q_lora_rank"]
@@ -1044,6 +1072,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self.fa_quant_layer or self.dtype not in (torch.bfloat16, torch.float16) or self.enable_kv_nz:
             return False
         dcp_size = config.parallel_config.decode_context_parallel_size
+        if dcp_size > 1 and self.sliding_window is not None and config.speculative_config is not None:
+            return False
         # History sees all Q heads in the DCP group; current uses local heads.
         if self.use_pcp or self.num_heads * dcp_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
             return False
@@ -1119,6 +1149,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     softmax_lse,
                     dequant_scale_q_nope,
                     fak_descale_float,
+                    *draft_window_params,
                 ) = param
                 if _EXTRA_CTX.is_draft_model:
                     draft_step = attn_count // num_layers
@@ -1143,6 +1174,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                     seq_lens_list = seq_lens_list + [0] * (len(actual_seq_lengths) - len(seq_lens_list))
                 else:
                     seq_lens_list = seq_lens_list + [0] * (num_tokens - len(seq_lens_list))
+
+                if draft_window_params:
+                    (draft_window,) = draft_window_params
+                    block_table, attn_mask, seq_lens_list = draft_window.prepare(
+                        block_table, seq_lens_list, len(actual_seq_lengths), replay=True
+                    )
 
                 extra_args = {}
                 if dequant_scale_q_nope is not None:
@@ -2751,6 +2788,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
 
         attn_output_shape: tuple | None = None
+        draft_window = None
         # TODO: Drop SpecDecoding after V1/310P MTP paths use DecodeOnly and
         # verify that their FIA query layout still matches graph capture.
         if (
@@ -2786,6 +2824,16 @@ class AscendMLAImpl(MLAAttentionImpl):
                 sparse_mode = 3
                 attn_mask = decode_meta.attn_mask
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
+            if (
+                self.sliding_window is not None
+                and not attn_metadata.causal
+                and _EXTRA_CTX.is_draft_model
+                and self.speculative_config.use_dspark()
+                and not self.use_dcp
+                and not self.is_pcp_decode_sharded
+            ):
+                query_width = max(end - start for start, end in zip([0, *actual_seq_lengths], actual_seq_lengths))
+                draft_window = MLADraftWindow(self.sliding_window, block_size, query_width)
             if self.fa_quant_layer:
                 assert dequant_scale_q_nope is not None
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads)
@@ -2857,6 +2905,13 @@ class AscendMLAImpl(MLAAttentionImpl):
             q_pe = _mla_nope_zero_rope(q_nope, rope_dim, zero_rope_cache)
             k_pe = _mla_nope_zero_rope(k_nope, rope_dim, zero_rope_cache)
 
+        block_table = decode_meta.block_table
+        seq_lens_list = decode_meta.seq_lens_list
+        if draft_window is not None:
+            block_table, attn_mask, seq_lens_list = draft_window.prepare(
+                block_table, seq_lens_list, len(actual_seq_lengths), capture=_EXTRA_CTX.capturing
+            )
+
         common_kwargs = {
             "num_query_heads": self.num_heads_padded,
             "num_key_value_heads": self.num_kv_heads,
@@ -2864,10 +2919,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             "atten_mask": attn_mask,
             "sparse_mode": sparse_mode,
             "softmax_scale": self.scale,
-            "block_table": decode_meta.block_table,
+            "block_table": block_table,
             "block_size": block_size,
             "actual_seq_qlen": actual_seq_lengths,
-            "actual_seq_kvlen": decode_meta.seq_lens_list,
+            "actual_seq_kvlen": seq_lens_list,
         }
         common_kwargs["query_rope"] = q_pe
         common_kwargs["key_rope"] = k_pe
@@ -2913,9 +2968,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                 weak_ref_tensors(attn_mask) if attn_mask is not None else None,
                 sparse_mode,
                 self.scale,
-                decode_meta.block_table,
+                block_table,
                 block_size,
-                decode_meta.seq_lens_list,
+                seq_lens_list,
                 actual_seq_lengths,
                 weak_ref_tensors(attn_output),
                 weak_ref_tensors(softmax_lse),
@@ -2927,6 +2982,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 )  # type: ignore
             else:
                 attn_params = attn_params + (None, None)  # type: ignore
+            if draft_window is not None:
+                attn_params = (*attn_params, draft_window)  # type: ignore
 
             if workspace is None:
                 workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
@@ -2973,13 +3030,14 @@ class AscendMLAImpl(MLAAttentionImpl):
         flash.query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
         flash.query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
         record_attention_compute_start()
+        inputs = flash.draft_window or flash
         latent, _ = flash.adapter.attention(
             flash.query,
             fused_cache,
-            block_table=flash.block_table,
-            cache_seqlens=flash.cache_lens,
-            cu_seqlens_q=flash.cu,
-            seqused_q=flash.used_q,
+            block_table=inputs.block_table,
+            cache_seqlens=inputs.cache_lens,
+            cu_seqlens_q=inputs.cu,
+            seqused_q=inputs.used_q,
             metadata=flash.schedule,
             attn_mask=flash.attn_mask,
         )

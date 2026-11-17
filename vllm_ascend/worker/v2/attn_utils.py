@@ -200,6 +200,17 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
     from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 
+    # Annotated, so the arity does not come from whichever branch runs first.
+    sfa_indexer_cache_types: tuple[type, ...]
+    try:
+        from vllm.models.mistral.amd.indexer import MistralIndexerCache
+
+        sfa_indexer_cache_types = (DeepseekV32IndexerCache, MistralIndexerCache)
+    except ImportError:
+        # vLLM main ships Mistral Large 4 (vllm#64534); the older supported
+        # release pin does not, so the indexer cache type is optional here.
+        sfa_indexer_cache_types = (DeepseekV32IndexerCache,)
+
     use_turboquant = vllm_config.cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     attention_layer_names: list[str] = []
@@ -223,7 +234,12 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         elif c8_k_cache_dtype == torch.int8:
             c8_k_scale_cache_dtype = torch.float16
 
-    c8_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+    cache_dtype = vllm_config.cache_config.cache_dtype
+    c8_cache_dtype = (
+        torch.float8_e4m3fn
+        if cache_dtype == "fp8_ds_mla"
+        else kv_cache_dtype_str_to_dtype(cache_dtype, vllm_config.model_config)
+    )
 
     for layer_name, attn_module in attn_layers.items():
         if getattr(attn_module, "kv_sharing_target_layer_name", None):
@@ -328,7 +344,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 is_draft=spec.is_draft,
                 **ratio_kwargs,
             )
-        if isinstance(attn_module, DeepseekV32IndexerCache):
+        if isinstance(attn_module, sfa_indexer_cache_types):
             if not getattr(
                 getattr(attn_layers.get(layer_name.replace(".indexer.k_cache", ".attn")), "impl", None),
                 "runtime_has_indexer",
@@ -749,11 +765,21 @@ def build_attn_state(
     return attn_state
 
 
-def _get_layer_kv_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
+def _get_layer_kv_cache_specs(
+    kv_cache_config: KVCacheConfig,
+    shared_layers: Iterable[str] = (),
+) -> dict[str, KVCacheSpec]:
+    shared_layer_names = set(shared_layers)
     layer_kv_cache_spec: dict[str, KVCacheSpec] = {}
     for group_kv_cache_spec in kv_cache_config.kv_cache_groups:
         group_spec = group_kv_cache_spec.kv_cache_spec
         for layer_name in group_kv_cache_spec.layer_names:
+            # KV-sharing layers are logical consumers of their target layer's
+            # cache. They remain in ``layer_names`` for scheduler bookkeeping,
+            # but UniformTypeKVCacheSpecs intentionally has no independent
+            # entry or allocation for them.
+            if layer_name in shared_layer_names:
+                continue
             if isinstance(group_spec, UniformTypeKVCacheSpecs):
                 layer_kv_cache_spec[layer_name] = group_spec.kv_cache_specs[layer_name]
             else:
@@ -1179,7 +1205,7 @@ def _allocate_kv_cache(
     vllm_config = get_current_vllm_config()
     if KVPPConfig.from_vllm_config(vllm_config).size > 1:
         caches = allocate_kvpp_cache(vllm_config, kv_cache_config, device)
-        specs = _get_layer_kv_cache_specs(kv_cache_config)
+        specs = _get_layer_kv_cache_specs(kv_cache_config, shared_layers)
         # Indexer reshape expects a tuple even without a quantization scale.
         # Single-component main MLA caches still use a raw Tensor.
         return {
@@ -1191,7 +1217,7 @@ def _allocate_kv_cache(
     kv_cache_raw_tensors: dict[str, Any] = {}
     # prefill disaggregation need the addr of cache tensor be aligned with 2M
     alignment = 2 * 1024 * 1024
-    layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
+    layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config, shared_layers)
     attn_layers: dict[str, AttentionLayerBase] | None = None
     # Gemma 4 full/sliding groups share one pool while retaining contiguous
     # K/V views. The worker keeps the full budget only for this V2 path.
@@ -1704,7 +1730,7 @@ def _reshape_kv_cache_v2(
 
     vllm_config = get_current_vllm_config()
     is_dsv4_model = _is_dsv4_model(vllm_config)
-    layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
+    layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config, shared_kv_cache_layers)
     kv_caches: dict[str, Any] = {}
     # Qwen4 QSA hybrids (Qwen3.8 Flash Next) reconstruct every owner's
     # view from the same deterministic layout that _allocate_kv_cache used:
@@ -2207,7 +2233,7 @@ def _reshape_kv_cache_v2(
                 k_dtype = (
                     torch.int8
                     if vllm_config.cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE
-                    else kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+                    else kv_cache_spec.dtype
                 )
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 kv_caches[layer_name] = (k_cache,)

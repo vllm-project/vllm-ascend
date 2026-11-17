@@ -21,6 +21,7 @@
 # limitations under the License.
 
 from collections.abc import Callable
+from typing import Any
 
 import torch
 from torch import nn
@@ -146,6 +147,31 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         if impl is not None and hasattr(impl, "skip_topk"):
             impl.skip_topk = self.__dict__["_skip_topk"]
 
+    # Keep these below the skip_topk setter: a property split across
+    # non-adjacent statements reads as a redefinition, which costs the setter
+    # above its pair and makes skip_topk look read-only at the __init__
+    # assignment.
+    @property
+    def impl(self) -> Any:
+        """Expose the wrapped backend through the upstream MLA contract."""
+        return self.mla_attn.impl
+
+    @property
+    def kv_cache(self) -> Any:
+        return self.mla_attn.kv_cache
+
+    @kv_cache.setter
+    def kv_cache(self, value: Any) -> None:
+        self.mla_attn.kv_cache = value
+
+    @property
+    def kv_cache_dtype(self) -> Any:
+        return self.mla_attn.kv_cache_dtype
+
+    @property
+    def _k_scale(self) -> Any:
+        return self.mla_attn._k_scale
+
     @property
     def topk_indices_buffer(self) -> torch.Tensor | None:
         impl = getattr(getattr(self, "mla_attn", None), "impl", None)
@@ -187,6 +213,8 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         skip_topk: bool = False,
         non_causal_multi_token_decode: bool = False,
         allow_short_prefill_indexer_scoring_skip: bool = False,
+        kv_sharing_target_layer_name: str | None = None,
+        sliding_window: int | None = None,
         # Upstream fuses the q_a/kv_a RMSNorms on the CUDA path. On Ascend the
         # whole MLA preprocess runs inside the attention impl, which receives
         # both layernorms as extra args, so this flag has no effect here and is
@@ -245,6 +273,8 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             skip_topk=skip_topk,
             topk_indices_buffer=getattr(mla_modules, "topk_indices_buffer", None),
             non_causal_multi_token_decode=non_causal_multi_token_decode,
+            kv_sharing_target_layer_name=kv_sharing_target_layer_name,
+            sliding_window=sliding_window,
             # extra args
             rotary_emb=mla_modules.rotary_emb,
             fused_qkv_a_proj=mla_modules.fused_qkv_a_proj,
@@ -258,6 +288,11 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             use_mla_rope=mla_modules.rotary_emb is not None,
             layer_name=f"{prefix}.attn",
         )
+        # Some model-specific speculative decoders (for example Mistral
+        # DSpark) access the cache layer directly through the outer MLA
+        # wrapper. Keep the same public layer-name contract as the wrapped
+        # attention layer so KV-cache discovery resolves the registered key.
+        self.layer_name = self.mla_attn.layer_name
 
         # Fused preprocess (mlapo/prolog_v3) owns transpose+NZ for these
         # layers, so quant methods must skip their own NZ conversion.
