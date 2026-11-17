@@ -1272,12 +1272,14 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             return
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
             return
+        # Earlier requests may have allocated a public key without publishing it yet.
+        public_allocated: set[str] = set()
         for request in requests:
             if self._save_disabled.is_set():
                 break
             if not request.can_save:
                 continue
-            if self._alloc_gvas_for_save_for_request([request]) is False:
+            if self._alloc_gvas_for_save_for_request([request], public_allocated) is False:
                 logger.error("Memcache save preparation failed for %s", request.req_id)
                 self._save_disabled.set()
         if self._save_disabled.is_set():
@@ -1289,7 +1291,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 request.can_save = False
                 request.save_keys = []
 
-    def _alloc_gvas_for_save_for_request(self, requests: list[ReqMeta]) -> bool | None:
+    def _alloc_gvas_for_save_for_request(self, requests: list[ReqMeta], public_allocated: set[str]) -> bool | None:
         """Allocate per-group GVA on the worker side right before batch_copy.
 
         For multi-group models, iterates all KV cache groups and allocates
@@ -1381,6 +1383,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 # SSD) does not need re-saving, and the load path rewarms
                 # SSD blocks on read.
                 missing_keys = self._pool_keys_missing(candidate_keys)
+                missing_keys.difference_update(public_allocated)
                 transfer_blocks = [
                     block_idx for block_idx, key in zip(candidate_blocks, candidate_keys) if key in missing_keys
                 ]
@@ -1410,9 +1413,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     # 0 means allocation failed; UINT64_MAX means a readable
                     # SSD hit. Filter both before converting GVAs to np.int64.
                     block_gvas = [gva if 0 < gva < MEMCACHE_SSD_HIT_GVA else 0 for gva in transfer_gvas]
-                    for key, gva in zip(transfer_keys, block_gvas):
+                    for block_idx, key, gva in zip(transfer_blocks, transfer_keys, block_gvas):
                         if gva > 0:
                             all_group_save_keys.append(key)
+                            if block_idx < len(group_block_hashes):
+                                public_allocated.add(key)
                     if self.layerwise_offload and any(gva <= 0 for gva in transfer_gvas):
                         return False
 
