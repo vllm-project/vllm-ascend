@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 import torch
+from vllm import envs as vllm_envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -32,6 +33,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.logger import logger
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
 from vllm.v1.outputs import KVConnectorOutput
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
@@ -55,6 +57,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import (
     MooncakeKVConnectorStats,
     MooncakePromMetrics,
 )
+from vllm_ascend.utils import is_c8_mxfp_kv_quant
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
@@ -249,12 +252,36 @@ class MooncakePullConnector(MooncakeBaseConnector):
     ) -> None:
         super().__init__(vllm_config, role, kv_cache_config)
 
+        if is_c8_mxfp_kv_quant(vllm_config):
+            parallel = vllm_config.parallel_config
+            if not vllm_envs.VLLM_USE_V2_MODEL_RUNNER or (
+                parallel.tensor_parallel_size,
+                parallel.prefill_context_parallel_size,
+                parallel.decode_context_parallel_size,
+                parallel.pipeline_parallel_size,
+            ) != (1, 1, 1, 1):
+                raise ValueError("Mooncake MXFP8 pull transfer requires Model Runner V2 and TP1/PCP1/DCP1/PP1.")
+
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = MooncakePullConnectorScheduler(vllm_config, str(self.engine_id), kv_cache_config)
         elif role == KVConnectorRole.WORKER:
             self.connector_worker = MooncakePullConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
         else:
             raise ValueError(f"Unsupported KVConnectorRole: {role}")
+
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        group_ids = super().get_loaded_kv_cache_group_ids(request)
+        if not is_c8_mxfp_kv_quant(self._vllm_config):
+            return group_ids
+        # MXFP8 does not import static V scales. Initialize the reassigned
+        # destination pages before the remote load writes the other views.
+        loaded_groups = []
+        for index in group_ids:
+            spec = self._kv_cache_config.kv_cache_groups[index].kv_cache_spec
+            specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
+            if all(type(layer_spec) is not FullAttentionSpec for layer_spec in specs):
+                loaded_groups.append(index)
+        return tuple(loaded_groups)
 
 
 class MooncakePushConnector(MooncakeBaseConnector):
@@ -269,6 +296,9 @@ class MooncakePushConnector(MooncakeBaseConnector):
         kv_cache_config: "KVCacheConfig",
     ) -> None:
         super().__init__(vllm_config, role, kv_cache_config)
+
+        if is_c8_mxfp_kv_quant(vllm_config):
+            raise ValueError("Mooncake MXFP8 KV transfer requires the pull path (use_layerwise=False).")
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = MooncakePushConnectorScheduler(vllm_config, str(self.engine_id), kv_cache_config)

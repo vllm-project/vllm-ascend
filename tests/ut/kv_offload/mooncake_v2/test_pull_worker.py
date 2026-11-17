@@ -1496,6 +1496,37 @@ def test_whole_block_mla_address_generation_uses_independent_stride() -> None:
     assert lengths == [128, 128]
 
 
+@pytest.mark.parametrize("matching_layout", [True, False])
+def test_mxfp8_pull_checks_layout_and_uses_per_peer_strides(matching_layout: bool) -> None:
+    local_shape = (1, 1, 16, 32)
+    remote_shape = local_shape if matching_layout else (1, 2, 16, 16)
+    thread = make_thread(
+        kv_caches_base_addr=[[1000]],
+        block_shapes=[[local_shape]],
+        block_strides=[[1152]],
+        block_lens=[[512]],
+    )
+    thread.vllm_config.cache_config = SimpleNamespace(cache_dtype="mxfp8")
+    remote = make_pp_metadata(
+        block_shapes=[[remote_shape]],
+        block_strides=[[1280]],
+        block_lens=[[512]],
+        tp_base_addrs={0: [[5000]]},
+    )
+    src, dst, lengths = [], [], []
+    args = (0, 0, 0, 1, 1, 1, {(0, 0): [("request", [1, 2], [3, 4])]}, remote, src, dst, lengths)
+
+    if matching_layout:
+        thread._append_spec_transfer_addresses(*args)
+        assert src == [4840, 6120]
+        assert dst == [2152, 3304]
+        assert lengths == [512, 512]
+    else:
+        with pytest.raises(ValueError, match="MXFP8 PA_NZ cache layout mismatch"):
+            thread._append_spec_transfer_addresses(*args)
+        assert not src and not dst and not lengths
+
+
 @pytest.mark.parametrize("spec", [make_circular_spec(), make_kpool_tail_spec()])
 def test_circular_address_generation_transfers_whole_page_with_independent_stride(spec: KVCacheSpec) -> None:
     thread = make_thread(

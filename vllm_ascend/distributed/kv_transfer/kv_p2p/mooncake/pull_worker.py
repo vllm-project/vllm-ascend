@@ -47,6 +47,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     group_concurrent_contiguous,
     zmq_ctx,
 )
+from vllm_ascend.utils import is_c8_mxfp_kv_quant
 
 
 class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
@@ -335,6 +336,18 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 remote_pcp_size,
                 remote_tp_size,
             )
+
+        if is_c8_mxfp_kv_quant(self.vllm_config) and type(spec) is FullAttentionSpec:
+            if (self.tp_size, self.pcp_size, self.dcp_size, remote_tp_size, remote_pcp_size, remote_dcp_size) != (
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+            ):
+                raise ValueError("Mooncake MXFP8 PA_NZ transfer currently requires TP1/PCP1/DCP1 on both peers.")
+            return [[0]]
 
         local_dcp_size, remote_dcp_size = self._get_attention_dcp_sizes(
             spec, remote_layer_index, remote_metadata, remote_dcp_size
@@ -973,9 +986,14 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             for request_id, (local_block_ids, remote_block_ids) in block_ids_by_request.items()
         }
         remote_tp_metadata = remote_metadata.metadata_by_pcp_rank[remote_pcp_rank].metadata_by_tp_rank[remote_tp_rank]
-        transfer_whole_block = is_circular_kv_cache_spec(spec) or isinstance(
-            spec,
-            (MLAAttentionSpec, SlidingWindowMLASpec, AscendSFAIndexerCacheSpec),
+        is_mxfp = is_c8_mxfp_kv_quant(self.vllm_config) and type(spec) is FullAttentionSpec
+        transfer_whole_block = (
+            is_mxfp
+            or is_circular_kv_cache_spec(spec)
+            or isinstance(
+                spec,
+                (MLAAttentionSpec, SlidingWindowMLASpec, AscendSFAIndexerCacheSpec),
+            )
         )
         if transfer_whole_block:
             for (local_layer_index, remote_layer_index), transfer_entries in transfer_entries_by_layer.items():
@@ -989,12 +1007,13 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 for cache_index, (local_base_addr, remote_base_addr) in enumerate(
                     zip(local_base_addrs, remote_base_addrs)
                 ):
-                    if is_circular_kv_cache_spec(spec):
+                    if is_mxfp or is_circular_kv_cache_spec(spec):
                         local_shape = self.block_shapes[local_layer_index][cache_index]
                         remote_shape = remote_metadata.block_shapes[remote_layer_index][cache_index]
                         if local_shape != remote_shape:
+                            layout = "MXFP8 PA_NZ" if is_mxfp else "circular"
                             raise ValueError(
-                                f"Mooncake circular cache layout mismatch for layer "
+                                f"Mooncake {layout} cache layout mismatch for layer "
                                 f"{self.layer_names[local_layer_index]!r}, cache {cache_index}: "
                                 f"local={local_shape}, remote={remote_shape}"
                             )

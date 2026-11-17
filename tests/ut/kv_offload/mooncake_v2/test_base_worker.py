@@ -140,6 +140,49 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
     transfer_engine.register_buffer.assert_called_once()
 
 
+def test_register_mxfp8_pa_nz_publishes_dynamic_views_only(monkeypatch) -> None:
+    num_blocks, pitch = 2, 1152
+    backing = torch.empty(num_blocks * pitch, dtype=torch.uint8)
+
+    def packet_view(shape, offset, dtype):
+        strides = torch.empty(shape[1:]).stride()
+        return backing.view(dtype).as_strided(shape, (pitch, *strides), offset)
+
+    key = packet_view((2, 1, 1, 16, 32), 0, torch.float8_e4m3fn)
+    key_scale = packet_view((2, 1, 1, 16, 1, 2), 512, torch.uint8)
+    value = packet_view((2, 1, 1, 16, 32), 544, torch.float8_e4m3fn)
+    value_scale = packet_view((2, 1, 1, 1, 16, 2), 1056, torch.uint8)
+    layer = "layer.0"
+    spec = make_full_spec()
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype="mxfp8"),
+        parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16),
+    )
+    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
+    worker.kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            make_kv_cache_tensor(size=backing.nbytes, layers=[layer], layer_stride=backing.nbytes, block_stride=pitch)
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer], kv_cache_spec=spec)],
+    )
+    worker.engine_id, worker.te_rpc_port = "engine-d", 9000
+    worker.block_size, worker.side_channel_host, worker.handshake_port = 16, "127.0.0.1", 5000
+    transfer_engine = MagicMock()
+    monkeypatch.setattr(base_worker, "global_te", transfer_engine)
+
+    worker.register_kv_caches({layer: (key, value, key_scale, value_scale)})
+
+    metadata = worker.xfer_handshake_metadata
+    assert metadata.kv_caches_base_addr == [[key.data_ptr(), value.data_ptr(), key_scale.data_ptr()]]
+    assert metadata.block_shapes == [[key.shape[1:], value.shape[1:], key_scale.shape[1:]]]
+    assert metadata.block_strides == [[pitch, pitch, pitch]]
+    assert metadata.block_lens == [[512, 512, 32]]
+    transfer_engine.register_buffer.assert_called_once()
+
+
 @pytest.mark.parametrize(
     ("heads", "shape", "step", "error"),
     [
