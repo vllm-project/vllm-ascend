@@ -2,11 +2,32 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Expose Kimi K3.1's nested DSA schema through the existing Kimi config."""
 
+from vllm.config import VllmConfig
+from vllm.model_executor.models.config import (
+    MODELS_CONFIG_MAP,
+    KimiK3ForConditionalGenerationConfig,
+    VerifyAndUpdateConfig,
+)
 from vllm.transformers_utils.config import _CONFIG_REGISTRY
 from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
 from vllm_ascend.utils import vllm_version_is
+
+
+class AscendKimiModelConfig(KimiK3ForConditionalGenerationConfig):
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        # #66037's Kimi hook selects GPU sparse/dense MLA cache formats and
+        # defaults MLA drafts to FLASHINFER_MLA + fp8, including on A2/A3.
+        # Ascend owns backend/cache selection in NPUPlatform and its attention
+        # layers. Keep explicit settings and the inherited quantization hook.
+        VerifyAndUpdateConfig.verify_and_update_config(vllm_config)
+
+
+if not vllm_version_is("0.33.0"):
+    for architecture in ("KimiK3ForConditionalGeneration", "KimiK3MTPModel", "KimiK31ForConditionalGeneration"):
+        MODELS_CONFIG_MAP[architecture] = AscendKimiModelConfig
 
 
 class KimiK31TextConfig(KimiLinearConfig):
