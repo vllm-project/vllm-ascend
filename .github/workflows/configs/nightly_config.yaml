@@ -11,6 +11,16 @@
 a2:
   single_node:
     test_config:
+      # pytest-driven tests
+      # KV-pool A/B protection on one 8-NPU node (TP8): the pool leg must return
+      # exactly the same tokens as the local-prefix-cache leg and stay inside the
+      # per-tier TTFT/throughput limits.
+      - name: kv-pool-glm53-flash-w8a8-a2-tp8
+        os: linux-aarch64-a2b3-8
+        tests: tests/SIT/cases/features/kv_pool/test_glm53_flash_kv_pool_ab_a2.py
+      - name: kv-pool-deepseek-v41-flash-a2-tp8
+        os: linux-aarch64-a2b3-8
+        tests: tests/SIT/cases/features/kv_pool/test_deepseek_v41_flash_kv_pool_ab_a2.py
       # YAML-driven tests
       - name: qwen3-30b-a3b-bf16-a2-performance
         os: linux-aarch64-a2b3-8
