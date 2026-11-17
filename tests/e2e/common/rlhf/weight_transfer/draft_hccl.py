@@ -21,7 +21,6 @@ from tests.e2e.common.rlhf.weight_transfer.hccl import (
     TRAINER_DEVICE_INDEX,
     WeightUpdateClient,
     create_draft_hccl_trainer,
-    send_update,
 )
 from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     draft_serve_args,
@@ -121,7 +120,13 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
             )
             for update_round, (role, source) in enumerate(updates, start=1):
                 print(f"[trainer] {speculative_case.id}: {role} update round={update_round}", flush=True)
-                send_update(server, engine, sync_client, source, is_draft=role == "draft")
+                sync_client.is_draft = role == "draft"
+                engine.source = source
+                post_control(server, "pause")
+                try:
+                    engine.send_weights()
+                finally:
+                    post_control(server, "resume")
                 after = snapshot_weight_update_models(server)
                 projections = post_control(
                     server, "collective_rpc", json={"method": "snapshot_draft_context_projections"}

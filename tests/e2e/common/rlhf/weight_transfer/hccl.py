@@ -113,15 +113,6 @@ class WeightUpdateClient(HTTPVLLMWeightSyncClient):
         self._post("start_draft_weight_update" if self.is_draft else "start_weight_update")
 
 
-def send_update(server, engine, client: WeightUpdateClient, source, *, is_draft: bool = False):
-    client.is_draft = is_draft
-    engine.source = source
-
-    post_control(server, "pause")
-    engine.send_weights()
-    post_control(server, "resume")
-
-
 def create_draft_hccl_trainer(client, source, packed: bool, buffer_source):
     """Initialize the normal factory engine with a draft-selecting client."""
     from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
