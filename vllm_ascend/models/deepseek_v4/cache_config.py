@@ -7,18 +7,14 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, UniformTypeKVCacheSpecs
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import LayerwiseCachePlanner
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    LayerwiseLayerCacheSpecs,
-    LayerwiseReuseLayout,
-    NamedKVCacheSpec,
-    build_layerwise_cache_layout,
     get_layerwise_reuse_config,
-    get_physical_layer_index,
 )
 
 
@@ -39,12 +35,6 @@ def is_deepseek_v4_cache(groups_or_specs) -> bool:
     return any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in specs)
 
 
-def is_shared_compressor_cache(name: str) -> bool:
-    # The attention history is registered as .self_attn; indexer histories and
-    # both compressors' .state_cache entries must remain resident.
-    return name.endswith((".self_attn", ".attn"))
-
-
 def component_layout_identity(groups) -> str:
     components = []
     for group_id, group in enumerate(groups):
@@ -63,12 +53,7 @@ def validate_dsv4_transfer_speculation(config) -> None:
 
 
 def build_deepseek_v4_reuse_config(config, groups, num_blocks):
-    """Separate resident allocations from the two compressed-history rings.
-
-    Splitting the ordinary cross-group overlay is deliberate: a resident view
-    must never pin or overlap a scratch slot. Every descriptor below owns its
-    allocation; capacity probes and device initialization use these same bytes.
-    """
+    """Plan the same named component slots for the capacity probe and allocation."""
     if not is_deepseek_v4_cache(groups):
         return None
     extra = get_layerwise_reuse_config(getattr(config, "kv_transfer_config", None))
@@ -83,84 +68,52 @@ def build_deepseek_v4_reuse_config(config, groups, num_blocks):
     validate_dsv4_transfer_speculation(config)
     if not config.model_config.enforce_eager:
         raise ValueError("DSV4 Mooncake temporal offload requires enforce_eager")
-    base = config.model_config.get_num_layers(parallel)
-    options = build_layerwise_cache_layout(base, extra)
+    if getattr(config.cache_config, "cache_dtype", None) == "turboquant":
+        raise ValueError("DSV4 Mooncake temporal offload does not support TurboQuant")
+
     specs = {name: group.kv_cache_spec.kv_cache_specs[name] for group in groups for name in group.layer_names}
-    per_layer = defaultdict(list)
-    for name, spec in specs.items():
-        per_layer[get_physical_layer_index(name, base)].append(NamedKVCacheSpec(name, spec))
-    if not set(range(base)).issubset(per_layer):
-        raise ValueError("DSV4 component plan must cover every target layer")
-    layer_specs = {}
-    resident_layers = set(options.independent_layers)
-    buckets = []
-    resident_names = []
-    for layer, components in sorted(per_layer.items()):
-        if layer >= base:
-            # Draft KV remains resident, including across prefill chunks.
-            resident_names.extend(item.layer_name for item in components)
-            continue
-        mains = [item for item in components if is_shared_compressor_cache(item.layer_name)]
-        if len(mains) > 1:
-            raise ValueError("DSV4 layer has multiple compressor histories")
-        main = mains[0] if mains else components[0]
-        layer_specs[layer] = LayerwiseLayerCacheSpecs(
-            main, extra_main_specs=tuple(item for item in components if item is not main)
+    native = [
+        KVCacheTensor(
+            size=num_blocks * spec.page_size_bytes,
+            layers=[name],
+            offset=0,
+            layer_stride=0,
+            block_stride=spec.page_size_bytes,
         )
-        if not mains:
-            resident_layers.add(layer)
-        resident_names.extend(
-            item.layer_name for item in components if item is not main or not mains or layer in resident_layers
-        )
-        if mains and layer not in resident_layers:
-            for signature, layers in buckets:
-                if main.spec == signature:
-                    layers.append(layer)
-                    break
-            else:
-                buckets.append((main.spec, [layer]))
-    slots = [(layer,) for layer in sorted(resident_layers)]
-    predecessors = {}
-    for _, layers in buckets:
-        count = min(options.num_shared_buffers, len(layers))
-        for index in range(count):
-            slot = tuple(layers[index::count])
-            slots.append(slot)
-            predecessors.update(zip(slot[1:], slot[:-1]))
-    layout = LayerwiseReuseLayout(
-        layer_specs,
-        tuple(slots),
-        predecessors,
-        sorted(resident_layers),
-        options.num_prefetch_layers,
-        bool(predecessors),
-    )
-    tensors = []
-    covered = set()
-    for slot in slots:
-        names = [layer_specs[layer].main.layer_name for layer in slot]
-        page_sizes = {specs[name].page_size_bytes for name in names}
-        if len(page_sizes) != 1:
-            raise ValueError("Incompatible DSV4 compressed history slot")
-        size = page_sizes.pop()
-        tensors.append(KVCacheTensor(size=num_blocks * size, layers=names, offset=0, layer_stride=0, block_stride=size))
-        covered.update(names)
-    for name in specs:
-        if name not in covered:
-            size = specs[name].page_size_bytes
-            tensors.append(
-                KVCacheTensor(size=num_blocks * size, layers=[name], offset=0, layer_stride=0, block_stride=size)
-            )
-    plan = KVCacheConfig(num_blocks=num_blocks, kv_cache_tensors=tensors, kv_cache_groups=groups)
+        for name, spec in specs.items()
+    ]
+    plan = KVCacheConfig(num_blocks=num_blocks, kv_cache_tensors=native, kv_cache_groups=groups)
     plan.prefix_cache_retention_interval = getattr(config.cache_config, "prefix_cache_retention_interval", None)
+    # DSV4 groups contain only attention history, window pages and compressor
+    # state. The common planner excludes draft and independently resident layers.
+    rules = dict.fromkeys(map(type, specs.values()), True)
+    planner = LayerwiseCachePlanner(plan, config, extra, spec_reuse_rules=rules)
+    layout = planner.build()
+    if layout.has_layer_reuse:
+        # The DSV4 allocator uses an independent, device-aligned backing per
+        # slot. Preserve the planner's alias relationships and page strides.
+        plan.kv_cache_tensors = [
+            KVCacheTensor(
+                size=num_blocks * slot.block_stride,
+                layers=slot.layers,
+                offset=0,
+                layer_stride=0,
+                block_stride=slot.block_stride,
+            )
+            for slot in layout.kv_cache_tensors
+        ]
+        layout = replace(layout, kv_cache_tensors=tuple(plan.kv_cache_tensors))
     plan.layerwise_reuse_layout = layout
-    # Already final, including the all-independent control configuration.
     plan.layerwise_kv_cache_reuse = layout.has_layer_reuse
     plan.layerwise_kv_cache_scratch = layout.has_layer_reuse
     plan.layerwise_store_verified_prefix = layout.has_layer_reuse
-    plan.dsv4_resident_cache_names = tuple(sorted(set(resident_names)))
-    plan.dsv4_shared_cache_names = tuple(
-        sorted(layer_specs[layer].main.layer_name for slot in slots if len(slot) > 1 for layer in slot)
+    plan.layerwise_draft_layer_names = tuple(sorted(planner.draft_names))
+    plan.dsv4_resident_cache_names = tuple(sorted(specs.keys() - layout.reused_cache_names))
+    plan.dsv4_shared_cache_names = tuple(sorted(layout.reused_cache_names))
+    plan.dsv4_window_group_ids = tuple(
+        group_id
+        for group_id, group in enumerate(groups)
+        if all(getattr(specs[name], "sliding_window", None) is not None for name in group.layer_names)
     )
     plan.dsv4_component_identity = component_layout_identity(groups)
     plan.kv_cache_allocation_alignment = 2 * 1024 * 1024
@@ -168,10 +121,10 @@ def build_deepseek_v4_reuse_config(config, groups, num_blocks):
     logger.info(
         "DSV4_OFFLOAD plan blocks=%d bytes=%d descriptors=%d predecessors=%s resident_layers=%s identity=%s",
         num_blocks,
-        sum(t.size for t in tensors),
-        len(tensors),
-        predecessors,
-        sorted(resident_layers),
+        sum(t.size for t in plan.kv_cache_tensors),
+        len(plan.kv_cache_tensors),
+        layout.prefetch_layer_map,
+        layout.independent_layers,
         plan.dsv4_component_identity,
     )
     return plan

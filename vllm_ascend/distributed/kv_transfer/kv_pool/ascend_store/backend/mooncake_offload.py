@@ -40,6 +40,9 @@ def _load_entries(worker, request, group, hashes, mask):
     if spec is None or not spec.can_load:
         return []
     recurrent = worker.group_uses_align_state[group]
+    live_window = spec.layerwise_previous_step and group in getattr(
+        getattr(worker, "kv_cache_config", None), "dsv4_window_group_ids", ()
+    )
     if (
         spec.layerwise_previous_step
         and getattr(getattr(worker, "kv_cache_config", None), "dsv4_shared_cache_names", None) is not None
@@ -77,11 +80,15 @@ def _load_entries(worker, request, group, hashes, mask):
     snapshot_start = worker._layerwise_load_snapshot_start(request, group, tokens)
     entries = []
     for index in range(end):
-        if mask is not None and index < len(mask) and not mask[index]:
+        if not live_window and mask is not None and index < len(mask) and not mask[index]:
             continue
         if recurrent and ids[index] == 0:
             raise ValueError("Mooncake offload restore selected a null recurrent checkpoint")
         if ids[index] == 0:
+            # DSV4's preceding window may include blocks evicted for this
+            # chunk. The scheduler's live table is authoritative in that case.
+            if live_window:
+                continue
             if worker._group_reuses_buffer(group) or (mask is not None and index < len(mask) and mask[index]):
                 raise ValueError("Mooncake offload restore selected a required null block")
             continue

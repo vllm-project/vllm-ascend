@@ -9,6 +9,7 @@ import ast
 import ctypes
 import hashlib
 import json
+from math import lcm
 import re
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field, replace
@@ -60,6 +61,7 @@ class Tensor:
     offset: int = 0
     layer_stride: int = 0
     block_stride: int = 0
+    host_resident: bool = False
 
 
 @dataclass
@@ -113,6 +115,15 @@ def ns():
         },
     )
     n["get_layerwise_reuse_config"] = lambda config: config.kv_connector_extra_config if config else None
+    planning = dict(n)
+    planning.update(lcm=lcm, round_up=lambda size, alignment: (size + alignment - 1) // alignment * alignment)
+    planning["cache_view_alignment"] = lambda spec: 1
+    definitions(STORE + "layerwise/layerwise_cache_layout.py", planning, {"get_layerwise_kv_cache_specs"})
+    definitions(
+        STORE + "layerwise/cache_views.py", planning, {"LayerwiseCacheConfig", "LayerwiseReuseLayout", "get_cache_views"}
+    )
+    definitions(STORE + "layerwise/cache_planner.py", planning, {"LayerwiseCachePlanner"})
+    n["LayerwiseCachePlanner"] = planning["LayerwiseCachePlanner"]
     definitions("vllm_ascend/models/deepseek_v4/cache_config.py", n)
     definitions(STORE + "layerwise/metadata.py", n, {"SharedBlockData", "LayerRangeReqMeta", "get_partial_block_index"})
     definitions(STORE + "layerwise/kv_transfer.py", n, {"LayerBatchBuilder"})
@@ -124,7 +135,7 @@ def ns():
 def configuration(buffers=2):
     return NS(
         kv_transfer_config=NS(
-            kv_connector_extra_config=dict(layerwise_num_shared_buffers=buffers, layerwise_independent_layers=[])
+            kv_connector_extra_config=dict(layerwise_num_shared_buffers=buffers, layerwise_independent_layers=[0, 1])
         ),
         model_config=NS(get_num_layers=lambda parallel: 43, enforce_eager=True),
         parallel_config=NS(pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1),
@@ -156,22 +167,42 @@ def test_component_slots_and_physical_capacity(ns, buffers):
     gs = groups()
     plan = ns["build_deepseek_v4_reuse_config"](configuration(buffers), gs, 7)
     layout = plan.layerwise_reuse_layout
-    slots = [slot for slot in layout.buffer_slots if len(slot) > 1]
-    assert len(slots) == 2 * buffers
     assert layout.independent_layers == [0, 1]
-    assert len(layout.prefetch_layer_map) == 41 - 2 * buffers
-    for layer, predecessor in layout.prefetch_layer_map.items():
-        assert layer % 2 == predecessor % 2
-        assert layer - predecessor == 2 * buffers
+    assert layout.has_layer_reuse
+    assert any(len(sources) > 1 for sources in layout.prefetch_layer_map.values())
+    for layer, sources in layout.prefetch_layer_map.items():
+        assert all(source < layer for source in sources)
     owners = {name: index for index, tensor in enumerate(plan.kv_cache_tensors) for name in tensor.layers}
-    resident = plan.dsv4_resident_cache_names
-    assert len({owners[name] for name in resident}) == len(resident)
-    assert not {owners[name] for name in resident} & {owners[name] for name in plan.dsv4_shared_cache_names}
+    assert len(owners) == sum(len(group.layer_names) for group in gs)
+    for suffix in (".self_attn", ".swa_cache", ".indexer.k_cache", ".compressor.state_cache"):
+        assert any(name.endswith(suffix) for name in plan.dsv4_shared_cache_names)
+    assert all(layout.cache_layer_indices[name] >= 2 for name in plan.dsv4_shared_cache_names)
+    for group in gs:
+        seen = set()
+        for name in group.layer_names:
+            key = (owners[name], layout.cache_layer_indices[name])
+            assert key not in seen
+            seen.add(key)
     probe = ns["build_deepseek_v4_reuse_config"](configuration(buffers), gs, 1)
     assert sum(t.size for t in plan.kv_cache_tensors) == 7 * sum(t.size for t in probe.kv_cache_tensors)
-    specs = {name: group.kv_cache_spec.kv_cache_specs[name] for group in gs for name in group.layer_names}
-    expected = sum(specs[name].page_size_bytes for name in resident) + 2 * buffers * 512
-    assert sum(t.size for t in probe.kv_cache_tensors) == expected
+    resident_config = configuration()
+    resident_config.kv_transfer_config.kv_connector_extra_config["layerwise_independent_layers"] = "all"
+    resident = ns["build_deepseek_v4_reuse_config"](resident_config, gs, 1)
+    assert sum(t.size for t in probe.kv_cache_tensors) < sum(t.size for t in resident.kv_cache_tensors)
+
+
+def test_dspark_draft_is_excluded_from_rotation(ns):
+    config = configuration()
+    config.speculative_config = NS(method="dspark")
+    cache_groups = groups()
+    draft = "model.layers.43.self_attn"
+    cache_groups[0].layer_names.append(draft)
+    cache_groups[0].kv_cache_spec.kv_cache_specs[draft] = Spec()
+    plan = ns["build_deepseek_v4_reuse_config"](config, cache_groups, 7)
+    assert plan.layerwise_draft_layer_names == (draft,)
+    assert draft in plan.dsv4_resident_cache_names
+    assert draft not in plan.dsv4_shared_cache_names
+    assert 43 not in plan.layerwise_reuse_layout.prefetch_layer_map
 
 
 def test_all_resident_control(ns):
@@ -389,6 +420,28 @@ def test_missing_required_compressed_page_fails_closed(ns):
     )
     with pytest.raises(ValueError, match="required null"):
         ns["_load_entries"](worker, request, 0, [b"hash"], None)
+
+
+def test_dsv4_window_continuation_restores_live_pages_only(ns):
+    worker = NS(
+        group_uses_align_state=[False],
+        grouped_block_size=[128],
+        use_eagle=False,
+        kv_cache_config=NS(dsv4_shared_cache_names=("swa",), dsv4_window_group_ids=(0,)),
+        _group_reuses_buffer=lambda group: True,
+        _layerwise_load_snapshot_start=lambda *args: None,
+        _make_layerwise_full_key=lambda group, key: key,
+    )
+    request = NS(
+        load_spec=NS(
+            can_load=True, layerwise_previous_step=True, kvpool_cached_tokens=256, kvpool_store_skip_tokens=None
+        ),
+        req_id="request",
+        layerwise_request_id="incarnation",
+        block_ids_by_group=[[0, 7]],
+    )
+    entries = ns["_load_entries"](worker, request, 0, [b"evicted", b"live"], [True, False])
+    assert entries == [(b"live".hex(), 1)]
 
 
 def isolated_method(path, cls_name, method_name, ns):

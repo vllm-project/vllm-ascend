@@ -1,13 +1,13 @@
 # DeepSeek-V4-Flash Mooncake offload 开发与整体验收
 
-本实现对应方案 v1.9。只将 Attention compressor KV（随上下文增长的压缩历史缓存）放入跨层轮转槽。
-SWA（近期滑窗缓存）、两个 compressor state（主注意力和索引压缩器各自的续算状态）和 Indexer K/scale（索引历史及缩放信息）保留本层内容。
+P 节点将 Attention compressor KV（随上下文增长的压缩历史缓存）、SWA（近期滑窗缓存）、Indexer K/scale（索引历史及缩放信息）和两类 compressor state（主注意力和索引压缩器各自的续算状态）纳入跨层轮转。
+独立层和 DSpark（DeepSeek-V4 的推测解码方法）的草稿缓存保留独立的组内地址。
 
 ## 实现与运行配置
 
-模型缓存布局入口为 `vllm_ascend/models/deepseek_v4/cache_config.py`。
-实际压缩历史注册名为 `.self_attn.attn`（兼容以 `.self_attn` 结尾的注册名）；只按组件选择共享，不能把整层辅助缓存一起折叠。
-普通布局继续使用既有跨组底层存储；开启共享时，将共享槽和驻留组件拆成独立分配，避免驻留数据与共享覆盖范围重叠。
+模型缓存布局入口为 `vllm_ascend/models/deepseek_v4/cache_config.py`，由公共规划器按页步长和缓存组规划共享槽。
+同层同组的不同组件使用不同槽。多个槽被同一层复用时，显存写入等待所有涉及的前驱层完成存池和交接。
+D 节点使用普通跨组布局。P 节点每个物理槽独立分配。
 容量计算、MRV2（第二版模型执行器）的实际分配和搬运地址均消费同一份描述。
 每份分配额外预留 2 MiB（满足现有地址对齐分配器需要的空间），不会按逻辑别名重复收费。
 
@@ -15,7 +15,7 @@ SWA（近期滑窗缓存）、两个 compressor state（主注意力和索引压
 在该版本上，调度端通过 `kv_connector_block_state.get_block_ids()`（读取本轮真实有效分组块表的接口）替换请求跟踪表。
 即使本轮没有分配新块也同步，保留滑窗回收后的空块位置。接口缺失或表缺失会报错。
 
-首轮采用 eager（直接执行算子）、同步调度、关闭推测解码；PP（流水线并行）、PCP（预填充上下文并行）、DCP（解码上下文并行）均为1。
+采用 eager（直接执行算子）和同步调度。DSpark 验收使用 `--speculative-config '{"method":"dspark","num_speculative_tokens":3}'`。PP（流水线并行）、PCP（预填充上下文并行）、DCP（解码上下文并行）均为1。
 DP（独立数据并行副本）和 TP（张量并行）沿用现有服务配置，目标为 DP4/TP1＋EP（专家并行）。
 必须启用 MRV2，并配置 `--enforce-eager --max-num-batched-tokens 4096`。
 沿用原有模型、量化和 Mooncake 连接配置，Store（缓存池连接器）配置示例：
