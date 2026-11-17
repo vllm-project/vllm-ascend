@@ -1375,8 +1375,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     )
                 if self.layerwise_offload:
                     pages = self._snapshot_keys.setdefault(request.req_id, {}).setdefault(group_id, {})
-                    if self.group_uses_align_state[group_id] and (candidate_blocks or partial_key is not None):
-                        pages.clear()
                     pages.update(
                         (index, (min((index + 1) * effective_block_size, request.target_token_len), key))
                         for index, key in zip(candidate_blocks, candidate_keys)
