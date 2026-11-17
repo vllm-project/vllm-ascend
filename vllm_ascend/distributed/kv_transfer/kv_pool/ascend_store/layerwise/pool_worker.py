@@ -204,7 +204,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._reused_layers_by_group: dict[int, set[int]] = {}
         self._recurrent_layers: set[int] = set()
         stage_num_layers = self.num_layers
-        base_layers = getattr(self.hf_config, "num_hidden_layers", stage_num_layers)
         # Defaults for partial initialization (unit tests construct the worker
         # without the full _init_parallelism_info path).
         if not hasattr(self, "layerwise_key_layers"):
@@ -303,6 +302,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 stage_start = self.layerwise_key_layer_offset
                 stage_layers = range(stage_start, stage_start + stage_num_layers)
                 total_layers = getattr(self, "total_layers", None)
+                base_layers = getattr(self.hf_config, "num_hidden_layers", stage_num_layers)
                 cache_layout = LayerwiseCacheConfig.parse(
                     total_layers if isinstance(total_layers, int) else base_layers,
                     self._extra_config,
