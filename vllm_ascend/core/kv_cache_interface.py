@@ -181,10 +181,28 @@ def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
     if getattr(kv_transfer_config, "kv_connector_module_path", None) is not None:
         return False
 
-    return getattr(kv_transfer_config, "kv_connector", None) in {
-        "MooncakeConnectorV2",
-        "MooncakePullConnector",
-    }
+    connector = getattr(kv_transfer_config, "kv_connector", None)
+    extra = getattr(kv_transfer_config, "kv_connector_extra_config", {})
+    if connector == "MultiConnector":
+        # A single child receives the original cache tensors unchanged. Keep
+        # composite/nested/custom connectors on the legacy layout until their
+        # transfer and completion contracts have been validated separately.
+        if not isinstance(extra, dict):
+            return False
+        children = extra.get("connectors")
+        if not isinstance(children, list) or len(children) != 1:
+            return False
+        child = children[0]
+        if not isinstance(child, dict) or child.get("kv_connector_module_path") is not None:
+            return False
+        connector = child.get("kv_connector")
+        extra = child.get("kv_connector_extra_config", {})
+
+    if connector == "MooncakeConnectorV2":
+        # The layerwise worker has a separate transfer contract; preserve the
+        # same exclusion for direct and wrapped connectors.
+        return isinstance(extra, dict) and not extra.get("use_layerwise", False)
+    return connector == "MooncakePullConnector"
 
 
 @dataclass(frozen=True, kw_only=True)

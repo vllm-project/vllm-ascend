@@ -280,12 +280,16 @@ def runner(ready=True):
     return instance, scope
 
 
-@pytest.mark.parametrize("connector", [None, "MooncakeConnectorV2", "MooncakePullConnector"])
+@pytest.mark.parametrize("connector", [None, "MooncakeConnectorV2", "MooncakePullConnector", "MultiConnector"])
 @pytest.mark.parametrize("ready", [False, True])
 def test_real_runner_copy_and_wait_share_the_same_predicate(monkeypatch, ready, connector):
     instance, scope = runner(ready)
     if connector is not None:
         instance.vllm_config.kv_transfer_config = SimpleNamespace(kv_connector=connector)
+        if connector == "MultiConnector":
+            instance.vllm_config.kv_transfer_config.kv_connector_extra_config = {
+                "connectors": [{"kv_connector": "MooncakeConnectorV2"}]
+            }
     assert instance._can_skip_spec_cpu_length_sync() is ready
     instance.req_states = SimpleNamespace(
         num_computed_tokens=SimpleNamespace(gpu=torch.tensor([98, 195])),
@@ -341,6 +345,68 @@ def test_pd_selection_and_length_sync_share_a5_transfer_gate(role, connector, mo
     instance, _ = runner()
     instance.vllm_config.kv_transfer_config = transfer
     assert instance._can_skip_spec_cpu_length_sync() is expected
+
+
+@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
+@pytest.mark.parametrize(
+    "children,module,expected",
+    [
+        ([{"kv_connector": "MooncakeConnectorV2"}], None, True),
+        ([{"kv_connector": "MooncakePullConnector"}], None, True),
+        ([{"kv_connector": "MooncakeConnectorV2"}], "custom.wrapper", False),
+        ([{"kv_connector": "MooncakeConnectorV2", "kv_connector_module_path": "custom.child"}], None, False),
+        ([{"kv_connector": "MooncakeConnectorV2"}, {"kv_connector": "MooncakePullConnector"}], None, False),
+        ([{"kv_connector": "MooncakeConnectorV1"}], None, False),
+        ([{"kv_connector": "MultiConnector"}], None, False),
+        ([{}], None, False),
+        ([None], None, False),
+        ([], None, False),
+        (None, None, False),
+        ({"kv_connector": "MooncakeConnectorV2"}, None, False),
+    ],
+)
+def test_single_child_multi_pd_selection_and_sync(role, children, module, expected):
+    transfer = SimpleNamespace(
+        kv_connector="MultiConnector",
+        kv_connector_module_path=module,
+        kv_role=role,
+        kv_connector_extra_config={"connectors": children},
+    )
+    impl = selection_impl()
+    impl.vllm_config.kv_transfer_config = transfer
+    assert (
+        sink.supports_a3_mla(
+            impl, is_a3=True, is_draft=True, pd_supported=supports_component_major_mla_pd(impl.vllm_config)
+        )
+        is expected
+    )
+    instance, _ = runner()
+    instance.vllm_config.kv_transfer_config = transfer
+    assert instance._can_skip_spec_cpu_length_sync() is expected
+    # Inspecting child capability must not replace the user's connector config.
+    assert transfer.kv_connector == "MultiConnector"
+    assert transfer.kv_connector_extra_config["connectors"] is children
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("layerwise", [False, True])
+def test_mooncake_layerwise_retains_legacy_layout_and_sync(wrapped, layerwise):
+    child = {"kv_connector": "MooncakeConnectorV2", "kv_connector_extra_config": {"use_layerwise": layerwise}}
+    transfer = SimpleNamespace(
+        **(
+            {"kv_connector": "MultiConnector", "kv_connector_extra_config": {"connectors": [child]}}
+            if wrapped
+            else child
+        )
+    )
+    impl = selection_impl()
+    impl.vllm_config.kv_transfer_config = transfer
+    assert sink.supports_a3_mla(
+        impl, is_a3=True, is_draft=True, pd_supported=supports_component_major_mla_pd(impl.vllm_config)
+    ) is (not layerwise)
+    instance, _ = runner()
+    instance.vllm_config.kv_transfer_config = transfer
+    assert instance._can_skip_spec_cpu_length_sync() is (not layerwise)
 
 
 @pytest.mark.parametrize(
