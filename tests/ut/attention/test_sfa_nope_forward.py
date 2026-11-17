@@ -286,6 +286,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=1,
             decode_context_parallel_size=1,
+            pcp_shard_decode_requests=False,
         ),
         kv_transfer_config=None,
         weight_transfer_config=None,
