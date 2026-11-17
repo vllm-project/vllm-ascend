@@ -620,10 +620,10 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
     ) -> None:
         """After-sample: ``rare_chars`` from stashed pre-sample logits.
 
-        Uses sampler-side v35 Triton narrow collect (``_v35_partials`` /
-        ``_v35_finish`` → ``(top1, chosen)`` only — no full logprob table, no
-        ranks, no ``SamplingParams.logprobs``). Soft-fail wrapper is applied by
-        the caller.
+        Uses sampler-side narrow collect (``_narrow_collect_partials`` /
+        ``_narrow_collect_finish`` → ``(top1, chosen)`` only — no full logprob
+        table, no ranks, no ``SamplingParams.logprobs``). Soft-fail wrapper is
+        applied by the caller.
         """
         # Lazy import avoids hooks ↔ processor cycle (hooks imports SamplePhaseResult).
         from vllm_ascend.observability.runtime_guard.hooks import take_pre_sample_logits
@@ -642,9 +642,8 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
     def _schedule_rare_collect(self, logits: Any, sampled_token_ids: Any) -> None:
         """Launch (top1, chosen) on main; defer D2H+feed off the sample path.
 
-        Sampled ids stay on device. The v35 kernels read the stashed logits by
-        stride. Output rank only. Pair copy is issued later on the rare-pair
-        wait queue.
+        Sampled ids stay on device. Collect reads the stashed logits by stride.
+        Output rank only. Pair copy is issued later on the rare-pair wait queue.
         """
         from vllm_ascend.observability.runtime_guard.hooks import is_async_output_rank
 
