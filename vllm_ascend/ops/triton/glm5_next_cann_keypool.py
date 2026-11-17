@@ -252,7 +252,11 @@ def _build_keypool_metadata_kernel(
         tl.store(writes + row[:, None] * WIDTH + cols[None, :], address, (row[:, None] < n) & (cols[None, :] < WIDTH))
     else:
         pos = tl.load(raw_positions + row * POS_STRIDE, row < source, other=0).to(tl.int64)
-        slot = tl.load(raw_slots + row * SLOT_STRIDE, row < source, other=-1).to(tl.int64)
+        # Use the same padding convention as the request boundaries above.
+        # The graph may own more rows than the live device partition.
+        live_end = tl.load(raw_query + n * QUERY_STRIDE)
+        live_end = tl.minimum(tl.where(live_end < 0, actual, live_end), actual)
+        slot = tl.load(raw_slots + row * SLOT_STRIDE, (row < source) & (row < live_end), other=-1).to(tl.int64)
         compressed = slot // LOGICAL * (LOGICAL // POOL) + slot % LOGICAL // POOL
         tl.store(positions + row, pos, row < tokens)
         tl.store(slots + row, tl.where((slot >= 0) & ((pos + 1) % POOL == 0), compressed, -1), row < tokens)

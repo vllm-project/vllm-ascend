@@ -7,6 +7,7 @@ from fla_npu.ops.ascendc import causal_conv1d_fn, causal_conv1d_update
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.ops.triton.kda.conv_state import copy_conv_state
+from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_varlen
 
 
 def causal_conv1d(
@@ -20,6 +21,7 @@ def causal_conv1d(
     initial_state_mode: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
     output_buffer: torch.Tensor | None = None,
+    max_query_len: int | None = None,
 ) -> torch.Tensor:
     """Consume GDN metadata and update the caller's [cache, state_len, dim] state."""
     output = None
@@ -29,6 +31,21 @@ def causal_conv1d(
             raise ValueError("Convolution output buffer must cover the input rows and match its feature shape")
     if cache_indices.shape[0] == 0:
         return torch.zeros_like(x) if output is None else output
+    if run_mode == 1 and max_query_len is not None:
+        if num_accepted_tokens is None:
+            raise ValueError("Adaptive convolution requires previous accepted-token counts")
+        indices = cache_indices[:, 0] if cache_indices.ndim == 2 else cache_indices
+        return causal_conv1d_update_varlen(
+            x,
+            conv_state,
+            weight,
+            conv_state_indices=indices,
+            num_accepted_tokens=num_accepted_tokens,
+            query_start_loc=query_start_loc,
+            max_query_len=max_query_len,
+            activation="silu",
+            out=output,
+        )
     kernel_state = conv_state
     # GLM metadata shares a contiguous vector across this group's layers.
     # Standalone callers can still pass a matrix, using its first column.
