@@ -335,7 +335,9 @@ DeepseekV2Model.__init__ = _patched_deepseek_v2_model_init
 
 
 # Reuse upstream slot bookkeeping; Ascend owns capture and TP gathering.
-if vllm_version_is("0.33.0"):
+# v0.34.0's DeepseekV2Model does not inherit EagleModelMixin yet, so the mixin
+# members have to be copied in place; the native inheritance only landed on main.
+if vllm_version_is("0.34.0"):
     for _member in (
         "AUX_HIDDEN_STATE_KEY",
         "_aux_slot_base_cached",

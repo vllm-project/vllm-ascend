@@ -37,12 +37,12 @@ def test_native_causal_lm_factory_uses_registered_decoder():
     from vllm.model_executor.models.interfaces import EagleModelMixin
 
     assert native.DeepseekV2ForCausalLM.model_cls is native.DeepseekV2Model
-    if not vllm_version_is("0.33.0"):
+    if not vllm_version_is("0.34.0"):
         assert issubclass(native.DeepseekV2ForCausalLM.model_cls, EagleModelMixin)
 
 
 def _aux_handler_fixture(model, last_rank):
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         return SimpleNamespace(
             aux_hidden_state_relay_keys=[f"aux_hidden_states_{i}" for i in range(model._aux_slot_base_cached)]
         )
@@ -210,7 +210,7 @@ def test_aux_relay_matches_unpartitioned_forward(monkeypatch, with_topk, boundar
                     torch.testing.assert_close(transported[0], expected_topk)
                     assert transported[0].data_ptr() == model.topk_indices_buffer.data_ptr()
                 assert set(output.tensors) == expected_keys
-            elif not vllm_version_is("0.33.0"):
+            elif not vllm_version_is("0.33.0") and not vllm_version_is("0.34.0"):
                 output = PPHandler.add_upstream_aux_hidden_states(handler, incoming, output)
             incoming = output
         return output if aux_layers or not vllm_version_is("0.33.0") else (output, [])
