@@ -33,6 +33,9 @@ from vllm_ascend.ascend_config import DyntraLBConfig
 from vllm_ascend.core.scheduler_output import make_cached_request_data
 from vllm_ascend.utils import vllm_version_is
 
+if not vllm_version_is("0.33.0"):
+    from vllm.v1.core.sched.output import IterationDetails
+
 if TYPE_CHECKING:
     from vllm.v1.core.sched.scheduler import Scheduler as _SchedulerBase
 else:
@@ -1089,18 +1092,39 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                 for req in scheduled_new_reqs
             ]
 
+        iteration_details = None
+        if not vllm_version_is("0.33.0") and (
+            (self.log_stats and self.observability_config.enable_logging_iteration_details)
+            or self.vllm_config.profiler_config.profiler is not None
+        ):
+            iteration_details = IterationDetails()
+
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
-            cached_reqs_data, schedule_metadata = make_cached_request_data(
+            cached_reqs_data = make_cached_request_data(
                 self,
                 scheduled_running_reqs,
                 scheduled_resumed_reqs,
                 num_scheduled_tokens,
                 scheduled_spec_decode_tokens,
                 req_to_new_blocks,
-                new_reqs_data,
-                scheduled_encoder_inputs,
-                encoder_compute_budget,
+                iteration_details=iteration_details,
             )
+
+        schedule_metadata: dict[str, Any] = {}
+        if not vllm_version_is("0.33.0"):
+            if iteration_details is not None:
+                iteration_details.num_prefill_requests = (
+                    len(num_scheduled_tokens) - iteration_details.num_decode_requests
+                )
+                iteration_details.num_prefill_tokens = total_num_scheduled_tokens - iteration_details.num_decode_tokens
+                iteration_details.num_encoder_inputs = sum(len(inputs) for inputs in scheduled_encoder_inputs.values())
+                iteration_details.num_encoder_output_tokens = self.max_num_encoder_input_tokens - encoder_compute_budget
+            schedule_metadata = {
+                "iteration_details": iteration_details,
+                "encoder_input_updates": self._get_encoder_input_updates(
+                    num_scheduled_tokens, new_reqs_data, scheduled_encoder_inputs
+                ),
+            }
 
         # Record the request ids that were scheduled in this step (MRV1-only).
         if vllm_version_is("0.33.0") and not self.use_v2_model_runner:
