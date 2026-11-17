@@ -132,9 +132,12 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device, **kwargs):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device, metadata_cls=AscendHiSparseMetadata, **kwargs)
         self._request_row_buffers: dict[int | None, torch.Tensor] = {}
-        self._pcp_query_buffers: dict[int | None, tuple[torch.Tensor, torch.Tensor]] = {}
-        self._pcp_request_capacity = get_sfa_max_num_reqs(vllm_config)
-        self._pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        if self.use_pcp:
+            # Core PCP creates a new int64 idx_mapping per batch; the resolver
+            # needs a fixed int32 input. Later draft decode uses Core's global map.
+            self._pcp_request_state_indices = torch.empty(
+                get_sfa_max_num_reqs(vllm_config), dtype=torch.int32, device=device
+            )
         self._row_capacity = max(
             vllm_config.scheduler_config.max_num_batched_tokens,
             vllm_config.compilation_config.max_cudagraph_capture_size or 0,
@@ -161,16 +164,12 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
             metadata.num_input_tokens,
         )
         if pcp_context is not None:
-            if draft_index not in self._pcp_query_buffers:
-                self._pcp_query_buffers[draft_index] = (
-                    torch.empty(self._pcp_request_capacity, dtype=torch.int32, device=self.device),
-                    torch.empty(1, dtype=torch.int32, device=self.device),
-                )
-            states, valid_rows = self._pcp_query_buffers[draft_index]
             local_states = pcp_context.local_request_state_indices
             assert local_states is not None
-            write_world_size = self._pcp_size if needs_pcp_kv_gather(metadata, self.is_pcp_decode_sharded) else 1
-            prepare_pcp_query_metadata(metadata, states, valid_rows, local_states, write_world_size)
+            write_world_size = (
+                get_pcp_group().world_size if needs_pcp_kv_gather(metadata, self.is_pcp_decode_sharded) else 1
+            )
+            prepare_pcp_query_metadata(metadata, self._pcp_request_state_indices, local_states, write_world_size)
         if metadata.num_prefills:
             seq_lens_cpu = metadata.seq_lens_cpu
             if seq_lens_cpu is None:
