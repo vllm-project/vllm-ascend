@@ -19,9 +19,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_str,
     get_block_hashes,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.offload_diagnostics import offload_event
 
 if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
+
+
+_OBJECT_ALREADY_EXISTS = -705
 
 
 def snapshot_key(worker: LayerwiseKVPoolWorker, request: ReqMeta, group: int, index: int, endpoint: int) -> str:
@@ -36,6 +40,12 @@ def _load_entries(worker, request, group, hashes, mask):
     if spec is None or not spec.can_load:
         return []
     recurrent = worker.group_uses_align_state[group]
+    if (
+        spec.layerwise_previous_step
+        and getattr(getattr(worker, "kv_cache_config", None), "dsv4_shared_cache_names", None) is not None
+        and not worker._group_reuses_buffer(group)
+    ):
+        return []
     if spec.layerwise_previous_step and recurrent and not worker._group_reuses_buffer(group):
         return []
     tokens = spec.kvpool_cached_tokens
@@ -59,7 +69,11 @@ def _load_entries(worker, request, group, hashes, mask):
             # final, unaligned prompt chunk. It cannot be floored to an older
             # hash boundary or rolled back from a later speculative state.
             raise ValueError("Mooncake recurrent restore requires its exact saved snapshot endpoint")
-        return [(worker._make_layerwise_full_key(group, block_hash_to_str(hashes[index])), index)]
+        key = worker._make_layerwise_full_key(group, block_hash_to_str(hashes[index]))
+        key = getattr(worker, "_offload_private_aliases", {}).get(
+            (request.req_id, request.layerwise_request_id, key), key
+        )
+        return [(key, index)]
     snapshot_start = worker._layerwise_load_snapshot_start(request, group, tokens)
     entries = []
     for index in range(end):
@@ -67,6 +81,10 @@ def _load_entries(worker, request, group, hashes, mask):
             continue
         if recurrent and ids[index] == 0:
             raise ValueError("Mooncake offload restore selected a null recurrent checkpoint")
+        if ids[index] == 0:
+            if worker._group_reuses_buffer(group) or (mask is not None and index < len(mask) and mask[index]):
+                raise ValueError("Mooncake offload restore selected a required null block")
+            continue
         if snapshot_start is not None and index >= snapshot_start:
             key = snapshot_key(worker, request, group, index, spec.layerwise_snapshot_end_token)
         elif index < min(tokens // size, len(hashes)):
@@ -74,6 +92,10 @@ def _load_entries(worker, request, group, hashes, mask):
         else:
             # Never invent a snapshot endpoint for an external prefix hit.
             raise ValueError("Mooncake offload restore has no exact snapshot identity")
+        if spec.layerwise_previous_step:
+            key = getattr(worker, "_offload_private_aliases", {}).get(
+                (request.req_id, request.layerwise_request_id, key), key
+            )
         entries.append((key, index))
     return entries
 
@@ -107,20 +129,33 @@ def _save_entries(worker, request, view, group, hashes):
     if end > len(ids) or (partial is not None and partial >= len(ids)):
         raise ValueError("Mooncake offload save exceeds the allocated block table")
     mask = request.store_masks[group] if request.store_masks is not None else None
+    # RequestTracker describes the private suffix in transfer-LCM units.
+    # A finer group can have hashed complete pages inside that suffix. Saving
+    # those under public keys makes the next step's private-key GET miss.
+    snapshot_start = None
+    if not recurrent:
+        transfer_size = getattr(worker, "cache_transfer_granularity", size)
+        full_transfer_blocks = request.target_token_len // transfer_size
+        hashed_transfer_blocks = len(hashes) * size // transfer_size
+        if request.target_token_len % transfer_size or full_transfer_blocks > hashed_transfer_blocks:
+            snapshot_start = min(full_transfer_blocks, hashed_transfer_blocks) * transfer_size // size
     entries = []
     for index in range(start, end):
+        if ids[index] == 0:
+            continue
         if mask is not None and index < len(mask) and not mask[index]:
             continue
+        use_private_snapshot = snapshot_start is not None and index >= snapshot_start
         key = (
-            worker._make_layerwise_full_key(group, block_hash_to_str(hashes[index]))
-            if index < len(hashes)
-            else snapshot_key(worker, request, group, index, request.target_token_len)
+            snapshot_key(worker, request, group, index, request.target_token_len)
+            if use_private_snapshot or index >= len(hashes)
+            else worker._make_layerwise_full_key(group, block_hash_to_str(hashes[index]))
         )
         entries.append((key, index - start))
     if reused_state and request.target_token_len > 0:
         partial = (request.target_token_len - 1) // size
         view.partial_block_index = partial
-    if partial is not None:
+    if partial is not None and partial < len(ids) and ids[partial] != 0:
         entries.append((snapshot_key(worker, request, group, partial, request.target_token_len), None))
     return entries
 
@@ -135,6 +170,8 @@ def _open_puts(worker, slots):
         sizes[key] = size
     missing = worker._filter_pool_existing_keys(list(sizes))
     started = set()
+    fallback_slots = []
+    aliases = {}
     try:
         for batch in worker._layerwise_key_batches(missing):
             codes = require_aligned_batch_results(
@@ -147,8 +184,49 @@ def _open_puts(worker, slots):
             rejected = [key for key, code in zip(batch, codes, strict=True) if code != 0]
             # A competing writer may have committed since the existence probe.
             # An unfinished competing PUT is not a safe offload destination.
-            if rejected and worker._filter_pool_existing_keys(rejected):
-                raise RuntimeError("Mooncake offload could not open a required PUT session")
+            unresolved = worker._filter_pool_existing_keys(rejected) if rejected else []
+            codes_by_key = dict(zip(batch, codes, strict=True))
+            conflicts = {
+                key for key in unresolved
+                if codes_by_key[key] == _OBJECT_ALREADY_EXISTS and "offload_v1:" not in key
+            }
+            fatal = [key for key in unresolved if key not in conflicts]
+            if fatal:
+                details = [
+                    dict(result=codes_by_key[key], bytes=sizes[key], private_snapshot="offload_v1:" in key)
+                    for key in fatal[:8]
+                ]
+                offload_event("put_session_failed", failed_keys=len(fatal), samples=details)
+                raise RuntimeError(
+                    f"Mooncake offload could not open a required PUT session: "
+                    f"failed_keys={len(fatal)} samples={details}"
+                )
+            # Do not overwrite a competing writer or wait for a peer that
+            # may need this rank's EP collectives to finish its own PUT.
+            for view, key, slot, size in slots:
+                if key not in conflicts:
+                    continue
+                incarnation = view.layerwise_request_id
+                if not incarnation:
+                    raise ValueError("Offload PUT conflict requires a request incarnation")
+                private_key = f"{key}@offload_v1:fallback:{incarnation}"
+                fallback_slots.append((view, private_key, slot, size))
+                aliases[(view.req_id, incarnation, key)] = private_key
+        if fallback_slots:
+            with worker._put_started_keys_lock:
+                before_fallback = worker._put_started_keys.copy()
+            try:
+                _open_puts(worker, fallback_slots)
+            finally:
+                with worker._put_started_keys_lock:
+                    started.update(worker._put_started_keys - before_fallback)
+            if not hasattr(worker, "_offload_private_aliases"):
+                worker._offload_private_aliases = {}
+            worker._offload_private_aliases.update(aliases)
+            offload_event(
+                "put_collision_fallback", keys=len(set(aliases.values())),
+                requests=len({view.req_id for view, _, _, _ in fallback_slots}),
+            )
     except Exception:
         worker._queue_layerwise_revoke_keys(list(started))
         raise
@@ -179,6 +257,19 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
             view.load_key_block_offset = 0
             hashes = get_block_hashes(request.block_hashes, worker.grouped_block_size[group], worker.hash_block_size)
             entries = _load_entries(worker, request, group, hashes, masks[group] if masks is not None else None)
+            offload_event(
+                "restore",
+                request=request.req_id,
+                incarnation=request.layerwise_request_id,
+                group=group,
+                endpoint=cached,
+                target=request.target_token_len,
+                source="previous_step"
+                if request.load_spec and request.load_spec.layerwise_previous_step
+                else "external",
+                keys=len(entries),
+                shared=worker._group_reuses_buffer(group),
+            )
             view.load_block_keys = [None] * (max((index for _, index in entries), default=-1) + 1)
             for key, index in entries:
                 view.load_block_keys[index] = key

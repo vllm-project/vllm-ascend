@@ -151,6 +151,8 @@ class SharedBlockData:
     block_keys: list[str] | None = None
     save_keys: list[str] = field(default_factory=list)
     load_keys: list[str] = field(default_factory=list)
+    # One flag per key row; mixed batches can contain both load sources.
+    previous_step_rows: list[bool] = field(default_factory=list)
 
 
 @dataclass

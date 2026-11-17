@@ -1,0 +1,6 @@
+{
+  "kv_connector": "MooncakePushConnector",
+  "kv_role": "kv_consumer",
+  "kv_port": 14600,
+  "kv_load_failure_policy": "fail"
+}

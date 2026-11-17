@@ -5,6 +5,7 @@
 from vllm.config import VllmConfig
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheSpec
 
+from vllm_ascend.models.deepseek_v4.cache_config import build_deepseek_v4_reuse_config, is_deepseek_v4_cache
 from vllm_ascend.models.glm5next.cache_config import (
     _build_glm5_next_kv_cache_config,
     _get_glm5_next_cache_layout,
@@ -17,6 +18,9 @@ def get_physical_kv_cache_config(
     vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec], num_blocks: int
 ) -> KVCacheConfig | None:
     """Resolve model-owned physical placement at the existing builder seam."""
+    dsv4 = build_deepseek_v4_reuse_config(vllm_config, kv_cache_groups, num_blocks)
+    if dsv4 is not None:
+        return dsv4
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return _build_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, num_blocks)
     return None
@@ -32,6 +36,12 @@ def get_physical_kv_cache_config_from_specs(
     vllm_config: VllmConfig, kv_cache_specs: dict[str, KVCacheSpec]
 ) -> KVCacheConfig | None:
     """Probe physical builders without regrouping ordinary model layouts."""
+    if is_deepseek_v4_cache(kv_cache_specs):
+        # Lazy import: the builder imports this common planning seam.
+        from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+
+        groups = AscendKVCacheConfigBuilder().get_kv_cache_groups(vllm_config, kv_cache_specs)
+        return get_physical_kv_cache_config(vllm_config, groups, 1)
     if not any(_is_glm5_next_spec(spec) for spec in kv_cache_specs.values()):
         return None
     groups = get_glm5_next_kv_cache_groups(vllm_config, kv_cache_specs)

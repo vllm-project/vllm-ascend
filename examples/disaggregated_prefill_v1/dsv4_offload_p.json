@@ -1,0 +1,29 @@
+{
+  "kv_connector": "MultiConnector",
+  "kv_role": "kv_producer",
+  "kv_load_failure_policy": "fail",
+  "kv_connector_extra_config": {
+    "connectors": [
+      {
+        "kv_connector": "MooncakePushConnector",
+        "kv_role": "kv_producer",
+        "kv_port": 14500
+      },
+      {
+        "kv_connector": "AscendStoreConnector",
+        "kv_role": "kv_producer",
+        "kv_connector_extra_config": {
+          "backend": "mooncake",
+          "lookup_rpc_port": "0",
+          "use_layerwise": true,
+          "layerwise_num_shared_buffers": 2,
+          "layerwise_independent_layers": [
+            0,
+            1
+          ],
+          "layerwise_prefetch_layers": 2
+        }
+      }
+    ]
+  }
+}

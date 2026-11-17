@@ -471,7 +471,10 @@ def apply_layerwise_kv_cache_plan(
     excluded_layer_names: set[str] | None = None,
 ) -> None:
     """Rewrite logical layer tensors to use shared physical KV buffers."""
-    if getattr(kv_cache_config, "layerwise_kv_cache_reuse", False):
+    if (
+        getattr(kv_cache_config, "layerwise_kv_cache_reuse", False)
+        or getattr(kv_cache_config, "dsv4_shared_cache_names", None) is not None
+    ):
         # The capacity builder may already have produced the final physical
         # descriptors. The runner must consume that same plan unchanged.
         return

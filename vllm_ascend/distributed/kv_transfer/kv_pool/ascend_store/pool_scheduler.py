@@ -38,6 +38,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     normalize_block_ids_by_group,
     uses_hybrid_kv_cache,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.offload_diagnostics import offload_event
 
 
 def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
@@ -562,6 +563,15 @@ class BaseKVPoolScheduler(ABC):
         if new_block_ids is not None:
             request_tracker.update(new_block_ids, request.num_computed_tokens)
         self._sync_swa_block_ids(request_tracker)
+        if getattr(self.kv_cache_config, "dsv4_component_identity", None) is not None:
+            request_tracker.sync_live_block_ids(scheduler_output)
+            offload_event(
+                "live_blocks",
+                request=req_id,
+                endpoint=num_current_tokens,
+                groups=[len(ids) for ids in request_tracker.allocated_block_ids_by_group],
+                nulls=[ids.count(0) for ids in request_tracker.allocated_block_ids_by_group],
+            )
         load_spec = self._running_load_spec(request_tracker, num_current_tokens)
         # save_decode_cache is intentionally narrower than
         # consumer_is_to_put: a consumer keeps skipping prefill writes and is

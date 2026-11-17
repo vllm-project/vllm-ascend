@@ -25,6 +25,9 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import MooncakeMetaserverClient
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.offload_diagnostics import offload_event
+from vllm_ascend.models.deepseek_v4.cache_config import is_deepseek_v4_cache
+
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -55,6 +58,22 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: "KVCacheConfig") -> None:
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        # Scheduler projection keeps only one spec per group. Use the identity
+        # captured from all components before that projection.
+        component_identity = getattr(kv_cache_config, "dsv4_component_identity", None)
+        self._is_dsv4 = component_identity is not None or is_deepseek_v4_cache(kv_cache_config.kv_cache_groups)
+        if self._is_dsv4 and component_identity is None:
+            raise ValueError("DSV4 Push requires a component identity from the physical cache config")
+        self.need_truncate |= self._is_dsv4
+        self._dsv4_identity = (
+            (
+                component_identity,
+                vllm_config.model_config.compute_hash(),
+                vllm_config.cache_config.cache_dtype,
+            )
+            if self._is_dsv4
+            else None
+        )
         self._metadata_thread: MooncakePushMetadataThread | None = None
         self._reqs_pending_recv: dict[str, tuple[Request, BlockIds, int]] = {}
         self._reqs_need_send_layerwise: dict[str, tuple[Request, BlockIds]] = {}
@@ -85,6 +104,9 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                 return
             if params["remote_num_external_tokens"] == 0:
                 return
+            if self._is_dsv4:
+                offload_event("push_p_alloc", request=request.request_id, remote=params.get("remote_request_id"),
+                              prompt_tokens=request.num_prompt_tokens)
             self._reqs_need_send_layerwise[request.request_id] = (
                 request,
                 tuple(list(group) for group in blocks.get_block_ids()),
@@ -97,6 +119,13 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                     request,
                     tuple(list(group) for group in blocks.get_block_ids()),
                     num_external_tokens,
+                )
+            if self._is_dsv4:
+                offload_event(
+                    "push_prefix",
+                    request=request.request_id,
+                    local_tokens=params["num_computed_tokens"],
+                    external_tokens=num_external_tokens,
                 )
             params["do_remote_prefill"] = False
             # The proxy matches external IDs; workers retain the full D ID.
@@ -123,7 +152,12 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                 remote_num_external_tokens=num_external_tokens,
                 remote_worker_addresses=self._remote_worker_addresses,
             )
+            if self._dsv4_identity is not None:
+                message["dsv4_identity"] = self._dsv4_identity
             assert self.metaserver_client is not None
+            if self._is_dsv4:
+                offload_event("push_callback_submit", request=request.request_id, external_id=external_request_id,
+                              prompt_tokens=request.num_prompt_tokens, url=params.get("metaserver"))
             self.metaserver_client.submit(request.request_id, params.get("metaserver"), message)
 
     def build_connector_meta(self, scheduler_output: "SchedulerOutput") -> MooncakeConnectorMetadata:
@@ -155,6 +189,18 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                 local_num_computed_tokens = num_computed_tokens[req_id]
                 if local_num_computed_tokens >= request.num_prompt_tokens:
                     continue
+                if self._is_dsv4:
+                    state = getattr(scheduler_output, "kv_connector_block_state", None)
+                    live_blocks = state.get_block_ids(req_id) if state is not None else None
+                    if live_blocks is None:
+                        raise RuntimeError("DSV4 Push requires current grouped block tables")
+                    block_ids = tuple(list(group) for group in live_blocks)
+                    end_token = local_num_computed_tokens + num_scheduled_tokens
+                    offload_event(
+                        "push_p_chunk", request=req_id, start=local_num_computed_tokens,
+                        end=min(end_token, request.num_prompt_tokens),
+                        final=end_token >= request.num_prompt_tokens,
+                    )
                 meta.add_new_push_send_req(
                     request_id=req_id,
                     # Match D's transfer table: the final Mamba block must be
@@ -165,7 +211,15 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                     num_scheduled_tokens=min(
                         num_scheduled_tokens, request.num_prompt_tokens - local_num_computed_tokens
                     ),
-                    kv_transfer_params=request.kv_transfer_params,
+                    kv_transfer_params=(
+                        dict(
+                            request.kv_transfer_params,
+                            dsv4_peer_compatible=tuple(request.kv_transfer_params.get("dsv4_identity", ()))
+                            == self._dsv4_identity,
+                        )
+                        if self._is_dsv4
+                        else request.kv_transfer_params
+                    ),
                 )
                 self._reqs_sent_to_worker.add(req_id)
             # These notifications must also be delivered in connector-only steps.

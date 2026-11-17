@@ -499,6 +499,8 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             raise ValueError("MooncakeConnector single-head NHD requires contiguous bytes within each KV block.")
         return (1, shape[0], shape[2])  # [tokens, 1, dim] has the same bytes as [1, tokens, dim].
 
+    _preserve_component_pages = False
+
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
@@ -515,6 +517,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         )
         kvpp_rank = self.pcp_rank * self.tp_size + self.tp_rank
         layer_names: list[str] = []
+        dsv4 = self._preserve_component_pages
         layer_block_sizes: list[int] = []
         group_indices: list[int] = []
         kv_caches_base_addr: list[list[int]] = []
@@ -554,7 +557,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                 caches = as_kv_cache_tensors(cache_or_caches)
                 shared_page_metadata = (
                     self._get_shared_page_metadata(caches)
-                    if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+                    if not dsv4 and isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
                     else None
                 )
                 if shared_page_metadata is not None and _is_component_major_mla_binding(spec, caches):
@@ -581,7 +584,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                     for cache in caches:
                         tensor_num_blocks = cache.shape[0]
                         element_size = cache.element_size()
-                        block_shape = self._get_transfer_block_shape(spec, cache)
+                        block_shape = tuple(cache.shape[1:]) if dsv4 else self._get_transfer_block_shape(spec, cache)
                         base_addrs.append(cache.data_ptr())
                         block_strides.append(cache.stride(0) * element_size)
                         block_lens.append(math.prod(block_shape) * element_size)

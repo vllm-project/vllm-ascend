@@ -92,6 +92,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     allocate_shared_indexer_cache,
     get_layerwise_reuse_config,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.offload_diagnostics import offload_event
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     reshape_kv_cache_tensors_for_sparse_kv_offload,
@@ -1215,6 +1216,36 @@ def _allocate_kv_cache(
         for allocation in kv_cache_config.kv_cache_tensors:
             backing = _allocate_int8_cache_tensor(allocation.size, alignment, device)
             for name in get_kv_cache_tensor_layers(allocation):
+                kv_cache_raw_tensors[name] = backing
+        return kv_cache_raw_tensors
+    if getattr(kv_cache_config, "dsv4_shared_cache_names", None) is not None:
+        # DSV4's model-owned plan separates resident regions from scratch.
+        # Keep this before the ordinary shared-tuple allocation below.
+        covered: set[str] = set()
+        for descriptor in kv_cache_config.kv_cache_tensors:
+            names = get_kv_cache_tensor_layers(descriptor)
+            if (
+                not names
+                or descriptor.offset
+                or descriptor.layer_stride
+                or descriptor.size != kv_cache_config.num_blocks * descriptor.block_stride
+                or any(layer_kv_cache_spec[name].page_size_bytes != descriptor.block_stride for name in names)
+                or covered.intersection(names)
+            ):
+                raise ValueError("Invalid DSV4 component slot geometry")
+            covered.update(names)
+        if covered != set(layer_kv_cache_spec):
+            raise ValueError("DSV4 component slots must cover every cache exactly once")
+        for descriptor in kv_cache_config.kv_cache_tensors:
+            backing = _allocate_int8_cache_tensor(descriptor.size, alignment, device)
+            offload_event(
+                "allocation",
+                address=backing.data_ptr(),
+                bytes=descriptor.size,
+                alignment_reserve=alignment,
+                names=get_kv_cache_tensor_layers(descriptor),
+            )
+            for name in get_kv_cache_tensor_layers(descriptor):
                 kv_cache_raw_tensors[name] = backing
         return kv_cache_raw_tensors
     uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())

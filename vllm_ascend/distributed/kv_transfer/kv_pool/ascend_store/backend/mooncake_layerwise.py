@@ -66,6 +66,19 @@ def layerwise_topology_namespace(vllm_config: Any, kv_cache_config: Any = None) 
     kvpp_namespace = (
         f"kvpp-tp{parallel.tensor_parallel_size}-pcp{parallel.prefill_context_parallel_size}" if kvpp_size > 1 else ""
     )
+    component_identity = getattr(kv_cache_config, "dsv4_component_identity", None)
+    if component_identity is not None:
+        model = vllm_config.model_config
+        identity = (
+            "dsv4_components_v1",
+            component_identity,
+            model.compute_hash(),
+            vllm_config.cache_config.cache_dtype,
+            parallel.tensor_parallel_size,
+            parallel.prefill_context_parallel_size,
+            parallel.decode_context_parallel_size,
+        )
+        return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     if parallel.pipeline_parallel_size == 1:
         # Owner-only objects have different sizes and layer offsets from the
         # ordinary replicated layout, even with the same model and TP size.

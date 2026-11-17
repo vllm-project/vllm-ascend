@@ -1,0 +1,7 @@
+entries:
+  - category: feature
+    model: DeepSeek-V4-Flash
+    text: >-
+      Added final-chunk layerwise Mooncake D2D handoff alongside Store temporal
+      KV offload, with per-component page strides, compatible peer validation,
+      shared-slot source-read protection, and matching P/D deployment examples.

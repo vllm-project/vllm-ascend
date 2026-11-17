@@ -3,6 +3,7 @@ import functools
 import json
 import os
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
@@ -28,6 +29,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_sharded_mamba_group_ids
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.offload_diagnostics import offload_event
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
 
@@ -406,6 +408,19 @@ class MooncakeBackend(Backend):
         extra_config: dict[str, Any] | None = None,
     ):
         self.parallel_config = parallel_config
+        extra = extra_config or {}
+        delay = extra.get("offload_debug_put_delay_ms", 0)
+        if isinstance(delay, bool) or not isinstance(delay, int) or not 0 <= delay <= 5000:
+            raise ValueError("offload_debug_put_delay_ms must be an integer in [0, 5000]")
+        fault = extra.get("offload_debug_fail_once", "")
+        if fault not in ("", "get", "put", "commit"):
+            raise ValueError("offload_debug_fail_once must be '', 'get', 'put' or 'commit'")
+        if (delay or fault) and not get_ascend_config().kv_pool_range_debug:
+            raise ValueError("Offload debug fault injection requires kv_pool_range_debug=True")
+        self._offload_debug_delay_ms = delay
+        self._offload_debug_fault = fault
+        self._offload_debug_used: set[str] = set()
+        self._offload_debug_lock = threading.Lock()
         self.config = MooncakeStoreConfig.load_from_env()
         if self.config.protocol != "ascend":
             raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
@@ -662,6 +677,22 @@ class MooncakeBackend(Backend):
             self._build_replicate_config(),
         )
 
+    def _inject_offload_debug_fault(self, operation: str, keys: list[str]) -> bool:
+        """One-shot, explicitly configured server acceptance faults only."""
+        if not keys or not (getattr(self, "_offload_debug_delay_ms", 0) or getattr(self, "_offload_debug_fault", "")):
+            return False
+        with self._offload_debug_lock:
+            if operation in self._offload_debug_used:
+                return False
+            self._offload_debug_used.add(operation)
+        if operation == "put" and self._offload_debug_delay_ms:
+            offload_event("fault_delay", operation=operation, delay_ms=self._offload_debug_delay_ms)
+            time.sleep(self._offload_debug_delay_ms / 1000)
+        fail = operation == self._offload_debug_fault
+        if fail:
+            offload_event("fault_injected", operation=operation, keys=len(keys))
+        return fail
+
     def batch_copy_put(
         self,
         keys: list[str],
@@ -669,6 +700,8 @@ class MooncakeBackend(Backend):
         all_sizes: list[list[int]],
         all_dst_offsets: list[list[int]],
     ) -> list[int]:
+        if self._inject_offload_debug_fault("put", keys):
+            return [-1] * len(keys)
         return self._call_layerwise_batch(
             "batch_put_from_multi_buffer_ranges",
             keys,
@@ -679,6 +712,8 @@ class MooncakeBackend(Backend):
         )
 
     def batch_commit(self, keys: list[str]) -> list[int]:
+        if self._inject_offload_debug_fault("commit", keys):
+            return [-1] * len(keys)
         return self._call_layerwise_batch("batch_put_session_end", keys, keys)
 
     def batch_revoke(self, keys: list[str]) -> list[int]:
@@ -694,6 +729,8 @@ class MooncakeBackend(Backend):
         all_sizes: list[list[int]],
         all_src_offsets: list[list[int]],
     ) -> list[int]:
+        if self._inject_offload_debug_fault("get", keys):
+            return [-1] * len(keys)
         return self._call_layerwise_batch(
             "batch_get_into_multi_buffer_ranges",
             keys,

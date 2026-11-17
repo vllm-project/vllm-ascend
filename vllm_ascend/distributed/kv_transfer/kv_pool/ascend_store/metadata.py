@@ -890,6 +890,20 @@ class RequestTracker:
         self.last_layerwise_snapshot_block_index = last_layerwise_snapshot_block_index
         self.last_layerwise_snapshot_start_block = last_layerwise_snapshot_start_block
 
+    def sync_live_block_ids(self, scheduler_output) -> None:
+        """Replace, rather than append, the scheduler's current grouped table."""
+        state = getattr(scheduler_output, "kv_connector_block_state", None)
+        getter = getattr(state, "get_block_ids", None)
+        if not callable(getter):
+            raise RuntimeError("DSV4 Store requires kv_connector_block_state.get_block_ids")
+        blocks = getter(self.req_id)
+        if blocks is None:
+            raise RuntimeError(f"DSV4 Store has no live block table for {self.req_id}")
+        groups = [list(ids) for ids in blocks]
+        if len(groups) != len(self.allocated_block_ids_by_group):
+            raise RuntimeError("DSV4 Store live block table has inconsistent group count")
+        self.allocated_block_ids_by_group = groups
+
     @property
     def allocated_block_ids(self) -> list[int]:
         return self.allocated_block_ids_by_group[0] if self.allocated_block_ids_by_group else []

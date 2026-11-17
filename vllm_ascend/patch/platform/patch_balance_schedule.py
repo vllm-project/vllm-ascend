@@ -63,6 +63,7 @@ import torch
 import torch.distributed as dist
 import vllm.v1.core.sched.scheduler as _sched_mod
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
+from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -78,6 +79,9 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import init_ascend_config
+
+
+logger = init_logger(__name__)
 
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
@@ -606,6 +610,13 @@ class BalanceScheduler(Scheduler):
                         num_external_computed_tokens,
                     )
                     if num_new_tokens == 0:
+                        params = request.kv_transfer_params or {}
+                        if params.get("do_remote_decode") and not getattr(request, "_push_alignment_logged", False):
+                            request._push_alignment_logged = True
+                            logger.warning(
+                                "Push P admission blocked request=%s phase=alignment prompt_tokens=%d",
+                                request.request_id, request.num_prompt_tokens,
+                            )
                         break
 
                 # Handles an edge case when P/D Disaggregation

@@ -28,7 +28,7 @@ from zmq.constants import SocketOption, SocketType
 from zmq.error import Again, ZMQError
 from zmq.sugar.context import Context
 
-from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec, is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import MooncakeBaseConnectorWorker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
@@ -45,6 +45,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     get_physical_layer_index,
     reuse_sources,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.offload_diagnostics import offload_event
+from vllm_ascend.models.deepseek_v4.cache_config import is_deepseek_v4_cache, validate_dsv4_transfer_speculation
 
 # Rank tuples are (PP, PCP, TP), matching scheduler handshake keys.
 WorkerRank = tuple[int, int, int]
@@ -209,6 +211,19 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         if vllm_config.parallel_config.decode_context_parallel_size != 1:
             raise ValueError("Mooncake Push worker currently requires DCP=1")
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        self._is_dsv4 = is_deepseek_v4_cache(getattr(kv_cache_config, "kv_cache_groups", ()))
+        self._preserve_component_pages = self._is_dsv4
+        if self._is_dsv4:
+            parallel = vllm_config.parallel_config
+            if (
+                parallel.tensor_parallel_size,
+                parallel.pipeline_parallel_size,
+                parallel.prefill_context_parallel_size,
+            ) != (1, 1, 1):
+                raise ValueError("DSV4 Mooncake Push requires TP=PP=PCP=1")
+            if not vllm_config.model_config.enforce_eager:
+                raise ValueError("DSV4 Mooncake Push requires eager execution")
+            validate_dsv4_transfer_speculation(vllm_config)
         self._stop_event = threading.Event()
         self._result_queue: queue.SimpleQueue = queue.SimpleQueue()
         self._reqs_recv_state: dict[str, _ReceiveState] = {}
@@ -258,11 +273,16 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             self._layer_names_by_index: dict[tuple[str, int], list[str]] = {}
             for name, layer_index in self._layer_index_by_name.items():
                 self._layer_names_by_index.setdefault(layer_index, []).append(name)
-            if self._slot_predecessors:
+            if self._slot_predecessors or self._is_dsv4:
                 base_layers = self.vllm_config.model_config.get_num_layers(self.vllm_config.parallel_config)
                 self._slot_index_by_name = {
                     name: get_physical_layer_index(name, base_layers) for name in self._layer_indices
                 }
+            if self._is_dsv4:
+                for name in self._layer_indices:
+                    if name.endswith(".self_attn.swa_cache"):
+                        hook = name.removesuffix(".swa_cache") + ".attn"
+                        self._layer_index_by_name.setdefault(hook, self._layer_index_by_name[name])
             # Layer numbers do not establish execution order across models.
             # Multiple namespaces finalize at wait_for_save after draft execution.
             namespaces = {namespace for namespace, _ in self._layer_names_by_index}
@@ -298,6 +318,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 state.metadata = request
                 if not state.destinations:
                     self._prepare_destinations(state, request)
+                if self._is_dsv4 and not request.dsv4_peer_compatible:
+                    state.error = "DSV4 P/D model, component or cache-format identity differs"
                 # Prefix data is immediately readable only with resident KV.
                 if not self._slot_predecessors and not state.available_layers and request.num_computed_tokens:
                     event = torch.npu.Event()
@@ -402,6 +424,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             reply = msgspec.msgpack.decode(ensure_zmq_recv(sock, path))
             if reply != {"kind": "done_ack", "request_id": params["request_id"]}:
                 raise ValueError("Invalid DONE ACK")
+            if self._is_dsv4:
+                offload_event("push_done_ack", request=params["request_id"], failed=bool(error))
             return True
         except Exception:
             # D may have died. Its receive timeout handles a missing DONE.
@@ -472,7 +496,11 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 local_rank // ratio == remote_rank if local_size >= remote_size else remote_rank // ratio == local_rank
             )
             return (0, 0, 1) if matched else None
-        whole = isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)) or is_circular_kv_cache_spec(spec)
+        whole = (
+            self._is_dsv4
+            or isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+            or is_circular_kv_cache_spec(spec)
+        )
         if whole:
             # Replicated pages: exactly one P worker writes each D replica.
             owner = (rank[2] * remote.pcp_size + rank[1]) % (self.tp_size * self.pcp_size)
@@ -523,7 +551,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             or is_circular_kv_cache_spec(spec)
             or getattr(spec, "sliding_window", None) is not None
         )
-        if final_only and not final:
+        if (final_only or self._is_dsv4) and not final:
             return None
         local_blocks = meta.local_block_ids[self.transfer_metadata.group_indices[local_index]]
         remote_blocks = params["block_ids"][pp.group_indices[remote_index]]
@@ -537,6 +565,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         elif is_circular_kv_cache_spec(spec):
             if len(local_blocks) != 1 or len(remote_blocks) != 1:
                 raise ValueError("Circular Push requires one state block per request")
+            if not local_blocks[0] or not remote_blocks[0]:
+                raise ValueError("Required circular state block is not resident")
             local_scale = self.transfer_metadata.block_size_scales[local_index][0]
             remote_scale = pp.block_size_scales[remote_index][0]
             if local_scale != remote_scale:
@@ -546,6 +576,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         else:
             local_scale = self.transfer_metadata.block_size_scales[local_index][0]
             remote_scale = pp.block_size_scales[remote_index][0]
+            if self._is_dsv4 and (local_scale, remote_scale) != (1, 1):
+                raise ValueError("DSV4 Push requires one physical page per logical block")
             block_size = self.transfer_metadata.layer_block_sizes[local_index] // local_scale
             if block_size != pp.layer_block_sizes[remote_index] // remote_scale:
                 raise ValueError("Push requires equal P/D kernel block sizes")
@@ -555,7 +587,13 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 return None
             if final_only:
                 # Window tables retain logical positions, including null slots.
-                start = max(start, end - getattr(spec, "num_retained_tokens", spec.sliding_window - 1) - 1)
+                window_start = max(0, end - getattr(spec, "num_retained_tokens", spec.sliding_window - 1) - 1)
+                if self._is_dsv4 and not is_prefix_cacheable(spec):
+                    # The D prefix hit covers cacheable history only. Rebuild
+                    # the entire live window, including pages before that hit.
+                    start = window_start
+                else:
+                    start = max(start, window_start)
             first, last = start // block_size, (end + block_size - 1) // block_size
             local_ids, remote_ids = [], []
             for index in range(first, last):
@@ -604,7 +642,11 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 partition = self._get_transfer_partition(batch.layer_name, remote, batch.remote_rank)
                 assert partition is not None
                 local_offset, remote_offset, heads = partition
-                whole = isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)) or is_circular_kv_cache_spec(spec)
+                whole = (
+                    self._is_dsv4
+                    or isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+                    or is_circular_kv_cache_spec(spec)
+                )
                 local = self.transfer_metadata
                 for cache_index, (local_addr, remote_addr) in enumerate(
                     zip(local.kv_caches_base_addr[local_index], worker.kv_caches_base_addr[remote_index], strict=True)
@@ -616,6 +658,10 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                         remote_len //= pp.block_shapes[remote_index][cache_index][0]
                     if local_len != remote_len:
                         raise ValueError("P/D cache slice lengths differ")
+                    if self._is_dsv4 and local_len > min(
+                        local.block_strides[local_index][cache_index], pp.block_strides[remote_index][cache_index]
+                    ):
+                        raise ValueError("DSV4 Push payload exceeds physical page stride")
                     for req in batch.requests:
                         for local_block, remote_block in zip(req.local_block_ids, req.remote_block_ids, strict=True):
                             src_list.append(
@@ -633,6 +679,14 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             if src_list:
                 session = f"{worker.local_ip}:{worker.te_rpc_port}"
                 ret = self.engine.batch_transfer_sync_write(session, src_list, dst_list, length_list)
+                if self._is_dsv4:
+                    offload_event(
+                        "p2p_send",
+                        requests=[req.request_id for req in batch.requests],
+                        layer=batch.layer_name,
+                        bytes=sum(length_list),
+                        failed=ret < 0,
+                    )
                 if ret < 0:
                     return f"Mooncake WRITE failed: session={session}, ret={ret}"
         except Exception as exc:
@@ -775,6 +829,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     for layer in destination.required_layers
                 )
                 if state.error or complete:
+                    if self._is_dsv4:
+                        offload_event("push_done_queued", request=request_id, rank=rank, error=state.error)
                     assert self._sender_executor is not None
                     destination.completion = self._sender_executor.submit(
                         self._send_done_after_transfers, destination.transfer_params, state.error, transfers
@@ -942,6 +998,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     continue
                 state.finished_ranks.add(source)
                 if state.finished_ranks == state.expected_ranks:
+                    if self._is_dsv4:
+                        offload_event("p2p_receive", request=request_id, failed=state.failed)
                     results.finished_recving.add(state.request_id)
                     if state.failed:
                         results.failed_recving.add(state.request_id)

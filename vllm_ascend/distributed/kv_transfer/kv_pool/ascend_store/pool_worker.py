@@ -66,6 +66,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.offload_diagnostics import offload_event
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
@@ -598,6 +599,8 @@ class BaseKVPoolWorker(ABC):
         group_block_lens: list[int] = []
         group_block_strides: list[int] = []
         group_cache_entry_segments: list[tuple[int, int]] = []
+        shared_entries: list[bool] = []
+        shared_names = getattr(self.kv_cache_config, "dsv4_shared_cache_names", None)
         layer_names_by_physical: dict[int, list[str]] = {}
         for layer_name in layer_names:
             phys = self._extract_physical_layer_index(layer_name)
@@ -621,7 +624,21 @@ class BaseKVPoolWorker(ABC):
                 )
                 for segments in cache_segments:
                     for segment_index, (base_addr, block_len, block_stride) in enumerate(segments):
+                        shared_entries.append(shared_names is None or layer_name in shared_names)
                         group_cache_entry_segments.append((segment_index, len(segments)))
+                        if shared_names is not None:
+                            offload_event(
+                                "component",
+                                component=layer_name,
+                                group=group_id,
+                                layer=phys,
+                                segment=segment_index,
+                                address=base_addr,
+                                page_bytes=block_len,
+                                stride=block_stride,
+                                shared=layer_name in shared_names,
+                                blocks=self.num_blocks,
+                            )
                         group_addrs.append(base_addr)
                         group_block_lens.append(block_len)
                         group_block_strides.append(block_stride)
@@ -634,6 +651,10 @@ class BaseKVPoolWorker(ABC):
                         len(combined),
                     )
             layer_cache_entry_offsets.append(len(group_addrs))
+        if shared_names is not None:
+            if not hasattr(self, "dsv4_group_shared_entries"):
+                self.dsv4_group_shared_entries = {}
+            self.dsv4_group_shared_entries[group_id] = shared_entries
         self.group_kv_caches_base_addr[group_id] = group_addrs
         self.group_block_len[group_id] = group_block_lens
         self.group_block_stride[group_id] = group_block_strides

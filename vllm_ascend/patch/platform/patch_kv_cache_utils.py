@@ -23,6 +23,11 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.models.deepseek_v4.cache_config import (
+    _get_deepseek_v4_cache_layout,
+    build_deepseek_v4_reuse_config,
+    component_layout_identity,
+)
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -313,51 +318,6 @@ def _ascend_get_packed_kv_cache_groups(
     return groups
 
 
-def _get_deepseek_v4_cache_layout(
-    kv_cache_groups: list[KVCacheGroupSpec],
-) -> tuple[list[int], list[dict[int, list[str]]], list[str], int, int]:
-    """Return the geometry shared by DSV4 planning and rank normalization.
-
-    Precondition: kv_cache_groups[0] is the full-MLA group; its page sizes
-    define the canonical bucket set. Non-full-MLA groups must have been
-    page_size-padded upstream (see _get_kv_cache_groups_uniform_groups) so
-    every layer's page_size matches one of the full-MLA bucket sizes.
-
-    For each group, bucket its layers by page_size_bytes and place each layer
-    at tuple_idx = position-within-bucket.
-    """
-    full_mla_spec = kv_cache_groups[0].kv_cache_spec
-    assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
-    page_sizes = sorted(_page_sizes(full_mla_spec))
-
-    # Pre-bucket each group's layers by page_size (registration order within
-    # bucket). bucketed[g_idx][page_size] = [layer_name, ...].
-    mtp_layer_names = []
-    mtp_page_size = 0
-    bucketed: list[dict[int, list[str]]] = []
-    for group in kv_cache_groups:
-        assert isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-        specs = group.kv_cache_spec.kv_cache_specs
-        b: dict[int, list[str]] = defaultdict(list)
-        for name in group.layer_names:
-            padded = getattr(specs[name], "page_size_padded", None)
-            page_size = padded if padded is not None else specs[name].page_size_bytes
-            if "mtp" not in name:
-                b[page_size].append(name)
-            else:
-                mtp_layer_names.append(name)
-                mtp_page_size = page_size
-        bucketed.append(b)
-
-    # num_layer_tuples = longest bucket list across all groups. For the
-    # full-MLA group this equals the count of layers in the largest
-    # per-page-size bucket (= get_num_layer_tuples()); for SWA sub-groups
-    # this equals the sub-group size (each has a single page_size).
-    num_layer_tuples = max(len(layers) for b in bucketed for layers in b.values()) + len(mtp_layer_names)
-
-    return page_sizes, bucketed, mtp_layer_names, mtp_page_size, num_layer_tuples
-
-
 def _get_kv_cache_config_deepseek_v4_main(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -493,6 +453,9 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
     if not _is_deepseek_v4_groups(kv_cache_groups):
         return _orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
 
+    plan = build_deepseek_v4_reuse_config(vllm_config, kv_cache_groups, 1)
+    if plan is not None:
+        return sum(tensor.size for tensor in plan.kv_cache_tensors)
     page_sizes, _, _, _, num_layer_tuples = _get_deepseek_v4_cache_layout(kv_cache_groups)
     return sum(page_sizes) * num_layer_tuples
 
@@ -602,17 +565,27 @@ def _ascend_get_kv_cache_config_from_groups(
     elif not _is_deepseek_v4_groups(kv_cache_groups):
         kv_cache_config = _orig_get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
     else:
-        num_blocks, kv_cache_tensors = _get_kv_cache_config_deepseek_v4_main(
-            vllm_config,
-            kv_cache_groups,
-            available_memory,
-        )
-        kv_cache_config = KVCacheConfig(
-            num_blocks=num_blocks,
-            kv_cache_tensors=kv_cache_tensors,
-            kv_cache_groups=kv_cache_groups,
-            prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
-        )
+        probe = build_deepseek_v4_reuse_config(vllm_config, kv_cache_groups, 1)
+        if probe is not None:
+            cost = sum(tensor.size for tensor in probe.kv_cache_tensors)
+            blocks = may_override_num_blocks(vllm_config, available_memory // cost)
+            if blocks * cost > available_memory:
+                raise ValueError("DSV4 KV block override exceeds physical memory budget")
+            kv_cache_config = build_deepseek_v4_reuse_config(vllm_config, kv_cache_groups, blocks)
+        else:
+            num_blocks, kv_cache_tensors = _get_kv_cache_config_deepseek_v4_main(
+                vllm_config,
+                kv_cache_groups,
+                available_memory,
+            )
+            kv_cache_config = KVCacheConfig(
+                num_blocks=num_blocks,
+                kv_cache_tensors=kv_cache_tensors,
+                kv_cache_groups=kv_cache_groups,
+                prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
+            )
+    if _is_deepseek_v4_groups(kv_cache_groups):
+        kv_cache_config.dsv4_component_identity = component_layout_identity(kv_cache_groups)
     kv_cache_config.kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config is not None and speculative_config.method == "dspark":

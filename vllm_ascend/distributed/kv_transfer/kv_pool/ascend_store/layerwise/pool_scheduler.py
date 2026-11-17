@@ -154,7 +154,10 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             # Never admit a local hit whose overwritten payload is unavailable.
             if restored_tokens < num_computed_tokens:
                 raise RuntimeError("Layerwise reuse local prefix has no complete external restore point")
-            if load_spec is not None and self.num_speculative_blocks_by_group:
+            if load_spec is not None and (
+                self.num_speculative_blocks_by_group
+                or getattr(self.kv_cache_config, "dsv4_component_identity", None) is not None
+            ):
                 # Private tail reconstruction can shorten a full external hit.
                 # Restore recurrent state at that exact endpoint.
                 load_spec.kvpool_store_skip_tokens = restored_tokens
@@ -169,7 +172,11 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         # Query the exact replay endpoint; a later KDA checkpoint cannot be
         # sliced into a valid earlier state.
         if hit > limit:
-            return self._get_block_key_layerwise_hit_tokens(request, limit, 0) if limit else 0
+            if not limit:
+                return 0
+            if self.use_block_key_layerwise:
+                return self._get_block_key_layerwise_hit_tokens(request, limit, 0)
+            return self._get_layerwise_hit_tokens(request, limit, 0)
         return hit
 
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
@@ -188,7 +195,8 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
                 token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
             if token_len < self.cache_transfer_granularity:
                 return None
-            return self._get_block_key_layerwise_hit_tokens(request, token_len, num_computed_tokens)
+            hbm_hit_tokens = 0 if self.layerwise_offload else num_computed_tokens
+            return self._get_block_key_layerwise_hit_tokens(request, token_len, hbm_hit_tokens)
 
         if self.use_layerwise_transfer:
             return self._get_layerwise_hit_tokens(request, prompt_token_len, num_computed_tokens)
