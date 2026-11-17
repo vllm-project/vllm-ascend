@@ -45,9 +45,16 @@ class PoolSnapshot:
         return self.delta_hits(later) / dq
 
 
+def _metrics_source(source: Any) -> Any:
+    """VllmRunner on some branches exposes metrics via ``runner.model``."""
+    if hasattr(source, "get_metrics"):
+        return source
+    return source.model
+
+
 def snapshot_metrics(source: Any) -> PoolSnapshot:
     """Read counters from a runner whose ``get_metrics()`` returns a dict or a metric list."""
-    metrics = source.get_metrics()
+    metrics = _metrics_source(source).get_metrics()
     raw: dict[str, float] = {}
     if isinstance(metrics, dict):
         raw = {name: float(value) for name, value in metrics.items()}
@@ -424,7 +431,7 @@ class PoolABReport:
 
 def _prefix_cache_hits(source: Any) -> float:
     """Local prefix-cache hit tokens; used to prove the B leg really hits locally."""
-    metrics = source.get_metrics()
+    metrics = _metrics_source(source).get_metrics()
     if isinstance(metrics, dict):
         return float(metrics.get(PREFIX_HITS_METRIC, 0.0))
     for metric in metrics:
@@ -502,6 +509,36 @@ def _collect_perf(
             raise PerfUnstable(message)
         print(f"[kv_pool_perf] {message}; recording without failure", flush=True)
     return _percentile(ttft, 0.50), _percentile(ttft, 0.95), produced / wall, mean, minimum, maximum
+
+
+def _dump_ab_token_diff(a_outputs: list[list[int]], b_outputs: list[list[int]], case_name: str) -> None:
+    """Print the first A/B divergence site so CI logs show what differs."""
+    print(
+        f"[{case_name}] A/B token diagnostic: len(A)={len(a_outputs)} len(B)={len(b_outputs)}",
+        flush=True,
+    )
+    for index, (a_ids, b_ids) in enumerate(zip(a_outputs, b_outputs)):
+        if a_ids == b_ids:
+            print(f"  output[{index}]: identical ({len(a_ids)} tokens)", flush=True)
+            continue
+        first_diff = next(
+            (i for i, (x, y) in enumerate(zip(a_ids, b_ids)) if x != y),
+            min(len(a_ids), len(b_ids)),
+        )
+        num_diff = sum(1 for x, y in zip(a_ids, b_ids) if x != y) + abs(len(a_ids) - len(b_ids))
+        print(
+            f"  output[{index}]: len(A)={len(a_ids)} len(B)={len(b_ids)} "
+            f"num_diff={num_diff} first_diff={first_diff}",
+            flush=True,
+        )
+        print(f"  A[head]={a_ids[:16]}", flush=True)
+        print(f"  B[head]={b_ids[:16]}", flush=True)
+        print(f"  A[around_diff]={a_ids[max(0, first_diff - 8): first_diff + 8]}", flush=True)
+        print(f"  B[around_diff]={b_ids[max(0, first_diff - 8): first_diff + 8]}", flush=True)
+        print(f"  A[tail]={a_ids[-12:]}", flush=True)
+        print(f"  B[tail]={b_ids[-12:]}", flush=True)
+    if len(a_outputs) != len(b_outputs):
+        print("  output count differs between legs", flush=True)
 
 
 def _control_hit_outputs(
@@ -647,6 +684,8 @@ def run_pool_ab(
             token_diff,
             perf_bad and perf_gate,
         )
+    if a_result.outputs and b_result.outputs:
+        _dump_ab_token_diff(a_result.outputs, b_result.outputs, case_name)
     report = PoolABReport(case_name, a_result, b_result, "PASS" if label == "PASS" else "FAIL", label)
     print(
         f"[kv_pool_ab] perf_samples={perf_sample_count} "

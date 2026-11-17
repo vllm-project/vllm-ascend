@@ -16,22 +16,39 @@
 #
 """DeepSeek-V4 DSA-PCP tests for Model Runner V2.
 
+The MTP case additionally runs the KV-pool A/B watch (P6) ported from
+PR #20757: pool (A) vs non-pool (B) legs answer the same 16K secret
+question on every round, with rich prints so a CI failure shows exactly
+which gate failed and where the two legs diverge.
+
 Run `pytest tests/e2e/pull_request/four_card/context_parallel/test_deepseek_v4.py`.
 """
 
 import os
+from contextlib import ExitStack, contextmanager
+from typing import Any
 from unittest.mock import patch
 
 import pytest
+from transformers import AutoTokenizer
 from vllm import SamplingParams
+from vllm.utils.network_utils import get_open_port
 from vllm.v1.metrics.reader import Counter, Vector
 
+from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
+from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.pull_request.kv_pool_watch import (
+    POOL_SECRET,
+    build_pool_accuracy_prompt,
+    run_pool_ab,
+    run_pool_hit_sequence,
+)
 from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
 from tests.e2e.pull_request.utils import PROMPTS_SHORT
 
-MTP_MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
-DSPARK_MODEL = "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test"
+MTP_MODEL = os.environ.get("DEEPSEEK_V4_MTP_MODEL_PATH", "gdydems/DeepSeek-V4-Flash-w4a8-mtp")
+DSPARK_MODEL = os.environ.get("DEEPSEEK_V4_DSPARK_MODEL_PATH", "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test")
 
 MAX_NUM_SEQS = 4
 MAX_TOKENS = 1024
@@ -59,6 +76,163 @@ EXPECTED_OUTPUT_PREFIXES = {
 MTP_MIN_ACCEPTANCE_RATES = [0.85, 0.65, 0.35]
 DSPARK_MIN_ACCEPTANCE_RATES = [0.73, 0.64, 0.55, 0.49, 0.42]
 ACCEPTANCE_RATE_TOLERANCE = 0.03
+
+# 16,388 = lcm(16,384) + 4. MTP trims the final lcm block, so a 16,384-token
+# prompt would hit 0; the 4-token tail keeps 16,384 hit tokens.
+POOL_LCM_BLOCK_SIZE = 16384
+POOL_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + 4
+# Perf prompt: one lcm block plus a tail -> 90% hit at concurrency 4.
+POOL_PERF_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + POOL_LCM_BLOCK_SIZE // 9
+# A 16K budget does not fit TP2xPCP2 at gpu_memory_utilization=0.9
+# (8.72 GiB required vs 4.53 GiB available); 4,096 keeps chunked prefill and
+# still produces bitwise-identical H3 outputs.
+POOL_BATCHED_TOKENS = 4096
+POOL_MAX_MODEL_LEN = max(POOL_PROMPT_TOKENS, POOL_PERF_PROMPT_TOKENS) + 128
+
+POOL_KV_TRANSFER_CONFIG = {
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+        "backend": "memcache",
+        "lookup_rpc_port": "1",
+        "use_layerwise": False,
+    },
+}
+
+
+def _build_memcache_pool_config() -> MemcacheKVPoolConfig:
+    return MemcacheKVPoolConfig(
+        meta_service_port=get_open_port(),
+        config_store_port=get_open_port(),
+        config={
+            "meta": {"ock.mmc.log_level": "error"},
+            "local": {
+                "ock.mmc.log_level": "error",
+                "ock.mmc.local_service.world_size": 256,
+                "ock.mmc.local_service.protocol": "device_sdma",
+                "ock.mmc.local_service.dram.size": "10GB",
+            },
+        },
+    )
+
+
+def _run_pool_test(
+    model: str,
+    minimum_rates: list[float] | None,
+    speculative_config: dict,
+    compilation_config: dict,
+    expected_output_prefixes: dict[str, str],
+) -> None:
+    """P6 pool watch: pool (A) vs non-pool (B) legs, per-round accuracy gates.
+
+    Same two-leg logic as PR #20757. The CI verdict is accuracy-only: the
+    per-round answers, the exact 16384 pool hits and the within-leg H3
+    output identity fail the test; cross-leg token identity and perf
+    numbers are recorded and dumped by run_pool_ab, but do not gate.
+    """
+    sampling_params = SamplingParams(max_tokens=MAX_TOKENS, temperature=0.0, seed=0)
+    case_name = f"dsv4_cp_{model.split('/')[-1]}"
+    tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+    prompt_ids = build_pool_accuracy_prompt(tokenizer, POOL_PROMPT_TOKENS, POOL_MAX_MODEL_LEN)
+    print(f"[{case_name}] pool prompt built: tokens={len(prompt_ids)}", flush=True)
+
+    @contextmanager
+    def _leg(use_pool: bool, leg_case_name: str):
+        """Leg A enables the memcache pool; leg B keeps everything else identical."""
+        print(f"[{case_name}] starting leg use_pool={use_pool} case={leg_case_name}", flush=True)
+        with ExitStack() as stack:
+            kwargs: dict[str, Any] = dict(
+                max_model_len=POOL_MAX_MODEL_LEN,
+                max_num_seqs=MAX_NUM_SEQS,
+                max_num_batched_tokens=POOL_BATCHED_TOKENS,
+                dtype="auto",
+                tensor_parallel_size=2,
+                prefill_context_parallel_size=2,
+                enable_expert_parallel=True,
+                gpu_memory_utilization=0.9,
+                quantization="ascend",
+                tokenizer_mode="deepseek_v4",
+                block_size=128,
+                enforce_eager=False,
+                compilation_config=compilation_config,
+                enable_prefix_caching=not use_pool,
+                disable_log_stats=False,  # required by LLM.get_metrics()
+                speculative_config=speculative_config,
+                attention_config={"indexer_kv_dtype": "int8"},
+                additional_config={
+                    "enable_prefill_mc2": True,
+                    # TODO: Re-enable after PCP decode sharding lands; DSV4 results are unstable.
+                    "enable_pcp_o_proj_weight_sharding": False,
+                },
+            )
+            if use_pool:
+                pool = stack.enter_context(SingleNodeMemcacheManager(_build_memcache_pool_config(), leg_case_name))
+                stack.enter_context(patch.dict(os.environ, pool.server_envs))
+                kwargs["kv_transfer_config"] = POOL_KV_TRANSFER_CONFIG
+            yield stack.enter_context(VllmRunner(model, **kwargs))
+        print(f"[{case_name}] leg finished use_pool={use_pool}", flush=True)
+
+    def _accuracy(runner) -> None:
+        outputs = runner.generate(PROMPTS_SHORT, sampling_params)
+        metrics = runner.model.get_metrics()
+        for prompt, (_, texts) in zip(PROMPTS_SHORT, outputs, strict=True):
+            print(f"Model: {model}, Prompt: {prompt!r}, Outputs: {texts!r}", flush=True)
+
+        assert len(outputs) == len(PROMPTS_SHORT), f"Expected {len(PROMPTS_SHORT)} outputs, got {len(outputs)}"
+        for prompt, (_, texts) in zip(PROMPTS_SHORT, outputs, strict=True):
+            assert len(texts) == 1, f"Expected one completion for prompt {prompt!r}, got {len(texts)}"
+            expected_prefix = expected_output_prefixes.get(prompt)
+            if expected_prefix is not None:
+                assert texts[0].startswith(expected_prefix), (
+                    f"Unexpected output prefix for prompt {prompt!r}: "
+                    f"got {texts[0][: len(expected_prefix)]!r}, expected {expected_prefix!r}"
+                )
+
+        acceptance_rates = calculate_acceptance_per_pos(
+            metrics,
+            speculative_config["num_speculative_tokens"],
+            Counter,
+            Vector,
+        )
+        print(f"Model: {model}, Acceptance rates per draft position: {acceptance_rates}", flush=True)
+        if minimum_rates is None:
+            return
+        assert len(acceptance_rates) == len(minimum_rates), (
+            f"Expected {len(minimum_rates)} acceptance rates, got {len(acceptance_rates)}"
+        )
+        for position, (actual, minimum) in enumerate(zip(acceptance_rates, minimum_rates, strict=True)):
+            assert actual >= minimum or minimum - actual < ACCEPTANCE_RATE_TOLERANCE, (
+                f"Acceptance rate at draft position {position} is {actual}, below minimum {minimum}"
+            )
+
+    def _hit(runner) -> dict:
+        print(
+            f"[{case_name}] running pool hit sequence: 16K secret question, "
+            "R1 cold / R2-R3 hit / R4 disjoint miss",
+            flush=True,
+        )
+        return run_pool_hit_sequence(
+            runner,
+            block_size=128,
+            prompt_tokens=POOL_PROMPT_TOKENS,
+            prompt_ids=prompt_ids,
+            lcm_block_size=POOL_LCM_BLOCK_SIZE,
+            answer_secret=POOL_SECRET,
+            tag=f"dsv4-cp-{model.split('/')[-1]}",
+        )
+
+    run_pool_ab(
+        case_name=case_name,
+        build_leg=_leg,
+        accuracy=_accuracy,
+        hit=_hit,
+        prompt_ids=prompt_ids,
+        perf_prompt_tokens=POOL_PERF_PROMPT_TOKENS,
+        # Accuracy-only CI verdict: cross-leg token identity and perf stay
+        # record-only; run_pool_ab still dumps the A/B token comparison.
+        token_identity=False,
+        perf_gate=False,
+    )
 
 
 def _run_test(
@@ -140,8 +314,8 @@ def _run_test(
 @patch.dict(os.environ, COMMON_ENV)
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_deepseek_v4_dsa_pcp_mtp_full_decode_only() -> None:
-    """Verify output accuracy and MTP acceptance for DSA-PCP graph execution."""
-    _run_test(
+    """P6: verify accuracy, pool hits and MTP acceptance via the pool A/B watch."""
+    _run_pool_test(
         MTP_MODEL,
         minimum_rates=MTP_MIN_ACCEPTANCE_RATES,
         expected_output_prefixes=EXPECTED_OUTPUT_PREFIXES,
@@ -186,3 +360,4 @@ def test_deepseek_v4_dsa_pcp_dspark() -> None:
             "cudagraph_capture_sizes": [6, 12, 18, 24],
         },
     )
+
