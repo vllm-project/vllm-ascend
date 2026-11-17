@@ -383,18 +383,6 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
 
 
-def as_byte_view(x: torch.Tensor) -> torch.Tensor:
-    """Return a byte view for FP8 tensors, preserving their bit patterns."""
-    if x.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-        return x.view(torch.uint8)
-    return x
-
-
-def _index_select_kv_blocks(cache: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
-    # FP8 block movement must preserve bytes, including NaN bit patterns.
-    return torch.index_select(as_byte_view(cache), 0, indices).view(cache.dtype)
-
-
 @dataclass
 class DSACPContext:
     num_tokens: int
@@ -1793,7 +1781,12 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         )
         # Prefill DCP gathers referenced blocks after the current layer writes
         # its SFA KV cache and before indexer/top-k work begins.
-        if kv_cache is not None and attn_metadata.dcp_context.kv_gather_block_ids is not None:
+        if (
+            kv_cache is not None
+            and isinstance(attn_metadata, AscendSFADCPMetadata)
+            and attn_metadata.dcp_context is not None
+            and attn_metadata.dcp_context.kv_gather_block_ids is not None
+        ):
             self._record_dcp_kv_gather_context(kv_cache, attn_metadata)
         return result
 

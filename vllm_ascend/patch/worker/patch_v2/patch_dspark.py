@@ -34,12 +34,14 @@ it upstream to ``load_dspark_model``.
 """
 
 from contextlib import AbstractContextManager, nullcontext
+from copy import copy as _shallow_copy
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
 
 import vllm.envs as vllm_envs
 import vllm.model_executor.models.utils as model_utils
+import vllm.v1.worker.gpu.spec_decode.dflash.speculator as _dflash_spec_module
 import vllm.v1.worker.gpu.spec_decode.dspark.speculator as speculator_module
 import vllm.v1.worker.gpu.spec_decode.dspark.utils as dspark_utils
 import vllm.v1.worker.gpu.spec_decode.eagle.utils as eagle_utils
@@ -82,11 +84,13 @@ def _patch_dspark_parallel_config_for_pcp(target_parallel_config):
         config = _original_get_dspark_parallel_config(parallel_config, tensor_parallel_size)
         # Draft queries are replicated: use a PCP=1 view.  Preserve the
         # target DCP so the draft's KV addressing matches the physical group.
-        return type(config)(
-            **{**config.__dict__,
-               "prefill_context_parallel_size": 1,
-               "decode_context_parallel_size": dcp_size}
-        ) if hasattr(config, "__dict__") and config.__dict__ else config
+        return (
+            type(config)(
+                **{**config.__dict__, "prefill_context_parallel_size": 1, "decode_context_parallel_size": dcp_size}
+            )
+            if hasattr(config, "__dict__") and config.__dict__
+            else config
+        )
 
     return _pcp_aware_config
 
@@ -141,9 +145,7 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
     # loads with a PCP=1 query view but the target DCP for KV addressing.
     is_pcp_dcp = _is_kimi_dspark_pcp_dcp(speculative_config, vllm_config.parallel_config)
     if is_pcp_dcp:
-        dspark_utils._get_dspark_parallel_config = _patch_dspark_parallel_config_for_pcp(
-            vllm_config.parallel_config
-        )
+        dspark_utils._get_dspark_parallel_config = _patch_dspark_parallel_config_for_pcp(vllm_config.parallel_config)
     try:
         # Native draft loading already sets PP=1, but still reads the target's
         # manual layer partition. Mask that partition on both version paths.
@@ -175,19 +177,13 @@ speculator_module.load_dspark_model = _load_dspark_model_with_target_quant
 # 1; for non-Kimi models that is fine because the DCP group equals the TP
 # group.  For Kimi DSpark the physical DCP group spans the PCP ranks, so
 # zeroing PCP must not also lose the DCP size.
-from copy import copy as _shallow_copy
-
-import vllm.v1.worker.gpu.spec_decode.dflash.speculator as _dflash_spec_module
-
 _original_dflash_init = _dflash_spec_module.DFlashSpeculator.__init__
 
 
 def _pcp_aware_dflash_init(self, vllm_config, device):
     parallel_config = vllm_config.parallel_config
     spec_config = vllm_config.speculative_config
-    if parallel_config.prefill_context_parallel_size > 1 and _is_kimi_dspark_pcp_dcp(
-        spec_config, parallel_config
-    ):
+    if parallel_config.prefill_context_parallel_size > 1 and _is_kimi_dspark_pcp_dcp(spec_config, parallel_config):
         vllm_config = _shallow_copy(vllm_config)
         draft_pc = _shallow_copy(parallel_config)
         draft_pc.prefill_context_parallel_size = 1
