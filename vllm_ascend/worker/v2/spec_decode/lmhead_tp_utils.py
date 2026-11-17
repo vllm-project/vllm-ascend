@@ -39,7 +39,9 @@ class LmheadTPDraftSamplingMixin:
         return lmhead_tp_max_num_logits(self.max_num_reqs, self.num_speculative_steps + 1)
 
     @contextmanager
-    def _lmhead_pad_size_context(self, dp_sync=None, capture_num_reqs: int | None = None):
+    def _lmhead_pad_size_context(
+        self, dp_sync=None, capture_num_reqs: int | None = None, *, graph_num_reqs: int | None = None
+    ):
         # TODO: Integrate this padding logic into the main execution flow.
         # The context manager currently minimizes changes to that flow.
         previous = getattr(self, "_lmhead_pad_size", None)
@@ -54,16 +56,10 @@ class LmheadTPDraftSamplingMixin:
                 pad_size = self.max_num_reqs
                 if request_bound is not None:
                     if dp_sync is not None and not getattr(dp_sync, "eager", True):
-                        # Idle batches use graph request slots, which can exceed
-                        # the pre-padding DP request count. Derive a shared bound
-                        # from the already-synced, CPU-resident padded token count.
-                        padded_tokens = int(dp_sync.num_tokens_across_dp.max().item())
-                        query_len = dp_sync.uniform_token_count or 1
-                        if not self.vllm_config.compilation_config.cudagraph_mode.separate_routine():
-                            # Mixed FULL graphs reserve up to one slot per token.
-                            query_len = 1
-                        graph_requests = (padded_tokens + query_len - 1) // query_len
-                        request_bound = max(request_bound, graph_requests)
+                        # Reuse the target descriptor's request slots, including
+                        # those used by idle dummy batches. Local attention
+                        # padding can differ, so do not use num_reqs_after_padding.
+                        request_bound = max(request_bound, graph_num_reqs or 0)
                     # Keep a non-empty collective shape for dummy/idle calls.
                     pad_size = min(pad_size, max(1, int(request_bound)))
             self._lmhead_pad_size = pad_size

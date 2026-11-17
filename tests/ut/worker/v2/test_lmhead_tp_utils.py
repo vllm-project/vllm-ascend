@@ -274,20 +274,17 @@ def test_draft_samples_dp_wide_request_rows_not_target_tokens(draft_mixin, local
 def test_graph_padded_dummy_and_active_ranks_share_capacity(monkeypatch, local_rows):
     spec, weight = _speculator()
     spec.method = "mtp"
-    spec.vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        compilation_config=SimpleNamespace(cudagraph_mode=SimpleNamespace(separate_routine=lambda: True)),
-    )
+    spec.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
     state = SimpleNamespace(
         num_reqs=5,
-        num_tokens_across_dp=torch.tensor([24, 24]),
+        num_tokens_across_dp=MagicMock(),
         uniform_token_count=4,
         eager=False,
     )
     hidden = torch.arange(local_rows * HIDDEN_SIZE, dtype=torch.float32).reshape(local_rows, HIDDEN_SIZE)
     monkeypatch.setattr(lmhead_tp_utils, "lmhead_tp_enable", lambda: True)
 
-    with spec._lmhead_pad_size_context(state):
+    with spec._lmhead_pad_size_context(state, graph_num_reqs=6):
         # Active ranks have up to five requests; the idle graph batch has six.
         logits = spec.compute_draft_logits(hidden, spec_step_idx=0)
         assert spec._lmhead_pad_size == 6
@@ -300,39 +297,34 @@ def test_graph_padded_dummy_and_active_ranks_share_capacity(monkeypatch, local_r
     assert torch.count_nonzero(compute_input[local_rows:]) == 0
     torch.testing.assert_close(logits, hidden @ weight)
     assert spec._lmhead_pad_size is None
+    state.num_tokens_across_dp.max.assert_not_called()
 
 
 @pytest.mark.parametrize(
-    "tokens,uniform_tokens,eager,separate_routine,expected",
+    "graph_reqs,eager,expected",
     [
-        ([20, 20], 4, False, True, 5),
-        ([8, 8], 1, False, True, 8),
-        ([24, 24], None, False, True, 8),
-        # Mixed FULL graphs reserve one request slot per token even for a
-        # runtime batch with a uniform speculative query length.
-        ([24, 24], 4, False, False, 8),
-        ([4, 20], 4, True, True, 5),
-        ([4, 20], None, True, False, 5),
+        (5, False, 5),
+        (6, False, 6),
+        (8, False, 8),  # Mixed/varlen FULL descriptor.
+        (None, False, 5),  # PIECEWISE does not pad requests.
+        (2, False, 5),  # PIECEWISE dummy's scheduled requests are rank-local.
+        (2, True, 5),
+        (8, True, 5),
     ],
 )
-def test_graph_request_bound_keeps_eager_and_nonuniform_paths_safe(
-    draft_mixin, tokens, uniform_tokens, eager, separate_routine, expected
-):
+def test_graph_request_bound_keeps_eager_and_nonuniform_paths_safe(draft_mixin, graph_reqs, eager, expected):
     mixin, _ = draft_mixin
     draft = make_drafter(mixin)
-    draft.vllm_config.compilation_config = SimpleNamespace(
-        cudagraph_mode=SimpleNamespace(separate_routine=lambda: separate_routine)
-    )
     state = SimpleNamespace(
         num_reqs=5,
-        num_tokens_across_dp=torch.tensor(tokens),
-        uniform_token_count=uniform_tokens,
+        num_tokens_across_dp=MagicMock(),
         eager=eager,
     )
-    with draft._lmhead_pad_size_context(state):
+    with draft._lmhead_pad_size_context(state, graph_num_reqs=graph_reqs):
         out = draft.sample_draft(torch.ones(expected, 4))
         assert draft.sample_rows == [expected]
         torch.testing.assert_close(out, torch.arange(expected))
+    state.num_tokens_across_dp.max.assert_not_called()
 
 
 @pytest.mark.parametrize("requests,expected", [(None, 8), (0, 1), (1, 1), (2, 2), (5, 5), (8, 8), (64, 8)])
@@ -372,10 +364,19 @@ def test_context_restores_padding_after_failure(draft_mixin):
 
 
 @pytest.mark.parametrize(
-    "dp_size,pcp_enabled,shared_reqs,expected",
-    [(1, False, None, 2), (2, False, 5, 5), (2, False, None, 8), (2, True, 5, 8)],
+    "dp_size,pcp_enabled,shared_reqs,graph_reqs,local_reqs,expected",
+    [
+        (1, False, None, 6, 2, 2),
+        (2, False, 5, None, 2, 5),
+        (2, False, None, 6, 2, 8),
+        (2, True, 5, 6, 2, 8),
+        (2, False, 5, 6, 2, 6),
+        (2, False, 5, 6, 5, 6),
+        (2, False, 5, 6, 6, 6),
+        (2, False, 5, 8, 2, 8),
+    ],
 )
-def test_propose_uses_request_bounds(draft_mixin, dp_size, pcp_enabled, shared_reqs, expected):
+def test_propose_uses_request_bounds(draft_mixin, dp_size, pcp_enabled, shared_reqs, graph_reqs, local_reqs, expected):
     mixin, _ = draft_mixin
     tree = ast.parse(Path(ar_module.__file__).read_text())
     ar_class = next(
@@ -414,8 +415,14 @@ def test_propose_uses_request_bounds(draft_mixin, dp_size, pcp_enabled, shared_r
     draft.__dict__.update(make_drafter(mixin).__dict__)
     draft.dp_size = dp_size
     draft.pcp_manager = object() if pcp_enabled else None
+    draft.enable_adaptive_verification = False
     draft._get_draft_prefill_metadata = lambda metadata: metadata
-    batch = SimpleNamespace(num_reqs=2, num_tokens_after_padding=24)
-    state = None if shared_reqs is None else SimpleNamespace(num_reqs=shared_reqs)
+    batch = SimpleNamespace(
+        num_reqs=local_reqs,
+        num_reqs_after_padding=local_reqs + 1,
+        num_tokens_after_padding=24,
+        graph_num_reqs=graph_reqs,
+    )
+    state = None if shared_reqs is None else SimpleNamespace(num_reqs=shared_reqs, eager=False)
     assert draft.propose(batch, *([None] * 10), dp_sync_state=state) == "drafted"
     assert draft._lmhead_pad_size is None
