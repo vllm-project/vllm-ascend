@@ -66,3 +66,31 @@ def test_qsa_rmsnorm_mrope(num_heads: int) -> None:
     torch_npu.npu.synchronize()
 
     torch.testing.assert_close(actual.cpu(), expected, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.parametrize("num_tokens", [16, 32, 64])
+@torch.inference_mode()
+def test_qsa_rmsnorm_mrope_tp2_decode(num_tokens: int) -> None:
+    """Cover the TP2-local two-head direct-cache specialization."""
+    torch.manual_seed(19)
+    num_heads, head_dim, rope_dim = 2, 128, 64
+    packed_cpu = torch.randn(num_tokens, num_heads + 1, head_dim, dtype=torch.bfloat16)
+    tensor_cpu = packed_cpu[:, :num_heads]
+    weight_cpu = torch.randn(head_dim, dtype=torch.bfloat16) * 0.05
+    cache_cpu = torch.randn(257, rope_dim, dtype=torch.bfloat16)
+    positions_cpu = torch.randint(0, cache_cpu.shape[0], (3, num_tokens), dtype=torch.int64)
+    gathered_cpu = cache_cpu[positions_cpu]
+    expected = _reference(tensor_cpu, weight_cpu, gathered_cpu, 1e-6)
+
+    actual = triton_qsa_rmsnorm_mrope(
+        tensor_cpu.npu(),
+        weight_cpu.npu(),
+        cache_cpu.npu(),
+        1e-6,
+        [11, 11, 10],
+        rope_dim,
+        positions_cpu.npu(),
+    )
+    torch_npu.npu.synchronize()
+
+    torch.testing.assert_close(actual.cpu(), expected, rtol=2e-2, atol=2e-2)

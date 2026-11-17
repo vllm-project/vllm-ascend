@@ -188,7 +188,10 @@ def triton_qsa_rmsnorm_mrope(
     use_fused_heads = (
         positions is not None
         and has_mrope
-        and num_heads == 4
+        # Qwen3.8-Flash-Next has four QSA query heads globally.  Under TP2,
+        # each rank receives two heads, so the production decode path must
+        # accept both the unsharded and TP2-local layouts.
+        and num_heads in (2, 4)
         and head_dim == 128
         and rope_dim == 64
         # This specialization targets decode-sized batches.  Keeping large
