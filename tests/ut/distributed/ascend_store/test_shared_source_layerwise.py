@@ -275,7 +275,7 @@ class TestSharedSourceLayerwise(unittest.TestCase):
                     + [(20, 21), (21, 22), (22, 23), (23, 24)]
                 )
                 for _ in range(2):
-                    submitted = []
+                    submitted: list[tuple[int, int]] = []
                     enqueue = worker.kv_recv_thread.add_request
 
                     def record(task, worker=worker, submitted=submitted, enqueue=enqueue):
@@ -301,7 +301,7 @@ class TestSharedSourceLayerwise(unittest.TestCase):
                 worker.prepare_layerwise_step(meta)
                 passed_empty_layers = threading.Event()
                 done = threading.Event()
-                errors = []
+                errors: list[Exception] = []
 
                 def forward(worker, meta, passed_empty_layers, done, errors):
                     try:
@@ -414,7 +414,7 @@ class TestSharedSourceLayerwise(unittest.TestCase):
     def test_shared_prefix_acquires_one_lease_per_step(self):
         worker, store, _ = make_shared_worker(self, bounded=True)
         save_prefix(worker)
-        counts = Counter()
+        counts: Counter[str] = Counter()
         add_lease, remove_lease = store.batch_add_lease, store.batch_remove_lease
 
         def acquire(keys, ttl):

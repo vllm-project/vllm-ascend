@@ -4,6 +4,7 @@
 
 import unittest
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import torch
@@ -114,7 +115,7 @@ class TestStandardConnectorHooks(unittest.TestCase):
             ),
         )
         ctx = SimpleNamespace(attn_metadata={}, no_compile_layers={"cut": attn})
-        scope = dict(
+        scope: dict[str, Any] = dict(
             get_forward_context=lambda: ctx,
             wait_for_kv_layer_from_connector=lambda _: events.append("wait"),
             maybe_save_kv_layer_to_connector=lambda *args: events.append("save"),

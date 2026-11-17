@@ -140,10 +140,10 @@ if _MOCK_VLLM_DEPS:
         if _mod_name not in sys.modules:
             sys.modules[_mod_name] = MagicMock()
     _lookup_protocol = sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol"]
-    _lookup_protocol.LOOKUP_MSG = b"lookup"
-    _lookup_protocol.RESET_MSG = b"reset"
-    _lookup_protocol.RESP_OK = b"\x01"
-    _lookup_protocol.RESP_ERR = b"\x00"
+    _lookup_protocol.LOOKUP_MSG = b"lookup"  # type: ignore[attr-defined]
+    _lookup_protocol.RESET_MSG = b"reset"  # type: ignore[attr-defined]
+    _lookup_protocol.RESP_OK = b"\x01"  # type: ignore[attr-defined]
+    _lookup_protocol.RESP_ERR = b"\x00"  # type: ignore[attr-defined]
     sys.modules["vllm.v1.worker"].mamba_utils.MambaCopyBuffers = type("MambaCopyBuffers", (), {})
 
     @dataclass
@@ -152,7 +152,7 @@ if _MOCK_VLLM_DEPS:
         finished_recving: set[str] | None = None
         kv_connector_worker_meta: Any = None
 
-    sys.modules["vllm.v1.outputs"].KVConnectorOutput = _FakeKVConnectorOutput
+    sys.modules["vllm.v1.outputs"].KVConnectorOutput = _FakeKVConnectorOutput  # type: ignore[attr-defined]
 
 if _MOCK_VLLM_DEPS:
     sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)  # type: ignore[attr-defined]

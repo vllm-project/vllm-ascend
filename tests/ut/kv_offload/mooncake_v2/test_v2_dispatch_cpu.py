@@ -6,6 +6,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
+from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
@@ -37,14 +38,14 @@ def facade():
 
 
 def registration():
-    registry = {}
+    registry: dict[str, tuple[str, str]] = {}
     factory = SimpleNamespace(
         _registry=registry,
         register_connector=lambda name, module, cls: registry.__setitem__(name, (module, cls)),
     )
     offloading = ModuleType("vllm.v1.kv_offload.factory")
-    offloading.OffloadingSpecFactory = SimpleNamespace(_registry={}, register_spec=Mock())
-    scope = {"KVConnectorFactory": factory, "logger": Mock()}
+    offloading.OffloadingSpecFactory = SimpleNamespace(_registry={}, register_spec=Mock())  # type: ignore[attr-defined]
+    scope: dict[str, Any] = {"KVConnectorFactory": factory, "logger": Mock()}
     execute("__init__.py", scope, method="_register_with_class_name_alias")
     execute("__init__.py", scope, method="register_connector")
     with patch.dict(sys.modules, {offloading.__name__: offloading}):
