@@ -15,6 +15,7 @@ Read linked documentation when it applies to the current task, using the relevan
 - [Code Style](#code-style)
     - [Python Conventions](#python-conventions)
     - [Naming Conventions](#naming-conventions)
+- [Triton Operators](#triton-operators)
 - [NPU-Specific Considerations](#npu-specific-considerations)
     - [Tensor item() Operations](#tensor-item-operations)
     - [Memory and Performance](#memory-and-performance)
@@ -111,6 +112,21 @@ E2E, multi-card, and performance tests require real NPU hardware. Do not attempt
 - **Functions/Methods**: `snake_case` (e.g., `forward_pass`, `compute_attention`)
 - **Constants**: `ALL_UPPER_CASE`
 - **Variables**: `snake_case` (e.g., `token_ids`, `sequence_lengths`)
+
+---
+
+## Triton Operators
+
+When adding, modifying, or reviewing Triton operators, follow the [Triton operator contribution guidelines](docs/source/developer_guide/contribution/triton_operators.md) for deliverables, functionality, accuracy, performance, and code quality.
+
+Contributors and reviewers must check:
+
+- The documented interface, production integration, and compatibility across applicable devices.
+- Operator and model accuracy and performance evidence, with test coverage appropriate to framework-wide or model-specific use.
+- Public wrapper usage, documented side effects, and JIT specialization and recompilation risks.
+- When warmup is used, required variants, registration in the selected component's active registry window, and reuse of the same wrapper for runtime calls.
+
+For warmup integration or changes, read [Triton JIT warmup on Ascend](docs/source/developer_guide/Design_Documents/triton_jit_warmup.md) for the startup flow, registration locations, and validation steps.
 
 ---
 
