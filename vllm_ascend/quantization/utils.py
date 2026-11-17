@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import re
 from enum import IntEnum
 from pathlib import Path
 
@@ -255,11 +256,59 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
     vllm_config.quant_config = _VllmConfig._get_quantization_config(model_config, vllm_config.load_config)
 
 
+def resolve_k3_dspark_quant_prefix(vllm_config, prefix: str) -> str:
+    """Resolve K3 DSpark runtime layer names in the draft checkpoint namespace.
+
+    The model offsets draft attention IDs by the target's layer count, but
+    ModelSlim recipes retain local draft IDs. Do not mutate recipes or target
+    names, and do not offset names that have already been resolved.
+    """
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    if speculative_config is None or speculative_config.method != "dspark":
+        return prefix
+    draft_config = getattr(speculative_config, "draft_model_config", None)
+    draft_hf_config = getattr(draft_config, "hf_config", None)
+    if getattr(draft_hf_config, "model_type", None) != "k3_dspark":
+        return prefix
+    from vllm.compilation import backends
+
+    if backends.model_tag != "dspark_head":
+        return prefix
+    match = re.match(r"^model\.layers\.(\d+)(?=\.|$)", prefix)
+    if match is None:
+        return prefix
+    start_layer_id = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+    local_layer_id = int(match.group(1)) - start_layer_id
+    if not 0 <= local_layer_id < draft_hf_config.num_hidden_layers:
+        return prefix
+    return f"layers.{local_layer_id}{prefix[match.end() :]}"
+
+
 def enable_fa_quant(vllm_config, layer_name=None) -> bool:
     model_config = getattr(vllm_config, "model_config", None)
+    quant_config = getattr(vllm_config, "quant_config", None)
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    is_dspark_draft = False
+    if speculative_config is not None and speculative_config.method == "dspark":
+        # V2 keeps the target VllmConfig while constructing a DSpark model.
+        # Resolve the live loader tag before applying target-only SFA gates,
+        # and use the draft checkpoint's own FA scales/quant recipe.
+        from vllm.compilation import backends
+
+        is_dspark_draft = backends.model_tag == "dspark_head"
+        if is_dspark_draft:
+            from vllm.model_executor.models.utils import get_draft_quant_config
+
+            model_config = speculative_config.draft_model_config
+            quant_config = get_draft_quant_config(vllm_config)
     if model_config is None or not model_config.use_mla:
         return False
-    if enable_sfa(vllm_config):
+    if not is_dspark_draft and enable_sfa(vllm_config):
+        return False
+    # V2 shares the target cache config with the draft. An unquantized
+    # draft must not inherit the target's request for an FP8 attention cache.
+    # Keep errors for a declared quantization method whose recipe is missing.
+    if is_dspark_draft and quant_config is None and getattr(model_config, "quantization", None) is None:
         return False
     cache_config = getattr(vllm_config, "cache_config", None)
     if cache_config is None or cache_config.cache_dtype not in ["fp8", "int8"]:
@@ -267,10 +316,10 @@ def enable_fa_quant(vllm_config, layer_name=None) -> bool:
     is_kv_consumer = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
     if not is_kv_consumer and not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
         return False
-    if vllm_config.quant_config is not None and getattr(vllm_config.quant_config, "enable_fa_quant", False):
+    if quant_config is not None and getattr(quant_config, "enable_fa_quant", False):
         if layer_name is not None:
             # Determine whether quantization is enabled at each layer.
-            return vllm_config.quant_config.enabling_fa_quant(vllm_config, layer_name)
+            return quant_config.enabling_fa_quant(vllm_config, layer_name)
         else:
             return True
     raise ValueError(

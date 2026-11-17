@@ -44,6 +44,11 @@ from vllm_ascend.attention.flashmla import (
     get_flashmla_ops,
     split_flashmla_requests,
 )
+from vllm_ascend.attention.quant_flashmla import (
+    QUANT_FLASHMLA_SUPPORTED_Q_HEADS,
+    QuantFlashMLAConfig,
+    QuantFlashMLAImpl,
+)
 from vllm_ascend.attention.utils import (
     ATTENTION_UPDATE_MAX_INPUTS,
     MLA_FLASH_SUPPORTED_Q_HEADS,
@@ -52,6 +57,7 @@ from vllm_ascend.attention.utils import (
     PreprocessType,
     ascend_chunked_prefill_workspace_size,
     enabling_mlapo,
+    get_quant_flashmla_ops,
     is_dcp_enabled,
     maybe_save_kv_layer_to_connector,
     merge_prefill_chunks,
@@ -176,6 +182,18 @@ class AscendMLAAttention(MLAAttention):
             # Preserve the existing Kimi Linear cache head-count contract.
             storage_heads = spec.num_heads
         head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8 = self._get_kv_cache_format(spec)
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        draft_config = getattr(speculative_config, "draft_model_config", None)
+        if (
+            (spec.is_draft or self.is_draft_layer)
+            and getattr(speculative_config, "method", None) == "dspark"
+            and getattr(getattr(draft_config, "hf_config", None), "model_type", None) == "k3_dspark"
+            and not (use_sfa_turboquant or use_sfa_c8 or getattr(self.impl, "fa_quant_layer", False))
+            and self.impl.dtype in (torch.bfloat16, torch.float16)
+        ):
+            # The target may request FP8 while the draft is unquantized. Keep
+            # the layer's floating format before the backend customizes pages.
+            dtype, cache_dtype_str = self.impl.dtype, None
 
         # Preserve upstream metadata and apply all owner fields together.
         # Reuse the physical packing selected by the execution implementation.
@@ -432,15 +450,30 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         if len(flashmla_choices) > 1:
             raise ValueError("MLA layers in one attention group must use the same decode backend")
         if layer_names:
+            first_impl = static_forward_context[layer_names[0]].impl
+            backend_name = "QuantFlashMLA" if getattr(first_impl, "use_quant_flashmla", False) else "FlashMLA"
             logger.info(
                 "MLA decode backend for group starting at %s: %s",
                 layer_names[0],
-                "FlashMLA" if True in flashmla_choices else "FIA",
+                backend_name if True in flashmla_choices else "FIA",
             )
         if True in flashmla_choices:
             impl = static_forward_context[layer_names[0]].impl
+            adapter = None
+            if getattr(impl, "use_quant_flashmla", False):
+                adapter = QuantFlashMLAImpl.load(
+                    QuantFlashMLAConfig(
+                        impl.num_heads,
+                        impl.scale,
+                        return_softmax_lse=False,
+                    )
+                )
             self.flashmla_state = FlashMLAMetadataBuilder(
-                impl, device, scheduler_config.max_num_seqs, self.attn_mask_builder.get_splitfuse_attn_mask()
+                impl,
+                device,
+                scheduler_config.max_num_seqs,
+                self.attn_mask_builder.get_splitfuse_attn_mask(),
+                adapter=adapter,
             )
 
     def _build_external_flashmla(self, common_prefix_len, common, *, retain_for_graph: bool = False):
@@ -1128,8 +1161,47 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.mlapo_num_heads = self.num_heads
         self.mlapo_weight_quant_mode = 3
         self._mlapo_uses_native_weights = False
-        self.use_flashmla: bool = self._can_use_flashmla()
+        self.use_quant_flashmla: bool = self._can_use_quant_flashmla()
+        self.use_flashmla: bool = self.use_quant_flashmla or self._can_use_flashmla()
         self._flashmla_writer_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+        self._quant_flashmla_writer_scales: tuple[torch.Tensor, torch.Tensor] | None = None
+
+    def _can_use_quant_flashmla(self) -> bool:
+        config = self.vllm_config
+        speculative_config = config.speculative_config
+        is_dspark_draft = (
+            (self.is_draft_model or backends.model_tag == "dspark_head")
+            and speculative_config is not None
+            and speculative_config.method == "dspark"
+        )
+        if config.model_config.hf_config.model_type not in ("kimi_k3", "kimi_linear") and not is_dspark_draft:
+            return False
+        if not getattr(config, "use_v2_model_runner", False):
+            return False
+        if speculative_config is not None and speculative_config.method != "dspark":
+            return False
+        hardware = get_current_hardware_profile()
+        if not hardware.supports(HardwareCapability.MLA_FLASH) or not self.support_fp8_attention:
+            return False
+        if self.num_heads not in QUANT_FLASHMLA_SUPPORTED_Q_HEADS or self.num_kv_heads != 1:
+            return False
+        if self.kv_lora_rank != FLASHMLA_V_DIM or self.qk_rope_head_dim != FLASHMLA_QK_DIM - FLASHMLA_V_DIM:
+            return False
+        if (
+            not self.fa_quant_layer
+            or self.dtype != torch.float8_e4m3fn
+            or config.model_config.dtype != torch.bfloat16
+            or self.enable_kv_nz
+        ):
+            return False
+        # The full-quant operator can return LSE, but the existing DCP merge
+        # path does not carry q/k descales. Keep K3 C8 on single-rank decode
+        # until that scale contract is added to context_parallel/mla_cp.py.
+        if self.use_pcp or config.parallel_config.decode_context_parallel_size != 1:
+            return False
+        if not supports_component_major_mla_pd(config):
+            return False
+        return get_quant_flashmla_ops() is not None
 
     def _can_use_flashmla(self) -> bool:
         config = self.vllm_config
@@ -1260,7 +1332,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                 # through AscendLinearMethod.quant_method. Let an unsupported
                 # wrapper fail here instead of silently disabling MLAPO.
                 quant_method = layer_quant_method.quant_method
-            self._mlapo_uses_native_weights = quant_method is None
             supports_quantized_weights = isinstance(
                 quant_method,
                 (AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod),
@@ -1293,17 +1364,39 @@ class AscendMLAImpl(MLAAttentionImpl):
         elif not getattr(self, "use_dcp", False):
             self._prepare_prolog_v3_weights_after_loading()
         self._prepare_strided_kv_workspace()
-        if self.use_flashmla and self.supports_prolog_v3_writer():
+        if self.use_flashmla and (
+            self.supports_prolog_v3_writer() or (getattr(self, "use_quant_flashmla", False) and self.use_mla_rope)
+        ):
             self._prepare_flashmla_writer_buffers()
 
     def _prepare_flashmla_writer_buffers(self) -> None:
         """Keep a bounded dense PROLOG workspace alive across graph replay."""
+        if getattr(self, "use_quant_flashmla", False):
+            if self.fak_descale_reciprocal.numel() != 1:
+                raise ValueError("QuantFlashMLA requires a single per-tensor latent KV scale")
+            if self._quant_flashmla_writer_scales is None:
+                self._quant_flashmla_writer_scales = (
+                    torch.ones(self.qk_rope_head_dim, dtype=torch.float32, device=self.W_UV.device),
+                    torch.empty(self.kv_lora_rank, dtype=torch.float32, device=self.W_UV.device),
+                )
+            # Refresh in place on weight reload, before the workspace early return.
+            # The writer ABI requires dense per-channel scale vectors, while
+            # QuantFlashMLA uses one calibrated per-tensor latent KV scale.
+            self._quant_flashmla_writer_scales[1].copy_(
+                self.fak_descale_reciprocal.reshape(1).expand(self.kv_lora_rank)
+            )
         if self._flashmla_writer_buffers is not None:
             return
         capacity = self.vllm_config.scheduler_config.max_num_batched_tokens
         # PROLOG_V3 limits blockSize to 1024. FlashMLA history pages can be
         # larger (e.g. 1536), but this private writer is scattered by slot.
-        block_size = min(self.vllm_config.cache_config.block_size, PROLOG_V3_MAX_BLOCK_SIZE)
+        # Quantized staging follows the backend kernel geometry. Keep the
+        # existing PROLOG limit for the unquantized writer.
+        block_size = (
+            min(AscendMLABackend.get_supported_kernel_block_sizes())
+            if self.use_quant_flashmla
+            else min(self.vllm_config.cache_config.block_size, PROLOG_V3_MAX_BLOCK_SIZE)
+        )
         shape = (cdiv(capacity, block_size), block_size, self.num_kv_heads)
         self._flashmla_writer_buffers = (
             torch.empty((*shape, self.kv_lora_rank), dtype=self.dtype, device=self.W_UV.device),
@@ -1360,7 +1453,37 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert self.q_proj is not None
         assert self.fused_qkv_a_proj is not None
 
-        is_native = self._mlapo_uses_native_weights
+        # FA/cache quantization does not imply quantized projection weights.
+        # DSpark can disable MLAPO yet still use the FA-quant fused path, so
+        # classify both projections here rather than only in the MLAPO gate.
+        fused_method = self.fused_qkv_a_proj.quant_method
+        q_method = self.q_proj.quant_method
+        fused_native = isinstance(fused_method, UnquantizedLinearMethod)
+        q_native = isinstance(q_method, UnquantizedLinearMethod)
+        if fused_native != q_native:
+            raise RuntimeError(
+                "Fused MLA projections require compatible weight methods: "
+                f"fused_qkv_a_proj={type(fused_method).__name__}, "
+                f"q_proj={type(q_method).__name__}"
+            )
+        if fused_native:
+            if not self.fused_qkv_a_proj.weight.is_floating_point() or not self.q_proj.weight.is_floating_point():
+                raise RuntimeError("Native fused MLA projections require floating-point weights")
+        else:
+            fused_scheme = getattr(fused_method, "quant_method", None)
+            q_scheme = getattr(q_method, "quant_method", None)
+            supported = isinstance(
+                fused_scheme,
+                (AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod),
+            ) or (not self.support_fp8_attention and type(fused_scheme) is AscendW8A8DynamicLinearMethod)
+            if not supported or type(fused_scheme) is not type(q_scheme):
+                raise RuntimeError(
+                    "Fused MLA projections require the same supported quantization scheme: "
+                    f"fused_qkv_a_proj={type(fused_scheme).__name__}, "
+                    f"q_proj={type(q_scheme).__name__}"
+                )
+        is_native = fused_native
+        self._mlapo_uses_native_weights = is_native
         fused_weight = self.fused_qkv_a_proj.weight.data
         weight_uq_qr = self.q_proj.weight.data
         if is_native:
@@ -1700,8 +1823,17 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
         kv_c_normed = kv_c_normed.view(num_tokens, self.num_kv_heads, self.kv_lora_rank)
         k_pe = k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim)
+        cache_k_nope = kv_c_normed
+        if getattr(self, "use_quant_flashmla", False):
+            # QuantFlashMLA applies k_descale to the complete 576-wide dot.
+            # Quantize the latent slice with the checkpoint's static scale,
+            # while keeping the positional slice as a raw FP8 cast; decode Q
+            # compensates that positional slice for k_descale explicitly.
+            cache_k_nope = torch.mul(kv_c_normed.to(self.fak_descale_reciprocal.dtype), self.fak_descale_reciprocal).to(
+                kv_cache[0].dtype
+            )
         DeviceOperator.reshape_and_cache(
-            key=kv_c_normed,
+            key=cache_k_nope,
             value=k_pe,
             key_cache=kv_cache[0],
             value_cache=kv_cache[1],
@@ -1759,6 +1891,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             return kv_cache[1], kv_cache[0]
         if not self.use_mla_rope:
             current_k_pe, current_k_nope = self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
+            if return_current_kv:
+                return kv_cache[1], kv_cache[0], current_k_pe, current_k_nope
+            return kv_cache[1], kv_cache[0]
+        if getattr(self, "use_quant_flashmla", False) and any(not cache.is_contiguous() for cache in kv_cache):
+            current_k_pe, current_k_nope = self._exec_quant_flashmla_kv_writer(kv_no_split, cos, sin, kv_cache, slots)
             if return_current_kv:
                 return kv_cache[1], kv_cache[0], current_k_pe, current_k_nope
             return kv_cache[1], kv_cache[0]
@@ -1931,6 +2068,55 @@ class AscendMLAImpl(MLAAttentionImpl):
         DeviceOperator.reshape_and_cache(
             key=current_nope,
             value=current_rope,
+            key_cache=kv_cache[0],
+            value_cache=kv_cache[1],
+            slot_mapping=slots,
+        )
+        return current_rope, current_nope
+
+    def _exec_quant_flashmla_kv_writer(self, kv_no_split, cos, sin, kv_cache, slots):
+        """Quantize into dense staging pages, then scatter into fused FP8 pages.
+
+        ``npu_kv_rmsnorm_rope_cache`` may materialize its non-contiguous cache
+        outputs. QuantFlashMLA exposes NoPE/RoPE as slices of one 576-wide page,
+        so write dense temporary pages first and use the cache scatter operator
+        for the persistent token-interleaved layout.
+        """
+        buffers = self._flashmla_writer_buffers
+        if buffers is None:
+            raise RuntimeError("QuantFlashMLA KV writer workspace was not prepared during weight loading")
+        nope, rope, indices = buffers
+        num_tokens = kv_no_split.shape[0]
+        if num_tokens > indices.numel():
+            raise RuntimeError("QuantFlashMLA KV input exceeds the profiled writer capacity")
+        if num_tokens == 0:
+            return rope.flatten(0, 1)[:0], nope.flatten(0, 1)[:0]
+        self._validate_prolog_v3_cache(kv_cache)
+        scales = self._quant_flashmla_writer_scales
+        if scales is None:
+            raise RuntimeError("QuantFlashMLA writer scales were not prepared during weight loading")
+        rope_scale, latent_scale = scales
+        assert self.kv_a_layernorm is not None
+        blocks = cdiv(num_tokens, nope.shape[1])
+        _, _, current_rope, current_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
+            kv_no_split.view(num_tokens, self.num_kv_heads, 1, self.kv_lora_rank + self.qk_rope_head_dim),
+            self.kv_a_layernorm.weight,
+            cos,
+            sin,
+            indices[:num_tokens],
+            rope[:blocks],
+            nope[:blocks],
+            k_rope_scale=rope_scale,
+            c_kv_scale=latent_scale,
+            epsilon=self.kv_a_layernorm.variance_epsilon,
+            cache_mode="PA",
+            is_output_kv=True,
+        )
+        # is_output_kv returns unquantized BF16 tensors for prefill. Only
+        # the dense staging caches contain the scaled FP8 values to persist.
+        DeviceOperator.reshape_and_cache(
+            key=nope.flatten(0, 1)[:num_tokens],
+            value=rope.flatten(0, 1)[:num_tokens],
             key_cache=kv_cache[0],
             value_cache=kv_cache[1],
             slot_mapping=slots,
@@ -2619,6 +2805,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         if not self.use_mla_rope:
             k_pe, k_nope = self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
+        elif getattr(self, "use_quant_flashmla", False) and any(not cache.is_contiguous() for cache in kv_cache):
+            k_pe, k_nope = self._exec_quant_flashmla_kv_writer(kv_no_split, cos, sin, kv_cache, slots)
         elif self._uses_strided_kv_adapter() and any(not cache.is_contiguous() for cache in kv_cache):
             k_pe, k_nope = self._exec_strided_kv_writer(kv_no_split, cos, sin, kv_cache, slots)
         else:
@@ -2920,6 +3108,15 @@ class AscendMLAImpl(MLAAttentionImpl):
         flash.query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
         flash.query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
         record_attention_compute_start()
+        quant_kwargs = {}
+        if getattr(self, "use_quant_flashmla", False):
+            q_descale = preprocessed.dequant_scale_q_nope
+            if q_descale is None:
+                raise RuntimeError("QuantFlashMLA requires the per-token-head query descale from MLA preprocessing")
+            quant_kwargs = {
+                "q_descale": q_descale.view(flash.query.shape[0], self.num_heads),
+                "k_descale": self.fak_descale_float.view(1),
+            }
         latent, _ = flash.adapter.attention(
             flash.query,
             fused_cache,
@@ -2929,6 +3126,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             seqused_q=flash.used_q,
             metadata=flash.schedule,
             attn_mask=flash.attn_mask,
+            **quant_kwargs,
         )
         return self._v_up_proj(latent)
 
@@ -3128,10 +3326,22 @@ class AscendMLAImpl(MLAAttentionImpl):
         decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
         dequant_scale_q_nope = None
         if self.fa_quant_layer and self.support_fp8_attention:
-            decode_ql_nope, dequant_scale_q_nope = torch_npu.npu_dynamic_quant(
-                decode_ql_nope, dst_type=torch.float8_e4m3fn
-            )
-            decode_q_pe = (decode_q_pe / dequant_scale_q_nope.unsqueeze(-1) / self.fak_descale_float).to(torch.bfloat16)
+            if self.use_quant_flashmla:
+                # QuantFlashMLA applies one descale to all 576 query channels.
+                joint_query = torch.cat(
+                    (decode_ql_nope.float(), decode_q_pe.float() / self.fak_descale_float), dim=-1
+                ).to(decode_ql_nope.dtype)
+                joint_query, dequant_scale_q_nope = torch_npu.npu_dynamic_quant(
+                    joint_query, dst_type=torch.float8_e4m3fn
+                )
+                decode_ql_nope, decode_q_pe = joint_query.split((self.kv_lora_rank, self.qk_rope_head_dim), dim=-1)
+            else:
+                decode_ql_nope, dequant_scale_q_nope = torch_npu.npu_dynamic_quant(
+                    decode_ql_nope, dst_type=torch.float8_e4m3fn
+                )
+                decode_q_pe = (decode_q_pe / dequant_scale_q_nope.unsqueeze(-1) / self.fak_descale_float).to(
+                    torch.bfloat16
+                )
         decode_slots = attn_metadata.slot_mapping[:num_decode_tokens:1]
         if attn_metadata.external_flashmla is not None:
             decode_slots = attn_metadata.external_flashmla.slots
