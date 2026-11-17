@@ -63,6 +63,15 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Qwen4Exp"):
             self.config_module.validate_qwen_gdn_recoverssm(cfg)
 
+    def test_rejects_missing_text_model_configuration(self):
+        for model_config in (
+            types.SimpleNamespace(),
+            types.SimpleNamespace(hf_text_config=None),
+            types.SimpleNamespace(hf_text_config=types.SimpleNamespace()),
+        ):
+            with self.subTest(model_config=model_config), self.assertRaisesRegex(ValueError, "Qwen4Exp"):
+                self.config_module.validate_qwen_gdn_recoverssm(config(model_config=model_config))
+
     def test_rejects_context_and_pipeline_parallelism(self):
         for field in ("pipeline_parallel_size", "decode_context_parallel_size", "prefill_context_parallel_size"):
             cfg = config()

@@ -69,8 +69,11 @@ _upstream_make_draft_vllm_config = upstream_mtp._make_draft_vllm_config
 def _make_draft_vllm_config(
     vllm_config: VllmConfig,
     mtp_start_layer_idx: int,
-    num_mtp_layers: int,
+    num_mtp_layers: int | None = None,
 ) -> VllmConfig:
+    if num_mtp_layers is None:
+        hf_text_config = getattr(vllm_config.model_config, "hf_text_config", None)
+        num_mtp_layers = getattr(hf_text_config, "mtp_num_hidden_layers", 1)
     draft_vllm_config = _upstream_make_draft_vllm_config(
         vllm_config,
         mtp_start_layer_idx,

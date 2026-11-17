@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from vllm_ascend.models.qwen4_exp import mtp
 
 
@@ -68,3 +70,24 @@ def test_draft_config_remaps_modelslim_description(monkeypatch) -> None:
     assert draft_config.quant_config.quant_description == {
         "mtp.layers.48.self_attn.q_proj.weight": "W8A8_DYNAMIC",
     }
+
+
+@pytest.mark.parametrize("configured_layers", [None, 2])
+def test_two_argument_draft_config_infers_layer_count(monkeypatch, configured_layers) -> None:
+    text_config = SimpleNamespace()
+    if configured_layers is not None:
+        text_config.mtp_num_hidden_layers = configured_layers
+    target_config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=text_config))
+    draft_config = SimpleNamespace(
+        quant_config=SimpleNamespace(quant_description={"mtp.layers.0.self_attn.q_proj.weight": "W8A8_DYNAMIC"})
+    )
+    calls = []
+
+    def upstream(config, start, layers):
+        calls.append((config, start, layers))
+        return draft_config
+
+    monkeypatch.setattr(mtp, "_upstream_make_draft_vllm_config", upstream)
+    assert mtp._make_draft_vllm_config(target_config, mtp_start_layer_idx=48) is draft_config
+    assert calls == [(target_config, 48, 1 if configured_layers is None else configured_layers)]
+    assert draft_config.quant_config.quant_description == {"mtp.layers.48.self_attn.q_proj.weight": "W8A8_DYNAMIC"}

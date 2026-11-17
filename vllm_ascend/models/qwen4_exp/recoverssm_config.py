@@ -10,7 +10,8 @@ def use_qwen_gdn_recoverssm(config) -> bool:
 def validate_qwen_gdn_recoverssm(config) -> None:
     if not use_qwen_gdn_recoverssm(config):
         return
-    if config.model_config.hf_text_config.model_type not in ("qwen4_exp", "qwen4_exp_text"):
+    hf_text_config = getattr(config.model_config, "hf_text_config", None)
+    if getattr(hf_text_config, "model_type", None) not in ("qwen4_exp", "qwen4_exp_text"):
         raise ValueError("qwen_gdn_recoverssm requires Qwen4Exp")
     if config.speculative_config is None or config.speculative_config.num_speculative_tokens < 1:
         raise ValueError("Qwen GDN RecoverSSM requires speculative decoding")
