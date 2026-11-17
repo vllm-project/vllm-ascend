@@ -408,8 +408,10 @@ def rejection_sample(
     has_draft_logits = draft_logits is not None
 
     # [dfx/nan] Input-side NaN census -- BEFORE the dummy replacement below
-    # so the real draft_logits (or None) is what gets inspected.
-    log_nan_census(target_logits, draft_logits, num_speculative_steps)
+    # so the real draft_logits (or None) is what gets inspected. The packed
+    # row boundaries are passed so mixed prefill/decode or shorter-draft
+    # batches get correct request/step coordinates.
+    log_nan_census(target_logits, draft_logits, num_speculative_steps, cu_num_logits)
 
     # Both upstream kernels detect bonus rows using the total logit count.
     stats_num_logits = num_logits

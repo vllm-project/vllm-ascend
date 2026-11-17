@@ -123,6 +123,38 @@ def test_draft_logits_nan(capture):
     assert len(recs) == 1, recs
     assert "rows_with_nan=1" in recs[0]
     assert "total_nan=7" in recs[0]
+
+
+def test_packed_rows_mixed_boundaries(capture):
+    """Regression: target_logits is packed with cu_num_logits, so requests
+    do NOT always occupy num_speculative_steps + 1 rows. With K=3 and
+    boundaries [0, 1, 5] (a request without drafts followed by one with
+    three drafts), a NaN at row 1 belongs to request 1 step 0 -- the
+    uniform division (i // (K+1)) would misreport request 0 step 1."""
+    boundaries = torch.tensor([0, 1, 5], dtype=torch.int64)
+    t = torch.zeros(5, V)
+    t[0, 0] = float("nan")  # request 0's only row
+    t[1, 0] = float("nan")  # request 1, step 0
+    t[4, :2] = float("nan")  # request 1, last row (bonus)
+    dfx.log_nan_census(t, None, 3, boundaries)
+    recs = _target_records(capture)
+    assert len(recs) == 1, recs
+    assert "rows_with_nan=3/5" in recs[0]
+    assert "req=0 step=0 nan=1" in recs[0]
+    assert "req=1 step=0 nan=1" in recs[0]
+    assert "req=1 step=3 nan=2" in recs[0]
+
+
+def test_packed_rows_uniform_boundaries_match_legacy(capture):
+    """With uniform boundaries (every request K+1 rows) the packed path
+    must agree with the legacy uniform division."""
+    boundaries = torch.tensor([0, 6, 12], dtype=torch.int64)
+    t = torch.zeros(12, V)
+    t[6, 0] = float("nan")  # request 1, step 0
+    dfx.log_nan_census(t, None, K, boundaries)
+    recs = _target_records(capture)
+    assert len(recs) == 1, recs
+    assert "req=1 step=0 nan=1" in recs[0]
     assert "slot=1 step=3 nan=7" in recs[0]
 
 

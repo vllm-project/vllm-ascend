@@ -14,6 +14,7 @@ INFO path each call site pays one integer compare; under
 diagnostics must not take down the sampler.
 """
 
+import bisect
 import logging
 
 import torch
@@ -28,27 +29,49 @@ _logger = _vllm_logger
 _NAN_ROW_FMT_LIMIT = 8
 
 
-def _fmt_nan_rows(bad_rows, nan_per_row, rows_per_req: int, unit: str) -> str:
-    """Render (row_id, nan_count) pairs as req/step coordinates.
+def _fmt_rows(rows_counts: list[tuple[int, int, int]], unit: str) -> str:
+    """Render (owner_id, step, nan_count) triples.
 
-    Both host transfers are batched: indexing ``nan_per_row`` per element
-    inside the loop would pay one D2H sync per iteration (up to
+    Both host transfers are batched upstream: indexing ``nan_per_row`` per
+    element inside the loop would pay one D2H sync per iteration (up to
     ``_NAN_ROW_FMT_LIMIT``); slicing first and copying the whole batch
     collapses it to two syncs (one per list).
     """
-    limit_rows = bad_rows[:_NAN_ROW_FMT_LIMIT]
-    bad_rows_list = limit_rows.tolist()
-    bad_counts_list = nan_per_row[limit_rows].tolist()
-    parts = []
-    for i, count in zip(bad_rows_list, bad_counts_list):
-        parts.append(f"{unit}={i // rows_per_req} step={i % rows_per_req} nan={int(count)}")
+    parts = [f"{unit}={r} step={s} nan={c}" for r, s, c in rows_counts]
     return "[" + ", ".join(parts) + "]"
+
+
+def _uniform_coords(bad_rows_list: list[int], nan_counts: list[int], rows_per_req: int) -> list[tuple[int, int, int]]:
+    """Row coordinates for a uniform batch: every request occupies exactly
+    ``rows_per_req`` rows."""
+    return [(i // rows_per_req, i % rows_per_req, int(c)) for i, c in zip(bad_rows_list, nan_counts)]
+
+
+def _packed_coords(
+    bad_rows_list: list[int],
+    nan_counts: list[int],
+    boundaries: list[int],
+) -> list[tuple[int, int, int]]:
+    """Row coordinates from inclusive-cumsum row boundaries.
+
+    ``target_logits`` is packed with ``cu_num_logits``: a request occupies
+    ``end - start`` rows, which is NOT always ``num_speculative_steps + 1``
+    (mixed prefill/decode batches, requests with fewer scheduled drafts).
+    Row ``i`` belongs to request ``bisect_right(boundaries, i) - 1`` and its
+    step offset is ``i - boundaries[r]``.
+    """
+    coords = []
+    for i, c in zip(bad_rows_list, nan_counts):
+        req = bisect.bisect_right(boundaries, i) - 1
+        coords.append((req, i - boundaries[req], int(c)))
+    return coords
 
 
 def log_nan_census(
     target_logits: torch.Tensor,
     draft_logits: torch.Tensor | None,
     num_speculative_steps: int,
+    cu_num_logits: torch.Tensor | None = None,
 ) -> None:
     """[dfx/nan] Per-row NaN census of the verification inputs.
 
@@ -59,33 +82,48 @@ def log_nan_census(
     degenerate but legal token (id 0). A single census record therefore
     identifies exactly which request/step was poisoned.
 
+    ``cu_num_logits`` (inclusive cumsum over rows per request) should be
+    passed whenever available: without it the coordinates assume a uniform
+    ``num_speculative_steps + 1`` layout, which misassigns rows in mixed
+    prefill/decode or shorter-draft batches.
+
     DEBUG-gated: INFO pays one integer compare per step; DEBUG pays one
     device reduction + D2H sync per input tensor (diagnostic mode only).
     """
     if not _logger.isEnabledFor(logging.DEBUG):
         return
     try:
-        rows_per_req = num_speculative_steps + 1
         nan_per_row = torch.isnan(target_logits).sum(dim=-1)
         bad_rows = nan_per_row.nonzero(as_tuple=True)[0]
         if bad_rows.numel() > 0:
+            limit_rows = bad_rows[:_NAN_ROW_FMT_LIMIT]
+            bad_rows_list = limit_rows.tolist()
+            bad_counts_list = nan_per_row[limit_rows].tolist()
+            if cu_num_logits is not None:
+                boundaries = cu_num_logits.tolist() if torch.is_tensor(cu_num_logits) else list(cu_num_logits)
+                coords = _packed_coords(bad_rows_list, bad_counts_list, boundaries)
+            else:
+                coords = _uniform_coords(bad_rows_list, bad_counts_list, num_speculative_steps + 1)
             _logger.debug(
                 "[dfx/nan] target_logits: rows_with_nan=%d/%d total_nan=%d %s",
                 bad_rows.numel(),
                 target_logits.shape[0],
                 int(nan_per_row.sum()),
-                _fmt_nan_rows(bad_rows, nan_per_row, rows_per_req, "req"),
+                _fmt_rows(coords, "req"),
             )
         if draft_logits is not None and draft_logits.numel() > 1:
-            d_nan = torch.isnan(draft_logits).sum(dim=-1).view(-1)
-            d_bad = d_nan.nonzero(as_tuple=True)[0]
-            if d_bad.numel() > 0:
-                _logger.debug(
-                    "[dfx/nan] draft_logits: rows_with_nan=%d total_nan=%d %s",
-                    d_bad.numel(),
-                    int(d_nan.sum()),
-                    _fmt_nan_rows(d_bad, d_nan, num_speculative_steps, "slot"),
-                )
+                    d_nan = torch.isnan(draft_logits).sum(dim=-1).view(-1)
+                    d_bad = d_nan.nonzero(as_tuple=True)[0]
+                    if d_bad.numel() > 0:
+                        limit_rows = d_bad[:_NAN_ROW_FMT_LIMIT]
+                        d_counts = d_nan[limit_rows].tolist()
+                        coords = _uniform_coords(limit_rows.tolist(), d_counts, num_speculative_steps)
+                        _logger.debug(
+                            "[dfx/nan] draft_logits: rows_with_nan=%d total_nan=%d %s",
+                            d_bad.numel(),
+                            int(d_nan.sum()),
+                            _fmt_rows(coords, "slot"),
+                        )
     except Exception as e:  # diagnostics must never take down the sampler
         _logger.debug("[dfx/nan] target/draft census failed: %s", e)
 
