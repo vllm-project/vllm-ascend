@@ -4,6 +4,8 @@ entries:
     text: >-
       Added experimental bulk AscendStore prefix reuse with colocated HiSparse
       on A5 using MemCache host_tcp and asynchronous loading (load_async=true).
-      The combination requires kv_role=kv_both and rejects layerwise transfers,
-      other Store backends and other MemCache protocols at startup.
+      The combination supports single-node colocated Prefill and Decode with
+      kv_role=kv_both on MultiConnector and its children. Startup rejects PD
+      disaggregation, multi-node deployments, additional connector types,
+      layerwise transfers, other Store backends and other MemCache protocols.
     hardware: [A5]
