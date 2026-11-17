@@ -117,15 +117,21 @@ def _align_draft_rope_with_target(vllm_config: VllmConfig) -> None:
     if speculative_config is None or speculative_config.draft_model_config is None:
         return
 
-    target_model_config = vllm_config.model_config
+    target_model_config = getattr(speculative_config, "target_model_config", None)
+    if target_model_config is None:
+        target_model_config = vllm_config.model_config
     draft_model_config = speculative_config.draft_model_config
-    if not target_model_config.uses_mrope and draft_model_config.uses_mrope:
+    if (
+        getattr(target_model_config, "uses_mrope", None) is False
+        and getattr(draft_model_config, "uses_mrope", None) is True
+    ):
         _strip_qwen4_exp_mrope(draft_model_config)
 
 
 def _make_draft_vllm_config(
     vllm_config: VllmConfig,
     mtp_start_layer_idx: int,
+    num_mtp_layers: int | None = None,
 ) -> VllmConfig:
     # Align the speculator-owned config before upstream derives the runtime
     # draft config and its QSA cache specs from it.
@@ -133,15 +139,22 @@ def _make_draft_vllm_config(
     # Run before the Qwen4Exp MTP layers construct their rotary embeddings so
     # graph capture cannot retain an undersized cache.
     _align_qwen4_exp_mtp_position_cache(vllm_config)
-    draft_vllm_config = _upstream_make_draft_vllm_config(
-        vllm_config,
-        mtp_start_layer_idx,
-    )
-    num_mtp_layers = getattr(
-        vllm_config.model_config.hf_text_config,
-        "mtp_num_hidden_layers",
-        1,
-    )
+    if num_mtp_layers is None:
+        draft_vllm_config = _upstream_make_draft_vllm_config(
+            vllm_config,
+            mtp_start_layer_idx,
+        )
+        num_mtp_layers = getattr(
+            vllm_config.model_config.hf_text_config,
+            "mtp_num_hidden_layers",
+            1,
+        )
+    else:
+        draft_vllm_config = _upstream_make_draft_vllm_config(
+            vllm_config,
+            mtp_start_layer_idx,
+            num_mtp_layers,
+        )
     _remap_modelslim_mtp_layer_ids(
         draft_vllm_config.quant_config,
         mtp_start_layer_idx,
