@@ -8,7 +8,6 @@ Pool publication, identity and lease management belong to the caller.
 
 import ctypes
 import os
-import weakref
 from pathlib import Path
 
 import torch
@@ -26,19 +25,13 @@ class _Allocation(ctypes.Structure):
         ("host_ptr", ctypes.c_void_p),
         ("device_ptr", ctypes.c_void_p),
         ("size", ctypes.c_size_t),
-        ("physical_device", ctypes.c_int32),
-        ("owner", ctypes.c_int32),
-        ("host_type", ctypes.c_int32),
-        ("host_id", ctypes.c_int32),
-        ("device_type", ctypes.c_int32),
-        ("device_id", ctypes.c_int32),
         ("token", ctypes.c_uint64),
     ]
 
 
 def _library(path: Path):
     lib = ctypes.CDLL(str(path))
-    if lib.host_vmm_abi_version() != 2:
+    if lib.host_vmm_abi_version() != 3:
         raise RuntimeError("Engram host-VMM ABI mismatch")
     lib.host_shared_registered_alloc.argtypes = [
         ctypes.c_size_t,
@@ -84,7 +77,6 @@ class MappedHostBuffer:
         self.lib = lib or _library(Path(library_path))
         self.allocation = _Allocation()
         self.closed = False
-        self._views: weakref.WeakSet[HostTableSlice] = weakref.WeakSet()
         with torch.npu.device(self.device):
             rc = self.lib.host_shared_registered_alloc(
                 self.size, self.device.index, os.fsencode(path), int(owner), ctypes.byref(self.allocation)
@@ -105,45 +97,12 @@ class MappedHostBuffer:
             self.allocation.host_ptr + start * self.row_bytes, source.data_ptr(), source.numel() * source.element_size()
         )
 
-    def view(self, start=0, end=None, *, chunk_rows=CHUNK_ROWS):
-        """TP-independent row slice consumed by the existing lookup kernel."""
-        end = self.rows if end is None else end
-        if self.closed or not 0 <= start < end <= self.rows:
-            raise ValueError("Invalid or closed host-VMM slice")
-        view = HostTableSlice(self, start, end, chunk_rows)
-        self._views.add(view)
-        return view
-
     def close(self):
         if self.closed:
             return
-        if self._views:
-            raise RuntimeError("Release all Engram slices before closing their mapping")
         with torch.npu.device(self.device):
             torch.npu.synchronize()
             rc = self.lib.host_shared_registered_free(ctypes.byref(self.allocation))
         if rc:
             raise EngramReleaseError(f"Engram VMM release: {self.lib.host_shared_last_error().decode()}")
         self.closed = True
-
-
-class HostTableSlice:
-    """Metadata and device pointers only; no copy and no remote CPU access."""
-
-    def __init__(self, mapping, start, end, chunk_rows=CHUNK_ROWS):
-        self._mapping = mapping
-        self.tensor = torch.empty((end - start, mapping.width), dtype=mapping.dtype, device="meta")
-        self.ptrs = torch.tensor(
-            [mapping.allocation.device_ptr + row * mapping.row_bytes for row in range(start, end, chunk_rows)],
-            dtype=torch.int64,
-            device=mapping.device,
-        )
-
-    def close(self):
-        if self._mapping is None:
-            return
-        with torch.npu.device(self._mapping.device):
-            torch.npu.synchronize()
-        self._mapping._views.discard(self)
-        self.ptrs = self.tensor = None
-        self._mapping = None

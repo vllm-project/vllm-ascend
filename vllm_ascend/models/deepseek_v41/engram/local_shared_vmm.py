@@ -91,6 +91,16 @@ class LocalSharedVmmScaleView:
         )
 
 
+def _codes_view(mapping, shape, dtype, device):
+    tensor = torch.empty(shape, dtype=dtype, device="meta")
+    ptrs = torch.tensor(
+        [mapping.allocation.device_ptr + row * mapping.row_bytes for row in range(0, shape[0], CHUNK_ROWS)],
+        dtype=torch.int64,
+        device=device,
+    )
+    return tensor, ptrs
+
+
 class LocalSharedVmmBuffer:
     """One creator and per-rank imports; the creator alone publishes rows.
 
@@ -101,7 +111,6 @@ class LocalSharedVmmBuffer:
     def __init__(self, shape, dtype, device, group, *, scales_shape=None, scale_dtype=None):
         self.group = group
         self.mapping = None
-        self.view = None
         self.tensor = None
         self.ptrs = None
         self.scales: LocalSharedVmmScaleView | None = None
@@ -166,8 +175,7 @@ class LocalSharedVmmBuffer:
                         lib=self.lib,
                     )
                 assert self.mapping is not None
-                self.view = self.mapping.view(0, shape[0])
-                self.tensor, self.ptrs = self.view.tensor, self.view.ptrs
+                self.tensor, self.ptrs = _codes_view(self.mapping, shape, dtype, device)
                 if scales_shape is not None:
                     self.scales = LocalSharedVmmScaleView(self, scales_shape, scale_dtype, scale_offset, device)
             except Exception as exc:  # noqa: BLE001 - propagate to all ranks
@@ -246,10 +254,7 @@ class LocalSharedVmmBuffer:
         if self.scales is not None:
             self.scales.tensor = self.scales.ptrs = None
             self.scales = None
-        if self.view is not None:
-            self.view.close()
-            self.view = None
-            self.tensor = self.ptrs = None
+        self.tensor = self.ptrs = None
         if self.mapping is not None:
             self.mapping.close()
             logger.info("Local Engram VMM mapping released: rank=%s owner=%s", self.group.rank_in_group, self.owner)

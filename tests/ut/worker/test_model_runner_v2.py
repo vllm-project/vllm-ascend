@@ -2047,7 +2047,7 @@ def test_shutdown_retains_vmm_owner_until_parent_graph_teardown():
         runner.shutdown()
 
     assert events == ["parent", "close"]
-    assert runner._pending_engram_vmm == []
+    assert runner._shared_engram_shutdown_pending == []
 
 
 def test_shutdown_retries_failed_vmm_close_and_keeps_default_untouched():
@@ -2057,17 +2057,17 @@ def test_shutdown_retries_failed_vmm_close_and_keeps_default_untouched():
     with patch.object(GPUModelRunner, "shutdown"):
         with pytest.raises(RuntimeError, match="peer lost"):
             runner.shutdown()
-        assert runner._pending_engram_vmm == [table]
+        assert runner._shared_engram_shutdown_pending == [table]
         runner.model = None
         runner.shutdown()
-    assert runner._pending_engram_vmm == []
+    assert runner._shared_engram_shutdown_pending == []
     assert table.close_host_offload.call_count == 2
 
     default_runner = NPUModelRunner.__new__(NPUModelRunner)
     default_runner.model = SimpleNamespace(modules=Mock(return_value=[]))
     with patch.object(GPUModelRunner, "shutdown"):
         default_runner.shutdown()
-    assert default_runner.model.modules.call_count == 2
+    assert default_runner.model.modules.call_count == 1
 
 
 def test_shutdown_does_not_release_vmm_when_parent_teardown_fails():
@@ -2080,7 +2080,7 @@ def test_shutdown_does_not_release_vmm_when_parent_teardown_fails():
     ):
         runner.shutdown()
     table.close_host_offload.assert_not_called()
-    assert runner._pending_engram_vmm == [table]
+    assert runner._shared_engram_shutdown_pending == [table]
 
 
 def test_shutdown_continues_after_synchronized_vmm_release_failure():
@@ -2093,7 +2093,7 @@ def test_shutdown_continues_after_synchronized_vmm_release_failure():
     with patch.object(GPUModelRunner, "shutdown"), pytest.raises(EngramSharedReleaseError, match="failed"):
         runner.shutdown()
     first.close_host_offload.assert_called_once()
-    assert runner._pending_engram_vmm == [last]
+    assert runner._shared_engram_shutdown_pending == [last]
 
 
 def test_shutdown_deduplicates_pending_local_vmm_owner():
@@ -2104,7 +2104,6 @@ def test_shutdown_deduplicates_pending_local_vmm_owner():
     with patch.object(GPUModelRunner, "shutdown"):
         runner.shutdown()
     table.close_host_offload.assert_called_once_with()
-    assert runner._pending_engram_vmm == []
     assert runner._shared_engram_shutdown_pending == []
 
 

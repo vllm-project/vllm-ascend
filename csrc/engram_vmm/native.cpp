@@ -24,8 +24,6 @@ thread_local std::string g_error;
 struct SharedDescriptor {
   uint64_t magic;
   uint64_t size;
-  int32_t owner_physical_device;
-  int32_t owner_numa;
   std::array<uint8_t, 128> fabric_handle;
 };
 
@@ -166,7 +164,7 @@ int Rollback(LocalMapping& mapping, int original_ret) {
 
 extern "C" {
 
-int host_vmm_abi_version() { return 2; }
+int host_vmm_abi_version() { return 3; }
 
 int host_vmm_retry_rollbacks() {
   std::lock_guard<std::mutex> lock(g_mutex);
@@ -192,12 +190,6 @@ struct HostSharedRegisteredResult {
   void* host_ptr;
   void* device_ptr;
   size_t size;
-  int32_t physical_device;
-  int32_t owner;
-  int32_t host_observed_location_type;
-  int32_t host_observed_location_id;
-  int32_t device_observed_location_type;
-  int32_t device_observed_location_id;
   uint64_t token;  // Stable even if a partially released VA gets reused.
 };
 
@@ -217,7 +209,6 @@ int host_shared_registered_alloc(size_t size, int32_t logical_device, const char
   g_error.clear();
   *result = {};
   result->size = size;
-  result->owner = owner;
   const std::string descriptor_path(path);
   const std::string ready_path = descriptor_path + ".ready";
 
@@ -226,12 +217,6 @@ int host_shared_registered_alloc(size_t size, int32_t logical_device, const char
     SetAclError("aclrtSetDevice", ret);
     return ret;
   }
-  ret = aclrtGetPhyDevIdByLogicDevId(logical_device, &result->physical_device);
-  if (ret != ACL_ERROR_NONE) {
-    SetAclError("aclrtGetPhyDevIdByLogicDevId", ret);
-    return ret;
-  }
-
   SharedDescriptor descriptor{};
   descriptor.magic = kMagic;
   descriptor.size = size;
@@ -269,8 +254,6 @@ int host_shared_registered_alloc(size_t size, int32_t logical_device, const char
       SetAclError("aclrtMallocPhysical(HOST)", ret);
       return Rollback(mapping, ret);
     }
-    descriptor.owner_physical_device = result->physical_device;
-    descriptor.owner_numa = prop.location.id;
     std::fprintf(stdout, "HOST_VMM_PHYSICAL bytes=%zu mem_attr=%d location=%d:%d\n", size,
                  static_cast<int>(prop.memAttr), static_cast<int>(prop.location.type), prop.location.id);
     std::fflush(stdout);
@@ -346,19 +329,6 @@ int host_shared_registered_alloc(size_t size, int32_t logical_device, const char
 
   result->host_ptr = owner ? mapping.owner_va : mapping.imported_va;
   result->device_ptr = mapping.imported_va;
-  aclrtPtrAttributes attributes{};
-  if (owner && aclrtPointerGetAttributes(mapping.owner_va, &attributes) == ACL_ERROR_NONE) {
-    result->host_observed_location_type = attributes.location.type;
-    result->host_observed_location_id = attributes.location.id;
-  } else {
-    result->host_observed_location_type = ACL_MEM_LOCATION_TYPE_HOST;
-    result->host_observed_location_id = descriptor.owner_numa;
-  }
-  attributes = {};
-  if (aclrtPointerGetAttributes(mapping.imported_va, &attributes) == ACL_ERROR_NONE) {
-    result->device_observed_location_type = attributes.location.type;
-    result->device_observed_location_id = attributes.location.id;
-  }
   result->token = ++g_next_token;
   if (!result->token || !g_mappings.emplace(result->token, mapping).second) {
     *result = {};

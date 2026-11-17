@@ -88,7 +88,7 @@ def test_combined_codes_and_scales_share_one_allocation(monkeypatch, tmp_path):
     address = ctypes.addressof(backing)
     mapping = Mock()
     mapping.allocation = types.SimpleNamespace(host_ptr=address, device_ptr=address)
-    mapping.view.return_value = types.SimpleNamespace(tensor=object(), ptrs=object())
+    mapping.row_bytes = 8
     allocate = Mock(return_value=mapping)
     monkeypatch.setattr(module, "MappedHostBuffer", allocate)
     monkeypatch.setattr(module.tempfile, "mkdtemp", lambda **_kwargs: str(tmp_path))
@@ -105,6 +105,22 @@ def test_combined_codes_and_scales_share_one_allocation(monkeypatch, tmp_path):
     assert bytes(backing[:16]) == bytes(16)
     assert list((ctypes.c_float * 2).from_buffer(backing, 16)) == [1.5, 2.5]
     assert buf.scales.ptrs.tolist() == [address + 16]
+    host = sys.modules["local_vmm_test_package.local_vmm_host"]
+    codes = host.MappedHostBuffer.__new__(host.MappedHostBuffer)
+    codes.rows, codes.width, codes.dtype = 2, 8, torch.int8
+    codes.row_bytes, codes.owner, codes.closed = 8, True, False
+    codes.allocation = types.SimpleNamespace(host_ptr=address)
+    codes.publish(0, torch.ones((2, 8), dtype=torch.int8))
+    assert bytes(backing[:16]) == bytes([1] * 16)
+    assert list((ctypes.c_float * 2).from_buffer(backing, 16)) == [1.5, 2.5]
+    codes.owner = False
+    with pytest.raises(RuntimeError, match="owner"):
+        codes.publish(0, torch.zeros((1, 8), dtype=torch.int8))
+    codes.owner = True
+    with pytest.raises(ValueError, match="outside"):
+        codes.publish(2, torch.zeros((1, 8), dtype=torch.int8))
+    with pytest.raises(ValueError, match="dtype"):
+        codes.publish(0, torch.zeros((1, 8), dtype=torch.float32))
 
 
 def test_failed_allocation_retries_with_loaded_library(monkeypatch, tmp_path):
@@ -143,13 +159,11 @@ def _missing_library_worker(rank, rendezvous, directory, missing_rank):
             def __init__(self, *_args, **_kwargs):
                 pass
 
-            def view(self, *_args):
-                return types.SimpleNamespace(tensor=object(), ptrs=object(), close=lambda: None)
-
             def close(self):
                 pass
 
         monkeypatch.setattr(module, "MappedHostBuffer", Mapping)
+        monkeypatch.setattr(module, "_codes_view", lambda *_args: (object(), object()))
         group = types.SimpleNamespace(rank_in_group=rank, cpu_group=dist.group.WORLD, world_size=2)
         try:
             with pytest.raises(module.EngramSharedInitError, match="missing library"):
@@ -190,11 +204,6 @@ def _rollback_worker(rank, rendezvous, directory, log_path, fail_consumer_close,
             def __init__(self, *_args, **_kwargs):
                 pass
 
-            def view(self, *_args):
-                if rank == 1:
-                    raise RuntimeError("injected view failure")
-                return types.SimpleNamespace(tensor=object(), ptrs=object(), close=lambda: None)
-
             def close(self):
                 with open(log_path, "a") as log:
                     log.write(f"close {rank}\n")
@@ -202,6 +211,13 @@ def _rollback_worker(rank, rendezvous, directory, log_path, fail_consumer_close,
                     raise RuntimeError("injected cleanup failure")
 
         monkeypatch.setattr(module, "MappedHostBuffer", Mapping)
+
+        def view(*_args):
+            if rank == 1:
+                raise RuntimeError("injected view failure")
+            return object(), object()
+
+        monkeypatch.setattr(module, "_codes_view", view)
         monkeypatch.setattr(module, "retry_pending_rollbacks", lambda **_kwargs: None)
         group = types.SimpleNamespace(rank_in_group=rank, cpu_group=dist.group.WORLD, world_size=2)
         try:
@@ -258,7 +274,7 @@ def test_unsynchronized_constructor_collective_failure_retains_local_mapping(mon
     directory = tmp_path / "capability"
     directory.mkdir()
     mapping = Mock()
-    mapping.view.return_value = types.SimpleNamespace(tensor=object(), ptrs=object(), close=Mock())
+    monkeypatch.setattr(module, "_codes_view", lambda *_args: (object(), object()))
     monkeypatch.setattr(module.tempfile, "mkdtemp", lambda **_kwargs: str(directory))
     monkeypatch.setattr(module, "MappedHostBuffer", Mock(return_value=mapping))
     monkeypatch.setattr(module.dist, "get_global_rank", lambda _group, rank: rank)

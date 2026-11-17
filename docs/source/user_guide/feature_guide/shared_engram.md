@@ -187,17 +187,3 @@ a stable speedup. The20–40K TTFT target of7s was missed by both baseline7.640s
 and shared8.238s. Full SLO acceptance and owner-failure validation remain open.
 The private request corpus is not distributed with this change; reproduce
 performance using a representative corpus and report workload differences.
-
-## A3 local shared Engram
-
-On supported A3 systems, shared CPU-offloaded INT8 DeepSeek-V4.1 Engram tables
-automatically use Host VMM when all local ranks pass its allocation and import
-probe. The build must include the Host VMM library, the CANN/driver stack must
-support it, and local ranks must share `/dev/shm`. Existing `shared_engram`
-configurations keep their own backend. If coordinated cleanup succeeds after a
-probe or allocation failure, remaining tables use HostRegister; failed cleanup
-or a lost rank aborts startup. The HostRegister path can still encounter error
-207001. Mooncake P/D and recovery from a lost peer or unfinished transfer have
-not been validated for this backend. Stop admission and drain requests before
-shutdown; do not retry collective cleanup without all original ranks and a
-coordinated retry order.

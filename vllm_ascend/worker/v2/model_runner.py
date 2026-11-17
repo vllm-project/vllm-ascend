@@ -603,16 +603,13 @@ class NPUModelRunner(GPUModelRunner):
     def shutdown(self) -> None:
         model = getattr(self, "model", None)
         # Include private/shared UVA owners, which have no MemFabric client.
-        pending_owners = list(getattr(self, "_shared_engram_shutdown_pending", None) or [])
-        shared_embeddings = [owner for owner in pending_owners if getattr(owner, "local_vmm", False) is not True]
+        shared_embeddings = list(getattr(self, "_shared_engram_shutdown_pending", None) or [])
         if model is not None:
             owner_ids = {id(owner) for owner in shared_embeddings}
             shared_embeddings.extend(
                 module
                 for module in model.modules()
-                if id(module) not in owner_ids
-                and getattr(module, "local_vmm", False) is not True
-                and callable(getattr(module, "close_host_offload", None))
+                if id(module) not in owner_ids and callable(getattr(module, "close_host_offload", None))
             )
         # Drop C8 packet views before the parent collects tensors and
         # empties the allocator cache.
@@ -623,21 +620,14 @@ class NPUModelRunner(GPUModelRunner):
         if isinstance(zeroer, C8KVBlockZeroer):
             zeroer.entries.clear()
             self.kv_block_zeroer = zeroer.delegate
-        if not hasattr(self, "_pending_engram_vmm"):
-            self._pending_engram_vmm = [owner for owner in pending_owners if getattr(owner, "local_vmm", False) is True]
-            if model is not None:
-                owner_ids = {id(owner) for owner in self._pending_engram_vmm}
-                self._pending_engram_vmm.extend(
-                    module
-                    for module in model.modules()
-                    if id(module) not in owner_ids and getattr(module, "local_vmm", False) is True
-                )
         self._shared_engram_shutdown_pending = shared_embeddings
         if not getattr(self, "_shared_engram_parent_stopped", False):
             super().shutdown()
             self._shared_engram_parent_stopped = True
         first_error = None
         for embedding in shared_embeddings:
+            if getattr(embedding, "local_vmm", False) is True:
+                continue
             try:
                 embedding.close_host_offload()
             except Exception as exc:
@@ -645,18 +635,19 @@ class NPUModelRunner(GPUModelRunner):
                     first_error = exc
         if first_error is not None:
             raise first_error
-        self._shared_engram_shutdown_pending = []
-        if getattr(self, "_pending_engram_vmm", None):
+        pending = [owner for owner in shared_embeddings if getattr(owner, "local_vmm", False) is True]
+        self._shared_engram_shutdown_pending = pending
+        if pending:
             from vllm_ascend.models.deepseek_v41.engram.local_shared_vmm import EngramSharedReleaseError
 
             errors = []
-            for index in range(len(self._pending_engram_vmm) - 1, -1, -1):
+            for index in range(len(pending) - 1, -1, -1):
                 try:
-                    self._pending_engram_vmm[index].close_host_offload()
+                    pending[index].close_host_offload()
                 except EngramSharedReleaseError as exc:
                     errors.append(str(exc))
                 else:
-                    del self._pending_engram_vmm[index]
+                    del pending[index]
             if errors:
                 raise EngramSharedReleaseError("; ".join(errors))
 
