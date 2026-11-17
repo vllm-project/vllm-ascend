@@ -28,7 +28,7 @@ to zero, and keyword-only `sort_indices`, which defaults to False.
 
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
-| `score` | Input/workspace | Scores `[H, B * Q, W]`; may be modified in place | float32 | ND, strided supported |
+| `score` | Input/workspace | Scores `[H, B * Q, W]`; FP32 may be modified in place, FP16 is read-only | float16/float32 | ND, strided supported |
 | `context_lens` | Input | Context lengths before the current queries, `[B]` | int32/int64 | ND, strided supported |
 | `decode_query_len` | Attribute | Uniform query length `Q > 0` | Python int | Scalar |
 | `topk` | Attribute | Number of output slots `K > 0` | Python int | Scalar |
@@ -53,9 +53,11 @@ to zero, and keyword-only `sort_indices`, which defaults to False.
 - Scores in visible blocks must be initialized. Padding/invisible scores are
   never loaded. Tests use finite scores below the forced-score sentinels;
   selection among equal scores has no stable index-order guarantee.
-- A contiguous score buffer can be reused and modified in place. Clone it if
-  the caller needs original scores after this call. Non-contiguous scores use
-  a separate contiguous preparation buffer.
+- A contiguous FP32 score buffer is reused in place only if its width also
+  covers the aligned TopK workspace. Clone it to preserve the original scores.
+  FP16, strided, or insufficient-width inputs use a separate FP32 preparation
+  buffer; the caller's input and backing guards remain unchanged. FP16 values
+  are widened before applying `1e30`/`1e29` forced priorities, which overflow FP16.
 - Contexts must fit int32 arithmetic including the query offset and block
   rounding. MiniMax-M3's tested maximum is 263000 tokens.
 - Context values and input dtype, shape, strides and storage addresses are
@@ -103,6 +105,7 @@ Accuracy and interface cases are in
 | Model geometry | Local B=5/Q=8/128K; B=10/Q=8/64K; historical B=11/Q=4/64K; maximum context 263000; Q=9/16 |
 | Repeated model TopK | H=4/B=2/Q=8/K=16/W=33, repeated allocations, independent CPU oracle, failure tensor artifact |
 | Input side effects | Allowed score-workspace writes; strided backing guards; context and input metadata unchanged |
+| FP16 extension | Empty/zero widths, block boundaries, Q=8, forced priorities, sorted/unsorted selection, dense/strided input and exact backing preservation |
 
 Integer IDs/counts require 100% exact agreement (`rtol=0, atol=0`). Floating-point
 tolerances must not excuse a wrong block ID. Selected scores are checked exactly.

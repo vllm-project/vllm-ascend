@@ -7,9 +7,9 @@ from typing import Any
 import pytest
 import torch
 import torch_npu  # noqa: F401
-
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+
 from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import index_decode_topk_fused
 
 
@@ -18,8 +18,9 @@ from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import index_decode_top
     reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("shape", [(0, 0, 0), (0, 3, 32), (4, 0, 32), (4, 0, 0)])
-def test_empty_shape(shape: tuple[int, int, int]) -> None:
-    score = torch.empty(shape, dtype=torch.float32, device="npu")
+@pytest.mark.parametrize("score_dtype", [torch.float16, torch.float32])
+def test_empty_shape(shape: tuple[int, int, int], score_dtype: torch.dtype) -> None:
+    score = torch.empty(shape, dtype=score_dtype, device="npu")
     context = torch.zeros(shape[1], dtype=torch.int32, device="npu")
     indices, counts = index_decode_topk_fused(score, context, 1, 16, shape[-1])
     assert indices.shape == (*shape[:2], 16)
@@ -33,8 +34,9 @@ def test_empty_shape(shape: tuple[int, int, int]) -> None:
     reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("width", [0, 32])
-def test_zero_logical_blocks(width: int) -> None:
-    score = torch.empty((4, 8, width), dtype=torch.float32, device="npu")
+@pytest.mark.parametrize("score_dtype", [torch.float16, torch.float32])
+def test_zero_logical_blocks(width: int, score_dtype: torch.dtype) -> None:
+    score = torch.empty((4, 8, width), dtype=score_dtype, device="npu")
     context = torch.zeros(8, dtype=torch.int32, device="npu")
     indices, counts = index_decode_topk_fused(score, context, 1, 16, 0)
     assert torch.all(indices == -1)
@@ -88,12 +90,15 @@ def test_invalid_inputs(change: dict, message: str) -> None:
     reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("context_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("score_dtype", [torch.float16, torch.float32])
 @pytest.mark.parametrize("query_len", [1, 4])
 @pytest.mark.parametrize("topk,width", [(1, 1), (16, 7), (16, 33), (32, 16)])
-def test_block_boundaries(context_dtype: torch.dtype, query_len: int, topk: int, width: int) -> None:
+def test_block_boundaries(
+    context_dtype: torch.dtype, score_dtype: torch.dtype, query_len: int, topk: int, width: int
+) -> None:
     context = torch.tensor([-query_len, 0, 127, 128, 255, 256, 4095], dtype=context_dtype)
     tokens = context.numel() * query_len
-    reference = torch.arange(width, dtype=torch.float32).expand(4, tokens, width).contiguous()
+    reference = torch.arange(width, dtype=score_dtype).expand(4, tokens, width).contiguous()
     indices, counts = index_decode_topk_fused(reference.to("npu"), context.to("npu"), query_len, topk, width)
     indices, counts = indices.cpu(), counts.cpu()
     for query in range(tokens):
@@ -288,3 +293,68 @@ def test_sorted_topk_unaligned_multihead_repeated(init_blocks: int, local_blocks
                 tmp_path / f"unaligned-topk-trial-{trial}.pt",
             )
             raise
+
+
+@pytest.mark.parametrize("strided", [False, True])
+@pytest.mark.parametrize("init_blocks,local_blocks", [(0, 0), (1, 2)])
+@pytest.mark.parametrize("sort_indices", [False, True])
+def test_fp16_workspace_preserved_and_forced_scores_widened(strided, init_blocks, local_blocks, sort_indices):
+    # Exactly representable, distinct FP16 scores keep the oracle independent
+    # of floating-point tolerance. The forced values overflow FP16 unless the
+    # preparation kernel widens before applying priorities.
+    width, topk, query_len = 33, 16, 8
+    source = torch.arange(width, dtype=torch.float16).expand(2, 3 * query_len, width).contiguous()
+    context = torch.tensor([4095, 127, -query_len], dtype=torch.int32)
+    backing = torch.full((2, 3 * query_len, width * (2 if strided else 1)), -99, dtype=source.dtype, device="npu")
+    score = backing[..., ::2] if strided else backing
+    score.copy_(source)
+    saved = backing.clone()
+    metadata = (score.dtype, score.shape, score.stride(), score.data_ptr())
+    lengths = context.npu()
+    # FP32 path remains a workspace; use a private copy for the baseline.
+    expected, expected_counts = index_decode_topk_fused(
+        source.float().npu(),
+        lengths,
+        query_len,
+        topk,
+        width,
+        init_blocks,
+        local_blocks,
+        sort_indices=sort_indices,
+    )
+    actual, counts = index_decode_topk_fused(
+        score,
+        lengths,
+        query_len,
+        topk,
+        width,
+        init_blocks,
+        local_blocks,
+        sort_indices=sort_indices,
+    )
+    torch.testing.assert_close(counts, expected_counts, rtol=0, atol=0)
+    # Forced-score ties can choose different equally ranked IDs. Verify the
+    # semantic TopK scores, exact counts, uniqueness and invalid sentinels.
+    actual, counts = actual.cpu(), counts.cpu()
+    for row in range(source.shape[1]):
+        visible_blocks = max(0, (int(context[row // query_len]) + row % query_len + 128) // 128)
+        visible = min(width, visible_blocks)
+        golden = source[:, row, :visible].float()
+        golden[:, :init_blocks] = 1e30
+        if local_blocks:
+            golden[:, max(0, visible_blocks - local_blocks) :] = 1e29
+        count = min(topk, visible)
+        for head in range(source.shape[0]):
+            ids = actual[head, row, :count].long()
+            assert counts[head, row] == count
+            assert torch.all((ids >= 0) & (ids < visible))
+            assert ids.unique().numel() == count
+            assert torch.all(actual[head, row, count:] == -1)
+            torch.testing.assert_close(
+                golden[head, ids].sort().values, golden[head].topk(count).values.sort().values, rtol=0, atol=0
+            )
+            if sort_indices:
+                assert torch.equal(ids, ids.sort().values)
+    torch.testing.assert_close(backing, saved, rtol=0, atol=0)
+    torch.testing.assert_close(lengths.cpu(), context, rtol=0, atol=0)
+    assert (score.dtype, score.shape, score.stride(), score.data_ptr()) == metadata

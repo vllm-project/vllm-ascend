@@ -8,10 +8,10 @@ from importlib import import_module
 from typing import Any
 
 import torch
-
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import index_decode_topk_fused
 from vllm_ascend.utils import enable_custom_op
+
+from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import index_decode_topk_fused
 
 # Existing mode for A5 FP8 KV-gather-Q prefill.
 _SPARSE_ATTN_INNER_PRECISE = 4
@@ -432,6 +432,12 @@ def _minimax_m3_index_score(
     from cann_ops_transformer.ops import msa_index_score
 
     index_kv_cache = _as_ascendc_index_kv_cache(index_kv_cache)
+    # MsaIndexScore needs an aligned logical table width for batched queries.
+    # A larger row stride alone does not fix its addressing. Pad a private
+    # table; scores already have this aligned width and lengths mask the tail.
+    table_padding = (-block_table.shape[1]) % _MSA_SCORE_BLOCK_ALIGNMENT
+    if table_padding:
+        block_table = torch.nn.functional.pad(block_table, (0, table_padding), value=0)
     if index_kv_cache.dtype == torch.float8_e4m3fn and idx_q.dtype != index_kv_cache.dtype:
         idx_q = _to_fp8_e4m3(idx_q)
     return msa_index_score(

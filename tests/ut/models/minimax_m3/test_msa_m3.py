@@ -16,10 +16,11 @@ import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import FullAttentionSpec
-
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.utils import AscendDeviceType
+
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseAttention
 from vllm_ascend.models.minimax_m3 import msa_m3 as msa_m3_module
 from vllm_ascend.models.minimax_m3.minimax_m3 import (
@@ -62,7 +63,6 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
 )
 from vllm_ascend.ops.triton.msa import msa_m3_index_postprocess
 from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import FP32_INDEX_SENTINEL
-from vllm_ascend.utils import AscendDeviceType
 
 
 @pytest.mark.parametrize(
@@ -1410,12 +1410,13 @@ def test_ascendc_index_cache_unwraps_runtime_tuple() -> None:
 def test_cann_index_score_forwards_metadata_operands() -> None:
     idx_q = torch.zeros(1, 2, 128)
     index_key_cache = torch.zeros(4, 128, 128)
-    block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
+    # Aligned native tables retain the no-copy forwarding contract.
+    block_table = torch.arange(16, dtype=torch.int32).reshape(1, 16) % 4
     cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32)
     seq_lens = torch.tensor([129], dtype=torch.int32)
     start_loc = torch.tensor([1], dtype=torch.int32)
     causal_mask = torch.zeros(2048, 2048, dtype=torch.int8)
-    expected = torch.zeros(2, 1, 4)
+    expected = torch.zeros(2, 1, 16)
 
     mock_index_score = MagicMock(return_value=expected)
     with patch.dict("sys.modules", {"cann_ops_transformer.ops": SimpleNamespace(msa_index_score=mock_index_score)}):

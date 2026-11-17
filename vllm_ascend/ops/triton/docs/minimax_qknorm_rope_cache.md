@@ -22,6 +22,8 @@
 | `key_cache`, `value_cache` | Output | Main cache `[num_blocks, block_size, heads, head_dim]` | bfloat16 or float8_e4m3fn |
 | `index_cache` | Output | Index cache `[num_blocks, block_size, head_dim]` | bfloat16 or float8_e4m3fn |
 | `slot_mapping`, `index_slot_mapping` | Input | Independent main and index slots. Negative slots are not written | integer |
+| `index_context_parallel_size` | Attribute | Keyword-only; 1 (default), 2 or 4 | Python int |
+| `index_context_parallel_rank` | Attribute | Keyword-only; shard owner in `[0, size)`, default 0 | Python int |
 | query, index query | Output | Materialized queries only | bfloat16 / index cache dtype |
 
 ## Constraints
@@ -29,6 +31,12 @@
 - `NUM_SLOTS` and `NUM_TOKENS` are runtime scalars with `do_not_specialize`, so varying the actual token count or loop bound does not create a specialization for each value.
 - `num_blocks` is the runtime cache capacity. It is not hardcoded and is not a kernel compile parameter. Main and index block sizes may differ.
 - Cache writes use the actual tensor strides, including block padding.
+- With index context sharding, the logical page has 128 tokens and the physical
+  index cache is `[num_blocks, 128 / size, 128]` in BF16. Index slots remain
+  logical slots. Rank `r` writes only slots with `slot % size == r`, to physical
+  position `[slot // 128, (slot % 128) // size]`. Main K/V layout is unchanged.
+  Size/rank are fixed deployment geometry and intentionally specialize the kernel.
+  Existing calls use size 1/rank 0 and keep the unsharded mapping.
 - Slots outside `num_actual_tokens`, and negative slots, do not update a cache. The caller must keep valid slots in range and must not write the same destination twice in one call.
 - Normalization accumulates in FP32 and rounds back to BF16 before RoPE. Main K is rounded to the model dtype before the cache store. FP8 E4M3 caches are clamped to ±448 before the store.
 - A forward without attention metadata only zeroes the attention output and does not touch the cache.
@@ -49,6 +57,15 @@ pytest -q tests/e2e/pull_request/one_card/test_minimax_qknorm_rope_cache.py
 Unit tests cover the fusion guard, fallback, dummy and fake forwards, separate index projections, and cache-insertion order. NPU tests cover 1 to 8192 tokens, several head layouts, partial and full RoPE, shuffled and negative slots, untouched cache regions, non-contiguous inputs, empty inputs, and graph replay after `positions` or slots change. A3 large-prefill validation additionally samples output/cache correctness and latency at 32768, 65536, 131072, and 262144 tokens. Dynamic-cache cases use 3, 64, 5392, and 8192 blocks. Two FP8 cases are skipped when A5 is not available.
 
 ## Compilation and performance regression tests
+
+The sharded writer regression is in
+`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_minimax_m3_indexer_dcp.py`.
+It covers TP2/TP4, all shard owners, separate/packed projections, logical page
+boundaries, negative slots and padded backing guards. BF16 results must pass the
+mixed tolerance `rtol=atol=2**-6` for at least 99% of elements and maximum absolute
+error at most 1. Untouched storage and standalone scatter copies must match exactly.
+These tests are validation entry points; their presence does not establish that
+every supported device or model dataset has been validated.
 
 The request-size test uses a fresh real JIT function in a single process. After
 one warmup it independently varies launch token count, `NUM_SLOTS` (including

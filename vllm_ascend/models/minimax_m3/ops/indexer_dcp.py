@@ -20,12 +20,12 @@ GATHER_BLOCKS_PER_TILE = 16
 SCORE_FILL_VALUE = tl.constexpr(float("-inf"))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_tokens"])
 def _scatter_index_shard(
-    Updates,
-    Slots,
-    Cache,
-    NUM_TOKENS: tl.constexpr,
+    updates_ptr,
+    slots_ptr,
+    cache_ptr,
+    num_tokens,
     SIZE: tl.constexpr,
     RANK: tl.constexpr,
     UPDATE_STRIDE: tl.constexpr,
@@ -37,17 +37,29 @@ def _scatter_index_shard(
 ):
     token = tl.program_id(0) * TILE + tl.arange(0, TILE)
     dim = tl.arange(0, INDEX_HEAD_DIM)
-    slot = tl.load(Slots + token, token < NUM_TOKENS, other=-1)
-    owned = (slot >= 0) & (slot % SIZE == RANK) & (token < NUM_TOKENS)
+    slot = tl.load(slots_ptr + token, token < num_tokens, other=-1).to(tl.int64)
+    owned = (slot >= 0) & (slot % SIZE == RANK) & (token < num_tokens)
     cache_offset = slot // INDEX_BLOCK_SIZE * CACHE_STRIDE_P + slot % INDEX_BLOCK_SIZE // SIZE * CACHE_STRIDE_T
     value = tl.load(
-        Updates + token[:, None] * UPDATE_STRIDE + dim[None, :] * UPDATE_DIM_STRIDE, owned[:, None], other=0
+        updates_ptr + token[:, None] * UPDATE_STRIDE + dim[None, :] * UPDATE_DIM_STRIDE, owned[:, None], other=0
     )
-    tl.store(Cache + cache_offset[:, None] + dim[None, :] * CACHE_STRIDE_D, value, owned[:, None])
+    tl.store(cache_ptr + cache_offset[:, None] + dim[None, :] * CACHE_STRIDE_D, value, owned[:, None])
 
 
 def scatter_index_shard(cache: torch.Tensor, updates: torch.Tensor, slots: torch.Tensor, size: int, rank: int) -> None:
-    """Skip graph-padding slots (-1) without dynamic tensor indexing."""
+    """Write BF16 keys owned by rank in place; leave other cache entries unchanged."""
+    if size not in (2, 4) or not 0 <= rank < size:
+        raise ValueError("M3 index scatter requires TP2/TP4 and a valid shard rank")
+    if cache.ndim != 3 or cache.shape[1:] != (128 // size, 128):
+        raise ValueError("M3 index scatter requires compact 128-token pages with 128-wide keys")
+    if slots.ndim != 1 or slots.dtype not in (torch.int32, torch.int64) or not slots.is_contiguous():
+        raise ValueError("M3 index scatter requires contiguous int32/int64 slots")
+    if cache.dtype != torch.bfloat16 or updates.dtype != cache.dtype:
+        raise ValueError("M3 index scatter requires BF16 keys and cache")
+    if cache.device != updates.device or cache.device != slots.device:
+        raise ValueError("M3 index scatter inputs must be on the same device")
+    if updates.numel() != slots.numel() * 128:
+        raise ValueError("M3 index scatter requires one 128-wide update per slot")
     if slots.numel() == 0:
         return
     updates = updates.reshape(slots.numel(), 128)
@@ -92,49 +104,62 @@ def plan_prefill_index_gather(
     return pages, remapped
 
 
-@triton.jit(do_not_specialize=["row_start"])
+# Request sizes and pool-dependent GEMM row strides are runtime indexing values.
+# Keep only fixed geometry, tiling and causal policy as compile-time parameters.
+@triton.jit(
+    do_not_specialize=[
+        "row_start",
+        "raw_stride",
+        "table_stride",
+        "table_width",
+        "tokens",
+        "query_len",
+        "width",
+        "block_tiles",
+    ]
+)
 def _gather_index_shard_scores(
-    Raw,
-    Table,
-    Lengths,
-    Scores,
+    raw_ptr,
+    table_ptr,
+    lengths_ptr,
+    scores_ptr,
     row_start,
-    RAW_STRIDE: tl.constexpr,
-    TABLE_STRIDE: tl.constexpr,
-    TABLE_WIDTH: tl.constexpr,
-    TOKENS: tl.constexpr,
+    raw_stride,
+    table_stride,
+    table_width,
+    tokens,
     HEADS: tl.constexpr,
-    QUERY_LEN: tl.constexpr,
-    WIDTH: tl.constexpr,
+    query_len,
+    width,
     SIZE: tl.constexpr,
     RANK: tl.constexpr,
-    BLOCK_TILES: tl.constexpr,
+    block_tiles,
     TILE: tl.constexpr,
     CAUSAL: tl.constexpr,
 ):
     # GEMM rows flatten (token, head). Select only this request's physical
     # pages, then mask interleaved positions before taking the block maximum.
     program = tl.program_id(0)
-    row = program // BLOCK_TILES
+    row = program // block_tiles
     absolute_row = row_start + row
     token = absolute_row // HEADS
     head = absolute_row % HEADS
-    request = token // QUERY_LEN
-    columns = program % BLOCK_TILES * TILE + tl.arange(0, TILE)
+    request = token // query_len
+    columns = program % block_tiles * TILE + tl.arange(0, TILE)
     lane = tl.arange(0, INDEX_BLOCK_SIZE // SIZE)
-    page = tl.load(Table + request * TABLE_STRIDE + columns, columns < TABLE_WIDTH, other=-1).to(tl.int64)
-    length = tl.load(Lengths + request)
+    page = tl.load(table_ptr + request * table_stride + columns, columns < table_width, other=-1).to(tl.int64)
+    length = tl.load(lengths_ptr + request)
     position = columns[:, None] * INDEX_BLOCK_SIZE + lane[None, :] * SIZE + RANK
-    valid = (columns[:, None] < TABLE_WIDTH) & (page[:, None] >= 0) & (position < length)
+    valid = (columns[:, None] < table_width) & (page[:, None] >= 0) & (position < length)
     if CAUSAL:
-        valid = valid & (position < length - QUERY_LEN + token % QUERY_LEN + 1)
+        valid = valid & (position < length - query_len + token % query_len + 1)
     dots = tl.load(
-        Raw + row * RAW_STRIDE + page[:, None] * (INDEX_BLOCK_SIZE // SIZE) + lane[None, :],
+        raw_ptr + row * raw_stride + page[:, None] * (INDEX_BLOCK_SIZE // SIZE) + lane[None, :],
         valid,
         other=SCORE_FILL_VALUE,
     )
     maxima = tl.max(dots, axis=1)
-    tl.store(Scores + (head * TOKENS + token) * WIDTH + columns, maxima, columns < WIDTH)
+    tl.store(scores_ptr + (head * tokens + token) * width + columns, maxima, columns < width)
 
 
 def index_shard_scores(
@@ -157,6 +182,14 @@ def index_shard_scores(
     """
     if size not in (2, 4) or not 0 <= rank < size:
         raise ValueError("M3 index scores require TP2/TP4 and a valid shard rank")
+    if query.ndim != 3 or cache.ndim != 3 or block_table.ndim != 2 or seq_lens.ndim != 1:
+        raise ValueError("M3 index scores require rank-3 queries/cache, rank-2 table and rank-1 lengths")
+    if block_table.dtype not in (torch.int32, torch.int64) or seq_lens.dtype not in (torch.int32, torch.int64):
+        raise ValueError("M3 index scores require int32/int64 block tables and lengths")
+    if block_table.stride(1) != 1 or not seq_lens.is_contiguous():
+        raise ValueError("M3 index scores require unit-stride table columns and contiguous lengths")
+    if any(t.device != query.device for t in (cache, block_table, seq_lens)):
+        raise ValueError("M3 index scores inputs must be on the same device")
     if query.dtype != torch.bfloat16 or cache.dtype != torch.bfloat16:
         raise ValueError("M3 compact index scores require BF16 queries and keys")
     if cache.shape[1:] != (128 // size, 128) or query.shape[-1] != 128:

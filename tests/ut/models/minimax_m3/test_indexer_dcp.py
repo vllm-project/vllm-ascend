@@ -2,7 +2,7 @@
 """Cache accounting and PD ownership for token-sharded MiniMax index keys."""
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -167,3 +167,27 @@ def test_compact_scores_empty_batch_does_not_launch_a_kernel():
 def test_reduce_scatter_rejects_uneven_head_ownership():
     with pytest.raises(ValueError, match="divide evenly"):
         reduce_scatter_index_scores(torch.empty(3, 2, 16), SimpleNamespace(world_size=4))
+
+
+@pytest.mark.parametrize(("width", "aligned_width"), [(2, 16), (16, 16), (17, 32)])
+def test_cann_score_pads_table_width_without_mutating_caller(width, aligned_width):
+    from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import _minimax_m3_index_score
+
+    table = torch.arange(2 * width, dtype=torch.int32).reshape(2, width) % 3
+    original = table.clone()
+    query = torch.zeros(2, 4, 128, dtype=torch.bfloat16)
+    cache = torch.zeros(3, 128, 128, dtype=query.dtype)
+    lengths = torch.tensor([128, 0], dtype=torch.int32)
+    cu = torch.arange(3, dtype=torch.int32)
+    native = Mock(return_value=object())
+    with patch.dict("sys.modules", {"cann_ops_transformer.ops": SimpleNamespace(msa_index_score=native)}):
+        result = _minimax_m3_index_score(query, cache, table, cu, lengths, (lengths - 1) // 128, None)
+    assert result is native.return_value
+    prepared = native.call_args.kwargs["block_table"]
+    assert prepared.shape == (2, aligned_width)
+    torch.testing.assert_close(prepared[:, :width], original, rtol=0, atol=0)
+    assert not prepared[:, width:].any()
+    torch.testing.assert_close(table, original, rtol=0, atol=0)
+    assert table.shape == (2, width)
+    if width == aligned_width:
+        assert prepared is table
