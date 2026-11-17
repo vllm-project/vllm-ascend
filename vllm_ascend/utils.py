@@ -237,6 +237,23 @@ def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> 
     return model_uses_sfa_sparse(vllm_config.model_config) and parallel_config.decode_context_parallel_size > 1
 
 
+def _has_sharded_indexer_candidate_op() -> bool:
+    """Whether the owner-local QLI candidate operator is registered.
+
+    The token-sharded indexer selects candidates from each rank's own causal
+    prefix with ``torch.ops._C_ascend.npu_quant_lightning_indexer_local_candidates``.
+    Without that operator the sharded layout cannot produce local candidates, so
+    the selector must stay on the replicated path instead of switching layouts
+    and failing inside the first forward.
+    """
+    try:
+        import torch
+
+        return hasattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_local_candidates")
+    except (AttributeError, ImportError, RuntimeError):
+        return False
+
+
 def enable_sfa_dcp_sharded_indexer(vllm_config: VllmConfig | None = None) -> bool:
     """Kimi's uncompressed indexer uses the same token owners as MLA."""
     if vllm_config is None:
@@ -245,9 +262,10 @@ def enable_sfa_dcp_sharded_indexer(vllm_config: VllmConfig | None = None) -> boo
         vllm_config = get_current_vllm_config()
 
     text = vllm_config.model_config.hf_text_config
-    return enable_sfa_dcp_replicated_indexer(vllm_config) and getattr(text, "model_type", None) in (
-        "kimi_linear",
-        "kimi_k31",
+    return (
+        enable_sfa_dcp_replicated_indexer(vllm_config)
+        and getattr(text, "model_type", None) in ("kimi_linear", "kimi_k31")
+        and _has_sharded_indexer_candidate_op()
     )
 
 
