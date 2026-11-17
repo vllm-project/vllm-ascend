@@ -1735,11 +1735,11 @@ Compare restored output with a cold reference under the same topology and
 sampling settings. A short-output comparison is a functional check, not a full
 model-accuracy or throughput benchmark.
 
-Hash-grained recovery with MTP/EAGLE block dropping or EAGLE-marked cache
-groups is not supported in this revision and is rejected during initialization.
-Use whole-page cache alignment for that combination. Existing whole-page and
-layerwise MTP paths remain available. Mamba boundary-state saving is supported
-without MTP; it is also required by hybrid models without speculative decoding.
+For a pure P/D prefill producer, Ascend's existing scheduler/coordinator omit
+the EAGLE checkpoint backoff. The hash Store scheduler and worker reuse that
+same role policy, so Attention payload keys and Mamba state keys describe the
+same boundary. This does not disable MTP or change engine configuration.
+Consumers and `kv_both` deployments keep upstream Store's EAGLE policy.
 
 Fabric shared-handle self-import is unsupported by CANN: use a separate Store
 provider with capacity and configure inference clients with

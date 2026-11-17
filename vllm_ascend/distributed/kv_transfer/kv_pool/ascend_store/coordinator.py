@@ -12,7 +12,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import replay_boundaries
-from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, KVCacheBlock, eagle_proof_margin
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -205,6 +205,16 @@ class AscendStoreCoordinator:
             self.eagle_attn_group_indices = set(range(len(self.attention_groups)))
         self.eagle_reachable_group_ids: set[int] = {
             group_id for index in self.eagle_attn_group_indices for group_id in self.attention_groups[index][1]
+        }
+        self.eagle_proof_margin_by_group = {
+            group_id: eagle_proof_margin(
+                spec.block_size,
+                self.hash_block_size,
+                self.enable_partial_hash_hits and getattr(manager_cls, "supports_fine_grained_hash_lookup", False),
+            )
+            for index, (spec, group_ids, manager_cls) in enumerate(self.attention_groups)
+            if index in self.eagle_attn_group_indices and not isinstance(spec, MambaSpec)
+            for group_id in group_ids
         }
 
     def find_longest_cache_hit(
@@ -407,8 +417,9 @@ class AscendStoreCoordinator:
 
                 drop_eagle_block = index in eagle_indices and index not in eagle_verified
                 max_group_length = curr_hit_length
-                if drop_eagle_block:
-                    max_group_length = min(curr_hit_length + spec.block_size, max_length)
+                if drop_eagle_block and not isinstance(spec, MambaSpec):
+                    margin = self.eagle_proof_margin_by_group.get(first_group_id, spec.block_size)
+                    max_group_length = min(curr_hit_length + margin, len(block_hashes) * self.hash_block_size)
                 hashes = cast(BlockHashList, block_hashes)
                 hit_blocks, new_hit_length = _find_longest_cache_hit(
                     manager_cls,

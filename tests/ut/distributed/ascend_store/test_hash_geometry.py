@@ -19,6 +19,7 @@ def geometry_config(*, block_drop=False, marked=False, alignment=4):
         kv_transfer_config=SimpleNamespace(kv_connector_extra_config={}),
     )
     cache = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(is_kv_producer=False, is_kv_consumer=True),
         kv_cache_groups=[
             KVCacheGroupSpec(
                 ["attention"],
@@ -34,10 +35,24 @@ def geometry_config(*, block_drop=False, marked=False, alignment=4):
 
 
 @pytest.mark.parametrize("block_drop,marked", [(True, False), (False, True), (True, True)])
-def test_hash_recovery_rejects_mtp_until_followup(block_drop, marked):
+def test_hash_recovery_accepts_mtp(block_drop, marked):
     config, cache = geometry_config(block_drop=block_drop, marked=marked)
-    with pytest.raises(ValueError, match="hash recovery with MTP/EAGLE"):
-        resolve_pool_cache_geometry(config, cache, use_layerwise=False)
+    geometry = resolve_pool_cache_geometry(config, cache, use_layerwise=False)
+    assert geometry.partial_hits
+    assert geometry.use_eagle == block_drop
+    assert geometry.groups[0].is_eagle_group == marked
+
+
+@pytest.mark.parametrize("producer,consumer", [(True, False), (False, True), (True, True)])
+def test_eagle_block_drop_follows_engine_role(producer, consumer):
+    config, cache = geometry_config(block_drop=True, marked=True)
+    cache.kv_transfer_config = SimpleNamespace(is_kv_producer=producer, is_kv_consumer=consumer)
+    geometry = resolve_pool_cache_geometry(config, cache, use_layerwise=False)
+    expected = not (producer and not consumer)
+    assert geometry.use_eagle == expected
+    assert geometry.groups[0].is_eagle_group == expected
+    # Resolving a pure producer must not mutate Core's original group markers.
+    assert cache.kv_cache_groups[0].is_eagle_group
 
 
 @pytest.mark.parametrize("alignment,layerwise", [(16, False), (4, True)])

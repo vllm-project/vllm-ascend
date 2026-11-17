@@ -227,6 +227,8 @@ class BaseKVPoolWorker(ABC):
         )
         self.cacheable_group_ids = list(self.pool_cache_geometry.cacheable_group_ids)
         self.enable_partial_hash_hits = self.pool_cache_geometry.partial_hits
+        if self.enable_partial_hash_hits:
+            self.use_eagle = self.pool_cache_geometry.use_eagle
         self.grouped_block_size = list(self.pool_cache_geometry.block_sizes)
         self.hash_block_size = self.pool_cache_geometry.hash_block_size
         self.block_size = self.grouped_block_size[0]
@@ -428,7 +430,7 @@ class BaseKVPoolWorker(ABC):
             hash_block_size=self.hash_block_size,
             group_block_sizes=self.grouped_block_size,
             group_cache_families=self.kv_cache_group_families,
-            use_eagle=use_eagle,
+            use_eagle=self.pool_cache_geometry.use_eagle if self.enable_partial_hash_hits else use_eagle,
             retention_interval=self.pool_cache_geometry.retention_interval
             if self.enable_partial_hash_hits
             else retention_interval,

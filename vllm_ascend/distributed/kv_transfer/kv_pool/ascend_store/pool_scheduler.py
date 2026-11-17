@@ -126,6 +126,8 @@ class BaseKVPoolScheduler(ABC):
         }
         self.enable_partial_hash_hits = self.pool_cache_geometry.partial_hits
         self._lookup_tail_boundaries = {}
+        if self.enable_partial_hash_hits:
+            self.use_eagle = self.pool_cache_geometry.use_eagle
         self.grouped_block_size = list(self.pool_cache_geometry.block_sizes)
         self.hash_block_size = self.pool_cache_geometry.hash_block_size
         self._block_size = self.grouped_block_size[0]
@@ -275,7 +277,7 @@ class BaseKVPoolScheduler(ABC):
             return 0, False
 
         store_skip_tokens = num_external_hit_tokens
-        if self.use_eagle:
+        if self.use_eagle and not self.enable_partial_hash_hits:
             # Keep the draft model's recomputation zone intact: the
             # generation-point hidden states must be freshly computed, and the
             # local prefix-cache path already drops its trailing block
@@ -843,7 +845,7 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         coord = self.cache_coordinator
         assert coord is not None
         prompt = req_meta.prefill_end_tokens or req_meta.num_prompt_tokens or 0
-        boundary = get_mamba_prefill_checkpoint_position(prompt, self.hash_block_size, False)
+        boundary = get_mamba_prefill_checkpoint_position(prompt, self.hash_block_size, self.use_eagle)
         mamba_tails = {
             put.num_tokens
             for put in req_meta.boundary_puts or []
@@ -858,7 +860,7 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         for group_id in self.cacheable_group_ids:
             if group_id in coord.mamba_group_ids:
                 continue
-            proof_end = boundary
+            proof_end = boundary + coord.eagle_proof_margin_by_group.get(group_id, 0)
             if proof_end > (req_meta.completed_token_len or 0):
                 continue
             if proof_end // self.hash_block_size > len(req_meta.block_hashes):

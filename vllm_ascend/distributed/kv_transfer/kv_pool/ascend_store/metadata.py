@@ -343,6 +343,7 @@ class PoolCacheGeometry:
     core_hit_alignment: int
     transfer_granularity: int
     groups: tuple = ()
+    use_eagle: bool = False
     retention_interval: int | None = None
     use_layerwise: bool = False
 
@@ -405,10 +406,16 @@ def resolve_pool_cache_geometry(vllm_config, kv_cache_config, *, use_layerwise: 
             f"{tuple(block_sizes[i] for i in group_ids)}"
         )
     extra = vllm_config.kv_transfer_config.kv_connector_extra_config
+    speculative = getattr(vllm_config, "speculative_config", None)
+    eagle = getattr(speculative, "use_eagle_block_drop", None)
+    engine_transfer = get_engine_transfer_config(vllm_config, kv_cache_config)
+    producer_only = bool(engine_transfer and engine_transfer.is_kv_producer and not engine_transfer.is_kv_consumer)
+    use_eagle = bool(callable(eagle) and eagle() is True and not producer_only)
     resolved_groups = tuple(
         replace(
             group,
             kv_cache_spec=kv_cache_utils.resolve_dcp_kv_cache_spec(group.kv_cache_spec, dcp),
+            is_eagle_group=False if producer_only else group.is_eagle_group,
         )
         for group in groups or []
     )
@@ -419,17 +426,10 @@ def resolve_pool_cache_geometry(vllm_config, kv_cache_config, *, use_layerwise: 
         core_hit_alignment=hit_alignment,
         transfer_granularity=page_alignment,
         groups=resolved_groups,
+        use_eagle=use_eagle,
         retention_interval=getattr(kv_cache_config, "prefix_cache_retention_interval", None),
         use_layerwise=use_layerwise,
     )
-    speculative = getattr(vllm_config, "speculative_config", None)
-    eagle = getattr(speculative, "use_eagle_block_drop", None)
-    if geometry.partial_hits and (
-        (callable(eagle) and eagle() is True) or any(group.is_eagle_group for group in geometry.groups)
-    ):
-        raise ValueError(
-            "AscendStore hash recovery with MTP/EAGLE is not supported yet; use whole-page cache alignment"
-        )
     if geometry.partial_hits and extra.get("discard_partial_chunks", True) is not True:
         raise ValueError("AscendStore hash recovery requires discard_partial_chunks=true")
     logger.info(

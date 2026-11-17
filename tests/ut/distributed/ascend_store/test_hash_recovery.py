@@ -35,7 +35,7 @@ def groups():
 
 
 @pytest.mark.parametrize("seed", range(20))
-@pytest.mark.parametrize("eagle", [False])
+@pytest.mark.parametrize("eagle", [False, True])
 def test_same_group_hits_as_upstream(seed, eagle):
     upstream = importlib.import_module(CORE + ".coordinator")
     hashes = [BlockHash(bytes([i + 1]) * 8) for i in range(32)]
