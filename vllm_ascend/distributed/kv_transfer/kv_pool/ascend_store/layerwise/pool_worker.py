@@ -1227,12 +1227,14 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 end = partial_block_index
         return end
 
-    def _pool_keys_missing(self, keys: list[str], *, fail_open: bool = True) -> set[str]:
+    def _pool_keys_missing(self, keys: list[str]) -> set[str]:
         """Return the subset of ``keys`` not yet committed in the pool.
 
         The check is medium-agnostic on purpose: a block committed on any
         medium (DRAM or SSD) does not need re-saving, and the load path
-        rewarms SSD blocks on read. Public keys require a definite miss.
+        rewarms SSD blocks on read. Fails open (treats check errors as
+        missing) so an unreadable pool costs transfer bandwidth, never the
+        blocks themselves.
         """
         if not keys:
             return set()
@@ -1240,20 +1242,16 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         missing: set[str] = set()
         for key_batch in self._layerwise_key_batches(unique_keys):
             try:
-                states = [int(state) for state in self.m_store.batch_is_exist(key_batch)]
+                states = self.m_store.batch_is_exist(key_batch)
                 if len(states) != len(key_batch):
                     raise RuntimeError(
                         "MemCache exists check returned unexpected number of states: "
                         f"expected={len(key_batch)}, actual={len(states)}"
                     )
-                if not fail_open and any(state not in (0, 1) for state in states):
-                    raise RuntimeError("Memcache exists check returned an invalid state")
-                missing.update(key for key, state in zip(key_batch, states, strict=True) if state != 1)
+                missing.update(key for key, state in zip(key_batch, states) if int(state) != 1)
             except Exception as exc:
-                if not fail_open:
-                    raise
                 logger.error(
-                    "Pool exists check failed keys=%d error=%s",
+                    "Pool exists check failed keys=%d error=%s; treating all as missing",
                     len(key_batch),
                     exc,
                 )
@@ -1399,22 +1397,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 # is medium-agnostic on purpose: a committed block (DRAM or
                 # SSD) does not need re-saving, and the load path rewarms
                 # SSD blocks on read.
+                missing_keys = self._pool_keys_missing(candidate_keys)
                 if public_allocated is not None:
-                    private_keys = [key for key in candidate_keys if key not in candidate_public_keys]
-                    missing_keys = self._pool_keys_missing(private_keys)
-                    try:
-                        missing_keys.update(self._pool_keys_missing(list(candidate_public_keys), fail_open=False))
-                    except Exception as exc:
-                        logger.error(
-                            "Public KV exists check failed: req=%s group=%d error=%s",
-                            request.req_id,
-                            group_id,
-                            exc,
-                        )
-                        return False
                     missing_keys.difference_update(public_allocated)
-                else:
-                    missing_keys = self._pool_keys_missing(candidate_keys)
                 transfer_blocks = [
                     block_idx for block_idx, key in zip(candidate_blocks, candidate_keys) if key in missing_keys
                 ]
