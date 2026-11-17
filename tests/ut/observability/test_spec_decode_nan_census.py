@@ -30,7 +30,7 @@ class _Capture:
 
     def __init__(self, level: int):
         self.level = level
-        self.records = []
+        self.records: list[str] = []
 
     def isEnabledFor(self, lvl: int) -> bool:
         return lvl >= self.level
