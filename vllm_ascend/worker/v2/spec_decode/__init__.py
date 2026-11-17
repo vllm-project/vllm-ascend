@@ -26,6 +26,16 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.states import RequestState
 
 
+def uses_step3p5_mtp(speculative_config) -> bool:
+    # Native #63373 removed this predicate with MRv1. Retain the same model
+    # distinction so Step3.5 keeps its existing fallback instead of generic MTP.
+    return (
+        speculative_config.method == "mtp"
+        and speculative_config.draft_model_config is not None
+        and getattr(speculative_config.draft_model_config.hf_config, "model_type", None) == "step3p5_mtp"
+    )
+
+
 def init_speculator(
     vllm_config: VllmConfig,
     device: torch.device,
@@ -95,7 +105,7 @@ def init_speculator(
         from vllm_ascend.worker.v2.spec_decode.multi_module_mtp.speculator import AscendMultiModuleMTPSpeculator
 
         return AscendMultiModuleMTPSpeculator(vllm_config, device)
-    if speculative_config.method == "mtp":
+    if speculative_config.method == "mtp" and not uses_step3p5_mtp(speculative_config):
         from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
             AscendMTPSpeculator,
         )
