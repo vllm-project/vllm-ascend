@@ -333,3 +333,11 @@ def test_flash_attn_npu_3_supported_models(device_type, models) -> None:
     profile = get_hardware_profile(device_type)
     assert profile.flash_attn_npu_3_models == models
     assert profile.supports(HardwareCapability.FLASH_ATTN_NPU_3) == bool(models)
+
+
+@pytest.mark.parametrize(
+    "device, expected",
+    [(AscendDeviceType.A2, 8), (AscendDeviceType.A3, 8), (AscendDeviceType.A5, 0), (AscendDeviceType._310P, 0)],
+)
+def test_gdn_projection_overlap_cutoff(device, expected):
+    assert get_hardware_profile(device).gdn_projection_overlap_max_tokens == expected

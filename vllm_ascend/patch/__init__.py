@@ -1697,7 +1697,7 @@
 
 # worker/patch_qwen3_5.py: GDN input projection overlap.
 # Why: Ascend replaces the upstream GDN forward/backend.
-# How: reuse packed-weight initialization for the opt-in per-layer NPU adaptation.
+# How: reuse packed-weight initialization for hardware-gated per-layer NPU overlap.
 # Related PR: vllm-project/vllm#64425.
 # Future Plan: remove this initialization hook when a shared backend extension supports it.
 

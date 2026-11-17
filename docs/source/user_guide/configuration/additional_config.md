@@ -410,26 +410,25 @@ Validate correctness, quality and performance on the deployment hardware before 
 
 ## GDN input projection overlap
 
-Set `gdn_projection_overlap_max_tokens` to a positive integer in
-`--additional-config` to allow Qwen GDN layers to capture the QKVZ and BA
-input projections on separate NPU streams. The default is `0` (disabled).
-The threshold counts input rows after graph padding. The projections use the
-same weights and operators as the serial path.
+On A2/A3, eligible Qwen GDN layers automatically overlap the QKVZ and BA
+input projections during ACLGraph execution for **1–8 input rows after graph
+padding**. The cutoff is an internal hardware policy, not an additional-config
+option. A5 and 310P retain serial projections.
 
-This option requires an uncompiled forward (`mode: 0`) captured in
-`FULL` or `FULL_DECODE_ONLY` ACLGraph mode. It applies only to plain BF16
-projections with no LoRA, dual batch overlap, prefill context parallelism,
-output gather, or custom communication operator. Eager execution, piecewise
-graphs and other ineligible paths keep the serial projections.
+This requires an uncompiled forward (`mode: 0`) captured in `FULL` or
+`FULL_DECODE_ONLY` ACLGraph mode. It applies only to plain BF16 projections
+with no LoRA, dual batch overlap, prefill context parallelism, output gather,
+or custom communication operator. Larger buckets, eager execution, piecewise
+graphs and other ineligible paths retain serial projections.
 
-For an initial 910C trial with Model Runner V2, use:
+For Model Runner V2, a compatible graph configuration is:
 
 ```bash
 VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <qwen-bf16-model> --dtype bfloat16 \
-  --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --additional-config '{"gdn_projection_overlap_max_tokens":64}'
+  --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}'
 ```
 
-`64` is a trial threshold. Confirm the selected graph buckets and actual
-overlap with a profiler, and compare decode latency and output accuracy
-against the same graph configuration with the threshold set to `0`.
+The projections use the same weights and operators as the serial path.
+The internal cutoff of 8 is a conservative default, not a claim of optimal
+performance across all A2/A3 models and TP configurations. Validate accuracy,
+latency, and memory use on the deployment configuration.

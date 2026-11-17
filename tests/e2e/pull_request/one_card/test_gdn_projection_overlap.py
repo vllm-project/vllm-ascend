@@ -1,15 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 from types import SimpleNamespace
 
+import pytest
 import torch
 from vllm.config import CompilationMode, CUDAGraphMode
 
+from vllm_ascend.device.hardware_profile import get_current_hardware_profile
 from vllm_ascend.ops import gdn_projection
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 
 
+@pytest.mark.skipif(
+    get_current_hardware_profile().gdn_projection_overlap_max_tokens == 0,
+    reason="GDN projection overlap is enabled only on A2/A3",
+)
 @torch.inference_mode()
-def test_projection_overlap_aclgraph_matches_serial(monkeypatch):
+def test_projection_overlap_aclgraph_matches_serial():
     class Projection(torch.nn.Module):
         def __init__(self, width):
             super().__init__()
@@ -21,9 +27,6 @@ def test_projection_overlap_aclgraph_matches_serial(monkeypatch):
             self.stream = torch.npu.current_stream()
             return self.quant_method.apply(self, inputs), None
 
-    monkeypatch.setattr(
-        gdn_projection, "get_ascend_config", lambda: SimpleNamespace(gdn_projection_overlap_max_tokens=8)
-    )
     layer = SimpleNamespace(
         in_proj_qkvz=Projection(512),
         in_proj_ba=Projection(16),
@@ -40,7 +43,7 @@ def test_projection_overlap_aclgraph_matches_serial(monkeypatch):
     )
     gdn_projection.initialize_gdn_projection_overlap(layer, config)
     graphs = []
-    for rows in (4, 8):
+    for rows in (1, 8, 9):
         inputs = torch.randn(rows, 128, device="npu", dtype=torch.bfloat16)
         gdn_projection.project_gdn_inputs(layer, inputs + 1)
         torch.npu.synchronize()
@@ -49,7 +52,10 @@ def test_projection_overlap_aclgraph_matches_serial(monkeypatch):
             qkvz, ba = gdn_projection.project_gdn_inputs(layer, inputs + 1)
             # Consume both outputs on the capture stream, as GDN does.
             outputs = (qkvz.clone(), ba.clone())
-        assert layer.in_proj_ba.stream == layer._ascend_ba_stream
+        if rows <= get_current_hardware_profile().gdn_projection_overlap_max_tokens:
+            assert layer.in_proj_ba.stream == layer._ascend_ba_stream
+        else:
+            assert layer.in_proj_ba.stream != layer._ascend_ba_stream
         assert layer.in_proj_qkvz.stream != layer._ascend_ba_stream
         graphs.append((graph, inputs, outputs))
 

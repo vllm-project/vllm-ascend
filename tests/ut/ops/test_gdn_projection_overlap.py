@@ -42,7 +42,7 @@ class GDNProjectionTest(unittest.TestCase):
         self.main = Stream()
         self.main.name = "main"
         self.capture = True
-        self.config = SimpleNamespace(gdn_projection_overlap_max_tokens=8)
+        self.profile = SimpleNamespace(gdn_projection_overlap_max_tokens=8)
         self.compilation_mode = SimpleNamespace(NONE=0, VLLM_COMPILE=3)
         self.graph_mode = SimpleNamespace(NONE=0, PIECEWISE=1, FULL=2, FULL_DECODE_ONLY=3)
         self.method = type("UnquantizedLinearMethod", (), {})
@@ -69,7 +69,7 @@ class GDNProjectionTest(unittest.TestCase):
             },
             "vllm.model_executor.layers.linear": {"UnquantizedLinearMethod": self.method},
             "vllm_ascend.ops.linear": {"AscendUnquantizedLinearMethod": self.method},
-            "vllm_ascend.ascend_config": {"get_ascend_config": lambda: self.config},
+            "vllm_ascend.device.hardware_profile": {"get_current_hardware_profile": lambda: self.profile},
         }.items():
             module = ModuleType(name)
             module.__dict__.update(attrs)
@@ -142,9 +142,33 @@ class GDNProjectionTest(unittest.TestCase):
 
     def test_disabled_quantized_and_lora_paths_do_not_create_stream(self):
         for limit, lora, method in [(0, None, self.method()), (8, object(), self.method()), (8, None, object())]:
-            self.config.gdn_projection_overlap_max_tokens = limit
+            self.profile.gdn_projection_overlap_max_tokens = limit
             self.vllm_config.lora_config = lora
             self.layer.in_proj_ba.quant_method = method
+            self.module.initialize_gdn_projection_overlap(self.layer, self.vllm_config)
+            self.assertFalse(hasattr(self.layer, "_ascend_ba_stream"))
+
+    def test_cutoff_boundary_and_single_row_use_overlap(self):
+        self.module.initialize_gdn_projection_overlap(self.layer, self.vllm_config)
+        for rows in (1, 8):
+            with self.subTest(rows=rows):
+                self.tensor.shape = (rows, 8)
+                self.trace.clear()
+                self.module.project_gdn_inputs(self.layer, self.tensor)
+                self.assertEqual([name for op, name in self.trace if op == "gemm"], ["ba", "qkvz"])
+                self.assertIn(("wait", "main"), self.trace)
+
+    def test_unsupported_hardware_keeps_serial_path(self):
+        self.profile.gdn_projection_overlap_max_tokens = 0
+        self.module.initialize_gdn_projection_overlap(self.layer, self.vllm_config)
+        self.assertFalse(hasattr(self.layer, "_ascend_ba_stream"))
+        self.module.project_gdn_inputs(self.layer, self.tensor)
+        self.assertEqual(self.trace, [("gemm", "qkvz"), ("gemm", "ba")])
+
+    def test_ubatching_and_non_bf16_do_not_create_stream(self):
+        for ubatching, dtype in [(True, "bf16"), (False, "fp16")]:
+            self.vllm_config.parallel_config.use_ubatching = ubatching
+            self.vllm_config.model_config.dtype = dtype
             self.module.initialize_gdn_projection_overlap(self.layer, self.vllm_config)
             self.assertFalse(hasattr(self.layer, "_ascend_ba_stream"))
 

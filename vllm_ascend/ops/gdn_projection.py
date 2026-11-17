@@ -1,24 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Optional overlap of independent GDN input projections during ACL capture."""
+"""Hardware-gated overlap of independent GDN projections during ACL capture."""
 
 import torch
 import torch_npu  # noqa: F401 - register the NPU backend and torch.npu
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.device.hardware_profile import get_current_hardware_profile
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 
 
 def initialize_gdn_projection_overlap(layer, config: VllmConfig) -> None:
-    limit = get_ascend_config().gdn_projection_overlap_max_tokens
+    limit = get_current_hardware_profile().gdn_projection_overlap_max_tokens
+    if not limit:
+        return
     compilation_config = config.compilation_config
     # LoRA can replace these modules, and quantized GEMMs may share scratch
     # storage. Do not overlap either projection unless both are plain GEMMs.
     if (
-        not limit
-        or compilation_config.mode != CompilationMode.NONE
+        compilation_config.mode != CompilationMode.NONE
         or compilation_config.cudagraph_mode not in (CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY)
         or hasattr(layer, "in_proj_qkv")
         or config.lora_config is not None
