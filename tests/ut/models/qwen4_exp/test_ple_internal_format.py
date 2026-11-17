@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -206,25 +207,108 @@ def test_set_internal_format_without_any_api_only_warns(
     ple._set_allow_internal_format(False)  # must not raise
 
 
-def test_ple_internal_format_is_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
+class _DummyPLEMetadata:
+    pass
+
+
+def _install_ple_forward_context(monkeypatch: pytest.MonkeyPatch, attn_metadata: object) -> object:
+    import vllm.forward_context as forward_context_module
+    import vllm.model_executor.layers.mamba.mamba_utils as mamba_utils
+    import vllm.v1.attention.backends.short_conv_attn as short_conv_attn
+
+    monkeypatch.setattr(short_conv_attn, "PleShortConvAttentionMetadata", _DummyPLEMetadata)
+    monkeypatch.setattr(
+        forward_context_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata=attn_metadata),
+    )
+    return mamba_utils
+
+
+def _make_ple_layer(state: torch.Tensor, dispatch: object) -> SimpleNamespace:
+    return SimpleNamespace(
+        prefix="layers.1.ple",
+        kv_cache=[state],
+        conv_state_len=9,
+        num_spec_tokens=3,
+        conv1d=SimpleNamespace(weight=torch.randn(4, 1, 4)),
+        _short_conv_dilated_dispatch=dispatch,
+    )
+
+
+def test_ple_wrap_dispatches_sd_state(monkeypatch: pytest.MonkeyPatch) -> None:
     updates: list[bool] = []
     monkeypatch.setattr(ple, "_get_allow_internal_format", lambda: True)
     monkeypatch.setattr(ple, "_set_allow_internal_format", updates.append)
-    output = torch.tensor([2.0])
-    original = Mock(return_value=output)
-    layer = SimpleNamespace(prefix="layers.1.ple")
     wait = Mock()
     monkeypatch.setattr(ple, "wait_for_kv_layer_from_connector", wait)
-    inputs = torch.tensor([1.0])
-    residual = torch.tensor([2.0])
-    outer_residual = torch.tensor([3.0])
+    original = Mock()
+    calls: list[dict[str, Any]] = []
+    # SD layout: [slots, window, channels]. The trailing capacity is kept.
+    state = torch.randn(3, 14, 4)
+    layer = _make_ple_layer(state, lambda **kwargs: calls.append(kwargs))
+    metadata = _DummyPLEMetadata()
+    mamba_utils = _install_ple_forward_context(monkeypatch, {layer.prefix: metadata})
+    monkeypatch.setattr(mamba_utils, "is_conv_state_dim_first", lambda: False)
+    inputs = torch.randn(2, 4, dtype=torch.bfloat16)
+    residual = torch.randn(2, 4)
+    outer_residual = torch.randn(2, 4)
 
     wrapped = ple._wrap_ple_short_conv(original)
 
-    assert wrapped(layer, inputs, residual, outer_residual) is output
-    original.assert_called_once_with(layer, inputs, residual, outer_residual)
+    assert wrapped(layer, inputs, residual, outer_residual) is None
+    original.assert_not_called()
     assert updates == [False, True]
     wait.assert_called_once_with(layer.prefix)
+    assert len(calls) == 1
+    kwargs = calls[0]
+    assert kwargs["inputs"] is inputs
+    assert kwargs["residual"] is residual
+    assert kwargs["outer_residual"] is outer_residual
+    assert kwargs["metadata"] is metadata
+    assert kwargs["conv_state"].shape == (3, 12, 4)
+    assert kwargs["conv_weights"].shape == (4, 4)
+    assert kwargs["conv_weights"].dtype == inputs.dtype
+
+
+def test_ple_wrap_transposes_dim_first_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ple, "_get_allow_internal_format", lambda: True)
+    monkeypatch.setattr(ple, "_set_allow_internal_format", lambda _enabled: None)
+    monkeypatch.setattr(ple, "wait_for_kv_layer_from_connector", Mock())
+    calls: list[dict[str, Any]] = []
+    # DS layout: [slots, channels, window].
+    state = torch.randn(3, 4, 14)
+    layer = _make_ple_layer(state, lambda **kwargs: calls.append(kwargs))
+    metadata = _DummyPLEMetadata()
+    mamba_utils = _install_ple_forward_context(monkeypatch, {layer.prefix: metadata})
+    monkeypatch.setattr(mamba_utils, "is_conv_state_dim_first", lambda: True)
+
+    wrapped = ple._wrap_ple_short_conv(Mock())
+
+    wrapped(layer, torch.randn(2, 4), torch.randn(2, 4), None)
+
+    conv_state = calls[0]["conv_state"]
+    assert conv_state.shape == (3, 12, 4)
+    assert conv_state.untyped_storage().data_ptr() == state.untyped_storage().data_ptr()
+
+
+def test_ple_wrap_is_a_noop_without_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    updates: list[bool] = []
+    monkeypatch.setattr(ple, "_get_allow_internal_format", lambda: True)
+    monkeypatch.setattr(ple, "_set_allow_internal_format", updates.append)
+    monkeypatch.setattr(ple, "wait_for_kv_layer_from_connector", Mock())
+    dispatch = Mock()
+    layer = _make_ple_layer(torch.randn(3, 14, 4), dispatch)
+    _install_ple_forward_context(monkeypatch, None)
+    residual = torch.zeros(2, 4)
+    outer_residual = torch.ones(2, 4)
+
+    wrapped = ple._wrap_ple_short_conv(Mock())
+
+    assert wrapped(layer, torch.randn(2, 4), residual, outer_residual) is None
+    dispatch.assert_not_called()
+    torch.testing.assert_close(residual, outer_residual)
+    assert updates == [False, True]
 
 
 def test_ple_internal_format_is_restored_on_error(
@@ -233,16 +317,15 @@ def test_ple_internal_format_is_restored_on_error(
     updates: list[bool] = []
     monkeypatch.setattr(ple, "_get_allow_internal_format", lambda: True)
     monkeypatch.setattr(ple, "_set_allow_internal_format", updates.append)
-
-    original = Mock(side_effect=RuntimeError("expected short-conv failure"))
-    layer = SimpleNamespace(prefix="layers.1.ple")
     monkeypatch.setattr(ple, "wait_for_kv_layer_from_connector", Mock())
-    inputs = torch.tensor([1.0])
-    wrapped = ple._wrap_ple_short_conv(original)
+    layer = _make_ple_layer(torch.randn(3, 14, 4), Mock(side_effect=RuntimeError("expected short-conv failure")))
+    metadata = _DummyPLEMetadata()
+    mamba_utils = _install_ple_forward_context(monkeypatch, {layer.prefix: metadata})
+    monkeypatch.setattr(mamba_utils, "is_conv_state_dim_first", lambda: False)
+    wrapped = ple._wrap_ple_short_conv(Mock())
 
     with pytest.raises(RuntimeError, match="expected short-conv failure"):
-        wrapped(layer, inputs)
-    original.assert_called_once_with(layer, inputs)
+        wrapped(layer, torch.randn(2, 4), torch.randn(2, 4), None)
     assert updates == [False, True]
 
 

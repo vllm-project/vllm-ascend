@@ -18,7 +18,7 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 if TYPE_CHECKING:
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
 
 
 def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
@@ -112,7 +112,7 @@ class LookupKeyClient:
 class LookupKeyServer:
     def __init__(
         self,
-        pool_worker: KVPoolWorker,
+        pool_worker: BaseKVPoolWorker,
         vllm_config: VllmConfig,
     ):
         self.decoder = MsgpackDecoder()

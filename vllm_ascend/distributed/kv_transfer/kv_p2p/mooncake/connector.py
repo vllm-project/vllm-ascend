@@ -6,8 +6,8 @@ The connector classes in this module bridge vLLM's KV connector interface to
 the scheduler-side and worker-side Mooncake implementations. Transfer and
 scheduling details belong in those implementations rather than in this facade.
 
-``MooncakeConnector`` remains an alias for the pull-based connector. The push
-connector is declared as part of the new architecture but is not implemented.
+``MooncakeConnector`` remains an alias for the pull-based connector.
+``MooncakeConnectorV2`` selects pull or layerwise push from extra configuration.
 """
 
 from collections.abc import Mapping
@@ -49,6 +49,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import (
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import (
     MooncakePullConnectorWorker,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_scheduler import MooncakePushConnectorScheduler
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_worker import MooncakePushConnectorWorker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import (
     MooncakeKVConnectorStats,
     MooncakePromMetrics,
@@ -233,7 +235,7 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """Return this worker's out-of-band transfer handshake metadata."""
         assert self.connector_worker is not None
-        return self.connector_worker.xfer_handshake_metadata
+        return self.connector_worker.get_handshake_metadata()
 
 
 class MooncakePullConnector(MooncakeBaseConnector):
@@ -256,7 +258,9 @@ class MooncakePullConnector(MooncakeBaseConnector):
 
 
 class MooncakePushConnector(MooncakeBaseConnector):
-    """Placeholder for the not-yet-implemented push-based connector."""
+    """Layerwise Push facade with role-specific initialization."""
+
+    requires_full_blocks_on_update_after_alloc = True
 
     def __init__(
         self,
@@ -264,7 +268,45 @@ class MooncakePushConnector(MooncakeBaseConnector):
         role: KVConnectorRole,
         kv_cache_config: "KVCacheConfig",
     ) -> None:
-        raise NotImplementedError("MooncakePushConnector is not implemented yet.")
+        super().__init__(vllm_config, role, kv_cache_config)
+
+        if role == KVConnectorRole.SCHEDULER:
+            self.connector_scheduler = MooncakePushConnectorScheduler(vllm_config, str(self.engine_id), kv_cache_config)
+        elif role == KVConnectorRole.WORKER:
+            self.connector_worker = MooncakePushConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
+        else:
+            raise ValueError(f"Unsupported KVConnectorRole: {role}")
+
+    def save_kv_layer(
+        self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: "AttentionMetadata", **kwargs: Any
+    ) -> None:
+        assert isinstance(self.connector_worker, MooncakePushConnectorWorker)
+        self.connector_worker.save_kv_layer(layer_name)
+
+    def wait_for_save(self) -> None:
+        assert isinstance(self.connector_worker, MooncakePushConnectorWorker)
+        self.connector_worker.wait_for_save()
+
+    def shutdown(self) -> None:
+        if self.connector_worker is not None:
+            assert isinstance(self.connector_worker, MooncakePushConnectorWorker)
+            self.connector_worker.shutdown()
+        super().shutdown()
+
+
+class MooncakeConnectorV2(MooncakeBaseConnector):
+    """Select pull by default, or layerwise push via extra configuration."""
+
+    def __new__(
+        cls,
+        vllm_config: VllmConfig,
+        role: KVConnectorRole,
+        kv_cache_config: "KVCacheConfig",
+    ) -> MooncakeBaseConnector:
+        assert vllm_config.kv_transfer_config is not None
+        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        connector_cls = MooncakePushConnector if extra_config.get("use_layerwise", False) else MooncakePullConnector
+        return connector_cls(vllm_config, role, kv_cache_config)
 
 
 # Backward compatibility: MooncakeConnector is the pull-based connector.
@@ -274,6 +316,7 @@ MooncakeConnector = MooncakePullConnector
 __all__ = [
     "MooncakeBaseConnector",
     "MooncakeConnector",
+    "MooncakeConnectorV2",
     "MooncakePullConnector",
     "MooncakePushConnector",
 ]

@@ -19,7 +19,7 @@ from vllm_ascend.worker.v2.attn_utils import (
 
 
 class AscendStandaloneARSpeculator(StandaloneARSpeculator):
-    if not vllm_version_is("0.32.0"):
+    if not vllm_version_is("0.33.0"):
 
         def supports_batch_sharded_draft_logits(self) -> bool:
             # NPU draft-logits kernels index the cache by request state.
@@ -37,12 +37,10 @@ class AscendStandaloneARSpeculator(StandaloneARSpeculator):
         slot_mappings: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         draft_seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound
-        if step == 0:
-            # TODO: Remove this workaround once upstream includes the correction
-            # token in the standalone AR prefill sequence-length bound.
-            # Draft prefill appends the target's correction token to the
-            # expanded query, so the upstream builder must receive target
-            # length + 1. Keep the input batch's bounds unchanged.
+        if step == 0 and vllm_version_is("0.33.0"):
+            # #60989 includes the correction token before calling this builder
+            # on main. Only release still needs the extra prefill token here.
+            # Keep the input batch's bounds unchanged.
             draft_seq_lens_cpu_upper_bound = (seq_lens_cpu_upper_bound[:num_reqs] + 1).clamp(max=self.max_model_len)
 
         num_tokens = int(query_start_loc_np[-1])

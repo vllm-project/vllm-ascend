@@ -30,7 +30,6 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import DyntraLBConfig
-from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.scheduler import Scheduler as _SchedulerBase
@@ -433,6 +432,8 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
+        # Whether any scheduled request has a synchronous connector KV load.
+        has_sync_kv_loads = False
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -594,9 +595,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                         break
 
             if new_blocks is None:
-                if not vllm_version_is("0.32.0") and (
-                    self.policy == SchedulingPolicy.PRIORITY and request.status == RequestStatus.PREEMPTED
-                ):
+                if self.policy == SchedulingPolicy.PRIORITY and request.status == RequestStatus.PREEMPTED:
                     # The request was the lowest-priority running request and
                     # preempted itself. The requests after it have higher
                     # priority and may still fit; it was removed from
@@ -1002,6 +1001,9 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                 request = request_queue.pop_request()
                 self.deferred_waiting.discard(request)
                 self.running.append(request)
+                if num_external_computed_tokens > 0:
+                    # load_kv_async is False here
+                    has_sync_kv_loads = True
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
@@ -1061,14 +1063,6 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         # this step, the total number of scheduled requests can be smaller than
         # len(self.running).
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs) <= len(self.running)
-
-        # Get the longest common prefix among all requests in the running queue.
-        # This can be potentially used for cascade attention.
-        num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
-        with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
-            if self.running:
-                any_request_id = self.running[0].request_id
-                num_common_prefix_blocks = self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
 
         # Construct the scheduler output.
         if self.use_v2_model_runner:
@@ -1152,7 +1146,6 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             scheduled_encoder_input_stats=scheduled_encoder_input_stats,
-            num_common_prefix_blocks=num_common_prefix_blocks,
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
@@ -1167,6 +1160,8 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
             scheduler_output_kwargs["kv_cache_block_copies"] = pending_kv_cache_block_copies
         if self._scheduler_output_supports("kv_connector_block_state"):
             scheduler_output_kwargs["kv_connector_block_state"] = kv_connector_block_state
+        if self._scheduler_output_supports("has_sync_kv_loads"):
+            scheduler_output_kwargs["has_sync_kv_loads"] = has_sync_kv_loads
         if self._scheduler_output_supports("ec_manager_metadata"):
             get_manager_metadata = getattr(
                 self.encoder_cache_manager,

@@ -34,7 +34,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 | `DeepSeek-V4-Pro-w4a8-mtp`  | 2 Atlas 800I A3 (128GB × 8) nodes or 4 Atlas 800I A2 (64GB × 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp) |
 | `DeepSeek-V4-Pro-0813-w4a8` | 2 Atlas 800I A3 (128GB × 8) nodes or 4 Atlas 800I A2 (64GB × 8) nodes | [ModelScope](https://modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-0813-w4a8)    |
 | `DeepSeek-V4-Pro-0813-w4a4c8` | 950PR&950DT products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_pro_w4a4c8.yaml) |
-| `DeepSeek-V4-Pro-0813` | 950DT products | [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813) |
+| `DeepSeek-V4-Pro-0813` | 950DT products | [ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4-Pro-0813) \| [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813)|
 
 - `DeepSeek-V4-Pro-0813-w4a8` (Official release with DSpark after quantization): This checkpoint includes the DSpark draft weights, so no separate draft-model path is required.
 
@@ -364,7 +364,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export TASK_QUEUE_ENABLE=1
-    export VLLM_USE_V2_MODEL_RUNNER=0
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
 
     vllm serve /path/to/DeepSeek-V4-Pro-0813-w4a8 \
@@ -426,7 +426,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export TASK_QUEUE_ENABLE=1
-    export VLLM_USE_V2_MODEL_RUNNER=0
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
 
     vllm serve /path/to/DeepSeek-V4-Pro-0813-w4a8 \

@@ -13,8 +13,8 @@ from vllm.model_executor.models import utils as model_utils
 from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.model_executor.models.utils import PPMissingLayer
 
-from vllm_ascend.models import kimi_k3 as k3_module
-from vllm_ascend.models import kimi_k3_mtp as mtp_module
+from vllm_ascend.models.kimi_k3 import kimi_k3 as k3_module
+from vllm_ascend.models.kimi_k3 import kimi_k3_mtp as mtp_module
 from vllm_ascend.patch.platform import patch_eplb
 
 

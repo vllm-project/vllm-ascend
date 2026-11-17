@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -102,6 +103,8 @@ def test_chunk_uses_host_descriptors_and_preserves_vk_cache(monkeypatch, state_d
         assert kwargs["cu_seqlens"] is metadata.cu_seqlens_host
         assert kwargs["chunk_indices"] is metadata.chunk_indices_chunk64_host
         assert kwargs["initial_state"].dtype == torch.float32
+        assert kwargs["use_qk_l2norm_in_kernel"] is False
+        assert l2norm.call_count == 2
         torch.testing.assert_close(kwargs["initial_state"][0], saved[3].float())
         if not compact:
             assert torch.count_nonzero(kwargs["initial_state"][1]) == 0
@@ -109,10 +112,14 @@ def test_chunk_uses_host_descriptors_and_preserves_vk_cache(monkeypatch, state_d
         return v, torch.full_like(kwargs["initial_state"], 17)
 
     monkeypatch.setattr(kda_ops, "chunk_kda_fwd", chunk)
-    monkeypatch.setattr("vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd", lambda x: x)
+    l2norm = MagicMock(side_effect=lambda x: x)
+    monkeypatch.setattr("vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd", l2norm)
     out = kda.chunk_kda(
         q, q, q, q, torch.zeros(1, 3, 1), state, indices, has_initial, metadata, torch.zeros(1), torch.zeros(128), -4
     )
+    for call in l2norm.call_args_list:
+        assert call.args[0].is_contiguous()
+        torch.testing.assert_close(call.args[0], q)
     torch.testing.assert_close(out, q)
     assert (state[3] == 17).all()
     torch.testing.assert_close(state[0], saved[0])

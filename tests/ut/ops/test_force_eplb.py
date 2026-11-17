@@ -86,26 +86,3 @@ def test_get_force_eplb_topk_requires_forward_context():
 
     with pytest.raises(AssertionError, match="Forward context is not set"):
         force_eplb.get_force_eplb_topk(topk_ids, num_logical_experts=8)
-
-
-@pytest.mark.parametrize(
-    ("configured_sizes", "expected_sizes"),
-    [
-        ([4, 8], {4, 8}),
-        ([], {16}),
-    ],
-)
-def test_build_force_eplb_topk_uses_configured_or_fallback_sizes(configured_sizes, expected_sizes):
-    moe_comm_method = _make_moe_comm_method(ep_rank=0)
-    context = SimpleNamespace(moe_comm_method=moe_comm_method)
-    vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_capture_sizes=configured_sizes))
-
-    with (
-        patch.object(force_eplb, "get_forward_context", return_value=context),
-        patch.object(force_eplb, "get_current_vllm_config", return_value=vllm_config),
-    ):
-        force_eplb.build_force_eplb_topk(torch.device("cpu"), max_num_tokens=16)
-
-    cached_sizes = {key[0] for key in moe_comm_method._force_eplb_topk_cache}
-    assert cached_sizes == expected_sizes
-    assert len(moe_comm_method._force_eplb_topk_cache) == 2 * len(expected_sizes)

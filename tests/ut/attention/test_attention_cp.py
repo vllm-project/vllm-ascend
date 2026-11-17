@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 
+from tests.ut.attention.utils import _update_out_and_lse
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
@@ -20,7 +21,6 @@ from vllm_ascend.attention.context_parallel.attention_cp import (
     AscendMetadataForDecode,
     AscendMetadataForPrefill,
 )
-from vllm_ascend.attention.context_parallel.common_cp import _update_out_and_lse
 
 
 def test_gqa_dcp_extends_v1_backend_without_polluting_base_metadata() -> None:
@@ -32,6 +32,24 @@ def test_gqa_dcp_extends_v1_backend_without_polluting_base_metadata() -> None:
     assert AscendAttentionDCPMetadataBuilder.metadata_cls is (AscendAttentionDCPMetadata)
     assert not hasattr(AscendMetadata(), "decode")
     assert not hasattr(AscendMetadata(), "prefill")
+
+
+@pytest.mark.parametrize("dcp_sharded", [False, True])
+def test_gqa_builder_respects_group_sharding(dcp_sharded) -> None:
+    spec = SimpleNamespace(dcp_sharded=dcp_sharded)
+    with (
+        patch.object(AscendAttentionMetadataBuilder, "__init__", return_value=None) as base_init,
+        patch.object(AscendAttentionDCPMetadataBuilder, "__init__", return_value=None) as dcp_init,
+    ):
+        builder = AscendAttentionDCPMetadataBuilder(spec, ["draft.attn"], "config", "device")
+    if dcp_sharded:
+        assert type(builder) is AscendAttentionDCPMetadataBuilder
+        dcp_init.assert_called_once_with(spec, ["draft.attn"], "config", "device")
+        base_init.assert_not_called()
+    else:
+        assert type(builder) is AscendAttentionMetadataBuilder
+        base_init.assert_called_once_with(spec, ["draft.attn"], "config", "device")
+        dcp_init.assert_not_called()
 
 
 def test_gqa_tp_only_dcp_still_gathers_heads() -> None:
@@ -484,7 +502,6 @@ def test_dcp_split_uses_builder_config_without_current_context(
     builder.speculative_config = None
     query_start_loc = torch.tensor([0, query_lens[0], sum(query_lens)], dtype=torch.int32)
     common = SimpleNamespace(
-        context_parallel_metadata=None,
         max_query_len=max(query_lens),
         num_reqs=2,
         num_actual_tokens=sum(query_lens),

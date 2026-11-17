@@ -18,6 +18,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from vllm.config.attention import AttentionConfig
 from vllm.utils.mem_constants import GiB_bytes
 
 from tests.ut.base import TestBase
@@ -53,7 +54,9 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
 
-        worker.vllm_config = SimpleNamespace(kv_transfer_config=None, additional_config={})
+        worker.vllm_config = SimpleNamespace(
+            attention_config=AttentionConfig(), kv_transfer_config=None, additional_config={}
+        )
         worker._kvpp_cache_allocation_plan = None
         worker.model_runner = MagicMock()
         worker.model_runner.model_memory_usage = model_memory_usage

@@ -1,13 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
 
+from vllm_ascend.distributed.eplb import eplb_state as state_module
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops.fused_moe.eplb import record_expert_tokens
+
+
+def _forward_context():
+    """A context like the one every forward enters, with its own extras dict."""
+    return SimpleNamespace(is_padding=None, additional_kwargs={})
 
 
 def _state(record_enabled: bool = True):
@@ -63,12 +70,15 @@ def test_allgather_records_masked_load_on_source_ineligible_owner(monkeypatch, g
         return token_mask
 
     monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
+    context = _forward_context()
+    monkeypatch.setattr(state_module, "get_forward_context", lambda: context)
     state.record_load(counts, group_list_type, topk_ids=topk_ids, num_source_tokens=3, all_gather_mask=gather_mask)
     expected = torch.tensor([0, 0, 0, 0, 2, 1, 0, 0], dtype=torch.int32)
     torch.testing.assert_close(state.expert_load_view, expected)
     assert state.allgather_record_tensor.item() == 1
     # An ineligible later layer/draft must not clear the shared step decision.
     token_mask.zero_()
+    context = _forward_context()
     state.record_load(counts, group_list_type, topk_ids=topk_ids, num_source_tokens=3, all_gather_mask=gather_mask)
     assert state.allgather_record_tensor.item() == 1
     assert state.allgather_record_tensor.data_ptr() == record_pointer
@@ -76,10 +86,11 @@ def test_allgather_records_masked_load_on_source_ineligible_owner(monkeypatch, g
     torch.testing.assert_close(state.expert_load_view, expected)
 
 
-def test_record_load_updates_step_flag_before_rejecting_missing_counts():
+def test_record_load_updates_step_flag_before_rejecting_missing_counts(monkeypatch):
     state = _state()
     state.allgather_record_tensor = torch.tensor(-1, dtype=torch.int32)
     state.allgather_source_is_padding = torch.tensor([False])
+    monkeypatch.setattr(state_module, "get_forward_context", _forward_context)
     with pytest.raises(RuntimeError, match="operator-provided expert counts"):
         state.record_load(None, 1, topk_ids=torch.tensor([[4]]), num_source_tokens=1, all_gather_mask=lambda mask: mask)
     assert state.allgather_record_tensor.item() == 1
