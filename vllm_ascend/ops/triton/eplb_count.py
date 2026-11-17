@@ -7,7 +7,8 @@ from vllm.triton_utils import tl, triton
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 ASSIGNMENTS_PER_TILE = 512
-PARTIALS_PER_REDUCE_TILE = 10
+# 64 KiB of INT64 partial counts, leaving room for reduction temporaries.
+MAX_REDUCE_ELEMENTS = 8192
 
 
 @triton.jit(do_not_specialize=["num_assignments", "local_start", "local_count"])
@@ -114,14 +115,15 @@ def count_allgather_tokens_triton(
         NUM_BINS=num_bins,
         compile_mode="simd",
     )
+    reduce_rows = min(programs, max(1, MAX_REDUCE_ELEMENTS // num_bins))
     _reduce_allgather_counts_kernel[(1,)](
         partial_counts,
         counts,
         NUM_PROGRAMS=programs,
         NUM_BINS=num_bins,
         LOCAL_COUNT=local_expert_count,
-        ROWS_PER_TILE=PARTIALS_PER_REDUCE_TILE,
-        BLOCK_ROWS=triton.next_power_of_2(PARTIALS_PER_REDUCE_TILE),
+        ROWS_PER_TILE=reduce_rows,
+        BLOCK_ROWS=triton.next_power_of_2(reduce_rows),
         compile_mode="simd",
     )
     return counts

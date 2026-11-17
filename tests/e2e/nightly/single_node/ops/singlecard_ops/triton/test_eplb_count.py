@@ -60,6 +60,9 @@ def reference(ids, mask, start, count):
         (10240, 32, 128),
         (10240, 8, 16),
         (10240, 8, 512),
+        (960, 8, 512),
+        (1024, 8, 512),
+        (1088, 8, 512),
     ],
 )
 @pytest.mark.parametrize("pattern", ["mixed", "hot", "disabled", "all_valid", "remote"])
