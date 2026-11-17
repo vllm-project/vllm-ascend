@@ -2,7 +2,7 @@
 
 扩展现有 `dispatch_ffn_combine` 接口，让 W8A8、W4A8、BF16 三套 AscendC 内核在产生本卡专家计数后，直接更新 EPLB 负载。支持的调用默认融合，不新增算子名称或用户开关；不满足条件的调用保留原有 MoE 和独立 Record 路径。
 
-实验分支为 `feat/eplb-fused-mc2-record`，起点为上游 main 的 `8cd3c3762d8a10cd9bd814110c5a3b69999b6269`。本文记录方案与当前实验实现；构建、设备正确性和性能仍须分别验证。
+实验分支为 `feat/eplb-fused-mc2-record`，起点为上游 main 的 `8cd3c3762d8a10cd9bd814110c5a3b69999b6269`。本文记录方案与当前实验实现。三套算子的 CANN 9.2.1 定向构建及框架 C++ 扩展编译已在 136 的容器中通过；设备正确性和性能仍须验证。
 
 当前实现把 Record 放在同一次 AscendC 算子启动的 `Process()` 末尾，由向量核 0 在原有 `expert_token_nums` 写出后读取并累加。`GetCumsumForMMAIV` 沿来源卡维度做前缀和，因此最后一行的每个元素已经是对应专家的独立计数，不能再对相邻专家做差分。此放置点与下文初始建议的 GMM 就绪信号之前不同，目的是先保持既有通信与矩阵乘重叠；需要通过性能测试确认取舍。
 
@@ -55,7 +55,7 @@ torch.ops._C_ascend.dispatch_ffn_combine(
 
 追加 CANN 输入会改变输入槽位布局，需要逐一核对三套实现的输入索引，不能只修改函数签名。新增起点属性追加在现有属性后，避免无意改变原属性索引。无需改矩阵乘的 `L1TileShape/L0TileShape`。
 
-PyTorch schema 必须声明 `expert_load_view` 为可变参数，并使 Meta 与真实调用的输出及别名契约一致。CANN 层也必须正确表达负载 Tensor 的原地读写，通过其支持的输入输出引用方式绑定同一存储，不能把写操作隐藏成普通只读输入。优先验证可选参数、生成接口、原地引用与图模式；检查没有为该引用插入额外复制 kernel。
+PyTorch schema 声明 `expert_load_view` 为可变参数；ACLNN wrapper 将同一 Tensor 同时传入 CANN 的 `expertLoad` 输入和 `expertLoadOut` 输出。可选输入输出使用不同名称，避免当前 CANN 代码生成器产生重复形参。仍需通过图模式与 profiler 验证别名传递没有引入额外复制 kernel。
 
 保留原算子名称，更新现有 ACLNN 签名；此次实验不要求新适配层兼容旧二进制 ABI。重新构建框架 C++ 扩展及三套自定义算子，并核对 136 实际加载路径和构建版本。不能对接口不匹配的旧库尝试调用，也不能在调用失败后重新执行原 MoE，以免重复通信或重复累加。
 

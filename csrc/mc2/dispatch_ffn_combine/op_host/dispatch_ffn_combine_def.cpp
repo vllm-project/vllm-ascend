@@ -82,8 +82,8 @@ class DispatchFFNCombine : public OpDef {
         .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32})
         .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
-    // Matching input/output names make this a writable ACLNN Ref tensor.
-    this->Output("expertLoad")
+    // The ACLNN wrapper binds this output to the same tensor as expertLoad.
+    this->Output("expertLoadOut")
         .ParamType(OPTIONAL)
         .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32})
         .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})

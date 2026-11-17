@@ -19,7 +19,7 @@
 using namespace AscendC;
 
 #include "kernel_operator.h"
-#include "../../common/record_expert_load.h"
+#include "record_expert_load.h"
 
 #include "utils/moe_distribute_base.h"
 
