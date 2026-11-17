@@ -13,6 +13,16 @@ memcache_bulk_tier2     memcache   bulk       DRAM
 memcache_layerwise_tier3 memcache layerwise  DRAM + SSD
 ======================  =========  =========  ===========
 
+The scenarios run on a single A2 card (``TP_SIZE=1``, the default) because the
+pool moves KV between ranks and the A2 slices available to this file have no
+working cross-NPU channel: device RoCE endpoints are unavailable there and the
+platform HCCS path fails with rtsIpcMemImportByKey 107000 / DisableP2P 17, which
+made every two-card scenario read back 0 of its 16128 expected hit tokens. A
+single card needs no cross-rank transfer, and the whole matrix was verified
+passing on one A2 card with the platform default transport. Export
+``QWEN38_POOL_TP_SIZE=2`` on a slice whose NPUs can exchange KV to exercise the
+sharded path.
+
 Every scenario runs two control legs, each inside one engine instance:
 
 - Leg A: pool enabled (backend / transfer mode / storage tier per scenario),
@@ -41,8 +51,10 @@ the SSD store stays armed-but-idle).
 ``memcache_layerwise_tier3`` is skipped when ``TP_SIZE < 2``: UBS IO derives
 ``ubsio.standalone.device_count`` from the local_service process count, and with
 a single process the storage-enabled pool stops reporting cross-request hits
-(0 of 16128 expected) even though writes reach the device. See the skip reason
-in the test body for the configurations that were ruled out.
+(0 of 16128 expected) even though writes reach the device. With the single-card
+default that scenario therefore always reports as skipped; it needs both two
+UBS IO processes and the raw block device below. See the skip reason in the test
+body for the configurations that were ruled out.
 
 Environment knobs:
 
@@ -118,7 +130,16 @@ from tests.e2e.pull_request.kv_pool_watch import (
 )
 
 MODEL = os.environ.get("QWEN38_POOL_MODEL", "Eco-Tech/Qwen3.8-27B-w8a8")
-TP_SIZE = int(os.environ.get("QWEN38_POOL_TP_SIZE", "2"))
+# These cases run on a single A2 card by default. The pool moves KV between
+# ranks, and the two-card A2 slice this file used to be routed to has no working
+# cross-NPU channel: pinning device RoCE fails with "Device roce endpoint is
+# unavailable, phy_device_id: 2/3", the platform HCCS default fails with
+# rtsIpcMemImportByKey 107000 / DisableP2P 17, and every scenario therefore read
+# back 0 of the 16128 expected hits (run 43987364748). A single card needs no
+# cross-rank transfer and was verified passing on A2 with the platform default
+# transport. Set QWEN38_POOL_TP_SIZE=2 on a slice whose NPUs can exchange KV to
+# exercise the sharded path.
+TP_SIZE = int(os.environ.get("QWEN38_POOL_TP_SIZE", "1"))
 
 # 16K-class shared prefix with a non-zero tail: the pool only transfers whole
 # blocks/lcm groups, and an lcm-aligned prompt would trim its final block into
@@ -221,14 +242,15 @@ AB_MODE = os.environ.get("KV_POOL_AB_MODE", "gate")
 # maintainer's direction. The version is printed per case for diagnostics,
 # and the SSD offload + prefetch below only activates on builds exposing
 # ExistOptions (mooncake >= 0.3.14, Mooncake PR 4272).
-# Performance gates per scenario, calibrated on A2 (Qwen3.8-27B W8A8, TP2)
-# against the local prefix-cache control leg:
+# Performance gates per scenario, calibrated on A2 (Qwen3.8-27B W8A8) against the
+# local prefix-cache control leg. Two-card numbers came from the dev A2 boxes,
+# single-card numbers from a full TP1 run with the platform default transport:
 #
-#   scenario                  observed TTFT    observed throughput
-#   mooncake_bulk_tier2        1.06-1.16x       0.86-0.94x
-#   mooncake_layerwise_tier3  1.12-1.18x       0.85-0.88x
-#   memcache_bulk_tier2        1.06-1.15x       0.86-0.92x
-#   memcache_layerwise_tier3   1.17-1.19x       0.36-0.47x
+#   scenario                  observed TTFT    observed throughput   (TP)
+#   mooncake_bulk_tier2        1.06-1.24x       0.81-0.94x           1 and 2
+#   mooncake_layerwise_tier3  1.12-1.20x       0.83-0.88x           1 and 2
+#   memcache_bulk_tier2        1.06-1.21x       0.83-0.92x           1 and 2
+#   memcache_layerwise_tier3   1.17-1.19x       0.36-0.47x           2 only
 #
 # The first three scenarios cluster tightly: the pool transfer is their only
 # cost and the mooncake layerwise streaming does not hurt its throughput on
