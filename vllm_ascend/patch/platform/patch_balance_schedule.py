@@ -82,7 +82,7 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.core.scheduler_output import make_cached_request_data
 from vllm_ascend.utils import vllm_version_is
 
-if not vllm_version_is("0.33.0"):
+if not vllm_version_is("0.34.0"):
     from vllm.v1.core.sched.output import IterationDetails
 
 
@@ -833,7 +833,7 @@ class BalanceScheduler(Scheduler):
             )
 
         schedule_metadata: dict[str, Any] = {}
-        if not vllm_version_is("0.33.0"):
+        if not vllm_version_is("0.34.0"):
             if iteration_details is not None:
                 iteration_details.num_prefill_requests = (
                     len(num_scheduled_tokens) - iteration_details.num_decode_requests
@@ -841,7 +841,7 @@ class BalanceScheduler(Scheduler):
                 iteration_details.num_prefill_tokens = total_num_scheduled_tokens - iteration_details.num_decode_tokens
                 iteration_details.num_encoder_inputs = num_scheduled_encoder_inputs
                 iteration_details.num_encoder_output_tokens = self.max_num_encoder_input_tokens - encoder_compute_budget
-            schedule_metadata = {"iteration_details": iteration_details}
+            schedule_metadata["iteration_details"] = iteration_details
 
         # Record the request ids that were scheduled in this step (MRV1-only).
         if vllm_version_is("0.33.0") and not self.use_v2_model_runner:
