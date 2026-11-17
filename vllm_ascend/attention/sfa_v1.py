@@ -1308,9 +1308,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
-    def _num_replicated_kv_tokens(self, attn_metadata: M) -> int:
-        return get_pcp_num_replicated_tokens(attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded)
-
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
@@ -1337,7 +1334,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         pending: tuple[tuple[torch.Tensor, torch.distributed.Work | None], ...] = ()
         sends: tuple[torch.Tensor, ...] = ()
         if gather_kv:
-            replicated = self._num_replicated_kv_tokens(attn_metadata)
+            replicated = get_pcp_num_replicated_tokens(attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded)
             assert 0 <= replicated <= local_rows
             if self.qk_rope_head_dim:
                 assert cos is not None and sin is not None

@@ -25,12 +25,16 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadataBuilder,
     needs_pcp_kv_gather,
 )
+from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.hisparse import cache_ops
 from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
 from vllm_ascend.hisparse.pcp import hisparse_write_target, prepare_pcp_query_metadata, prepare_pcp_query_states
 
 # Bound the temporary D2D packing workspace independently of prefill length.
 _ATTENTION_CHUNK_ROWS = 32
+# Temporary cache pages match AscendSFABackend's supported kernel block size.
+# Host-pool blocks can have a different size.
+_SFA_CACHE_BLOCK_SIZE = 128
 
 
 def finish_hisparse_kv_update(cache, metadata) -> None:
@@ -230,7 +234,9 @@ class AscendHiSparseImpl(AscendSFAImpl):
             self.vllm_config.scheduler_config.max_num_batched_tokens,
             self.vllm_config.compilation_config.max_cudagraph_capture_size or 0,
         )
-        self._kv_staging_capacity = (max_rows + 127) // 128 * 128
+        self._kv_staging_capacity = (
+            (max_rows + _SFA_CACHE_BLOCK_SIZE - 1) // _SFA_CACHE_BLOCK_SIZE * _SFA_CACHE_BLOCK_SIZE
+        )
 
     def _fused_preprocess_type(self):
         # Reuse SFA's supported quantization/weight preparation. The HiSparse
@@ -283,7 +289,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
 
         def allocate():
             device = self.index_group.logical_topk_indices.device
-            shape = (self._kv_staging_capacity // 128, 128, 1)
+            shape = (self._kv_staging_capacity // _SFA_CACHE_BLOCK_SIZE, _SFA_CACHE_BLOCK_SIZE, 1)
             return (
                 torch.empty((*shape, self.kv_lora_rank), dtype=dtype, device=device),
                 torch.empty((*shape, self.qk_rope_head_dim), dtype=dtype, device=device),
@@ -304,7 +310,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             device = self.index_group.logical_topk_indices.device
             return (
                 torch.empty(
-                    (self._kv_staging_capacity // 128, 128, 1, C8_ROW_BYTES),
+                    (self._kv_staging_capacity // _SFA_CACHE_BLOCK_SIZE, _SFA_CACHE_BLOCK_SIZE, 1, C8_ROW_BYTES),
                     dtype=torch.float8_e4m3fn,
                     device=device,
                 ),
@@ -409,10 +415,27 @@ class AscendHiSparseImpl(AscendSFAImpl):
             prepare_pcp_query_states(self.hisparse_cache, attn_metadata)
         return super().forward(layer_name, hidden_states, kv_cache, attn_metadata, output)
 
-    def _num_replicated_kv_tokens(self, attn_metadata) -> int:
-        # Resident slots and Host mirror rows share the rank-major write layout.
-        # Duplicate decode rows already have invalid slots; retain their positions.
-        return 0
+    def exec_kv(self, kv_no_split, cos, sin, kv_cache, slots, attn_metadata, *, defer_wait=False):
+        if not self.pcp_enabled or not needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded):
+            return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata, defer_wait=defer_wait)
+
+        # Native C8 PCP retains rank-major rows, including invalid duplicate
+        # decode slots, to match the Resident and Host-mirror write layout.
+        group = get_pcp_group()
+        sends = tuple(value.contiguous() for value in (kv_no_split, cos, sin))
+        pending = tuple(all_gather_async(value, group) for value in sends)
+        slots = slots[: group.world_size * kv_no_split.shape[0]]
+
+        def finish():
+            # Keep the communication inputs alive until every gather completes.
+            _ = sends
+            for _, work in pending:
+                if work is not None:
+                    work.wait()
+            values = tuple(value for value, _ in pending)
+            return self._exec_kv_local(*values, kv_cache, slots, attn_metadata)
+
+        return finish if defer_wait else finish()
 
     def _exec_kv_local(self, kv_no_split, cos, sin, kv_cache, slots, attn_metadata):
         assert self.kv_a_layernorm is not None
