@@ -9,9 +9,8 @@
 namespace optiling {
 
 // Launch modes carried in the `mode` attribute: one def/kernel/aclnn wrapper
-// serves all three HiSparse launches.
+// serves both HiSparse native launches (invalidation runs as a Triton kernel).
 constexpr uint32_t kHiSparseModeResolve = 0;
-constexpr uint32_t kHiSparseModeInvalidate = 1;
 constexpr uint32_t kHiSparseModeAccumulate = 2;
 
 BEGIN_TILING_DATA_DEF(HiSparseResolveResidencyTilingData)
@@ -42,12 +41,6 @@ TILING_DATA_FIELD_DEF(uint64_t, hashSize);
 TILING_DATA_FIELD_DEF(uint64_t, attentionCapacity);
 TILING_DATA_FIELD_DEF(uint64_t, byteMissMask);
 TILING_DATA_FIELD_DEF(uint32_t, ubBytes);
-TILING_DATA_FIELD_DEF(uint32_t, invalidateWritten64);
-TILING_DATA_FIELD_DEF(uint64_t, invalidateGroupCount);
-TILING_DATA_FIELD_DEF(uint64_t, invalidateRequestCount);
-TILING_DATA_FIELD_DEF(uint64_t, invalidateStateCount);
-TILING_DATA_FIELD_DEF(uint64_t, invalidateTokens);
-TILING_DATA_FIELD_DEF(uint64_t, invalidateRegion);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(HiSparseResolveResidency, HiSparseResolveResidencyTilingData)

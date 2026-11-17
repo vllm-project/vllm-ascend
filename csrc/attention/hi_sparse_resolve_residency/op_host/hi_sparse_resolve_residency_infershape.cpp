@@ -5,12 +5,11 @@
 namespace ops {
 namespace {
 constexpr size_t kModeAttr = 15;
-constexpr size_t kErrorRowsInput = 9;
+constexpr size_t kErrorRowsInput = 7;
 constexpr size_t kStatsOutput = 11;
 constexpr size_t kStatsWidth = 2;
 
 constexpr uint32_t kModeResolve = 0;
-constexpr uint32_t kModeInvalidate = 1;
 constexpr uint32_t kModeAccumulate = 2;
 
 void set_output_shape(gert::InferShapeContext* context, size_t idx, const gert::Shape& shape) {
@@ -19,20 +18,16 @@ void set_output_shape(gert::InferShapeContext* context, size_t idx, const gert::
 }
 }  // namespace
 
-// One infershape entry serves the three launch modes selected by the `mode`
-// attribute: invalidate mutates inputs in place (no outputs), accumulate
-// produces a [2] int64 stats tensor, resolve infers the residency outputs.
+// One infershape entry serves the two native launch modes selected by the
+// `mode` attribute: accumulate produces a [2] int64 stats tensor, resolve
+// infers the residency outputs. Invalidation runs as a Triton kernel without
+// touching this aclnn op.
 static ge::graphStatus InferShape4HiSparseResolveResidency(gert::InferShapeContext* context) {
     if (context == nullptr) return ge::GRAPH_FAILED;
     const auto* attrs = context->GetAttrs();
     const auto* mode = attrs != nullptr ? attrs->GetInt(kModeAttr) : nullptr;
     if (mode == nullptr) return ge::GRAPH_FAILED;
 
-    if (*mode == kModeInvalidate) {
-        // In-place invalidation produces no outputs; only check the inputs.
-        if (context->GetInputShape(0) == nullptr) return ge::GRAPH_FAILED;
-        return ge::GRAPH_SUCCESS;
-    }
     if (*mode == kModeAccumulate) {
         const gert::Shape* errors = context->GetInputShape(kErrorRowsInput);
         if (errors == nullptr || errors->GetDimNum() != 2) return ge::GRAPH_FAILED;

@@ -4,10 +4,12 @@
 namespace ops {
 // Single HiSparse residency op. The `mode` attribute selects the launch:
 //   0 = resolve residency (logical/hot_table inputs, tags/lru/... outputs)
-//   1 = invalidate written slots (group_table/states/requests/written inputs)
 //   2 = accumulate stats (error_rows input, stats output)
-// All tensors are optional at the def level so one aclnn wrapper serves the
-// three modes; each tiling/kernel path validates its own mode's geometry.
+// Invalidation is implemented by the shared Triton kernel in
+// vllm_ascend/ops/triton/hisparse.py on every SoC, so only the two native
+// modes remain. All tensors are optional at the def level so one aclnn
+// wrapper serves the two modes; each tiling/kernel path validates its own
+// mode's geometry.
 class HiSparseResolveResidency : public OpDef {
 public:
     explicit HiSparseResolveResidency(const char* name) : OpDef(name) {
@@ -26,10 +28,6 @@ public:
             .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32}).Format(formats).UnknownShapeFormat(formats).IgnoreContiguous();
         Input("valid_rows").ParamType(OPTIONAL)
             .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32}).Format(formats).UnknownShapeFormat(formats).IgnoreContiguous();
-        Input("group_table").ParamType(OPTIONAL)
-            .DataType({ge::DT_INT64}).Format(formats).UnknownShapeFormat(formats).IgnoreContiguous();
-        Input("written").ParamType(OPTIONAL)
-            .DataType({ge::DT_INT32, ge::DT_INT64}).Format(formats).UnknownShapeFormat(formats).IgnoreContiguous();
         Input("error_rows").ParamType(OPTIONAL)
             .DataType({ge::DT_INT32}).Format(formats).UnknownShapeFormat(formats).IgnoreContiguous();
         Attr("hostRows").AttrType(REQUIRED).Int();
@@ -48,8 +46,6 @@ public:
         Attr("countsStride").AttrType(REQUIRED).Int();
         Attr("byteMissMask").AttrType(REQUIRED).Int();
         Attr("mode").AttrType(REQUIRED).Int();
-        Attr("stateCount").AttrType(REQUIRED).Int();
-        Attr("region").AttrType(REQUIRED).Int();
         Output("tags").ParamType(OPTIONAL)
             .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32}).Format(formats).UnknownShapeFormat(formats);
         Output("lru").ParamType(OPTIONAL)

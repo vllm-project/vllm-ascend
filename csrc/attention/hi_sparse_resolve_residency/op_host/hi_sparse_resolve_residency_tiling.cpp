@@ -16,9 +16,7 @@ constexpr size_t kStatesInput = 3;
 constexpr size_t kSourceInput = 4;
 constexpr size_t kResidentInput = 5;
 constexpr size_t kValidRowsInput = 6;
-constexpr size_t kGroupTableInput = 7;
-constexpr size_t kWrittenInput = 8;
-constexpr size_t kErrorRowsInput = 9;
+constexpr size_t kErrorRowsInput = 7;
 constexpr size_t kTagsOutput = 0;
 constexpr size_t kLruOutput = 1;
 constexpr size_t kAttentionOutput = 5;
@@ -42,8 +40,6 @@ constexpr size_t kAttentionStrideAttr = 12;
 constexpr size_t kCountsStrideAttr = 13;
 constexpr size_t kByteMissMaskAttr = 14;
 constexpr size_t kModeAttr = 15;
-constexpr size_t kStateCountAttr = 16;
-constexpr size_t kRegionAttr = 17;
 
 ge::graphStatus TileResolve(gert::TilingContext* context,
                             HiSparseResolveResidencyTilingData& tiling) {
@@ -244,87 +240,6 @@ ge::graphStatus TileResolve(gert::TilingContext* context,
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus TileInvalidate(gert::TilingContext* context,
-                               HiSparseResolveResidencyTilingData& tiling) {
-    const auto* groups = context->GetInputShape(kGroupTableInput);
-    const auto* states = context->GetInputShape(kStatesInput);
-    const auto* requests = context->GetInputShape(kRequestsInput);
-    const auto* written = context->GetInputShape(kWrittenInput);
-    const auto* attrs = context->GetAttrs();
-    OP_CHECK_IF(groups == nullptr || states == nullptr || requests == nullptr || written == nullptr ||
-                    attrs == nullptr,
-                OP_LOGE(context->GetNodeName(), "invalidation requires group_table/states/requests/written."),
-                return ge::GRAPH_FAILED);
-
-    const auto* groupsDesc = context->GetInputDesc(kGroupTableInput);
-    const auto* writtenDesc = context->GetInputDesc(kWrittenInput);
-    OP_CHECK_IF(groupsDesc == nullptr || groupsDesc->GetDataType() != ge::DT_INT64,
-                OP_LOGE(context->GetNodeName(), "group_table must be int64."),
-                return ge::GRAPH_FAILED);
-    OP_CHECK_IF(writtenDesc == nullptr ||
-                    (writtenDesc->GetDataType() != ge::DT_INT32 && writtenDesc->GetDataType() != ge::DT_INT64),
-                OP_LOGE(context->GetNodeName(), "written slots must be int32 or int64."),
-                return ge::GRAPH_FAILED);
-
-    const auto* stateCount = attrs->GetInt(kStateCountAttr);
-    const auto* region = attrs->GetInt(kRegionAttr);
-    OP_CHECK_IF(stateCount == nullptr || region == nullptr,
-                OP_LOGE(context->GetNodeName(), "required attributes are missing."),
-                return ge::GRAPH_FAILED);
-    OP_CHECK_IF(*stateCount < 0 || *stateCount > INT32_MAX || *region < 0 || *region > 32768,
-                OP_LOGE(context->GetNodeName(), "invalid state count or region stride."),
-                return ge::GRAPH_FAILED);
-
-    const auto& groupsShape = groups->GetOriginShape();
-    const auto& statesShape = states->GetOriginShape();
-    const auto& requestsShape = requests->GetOriginShape();
-    const auto& writtenShape = written->GetOriginShape();
-    const int64_t groupCount = groupsShape.GetDimNum() > 0 ? groupsShape.GetDim(0) : 0;
-    const int64_t requestCount = statesShape.GetDimNum() > 0 ? statesShape.GetDim(0) : 0;
-    const int64_t tokens = writtenShape.GetDimNum() > 0 ? writtenShape.GetDim(0) : 0;
-    OP_CHECK_IF(groupCount < 0 || groupCount > INT32_MAX / 16,
-                OP_LOGE(context->GetNodeName(), "group count exceeds the kernel geometry."),
-                return ge::GRAPH_FAILED);
-    OP_CHECK_IF(requestCount < 0 || requestCount > INT32_MAX,
-                OP_LOGE(context->GetNodeName(), "state request count must fit int32."),
-                return ge::GRAPH_FAILED);
-    const int64_t writtenRequests = requestsShape.GetDimNum() > 0 ? requestsShape.GetDim(0) : 0;
-    OP_CHECK_IF(tokens != writtenRequests,
-                OP_LOGE(context->GetNodeName(), "requests and written slots must have equal lengths."),
-                return ge::GRAPH_FAILED);
-    OP_CHECK_IF(tokens > 64,
-                OP_LOGE(context->GetNodeName(), "batched invalidation supports at most 64 writes."),
-                return ge::GRAPH_FAILED);
-
-    auto* rawTiling = context->GetRawTilingData();
-    auto* workspace = context->GetWorkspaceSizes(1);
-    OP_CHECK_IF(rawTiling == nullptr || workspace == nullptr || rawTiling->GetCapacity() < tiling.GetDataSize(),
-                OP_LOGE(context->GetNodeName(), "failed to query tiling or workspace."),
-                return ge::GRAPH_FAILED);
-    tiling.set_invalidateGroupCount(static_cast<uint64_t>(groupCount));
-    tiling.set_invalidateRequestCount(static_cast<uint64_t>(requestCount));
-    tiling.set_invalidateStateCount(static_cast<uint64_t>(*stateCount));
-    tiling.set_invalidateTokens(static_cast<uint64_t>(tokens));
-    tiling.set_invalidateRegion(static_cast<uint64_t>(*region));
-    tiling.set_invalidateWritten64(writtenDesc->GetDataType() == ge::DT_INT64 ? 1U : 0U);
-    tiling.SaveToBuffer(rawTiling->GetData(), rawTiling->GetCapacity());
-    rawTiling->SetDataSize(tiling.GetDataSize());
-
-    // One block per group of hot tiles, capped at the vector core count, to
-    // match the former arch22 launcher's block computation.
-    fe::PlatFormInfos* platformInfoPtr = context->GetPlatformInfo();
-    OP_CHECK_IF(platformInfoPtr == nullptr,
-                OP_LOGE(context->GetNodeName(), "PlatformInfo is null."),
-                return ge::GRAPH_FAILED);
-    auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
-    const uint32_t aivCores = ascendcPlatform.GetCoreNumAiv();
-    const uint64_t tiles = static_cast<uint64_t>(groupCount) * ((static_cast<uint64_t>(*region) + 2047) / 2048);
-    context->SetBlockDim(std::max<uint32_t>(
-        1, static_cast<uint32_t>(std::min<uint64_t>(tiles, aivCores))));
-    workspace[0] = 0;
-    return ge::GRAPH_SUCCESS;
-}
-
 ge::graphStatus TileAccumulate(gert::TilingContext* context,
                                HiSparseResolveResidencyTilingData& tiling) {
     const auto* errors = context->GetInputShape(kErrorRowsInput);
@@ -369,8 +284,6 @@ ge::graphStatus TileHiSparseResolveResidency(gert::TilingContext* context) {
     HiSparseResolveResidencyTilingData tiling;
     tiling.set_mode(static_cast<uint32_t>(*mode));
     switch (tiling.get_mode()) {
-        case kHiSparseModeInvalidate:
-            return TileInvalidate(context, tiling);
         case kHiSparseModeAccumulate:
             return TileAccumulate(context, tiling);
         case kHiSparseModeResolve:

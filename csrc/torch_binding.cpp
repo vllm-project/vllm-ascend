@@ -2851,14 +2851,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 // Pybind on other platform
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
-#ifdef VLLM_ASCEND_HISPARSE_ARCH22
-    // group_table contains addresses of Runtime-owned tag rows. Mark the
-    // operation mutable so graph compilation retains the indirect writes.
-    ops.def("hisparse_invalidate_written(Tensor(a!) group_table, Tensor states, Tensor requests, "
-            "Tensor written, int state_count, int region) -> ()");
-    ops.impl("hisparse_invalidate_written", torch::kPrivateUse1, &vllm_ascend::hisparse::invalidate_written);
-    ops.impl("hisparse_invalidate_written", torch::kMeta, &vllm_ascend::hisparse::invalidate_written_meta);
-#endif
     ops.def("hisparse_resolve_residency(Tensor logical, Tensor hot_table, Tensor? requests, Tensor? states, Tensor? source, "
             "Tensor? resident, Tensor? valid_rows, Tensor(a!) dgi, Tensor(a!) lru, Tensor(a!) output, "
             "Tensor(a!) resolved, Tensor(a!) errors, Tensor(a!)? attention, Tensor(a!)? counts, "

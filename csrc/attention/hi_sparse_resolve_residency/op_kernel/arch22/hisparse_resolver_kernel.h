@@ -6,7 +6,7 @@
 // Migrated from the former standalone csrc/hisparse directory: the kernels are
 // now compiled as standard aclnn ops (op_host + op_kernel). The entry points
 // live in the op_kernel .cpp files; this header only carries the shared
-// Resolver implementation and the AccumulateStats / InvalidateWritten kernels.
+// Resolver implementation and the AccumulateStats kernel.
 #pragma once
 
 #include "kernel_operator.h"
@@ -567,77 +567,4 @@ __global__ __aicore__ void AccumulateStats(uint64_t errors, uint64_t stats, int3
     result.SetValue(0, hits);
     result.SetValue(1, misses);
     Store(stats, 0, result, 2);
-}
-
-// A block owns disjoint Hot slots across every state. Batch writes within
-// that owner rather than launching one program per (token, group, tile).
-__global__ __aicore__ void InvalidateWritten(uint64_t groups, uint64_t states, uint64_t requests,
-    uint64_t written, int32_t groupCount, int32_t requestCount, int32_t stateCount,
-    int32_t tokens, int32_t region, bool written64)
-{
-    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
-    constexpr int32_t tile = 2048;
-    TPipe pipe;
-    TBuf<TPosition::VECCALC> buffer;
-    pipe.InitBuffer(buffer, tile * 4 * 4 + tile / 8);
-    auto tags = buffer.Get<int32_t>();
-    auto diff = tags[tile];
-    auto floats = tags[2 * tile].ReinterpretCast<float>();
-    auto cleared = tags[3 * tile];
-    auto mask = tags[4 * tile].ReinterpretCast<uint8_t>();
-    Duplicate(cleared, int32_t(-1), tile);
-    PipeBarrier<PIPE_V>();
-    int32_t writeStates[64], values[64];
-    int32_t live = 0;
-    for (int32_t t = 0; t < tokens; ++t) {
-        int32_t request = Read<int32_t>(requests, t);
-        if (request < 0 || request >= requestCount) continue;
-        int32_t state = Read<int32_t>(states, request);
-        int64_t value = written64 ? Read<int64_t>(written, t) : Read<int32_t>(written, t);
-        if (state < 0 || state >= stateCount || value < 0 || value > INT32_MAX) continue;
-        writeStates[live] = state;
-        values[live++] = int32_t(value);
-    }
-    const int32_t tiles = (region + tile - 1) / tile;
-    for (int32_t unit = GetBlockIdx(); unit < groupCount * tiles; unit += GetBlockNum()) {
-        const int32_t group = unit / tiles, base = unit % tiles * tile;
-        const int32_t count = region - base < tile ? region - base : tile;
-        // CompareScalar's packed mask must cover a full 64-lane repeat.
-        // Pad only UB arithmetic; never read or write beyond the GM row.
-        const int32_t vectorCount = (count + 63) / 64 * 64;
-        const uint64_t address = Read<uint64_t>(groups, group);
-        GlobalTensor<int32_t> table;
-        table.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(address));
-        for (int32_t t = 0; t < live; ++t) {
-            bool first = true;
-            for (int32_t earlier = 0; earlier < t; ++earlier) {
-                if (writeStates[earlier] == writeStates[t]) first = false;
-            }
-            if (!first) continue;
-            const int64_t offset = int64_t(writeStates[t]) * region + base;
-            Duplicate(tags, int32_t(-1), vectorCount);
-            Sync<HardEvent::V_MTE2>();
-            DataCopyPad(tags, table[offset], DataCopyExtParams{1, uint32_t(count * 4), 0, 0, 0},
-                        DataCopyPadExtParams<int32_t>{false, 0, 0, 0});
-            Sync<HardEvent::MTE2_V>();
-            for (int32_t w = t; w < live; ++w) {
-                if (writeStates[w] != writeStates[t]) continue;
-                // Integer subtraction is zero iff the original int32 values
-                // match, including values not exactly representable as fp32.
-                Adds(diff, tags, -values[w], vectorCount);
-                PipeBarrier<PIPE_V>();
-                Cast(floats, diff, RoundMode::CAST_NONE, vectorCount);
-                PipeBarrier<PIPE_V>();
-                CompareScalar(mask, floats, 0.0f, CMPMODE::EQ, vectorCount);
-                PipeBarrier<PIPE_V>();
-                Select(tags.ReinterpretCast<float>(), mask, cleared.ReinterpretCast<float>(),
-                       tags.ReinterpretCast<float>(), SELMODE::VSEL_TENSOR_TENSOR_MODE, vectorCount);
-                PipeBarrier<PIPE_V>();
-            }
-            Sync<HardEvent::V_MTE3>();
-            DataCopyPad(table[offset], tags, DataCopyExtParams{1, uint32_t(count * 4), 0, 0, 0});
-            Sync<HardEvent::MTE3_MTE2>();
-            Sync<HardEvent::MTE3_V>();
-        }
-    }
 }

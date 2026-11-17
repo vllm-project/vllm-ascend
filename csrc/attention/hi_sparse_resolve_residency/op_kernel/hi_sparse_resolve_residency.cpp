@@ -6,11 +6,11 @@
 // arch22 (A2/A3) entry: the Resolver consumes the legacy pointer/geometry ABI
 // directly, keeping the classic AscendC UB path used on these SoCs. One block
 // per logical row, exactly like the former csrc/hisparse launcher. The `mode`
-// tiling field dispatches the three launch flavors sharing this single entry.
+// tiling field dispatches the two native launch flavors sharing this single
+// entry (invalidation runs as the shared Triton kernel on every SoC).
 #include "arch22/hisparse_resolver_kernel.h"
 
 namespace {
-constexpr uint32_t kModeInvalidate = 1;
 constexpr uint32_t kModeAccumulate = 2;
 }  // namespace
 
@@ -22,8 +22,6 @@ extern "C" __global__ __aicore__ void hi_sparse_resolve_residency(
     GM_ADDR source,
     GM_ADDR resident,
     GM_ADDR valid_rows,
-    GM_ADDR group_table,
-    GM_ADDR written,
     GM_ADDR error_rows,
     GM_ADDR tags,
     GM_ADDR lru,
@@ -42,17 +40,6 @@ extern "C" __global__ __aicore__ void hi_sparse_resolve_residency(
     GET_TILING_DATA(tilingData, tiling);
     (void)workspace;
 
-    if (tilingData.mode == kModeInvalidate) {
-        InvalidateWritten(reinterpret_cast<uintptr_t>(group_table), reinterpret_cast<uintptr_t>(states),
-            reinterpret_cast<uintptr_t>(requests), reinterpret_cast<uintptr_t>(written),
-            static_cast<int32_t>(tilingData.invalidateGroupCount),
-            static_cast<int32_t>(tilingData.invalidateRequestCount),
-            static_cast<int32_t>(tilingData.invalidateStateCount),
-            static_cast<int32_t>(tilingData.invalidateTokens),
-            static_cast<int32_t>(tilingData.invalidateRegion),
-            tilingData.invalidateWritten64 != 0);
-        return;
-    }
     if (tilingData.mode == kModeAccumulate) {
         AccumulateStats(reinterpret_cast<uintptr_t>(error_rows), reinterpret_cast<uintptr_t>(stats),
             static_cast<int32_t>(tilingData.rows));
@@ -121,8 +108,6 @@ extern "C" __global__ __aicore__ void hi_sparse_resolve_residency(
     GM_ADDR source,
     GM_ADDR resident,
     GM_ADDR valid_rows,
-    GM_ADDR group_table,
-    GM_ADDR written,
     GM_ADDR error_rows,
     GM_ADDR tags,
     GM_ADDR lru,
@@ -140,8 +125,6 @@ extern "C" __global__ __aicore__ void hi_sparse_resolve_residency(
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
     GET_TILING_DATA(tilingData, tiling);
     (void)workspace;
-    (void)group_table;
-    (void)written;
     (void)error_rows;
 
     // Allocate the SIMT scratch dynamically through the standard UB interface;

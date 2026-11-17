@@ -47,10 +47,12 @@ inline void validate_resolver_scratch(int64_t hot, int64_t union_rows)
  * place; the adapter maps the torch op arguments onto the single ACLNN
  * wrapper signature (inputs, attributes, outputs). The `mode` attribute
  * selects the launch flavor inside the one aclnn op:
- *   0 = resolve residency, 1 = invalidate written slots, 2 = accumulate stats.
- * The aclnn wrapper selects the arch22 scalar-UB kernel or the A5 SIMT kernel
- * through the registered SoC configs; arch22 additionally accumulates its
- * per-row error counters through a second ordered mode=2 launch.
+ *   0 = resolve residency, 2 = accumulate stats.
+ * Invalidation runs as the shared Triton kernel on every SoC, so it never
+ * reaches this aclnn wrapper. The aclnn wrapper selects the arch22 scalar-UB
+ * kernel or the A5 SIMT kernel through the registered SoC configs; arch22
+ * additionally accumulates its per-row error counters through a second
+ * ordered mode=2 launch.
  */
 inline void resolve_residency(
     const at::Tensor &logical, const at::Tensor &hot_table,
@@ -88,8 +90,8 @@ inline void resolve_residency(
     const int64_t attention_stride = attention ? attention->stride(0) : topk;
     const int64_t counts_stride = counts ? counts->stride(0) : 1;
     const int64_t miss_mask_bytes = static_cast<int64_t>(miss_mask.has_value() && miss_mask->element_size() == 1);
-    // Resolve mode (0) leaves the invalidate/accumulate-only inputs, attrs and
-    // outputs unbound; empty tensors convert to nullptr inside EXEC_NPU_CMD.
+    // Resolve mode (0) leaves the accumulate-only inputs, attrs and outputs
+    // unbound; empty tensors convert to nullptr inside EXEC_NPU_CMD.
     const at::Tensor empty;
     const int64_t zero = 0;
     EXEC_NPU_CMD(
@@ -98,14 +100,14 @@ inline void resolve_residency(
         requests_t, states_t,
         source_t, resident_t,
         valid_rows_t,
-        empty, empty, empty,
+        empty,
         host_rows, hot_block_size, source_block_size, resident_block_size,
         resident_null_block, attention_block_stride, union_rows, attention_capacity,
         logical_stride, source_stride,
         resident_stride, hot_table_stride,
         attention_stride, counts_stride,
         miss_mask_bytes,
-        zero, zero, zero,
+        zero,
         dgi, lru, output, resolved, errors,
         attention_t, counts_t,
         swap_host_t, swap_device_t,
@@ -118,54 +120,15 @@ inline void resolve_residency(
     if (stats_t.numel()) {
         EXEC_NPU_CMD(aclnnHiSparseResolveResidency,
                      empty, empty, empty, empty, empty, empty, empty,
-                     empty, empty, errors,
+                     errors,
                      zero, zero, zero, zero, zero, zero, zero, zero,
                      zero, zero, zero, zero, zero, zero, zero,
-                     zero, zero, zero,
+                     zero,
                      empty, empty, empty, empty, empty, empty, empty,
                      empty, empty, empty, empty, stats_t);
     }
 #endif
 }
-
-#ifdef VLLM_ASCEND_HISPARSE_ARCH22
-/**
- * arch22-only: clear Hot residency state for the slots written back to Host.
- * Uses the same HiSparseResolveResidency aclnn op with mode=1. All tensors
- * are one-dimensional vectors.
- */
-inline void invalidate_written(const at::Tensor& group_table, const at::Tensor& states,
-    const at::Tensor& requests, const at::Tensor& written, int64_t state_count, int64_t region)
-{
-    TORCH_CHECK(group_table.scalar_type() == at::kLong && states.scalar_type() == at::kInt &&
-                requests.scalar_type() == at::kInt &&
-                (written.scalar_type() == at::kInt || written.scalar_type() == at::kLong),
-                "Invalid HiSparse invalidation dtypes");
-    TORCH_CHECK(requests.numel() == written.numel() && written.numel() <= 64,
-                "HiSparse batched invalidation supports at most 64 writes");
-    TORCH_CHECK(state_count >= 0 && state_count <= INT32_MAX && region >= 0 && region <= 32768 &&
-                states.numel() <= INT32_MAX && group_table.numel() <= INT32_MAX / 16,
-                "Invalid HiSparse invalidation geometry");
-    if (!group_table.numel() || !states.numel() || !written.numel() || !state_count || !region) return;
-    // EXEC_NPU_CMD binds arguments to non-const lvalue references.
-    const at::Tensor empty;
-    const int64_t zero = 0;
-    const int64_t state_count_arg = state_count;
-    const int64_t region_arg = region;
-    const int64_t mode_arg = 1;
-    EXEC_NPU_CMD(aclnnHiSparseResolveResidency,
-                 empty, empty, requests, states, empty, empty, empty,
-                 group_table, written, empty,
-                 zero, zero, zero, zero, zero, zero, zero, zero,
-                 zero, zero, zero, zero, zero, zero, zero,
-                 mode_arg, state_count_arg, region_arg,
-                 empty, empty, empty, empty, empty, empty, empty,
-                 empty, empty, empty, empty, empty);
-}
-
-inline void invalidate_written_meta(const at::Tensor&, const at::Tensor&, const at::Tensor&,
-    const at::Tensor&, int64_t, int64_t) {}
-#endif  // VLLM_ASCEND_HISPARSE_ARCH22
 
 }  // namespace vllm_ascend::hisparse
 
