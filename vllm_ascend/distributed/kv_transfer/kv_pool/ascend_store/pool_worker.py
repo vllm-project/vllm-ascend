@@ -2895,12 +2895,15 @@ class KVPoolWorker:
         everything) when the coordinator is unavailable or the save extent
         is not aligned.
         """
+        masks = None
         if getattr(self, "block_key_hybrid", False) and request.can_save and request.save_end_token > 0:
             if self.cache_coordinator is None or request.save_end_token % self.cache_transfer_granularity:
                 raise ValueError("Block-key hybrid saves require a coordinator-aligned full-block boundary")
-            return self.token_database.store_mask(request.save_end_token, request.num_prompt_tokens)
-        masks = None
-        if (
+            # Reachability alone does not prove an align-mode state exists.
+            # Apply the null-slot and exact chunk-checkpoint checks below for
+            # block-key transfers too, before allocating any readable object.
+            masks = self.token_database.store_mask(request.save_end_token, request.num_prompt_tokens)
+        elif (
             self.cache_coordinator is not None
             and request.save_end_token > 0
             and request.save_end_token % self.cache_transfer_granularity == 0
@@ -4069,9 +4072,9 @@ class KVPoolWorker:
         return hits
 
     def get_kv_events(self) -> list[BlockStored]:
-        if self.enable_kv_events and self.kv_send_thread is not None:
+        if self.enable_kv_events:
             # collect store kv events form sending thread
-            events = self.kv_send_thread.get_kv_events()
+            events = self.kv_send_thread.get_kv_events() if self.kv_send_thread is not None else []
             if self.use_mamba:
                 from .event_layout import attach_deployment_layout, build_deployment_layout, deployment_announcement
 

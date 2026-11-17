@@ -13,15 +13,37 @@ class BlockStoredWithLayout(BlockStored, tag="BlockStored"):
     kv_cache_layout: str | None = None
 
 
+def _group_object_namespaces(worker, group_id: int, ranks: int) -> dict:
+    if worker.use_layerwise:
+        # Use the same bound key builder as PUT and scheduler lookup. Layerwise
+        # puts the TP coordinate after the hash, unlike the whole-key path.
+        marker = "{block_hash}"
+        keys = worker.layerwise_keys.make_hit_check_keys(group_id, marker, ranks)
+        namespaces = [key.split(marker) for key in keys]
+        if any(len(parts) != 2 for parts in namespaces):
+            raise ValueError("Layerwise object keys must contain exactly one block hash")
+        return {
+            "key_prefixes": [prefix for prefix, _ in namespaces],
+            "key_suffixes": [suffix for _, suffix in namespaces],
+        }
+    prefix = worker.token_database._get_key_prefix(group_id)
+    local_rank = worker.metadata[group_id].head_or_tp_rank
+    return {
+        "key_prefixes": [
+            prefix.replace(f"@head_or_tp_rank:{local_rank}@", f"@head_or_tp_rank:{rank}@", 1) for rank in range(ranks)
+        ],
+    }
+
+
 def build_deployment_layout(worker) -> str | None:
-    """Describe all groups/TP namespaces from one resolved non-layerwise pool.
+    """Describe all required groups/TP objects from one resolved Mooncake pool.
 
     Unsupported layouts remain undeclared instead of claiming completeness.
     In particular, only the known GLM pool-aligned transient tail is omitted.
     """
     if (
         not worker.use_mamba
-        or worker.use_layerwise
+        or (worker.use_layerwise and not getattr(worker, "use_block_key_layerwise", False))
         or worker.backend_name != "mooncake"
         or worker.pp_size != 1
         or worker.pcp_size != 1
@@ -45,17 +67,12 @@ def build_deployment_layout(worker) -> str | None:
         kind, _ = worker.kv_event_group_metadata[group_id]
         if kind not in ("mamba", "full_attention", "mla_attention"):
             return None
-        prefix = worker.token_database._get_key_prefix(group_id)
-        local_rank = worker.metadata[group_id].head_or_tp_rank
         ranks = worker.tp_size if worker.group_uses_align_state[group_id] else worker.tp_size // worker.put_step
         entry = {
             "group_idx": group_id,
             "kind": kind,
             "block_tokens": worker.grouped_block_size[group_id],
-            "key_prefixes": [
-                prefix.replace(f"@head_or_tp_rank:{local_rank}@", f"@head_or_tp_rank:{rank}@", 1)
-                for rank in range(ranks)
-            ],
+            **_group_object_namespaces(worker, group_id, ranks),
         }
         if kind == "mamba":
             if not all(isinstance(inner, MambaSpec) and inner.mamba_cache_mode == "align" for inner in specs):
@@ -65,6 +82,7 @@ def build_deployment_layout(worker) -> str | None:
     return json.dumps(
         {
             "format": "ascend-store-v1",
+            **({"object_key_format": "mooncake-layerwise-v1"} if worker.use_layerwise else {}),
             "model_name": worker.model_name,
             "hash_unit_tokens": worker.hash_block_size,
             "alignment_tokens": worker.cache_transfer_granularity,

@@ -53,15 +53,17 @@ def test_layout_only_announcement_never_claims_residency():
     assert json.loads(event.kv_cache_layout)["format"] == "ascend-store-v1"
 
 
-def test_worker_announces_layout_before_any_store_event():
+@pytest.mark.parametrize("has_sender", [False, True])
+def test_worker_announces_layout_before_any_store_event(has_sender):
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
     worker = KVPoolWorker.__new__(KVPoolWorker)
     worker.enable_kv_events = True
     worker.use_mamba = True
     worker.hash_block_size = 128
-    worker.kv_send_thread = MagicMock()
-    worker.kv_send_thread.get_kv_events.side_effect = [[], []]
+    worker.kv_send_thread = MagicMock() if has_sender else None
+    if has_sender:
+        worker.kv_send_thread.get_kv_events.side_effect = [[], []]
     declaration = '{"format":"ascend-store-v1"}'
     with patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.event_layout.build_deployment_layout",
@@ -74,13 +76,17 @@ def test_worker_announces_layout_before_any_store_event():
         build.assert_called_once_with(worker)
 
 
-def test_complete_layout_covers_all_tp_checkpoint_parts():
+@pytest.mark.parametrize("layerwise", [False, True])
+def test_complete_layout_covers_all_tp_checkpoint_parts(layerwise):
     import torch
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
 
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_layerwise import bind_layerwise_keys
+
     worker = SimpleNamespace(
         use_mamba=True,
-        use_layerwise=False,
+        use_layerwise=layerwise,
+        use_block_key_layerwise=layerwise,
         backend_name="mooncake",
         pp_size=1,
         pcp_size=1,
@@ -113,6 +119,16 @@ def test_complete_layout_covers_all_tp_checkpoint_parts():
         metadata=[SimpleNamespace(head_or_tp_rank=0), SimpleNamespace(head_or_tp_rank=0)],
         m_store=SimpleNamespace(config=SimpleNamespace(master_server_address="127.0.0.1:45211")),
     )
+    if layerwise:
+        worker.layerwise_keys = bind_layerwise_keys(
+            vllm_config=SimpleNamespace(
+                parallel_config=SimpleNamespace(pipeline_parallel_size=1, tensor_parallel_size=worker.tp_size)
+            ),
+            kv_cache_config=worker.kv_cache_config,
+            model_name=worker.model_name,
+            use_hybrid=True,
+            grouped_block_size=worker.grouped_block_size,
+        )
     declaration = json.loads(build_deployment_layout(worker))
     assert declaration["format"] == "ascend-store-v1"
     assert declaration["hash_unit_tokens"] == 16
@@ -125,10 +141,24 @@ def test_complete_layout_covers_all_tp_checkpoint_parts():
     assert checkpoint["block_tokens"] == 64
     assert checkpoint["mamba_cache_mode"] == "align"
     assert len(checkpoint["key_prefixes"]) == 4
-    assert "@head_or_tp_rank:3@" in checkpoint["key_prefixes"][3]
+    if layerwise:
+        assert declaration["object_key_format"] == "mooncake-layerwise-v1"
+        block_hash = "a" * 64
+        for group in declaration["groups"]:
+            for rank, (prefix, suffix) in enumerate(zip(group["key_prefixes"], group["key_suffixes"], strict=True)):
+                assert prefix + block_hash + suffix == worker.layerwise_keys.make_full_key(
+                    group["group_idx"], block_hash, rank, 0
+                )
+        assert checkpoint["key_suffixes"] == ["@0", "@1", "@2", "@3"]
+    else:
+        assert "object_key_format" not in declaration
+        assert "@head_or_tp_rank:3@" in checkpoint["key_prefixes"][3]
 
 
-@pytest.mark.parametrize("overrides", [{"use_mamba": False}, {"use_layerwise": True}, {"pp_size": 2}])
+@pytest.mark.parametrize(
+    "overrides",
+    [{"use_mamba": False}, {"use_layerwise": True, "use_block_key_layerwise": False}, {"pp_size": 2}],
+)
 def test_unsupported_deployment_is_not_inferred(overrides):
     worker = SimpleNamespace(use_mamba=True, use_layerwise=False, backend_name="mooncake", pp_size=1)
     worker.__dict__.update(overrides)
