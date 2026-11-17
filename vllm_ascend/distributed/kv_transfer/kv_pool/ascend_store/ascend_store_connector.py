@@ -190,7 +190,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 kv_cache_config,
             )
             assert self.connector_worker is not None
-            self.requires_mamba_state_copy_after_load = not self.use_layerwise and not self.connector_worker.load_async
             if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
                 self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config)
 
