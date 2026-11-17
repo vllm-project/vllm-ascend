@@ -100,6 +100,27 @@ def test_sym_range_uses_decode_batch_sizes_otherwise(mode):
     mock_compute.assert_called_once()
 
 
+def test_sym_range_covers_split_prefill_and_decode_grids():
+    """Newer vllm resolves prefill token sizes and decode request sizes
+    separately; under PIECEWISE both grids must enter the sym_range."""
+    vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.PIECEWISE,
+            cudagraph_capture_sizes=[4096],
+            prefill_cudagraph_capture_token_sizes=[1024, 2048],
+            decode_cudagraph_capture_request_sizes=[16, 2048],
+        ),
+    )
+    ascend_compilation_config = SimpleNamespace(enable_static_kernel=True, enable_super_kernel=False)
+    captured = {}
+
+    def process_kwargs_options(config, payload):
+        captured.update(payload["options"])
+
+    _configure_backend(SimpleNamespace(), ascend_compilation_config, vllm_config, process_kwargs_options)
+    assert captured["_vllm_aclnn_static_kernel_sym_range"] == [1024, 2048, 16]
+
+
 def test_super_kernel_options_enabled():
     options = _run_configure_backend(CUDAGraphMode.PIECEWISE, [16], enable_super_kernel=True)
 
