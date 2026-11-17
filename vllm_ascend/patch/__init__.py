@@ -294,33 +294,22 @@
 #
 # ** 10. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`,
-#      `..._max_memory_usage_bytes_from_groups`, `..._pool_bytes_per_block`
+#   1. `vllm.v1.core.kv_cache_planning._max_memory_usage_bytes_from_groups`,
+#      `..._annotate_eagle_groups`
 #    Why:
-#       Ascend cache layouts need platform-specific materialization and memory
-#       accounting.
+#       Ascend cache layouts keep their own admission accounting and EAGLE draft
+#       group marking, neither of which has a builder or platform hook upstream.
 #    How:
-#       Both supported versions select AscendKVCacheConfigBuilder through
-#       NPUPlatform. Its default materialization delegates to the patched
-#       planning functions.
+#       Monkey-patch only the module-level helpers the builder cannot express.
+#       Grouping, pool accounting, and materialization live in
+#       `AscendKVCacheConfigBuilder`, selected through NPUPlatform. That
+#       includes splitting replicated dense draft pools (vLLM PR #56723) so
+#       their contiguous K/V pages do not alias the target/Mamba pool.
 #    Related PR:
 #       https://github.com/vllm-project/vllm/pull/53558
-#   2. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`
-#      `vllm.v1.core.kv_cache_planning._pool_bytes_per_block`
-#    Why:
-#       Ascend dense GQA attention requires contiguous K/V pools. Replicated
-#       draft pages cannot alias block-strided target/Mamba pages with different
-#       scheduler block IDs in hybrid DCP models.
-#    How:
-#       Use dcp_sharded to identify replicated dense attention groups, then
-#       delegate each physical pool's descriptors to the upstream planner.
-#       Sum the pools' bytes per block to keep allocation within the budget.
-#    Related PR:
-#       https://github.com/vllm-project/vllm/pull/56723 supplies dcp_sharded;
-#       the remaining physical-layout restriction is specific to Ascend.
 #    Future Plan:
-#       Remove pool separation when Ascend dense attention supports the
-#       upstream block-strided shared-pool layout.
+#       Fold the remaining helpers into the builder once upstream exposes hooks
+#       for them.
 #
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
