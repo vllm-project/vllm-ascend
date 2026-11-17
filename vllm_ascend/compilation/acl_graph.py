@@ -32,13 +32,8 @@ from .updatable_graph import (
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
 
 if vllm_version_is("0.33.0"):
-    from vllm.compilation import monitor
-
-
-def validate_cudagraph_capturing_enabled() -> None:
-    """Retain release's capture guard until v0.33.0 support ends."""
-    if vllm_version_is("0.33.0"):
-        monitor.validate_cudagraph_capturing_enabled()
+    # Removed from upstream main by #63373; retained until v0.33.0 support ends.
+    from vllm.compilation.monitor import validate_cudagraph_capturing_enabled  # type: ignore[attr-defined]
 
 
 _STREAM_RESOURCE_ERROR_CODE = "207008"
@@ -199,7 +194,8 @@ class ACLGraphWrapper:
                 # piecewise mode.
                 logger.debug("Capturing ACL graph (%s, %s)", self.runtime_mode.name, entry.batch_descriptor)
             # validate that aclgraph capturing is legal at this point.
-            validate_cudagraph_capturing_enabled()
+            if vllm_version_is("0.33.0"):
+                validate_cudagraph_capturing_enabled()
 
             input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
             entry.input_addresses = input_addresses
