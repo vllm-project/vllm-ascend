@@ -23,9 +23,12 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 # patch_ascend_ops rebinds causal_conv1d to the AscendC wrappers; the NPU
 # Triton kernel overrides are installed through the official vLLM Triton
 # kernel dispatcher by vllm_ascend/triton_kernel_overrides.py, registered
-# by the platform hook.
+# by the platform hook. patch_triton shrank to the one swap the dispatcher
+# cannot express: the triton.next_power_of_2 host-helper shim, consumed
+# at kernel-compile time.
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_ascend_ops  # noqa
+    import vllm_ascend.patch.worker.patch_triton  # noqa
 
 # Apply before model construction on every device, including 310P.
 
