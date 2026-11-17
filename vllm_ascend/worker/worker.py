@@ -116,6 +116,7 @@ from vllm_ascend.utils import (
     register_ascend_fla_customop,
     register_device_print,
     setup_ascend_local_comm_res,
+    vllm_version_is,
 )
 
 
@@ -438,7 +439,10 @@ class NPUWorker(WorkerBase):
 
         assert self.weight_transfer_engine is not None
         self.weight_transfer_engine.finish_weight_update()
-        self.model_runner.reset_lora_state()
+        if vllm_version_is("0.33.0"):
+            self.model_runner.reset_lora_state()
+        else:
+            self.model_runner.on_target_weights_replaced()
         self._weight_update_active = False
 
     def shutdown(self) -> None:
