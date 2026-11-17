@@ -2,5 +2,9 @@ pr: 22098
 entries:
   - category: performance
     text: >-
-      Skipped unnecessary unquantized MoE LoRA routing and delta injection for
-      idle pure-TP AllGather batches while preserving EP collective behavior.
+      Skipped LoRA routing recovery and w13 delta injection for pure-TP
+      AllGather MoE batches with no adapter tokens. Those operations otherwise
+      build routing metadata and launch a fused MoE LoRA kernel in every MoE
+      layer even for base-model-only work, so this fast path removes that
+      repeated routing and kernel overhead while preserving active-LoRA and
+      multi-rank collective behavior.
