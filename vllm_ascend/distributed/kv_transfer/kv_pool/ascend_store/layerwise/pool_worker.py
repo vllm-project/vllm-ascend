@@ -293,6 +293,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     )
 
         self._layerwise_reuse_layout = layout
+        if layout is not None:
+            self.num_layers = self.layerwise_key_layers = len(layout.layers)
+        self.layer_load_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
+        self.layer_save_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
         self.layer_load_finished_events: list[threading.Event] | None = None
         self.layer_save_finished_events: list[threading.Event] | None = None
 
@@ -312,7 +316,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 )
                 self.num_prefetch_layers = layerwise_settings.num_prefetch_layers
             else:
-                self.num_layers = self.layerwise_key_layers = len(layout.layers)
                 self.prefetch_layer_map = self._remap_layout_to_stage_local(layout.prefetch_layer_map, layout.layers)
                 self.layerwise_offload = layout.has_layer_reuse
                 self.num_prefetch_layers = layout.num_prefetch_layers
@@ -336,8 +339,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     raise ValueError("layerwise_prefetch_layers must be a positive integer") from exc
                 if self.num_prefetch_layers <= 0:
                     raise ValueError("layerwise_prefetch_layers must be a positive integer")
-        self.layer_load_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
-        self.layer_save_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
         self.sync_save_events: list[torch.npu.Event] | None = None
 
         logger.info(
