@@ -20,7 +20,7 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ops.triton.linearnorm.qsa_rope_utils import validate_qsa_rope_positions
+from vllm_ascend.ops.triton.linearnorm.qsa_rmsnorm_mrope import validate_qsa_rope_positions
 from vllm_ascend.ops.triton.triton_utils import extract_slice, get_vectorcore_num, insert_slice
 
 
