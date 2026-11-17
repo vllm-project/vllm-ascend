@@ -26,12 +26,11 @@ def load_module(monkeypatch):
     package = types.ModuleType("local_vmm_test_package")
     package.__path__ = [str(path)]
     monkeypatch.setitem(sys.modules, package.__name__, package)
-    for name in ("local_vmm_host", "local_shared_vmm"):
-        spec = importlib.util.spec_from_file_location(f"{package.__name__}.{name}", path / f"{name}.py")
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        monkeypatch.setitem(sys.modules, spec.name, module)
-        spec.loader.exec_module(module)
+    spec = importlib.util.spec_from_file_location(f"{package.__name__}.local_shared_vmm", path / "local_shared_vmm.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
     monkeypatch.setattr(module, "_library", Mock(return_value=object()))
     return module
 
@@ -69,6 +68,7 @@ def test_combined_codes_and_scales_share_one_allocation(monkeypatch, tmp_path):
     mapping.allocation = types.SimpleNamespace(host_ptr=address, device_ptr=address)
     mapping.row_bytes = 8
     allocate = Mock(return_value=mapping)
+    host_buffer_cls = module.MappedHostBuffer
     monkeypatch.setattr(module, "MappedHostBuffer", allocate)
     monkeypatch.setattr(module.tempfile, "mkdtemp", lambda **_kwargs: str(tmp_path))
     monkeypatch.setattr(module.dist, "get_global_rank", lambda _group, rank: rank)
@@ -84,8 +84,7 @@ def test_combined_codes_and_scales_share_one_allocation(monkeypatch, tmp_path):
     assert bytes(backing[:16]) == bytes(16)
     assert list((ctypes.c_float * 2).from_buffer(backing, 16)) == [1.5, 2.5]
     assert buf.scales.ptrs.tolist() == [address + 16]
-    host = sys.modules["local_vmm_test_package.local_vmm_host"]
-    codes = host.MappedHostBuffer.__new__(host.MappedHostBuffer)
+    codes = host_buffer_cls.__new__(host_buffer_cls)
     codes.rows, codes.width, codes.dtype = 2, 8, torch.int8
     codes.row_bytes, codes.owner, codes.closed = 8, True, False
     codes.allocation = types.SimpleNamespace(host_ptr=address)
