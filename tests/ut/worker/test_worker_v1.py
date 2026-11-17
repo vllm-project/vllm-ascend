@@ -1152,6 +1152,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config = MagicMock()
             mock_model_runner = MagicMock()
             mock_uniform_decode_query_len = mock_model_runner.uniform_decode_query_len
+            mock_model_runner.decode_query_len = mock_uniform_decode_query_len
             worker.model_runner = mock_model_runner
 
             # Test execute_dummy_batch

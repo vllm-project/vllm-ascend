@@ -17,6 +17,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.metrics.reader import Counter, Vector
 
+from vllm_ascend.utils import vllm_version_is
+
 DEFAULT_CUDAGRAPH_CAPTURE_SIZES = (1, 2, 4, 6, 8, 16, 24, 32, 64, 96, 128, 256, 384, 512)
 
 
@@ -234,6 +236,9 @@ def run_profiling_sweep(args):
 def get_acceptance_rate_per_pos(args):
     """Get acceptance rate per position."""
 
+    if args.method in ("eagle", "eagle3") and args.disable_padded_drafter_batch and not vllm_version_is("0.33.0"):
+        raise ValueError("--disable-padded-drafter-batch is supported only with vLLM v0.33.0.")
+
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
     prompts = get_samples(args, tokenizer)
     llm_prompts: list[Any]
@@ -260,7 +265,9 @@ def get_acceptance_rate_per_pos(args):
             "method": args.method,
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
-            "disable_padded_drafter_batch": args.disable_padded_drafter_batch,
+            **(
+                {"disable_padded_drafter_batch": args.disable_padded_drafter_batch} if vllm_version_is("0.33.0") else {}
+            ),
             "parallel_drafting": args.parallel_drafting,
         }
     elif args.method == "ngram":
@@ -387,7 +394,11 @@ def main():
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--enable-chunked-prefill", action="store_true")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
-    parser.add_argument("--disable-padded-drafter-batch", action="store_true")
+    parser.add_argument(
+        "--disable-padded-drafter-batch",
+        action="store_true",
+        help="Disable drafter padding for Eagle/Eagle3 on vLLM v0.33.0.",
+    )
     parser.add_argument("--result-dir", type=str, default="./log/dynamic_sd")
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
     parser.add_argument("--prompt-lookup-min", type=int, default=2)
