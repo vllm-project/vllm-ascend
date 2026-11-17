@@ -275,16 +275,6 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             )
         )
 
-    def _fused_compress_eligible(self, tensor: torch.Tensor, positions: torch.Tensor) -> bool:
-        # Pooling supports other ratios, but the combined norm/store ABI does not.
-        # Keep those configurations on the existing decomposed path.
-        return (
-            self.compress_ratio == 4
-            and self.k_layernorm.weight.shape == (self.index_head_dim,)
-            and self.k_layernorm.weight.is_contiguous()
-            and self._fused_norm_rope_eligible(tensor, positions)
-        )
-
     def _fused_norm_rope(
         self,
         tensor: torch.Tensor,
@@ -467,7 +457,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             position_rows = qsa_indexer.canonical_qsa_rope_positions(positions)[:num_tokens].to(
                 device=raw_key_cache.device
             )
-        if self._fused_compress_eligible(token_k, positions):
+        if self._fused_norm_rope_eligible(token_k, positions):
             rotary_cache = self.rotary_emb._match_cos_sin_cache_dtype(token_k)  # noqa: SLF001
             qsa_compress_groups_with_ratio_fused(
                 token_k[:num_tokens],
