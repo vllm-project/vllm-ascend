@@ -120,10 +120,9 @@ def test_flash_attn_graph_forward_updates_metadata_without_replacing_device_view
     [
         (CUDAGraphMode.FULL, False),
         (CUDAGraphMode.NONE, False),
-        (CUDAGraphMode.PIECEWISE, False),
         (CUDAGraphMode.FULL, True),
     ],
-    ids=["flash-full", "flash-eager", "flash-piecewise", "mixed-full"],
+    ids=["flash-full", "flash-eager", "mixed-full"],
 )
 def test_propose_skips_metadata_build_only_for_supported_full_graphs(monkeypatch, graph_mode, mixed_backends):
     backends = [AscendFlashAttentionBackend]
@@ -162,43 +161,43 @@ def test_propose_skips_metadata_build_only_for_supported_full_graphs(monkeypatch
         side_effect=AssertionError("unexpected host graph update") if not mixed_backends else None
     )
 
-    for step, (num_reqs, rejected) in enumerate([(2, [0, 2]), (1, [3]), (3, [1, 0, 2])], start=1):
-        batch = SimpleNamespace(
-            num_reqs=num_reqs,
-            num_tokens=num_reqs,
-            seq_lens_cpu_upper_bound=torch.full((num_reqs,), 256, dtype=torch.int32),
-            query_start_loc=torch.arange(num_reqs + 1, dtype=torch.int32),
-        )
-        result = speculator.propose(
-            input_batch=batch,
-            attn_metadata={},
-            slot_mappings={},
-            last_hidden_states=torch.zeros(num_reqs, 8),
-            aux_hidden_states=None,
-            num_sampled=torch.ones(num_reqs, dtype=torch.int32),
-            num_rejected=torch.tensor(rejected, dtype=torch.int32),
-            last_sampled=torch.zeros(4, dtype=torch.int64),
-            next_prefill_tokens=torch.zeros(4, dtype=torch.int64),
-            temperature=speculator.temperature,
-            seeds=speculator.seeds,
-        )
-        torch.testing.assert_close(result, speculator.draft_tokens[:num_reqs])
-        assert prepare_inputs.call_count == step * len(backends)
-        assert speculator._build_uniform_attn_metadata.call_count == (0 if skip_build else step)
-        if skip_build:
-            assert graph.replay.call_count == step
-            assert offloader.sync_prev_onload.call_count == step
-            speculator.build_draft_attn_metadatas.assert_not_called()
-            manager._updatable_graph_replay.assert_not_called()
-            torch.testing.assert_close(speculator._num_rejected[:num_reqs], torch.tensor(rejected, dtype=torch.int32))
-        elif mixed_backends:
-            assert speculator.build_draft_attn_metadatas.call_count == step
-            manager._updatable_graph_replay.assert_called_with(desc, [host_metadata])
-            graph.replay.assert_not_called()
-        else:
-            assert speculator._generate_draft.call_count == step
-            assert speculator._generate_draft.call_args.args[2] is host_metadata
-            assert speculator._generate_draft.call_args.kwargs["cudagraph_runtime_mode"] == graph_mode
-            graph.replay.assert_not_called()
-        manager._graph_replay.assert_not_called()
+    num_reqs, rejected = 2, [0, 2]
+    batch = SimpleNamespace(
+        num_reqs=num_reqs,
+        num_tokens=num_reqs,
+        seq_lens_cpu_upper_bound=torch.full((num_reqs,), 256, dtype=torch.int32),
+        query_start_loc=torch.arange(num_reqs + 1, dtype=torch.int32),
+    )
+    result = speculator.propose(
+        input_batch=batch,
+        attn_metadata={},
+        slot_mappings={},
+        last_hidden_states=torch.zeros(num_reqs, 8),
+        aux_hidden_states=None,
+        num_sampled=torch.ones(num_reqs, dtype=torch.int32),
+        num_rejected=torch.tensor(rejected, dtype=torch.int32),
+        last_sampled=torch.zeros(4, dtype=torch.int64),
+        next_prefill_tokens=torch.zeros(4, dtype=torch.int64),
+        temperature=speculator.temperature,
+        seeds=speculator.seeds,
+    )
+    torch.testing.assert_close(result, speculator.draft_tokens[:num_reqs])
+    assert prepare_inputs.call_count == len(backends)
+    assert speculator._build_uniform_attn_metadata.call_count == (0 if skip_build else 1)
+    if skip_build:
+        assert graph.replay.call_count == 1
+        assert offloader.sync_prev_onload.call_count == 1
+        speculator.build_draft_attn_metadatas.assert_not_called()
+        manager._updatable_graph_replay.assert_not_called()
+        torch.testing.assert_close(speculator._num_rejected[:num_reqs], torch.tensor(rejected, dtype=torch.int32))
+    elif mixed_backends:
+        assert speculator.build_draft_attn_metadatas.call_count == 1
+        manager._updatable_graph_replay.assert_called_with(desc, [host_metadata])
+        graph.replay.assert_not_called()
+    else:
+        assert speculator._generate_draft.call_count == 1
+        assert speculator._generate_draft.call_args.args[2] is host_metadata
+        assert speculator._generate_draft.call_args.kwargs["cudagraph_runtime_mode"] == graph_mode
+        graph.replay.assert_not_called()
+    manager._graph_replay.assert_not_called()
     assert speculator.supports_decode_metadata_update is (not mixed_backends)

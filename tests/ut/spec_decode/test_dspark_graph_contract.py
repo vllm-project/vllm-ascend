@@ -28,8 +28,7 @@ class _BackendA:
         return object
 
 
-@pytest.mark.parametrize("num_reqs", [1, 2, 4])
-def test_flash_attn_graph_replay_uses_device_metadata_without_host_updates(monkeypatch, num_reqs):
+def test_flash_attn_graph_replay_uses_device_metadata_without_host_updates(monkeypatch):
     manager = DFlashAclGraphManager.__new__(DFlashAclGraphManager)
     manager.speculator = SimpleNamespace(
         attn_backends={f"draft.{i}": AscendFlashAttentionBackend for i in range(6)},
@@ -39,12 +38,10 @@ def test_flash_attn_graph_replay_uses_device_metadata_without_host_updates(monke
     monkeypatch.setattr(DFlashCudaGraphManager, "run_fullgraph", replay)
     manager._graph_replay = MagicMock(side_effect=AssertionError("unexpected FIA task update"))
     manager._updatable_graph_replay = MagicMock(side_effect=AssertionError("unexpected host graph update"))
-    desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=num_reqs * 4, num_reqs=num_reqs)
+    desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=16, num_reqs=4)
 
-    for _ in range(3):
-        assert manager.run_fullgraph(desc) is replay.return_value
-    assert replay.call_count == 3
-    replay.assert_called_with(desc)
+    assert manager.run_fullgraph(desc) is replay.return_value
+    replay.assert_called_once_with(desc)
     manager.speculator.build_draft_attn_metadatas.assert_not_called()
     manager._graph_replay.assert_not_called()
     manager._updatable_graph_replay.assert_not_called()

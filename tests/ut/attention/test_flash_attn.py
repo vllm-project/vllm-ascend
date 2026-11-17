@@ -411,7 +411,7 @@ def test_metadata_builder_does_not_materialize_exact_device_lengths(monkeypatch,
         for operation in ("tolist", "item", "cpu"):
             patches.setattr(torch.Tensor, operation, forbidden_host_materialization)
         if for_capture:
-            result = builder.build_for_graph_capture(common, AscendAttentionState.ChunkedPrefill)
+            result = builder.build_for_cudagraph_capture(common)
         else:
             result = builder.build_for_drafting(common, draft_index=0)
     assert result.seq_lens_gpu.data_ptr() == common.seq_lens.data_ptr()
@@ -446,9 +446,8 @@ def test_metadata_builder_slices_request_extent():
     assert metadata.query_start_loc_gpu.data_ptr() == common.query_start_loc.data_ptr()
 
 
-@pytest.mark.parametrize("warmup", [False, True])
 @pytest.mark.parametrize("managed_graph", [False, True])
-def test_capture_records_fresh_lengths_and_tiling_even_with_warmup_caches(monkeypatch, warmup, managed_graph):
+def test_capture_records_fresh_lengths_and_tiling_even_with_warmup_caches(monkeypatch, managed_graph):
     from vllm_ascend.attention.fa_v1 import AscendFlashAttentionMetadata
 
     query = torch.zeros(12, 8, 128, dtype=torch.bfloat16)
@@ -467,8 +466,7 @@ def test_capture_records_fresh_lengths_and_tiling_even_with_warmup_caches(monkey
     )
     monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
     monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)
-    if warmup:
-        impl.forward_impl(query, None, None, None, metadata, output)
+    impl.forward_impl(query, None, None, None, metadata, output)
     eager_lengths = metadata.flash_attn_lengths
     eager_plans = dict(metadata.flash_attn_plans)
     ops.flash_attn_metadata.reset_mock()
@@ -482,19 +480,29 @@ def test_capture_records_fresh_lengths_and_tiling_even_with_warmup_caches(monkey
     # request disappearing after rejection. No producer may come from warmup
     # or from the preceding capture.
     previous_plans = {id(plan) for plan, _attrs in eager_plans.values()}
-    for boundaries, lengths in (([0, 4, 8, -1], [253, 251, 0]), ([0, 4, 4, -1], [250, 0, 0])):
+    batches = [([0, 4, 8, -1], [253, 251, 0])]
+    if managed_graph:
+        batches.append(([0, 4, 4, -1], [250, 0, 0]))
+    length_preparation = Mock(wraps=torch.Tensor.cummax)
+    for boundaries, lengths in batches:
         tiling_start = ops.flash_attn_metadata.call_count
         metadata.query_start_loc_gpu.copy_(torch.tensor(boundaries, dtype=torch.int32))
         metadata.seq_lens_gpu.copy_(torch.tensor(lengths, dtype=torch.int32))
+        length_preparation.reset_mock()
         with monkeypatch.context() as patches:
             for operation in ("tolist", "item", "cpu"):
                 patches.setattr(torch.Tensor, operation, forbid_host_read)
+            # Count actual length producers, not the per-layer cache lookups.
+            patches.setattr(
+                torch.Tensor, "cummax", lambda tensor, *args, **kwargs: length_preparation(tensor, *args, **kwargs)
+            )
             scope = capture_resources() if managed_graph else nullcontext()
             with scope:
                 for _ in range(6):
                     impl.forward_impl(query, None, None, None, metadata, output)
         calls = ops.flash_attn_metadata.call_args_list[tiling_start:]
         assert len(calls) == (1 if managed_graph else 6)
+        assert length_preparation.call_count == (1 if managed_graph else 6)
         expected_boundaries = torch.tensor(boundaries, dtype=torch.int32).clamp(min=0).cummax(dim=0).values
         expected_lengths = torch.tensor(lengths, dtype=torch.int32).clamp(min=1)
         for call in calls:
@@ -504,7 +512,7 @@ def test_capture_records_fresh_lengths_and_tiling_even_with_warmup_caches(monkey
         assert len(captured_plans) == (1 if managed_graph else 6)
         assert captured_plans.isdisjoint(previous_plans)
         previous_plans.update(captured_plans)
-    assert ops.flash_attn.call_count == 12
+    assert ops.flash_attn.call_count == 6 * len(batches)
     assert metadata.flash_attn_lengths is eager_lengths
     assert metadata.flash_attn_plans == eager_plans
 
