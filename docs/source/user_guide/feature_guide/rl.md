@@ -185,9 +185,10 @@ the target LM head also updates that shared source when its LM-head weights
 are transferred.
 
 Generation must remain paused throughout the update. Overlapping target and
-draft update sessions are rejected. A failed update restores routing and head
-references, but does not roll back partially loaded weights; complete a fresh
-update before resuming generation.
+draft update sessions are rejected. Failed updates do not roll back partially
+loaded weights or guarantee that the reload state is reusable. After a failed
+weight update, restart the affected inference workers and load a complete,
+known-good checkpoint before resuming generation.
 
 #### Sparse HCCL
 
