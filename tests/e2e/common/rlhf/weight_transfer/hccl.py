@@ -26,7 +26,7 @@ from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     weight_transfer_servers,
 )
 from tests.e2e.common.rlhf.weight_transfer.weight_source import (
-    FixedRandomWeightSource,
+    make_weight_source,
     packed_buffer_size_for,
 )
 
@@ -45,7 +45,7 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
         pytest.skip("HCCL weight transfer e2e test requires at least 2 NPUs.")
 
     torch.npu.set_device(TRAINER_DEVICE_INDEX)
-    source = FixedRandomWeightSource(case, torch.device("npu", TRAINER_DEVICE_INDEX))
+    source = make_weight_source(case, torch.device("npu", TRAINER_DEVICE_INDEX))
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
         "ASCEND_RT_VISIBLE_DEVICES": server_visible_devices(INFERENCE_DEVICE_INDEX, INFERENCE_WORLD_SIZE),
