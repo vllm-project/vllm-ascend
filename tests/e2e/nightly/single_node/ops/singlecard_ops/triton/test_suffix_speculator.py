@@ -390,6 +390,25 @@ def test_corpus_wraps_without_straddling():
     assert num_valid[0] == 0
 
 
+@pytest.mark.parametrize("competitors,expected", [(1, [30, 31]), (2, [20, 21])])
+def test_corpus_wraparound_keeps_one_vote_with_the_newest_sequence(competitors, expected):
+    # Each document uses eight slots including the separator. The last document
+    # wraps to offset zero, leaving both its entry and the original entry for pos=4.
+    spec, rs = _make(2, 8, 2, 64, corpus_tokens=8 * (1 + competitors))
+    prefix = [1, 2, 3, 4]
+    for i, first in enumerate([10, *([20] * competitors), 30]):
+        _set(rs, 0, [], prefix + [first, first + 1, first + 2])
+        _finish(spec, rs, {f"r{i}": 0})
+
+    _set(rs, 1, [], prefix)
+    drafts, num_valid = _propose(spec, rs, [1])
+
+    # With one competitor, the latest document wins the tie. With two, the
+    # competitors win: the wrapped position must not get a duplicate vote.
+    assert num_valid.tolist() == [2]
+    assert drafts[0].tolist() == expected
+
+
 def test_ingestion_is_deterministic():
     """The same finished set, reported in different orders, builds identical
     corpus and index state (what keeps TP ranks consistent)."""

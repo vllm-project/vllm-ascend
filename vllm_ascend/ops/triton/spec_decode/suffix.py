@@ -157,8 +157,11 @@ def _corpus_draft(
     c_len = tl.sum((tl.cumsum(miss, axis=1) == 0).to(tl.int64), axis=1)
     nxt = tl.load(corpus_ptr + tl.minimum(cpos, corpus_len - 1), mask=(vals >= 0) & (cpos < corpus_len), other=-1)
     ok = (vals >= 0) & (nxt >= 0) & (c_len >= key_len) & (seq_len >= key_len)
-    # Both buckets often hold the same position; count it once.
-    dup = (cpos[:, None] == cpos[None, :]) & ok[:, None] & (c_iota[:, None] < c_iota[None, :])
+    # Count each position once, keeping its newest valid index entry after wraparound.
+    # At the same position, packed values differ only in their document sequence.
+    newer = vals[:, None] > vals[None, :]
+    same_entry_earlier = (vals[:, None] == vals[None, :]) & (c_iota[:, None] < c_iota[None, :])
+    dup = (cpos[:, None] == cpos[None, :]) & ok[:, None] & (newer | same_entry_earlier)
     ok = ok & (tl.max(dup.to(tl.int32), axis=0) == 0)
 
     # Continuations, cut at the first document separator.
