@@ -73,6 +73,7 @@ env_common: &env_common
   ASCEND_TRANSFER_TIMEOUT: "10000"
   ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config.protocol_desc":["hccs:device"]}'
   ASCEND_LOCAL_COMM_RES: '{"version":"1.2"}'
+  TORCH_EXTENSIONS_DIR: "/tmp/minimax_m3_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}"
 
 env_prefill: &env_prefill
   <<: *env_common
