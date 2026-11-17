@@ -57,17 +57,12 @@ class InFlightSaveBlockTracker:
         event_id = self.next_event_id
         self.next_event_id += 1
         req_meta.event_id = event_id
-        req_meta.store_job_id = event_id
         logger.debug("event: %s touch blocks: %s", event_id, block_ids)
         block_pool.touch([block_pool.blocks[block_id] for block_id in block_ids])
         self.sending_blocks[event_id] = block_ids
         self.sending_events[event_id] = 0
 
-    def complete(
-        self,
-        completed_events: dict[int, int],
-        block_pool: BlockPool,
-    ) -> None:
+    def complete(self, completed_events: dict[int, int], block_pool: BlockPool) -> None:
         for event_id, count in completed_events.items():
             logger.debug("event %s update with %s", event_id, count)
             total = self.sending_events.get(event_id)

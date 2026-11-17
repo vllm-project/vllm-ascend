@@ -1150,6 +1150,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
 )
 def test_connector_metadata_preserves_unscheduled_request_order(unfinished_ids, new_ids, cached_ids, expected_ids):
     scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler.enable_partial_hash_hits = False
     scheduler.kv_role = "kv_both"
     scheduler.consumer_is_to_put = scheduler.can_put = False
     scheduler._request_trackers = {}
@@ -1180,6 +1181,7 @@ def test_connector_metadata_without_pending_requests_does_not_scan_cached_ids(cl
             raise AssertionError("No cached-ID scan is needed without unfinished requests")
 
     scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler.enable_partial_hash_hits = False
     scheduler.kv_role = "kv_both"
     scheduler.consumer_is_to_put = scheduler.can_put = False
     scheduler._request_trackers = {}
@@ -1221,6 +1223,7 @@ def test_connector_metadata_filter_has_linear_key_lookup_work():
     cached_ids = [CountedRequestId(f"request-{index}") for index in range(count)]
     pending_ids = ["pending-b", "pending-a"]
     scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler.enable_partial_hash_hits = False
     scheduler.kv_role = "kv_both"
     scheduler.consumer_is_to_put = scheduler.can_put = False
     scheduler._request_trackers = {}

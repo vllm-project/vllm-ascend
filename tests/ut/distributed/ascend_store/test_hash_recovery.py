@@ -79,7 +79,8 @@ def bare_worker(coord, db, store):
 
 
 @pytest.mark.parametrize("seed", [0, 42, 1024])
-def test_boundary_save_lookup_and_physical_page_replay(seed):
+@pytest.mark.parametrize("store_job_id", [None, 99])
+def test_boundary_save_lookup_and_physical_page_replay(seed, store_job_id):
     coord = coordinator.AscendStoreCoordinator(
         groups(),
         16,
@@ -108,14 +109,23 @@ def test_boundary_save_lookup_and_physical_page_replay(seed):
         can_save=True,
         block_hashes=hashes,
         kv_cache_group_ids=[],
-        boundary_puts=[(0, 1, 8), (1, 3, 8)],
-        event_id=7,
+        boundary_puts=[metadata.BoundaryPut(0, 1, 8), metadata.BoundaryPut(1, 3, 8)],
+        store_job_id=store_job_id,
     )
+    tracker = InFlightSaveBlockTracker(1)
+    pool = SimpleNamespace(blocks=list(range(4)), touch=Mock(), free_blocks=Mock())
+    tracker.retain(req, {1: 0}, pool, retain_all=True)
+    assert req.store_job_id == store_job_id
     req.current_event = Mock()
     send.add_save_batch([req])
+    assert req.store_job_id is not None and req.store_job_id != req.event_id
     send._handle_request(send.request_queue.get())
     req.current_event.synchronize.assert_called_once()
-    assert send.take_save_outcomes() == ({7: 1}, set())
+    completed, failed = send.take_save_outcomes()
+    assert completed == {req.event_id: 1} and not failed
+    tracker.complete(completed, pool)
+    pool.free_blocks.assert_called_once_with([3, 1])
+    assert not tracker.has_pending_work()
     result = bare_worker(coord, db, store)._lookup_with_coordinator(13, hashes, [0, 1], True)
     assert result.hit_length == 8
     assert result.tail_key_boundaries == ((0, 8), (1, 8))

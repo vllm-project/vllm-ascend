@@ -94,8 +94,6 @@ def _shares_mooncake_v2_engine(transfer):
 class BaseKVPoolWorker(ABC):
     """Common cache registration, metadata, lookup, and lifecycle for pool workers."""
 
-    enable_partial_hash_hits = False
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -499,7 +497,7 @@ class BaseKVPoolWorker(ABC):
         Partial layerwise transfers also retain each segment's token interval.
         """
         block_len, block_stride, _, scale = self._get_cache_block_metadata(cache)
-        if getattr(self, "enable_partial_hash_hits", False) and not cache[0].is_contiguous():
+        if self.enable_partial_hash_hits and not cache[0].is_contiguous():
             # A shared HND slab can interleave heads/layers inside a physical
             # page as well as between pages. Enumerate dense suffixes using
             # actual strides; never copy the intervening padding or siblings.
@@ -692,7 +690,7 @@ class BaseKVPoolWorker(ABC):
         This results in the calculated start address not being the previously aligned address.
         Therefore, we down-align the start address to meet the 2MB alignment requirement.
         """
-        if getattr(self, "enable_partial_hash_hits", False):
+        if self.enable_partial_hash_hits:
             if _shares_mooncake_v2_engine(get_engine_transfer_config(self.vllm_config, self.kv_cache_config)):
                 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
                     collect_configured_register_regions,

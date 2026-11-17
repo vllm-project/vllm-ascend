@@ -52,8 +52,6 @@ def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
 class BaseKVPoolScheduler(ABC):
     """Shared request tracking, metadata, and cache lifecycle for pool schedulers."""
 
-    enable_partial_hash_hits = False
-
     def __init__(
         self,
         vllm_config: "VllmConfig",
