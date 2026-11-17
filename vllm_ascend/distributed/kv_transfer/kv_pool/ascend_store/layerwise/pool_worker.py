@@ -1582,17 +1582,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             num_blocks = request.save_end_token // self.grouped_block_size[group_id]
             if self.layerwise_offload:
                 num_blocks = self._layerwise_save_full_end(request, self.grouped_block_size[group_id], None)
-            if self.layerwise_offload and group_id in self._reused_layers_by_group:
-                # Only the running endpoint belongs to this layer after reuse.
-                # Older non-null slots may already hold another layer's state.
-                result[group_id] = [
-                    index == num_blocks - 1
-                    and request.target_token_len == num_blocks * self.grouped_block_size[group_id]
-                    and index < len(block_ids)
-                    and block_ids[index] != 0
-                    for index in range(num_blocks)
-                ]
-                continue
             # An aligned prefill chunk ends with a real recurrent checkpoint,
             # even when it is not the final prompt replay boundary. Keep that
             # checkpoint before the next chunk moves/reuses its state slots.
