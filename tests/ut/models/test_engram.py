@@ -134,6 +134,7 @@ def test_host_uva_aligns_registration_and_frees_original_allocation(monkeypatch,
             npu.HostUvaBuffer(shape, dtype, "cpu", "_codes_uva", owner)
     else:
         buffer = npu.HostUvaBuffer(shape, dtype, "cpu", "_codes_uva", owner)
+        assert buffer.tensor is not None
         assert buffer.tensor.data_ptr() == lib.registered
         assert lib.original <= lib.registered and lib.registered + size <= lib.original + size + alignment - 1
         buffer.tensor.fill_(17)
@@ -449,13 +450,13 @@ def test_shared_table_skips_per_step_dp_gather(monkeypatch):
 
     monkeypatch.setattr(embedding_mod, "gather_engram_hashes", gather)
     table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
-    table.embed_gathered = lambda ids, count: ids[:count]
+    setattr(table, "embed_gathered", lambda ids, count: ids[:count])  # noqa: B010 - instance stub
     table._shared_group = object()
     ids = torch.tensor([[7, 8]])
     assert table.forward(ids).tolist() == [[7, 8]]
     table._shared_group = None
     table.dp_size = 2
-    table.embed_gathered = lambda gathered, count: gathered[count : 2 * count]
+    setattr(table, "embed_gathered", lambda gathered, count: gathered[count : 2 * count])  # noqa: B010
     assert table.forward(ids).tolist() == [[7, 8]]
     assert calls == [True, False]
 
