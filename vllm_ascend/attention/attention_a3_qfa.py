@@ -143,6 +143,12 @@ def qfa_int8_paged_cache_views(
     # pitch is a sum of 4-byte-multiple sections, so both divide by 4 exactly.
     if k_elems % 4 or pitch % 4:
         raise ValueError("QFA INT8 packet sections must be 4-byte aligned for the FP32 descale view.")
+    # The raw cache can be a narrow view into a bigger group-packed storage
+    # (vLLM #51718 packs all group layers into one tensor), so the base offset
+    # may be nonzero; the FP32 descale view needs it 4-byte aligned.
+    base_offset = raw_tensor.storage_offset()
+    if base_offset % 4:
+        raise ValueError("QFA INT8 raw cache base offset must be 4-byte aligned for the FP32 descale view.")
 
     def _strided_view(shape, offset_bytes, elem_dtype, elem_size):
         # Per-axis strides in elements: dims 1.. contiguous, dim0 = packet pitch.
@@ -153,11 +159,18 @@ def qfa_int8_paged_cache_views(
             inner *= dim
         tail.reverse()
         strides = (pitch // elem_size, *tail)
+        # ``storage_offset()`` counts 1-byte elements; the dtype views re-
+        # express it in ``elem_dtype`` units, and ``as_strided`` takes an
+        # absolute offset -- so convert base + section together. Adding the
+        # base in byte units to the section in elem units (the previous form)
+        # silently worked for offset-zero raw caches (CPU tests) and exploded
+        # on the TP-aligned group-packed ones (A3 bring-up).
+        storage_offset = (base_offset + offset_bytes) // elem_size
         return torch.as_strided(
             raw_tensor.view(torch.uint8).view(elem_dtype),
             shape,
             strides,
-            storage_offset=raw_tensor.storage_offset() + offset_bytes // elem_size,
+            storage_offset=storage_offset,
         )
 
     nz_shape = (
