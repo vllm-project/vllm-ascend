@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-from importlib import import_module
 from typing import TYPE_CHECKING
 
 import vllm.envs as envs
@@ -14,21 +13,20 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 from vllm_ascend.utils import vllm_version_is
 
-if TYPE_CHECKING or not vllm_version_is("0.33.0"):
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import (
+if vllm_version_is("0.33.0"):
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (  # type: ignore[import-not-found]
         LOOKUP_MSG,
         RESET_MSG,
         RESP_ERR,
         RESP_OK,
     )
 else:
-    # Static CI checks against the pinned main tree; the release module is
-    # loaded at runtime only, preserving its own wire constants.
-    _legacy_protocol = import_module("vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol")
-    LOOKUP_MSG = _legacy_protocol.LOOKUP_MSG
-    RESET_MSG = _legacy_protocol.RESET_MSG
-    RESP_ERR = _legacy_protocol.RESP_ERR
-    RESP_OK = _legacy_protocol.RESP_OK
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import (
+        LOOKUP_MSG,
+        RESET_MSG,
+        RESP_ERR,
+        RESP_OK,
+    )
 
 if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
