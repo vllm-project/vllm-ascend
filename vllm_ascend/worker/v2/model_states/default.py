@@ -45,7 +45,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     reset_sparse_kv_offload_request_owners,
     update_sparse_kv_offload_metadata,
 )
-from vllm_ascend.utils import should_skip_allreduce_across_dp_group
+from vllm_ascend.utils import embedding_tp_enable, should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
@@ -382,6 +382,37 @@ class AscendModelState(DefaultModelState):
             "slot_mapping": slot_mappings[group_id],
             "block_table": block_tables[group_id][: batch.num_reqs],
         }
+
+    def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor:
+        # MRV2 calls this after DP synchronization, at the same input-preparation
+        # boundary as the real batch's embedding lookup. MM/prompt-embeds dummy
+        # batches otherwise reuse a buffer and miss the cross-DP exchange.
+        if embedding_tp_enable():
+            if not hasattr(self, "_embedding_tp_dummy_join"):
+                # Resolve after model loading; importing the op lazily also
+                # avoids loading the worker's custom ops during state imports.
+                from vllm_ascend.ops.vocab_parallel_embedding import AscendVocabParallelEmbedding, VocabParallelMode
+
+                self._embedding_tp_dummy_join = None
+                for module in self.model.modules():
+                    if (
+                        isinstance(module, AscendVocabParallelEmbedding)
+                        and module.parallel_mode == VocabParallelMode.FINE_GRAINED
+                        and module.token_exchange_group is not None
+                    ):
+                        capacity = module.embedding_tp_capacity
+                        assert capacity is not None
+                        token_ids = torch.zeros(capacity, dtype=torch.int64, device=self.device)
+                        self._embedding_tp_dummy_join = (module, token_ids)
+                        break
+            if self._embedding_tp_dummy_join is not None:
+                module, token_ids = self._embedding_tp_dummy_join
+                module(token_ids)
+
+        # Preserve the upstream buffer, shape and address for graph replay.
+        # Profiling and capture use the same lookup so its allocations and
+        # communicator are prepared before the first real request.
+        return super().dummy_inputs_embeds(num_tokens)
 
     def prepare_inputs_embeds(self, scheduled_encoder_inputs, input_batch, req_states) -> torch.Tensor:
         # MRV2 prepares MM embeddings before entering ForwardContext. Upstream
