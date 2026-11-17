@@ -29,7 +29,6 @@ from vllm_ascend.worker.sentinel.eplb_quant_schemes import (
 )
 
 __all__ = [
-    "build_orig_to_dense_rank_table",
     "densify_routing_table_physical_ids",
     "reload_experts_from_disk",
 ]
@@ -43,19 +42,6 @@ _GATHER_MAX_WORKERS = 8
 # Only source resolution changes here: Ascend loads from auto/safetensors, other
 # formats fall back to "auto"; the reload itself still requires safetensors.
 _DISK_LOAD_FORMATS = frozenset({"auto", "safetensors"})
-
-
-def build_orig_to_dense_rank_table(ep_world_size: int, dead_ranks: set[int]) -> torch.Tensor:
-    """Map each original EP rank to its densified rank (-1 for dead ranks).
-
-    Returns the ``[ep_world_size]`` int32 table the dispatch kernel reads as
-    ``table1``; survivors are numbered in ascending original-rank order.
-    """
-    table = torch.full((ep_world_size,), -1, dtype=torch.int32)
-    alive = sorted(set(range(ep_world_size)) - dead_ranks)
-    for dense_rank, orig_rank in enumerate(alive):
-        table[orig_rank] = dense_rank
-    return table
 
 
 def densify_routing_table_physical_ids(
