@@ -218,9 +218,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
     def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor | list[torch.Tensor]"]) -> None:
         super().register_kv_caches(kv_caches)
         if self.kv_transfer_config.is_kv_producer:
-            # KVPP is outside the Push support plan.
-            if self.ascend_config.kvpp_config.size > 1:
-                raise ValueError("Mooncake Push does not support KVPP yet")
             self._device = torch.npu.current_device()
             self._layer_indices = {name: i for i, name in enumerate(self.transfer_metadata.layer_names)}
             model_type = self.vllm_config.model_config.hf_text_config.model_type
@@ -336,7 +333,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         if metadata.engine_id != params["consumer_engine_id"]:
             raise ValueError("Push requires matching D engine metadata")
         if metadata.use_kv_pp:
-            raise ValueError("Push does not support KVPP yet")
+            raise ValueError("Push requires KVPP to be disabled on the decode node")
         return metadata
 
     def _send_done(self, params: dict[str, Any], error: str | None) -> bool:
@@ -463,6 +460,10 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             return (0, 0, 1) if matched else None
         whole = isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)) or is_circular_kv_cache_spec(spec)
         if whole:
+            # Registration exposes each KVPP target layer only on its persistent owner.
+            # That owner supplies the full page to every destination holding the layer.
+            if layer_name in self.kvpp_layer_owners:
+                return (0, 0, 1)
             # Choose one complete P DCP group per D worker. Every source shard
             # in that group may contribute; other groups are redundant copies.
             replicas = self.tp_size * self.pcp_size // local_dcp_size

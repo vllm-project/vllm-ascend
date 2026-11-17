@@ -78,12 +78,14 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
             raise ValueError("Ascend PLE offload requires BF16 weights")
         device = torch.device("npu", torch.npu.current_device())
         if self._shared_group is None:
-            self._host_table = HostUvaBuffer((num_embeddings, embedding_dim), dtype, device)
+            self._host_table = HostUvaBuffer((num_embeddings, embedding_dim), dtype, device, "_host_table", self)
             tensor = self._host_table.tensor
             assert tensor is not None
             tensor.zero_()
         else:
-            self._host_table = SharedUvaBuffer((num_embeddings, embedding_dim), dtype, device, self._shared_group)
+            self._host_table = SharedUvaBuffer(
+                (num_embeddings, embedding_dim), dtype, device, self._shared_group, "_host_table", self
+            )
             tensor = self._host_table.tensor
             assert tensor is not None
             if self._shared_group.rank_in_group == 0:
