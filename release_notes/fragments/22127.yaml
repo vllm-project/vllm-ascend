@@ -1,0 +1,9 @@
+# Release note fragment. See release_notes/README.md.
+pr: 22127
+entries:
+  - category: feature
+    text: >
+      Add the rl:routed_experts_state metric (basic level) to report the
+      MoE router-replay state as a 0/1 gauge labelled by state (enabled,
+      ready, capturing), so RL workloads can tell whether routed-expert
+      capture is configured and actually running.
