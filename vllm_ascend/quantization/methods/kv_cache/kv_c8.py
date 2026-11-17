@@ -162,3 +162,77 @@ class AscendC8KVCacheAttentionMethod(AscendAttentionScheme):
             "attention backend."
         )
         raise RuntimeError(err_msg)
+
+
+def _qfa_v_scale_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
+    """Weight loader for the QFA per-head V cache scale (``fa_v.scale``).
+
+    The checkpoint carries the FULL-width per-head FP32 scale
+    (``[Hkv_total]``); attention-module parameters bypass the linear
+    sharding, so slice it here following the same GQA TP rule vLLM uses
+    for KV heads: a plain ``tp_size``-way narrow when
+    ``Hkv_total >= tp_size``, replication groups otherwise.
+    """
+    if loaded_weight.dim() != 1:
+        loaded_weight = loaded_weight.flatten()
+    if loaded_weight.numel() != param.numel():
+        tp_rank = get_tensor_model_parallel_rank()
+        tp_size = get_tensor_model_parallel_world_size()
+        per_rank = param.numel()
+        if loaded_weight.numel() % per_rank:
+            raise AssertionError(
+                "[vllm-ascend/QFA_INT8] fa_v.scale has "
+                f"{loaded_weight.numel()} elements, not divisible by this rank's "
+                f"head count {per_rank} (TP size {tp_size})."
+            )
+        num_heads_total = loaded_weight.numel() // per_rank
+        heads_per_group = max(1, tp_size // num_heads_total)
+        src_head = tp_rank // heads_per_group
+        loaded_weight = loaded_weight.narrow(0, src_head * per_rank, per_rank)
+    param.data.copy_(loaded_weight.to(param.dtype).view_as(param.data))
+
+
+class AscendQFAKVCacheAttentionMethod(AscendAttentionScheme):
+    """Static per-head V cache scale for the QFA INT8 KV cache.
+
+    Enabled with ``--kv-cache-dtype int8_qfa`` (no recipe gate, the mxfp8
+    precedent): the checkpoint's ``fa_v.scale`` keys (per-head FP32, full
+    width) map onto ``layer.v_cache_scale``. K stays dynamic (per-token
+    descale stored inside the packet cache); V uses this static scale, so
+    ``AscendQFA3Int8Impl._layer_v_scale`` reads real calibrated scales
+    instead of the ones placeholder.
+    """
+
+    def __init__(self, quant_description: dict, prefix: str):
+        self.quant_description = quant_description
+        self.prefix = prefix
+
+    def create_weights(self, layer: torch.nn.Module) -> None:
+        weight_param = torch.nn.Parameter(
+            torch.ones(layer.num_kv_heads, dtype=torch.get_default_dtype()),
+            requires_grad=False,
+        )
+        layer.register_parameter("v_cache_scale", weight_param)
+        # When loading weights, slice the full-width scale according to TP.
+        weight_param.weight_loader = _qfa_v_scale_weight_loader
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        layer.v_cache_scale.data = layer.v_cache_scale.data.to(torch.float32).flatten()
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache,
+        attn_metadata,
+        attn_type,
+        scale,
+        output,
+    ) -> torch.Tensor:
+        raise RuntimeError(
+            "[vllm-ascend/QFA_INT8] AscendQFAKVCacheAttentionMethod.apply "
+            "should not be called. QFA INT8 KV cache quantization is handled "
+            "by the attention backend (AscendQFA3Int8Impl)."
+        )
