@@ -111,11 +111,7 @@ def _qsa_rmsnorm_mrope_fused_heads_kernel(
     head_offsets = tl.arange(0, num_heads)[:, None]
     dim_offsets = tl.arange(0, block_dim)[None, :]
     dim_mask = dim_offsets < head_dim
-    input_offsets = (
-        token_id * input_stride_token
-        + head_offsets * input_stride_head
-        + dim_offsets
-    )
+    input_offsets = token_id * input_stride_token + head_offsets * input_stride_head + dim_offsets
     values = tl.load(input_ptr + input_offsets, mask=dim_mask, other=0.0).to(tl.float32)
     weight = tl.load(weight_ptr + dim_offsets, mask=dim_mask, other=0.0).to(tl.float32) + 1.0
     variance = tl.sum(values * values, axis=1)[:, None] / head_dim
@@ -127,45 +123,27 @@ def _qsa_rmsnorm_mrope_fused_heads_kernel(
     h_mask = (rotary_offsets % 3 == 1) & (rotary_offsets < mrope_section_h * 3)
     w_mask = (rotary_offsets % 3 == 2) & (rotary_offsets < mrope_section_w * 3)
     axis = tl.where(h_mask, 1, tl.where(w_mask, 2, 0))
-    position = tl.load(
-        positions_ptr
-        + axis * position_stride_axis
-        + token_id * position_stride_token
-    )
+    position = tl.load(positions_ptr + axis * position_stride_axis + token_id * position_stride_token)
     position = tl.minimum(tl.maximum(position, 0), cache_rows - 1)
     cache_row = cos_sin_ptr + position.to(tl.int64) * cos_sin_stride_token
     cos = tl.load(cache_row + rotary_offsets).to(tl.float32)[None, :]
     sin = tl.load(cache_row + rotary_offsets + half_rope_dim).to(tl.float32)[None, :]
 
     rotary_head_offsets = head_offsets * input_stride_head
-    first_offsets = (
-        token_id * input_stride_token
-        + rotary_head_offsets
-        + rotary_offsets[None, :]
-    )
+    first_offsets = token_id * input_stride_token + rotary_head_offsets + rotary_offsets[None, :]
     second_offsets = first_offsets + half_rope_dim
     first = tl.load(input_ptr + first_offsets).to(tl.float32)
     second = tl.load(input_ptr + second_offsets).to(tl.float32)
     first_weight = tl.load(weight_ptr + rotary_offsets).to(tl.float32)[None, :] + 1.0
-    second_weight = (
-        tl.load(weight_ptr + rotary_offsets + half_rope_dim).to(tl.float32)[None, :] + 1.0
-    )
+    second_weight = tl.load(weight_ptr + rotary_offsets + half_rope_dim).to(tl.float32)[None, :] + 1.0
     first = (first * reciprocal_std * first_weight).to(tl.bfloat16)
     second = (second * reciprocal_std * second_weight).to(tl.bfloat16)
     rotated_first = ((first * cos).to(tl.bfloat16) - (second * sin).to(tl.bfloat16)).to(tl.bfloat16)
     rotated_second = ((second * cos).to(tl.bfloat16) + (first * sin).to(tl.bfloat16)).to(tl.bfloat16)
 
-    output_offsets = (
-        token_id * output_stride_token
-        + head_offsets * output_stride_head
-        + dim_offsets
-    )
+    output_offsets = token_id * output_stride_token + head_offsets * output_stride_head + dim_offsets
     tl.store(output_ptr + output_offsets, normalized, mask=dim_mask)
-    rotary_output_offsets = (
-        token_id * output_stride_token
-        + head_offsets * output_stride_head
-        + rotary_offsets[None, :]
-    )
+    rotary_output_offsets = token_id * output_stride_token + head_offsets * output_stride_head + rotary_offsets[None, :]
     tl.store(output_ptr + rotary_output_offsets, rotated_first)
     tl.store(output_ptr + rotary_output_offsets + half_rope_dim, rotated_second)
 
