@@ -13,14 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Vendored rare_chars algorithm for Runtime Guard.
-
-Algorithm and tables adapted from RinshannKaihou/self_evolving_inference_detector
-(v35_detector 0.4.0 / research commit 5118334). Guard owns the Ascend collect
-path and ConfigBackedDetector wiring; this package is CPU-only (numpy).
-
-See NOTICE in this directory for provenance.
-"""
+"""CPU rare_chars algorithm (numpy). Adapted from self_evolving_inference_detector."""
 
 from __future__ import annotations
 

@@ -13,15 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Runtime Guard wrapper for rare_chars (visible garbled / foreign-script).
-
-Collects ``(top1_logprob, chosen_logprob)`` via sampler-side narrow collect on
-Guard-stashed pre-sample logits + sampled ids (Ascend Triton
-``_narrow_collect_*``). Does **not** require ``SamplingParams.logprobs``.
-Per-tokenizer tables are built at warmup from the served tokenizer. Algorithm
-knobs (``think_end``, ``alert_monitor``) live in ``rare.json``; runtime_config
-only exposes ``enabled``.
-"""
+"""Runtime Guard wrapper for rare_chars (garbled / foreign-script detection)."""
 
 from __future__ import annotations
 
@@ -66,10 +58,7 @@ def _algo_knobs() -> tuple[dict[str, Any], str, bool]:
 
 
 def device_chosen_token_ids(sampled_token_ids: torch.Tensor) -> torch.Tensor:
-    """Last valid sampled id per row, kept on the sampled-id device.
-
-    Empty rows stay ``-1``. No host copy.
-    """
+    """Last valid sampled id per row on device; empty rows → ``-1``."""
     ids = sampled_token_ids.detach()
     if ids.numel() == 0:
         return ids.reshape(-1).to(dtype=torch.int64)
@@ -87,12 +76,7 @@ def device_chosen_token_ids(sampled_token_ids: torch.Tensor) -> torch.Tensor:
 
 
 def pack_rare_step(cpu: Any, sampled: Any, n_req: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Token ids and logprob columns for one step (contiguous 1-D host arrays).
-
-    Avoids a full ``float64`` round-trip plus two column ``ascontiguousarray``
-    copies when the pair tensor is already a CPU numpy/torch buffer: one
-    cast/slice pass materializes ``top1`` / ``chosen``.
-    """
+    """Host ``(token_ids, top1, chosen)`` arrays for one step."""
     if isinstance(cpu, torch.Tensor):
         pairs = cpu.detach()
         if pairs.device.type != "cpu":
@@ -107,38 +91,25 @@ def pack_rare_step(cpu: Any, sampled: Any, n_req: int) -> tuple[np.ndarray, np.n
         empty_i = np.zeros(0, np.int64)
         empty_f = np.zeros(0, np.float64)
         return empty_i, empty_f, empty_f
-    # One contiguous [n, 2] float64 block, then copy columns into 1-D vectors
-    # (column views of [n,2] are not C-contiguous).
-    if pairs_np.dtype == np.float64 and pairs_np.flags.c_contiguous:
-        base = pairs_np[:n]
-    else:
-        base = np.ascontiguousarray(pairs_np[:n], dtype=np.float64)
+    base = np.ascontiguousarray(pairs_np[:n], dtype=np.float64)
     top1 = np.empty(n, dtype=np.float64)
     chosen = np.empty(n, dtype=np.float64)
     top1[:] = base[:, 0]
     chosen[:] = base[:, 1]
-    token_ids = _last_token_ids(sampled, n)
-    return token_ids, top1, chosen
+    return _last_token_ids(sampled, n), top1, chosen
 
 
 def _last_token_ids(sampled: Any, n: int) -> np.ndarray:
-    """Last non-negative id of each of the first ``n`` rows (tensor or array-like)."""
     if not isinstance(sampled, torch.Tensor):
         sampled = torch.as_tensor(sampled, dtype=torch.int64)
     chosen = device_chosen_token_ids(sampled)
     if chosen.device.type != "cpu":
         chosen = chosen.detach().cpu()
-    arr = chosen.numpy()
-    out = arr[:n]
-    if out.dtype == np.int64 and out.flags.c_contiguous:
-        return out
-    return np.ascontiguousarray(out, dtype=np.int64)
+    return np.ascontiguousarray(chosen.numpy()[:n], dtype=np.int64)
 
 
 @dataclass
 class RareCharsReqState:
-    """Per-request streaming RareDetector state."""
-
     tokens_seen: int = 0
     alerted: bool = False
     last_reason: str = ""
@@ -146,25 +117,14 @@ class RareCharsReqState:
 
 
 class RareCharsDetector(ConfigBackedDetector):
-    """rare_chars: visible garbled / foreign-script / bad UTF-8.
-
-    Shadow-oriented: emits Guard ``Incident`` reports; does not abort the
-    request by itself (match upstream V35_RARE=shadow semantics).
-    """
+    """Shadow detector: emit ``Incident`` reports; does not abort requests."""
 
     incident_type = "rare_chars"
     section_key = "rare_chars"
     schema = DetectorSchema(
         section_key="rare_chars",
         stage="after_sample",
-        help=(
-            "Visible garbled text (rare_chars): foreign-script fragments, "
-            "illegal UTF-8, low-confidence rare tokens. Guard uses sampler-side "
-            "narrow collect (Ascend Triton) on stashed pre-sample logits "
-            "for (top1, chosen) — SamplingParams.logprobs not required. "
-            "Per-tokenizer table is built at warmup; think_end / alert_monitor "
-            "come from detector/rare/rare.json."
-        ),
+        help="Detect garbled / foreign-script / illegal UTF-8 via (top1, chosen) logprobs.",
         fields=(ConfigField("enabled", False, "bool", help="Master switch"),),
     )
 
