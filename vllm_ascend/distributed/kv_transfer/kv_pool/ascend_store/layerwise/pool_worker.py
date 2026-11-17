@@ -256,7 +256,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         if isinstance(spec, MambaSpec)
                     }
                 effective_num_layers = max(self.num_layers, len(physical_layers))
-                if self._layerwise_reuse_layout is None and effective_num_layers != self.num_layers:
+                if effective_num_layers != self.num_layers:
                     logger.info(
                         "KVPoolWorker: updated num_layers %d -> %d from cache group layout.",
                         self.num_layers,
