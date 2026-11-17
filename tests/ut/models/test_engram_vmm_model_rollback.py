@@ -231,13 +231,13 @@ def test_failed_model_rollback_retains_all_remaining_vmm_buffers():
 
 def test_synchronized_release_failure_attempts_remaining_tables():
     calls: list[str] = []
-    first, last = Table("first", calls), Table("last", calls)
 
-    def fail():
-        calls.append("last")
-        raise SharedReleaseError("peer release failed")
+    class FailingTable(Table):
+        def close_host_offload(self):
+            self.calls.append(self.name)
+            raise SharedReleaseError("peer release failed")
 
-    last.close_host_offload = fail
+    first, last = Table("first", calls), FailingTable("last", calls)
     with pytest.raises(RuntimeError, match="peer release failed"):
         candidate([first, last], SharedLoadError("load failed")).load_weights([])
     assert calls == ["last", "first"]
