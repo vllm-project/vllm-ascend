@@ -85,9 +85,9 @@ def test_main_projection_dispatch_uses_real_eligibility(monkeypatch, case):
         layer.rotary_emb._match_cos_sin_cache_dtype.assert_not_called()
 
 
-@pytest.mark.parametrize("head_dim", [128, 64])
+@pytest.mark.parametrize("ratio", [2, 4, 8])
 @pytest.mark.parametrize("with_position_ring", [False, True])
-def test_compression_dispatch_and_ring_order(head_dim, with_position_ring):
+def test_compression_dispatch_and_ring_order(ratio, with_position_ring):
     events = []
     pooled, first_positions, normalized = (object() for _ in range(3))
 
@@ -100,18 +100,18 @@ def test_compression_dispatch_and_ring_order(head_dim, with_position_ring):
     canonical = Mock(side_effect=lambda positions: positions.view(-1, 1, 1).expand(-1, 1, 3))
     layer = _load_dispatch(
         "AscendQSAIndexer",
-        {"_fused_norm_rope_eligible", "_update_and_compress"},
+        {"_fused_norm_rope_eligible", "_fused_compress_eligible", "_update_and_compress"},
         object,
         qsa_compress_groups_with_ratio_fused=compression,
         _store_qsa_cache_rows=stores,
         qsa_indexer=SimpleNamespace(canonical_qsa_rope_positions=canonical),
     )
-    layer.compress_ratio, layer.index_head_dim = 4, head_dim
-    layer.k_layernorm = SimpleNamespace(weight=torch.empty(head_dim, dtype=torch.bfloat16), variance_epsilon=1e-6)
+    layer.compress_ratio, layer.index_head_dim = ratio, 128
+    layer.k_layernorm = SimpleNamespace(weight=torch.empty(128, dtype=torch.bfloat16), variance_epsilon=1e-6)
     layer.rotary_emb = _rotary()
-    raw_cache = torch.empty(1, 8, 1, head_dim, dtype=torch.bfloat16)
+    raw_cache = torch.empty(1, 8, 1, 128, dtype=torch.bfloat16)
     position_ring = torch.empty(1, 8, 1, 3, dtype=torch.int64) if with_position_ring else None
-    compressed_cache = torch.empty(1, 8, 1, head_dim, dtype=torch.bfloat16)
+    compressed_cache = torch.empty(1, 8, 1, 128, dtype=torch.bfloat16)
     layer.raw_key_cache = SimpleNamespace(key_cache=raw_cache, rope_position_cache=position_ring)
     layer.compressed_key_cache = SimpleNamespace(kv_cache=compressed_cache)
 
@@ -134,7 +134,7 @@ def test_compression_dispatch_and_ring_order(head_dim, with_position_ring):
             events.append("store_positions")
 
     stores.side_effect = store
-    token_k = torch.zeros(3, 1, head_dim, dtype=torch.bfloat16)
+    token_k = torch.zeros(3, 1, 128, dtype=torch.bfloat16)
     positions = torch.arange(3)
     raw_metadata = SimpleNamespace(
         num_actual_tokens=2,
@@ -148,10 +148,10 @@ def test_compression_dispatch_and_ring_order(head_dim, with_position_ring):
     layer._update_and_compress(token_k, positions, raw_metadata, compressed_metadata)
     compression.assert_called_once()
     args, kwargs = compression.call_args
-    assert args[0].shape == (2, 1, head_dim)  # Exclude graph-padding rows.
-    assert args[8] == 4
+    assert args[0].shape == (2, 1, 128)  # Exclude graph-padding rows.
+    assert args[8] == ratio
     assert args[9] is position_ring
-    if head_dim == 128:
+    if ratio == 4:
         assert kwargs["compressed_cache"] is compressed_cache
         assert kwargs["norm_weight"] is layer.k_layernorm.weight
         layer.normalize_compressed_keys.assert_not_called()
