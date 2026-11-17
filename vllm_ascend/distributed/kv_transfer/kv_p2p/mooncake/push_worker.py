@@ -263,8 +263,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         self._uses_composite_kv_ready_events = False
         self._composite_kv_aliases: set[str] = set()
         self._declared_layer_indices: set[tuple[str, int]] = set()
-        self._deferred_layer_indices: set[tuple[str, int]] = set()
-        draft_names = set(getattr(self.kv_cache_config, "dspark_draft_layer_names", ()) or ())
         context = self.vllm_config.compilation_config.static_forward_context
         for alias, layer in context.items():
             cache_names = getattr(layer, "kv_transfer_cache_names", None)
@@ -275,13 +273,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             self._composite_kv_aliases.add(alias)
             self._declared_layer_indices.add(layer_index)
             self._uses_composite_kv_ready_events = True
-            is_draft = any(name in draft_names or ".mtp." in f".{name}" for name in cache_names)
-            if is_draft:
-                self._deferred_layer_indices.add(layer_index)
-        if self._uses_composite_kv_ready_events:
-            # Draft and unmapped namespaces may be overwritten after target
-            # forward. Keep ordinary physical hooks from publishing them early.
-            self._deferred_layer_indices.update(set(self._layer_names_by_index) - self._declared_layer_indices)
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
         if self.kv_transfer_config.is_kv_producer:
@@ -845,7 +836,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         if not self.kv_transfer_config.is_kv_producer or not self._prefilling_request_ids:
             return
         layer_index = self._layer_index_by_name.get(layer_name)
-        if layer_index is None or layer_index in self._deferred_layer_indices:
+        if layer_index is None:
             return
         if layer_index in self._declared_layer_indices and layer_name not in self._composite_kv_aliases:
             # One physical cache's callback cannot declare the whole owner ready.

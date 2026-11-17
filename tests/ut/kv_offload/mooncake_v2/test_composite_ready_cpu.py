@@ -4,6 +4,8 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 from tests.ut.attention.test_mla_layerwise_load_cpu import load
 
 PUSH = "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/push_worker.py"
@@ -32,8 +34,13 @@ def worker(cache_names=("model.layers.2.long", "model.layers.2.swa")):
     )
 
 
-def test_composite_owner_is_early_ready_but_component_and_draft_are_not():
+@pytest.mark.parametrize("draft_alias", [False, True])
+def test_target_and_draft_use_their_own_ready_hooks(draft_alias):
     obj = worker()
+    if draft_alias:
+        obj.vllm_config.compilation_config.static_forward_context["draft.v41_attn"] = SimpleNamespace(
+            kv_transfer_cache_names=("draft",)
+        )
     load(PUSH, "_register_composite_layer_aliases", {}, OWNER)(obj)
     state = SimpleNamespace(
         error=None, metadata=SimpleNamespace(num_computed_tokens=16, num_scheduled_tokens=16), available_layers={}
@@ -41,13 +48,18 @@ def test_composite_owner_is_early_ready_but_component_and_draft_are_not():
     obj._reqs_send_state = {"r": state}
     save = load(PUSH, "save_kv_layer", {"torch": SimpleNamespace(npu=SimpleNamespace(Event=Mock))}, OWNER)
     save(obj, "model.layers.2.long")
-    save(obj, "draft")
     assert not state.available_layers
     save(obj, "model.layers.2.v41_attn")
     assert {name: end for name, (end, _) in state.available_layers.items()} == {
         "model.layers.2.long": 32,
         "model.layers.2.swa": 32,
     }
+    if draft_alias:
+        save(obj, "draft")
+        assert "draft" not in state.available_layers
+    save(obj, "draft.v41_attn" if draft_alias else "draft")
+    assert state.available_layers["draft"][0] == 32
+    assert state.available_layers["draft"][1] is not state.available_layers["model.layers.2.long"][1]
 
 
 def test_external_prefix_is_not_marked_ready_before_model_load_hook():
