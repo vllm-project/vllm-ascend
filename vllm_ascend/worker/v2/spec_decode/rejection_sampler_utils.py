@@ -52,10 +52,19 @@ _NAN_ROW_FMT_LIMIT = 8
 
 
 def _fmt_nan_rows(bad_rows, nan_per_row, rows_per_req: int, unit: str) -> str:
-    """Render (row_id, nan_count) pairs as req/step coordinates."""
+    """Render (row_id, nan_count) pairs as req/step coordinates.
+
+    Both host transfers are batched: indexing ``nan_per_row`` per element
+    inside the loop would pay one D2H sync per iteration (up to
+    ``_NAN_ROW_FMT_LIMIT``); slicing first and copying the whole batch
+    collapses it to two syncs (one per list).
+    """
+    limit_rows = bad_rows[:_NAN_ROW_FMT_LIMIT]
+    bad_rows_list = limit_rows.tolist()
+    bad_counts_list = nan_per_row[limit_rows].tolist()
     parts = []
-    for i in bad_rows[:_NAN_ROW_FMT_LIMIT].tolist():
-        parts.append(f"{unit}={i // rows_per_req} step={i % rows_per_req} nan={int(nan_per_row[i])}")
+    for i, count in zip(bad_rows_list, bad_counts_list):
+        parts.append(f"{unit}={i // rows_per_req} step={i % rows_per_req} nan={int(count)}")
     return "[" + ", ".join(parts) + "]"
 
 
