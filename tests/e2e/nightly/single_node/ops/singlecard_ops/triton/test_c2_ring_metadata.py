@@ -223,9 +223,7 @@ def test_padded_graph_tail_and_dead_requests() -> None:
     num_reqs, num_tokens, rope_dim = 8, 64, 64
     num_actual_reqs, num_actual_tokens = 3, 37
     case = make_case(num_reqs, num_tokens, rope_dim, num_actual_reqs)
-    ring, complete, source_positions, cos, sin = run_kernel(
-        *case, num_reqs, num_actual_reqs, num_actual_tokens
-    )
+    ring, complete, source_positions, cos, sin = run_kernel(*case, num_reqs, num_actual_reqs, num_actual_tokens)
     # Requests past ``num_actual_reqs`` publish no ring work: used == 0 and the
     # first block is cleared, even though the block table still holds entries.
     assert (ring[1, num_actual_reqs:] == 0).all()
