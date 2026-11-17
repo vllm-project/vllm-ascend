@@ -21,7 +21,7 @@ import unittest
 from functools import partial
 from itertools import product
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 import pytest
@@ -1779,11 +1779,14 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         source.connector_worker = mirror
 
         stores = []
+        send_threads = []
         for _ in range(2):
             worker = self._make_worker()
-            worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
-            worker.kv_send_thread.request_queue = MagicMock()
-            worker.kv_send_thread.add_save_batch.side_effect = publish
+            send = MagicMock(spec=KVCacheStoreSendingThread)
+            send.request_queue = MagicMock()
+            send.add_save_batch.side_effect = publish
+            worker.kv_send_thread = send
+            send_threads.append(send)
             store = AscendStoreConnector.__new__(AscendStoreConnector)
             store.can_put = True
             store.use_layerwise = False
@@ -1807,13 +1810,24 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         ):
             npu.Event.return_value = send_event
             connector.wait_for_save()
+            first_step_trace = trace.copy()
+            # A step without draft tokens must still allow the same two Stores
+            # to PUT, with no duplicate wait or draft DMA.
+            trace.clear()
+            connector.wait_for_save()
+            empty_step_trace = trace.copy()
+            # A later step must mirror its new bytes before either Store reads.
+            trace.clear()
+            draft_resident_bytes = bytes([113])
+            mirror._draft_mirror_pending = True
+            connector.wait_for_save()
 
-        draft_ready_event.record.assert_called_once_with(compute_stream)
-        for store in stores:
-            store.connector_worker.kv_send_thread.request_queue.join.assert_called_once_with()
-            store.connector_worker.kv_send_thread.raise_if_failed.assert_called_once_with()
+        self.assertEqual(draft_ready_event.record.call_args_list, [call(compute_stream), call(compute_stream)])
+        for send in send_threads:
+            self.assertEqual(send.request_queue.join.call_count, 3)
+            self.assertEqual(send.raise_if_failed.call_count, 3)
         self.assertEqual(
-            trace,
+            first_step_trace,
             [
                 "record draft event",
                 "enqueue draft copy",
@@ -1824,6 +1838,8 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
                 bytes([37, 91]),
             ],
         )
+        self.assertEqual(empty_step_trace, ["record save event", bytes([37, 91])] * 2)
+        self.assertEqual(trace, first_step_trace[:3] + ["record save event", bytes([37, 113])] * 2)
         self.assertFalse(mirror._draft_mirror_pending)
         self.assertFalse(mirror._dma_submitted)
         self.assertEqual(mirror._post_forward_transfers, [page_transfer])

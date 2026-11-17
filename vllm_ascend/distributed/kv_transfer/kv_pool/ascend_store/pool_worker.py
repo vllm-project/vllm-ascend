@@ -769,6 +769,8 @@ class BaseKVPoolWorker(ABC):
         kv_cache_config = self.kv_cache_config
         host_num_blocks: int | None = getattr(kv_cache_config, "hisparse_host_num_blocks", None)
         if kv_cache_config is not None and host_num_blocks is not None:
+            from vllm_ascend.hisparse.binding import hisparse_indexer_transfer_views
+
             excluded_layer_names = set()
             normalized_caches = {}
             context = self.vllm_config.compilation_config.static_forward_context
@@ -780,9 +782,8 @@ class BaseKVPoolWorker(ABC):
                     host_resident_groups.add(group_id)
                 for name in group.layer_names:
                     parts = self._as_cache_tuple(kv_caches[name])
-                    stride = getattr(context[name], "hisparse_block_stride", 1)
-                    if group.role == "hisparse_indexer" and stride > 1:
-                        parts = tuple(part[::stride] for part in parts)
+                    if group.role == "hisparse_indexer":
+                        parts = hisparse_indexer_transfer_views(parts, context[name])
                     normalized_caches[name] = parts
                     if group.host_resident:
                         self._hisparse_host_num_blocks_by_layer[name] = host_num_blocks

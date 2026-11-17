@@ -105,6 +105,7 @@ class KVTransferThread(threading.Thread):
                 return
             if self._fatal_error is not None:
                 logger.error("Reject KV transfer submission to failed thread %s: %s", self.name, self._fatal_error)
+                self._handle_rejected_request(request)
                 return
             self.request_queue.put(request)
 
@@ -352,6 +353,10 @@ class KVTransferThread(threading.Thread):
 
     def _handle_request_exception(self, request_data: Any):
         """Allow subclasses to complete queue/request bookkeeping on errors."""
+        pass
+
+    def _handle_rejected_request(self, request_data: Any) -> None:
+        """Allow subclasses to report submissions made after a fatal error."""
         pass
 
     def lookup(
@@ -1038,6 +1043,23 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self.worker = worker
         self._record_operation_cb = record_operation
+
+    def _handle_request_exception(self, request_data: ReqMeta) -> None:
+        # run() holds the submission lock, and _handle_request already
+        # acknowledged the current item in its finally block.
+        failed = [request_data]
+        while True:
+            try:
+                queued = self.request_queue.get_nowait()
+            except queue.Empty:
+                break
+            if queued is not None:
+                failed.append(queued)
+            self.request_queue.task_done()
+        self._mark_failed_requests(failed, finish_receiving=True)
+
+    def _handle_rejected_request(self, request_data: ReqMeta) -> None:
+        self._mark_failed_requests([request_data], finish_receiving=True)
 
     def get_and_clear_receive_results(
         self, loading_req_ids: set[str], preempted_req_ids: set[str]
