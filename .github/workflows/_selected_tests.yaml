@@ -266,9 +266,10 @@ jobs:
         if: ${{ matrix.group.npu_type == 'a2' || matrix.group.npu_type == 'a3' || matrix.group.npu_type == 'a5' }}
         env:
           NPU_TYPE: ${{ matrix.group.npu_type }}
+          FLA_VERSION: ${{ matrix.group.npu_type == 'a3' && '26.10.0' || '26.9.1' }}
         run: |
           set -euo pipefail
-          uv pip install --no-deps "flash-linear-attention-npu-${NPU_TYPE}===26.9.1"
+          uv pip install --no-deps "flash-linear-attention-npu-${NPU_TYPE}===${FLA_VERSION}"
           python3 -c "import fla_npu.ops.ascendc"
 
       - name: Build MemFabric AccOffload for sparse KV lifecycle test
@@ -325,7 +326,7 @@ jobs:
         run: |
           set -euo pipefail
           uv pip install -r requirements-dev.txt
-          uv pip install --no-deps flash-linear-attention-npu-a3===26.9.1
+          uv pip install --no-deps flash-linear-attention-npu-a3===26.10.0
           uv pip install -e .
 
       - name: Uninstall Triton for 310P tests
