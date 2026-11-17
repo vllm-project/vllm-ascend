@@ -1,0 +1,5 @@
+pr: 21603
+entries:
+  - category: performance
+    text: Reduce repeated peer-prefix scans during distributed Top-K selection on Ascend A3; latency improvements depend on the workload.
+    hardware: [A3]

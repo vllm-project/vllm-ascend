@@ -5,6 +5,7 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.device.hardware_profile import get_current_hardware_profile
 from vllm_ascend.ops.triton.sparse_index_remap import _sort
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
@@ -211,43 +212,51 @@ def _pack_sorted_candidates(
         tl.store(packed_ptr + row_idx * BLOCK * 2 + packed_offsets, packed_pairs)
 
 
-@triton.jit(do_not_specialize=["ROWS"])
+@triton.jit(do_not_specialize=["num_rows"])
 def _merge_owner_prefix(
-    packed,
-    output,
-    ROWS,
+    packed_ptr,
+    output_ptr,
+    num_rows,
     WORLD: tl.constexpr,
     OWNER: tl.constexpr,
     INTERLEAVE: tl.constexpr,
     LOG_BLOCK: tl.constexpr,
     TILE: tl.constexpr,
     BLOCK_RANKS: tl.constexpr,
+    PARALLEL_PEERS: tl.constexpr = False,
 ):
     """Select an owner's exact sorted prefix without sorting other owners."""
+    # Two interpolated updates precede bisection; four spare probes bound the search.
+    INTERPOLATION_UPDATES: tl.constexpr = 2
+    SEARCH_MARGIN: tl.constexpr = 4
     K: tl.constexpr = 1 << LOG_BLOCK
     col = tl.arange(0, K)
     lanes = tl.arange(0, 2 * TILE)
+    SERIAL_TILE: tl.constexpr = min(K, triton.next_power_of_2(2 * K // WORLD)) if PARALLEL_PEERS else TILE
+    serial_lanes = tl.arange(0, 2 * SERIAL_TILE)
     ranks = tl.arange(0, BLOCK_RANKS)
-    for row in range(tl.program_id(0), ROWS, tl.num_programs(0)):
-        own = packed + (OWNER * ROWS + row) * K * 2
-        own_pair = tl.load(own + tl.arange(0, 2 * K))
+    for row in range(tl.program_id(0), num_rows, tl.num_programs(0)):
+        owner_ptr = packed_ptr + (OWNER * num_rows + row) * K * 2
+        own_pair = tl.load(owner_ptr + tl.arange(0, 2 * K))
         own_ids, own_bits = tl.split(tl.reshape(own_pair, (K, 2)))
         own_scores = own_bits.to(tl.float32, bitcast=True)
         own_valid = (own_ids.to(tl.float32) >= 0) & (tl.abs(own_scores) < float("inf"))
         upper = tl.sum(own_valid.to(tl.float32), 0).to(tl.int32)
-        tail_id = tl.load(own + (upper - 1) * 2, upper > 0, -1).to(tl.float32)
-        tail_score = tl.load(own + (upper - 1) * 2 + 1, upper > 0, 0).to(tl.float32, bitcast=True)
-        head_score = tl.load(own + 1, upper > 0, 0).to(tl.float32, bitcast=True)
+        tail_id = tl.load(owner_ptr + (upper - 1) * 2, upper > 0, -1).to(tl.float32)
+        tail_score = tl.load(owner_ptr + (upper - 1) * 2 + 1, upper > 0, 0).to(tl.float32, bitcast=True)
+        head_score = tl.load(owner_ptr + 1, upper > 0, 0).to(tl.float32, bitcast=True)
         equal_scores = (upper > 0) & (head_score == tail_score)
         head_mask = (ranks.to(tl.float32) < WORLD) & (ranks != OWNER) & (upper > 0)
         # A3's strided masked loads can still fault on padded peer addresses.
         # Bound the addresses as well as the mask for non-power-of-two worlds.
         peer_rank = tl.minimum(ranks, WORLD - 1)
-        peer_id = tl.load(packed + (peer_rank * ROWS + row) * K * 2, head_mask, -1).to(tl.float32)
-        peer_score = tl.load(packed + (peer_rank * ROWS + row) * K * 2 + 1, head_mask, 0).to(tl.float32, bitcast=True)
+        peer_id = tl.load(packed_ptr + (peer_rank * num_rows + row) * K * 2, head_mask, -1).to(tl.float32)
+        peer_score = tl.load(packed_ptr + (peer_rank * num_rows + row) * K * 2 + 1, head_mask, 0).to(
+            tl.float32, bitcast=True
+        )
         peer_valid = (peer_id >= 0) & (tl.abs(peer_score) < float("inf"))
         before_tail = peer_valid & ((peer_score > tail_score) | ((peer_score == tail_score) & (peer_id < tail_id)))
-        # If even the worst own candidate precedes every peer head, all own
+        # If even the worst owner candidate precedes every peer head, all owner
         # valid entries are winners. Other rows search their exact cutoff.
         lower = tl.where(tl.sum(before_tail.to(tl.float32), 0) == 0.0, upper, 0)
         peer_peak = tl.max(tl.where(peer_valid, peer_score, -float("inf")), 0)
@@ -258,28 +267,70 @@ def _merge_owner_prefix(
         # Three interpolation probes are followed by enough bisections for
         # every possible boundary. Estimates affect work only, never selection.
         iteration = tl.full((), 0, tl.int32)
-        while (lower < upper) & (iteration < LOG_BLOCK + 4):
-            pivot_id = tl.load(own + pivot * 2).to(tl.float32)
-            pivot_score = tl.load(own + pivot * 2 + 1).to(tl.float32, bitcast=True)
+        if PARALLEL_PEERS:
+            # Counts through K are exact in fp32; keep peer state in vector
+            # arithmetic rather than the backend's integer BlockData path.
+            peer_lower = tl.zeros((BLOCK_RANKS,), tl.float32)
+            peer_count = tl.zeros((BLOCK_RANKS,), tl.float32)
+            peer_upper = tl.where((ranks.to(tl.float32) < WORLD) & (ranks != OWNER), float(K), 0.0)
+        while (lower < upper) & (iteration < LOG_BLOCK + SEARCH_MARGIN):
+            pivot_id = tl.load(owner_ptr + pivot * 2).to(tl.float32)
+            pivot_score = tl.load(owner_ptr + pivot * 2 + 1).to(tl.float32, bitcast=True)
             pivot_valid = (pivot_id >= 0) & (tl.abs(pivot_score) < float("inf"))
             count = pivot.to(tl.float32)
-            for rank in range(WORLD):
-                if rank != OWNER:
-                    start = tl.full((), 0, tl.int32)
-                    amount = tl.full((), TILE, tl.float32)
-                    # Sorted peers cannot have a better candidate after
-                    # the first tile containing any non-better candidate.
-                    while (start < K) & (amount == TILE):
-                        pair = tl.load(packed + (rank * ROWS + row) * K * 2 + start * 2 + lanes)
-                        raw_ids, bits = tl.split(tl.reshape(pair, (TILE, 2)))
-                        ids = raw_ids.to(tl.float32)
-                        scores = bits.to(tl.float32, bitcast=True)
-                        valid = (ids >= 0) & (tl.abs(scores) < float("inf"))
-                        better = valid & ((scores > pivot_score) | ((scores == pivot_score) & (ids < pivot_id)))
-                        amount = tl.sum(better.to(tl.float32), 0)
-                        count += amount
-                        start += TILE
+            if not PARALLEL_PEERS or skewed:
+                for rank in range(WORLD):
+                    # K better entries before the first owner entry prove an
+                    # empty owner prefix. A partial count is sufficient only
+                    # for pivot zero, where the existing bounds close at zero.
+                    if (rank != OWNER) & ((pivot != 0) | (count < K)):
+                        start = tl.full((), 0, tl.int32)
+                        amount = tl.full((), SERIAL_TILE, tl.float32)
+                        # Sorted peers cannot have a better candidate after
+                        # the first tile containing any non-better candidate.
+                        while (start < K) & (amount == SERIAL_TILE):
+                            pair = tl.load(packed_ptr + (rank * num_rows + row) * K * 2 + start * 2 + serial_lanes)
+                            raw_ids, bits = tl.split(tl.reshape(pair, (SERIAL_TILE, 2)))
+                            ids = raw_ids.to(tl.float32)
+                            scores = bits.to(tl.float32, bitcast=True)
+                            valid = (ids >= 0) & (tl.abs(scores) < float("inf"))
+                            better = valid & ((scores > pivot_score) | ((scores == pivot_score) & (ids < pivot_id)))
+                            amount = tl.sum(better.to(tl.float32), 0)
+                            count += amount
+                            start += SERIAL_TILE
+            else:
+                # Counts stay in [peer_lower, peer_upper] for every remaining
+                # owner pivot. All peers retain one shared contiguous tile start.
+                active = (ranks.to(tl.float32) < WORLD) & (ranks != OWNER) & (peer_lower < peer_upper)
+                start = tl.min(tl.where(active, peer_lower, float(K)), 0).to(tl.int32)
+                peer_count = peer_lower
+                while (start < K) & (tl.sum(active.to(tl.float32), 0) > 0):
+                    scan_start = tl.minimum(start, K - TILE)
+                    offsets = ((peer_rank[:, None] * num_rows + row) * K + scan_start) * 2 + lanes[None, :]
+                    pair = tl.load(packed_ptr + offsets)
+                    raw_ids, bits = tl.split(tl.reshape(pair, (BLOCK_RANKS, TILE, 2)))
+                    ids = raw_ids.to(tl.float32)
+                    scores = bits.to(tl.float32, bitcast=True)
+                    positions = scan_start.to(tl.float32) + tl.arange(0, TILE).to(tl.float32)
+                    start_f = start.to(tl.float32)
+                    in_range = (positions[None, :] >= tl.maximum(peer_lower, start_f)[:, None]) & (
+                        positions[None, :] < peer_upper[:, None]
+                    )
+                    valid = active[:, None] & in_range & (ids >= 0) & (tl.abs(scores) < float("inf"))
+                    better = valid & ((scores > pivot_score) | ((scores == pivot_score) & (ids < pivot_id)))
+                    amount = tl.sum(better.to(tl.float32), 1)
+                    peer_count += amount
+                    capacity = tl.maximum(0.0, tl.minimum(start_f + TILE, peer_upper) - tl.maximum(start_f, peer_lower))
+                    active = active & (amount == capacity) & (start_f + TILE < peer_upper)
+                    start += TILE
+                count += tl.sum(peer_count, 0)
             selected = pivot_valid & (count < K)
+            if PARALLEL_PEERS:
+                if not skewed:
+                    # A selected owner pivot excludes earlier future pivots;
+                    # rejection excludes later ones. Direction may reverse.
+                    peer_lower = tl.where(selected, peer_count, peer_lower)
+                    peer_upper = tl.where(~selected & pivot_valid, peer_count, peer_upper)
             # Let S be the number of better peer entries. Monotonicity
             # makes K-S an upper bound after a selected pivot, or a lower
             # bound after a rejected valid pivot. Invalid pivots only
@@ -304,7 +355,7 @@ def _merge_owner_prefix(
                 else:
                     lower = tl.where(jump > block_end, tl.maximum(lower, block_end), lower)
                     upper = tl.where(jump < block_start, tl.minimum(upper, block_start), upper)
-            if iteration < 2:
+            if iteration < INTERPOLATION_UPDATES:
                 estimate = (pivot.to(tl.float32) + (K - count) / WORLD).to(tl.int32)
                 pivot = tl.minimum(tl.maximum(estimate, lower), upper - 1)
             else:
@@ -313,7 +364,7 @@ def _merge_owner_prefix(
         block = own_ids // INTERLEAVE
         local = block // WORLD * INTERLEAVE + own_ids - block * INTERLEAVE
         result = tl.where(col.to(tl.float32) < lower.to(tl.float32), local, -1)
-        tl.store(output + row * K + col, result)
+        tl.store(output_ptr + row * K + col, result)
 
 
 @triton.jit(do_not_specialize=["ROWS"])
@@ -570,6 +621,13 @@ def merge_packed_candidates(
         block = MAX_FUSED_TOPK  # The supported fused shape already is a power of two.
         if presorted and owner_sharded and local_rank is not None and 0 <= local_rank < world_size and local_k == topk:
             tile = min(block, triton.next_power_of_2(max(1, 2 * block // world_size)))
+            # Parallel setup amortizes across several peers and multiple rows/core.
+            # Small worlds, single-wave batches and other policies keep the original.
+            parallel_peers = (
+                get_current_hardware_profile().prefer_parallel_owner_prefix and world_size > 4 and rows > cores
+            )
+            if parallel_peers:
+                tile = min(block, triton.next_power_of_2(max(1, block // world_size)))
             _merge_owner_prefix[(programs,)](
                 packed,
                 output,
@@ -580,6 +638,7 @@ def merge_packed_candidates(
                 block.bit_length() - 1,
                 tile,
                 triton.next_power_of_2(world_size),
+                PARALLEL_PEERS=parallel_peers,
                 multibuffer=False,
             )
             return output

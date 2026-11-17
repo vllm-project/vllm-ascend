@@ -58,3 +58,77 @@ pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_candi
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_candidate_radix.py
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_pre_post.py -k local_lengths
 ```
+
+## Owner-prefix implementation
+
+`merge_packed_candidates` selects the owner-prefix kernel when `topk == 2048`,
+`local_k == topk`, `presorted=True`, `owner_sharded=True`, and `local_rank` names
+a valid rank. Production DCP callers provide rank-major gathered candidate pairs.
+The public wrapper allocates the output unless `out` is supplied; that buffer is
+written in place, including every `-1` padding slot. Inputs are not modified.
+
+One `_merge_owner_prefix` implementation handles both peer-count strategies.
+The A3 hardware profile enables parallel peers for `world_size > 4` and more rows
+than vector cores. Other workloads use serial peers. A skewed row also uses
+serial scans within the same kernel. Each sorted peer stops
+after its first partial tile. Bounds always use exact better-candidate counts.
+
+The parallel, non-skew path caches per-peer count bounds across owner pivots.
+For each peer, `L <= c(q) <= U` holds for every remaining owner candidate `q`,
+where `c(q)` is the number of peer entries preceding `q` in the existing
+score-descending, ID-ascending comparison. Selecting a valid pivot narrows the
+owner search to later entries, so its exact peer count becomes `L`. Rejecting a
+valid pivot narrows the search to earlier entries, so the count becomes `U`.
+The original interval jumps only remove more candidates. This permits pivot
+direction changes without assuming that successive peer boundaries move in one
+direction. Invalid pivots do not update the cache.
+
+Counts start at each peer's proved `L`. All peers retain a shared contiguous
+packed-pair tile starting from the minimum active `L`; only positions in `[L,U)`
+are counted. Physical tile starts are clipped to `K-TILE`, with a logical-start
+mask preventing duplicate counts in the final tile. Serial and skewed rows scan
+peers sequentially, with tile sizes derived from K and the world size. Bounds use
+FP32 like the existing peer counts;
+integer positions through K2048 are exactly representable. Added state is
+proportional to the peer count, without a resident WORLD-by-K candidate array.
+
+Inactive or bounded peer lanes can still be loaded while another peer needs
+the shared tile. A smaller mask alone does not establish fewer physical loads.
+Caching adds vector reductions and masks: repeated-prefix workloads can improve,
+while short prefixes and some row/owner combinations regress in the measured
+range. Performance comparisons use the public entry and report each workload
+against the same fixed main baseline.
+
+For the first owner candidate (`pivot == 0`), finding at least K better entries
+proves that the owner contributes no winners. Remaining peers may then be
+skipped. For any other pivot the count is completed, because interpolation and
+boundary updates require the exact value. This preserves score-descending,
+ID-ascending ordering, including tied scores and empty owner prefixes.
+
+### Specialization and warmup
+
+`WORLD`, `OWNER`, `INTERLEAVE`, `LOG_BLOCK`, `TILE`, `BLOCK_RANKS` and
+`PARALLEL_PEERS` are compile-time parameters: they determine fixed lane shapes,
+rank geometry, ID conversion or peer strategy. `num_rows` is a runtime integer
+with `do_not_specialize`; row count alone is not an explicit compile-time axis.
+Tensor dtype, alignment classes, compiler options and cache state still matter.
+The two interpolation updates and four spare probes are named search constants.
+
+This PR does not introduce an explicit warmup registration for the owner kernel.
+Uncached variants may compile during their first invocation, including a dummy
+run or graph capture. Serving-phase compilation counts have not been measured.
+
+### Owner-prefix validation
+
+The existing owner test uses independent CPU global Top-K and owner compaction
+with exact integer comparison. All 49 cases passed for the measured cached-scan
+kernel. They cover logical row counts 144/152, core boundaries, non-power-of-two
+worlds, ties, skew, short prefixes, invalid entries, output guards and changed
+inputs under graph replay. The inherited FP32 ID-comparison domain remains
+unchanged. A3 is the measured optimization target; A5 and model/distributed
+accuracy or performance validation remain outstanding for this revision.
+
+```bash
+pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_owner_prefix_adaptive.py
+pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_candidates.py
+```
