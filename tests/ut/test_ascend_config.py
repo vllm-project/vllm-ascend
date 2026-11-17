@@ -40,7 +40,6 @@ from vllm_ascend.ascend_config import (
     EplbConfig,
     FinegrainedTPConfig,
     KVPPConfig,
-    ProfilingChunkConfig,
     QuantizedAllReduceConfig,
     RejectionSamplerConfig,
     RlConfig,
@@ -81,7 +80,7 @@ def test_shared_engram_config_schema():
     for values in (
         {"endpoint": "owner:29500"},
         {"backend": "a3"},
-        {"backend": "a2", "endpoint": "owner:29500"},
+        {"backend": "unknown", "endpoint": "owner:29500"},
         {"backend": "a3", "endpoint": "owner:0"},
         {"backend": "a3", "endpoint": "owner:29500", "unexpected": True},
     ):
@@ -651,7 +650,6 @@ class TestAscendConfig(TestBase):
                 "enable_balance_scheduling": True,
                 "recompute_scheduler_enable": True,
                 "short_request_first_config": {"enabled": True, "threshold": 512},
-                "profiling_chunk_config": {"enabled": False},
             }
         }
 
@@ -661,7 +659,6 @@ class TestAscendConfig(TestBase):
         self.assertTrue(scheduler_config.recompute_scheduler_enable)
         self.assertTrue(scheduler_config.short_request_first_config.enabled)
         self.assertEqual(scheduler_config.short_request_first_config.threshold, 512)
-        self.assertFalse(scheduler_config.profiling_chunk_config.enabled)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -670,7 +667,6 @@ class TestAscendConfig(TestBase):
         test_vllm_config.additional_config = {
             "recompute_scheduler_enable": "false",
             "short_request_first_config": {"enabled": "true", "threshold": "512"},
-            "profiling_chunk_config": {"enabled": "false"},
             "batch_job_sched_config": {"enabled": "false"},
         }
 
@@ -679,7 +675,6 @@ class TestAscendConfig(TestBase):
         self.assertFalse(scheduler_config.recompute_scheduler_enable)
         self.assertTrue(scheduler_config.short_request_first_config.enabled)
         self.assertEqual(scheduler_config.short_request_first_config.threshold, 512)
-        self.assertFalse(scheduler_config.profiling_chunk_config.enabled)
         self.assertFalse(scheduler_config.batch_job_sched_config.enabled)
 
     @_clean_up_ascend_config
@@ -1248,7 +1243,6 @@ class TestSchedulerConfig(TestBase):
         self.assertFalse(config.enable_balance_scheduling)
         self.assertFalse(config.recompute_scheduler_enable)
         self.assertFalse(config.short_request_first_config.enabled)
-        self.assertFalse(config.profiling_chunk_config.enabled)
         self.assertFalse(hasattr(config, "_additional_config"))
         self.assertFalse(hasattr(config, "_balance_env_value"))
 
@@ -1271,12 +1265,6 @@ class TestSchedulerConfig(TestBase):
     def test_unknown_nested_scheduler_key_is_rejected(self):
         with self.assertRaises(ValueError):
             SchedulerConfig.from_additional_config({"scheduler_config": {"unknown_option": {"enabled": True}}})
-
-    def test_unknown_profiling_chunk_key_is_rejected(self):
-        with self.assertRaises(ValueError):
-            SchedulerConfig.from_additional_config(
-                {"scheduler_config": {"profiling_chunk_config": {"unknown_option": False}}}
-            )
 
     def test_unknown_batch_job_key_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -1306,7 +1294,6 @@ class TestSchedulerConfig(TestBase):
                         "threshold": 512,
                         "long_max_wait_ms": 2000,
                     },
-                    "profiling_chunk_config": {"enabled": True, "need_timing": False},
                 }
             },
         )
@@ -1316,8 +1303,6 @@ class TestSchedulerConfig(TestBase):
         self.assertTrue(config.short_request_first_config.enabled)
         self.assertEqual(config.short_request_first_config.threshold, 512)
         self.assertEqual(config.short_request_first_config.long_max_wait_ms, 2000.0)
-        self.assertTrue(config.profiling_chunk_config.enabled)
-        self.assertFalse(config.profiling_chunk_config.need_timing)
 
     @patch("vllm_ascend.ascend_config.logger.warning_once")
     def test_legacy_top_level_config_warns_and_remains_supported(self, mock_warning_once):
@@ -1326,15 +1311,13 @@ class TestSchedulerConfig(TestBase):
                 "enable_balance_scheduling": True,
                 "recompute_scheduler_enable": True,
                 "short_request_first_config": {"enabled": True},
-                "profiling_chunk_config": {"enabled": True},
             },
         )
 
         self.assertTrue(config.enable_balance_scheduling)
         self.assertTrue(config.recompute_scheduler_enable)
         self.assertTrue(config.short_request_first_config.enabled)
-        self.assertTrue(config.profiling_chunk_config.enabled)
-        self.assertEqual(mock_warning_once.call_count, 4)
+        self.assertEqual(mock_warning_once.call_count, 3)
 
     @patch("vllm_ascend.ascend_config.logger.warning_once")
     def test_nested_config_wins_and_legacy_fields_fill_missing_values(self, mock_warning_once):
@@ -1385,14 +1368,6 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         with self.assertRaises(ValueError):
             AscendCompilationConfig(unknown_key=1)
 
-    def test_profiling_chunk_config_int_lax_and_range(self):
-        # int string "2" coerces to 2 (fixes "2"==2 silent failure)
-        cfg = ProfilingChunkConfig(min_chunk="4096", max_fit_chunk="30")
-        self.assertEqual(cfg.min_chunk, 4096)
-        # range check preserved
-        with self.assertRaises(ValueError):
-            ProfilingChunkConfig(smooth_factor=1.5)
-
     def test_short_request_first_config_unknown_key_forbidden(self):
         # Was hand-written unknown-key check; now extra="forbid".
         with self.assertRaises(ValueError):
@@ -1429,8 +1404,9 @@ class TestSubconfigPydanticTypeValidation(TestBase):
                 config.lmhead_tensor_parallel_size,
                 config.embedding_tensor_parallel_size,
                 config.mlp_tensor_parallel_size,
+                config.qkv_iproj_tensor_parallel_size,
             ),
-            (1, 1, 1, 1),
+            (1, 1, 1, 1, 1),
         )
 
     def _oproj_tp_vllm_config(
@@ -1469,6 +1445,39 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         # single check covers both spellings of "no graph mode".
         with self.assertRaisesRegex(AssertionError, "only supported in graph mode"):
             config._validate_preconditions(self._oproj_tp_vllm_config(cudagraph_mode=CUDAGraphMode.NONE))
+
+    def test_qkv_iproj_tp_preconditions(self):
+        def deployment():
+            vc = self._oproj_tp_vllm_config()
+            vc.parallel_config.pipeline_parallel_size = 1
+            vc.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next_text", linear_num_heads=64)
+            return vc
+
+        for size in (2, 4, 8):
+            config = FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=size)
+            config._validate_preconditions(deployment())
+            self.assertEqual(config.qkv_iproj_tensor_parallel_size, size)
+        for field in ("tensor_parallel_size", "prefill_context_parallel_size", "pipeline_parallel_size"):
+            vc = deployment()
+            setattr(vc.parallel_config, field, 2)
+            with self.assertRaisesRegex(ValueError, "TP=1, PCP=1 and PP=1"):
+                FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)._validate_preconditions(vc)
+        vc = deployment()
+        vc.kv_transfer_config.is_kv_consumer = False
+        with self.assertRaisesRegex(ValueError, "PD decode node"):
+            FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)._validate_preconditions(vc)
+        vc = deployment()
+        vc.model_config.hf_text_config.model_type = "other"
+        with self.assertRaisesRegex(ValueError, "GLM-5.3-Flash only"):
+            FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)._validate_preconditions(vc)
+        with self.assertRaisesRegex(ValueError, "divide the KDA head count"):
+            FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=3)._validate_preconditions(deployment())
+        vc = deployment()
+        vc.parallel_config.data_parallel_size = 6
+        with self.assertRaisesRegex(AssertionError, "divide by data_parallel_size"):
+            FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=4)._validate_preconditions(vc)
+        with self.assertRaisesRegex(ValueError, "qkv_iproj_tensor_parallel_size must be non-negative"):
+            FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=-1)
 
     def test_oproj_tp_rejects_pcp(self):
         config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
@@ -2325,6 +2334,7 @@ class TestKVPPConfig(TestBase):
         from tests.ut.kvpp_utils import make_kvpp_config
 
         mooncake = {"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer"}
+        push = {**mooncake, "kv_connector": "MooncakePushConnector"}
         store = {"kv_connector": "AscendStoreConnector", "kv_role": "kv_both"}
 
         def multi(children):
@@ -2334,7 +2344,7 @@ class TestKVPPConfig(TestBase):
                 "kv_connector_extra_config": {"connectors": children},
             }
 
-        for transfer in (mooncake, store, multi([mooncake, store]), multi([store, mooncake])):
+        for transfer in (mooncake, push, store, multi([mooncake, store]), multi([store, mooncake])):
             with self.subTest(transfer=transfer):
                 config = make_kvpp_config()
                 config.kv_transfer_config = KVTransferConfig(**deepcopy(transfer))
@@ -2344,6 +2354,7 @@ class TestKVPPConfig(TestBase):
         unsupported = {**mooncake, "kv_connector": "MooncakeConnectorV1"}
         cases = (
             (consumer, "decode-only"),
+            ({**push, "kv_role": "kv_consumer"}, "decode-only"),
             (multi([store, consumer]), "decode-only"),
             (unsupported, "MooncakeConnectorV1"),
             (multi([mooncake, unsupported]), "MooncakeConnectorV1"),

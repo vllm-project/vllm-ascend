@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, create_autospec
 
 import numpy as np
 import pytest
@@ -31,7 +31,7 @@ def test_wants_fp32_target_logits(verifying, needs_processing, logprobs_mode, lo
     sampler = object.__new__(Sampler)
     sampler.needs_logits_processing = np.array([False, needs_processing])
     sampler.logprobs_mode = logprobs_mode
-    sampler.get_logprobs_dims = Mock(return_value=logprobs_dims)
+    sampler.get_logprobs_dims = create_autospec(lambda requests: None, return_value=logprobs_dims)
     rejection_sampler = object.__new__(RejectionSampler) if verifying else None
     input_batch = SimpleNamespace(
         num_draft_tokens=int(verifying),
@@ -42,7 +42,7 @@ def test_wants_fp32_target_logits(verifying, needs_processing, logprobs_mode, lo
 
     assert wants_fp32_target_logits(sampler, rejection_sampler, input_batch, vocab_size) is expected
     if needs_processing and logprobs_mode.startswith("raw_"):
-        sampler.get_logprobs_dims.assert_called_once_with(input_batch.idx_mapping_np, include_token_ids=not verifying)
+        sampler.get_logprobs_dims.assert_called_once_with(input_batch.idx_mapping_np)
     if verifying:
         input_batch.logits_indices = torch.arange(get_max_chunk_logits(vocab_size) + 1)
         assert not wants_fp32_target_logits(sampler, rejection_sampler, input_batch, vocab_size)

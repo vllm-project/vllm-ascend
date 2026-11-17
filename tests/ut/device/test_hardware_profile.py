@@ -17,6 +17,7 @@ from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
     MoECommPolicy,
     QuantizationBackendFamily,
+    WeightFormat,
     WeightLayoutPolicy,
     get_current_hardware_profile,
     get_hardware_profile,
@@ -58,6 +59,7 @@ _EXPECTED_CAPABILITIES = {
         HardwareCapability.FUSED_TP_LOGITS_LAYOUT,
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.NPU_TOP_K_TOP_P,
+        HardwareCapability.FLASH_ATTN_NPU_3,
     },
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
@@ -69,6 +71,7 @@ _EXPECTED_CAPABILITIES = {
         HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
         HardwareCapability.RMS_NORM_CAST,
+        HardwareCapability.FLASH_ATTN_NPU_3,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
         HardwareCapability.NPU_TOP_K_TOP_P,
     },
@@ -132,6 +135,22 @@ _EXPECTED_CAPABILITIES = {
 }
 
 
+_STANDARD_WEIGHT_FORMATS = frozenset({WeightFormat.BF16, WeightFormat.FP16, WeightFormat.INT8})
+_INT4_WEIGHT_FORMATS = _STANDARD_WEIGHT_FORMATS | {WeightFormat.INT4}
+_FP8_WEIGHT_FORMATS = _INT4_WEIGHT_FORMATS | {
+    WeightFormat.FP8,
+    WeightFormat.HIF8,
+    WeightFormat.MXFP8,
+    WeightFormat.MXFP4,
+}
+_EXPECTED_WEIGHT_FORMATS = {
+    AscendDeviceType.A2: _INT4_WEIGHT_FORMATS,
+    AscendDeviceType.A3: _INT4_WEIGHT_FORMATS,
+    AscendDeviceType._310P: _STANDARD_WEIGHT_FORMATS,
+    AscendDeviceType.A5: _FP8_WEIGHT_FORMATS,
+}
+
+
 @pytest.mark.parametrize(
     (
         "device_type",
@@ -143,6 +162,7 @@ _EXPECTED_CAPABILITIES = {
         "weight_layout_policy",
         "moe_comm_policy",
         "quantization_backend_family",
+        "native_weight_formats",
     ),
     [
         (
@@ -155,6 +175,7 @@ _EXPECTED_CAPABILITIES = {
             WeightLayoutPolicy.CONFIGURABLE,
             MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             QuantizationBackendFamily.STANDARD,
+            _INT4_WEIGHT_FORMATS,
         ),
         (
             AscendDeviceType.A3,
@@ -166,6 +187,7 @@ _EXPECTED_CAPABILITIES = {
             WeightLayoutPolicy.CONFIGURABLE,
             MoECommPolicy.FUSED_OR_CAPACITY,
             QuantizationBackendFamily.STANDARD,
+            _INT4_WEIGHT_FORMATS,
         ),
         (
             AscendDeviceType._310P,
@@ -177,6 +199,7 @@ _EXPECTED_CAPABILITIES = {
             WeightLayoutPolicy.FORCE_NZ,
             MoECommPolicy.ALLGATHER,
             QuantizationBackendFamily.COMPATIBILITY,
+            _STANDARD_WEIGHT_FORMATS,
         ),
         (
             AscendDeviceType.A5,
@@ -188,6 +211,7 @@ _EXPECTED_CAPABILITIES = {
             WeightLayoutPolicy.CONFIGURABLE,
             MoECommPolicy.CAPACITY_AND_WORLD_SIZE,
             QuantizationBackendFamily.STANDARD,
+            _FP8_WEIGHT_FORMATS,
         ),
     ],
 )
@@ -201,6 +225,7 @@ def test_hardware_profile_implementation_matrix(
     weight_layout_policy: WeightLayoutPolicy,
     moe_comm_policy: MoECommPolicy,
     quantization_backend_family: QuantizationBackendFamily,
+    native_weight_formats: frozenset[WeightFormat],
 ) -> None:
     profile = get_hardware_profile(device_type)
 
@@ -213,16 +238,22 @@ def test_hardware_profile_implementation_matrix(
     assert profile.weight_layout_policy is weight_layout_policy
     assert profile.moe_comm_policy is moe_comm_policy
     assert profile.quantization_backend_family is quantization_backend_family
+    assert profile.native_weight_formats == native_weight_formats
 
 
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
 def test_hardware_profile_capability_matrix(device_type: AscendDeviceType) -> None:
     profile = get_hardware_profile(device_type)
     expected_capabilities = _EXPECTED_CAPABILITIES[device_type]
+    expected_weight_formats = _EXPECTED_WEIGHT_FORMATS[device_type]
 
     assert profile.capabilities == expected_capabilities
     for capability in HardwareCapability:
         assert profile.supports(capability) is (capability in expected_capabilities)
+
+    assert profile.native_weight_formats == expected_weight_formats
+    for weight_format in WeightFormat:
+        assert profile.supports_weight_format(weight_format) is (weight_format in expected_weight_formats)
 
 
 @pytest.mark.parametrize(

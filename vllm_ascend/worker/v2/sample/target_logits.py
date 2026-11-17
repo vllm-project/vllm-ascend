@@ -34,8 +34,7 @@ def wants_fp32_target_logits(
 
     requests = input_batch.idx_mapping_np
     return bool(np.any(sampler.needs_logits_processing[requests])) and (
-        sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
-        or sampler.get_logprobs_dims(requests, include_token_ids=not is_verifying) is None
+        sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES or sampler.get_logprobs_dims(requests) is None
     )
 
 

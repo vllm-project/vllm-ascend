@@ -11,15 +11,17 @@ import numpy as np
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
     TargetDependentARSpeculator,
 )
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
-from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.distributed.eplb.tensor_ops import make_allgather_mask
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     AscendTargetDependentARSpeculator,
@@ -169,7 +171,9 @@ def test_generate_draft_updates_attn_metadata():
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     attn_metadata = {"layer.0": MagicMock()}
     speculator._update_decode_attn_metadata = MagicMock()
-    with patch.object(TargetDependentARSpeculator, "_generate_draft") as parent_generate:
+    with patch.object(
+        TargetDependentARSpeculator, "_generate_draft" if vllm_version_is("0.33.0") else "_decode"
+    ) as parent_generate:
         # main always passes the per-batch step count; there is no fallback to
         # the configured count.
         speculator._generate_draft(2, 4, attn_metadata, None, None, num_speculative_steps=3)
@@ -185,7 +189,7 @@ def test_generate_draft_skips_update_without_attn_metadata():
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     speculator.num_speculative_steps = 3
     speculator._update_decode_attn_metadata = MagicMock()
-    with patch.object(TargetDependentARSpeculator, "_generate_draft"):
+    with patch.object(TargetDependentARSpeculator, "_generate_draft" if vllm_version_is("0.33.0") else "_decode"):
         speculator._generate_draft(2, 4, None, None, None)
     speculator._update_decode_attn_metadata.assert_not_called()
 
@@ -246,6 +250,26 @@ def test_prefill_filters_target_only_metadata():
     # vLLM main added `skip_sample` and forwards it to the upstream _prefill.
     expected_args.append(False)
     parent_prefill.assert_called_once_with(*expected_args)
+
+
+@pytest.mark.parametrize("runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
+def test_prefill_preserves_mla_query_lengths_from_caller(runtime_mode):
+    speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    speculator.draft_attn_layer_names = {"draft"}
+    speculator._lmhead_pad_size_context = MagicMock(side_effect=lambda **kwargs: nullcontext())
+    metadata = AscendMLAMetadata.__new__(AscendMLAMetadata)
+    metadata.num_decode_tokens = 2
+    metadata.decode = SimpleNamespace(actual_seq_lengths_q=[2, 4, 6, 8], seq_lens_list=[10, 0, 0, 0])
+    slot_mappings = {"draft": object()}
+    metadata.slot_mapping = slot_mappings["draft"]
+    with patch.object(TargetDependentARSpeculator, "_prefill") as parent_prefill:
+        speculator._prefill(1, 8, {"draft": metadata}, slot_mappings, None, runtime_mode)
+
+    parent_prefill.assert_called_once()
+    forwarded = parent_prefill.call_args.args[2]["draft"]
+    assert forwarded is metadata
+    assert metadata.decode.actual_seq_lengths_q == [2, 4, 6, 8]
+    assert parent_prefill.call_args.args[3] is slot_mappings
 
 
 @pytest.mark.parametrize("skip_sample", [False, True])
@@ -617,15 +641,36 @@ def test_capture_multi_step_captures_decode():
     speculator.decode_cudagraph_manager.capture.assert_called_once()
 
 
-def test_propose_accepts_main_dp_sync_state_and_num_speculative_tokens():
+@pytest.mark.parametrize(
+    "adaptive,dummy,sync_uniform,clear_uniform",
+    [
+        (True, True, 6, True),
+        (True, False, 6, False),
+        (False, True, 6, False),
+        (False, False, 6, False),
+        (True, True, None, False),
+    ],
+)
+def test_propose_accepts_main_dp_sync_state_and_num_speculative_tokens(adaptive, dummy, sync_uniform, clear_uniform):
     # vLLM #60754 renamed the DP-sync argument to `dp_sync_state` on main and
     # vLLM #60335 added `num_speculative_tokens`; both are keyword-only upstream.
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     speculator.dp_size = 2
     speculator.pcp_manager = None
+    speculator.enable_adaptive_verification = adaptive
     input_batch = object()
-    args = [object() for _ in range(10)]
-    dp_sync = object()
+    attn_metadata = {"draft": object()}
+    args = [object() for _ in range(9)]
+    sync_kwargs = dict(
+        num_tokens_across_dp=torch.tensor([8, 8]),
+        uniform_token_count=sync_uniform,
+        eager=False,
+        num_reqs=1,
+        skip_drafts=True,
+    )
+    if not vllm_version_is("0.33.0"):
+        sync_kwargs["max_query_len"] = 6
+    dp_sync = DPSyncState(**sync_kwargs)
     expected = object()
     with (
         patch(
@@ -638,9 +683,19 @@ def test_propose_accepts_main_dp_sync_state_and_num_speculative_tokens():
         ),
         patch.object(TargetDependentARSpeculator, "propose", return_value=expected) as parent_propose,
     ):
-        result = speculator.propose(input_batch, *args, dp_sync_state=dp_sync, num_speculative_tokens=2)
+        result = speculator.propose(
+            input_batch, attn_metadata, *args, dp_sync_state=dp_sync, dummy_run=dummy, num_speculative_tokens=2
+        )
     assert result is expected
-    assert parent_propose.call_args.args[11] is dp_sync
+    assert parent_propose.call_args.args[1] == attn_metadata
+    forwarded = parent_propose.call_args.args[11]
+    assert (forwarded is dp_sync) is (not clear_uniform)
+    assert forwarded.uniform_token_count == (None if clear_uniform else sync_uniform)
+    assert dp_sync.uniform_token_count == sync_uniform
+    assert forwarded.num_tokens_across_dp is dp_sync.num_tokens_across_dp
+    assert (forwarded.num_reqs, forwarded.eager, forwarded.skip_drafts) == (1, False, True)
+    if not vllm_version_is("0.33.0"):
+        assert forwarded.max_query_len == 6
     assert parent_propose.call_args.kwargs.get("num_speculative_tokens") == 2
 
 
@@ -679,11 +734,7 @@ def test_init_dcp_enabled():
     dcp_manager_cls.assert_called_once_with(
         dcp_world_size=2,
         dcp_rank=1,
-        max_buffer_num_tokens=128,
-        max_num_reqs=16,
-        device=torch.device("cpu"),
         vllm_config=speculator.draft_vllm_config,
-        use_async_scheduling=True,
     )
 
 
@@ -800,9 +851,11 @@ def test_generate_draft_capture_uses_request_rows(num_reqs, num_tokens):
         assert speculator._lmhead_pad_size == num_reqs
 
     module = "vllm_ascend.worker.v2.spec_decode."
+    # #60989 renamed the native single-step draft entry point on main.
+    parent_method = "_generate_draft" if vllm_version_is("0.33.0") else "_decode"
     with (
         patch(module + "lmhead_tp_utils.lmhead_tp_enable", return_value=True),
-        patch.object(TargetDependentARSpeculator, "_generate_draft", side_effect=parent) as generate,
+        patch.object(TargetDependentARSpeculator, parent_method, side_effect=parent) as generate,
     ):
         speculator._generate_draft(num_reqs, num_tokens, None, None, None)
     expected = [num_reqs, num_tokens, None, None, None, CUDAGraphMode.NONE]

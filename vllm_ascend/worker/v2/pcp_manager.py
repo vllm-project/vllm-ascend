@@ -17,14 +17,13 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pcp_group, get_pp_group
 
 # vLLM main (#56888) replaced buffer_utils.async_copy_to_gpu with
 # torch_utils.async_tensor_h2d (gaining out=/device=None support).
@@ -34,15 +33,16 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
-from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 
 if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
     from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 
@@ -90,13 +90,34 @@ class AscendPCPManager(PCPManager):
     # draft prefill inputs; the rows are stashed in the _draft_*_stash buffers.
     _staged_draft_inputs: tuple[InputBuffers, int] | None = None
 
+    # vLLM 0.33.0 lacks the runner hook introduced by upstream #61994.
+    # Other supported versions inherit PCPManager.sync_drafts directly.
+    # Remove this block and the propose() calls when dropping 0.33.0.
+    # DFlash/DSpark return full-width row slices of contiguous draft buffers.
+    if vllm_version_is("0.33.0"):
+
+        def sync_drafts(
+            self,
+            draft_tokens: torch.Tensor,
+            idx_mapping: torch.Tensor,
+            draft_logits: "torch.Tensor | DraftLogitsCache | None",
+        ) -> None:
+            """Broadcast completed proposals in place, as the upstream hook does."""
+            pcp_group = get_pcp_group()
+            pcp_group.broadcast(draft_tokens, src=0)
+            if draft_logits is not None:
+                # Older paired versions store a Tensor instead of DraftLogitsCache.
+                logits_buffer = draft_logits if isinstance(draft_logits, torch.Tensor) else draft_logits.values
+                logits = logits_buffer[idx_mapping]
+                pcp_group.broadcast(logits, src=0)
+                logits_buffer[idx_mapping] = logits
+
     def __init__(
         self,
         pcp_world_size: int,
         pcp_rank: int,
         device: torch.device,
         shard_decode_requests: bool = False,
-        req_states: RequestState | None = None,
         max_num_reqs: int | None = None,
         max_num_tokens: int | None = None,
         block_tables: BlockTables | None = None,
@@ -185,53 +206,6 @@ class AscendPCPManager(PCPManager):
         """Use the shared policy after the runner injects vllm_config."""
         return is_pcp_decode_sharding_enabled(self.vllm_config)
 
-    # TODO: Remove replicated_requests and _iter_rank_chunks once the paired
-    # vLLM includes #52162, which shards decode requests upstream.
-    def replicated_requests(self, num_scheduled_tokens: np.ndarray, is_prefilling: np.ndarray) -> np.ndarray:
-        """Sharded decodes have a single owner, so none of them is replicated."""
-        replicated = super().replicated_requests(num_scheduled_tokens, is_prefilling)
-        if self.is_decode_sharded:
-            replicated &= np.asarray(is_prefilling, dtype=np.bool_)
-        return replicated
-
-    def _iter_rank_chunks(
-        self,
-        rank: int,
-        num_scheduled_tokens: np.ndarray,
-        is_prefilling: np.ndarray,
-    ) -> Iterator[tuple[int, int, int]]:
-        """Split prefills as upstream does and assign decodes round-robin.
-
-        Only scheduled decodes count toward the round-robin order, which keeps
-        every step balanced. Ownership may change between steps because KV
-        and hidden states are gathered back to every PCP rank.
-        """
-        if not self.is_decode_sharded:
-            yield from super()._iter_rank_chunks(rank, num_scheduled_tokens, is_prefilling)
-            return
-
-        decode_ordinal = 0
-        num_chunks = 2 * self.pcp_world_size
-        for req_idx, num_tokens in enumerate(num_scheduled_tokens):
-            query_len = int(num_tokens)
-            if query_len == 0:
-                continue
-
-            if not is_prefilling[req_idx]:
-                owner_rank = decode_ordinal % self.pcp_world_size
-                decode_ordinal += 1
-                if rank == owner_rank:
-                    yield req_idx, 0, query_len
-                continue
-
-            # DCP == 1 here, so prefills use upstream's DualChunkSwap split.
-            chunk_size = (query_len + num_chunks - 1) // num_chunks
-            for chunk_idx in (rank, num_chunks - 1 - rank):
-                chunk_offset = chunk_idx * chunk_size
-                chunk_len = min(chunk_size, query_len - chunk_offset)
-                if chunk_len > 0:
-                    yield req_idx, chunk_offset, chunk_len
-
     @property
     def global_batch(self) -> AscendInputBatch:
         """Return the scheduled batch retained before PCP partitioning."""
@@ -263,9 +237,9 @@ class AscendPCPManager(PCPManager):
 
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None:
-            if speculative_config.method not in ("mtp", "eagle3", "dspark"):
+            if speculative_config.method not in ("mtp", "eagle3", "dspark", "dflash"):
                 raise NotImplementedError(
-                    "Ascend MRV2 PCP supports speculative decoding only with MTP, Eagle3 and DSpark."
+                    "Ascend MRV2 PCP supports speculative decoding only with MTP, Eagle3, DSpark and DFlash."
                 )
 
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
@@ -332,7 +306,6 @@ class AscendPCPManager(PCPManager):
     ) -> AscendInputBatch:
         """Refresh Ascend-only local metadata after upstream PCP partitioning."""
         local_batch.is_dummy = getattr(global_batch, "is_dummy", False)
-        local_batch.is_cpp_profile = getattr(global_batch, "is_cpp_profile", False)
         self._pad_hidden_restore_idx(global_batch)
         if not self.is_decode_sharded:
             local_batch = self._pad_replicated_decode_graph(global_batch, local_batch)
@@ -367,28 +340,6 @@ class AscendPCPManager(PCPManager):
             kv_cache_config=self.kv_cache_config,
         )
         return local_batch
-
-    # vLLM main renamed ``PCPManager.prepare_inputs_to_capture`` to
-    # ``prepare_inputs_for_capture_or_profile`` so the capture path also expands
-    # ``is_padding`` to the rows the MoE routes.
-
-    def prepare_inputs_for_capture_or_profile(  # type: ignore[misc]
-        self,
-        input_batch: AscendInputBatch,
-    ) -> AscendInputBatch:
-        """Stage ordinary dummies, but partition CPP's global prefill dummy."""
-        if not getattr(input_batch, "is_cpp_profile", False):
-            staged = super().prepare_inputs_for_capture_or_profile(input_batch)
-            assert isinstance(staged, AscendInputBatch)
-            return staged
-
-        # The parent implementation only copies a dummy into PCP-local buffers.
-        # CPP instead supplies a global prompt, so use the real prefill splitter
-        # before those buffers are overwritten with the rank-local layout.
-        return self.partition_batch(
-            input_batch,
-            BatchExecutionDescriptor(CUDAGraphMode.NONE, input_batch.num_tokens, None),
-        )
 
     def _pad_hidden_restore_idx(self, global_batch: AscendInputBatch) -> None:
         """Extend restore indices to the global padded extent.
@@ -640,48 +591,6 @@ class AscendPCPManager(PCPManager):
             for layer_name in group.layer_names
         )
 
-    def prepare_slot_mappings(self) -> torch.Tensor:
-        """Pad PCP slot mappings to the fixed FULL-decode graph layout.
-
-        The upstream manager packs current local rows as
-        [rank 0 rows | rank 1 rows | ...]. A full-decode graph pads the model
-        input of each PCP rank to graph_num_tokens. Preserve that rank-major
-        layout when expanding the slot mapping:
-        [rank 0 rows | rank 0 padding | rank 1 rows | rank 1 padding | ...].
-
-        Sharded decode already uses the rank-local graph stride upstream.
-        """
-        slot_mappings = super().prepare_slot_mappings()
-        assert self._global_batch is not None
-        graph_num_tokens = self._global_batch.num_tokens_after_padding
-        is_decode_only = not bool(self._global_batch.is_prefilling_np.any())
-        if self.is_decode_sharded or not is_decode_only or graph_num_tokens <= self._global_batch.num_tokens:
-            return slot_mappings
-
-        assert self._gathered_kv_slot_mappings is not None
-        graph_num_slots = graph_num_tokens * self.pcp_world_size
-        local_num_tokens = slot_mappings.shape[1] // self.pcp_world_size
-        if local_num_tokens * self.pcp_world_size != slot_mappings.shape[1]:
-            raise RuntimeError(
-                "PCP gathered slot mappings must contain an equal local span "
-                f"for every rank, got {slot_mappings.shape[1]} slots for "
-                f"pcp_world_size={self.pcp_world_size}."
-            )
-
-        graph_slot_mappings = self._gathered_kv_slot_mappings[:, :graph_num_slots]
-        # The compact source is a view of this reusable destination buffer.
-        # Snapshot it first: a graph stride can overlap the next compact rank
-        # span (for example, 3 compact tokens expanded to a 4-token graph).
-        compact_slot_mappings = slot_mappings.clone()
-        for pcp_rank in range(self.pcp_world_size):
-            source_start = pcp_rank * local_num_tokens
-            target_start = pcp_rank * graph_num_tokens
-            graph_slot_mappings[:, target_start : target_start + local_num_tokens].copy_(
-                compact_slot_mappings[:, source_start : source_start + local_num_tokens]
-            )
-            graph_slot_mappings[:, target_start + local_num_tokens : target_start + graph_num_tokens].fill_(-1)
-        return graph_slot_mappings
-
     def refresh_gathered_slot_mappings(self, slot_mappings: torch.Tensor) -> None:
         """Publish updated global slots in the original rank-major PCP layout."""
         assert self._global_batch is not None
@@ -730,7 +639,7 @@ class AscendPCPManager(PCPManager):
         slot_mappings: torch.Tensor | None = None,
     ) -> AscendPCPAttentionContext:
         """Build PCP context for the current real, capture, or idle DP batch."""
-        if input_batch is not None and input_batch.is_dummy and not input_batch.is_cpp_profile:
+        if input_batch is not None and input_batch.is_dummy:
             # Both capture and runtime dummy batches bypass partition_batch().
             # Saved layout state may be absent or belong to a previous request.
             assert block_tables is not None
