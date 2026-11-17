@@ -55,7 +55,7 @@ def _count_allgather_kernel(
 def _reduce_allgather_counts_kernel(
     partial_counts_ptr,
     counts_ptr,
-    NUM_PROGRAMS: tl.constexpr,
+    NUM_PARTIAL_ROWS: tl.constexpr,
     NUM_BINS: tl.constexpr,
     LOCAL_COUNT: tl.constexpr,
     ROWS_PER_TILE: tl.constexpr,
@@ -66,7 +66,7 @@ def _reduce_allgather_counts_kernel(
     bins = tl.arange(0, NUM_BINS)
     partial_counts = tl.load(
         partial_counts_ptr + rows[:, None] * NUM_BINS + bins[None, :],
-        mask=(tile_rows[:, None] < ROWS_PER_TILE) & (rows[:, None] < NUM_PROGRAMS),
+        mask=(tile_rows[:, None] < ROWS_PER_TILE) & (rows[:, None] < NUM_PARTIAL_ROWS),
         other=0,
     )
     counts = tl.sum(partial_counts, axis=0)
@@ -122,7 +122,7 @@ def count_allgather_tokens_triton(
     _reduce_allgather_counts_kernel[(triton.cdiv(programs, reduce_rows),)](
         partial_counts,
         counts,
-        NUM_PROGRAMS=programs,
+        NUM_PARTIAL_ROWS=programs,
         NUM_BINS=num_bins,
         LOCAL_COUNT=local_expert_count,
         ROWS_PER_TILE=reduce_rows,
