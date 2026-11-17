@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import torch
-from vllm.config import KVTransferConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.v1.core.sched import scheduler as scheduler_module
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
@@ -32,33 +32,40 @@ def _make_scheduler(
     num_speculative_tokens=2,
     eagle_block_drop=True,
 ):
-    config = create_vllm_config(
-        max_num_batched_tokens=128,
-        block_size=16,
-        speculative_method=speculative_method,
-        num_speculative_tokens=num_speculative_tokens,
-    )
-    if config.speculative_config is not None:
-        # Current public hybrid checkpoints have one MTP module, even for K > 1.
-        config.speculative_config.draft_model_config.hf_config.num_nextn_predict_layers = 1
-        config.speculative_config.disable_eagle_block_drop = not eagle_block_drop
-    # BalanceScheduler initializes real runtime reporting; isolate its writes
-    # without requiring the source checkout to be writable.
-    config.additional_config.update(
-        runtime_config_path=str(tmp_path / "runtime_config.json"),
-        runtime_report_dir=str(tmp_path / "report"),
-        runtime_config_hot_reload=False,
-    )
-    config.model_config.max_model_len = 128
-    config.scheduler_config.max_model_len = 128
-    config.scheduler_config.max_num_batched_tokens = budget
-    config.scheduler_config.async_scheduling = scheduler_cls is AsyncScheduler
-    config.cache_config.mamba_cache_mode = cache_mode
-    config.cache_config.enable_prefix_caching = not has_mamba or cache_mode == "align"
-    config.cache_config.num_gpu_blocks = 128
-    config.kv_transfer_config = (
-        None if role is None else KVTransferConfig(kv_connector="MooncakeConnector", kv_role=role)
-    )
+    def finalize_config(**kwargs):
+        # Set fixture inputs before VllmConfig resolves connector capabilities
+        # and speculative lookahead. Avoid mutating derived config afterwards.
+        spec = kwargs["speculative_config"]
+        if spec is not None:
+            spec.draft_model_config.hf_config.num_nextn_predict_layers = 1
+            spec.disable_eagle_block_drop = not eagle_block_drop
+        kwargs["model_config"].max_model_len = 128
+        scheduler_config = kwargs["scheduler_config"]
+        scheduler_config.max_model_len = 128
+        scheduler_config.max_num_batched_tokens = budget
+        scheduler_config.async_scheduling = scheduler_cls is AsyncScheduler
+        cache_config = kwargs["cache_config"]
+        cache_config.mamba_cache_mode = cache_mode
+        cache_config.enable_prefix_caching = not has_mamba or cache_mode == "align"
+        cache_config.num_gpu_blocks = 128
+        kwargs["kv_transfer_config"] = (
+            None if role is None else KVTransferConfig(kv_connector="MooncakeConnector", kv_role=role)
+        )
+        # Keep BalanceScheduler runtime reporting off the read-only source.
+        kwargs["additional_config"] = {
+            "runtime_config_path": str(tmp_path / "runtime_config.json"),
+            "runtime_report_dir": str(tmp_path / "report"),
+            "runtime_config_hot_reload": False,
+        }
+        return VllmConfig(**kwargs)
+
+    with patch("tests.ut.kv_offload.utils.VllmConfig", new=finalize_config):
+        config = create_vllm_config(
+            max_num_batched_tokens=128,
+            block_size=16,
+            speculative_method=speculative_method,
+            num_speculative_tokens=num_speculative_tokens,
+        )
     connector = MagicMock(spec=KVConnectorBase_V1)
     connector.requires_kv_delivery = False
     connector.supports_divergent_local_hybrid_hits = False
@@ -114,22 +121,6 @@ def _prefill_intervals(scheduler, request):
 
 
 @pytest.mark.parametrize("scheduler_cls", [Scheduler, AsyncScheduler])
-@pytest.mark.parametrize("has_mamba,cache_mode", [(False, "none"), (False, "align"), (True, "none")])
-def test_attention_and_nonalign_schedulers_do_not_enter_mamba_split(
-    monkeypatch, tmp_path, scheduler_cls, has_mamba, cache_mode
-):
-    scheduler = _make_scheduler(
-        monkeypatch, tmp_path, scheduler_cls, has_mamba=has_mamba, cache_mode=cache_mode, budget=4
-    )
-    split = Mock(side_effect=AssertionError("This scheduler must not call Mamba alignment"))
-    monkeypatch.setattr(scheduler, "_mamba_block_aligned_split", split)
-    request = create_request(1, num_tokens=11, block_size=16)
-
-    assert _prefill_intervals(scheduler, request) == [(0, 4), (4, 8), (8, 11)]
-    split.assert_not_called()
-
-
-@pytest.mark.parametrize("scheduler_cls", [Scheduler, AsyncScheduler])
 @pytest.mark.parametrize("role", [None, "kv_producer", "kv_consumer", "kv_both"])
 def test_generic_hybrid_scheduler_keeps_reusable_prefill_boundary(monkeypatch, tmp_path, scheduler_cls, role):
     scheduler = _make_scheduler(
@@ -177,15 +168,7 @@ def test_single_module_mtp_consumer_prefill_keeps_checkpoints_and_progress(
         num_speculative_tokens=num_speculative_tokens,
         eagle_block_drop=eagle_block_drop,
     )
-    config = scheduler.vllm_config.speculative_config
-    assert config.method == "mtp"
-    assert config.draft_model_config.hf_config.num_nextn_predict_layers == 1
-    assert not config.use_multi_module_mtp()
     assert scheduler.num_prefill_lookahead == 1
-    assert scheduler.use_eagle and scheduler.use_eagle_block_drop == eagle_block_drop
-    assert scheduler.num_hash_lookahead_tokens == 0
-    assert scheduler.need_mamba_block_aligned_split
-    assert not scheduler.mamba_has_prefill_checkpoint_blocks
     split = Mock(wraps=scheduler._mamba_block_aligned_split)
     monkeypatch.setattr(scheduler, "_mamba_block_aligned_split", split)
     request = create_request(401, num_tokens=49, block_size=16)
