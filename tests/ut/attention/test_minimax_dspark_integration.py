@@ -34,6 +34,10 @@ def selector_runtime(monkeypatch):
     monkeypatch.setitem(sys.modules, "vllm.compilation", SimpleNamespace(backends=backends))
     monkeypatch.setitem(sys.modules, "vllm.config", config_module)
     monkeypatch.setitem(sys.modules, "vllm.v1.attention.backend", backend)
+    flash_backend = SimpleNamespace(get_supported_head_sizes=lambda: [128])
+    monkeypatch.setitem(
+        sys.modules, "vllm_ascend.attention.fa_v1", SimpleNamespace(AscendFlashAttentionBackend=flash_backend)
+    )
     namespace = {
         "torch": torch,
         "HardwareCapability": SimpleNamespace(DEVICE_LENGTH_FLASH_ATTN=object()),
@@ -97,19 +101,19 @@ def test_original_qwen3_dspark_graph_and_eager_support_is_retained(selector_runt
     assert not r.select((False, False, False), r.selector)
 
 
-def test_glm_dflash_selection_is_retained(selector_runtime):
+@pytest.mark.parametrize("eager", [False, True])
+def test_glm_dflash_selection_supports_graph_and_eager(selector_runtime, eager):
     r = selector_runtime
     spec = r.config.speculative_config
     spec.method = "dflash"
     spec.target_model_config.hf_text_config.model_type = "glm_moe_dsa"
     spec.draft_model_config.architectures = ["DFlash2DraftModel"]
+    spec.enforce_eager = eager
     r.backends.model_tag = "dflash_head"
     assert r.select((False, False, False), r.selector)
-    spec.enforce_eager = False
-    assert not r.select((False, False, False), r.selector)
 
 
-def test_flash_attn_plan_cache_separates_causal_masks(monkeypatch):
+def test_flash_attn_plan_updates_the_causal_mask(monkeypatch):
     source = Path(__file__).resolve().parents[3] / "vllm_ascend/attention/fa_v1.py"
     tree = ast.parse(source.read_text())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendFlashAttentionImpl")
@@ -119,19 +123,35 @@ def test_flash_attn_plan_cache_separates_causal_masks(monkeypatch):
     padded_size = next(
         n for n in backend_cls.body if isinstance(n, ast.FunctionDef) and n.name == "get_padded_head_size"
     )
+    builder_cls = next(
+        n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendFlashAttentionMetadataBuilder"
+    )
+    plan_methods = {"_get_flash_attn_plan", "_store_flash_attn_plan", "update_draft_decode_metadata"}
+    nodes = [method, pad, padded_size]
+    nodes.extend(n for n in builder_cls.body if isinstance(n, ast.FunctionDef) and n.name in plan_methods)
     namespace = {"torch": torch, "F": torch.nn.functional, "attention_transfer_window": nullcontext}
-    exec(compile(ast.Module(body=[method, pad, padded_size], type_ignores=[]), str(source), "exec"), namespace)
+    module = ast.Module(body=nodes, type_ignores=[])
+    exec(compile(module, str(source), "exec", flags=__future__.annotations.compiler_flag), namespace)
     namespace["AscendFlashAttentionBackend"] = SimpleNamespace(get_padded_head_size=namespace["get_padded_head_size"])
     query = torch.zeros(2, 8, 128, dtype=torch.bfloat16)
     ops = SimpleNamespace(
-        flash_attn_metadata=Mock(side_effect=[object(), object()]), flash_attn=Mock(return_value=(query, None))
+        flash_attn_metadata=Mock(
+            side_effect=lambda *_args, **kwargs: torch.full((16,), kwargs["mask_mode"], dtype=torch.int32)
+        ),
+        flash_attn=Mock(return_value=(query, None)),
     )
     monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
-    impl = SimpleNamespace(
+    builder = SimpleNamespace(
         num_heads=8,
         num_kv_heads=1,
+        head_size=128,
         sliding_window=None,
-        use_bnsd_kv_cache=False,
+        layout_kv="PA_BBND",
+        plan_buffer=torch.empty(16, dtype=torch.int32),
+    )
+    builder._get_flash_attn_plan = lambda metadata: namespace["_get_flash_attn_plan"](builder, metadata)
+    builder._store_flash_attn_plan = lambda plan: namespace["_store_flash_attn_plan"](builder, plan)
+    impl = SimpleNamespace(
         key_cache=None,
         value_cache=None,
         sinks=None,
@@ -139,8 +159,8 @@ def test_flash_attn_plan_cache_separates_causal_masks(monkeypatch):
         _pad_head=namespace["_pad_head"],
     )
     metadata = SimpleNamespace(
-        flash_attn_lengths=None,
-        flash_attn_plans={},
+        flash_attn_plan=None,
+        num_actual_tokens=query.shape[0],
         block_tables=torch.zeros(1, 1, dtype=torch.int32),
         query_start_loc_gpu=torch.tensor([0, 2]),
         seq_lens_gpu=torch.tensor([3]),
@@ -148,9 +168,12 @@ def test_flash_attn_plan_cache_separates_causal_masks(monkeypatch):
         flash_attn_mask=torch.ones(2, 2),
         causal=False,
     )
-    for causal in [False, True, False]:
+    for causal, mask_mode in [(False, 0), (True, 3), (False, 0)]:
         metadata.causal = causal
+        namespace["update_draft_decode_metadata"](builder, metadata)
         namespace["forward_impl"](impl, query, None, None, None, metadata, torch.empty_like(query))
-    assert ops.flash_attn_metadata.call_count == 2
-    assert [call.kwargs["mask_mode"] for call in ops.flash_attn.call_args_list] == [0, 3, 0]
-    assert ops.flash_attn.call_args_list[0].kwargs["metadata"] is ops.flash_attn.call_args_list[2].kwargs["metadata"]
+        args = ops.flash_attn.call_args.kwargs
+        assert args["mask_mode"] == mask_mode
+        assert args["metadata"].data_ptr() == builder.plan_buffer.data_ptr()
+        torch.testing.assert_close(args["metadata"], torch.full_like(builder.plan_buffer, mask_mode))
+    assert ops.flash_attn_metadata.call_count == 3

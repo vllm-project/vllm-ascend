@@ -375,13 +375,11 @@ A few important things to consider when using DFlash2 draft models:
 
     On 950DT Products, GLM (`glm_moe_dsa`) targets paired with `DFlash2DraftModel` use
     device-length CANN FlashAttn for both eager and full-graph drafts when the
-    draft has supported FP16/BF16 queries and unquantized KV. Full graphs
-    capture length preparation and FlashAttn metadata generation once per
-    compatible attention group in each captured forward, so replay
-    reads the latest rejection-corrected device lengths without converting
-      them to Python lists or updating FIA tasks on the host. The backend also
-      advertises in-place draft metadata updates, allowing `propose()` to skip
-      eager metadata construction before full-graph replay. Unsupported
+    draft has supported FP16/BF16 queries and unquantized KV. For full graphs
+    that use FlashAttn in every draft attention group, the draft metadata hook
+    captures length preparation and writes one FlashAttn plan per group to its
+    preallocated buffer. Replay reads the latest rejection-corrected device lengths,
+    and `propose()` skips eager metadata construction. Unsupported
     hardware, head sizes, cache types, and attention features retain their
     existing backend. This removes that draft length synchronization path;
     it does not remove all CPU-NPU transfers or guarantee a lower TPOT.
