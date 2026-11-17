@@ -5,7 +5,7 @@
 #include <ATen/ATen.h>
 #include <string>
 
-#include <ascendcl.h>
+#include <acl/acl_base_rt.h>
 #include <tiling/platform/platform_ascendc.h>
 
 #include "op_kernel/resolver_scratch.h"
