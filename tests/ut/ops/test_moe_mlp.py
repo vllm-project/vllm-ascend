@@ -404,6 +404,95 @@ class TestUnquantizedFusedMoEMethod(unittest.TestCase):
         self.assertEqual(out, "gate_up_out")
         self.assertEqual(mock_gmm.call_args.kwargs["weight"][0].shape, torch.Size([2, 16, 8]))
 
+    def test_apply_gmm1_lora_fastpath_is_limited_to_idle_allgather(self):
+        cases = (
+            ("allgather", True, (1, 1, 1, False), False),
+            ("allgather", True, (2, 1, 1, False), True),
+            ("allgather", True, (1, 2, 1, False), True),
+            ("allgather", True, (1, 1, 1, True), True),
+            ("allgather", False, (1, 1, 1, False), True),
+            ("all2all", True, (1, 1, 1, False), True),
+        )
+        for routing_kind, no_lora, topology, expects_lora in cases:
+            with self.subTest(routing_kind=routing_kind, no_lora=no_lora, topology=topology):
+                method = self._make_method()
+                ep_size, dp_size, pcp_size, is_sequence_parallel = topology
+                method.moe = SimpleNamespace(
+                    has_bias=False,
+                    ep_size=ep_size,
+                    dp_size=dp_size,
+                    pcp_size=pcp_size,
+                    is_sequence_parallel=is_sequence_parallel,
+                )
+                layer = SimpleNamespace(
+                    w13_weight=torch.randn(2, 8, 16),
+                    w2_weight=torch.randn(2, 16, 8),
+                    w13_bias=None,
+                    w2_bias=None,
+                )
+                lora_context = SimpleNamespace(
+                    punica_wrapper=SimpleNamespace(no_lora=no_lora),
+                )
+                routing_metadata = {}
+                if routing_kind == "allgather":
+                    routing_metadata = {
+                        "expanded_row_idx": torch.arange(4),
+                        "topk_ids": torch.zeros(4, 1, dtype=torch.int64),
+                    }
+                else:
+                    lora_context.exchanged_lora_indices = torch.tensor([0, -1])
+
+                mlp_compute_input = _mlp_compute_input(
+                    layer=layer,
+                    lora_context=lora_context,
+                    **routing_metadata,
+                )
+                gate_up_out = torch.zeros(4, 16)
+                routing = (torch.tensor([0, 0]), torch.tensor([0, -1]))
+                moe_comm_type = MoECommType.ALLGATHER if routing_kind == "allgather" else MoECommType.ALLTOALL
+                with (
+                    patch(
+                        "vllm_ascend.ops.fused_moe.routed_experts._EXTRA_CTX",
+                        SimpleNamespace(moe_comm_type=moe_comm_type),
+                    ),
+                    patch(
+                        "torch_npu.npu_grouped_matmul",
+                        return_value=[gate_up_out],
+                        create=True,
+                    ),
+                    patch(
+                        "vllm_ascend.lora.fused_moe._recover_moe_lora_routing_allgather",
+                        return_value=routing,
+                    ) as recover_allgather,
+                    patch(
+                        "vllm_ascend.lora.fused_moe._recover_moe_lora_routing_all2all",
+                        return_value=routing,
+                    ) as recover_all2all,
+                    patch("vllm_ascend.lora.fused_moe.moe_lora_apply_w13") as apply_w13,
+                ):
+                    out = method.apply_gmm1(mlp_compute_input)
+
+                self.assertIs(out, gate_up_out)
+                if expects_lora:
+                    if routing_kind == "allgather":
+                        recover_allgather.assert_called_once()
+                        recover_all2all.assert_not_called()
+                    else:
+                        recover_allgather.assert_not_called()
+                        recover_all2all.assert_called_once()
+                    apply_w13.assert_called_once_with(
+                        lora_context,
+                        gate_up_out=gate_up_out,
+                        hidden_states=mlp_compute_input.hidden_states,
+                        lora_routing=routing,
+                    )
+                    self.assertIs(method._lora_routing, routing)
+                else:
+                    recover_allgather.assert_not_called()
+                    recover_all2all.assert_not_called()
+                    apply_w13.assert_not_called()
+                    self.assertIsNone(method._lora_routing)
+
     def test_apply_act_quant_applies_topk_scales(self):
         method = self._make_method()
         mlp_compute_input = _mlp_compute_input(topk_scales=torch.tensor([0.5]))

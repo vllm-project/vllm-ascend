@@ -1,0 +1,6 @@
+pr: 22098
+entries:
+  - category: performance
+    text: >-
+      Skipped unnecessary unquantized MoE LoRA routing and delta injection for
+      idle pure-TP AllGather batches while preserving EP collective behavior.

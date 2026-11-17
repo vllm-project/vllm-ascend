@@ -30,11 +30,11 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import Un
 from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
-from vllm_ascend.lora.fused_moe import sync_lora_context
+from vllm_ascend.lora.fused_moe import has_lora, sync_lora_context
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMilestones
@@ -50,6 +50,18 @@ from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAll
 from vllm_ascend.quantization.nz import NzCastSpec
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
+
+
+def _is_safe_idle_allgather(moe_config, lora_context) -> bool:
+    """Return whether local idle LoRA work is independent of gathered ranks."""
+    if _EXTRA_CTX.moe_comm_type != MoECommType.ALLGATHER or has_lora(lora_context):
+        return False
+    return (
+        getattr(moe_config, "ep_size", None) == 1
+        and getattr(moe_config, "dp_size", None) == 1
+        and getattr(moe_config, "pcp_size", None) == 1
+        and getattr(moe_config, "is_sequence_parallel", None) is False
+    )
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -244,14 +256,19 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # the comm method provided routing metadata in lora_context.
         self._lora_routing = None
         lora_context = mlp_compute_input.lora_context
-        if lora_context is not None:  # LoRA applied
+        is_all_gather = _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER
+        # Only pure-TP AllGather is local. Any collective that can gather tokens
+        # from another rank must retain the context-presence gate.
+        if lora_context is not None and not _is_safe_idle_allgather(self.moe, lora_context):
             from vllm_ascend.lora.fused_moe import (
                 _recover_moe_lora_routing_all2all,
                 _recover_moe_lora_routing_allgather,
                 moe_lora_apply_w13,
             )
 
-            if mlp_compute_input.expanded_row_idx is not None and mlp_compute_input.topk_ids is not None:
+            if is_all_gather:
+                assert mlp_compute_input.expanded_row_idx is not None
+                assert mlp_compute_input.topk_ids is not None
                 # AllGather path: use npu_moe_init_routing's expanded_row_idx.
                 self._lora_routing = _recover_moe_lora_routing_allgather(
                     lora_context,
