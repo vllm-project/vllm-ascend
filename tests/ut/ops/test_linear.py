@@ -12,6 +12,7 @@ from tests.ut.base import TestBase
 from vllm_ascend import ascend_config
 from vllm_ascend.distributed import parallel_state
 from vllm_ascend.ops import linear
+from vllm_ascend.ops.kda_parallel import KDAMergedColumnParallelLinear
 from vllm_ascend.ops.linear import (
     AscendDCPGroupColumnParallelLinear,
     AscendMergedColumnParallelLinear,
@@ -318,6 +319,29 @@ class TestAscendMergedColumnParallelLinear(BaseLinearTest):
         down.weight.weight_loader(down.weight, down_weight)
         torch.testing.assert_close(gate_up.weight, torch.cat([gate_weight[:4], up_weight[:4]]))
         torch.testing.assert_close(down.weight, down_weight[:, :4])
+
+    @unittest.skipIf(vllm_version_is("0.33.0"), "Stacked shard tracking was added after v0.33")
+    def test_custom_allocations_preserve_missing_shard_validation(self):
+        layers: tuple[Any, ...] = (
+            KDAMergedColumnParallelLinear(8, [4, 4], tp_group=SimpleNamespace(world_size=1, rank_in_group=0)),
+            AscendMergedColumnParallelLinear(input_size=8, output_sizes=[4, 4], bias=False, disable_tp=True),
+            AscendQKVParallelLinear(hidden_size=8, head_size=2, total_num_heads=2, bias=False, disable_tp=True),
+        )
+        for layer in layers:
+            with self.subTest(layer=type(layer).__name__):
+                shards = layer.shard_ids
+                first = shards[0]
+                size = layer._get_shard_size_mapping(first)
+                layer.weight_loader(layer.weight, torch.ones(size, 8), first)
+                self.assertEqual(layer.pop_missing_shards(), [f"weight.{shard}" for shard in shards[1:]])
+                # A new complete load must start fresh and cover every shard.
+                for shard in shards:
+                    size = layer._get_shard_size_mapping(shard)
+                    layer.weight_loader(layer.weight, torch.ones(size, 8), shard)
+                self.assertEqual(layer.pop_missing_shards(), [])
+                torch.testing.assert_close(layer.weight, torch.ones_like(layer.weight))
+                with self.assertRaises(ValueError):
+                    layer.validate_shard_id("invalid", layer.weight)
 
     def test_merged_mlp_tp_init(self):
         ascend_config._ASCEND_CONFIG = MagicMock()

@@ -332,3 +332,26 @@ def test_kimi_head_parameters_and_conv_load_the_same_combined_rank(rank):
         attention.conv1d.weight.weight_loader(attention.conv1d.weight, projection, shard_id)
     expected = torch.cat([projection.chunk(4)[rank] for projection in conv.chunk(3)])
     torch.testing.assert_close(attention.conv1d.weight, expected)
+
+
+@pytest.mark.parametrize("size", [2, 4])
+def test_explicit_projection_group_preserves_merged_checkpoint_shards(size):
+    hidden, width = 4, 8
+    inputs = torch.arange(2 * hidden, dtype=torch.float32).reshape(2, hidden)
+    weights = [
+        torch.arange(width * hidden, dtype=torch.float32).reshape(width, hidden) + offset for offset in (0, 100, 200)
+    ]
+    native = SimpleNamespace(world_size=2, rank_in_group=1)
+    for rank in range(size):
+        group = SimpleNamespace(world_size=size, rank_in_group=rank)
+        with parallel_groups(native, native):
+            layer = kda_parallel.KDAMergedColumnParallelLinear(
+                hidden, [width] * 3, tp_group=group, bias=False, params_dtype=torch.float32
+            )
+        for shard, weight in enumerate(weights):
+            layer.weight.weight_loader(layer.weight, weight, shard)
+        expected_weight = torch.cat([weight.chunk(size)[rank] for weight in weights])
+        torch.testing.assert_close(layer.weight, expected_weight)
+        output, _ = layer(inputs)
+        torch.testing.assert_close(output, torch.nn.functional.linear(inputs, expected_weight))
+        assert layer.tp_rank == rank and layer.tp_size == size

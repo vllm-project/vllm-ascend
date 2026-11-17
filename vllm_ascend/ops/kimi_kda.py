@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Ascend Kimi K3 delta attention with TP x PCP head-sharded state."""
 
+from dataclasses import dataclass
 from functools import wraps
 
 import torch
@@ -37,11 +38,14 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
     record_attention_compute_start,
 )
 from vllm_ascend.distributed.parallel_state import get_gproj_tp_group, get_qkv_iproj_tp_group
-from vllm_ascend.ops.finegrained_tp import (
-    KDAProjectionTP,
-    ProjectionColumnParallelLinear,
-    ProjectionMergedColumnParallelLinear,
+from vllm_ascend.models.glm5next.kda_input_projection_tp import (
+    KDAInputProjectionTP,
+    KDAInputProjectionTPLayout,
+    PendingGate,
+    PendingTensor,
+    TPCommunication,
     projection_capacity,
+    uses_aiv_communication,
 )
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
 from vllm_ascend.ops.kda_parallel import (
@@ -67,6 +71,112 @@ from vllm_ascend.utils import npu_stream_switch, vllm_version_is
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 _F_PROJ_SHARD_ID = 1
 _KDA_BFG_STREAM: torch.npu.Stream | None = None
+
+
+@dataclass
+class PendingKDAProjection:
+    qkv: torch.Tensor
+    beta: torch.Tensor
+    forget: torch.Tensor
+    gate: PendingGate
+    pending_qkv: PendingTensor | None
+    layout: KDAInputProjectionTP
+    capacity: int
+
+    def wait(self):
+        if self.pending_qkv is not None:
+            self.qkv, self.beta = self.layout.restore_qkv_beta(self.pending_qkv.wait(), self.capacity)
+            self.pending_qkv = None
+        return (
+            self.qkv,
+            self.forget.view(1, self.capacity, self.layout.num_heads, self.layout.head_dim),
+            self.beta,
+            self.gate,
+        )
+
+
+class KDAProjectionTP:
+    def __init__(self, qkv_group, gate_group, heads: int, head_dim: int):
+        self.qkv_group, self.gate_group = qkv_group, gate_group
+        self.qkv_layout = KDAInputProjectionTP(qkv_group, heads, head_dim)
+        self.gate_layout = KDAInputProjectionTPLayout(gate_group, heads, head_dim)
+        self.communication = TPCommunication()
+        self.qkv_uses_aiv = uses_aiv_communication(qkv_group)
+        self.gate_uses_aiv = uses_aiv_communication(gate_group)
+
+    def project(self, layer, hidden, *, aux_stream: torch.npu.Stream):
+        owner, capacity = self.qkv_layout.prepare_input(hidden)
+        q_input = self.communication.gather(owner, self.qkv_group) if self.qkv_group is not None else None
+        if self.gate_group is self.qkv_group:
+            g_input = q_input
+        else:
+            g_input = self.communication.gather(owner, self.gate_group) if self.gate_group is not None else None
+
+        main = torch.npu.current_stream()
+        owner_ready = main.record_event()
+        owner.record_stream(aux_stream)
+        # C1: owner F needs no gathered input and runs during input AG.
+        with npu_stream_switch(aux_stream):
+            aux_stream.wait_event(owner_ready)
+            forget = layer.f_b_proj(layer.f_a_proj(owner)[0])[0]
+            forget_ready = aux_stream.record_event()
+        # G waits for input AG and owner F_b, avoiding concurrent Cube work.
+        g_hidden = g_input.wait() if g_input is not None else owner
+        main.wait_event(forget_ready)
+        gate = layer.g_proj(g_hidden)[0]
+        # CCU does not consume AIVs: start the return before beta Cube and
+        # input-quant Vector. AIV keeps the existing post-quant launch below.
+        pending_gate = self.exchange_gate(gate) if not self.gate_uses_aiv else None
+        q_hidden = g_hidden if q_input is g_input else q_input.wait() if q_input is not None else owner
+        input_ready = main.record_event()
+        q_hidden.record_stream(aux_stream)
+        # C2: raw BF16 beta Cube and MX input quant Vector have the same input.
+        with npu_stream_switch(aux_stream):
+            aux_stream.wait_event(input_ready)
+            beta = layer.b_proj(q_hidden)[0]
+            beta_ready = aux_stream.record_event()
+        quantized = layer._quantize_fused_qkv(q_hidden, for_finegrained_tp=True)
+        if pending_gate is None:
+            # The producer event follows DynamicQuant in AIV mode.
+            pending_gate = self.exchange_gate(gate)
+        main.wait_event(beta_ready)
+        beta.record_stream(main)
+        forget.record_stream(main)
+        qkv = layer._matmul_fused_qkv(quantized)
+        if self.gate_uses_aiv:
+            # Hide AIV communication only behind QKV Cube, then join before
+            # cat/reorder/zeros/cast/sigmoid/conv/recurrent Vector work.
+            pending_gate.wait()
+        q_pending = None
+        if self.qkv_group is not None:
+            if qkv.dtype != beta.dtype:
+                raise RuntimeError("Kimi QKV/beta exchange requires equal raw projection dtypes.")
+            q_pending = self.communication.exchange(
+                torch.cat((qkv, beta), dim=-1), self.qkv_group, overlap=not self.qkv_uses_aiv
+            )
+        result = PendingKDAProjection(
+            qkv,
+            beta.unsqueeze(0),
+            forget,
+            pending_gate,
+            q_pending,
+            self.qkv_layout,
+            capacity,
+        )
+        if self.qkv_uses_aiv:
+            result.wait()
+        # Non-AIV QKV communication can overlap independent output-buffer
+        # initialization. Its consumers still wait before reading QKV/beta.
+        return result
+
+    def exchange_gate(self, gate: torch.Tensor) -> PendingGate:
+        size = self.gate_group.world_size if self.gate_group is not None else 1
+        return PendingGate(
+            self.communication.exchange(gate, self.gate_group) if self.gate_group is not None else None,
+            gate if self.gate_group is None else None,
+            self.gate_layout,
+            gate.shape[0] // size,
+        )
 
 
 def _kda_bfg_stream() -> torch.npu.Stream:
@@ -256,39 +366,49 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                     raise ValueError(f"{name} must divide the KDA head count ({self.num_heads}).")
             qkv_group = get_qkv_iproj_tp_group() if qkv_size > 1 else None
             gate_group = get_gproj_tp_group() if gate_size > 1 else None
-            self.in_proj_qkvgfab = ProjectionMergedColumnParallelLinear(
+            self.in_proj_qkvgfab = KDAMergedColumnParallelLinear(
                 self.hidden_size,
                 [self.projection_size] * 3,
-                group=qkv_group,
+                tp_group=qkv_group,
+                bias=False,
+                gather_output=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.in_proj_qkv",
             )
             self.in_proj_padding = 0
-            self.b_proj = ProjectionColumnParallelLinear(
+            self.b_proj = KDAColumnParallelLinear(
                 self.hidden_size,
                 self.num_heads,
-                group=qkv_group,
+                tp_group=qkv_group,
+                bias=False,
+                gather_output=False,
                 quant_config=None,
                 prefix=f"{prefix}.b_proj",
             )
-            self.f_a_proj = ProjectionColumnParallelLinear(
+            self.f_a_proj = KDAColumnParallelLinear(
                 self.hidden_size,
                 self.head_dim,
-                group=None,
+                tp_group=None,
+                bias=False,
+                gather_output=False,
                 quant_config=None,
                 prefix=f"{prefix}.f_a_proj",
             )
-            self.f_b_proj = ProjectionColumnParallelLinear(
+            self.f_b_proj = KDAColumnParallelLinear(
                 self.head_dim,
                 self.projection_size,
-                group=None,
+                tp_group=None,
+                bias=False,
+                gather_output=False,
                 quant_config=None,
                 prefix=f"{prefix}.f_b_proj",
             )
-            self.g_proj = ProjectionColumnParallelLinear(
+            self.g_proj = KDAColumnParallelLinear(
                 self.hidden_size,
                 self.projection_size,
-                group=gate_group,
+                tp_group=gate_group,
+                bias=False,
+                gather_output=False,
                 quant_config=None,
                 prefix=f"{prefix}.g_proj",
             )

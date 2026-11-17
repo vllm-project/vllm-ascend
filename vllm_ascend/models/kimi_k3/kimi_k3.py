@@ -92,11 +92,8 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_gproj_tp_group
-from vllm_ascend.ops.finegrained_tp import (
-    FullRankGateTP,
-    ProjectionColumnParallelLinear,
-)
-from vllm_ascend.ops.kda_parallel import KDARowParallelLinear, get_kda_state_shape
+from vllm_ascend.models.glm5next.kda_input_projection_tp import FullRankGateTP
+from vllm_ascend.ops.kda_parallel import KDAColumnParallelLinear, KDARowParallelLinear, get_kda_state_shape
 from vllm_ascend.ops.kimi_kda import (
     AscendKimiK3DeltaAttention as AscendKimiK3DeltaAttentionBase,
 )
@@ -670,10 +667,12 @@ class AscendKimiDSAAttention(AscendKimiMLAAttention):
                         f"gproj_tensor_parallel_size must divide the DSA head count ({config.num_attention_heads})."
                     )
                 group = get_gproj_tp_group()
-                self.g_proj = ProjectionColumnParallelLinear(
+                self.g_proj = KDAColumnParallelLinear(
                     config.hidden_size,
                     config.num_attention_heads * config.v_head_dim,
-                    group=group,
+                    tp_group=group,
+                    bias=False,
+                    gather_output=False,
                     quant_config=None,
                     prefix=f"{prefix}.g_proj",
                 )

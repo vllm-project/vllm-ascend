@@ -9,8 +9,9 @@ import pytest
 import torch
 from torch import nn
 
+import vllm_ascend.ops.kimi_kda as projection_module
+from vllm_ascend.models.glm5next import kda_input_projection_tp as common_projection
 from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend, KimiKDARecoverSSMMetadataBackend
-import vllm_ascend.ops.finegrained_tp as projection_module
 from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
     AscendKimiK3DeltaAttention,
@@ -817,13 +818,15 @@ def test_kda_prefill_direct_norm_and_idle_output(mode, recover):
     ],
 )
 def test_projection_communication_mode_honors_pg_override(monkeypatch, env_mode, pg_mode, expected):
-    monkeypatch.setattr(projection_module.envs, "HCCL_OP_EXPANSION_MODE", env_mode)
+    monkeypatch.setattr(common_projection.envs, "HCCL_OP_EXPANSION_MODE", env_mode)
     options = SimpleNamespace(hccl_config={"hccl_op_expansion_mode": pg_mode})
     backend = SimpleNamespace(options=options)
-    group = SimpleNamespace(device_group=SimpleNamespace(_get_backend=lambda device: backend))
+    group = SimpleNamespace(
+        world_size=1, rank_in_group=0, device_group=SimpleNamespace(_get_backend=lambda device: backend)
+    )
     assert projection_module.uses_aiv_communication(group) is expected
     assert not projection_module.uses_aiv_communication(None)
-    assert projection_module.FullRankGateTP(group, 2, 2).uses_aiv is expected
+    assert common_projection.FullRankGateTP(group, 2, 2).uses_aiv is expected
 
 
 @pytest.mark.parametrize("aiv", [True, False])
@@ -833,7 +836,7 @@ def test_kda_g_precedes_quant_and_aiv_exchanges_join_before_vector(monkeypatch, 
     aux = _RecordingStream("aux", ["forget_ready", "beta_ready"], trace)
     group = SimpleNamespace(world_size=2)
     monkeypatch.setattr(projection_module, "uses_aiv_communication", lambda group: aiv)
-    monkeypatch.setattr(projection_module, "projection_capacity", lambda hidden: hidden.shape[0])
+    monkeypatch.setattr(common_projection, "projection_capacity", lambda hidden: hidden.shape[0])
     monkeypatch.setattr(projection_module.torch.npu, "current_stream", lambda: main)
     monkeypatch.setattr(projection_module, "npu_stream_switch", lambda stream: nullcontext())
     monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: None)
@@ -917,16 +920,16 @@ def test_pending_kda_projection_restores_owner_heads_once(monkeypatch):
         ]
     )
     work = MagicMock()
-    gate = projection_module.PendingGate(None, torch.zeros(2, 4), 1, 2, 2, 2)
+    gate = projection_module.PendingGate(
+        None, torch.zeros(2, 4), common_projection.KDAInputProjectionTPLayout(None, 2, 2), 2
+    )
     pending = projection_module.PendingKDAProjection(
         torch.empty(0),
         torch.empty(0),
         torch.zeros(2, 4),
         gate,
         projection_module.PendingTensor(receive, work, receive),
-        2,
-        2,
-        2,
+        common_projection.KDAInputProjectionTP(SimpleNamespace(world_size=2), 2, 2),
         2,
     )
     qkv, _, beta, _ = pending.wait()

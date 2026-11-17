@@ -13,7 +13,7 @@ import vllm_ascend.attention.sfa_v1 as sparse_mla
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, PreprocessType
-from vllm_ascend.ops.finegrained_tp import PendingGate, PendingTensor
+from vllm_ascend.models.glm5next.kda_input_projection_tp import KDAInputProjectionTPLayout, PendingGate, PendingTensor
 
 
 @pytest.fixture(autouse=True)
@@ -580,7 +580,9 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     gate_work.wait.side_effect = lambda: trace.append("join-G")
     if gate_aiv is not None:
         gate = torch.zeros(4, 2)
-        pending_gate = PendingGate(PendingTensor(gate, gate_work, gate), None, 1, 4, 1, 2)
+        pending_gate = PendingGate(
+            PendingTensor(gate, gate_work, gate), None, KDAInputProjectionTPLayout(None, 1, 2), 4
+        )
         impl.g_proj = MagicMock()
         impl.gproj_tp = SimpleNamespace(
             uses_aiv=gate_aiv,
