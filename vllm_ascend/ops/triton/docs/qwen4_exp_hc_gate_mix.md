@@ -100,6 +100,25 @@ Source: `vllm_ascend/ops/triton/qwen4_exp/hc.py` (public wrapper:
   uses the same wrapper at compilation and runtime; normal startup or graph
   capture prepares the bounded launch variants used by serving.
 
+## Serving Compile Behavior
+
+A real TP2 A3 serving probe used a fresh Triton cache and recorded every
+`_hc_gate_mix_row_block_kernel` compilation in both worker processes:
+
+| Phase | Input rows | Compilations |
+| --- | ---: | ---: |
+| Startup | capture/warmup | 2 |
+| Serving | 1024 | 0 |
+| Serving | 2049 | 2 |
+| Serving | 4096 | 0 |
+| Serving | 8191 | 0 |
+| Serving | 8192 | 0 |
+
+The two startup compilations are one exact-row variant per TP worker. The first
+row-tail request at 2049 rows compiles the other `EVEN_ROWS` class once per
+worker. All later row-tail sizes reuse that variant. A 1024-row request remains
+on the legacy kernel and therefore does not compile the row-block kernel.
+
 ## Origin and Differences
 
 - **Origin**: The math and public interface mirror the upstream Qwen4Exp
