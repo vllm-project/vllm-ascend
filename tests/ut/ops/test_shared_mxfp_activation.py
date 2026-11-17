@@ -39,7 +39,12 @@ class TestSharedMXFPActivation(unittest.TestCase):
             "validate_consistency",
         }
         methods = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in names]
-        constant_names = {"MXFP8_ACTIVATION_GROUP_SIZE", "SWIGLU_MX_INPUT_ALIGNMENT", "SWIGLU_MX_QUANT_MODE"}
+        constant_names = {
+            "MXFP8_ACTIVATION_GROUP_SIZE",
+            "SWIGLU_MX_INPUT_ALIGNMENT",
+            "SWIGLU_MX_QUANT_MODE",
+            "SITU_MX_DST_TYPE_E4M3FN",
+        }
         constants = [
             n
             for n in tree.body
@@ -56,10 +61,13 @@ class TestSharedMXFPActivation(unittest.TestCase):
         self.prepared_cls = PreparedLinearInput
         self.quantized = SimpleNamespace(shape=(36, 2048))
         self.fused = Mock(return_value=(self.quantized, "scale", None))
+        self.situ_fused = Mock(return_value=(self.quantized, "scale"))
         self.torch = SimpleNamespace(
             bfloat16="bf16",
             float8_e4m3fn="fp8",
-            ops=SimpleNamespace(_C_ascend=SimpleNamespace(npu_swiglu_group_quant=self.fused)),
+            ops=SimpleNamespace(
+                _C_ascend=SimpleNamespace(npu_swiglu_group_quant=self.fused, situ_mx_quant=self.situ_fused)
+            ),
         )
         self.namespace: dict[str, Any] = {
             "torch": self.torch,
@@ -101,6 +109,7 @@ class TestSharedMXFPActivation(unittest.TestCase):
         self.executor.lora_context = None
         self.executor.multistream_overlap = True
         self.executor.swiglu_limit = 0.0
+        self.executor.situ_activation = None
         self.gate_up = SimpleNamespace(dtype="bf16", ndim=2, shape=(36, 4096))
         self.executor.part1 = Mock(return_value=self.gate_up)
         self.executor.apply_activation = Mock(return_value="original_activation")
@@ -149,6 +158,63 @@ class TestSharedMXFPActivation(unittest.TestCase):
         self.executor._prepare_linear_input_for_overlap.assert_not_called()
         self.executor.layer.down_proj.assert_called_once_with(self.prepared_cls(self.quantized, "scale", "bf16"))
         self.executor.layer.expert_gate.assert_called_once_with("input")
+
+    def test_situ_shared_mxfp8_preserves_fusion_under_mxfp4_routed(self):
+        self.executor.quant_type = self.quant.W4A8MXFP
+        self.executor.layer.act_fn = SimpleNamespace(beta=4.0, linear_beta=25.0)
+        self.executor.situ_activation = self.executor.layer.act_fn
+        self.executor.layer.expert_gate = Mock(return_value=(2, None))
+        for linear_beta in (25.0, None):
+            with self.subTest(linear_beta=linear_beta):
+                self.executor.situ_activation.linear_beta = linear_beta
+                self.situ_fused.reset_mock()
+                self.assertEqual(self.run_mlp(), 14)
+                self.assertIs(self.submitted.path, self.paths.W8A8_MXFP_LINEAR)
+                self.situ_fused.assert_called_once_with(
+                    x=self.gate_up,
+                    beta=4.0,
+                    linear_beta=linear_beta or 0.0,
+                    activate_left=True,
+                    dst_type=self.namespace["SITU_MX_DST_TYPE_E4M3FN"],
+                )
+        self.fused.assert_not_called()
+        self.executor.apply_activation.assert_not_called()
+        self.executor._prepare_linear_input_for_overlap.assert_not_called()
+        self.executor.layer.down_proj.assert_called_with(self.prepared_cls(self.quantized, "scale", "bf16"))
+
+    def test_situ_fusion_keeps_scheme_constraints(self):
+        self.executor.layer.act_fn = SimpleNamespace(beta=4.0, linear_beta=25.0)
+        self.executor.situ_activation = self.executor.layer.act_fn
+        down = self.executor.layer.down_proj
+        scheme = down.quant_method.quant_method
+        cases = (
+            (self.executor, "lora_context", object()),
+            (scheme, "dynamic_mx_quant_scale_alg", 1),
+            (scheme, "group_size", 64),
+            (down, "mxfp8_tp_padding", (0, 16)),
+            (self.gate_up, "dtype", "fp16"),
+            (self.gate_up, "shape", (8, 192)),
+        )
+        for target, name, value in cases:
+            with self.subTest(name=name), patch.object(target, name, value):
+                self.executor.apply_activation.reset_mock()
+                self.executor._prepare_linear_input_for_overlap.reset_mock()
+                self.assertEqual(self.run_mlp(), 7)
+                self.executor.apply_activation.assert_called_once_with(self.gate_up)
+                self.executor._prepare_linear_input_for_overlap.assert_called_once_with(down, "original_activation")
+        self.situ_fused.assert_not_called()
+        self.fused.assert_not_called()
+
+    def test_situ_checks_its_own_kernel_availability(self):
+        self.executor.layer.act_fn = SimpleNamespace(beta=4.0, linear_beta=25.0)
+        self.executor.situ_activation = self.executor.layer.act_fn
+        del self.torch.ops._C_ascend.npu_swiglu_group_quant
+        self.assertEqual(self.run_mlp(), 7)
+        self.situ_fused.assert_called_once()
+        del self.torch.ops._C_ascend.situ_mx_quant
+        self.executor.apply_activation.reset_mock()
+        self.assertEqual(self.run_mlp(), 7)
+        self.executor.apply_activation.assert_called_once_with(self.gate_up)
 
     def test_unsupported_inputs_keep_original_preparation(self):
         down = self.executor.layer.down_proj

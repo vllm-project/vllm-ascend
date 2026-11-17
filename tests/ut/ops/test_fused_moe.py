@@ -1626,6 +1626,7 @@ def test_linear_wrapper_prepares_gate_input_before_router_stage(monkeypatch, rou
     shared_experts.multistream_overlap = True
     shared_experts.quant_type = routed_quant_type
     shared_experts.lora_context = None
+    shared_experts.situ_activation = None
     shared_experts.parallel_mode = MagicMock(return_value=SharedExpertParallelMode.TENSOR_PARALLEL)
 
     def gate_up_side_effect(_value):
@@ -1716,6 +1717,70 @@ def test_linear_wrapper_prepares_gate_input_before_router_stage(monkeypatch, rou
     assert prepared_down_input.quantized is quantized_down_input
     assert prepared_down_input.scale is down_input_scale
     assert prepared_down_input.output_dtype == torch.bfloat16
+
+
+def test_mixed_mxfp_shared_situ_fuses_before_combine_and_keeps_down_wrapper(monkeypatch):
+    scheme = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
+    scheme.group_size = 32
+    scheme.dynamic_mx_quant_scale_alg = 0
+    method = AscendLinearMethod(scheme)
+    hidden_states = torch.randn(8, 7168, dtype=torch.bfloat16)
+    gate_up = torch.randn(8, 1536, dtype=torch.bfloat16)  # Kimi shared localTP8.
+    quantized = torch.ones(8, 768, dtype=torch.float8_e4m3fn)
+    scale = torch.ones(8, 12, 2)
+    expected = torch.randn_like(hidden_states)
+    down = MagicMock(return_value=(expected, None))
+    down.quant_method = method
+    down.mxfp8_tp_padding = (0, 0)
+    down.input_is_parallel = True
+    down.weight_scale = torch.ones(1)
+    executor = AscendSharedExperts.__new__(AscendSharedExperts)
+    with patch("vllm_ascend.logger.configure_ascend_file_logging"), set_current_vllm_config(VllmConfig()):
+        situ = SituAndMul(beta=4.0, linear_beta=25.0)
+    executor.layer = SimpleNamespace(
+        gate_up_proj=SimpleNamespace(quant_method=method, weight_scale=torch.ones(1)),
+        down_proj=down,
+        act_fn=situ,
+        expert_gate=None,
+    )
+    executor.situ_activation = situ
+    executor.quant_type = QuantType.W4A8MXFP
+    executor.lora_context = None
+    executor.multistream_overlap = True
+    executor.swiglu_limit = 0.0
+    executor.apply_activation = MagicMock()
+    executor._prepare_linear_input_for_overlap = MagicMock()
+    order = MagicMock()
+    executor._wait_for_routed_stage = order.wait
+    order.attach_mock(down, "down")
+    order.fused.return_value = (quantized, scale)
+    monkeypatch.setattr(shared_experts_module.torch.ops._C_ascend, "situ_mx_quant", order.fused, raising=False)
+    submitted = SubmittedSharedExpertGateUp(
+        hidden_states=hidden_states,
+        gate_up=gate_up,
+        gate_up_input_scale=None,
+        local_dp_metadata=None,
+        path=executor._select_mlp_path(),
+    )
+    milestones = RoutedMoEMilestones()
+    result = executor._finish_shared_mlp(submitted, milestones)
+    assert submitted.path is SharedExpertMLPPath.W8A8_MXFP_LINEAR
+    assert result is expected
+    assert [entry[0] for entry in order.mock_calls] == ["wait", "fused", "wait", "down"]
+    order.fused.assert_called_once_with(
+        x=gate_up,
+        beta=4.0,
+        linear_beta=25.0,
+        activate_left=True,
+        dst_type=shared_experts_module.SITU_MX_DST_TYPE_E4M3FN,
+    )
+    prepared = down.call_args.args[0]
+    assert isinstance(prepared, PreparedLinearInput)
+    assert prepared.quantized is quantized
+    assert prepared.scale is scale
+    assert prepared.output_dtype == hidden_states.dtype
+    executor.apply_activation.assert_not_called()
+    executor._prepare_linear_input_for_overlap.assert_not_called()
 
 
 def test_linear_wrapper_preserves_prequantized_activation_for_down_proj(monkeypatch):

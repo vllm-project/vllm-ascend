@@ -1072,7 +1072,7 @@ class AscendSharedExperts:
         # Limit fusion to the existing kernel's BF16/default-MX contract.
         return (
             type(scheme) is AscendW8A8MXFP8DynamicLinearMethod
-            and type(self.layer.act_fn) is AscendSiluAndMul
+            and (type(self.layer.act_fn) is AscendSiluAndMul or self.situ_activation is not None)
             and self.swiglu_limit == 0.0
             and scheme.dynamic_mx_quant_scale_alg == 0
             and scheme.group_size == MXFP8_ACTIVATION_GROUP_SIZE
@@ -1082,20 +1082,32 @@ class AscendSharedExperts:
             and gate_up.ndim == 2
             and gate_up.shape[-1] > 0
             and gate_up.shape[-1] % SWIGLU_MX_INPUT_ALIGNMENT == 0
-            and hasattr(torch.ops._C_ascend, "npu_swiglu_group_quant")
+            and hasattr(
+                torch.ops._C_ascend,
+                "situ_mx_quant" if self.situ_activation is not None else "npu_swiglu_group_quant",
+            )
         )
 
     def _prepare_w8a8_mxfp_down_input(self, gate_up: torch.Tensor) -> LinearInput:
-        """Try fused SwiGLU/MX quant, otherwise use the scheme's preparation."""
+        """Try fused activation/MX quant, otherwise use the scheme's preparation."""
         if self._can_fuse_w8a8_mxfp_activation(gate_up):
-            quantized_x, scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
-                gate_up,
-                topk_weight=None,
-                group_index=None,
-                dst_type=torch.float8_e4m3fn,
-                quant_mode=SWIGLU_MX_QUANT_MODE,
-                clamp_value=0.0,
-            )
+            if self.situ_activation is not None:
+                quantized_x, scale = torch.ops._C_ascend.situ_mx_quant(
+                    x=gate_up,
+                    beta=self.situ_activation.beta,
+                    linear_beta=self.situ_activation.linear_beta or 0.0,
+                    activate_left=True,
+                    dst_type=SITU_MX_DST_TYPE_E4M3FN,
+                )
+            else:
+                quantized_x, scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
+                    gate_up,
+                    topk_weight=None,
+                    group_index=None,
+                    dst_type=torch.float8_e4m3fn,
+                    quant_mode=SWIGLU_MX_QUANT_MODE,
+                    clamp_value=0.0,
+                )
             return PreparedLinearInput(quantized_x, scale, gate_up.dtype)
 
         shared_act = self.apply_activation(gate_up)
