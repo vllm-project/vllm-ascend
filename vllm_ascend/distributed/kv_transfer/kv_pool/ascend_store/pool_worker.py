@@ -83,14 +83,6 @@ from vllm_ascend.distributed.utils import (
 SAVE_BATCH_FAILURE_POLL_INTERVAL_S = 1.0
 
 
-def _shares_mooncake_v2_engine(transfer):
-    """Only the V2/Store MultiConnector pair borrows the process-local engine."""
-    if transfer is None or getattr(transfer, "kv_connector", None) != "MultiConnector":
-        return False
-    children = transfer.kv_connector_extra_config.get("connectors", ())
-    return any(child.get("kv_connector") == "MooncakeConnectorV2" for child in children)
-
-
 class BaseKVPoolWorker(ABC):
     """Common cache registration, metadata, lookup, and lifecycle for pool workers."""
 
@@ -691,7 +683,16 @@ class BaseKVPoolWorker(ABC):
         Therefore, we down-align the start address to meet the 2MB alignment requirement.
         """
         if self.enable_partial_hash_hits:
-            if _shares_mooncake_v2_engine(get_engine_transfer_config(self.vllm_config, self.kv_cache_config)):
+            transfer = get_engine_transfer_config(self.vllm_config, self.kv_cache_config)
+            _has_mooncake_v2_connector = (
+                transfer is not None
+                and getattr(transfer, "kv_connector", None) == "MultiConnector"
+                and any(
+                    child.get("kv_connector") == "MooncakeConnectorV2"
+                    for child in transfer.kv_connector_extra_config.get("connectors", ())
+                )
+            )
+            if _has_mooncake_v2_connector:
                 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
                     collect_configured_register_regions,
                 )
