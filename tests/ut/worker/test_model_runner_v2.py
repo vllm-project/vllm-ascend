@@ -1323,7 +1323,8 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     runner.pcp_manager = MagicMock(spec=AscendPCPManager)
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = SimpleNamespace()
-    runner.model_config = SimpleNamespace(architecture=architecture)
+    runner.model_config = SimpleNamespace(architecture=architecture, hf_config=SimpleNamespace())
+    runner.vllm_config.model_config = runner.model_config
     kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     original = vllm_model_runner.ModelCudaGraphManager
     seen = {}
@@ -1394,7 +1395,8 @@ def test_initialize_kv_cache_forwards_allocation_context():
     runner.pcp_manager = None
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = None
-    runner.model_config = SimpleNamespace(architecture="OtherModel")
+    runner.model_config = SimpleNamespace(architecture="OtherModel", hf_config=SimpleNamespace())
+    runner.vllm_config.model_config = runner.model_config
     called = False
     captured_kwargs: dict[str, object] = {}
     allocation_context = object()

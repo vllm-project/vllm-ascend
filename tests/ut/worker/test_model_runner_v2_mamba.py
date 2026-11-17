@@ -785,7 +785,9 @@ def test_glm_kpool_pcp_advances_mamba_align_state_once_per_global_request(mock_k
 
 @patch(
     "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
-    return_value=SimpleNamespace(kv_transfer_config=None, additional_config={}),
+    return_value=SimpleNamespace(
+        kv_transfer_config=None, additional_config={}, model_config=SimpleNamespace(hf_config=SimpleNamespace())
+    ),
 )
 def test_mamba_cache_reshape_uses_page_strided_state_tensors(_mock_config):
     spec = _mamba_spec()
@@ -827,7 +829,9 @@ def test_mamba_cache_reshape_uses_page_strided_state_tensors(_mock_config):
 
 @patch(
     "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
-    return_value=SimpleNamespace(kv_transfer_config=None, additional_config={}),
+    return_value=SimpleNamespace(
+        kv_transfer_config=None, additional_config={}, model_config=SimpleNamespace(hf_config=SimpleNamespace())
+    ),
 )
 def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     attention_spec = FullAttentionSpec(
