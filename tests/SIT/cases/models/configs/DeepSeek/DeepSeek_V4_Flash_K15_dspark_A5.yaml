@@ -123,10 +123,9 @@ test_cases:
       - '{"method":"dspark","num_speculative_tokens":15,"enforce_eager":false,"enable_adaptive_verification": true}'
       - "--no-enable-prefix-caching"
       - "--kv-transfer-config"
-      - >-
-        {"kv_connector": "AscendStoreConnector", "kv_role": "kv_both",
+      - '{"kv_connector": "AscendStoreConnector", "kv_role": "kv_both",
         "kv_load_failure_policy": "fail",
-        "kv_connector_extra_config": {"backend": "memcache", "lookup_rpc_port": "0", "use_layerwise": false}}
+        "kv_connector_extra_config": {"backend": "memcache", "lookup_rpc_port": "0", "use_layerwise": false}}'
 #    test_content:
 #      - chat_completion
 #    prompts:
