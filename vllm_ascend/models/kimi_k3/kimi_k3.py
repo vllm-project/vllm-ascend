@@ -1450,6 +1450,14 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
     supports_replayssm: ClassVar[Literal[True]] = True
 
     @classmethod
+    def get_packed_hybrid_block_size(cls, vllm_config, attn_page_size_1_token, mamba_page_size, alignment) -> None:
+        # #66037 lets the native Kimi hook size a whole BLHNC row, including
+        # indexer and draft pages. Ascend overlays each recurrent checkpoint
+        # on one MLA page and keeps the other components in separate regions.
+        # Request native per-page alignment and padding for that layout.
+        return None
+
+    @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config):
         return get_kda_state_shape(vllm_config, super().get_mamba_state_shape_from_config)
 
