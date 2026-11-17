@@ -569,7 +569,9 @@ class NPUWorker(GPUWorker):
 
         assert self.weight_transfer_engine is not None
         self.weight_transfer_engine.finish_weight_update()
-        if vllm_version_is("0.33.0"):
+        # v0.34.0 still resets LoRA state here; the replacement hook landed on
+        # main after the release branch was cut.
+        if vllm_version_is("0.34.0"):
             self.model_runner.reset_lora_state()
         else:
             self.model_runner.on_target_weights_replaced()
