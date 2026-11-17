@@ -21,6 +21,8 @@ def make_linear(cls, output_sizes, tp_size=1, tp_rank=0):
     layer.tp_rank = tp_rank
     layer.tp_size = tp_size
     layer.output_sizes = output_sizes
+    # The real merged initializer establishes #66784's unpadded loader state.
+    layer.padding_size = 0
     layer.shard_ids = tuple(range(len(output_sizes)))
     layer.loaded_shard_ids = {}
     return layer

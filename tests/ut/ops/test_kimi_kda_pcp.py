@@ -11,6 +11,7 @@ import torch
 from vllm_ascend.models.kimi_k3 import kimi_k3
 from vllm_ascend.ops import kda_parallel, kda_pcp
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
+from vllm_ascend.utils import vllm_version_is
 
 
 @contextmanager
@@ -86,7 +87,7 @@ def test_kda_input_projection_preserves_upstream_padding_and_replication(loader,
     tp = SimpleNamespace(world_size=2, rank_in_group=1)
     pcp = SimpleNamespace(world_size=2, rank_in_group=1)
     output_sizes = [32] * 4 + [4, 8]
-    if padding:
+    if padding and vllm_version_is("0.33.0"):
         output_sizes.append(padding * 4)
     with parallel_groups(tp, pcp):
         projection = kda_parallel.KDAInputParallelLinear(8, output_sizes, 4, padding_size=padding, bias=False)

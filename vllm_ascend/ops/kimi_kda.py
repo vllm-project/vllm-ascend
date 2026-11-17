@@ -83,6 +83,9 @@ class _KDAFusedBFGLinear(MergedColumnParallelLinear):
     ) -> None:
         projection_size = num_heads * head_dim
         if head_parallel:
+            # This path bypasses MergedColumnParallelLinear.__init__, whose
+            # #66784 weight loaders now require the padding state.
+            self.padding_size = 0
             self.output_sizes = [num_heads, projection_size, projection_size]
             ColumnParallelLinear.__init__(
                 self,
