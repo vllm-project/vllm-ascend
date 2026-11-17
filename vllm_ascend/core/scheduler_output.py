@@ -9,7 +9,7 @@ from vllm.v1.core.sched.output import CachedRequestData
 
 from vllm_ascend.utils import vllm_version_is
 
-if not vllm_version_is("0.33.0"):
+if not vllm_version_is("0.34.0"):
     from vllm.v1.core.sched.output import IterationDetails
 
 
@@ -26,6 +26,12 @@ def make_cached_request_data(
     if vllm_version_is("0.33.0"):
         return scheduler._make_cached_request_data(
             running_reqs, resumed_reqs, num_scheduled_tokens, spec_decode_tokens, req_to_new_blocks
+        )
+    if vllm_version_is("0.34.0"):
+        # v0.34.0 already folds resumed requests into running_reqs and has no
+        # iteration-details argument yet (that landed on main after the cut).
+        return scheduler._make_cached_request_data(
+            running_reqs, num_scheduled_tokens, spec_decode_tokens, req_to_new_blocks
         )
 
     return scheduler._make_cached_request_data(
