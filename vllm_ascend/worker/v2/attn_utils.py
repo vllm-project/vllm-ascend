@@ -172,7 +172,10 @@ def _align_hybrid_attention_page_sizes(kv_cache_specs: dict[str, KVCacheSpec], m
     if not attention_specs:
         return
     reference = max(attention_specs.values(), key=lambda spec: spec.real_page_size_bytes)
-    page_size = reference.real_page_size_bytes
+    # Use the smallest page that can be formed by growing every scheduler
+    # block by an integer factor. The largest page alone is insufficient
+    # when attention layers have non-divisible unpadded page sizes.
+    page_size = math.lcm(*(spec.real_page_size_bytes for spec in attention_specs.values()))
     for layer_name, spec in attention_specs.items():
         # Ascend packs each layer as [all K blocks][all V blocks]. Equal
         # padded pages alone do not isolate block IDs: a smaller SWA K segment
