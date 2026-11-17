@@ -1148,7 +1148,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 len(group_block_hashes),
                 self.layerwise_offload,
             )
-            save_end_block = self._layerwise_save_full_end(request, group_id, block_size, partial_block_index)
+            save_end_block = self._layerwise_save_full_end(request, block_size, partial_block_index)
             # External hits already have full keys. A previous-step hit may
             # instead use snapshots, which still need promotion to full keys.
             if (
@@ -1218,15 +1218,13 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 )
             )
 
-    def _layerwise_save_full_end(
-        self, request: ReqMeta, group_id: int, block_size: int, partial_block_index: int | None
-    ) -> int:
+    def _layerwise_save_full_end(self, request: ReqMeta, block_size: int, partial_block_index: int | None) -> int:
         """Return the exclusive end of the group's full-block save range."""
         end = request.save_end_token // block_size
         if self.use_layerwise_transfer and self.layerwise_offload:
             end = request.target_token_len // block_size
-            if partial_block_index is not None and not self.group_uses_align_state[group_id]:
-                end = min(end, partial_block_index)
+            if partial_block_index is not None:
+                end = partial_block_index
         return end
 
     def _pool_keys_missing(self, keys: list[str], *, fail_open: bool = True) -> set[str]:
@@ -1337,9 +1335,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 partial_block_index = get_partial_block_index(
                     request.target_token_len, effective_block_size, len(group_block_hashes), self.layerwise_offload
                 )
-                save_end_block = self._layerwise_save_full_end(
-                    request, group_id, effective_block_size, partial_block_index
-                )
+                save_end_block = self._layerwise_save_full_end(request, effective_block_size, partial_block_index)
                 if (
                     request.load_spec is not None
                     and request.load_spec.can_load
@@ -1612,7 +1608,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             original_mask = result[group_id]
             num_blocks = request.save_end_token // self.grouped_block_size[group_id]
             if self.layerwise_offload:
-                num_blocks = self._layerwise_save_full_end(request, group_id, self.grouped_block_size[group_id], None)
+                num_blocks = self._layerwise_save_full_end(request, self.grouped_block_size[group_id], None)
             if self.layerwise_offload and group_id in self._reused_layers_by_group:
                 # Only the running endpoint belongs to this layer after reuse.
                 # Older non-null slots may already hold another layer's state.
