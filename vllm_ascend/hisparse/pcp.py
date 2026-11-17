@@ -170,6 +170,7 @@ def adapt_pcp_hisparse_connector(runner):
     if runner.pcp_manager is None:
         return connector
 
+    # Taking over ActiveKVConnector state must not discard a subclass's lifecycle.
     if type(connector) is not ActiveKVConnector or type(connector.kv_connector) is not HiSparseConnector:
         raise ValueError("HiSparse PCP requires the direct HiSparseConnector")
     prepare_pcp_mirror_staging(connector.kv_connector.connector_worker)
