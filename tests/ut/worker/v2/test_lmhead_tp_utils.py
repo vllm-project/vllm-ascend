@@ -270,6 +270,71 @@ def test_draft_samples_dp_wide_request_rows_not_target_tokens(draft_mixin, local
     state.num_tokens_across_dp.max.assert_not_called()
 
 
+@pytest.mark.parametrize("local_rows", [2, 5, 6])
+def test_graph_padded_dummy_and_active_ranks_share_capacity(monkeypatch, local_rows):
+    spec, weight = _speculator()
+    spec.method = "mtp"
+    spec.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        compilation_config=SimpleNamespace(cudagraph_mode=SimpleNamespace(separate_routine=lambda: True)),
+    )
+    state = SimpleNamespace(
+        num_reqs=5,
+        num_tokens_across_dp=torch.tensor([24, 24]),
+        uniform_token_count=4,
+        eager=False,
+    )
+    hidden = torch.arange(local_rows * HIDDEN_SIZE, dtype=torch.float32).reshape(local_rows, HIDDEN_SIZE)
+    monkeypatch.setattr(lmhead_tp_utils, "lmhead_tp_enable", lambda: True)
+
+    with spec._lmhead_pad_size_context(state):
+        # Active ranks have up to five requests; the idle graph batch has six.
+        logits = spec.compute_draft_logits(hidden, spec_step_idx=0)
+        assert spec._lmhead_pad_size == 6
+        with spec._lmhead_pad_size_context(capture_num_reqs=local_rows):
+            assert spec._lmhead_pad_size == 6
+
+    compute_input = spec.model.compute_logits.call_args.args[0]
+    assert compute_input.shape == (6, HIDDEN_SIZE)
+    torch.testing.assert_close(compute_input[:local_rows], hidden)
+    assert torch.count_nonzero(compute_input[local_rows:]) == 0
+    torch.testing.assert_close(logits, hidden @ weight)
+    assert spec._lmhead_pad_size is None
+
+
+@pytest.mark.parametrize(
+    "tokens,uniform_tokens,eager,separate_routine,expected",
+    [
+        ([20, 20], 4, False, True, 5),
+        ([8, 8], 1, False, True, 8),
+        ([24, 24], None, False, True, 8),
+        # Mixed FULL graphs reserve one request slot per token even for a
+        # runtime batch with a uniform speculative query length.
+        ([24, 24], 4, False, False, 8),
+        ([4, 20], 4, True, True, 5),
+        ([4, 20], None, True, False, 5),
+    ],
+)
+def test_graph_request_bound_keeps_eager_and_nonuniform_paths_safe(
+    draft_mixin, tokens, uniform_tokens, eager, separate_routine, expected
+):
+    mixin, _ = draft_mixin
+    draft = make_drafter(mixin)
+    draft.vllm_config.compilation_config = SimpleNamespace(
+        cudagraph_mode=SimpleNamespace(separate_routine=lambda: separate_routine)
+    )
+    state = SimpleNamespace(
+        num_reqs=5,
+        num_tokens_across_dp=torch.tensor(tokens),
+        uniform_token_count=uniform_tokens,
+        eager=eager,
+    )
+    with draft._lmhead_pad_size_context(state):
+        out = draft.sample_draft(torch.ones(expected, 4))
+        assert draft.sample_rows == [expected]
+        torch.testing.assert_close(out, torch.arange(expected))
+
+
 @pytest.mark.parametrize("requests,expected", [(None, 8), (0, 1), (1, 1), (2, 2), (5, 5), (8, 8), (64, 8)])
 def test_capture_request_buckets_and_conservative_fallback(draft_mixin, requests, expected):
     mixin, _ = draft_mixin

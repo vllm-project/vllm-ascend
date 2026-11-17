@@ -53,6 +53,17 @@ class LmheadTPDraftSamplingMixin:
                 request_bound = getattr(dp_sync, "num_reqs", None) if dp_sync is not None else capture_num_reqs
                 pad_size = self.max_num_reqs
                 if request_bound is not None:
+                    if dp_sync is not None and not getattr(dp_sync, "eager", True):
+                        # Idle batches use graph request slots, which can exceed
+                        # the pre-padding DP request count. Derive a shared bound
+                        # from the already-synced, CPU-resident padded token count.
+                        padded_tokens = int(dp_sync.num_tokens_across_dp.max().item())
+                        query_len = dp_sync.uniform_token_count or 1
+                        if not self.vllm_config.compilation_config.cudagraph_mode.separate_routine():
+                            # Mixed FULL graphs reserve up to one slot per token.
+                            query_len = 1
+                        graph_requests = (padded_tokens + query_len - 1) // query_len
+                        request_bound = max(request_bound, graph_requests)
                     # Keep a non-empty collective shape for dummy/idle calls.
                     pad_size = min(pad_size, max(1, int(request_bound)))
             self._lmhead_pad_size = pad_size
