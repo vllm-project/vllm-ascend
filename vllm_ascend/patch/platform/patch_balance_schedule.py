@@ -429,8 +429,11 @@ class BalanceScheduler(Scheduler):
                 if len(self.running) == self.max_num_active_reqs:
                     break
 
-                # Intentionally retain the global capacity freeze for KV holders under PAUSED_NEW.
-                # Coordinated pauses drain as running requests finish and balance_gather() refreshes counts.
+                # Keep admission balanced across DP ranks: if any rank was at
+                # the running cap after the previous step, stop admitting new
+                # waiting requests on every rank.
+                # This also applies to KV holders under PAUSED_NEW. During coordinated pauses,
+                # they drain as running requests finish and balance_gather() refreshes counts.
                 if max(t.item() for t in self.balance_queue) == self.max_num_running_reqs:
                     break
 
