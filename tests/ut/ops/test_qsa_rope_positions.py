@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import importlib.util
+import ast
 from pathlib import Path
 
 import pytest
@@ -9,13 +9,16 @@ import torch
 
 @pytest.fixture
 def validate():
-    # This shape-only helper intentionally has no vLLM, Triton or NPU dependency.
-    path = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/triton/linearnorm/qsa_rope_utils.py"
-    spec = importlib.util.spec_from_file_location("qsa_rope_utils", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.validate_qsa_rope_positions
+    # Load only the metadata validator so these tests need no Triton/NPU runtime.
+    path = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/triton/linearnorm" / "qsa_rmsnorm_mrope.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "validate_qsa_rope_positions"
+    )
+    module = ast.Module(body=[function], type_ignores=[])
+    namespace = {"torch": torch}
+    exec(compile(module, str(path), "exec"), namespace)
+    return namespace["validate_qsa_rope_positions"]
 
 
 @pytest.mark.parametrize("rows", [0, 1, 32])
