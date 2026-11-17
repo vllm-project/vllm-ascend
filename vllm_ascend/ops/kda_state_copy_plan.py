@@ -18,21 +18,12 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ops.triton.ascend_jit_warmup import AscendTritonJitKernel
-from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
-from vllm_ascend.ops.triton.kda_state_copy_kernel import (
-    DEFAULT_KDA_BLOCK_SIZE,
-    _configuration,
-    _kda_state_copy_kernel,
-    _validate_cache_layout,
-)
-from vllm_ascend.utils import is_950
+from vllm_ascend.utils import is_950, supports_triton
 
 if TYPE_CHECKING:
-    from vllm_ascend.ops.triton.kda_state_copy_kernel import _CompiledKernel
+    from vllm_ascend.ops.triton.kda_state_copy_jit import StateCopyJitKernel
 
 _FALLBACK_COPY_BLOCK_SIZE = 8192
 
@@ -41,48 +32,6 @@ _FALLBACK_COPY_BLOCK_SIZE = 8192
 class StateCopyCompileKey:
     device: torch.device
     arguments: tuple[tuple[str, Any], ...]
-
-
-class StateCopyJitKernel(AscendTritonJitKernel[StateCopyCompileKey]):
-    """Worker-owned compiled launchers scheduled by JitWarmupRegistry.
-
-    Metadata-only warmup compiles without allocating or launching device data.
-    The cached executor includes its ABI constants, resolved once at compile
-    time. With JIT warmup disabled, the framework cache compiles on first use.
-    """
-
-    def __init__(self, kernel: Any, constexpr_names: tuple[str, ...]) -> None:
-        super().__init__()
-        self.kernel = kernel
-        self._constexpr_names = constexpr_names
-
-    @property
-    def supports_parallel_compile(self) -> bool:
-        # Signature inspection needs a completed CompiledKernel rather than
-        # the futures returned inside Triton's asynchronous compile pool.
-        return False
-
-    def get_warmup_keys(self, key: StateCopyCompileKey) -> list[StateCopyCompileKey]:
-        return [key]
-
-    def warmup_inputs(self, compile_key: StateCopyCompileKey) -> dict[str, Any]:
-        return dict(compile_key.arguments)
-
-    def compile(self, compile_key: StateCopyCompileKey) -> None:
-        if compile_key in self._compiled_cache:
-            return
-        inputs = self.warmup_inputs(compile_key)
-        with torch.npu.device(compile_key.device):
-            compiled = self.kernel.warmup(grid=(1,), **inputs)
-        constants = (
-            tuple(inputs[name] for name in self._constexpr_names)
-            if "constexpr" in compiled.src.signature.values()
-            else ()
-        )
-        self._compiled_cache[compile_key] = compiled, constants
-
-    def executor(self, compile_key: StateCopyCompileKey) -> tuple[_CompiledKernel, tuple[Any, ...]]:
-        return self._get_or_compile(compile_key)
 
 
 def supports_kda_state_copy(state: torch.Tensor) -> bool:
@@ -156,6 +105,19 @@ class KDAStateCopyPlan:
     @classmethod
     def prepare(cls, state: torch.Tensor, max_selected: int) -> KDAStateCopyPlan:
         """Bind cache metadata and register four compile keys without JIT work."""
+        if not supports_triton():
+            raise ValueError("KDA state-copy plans require Triton-capable hardware; select a supported model on 310P")
+
+        from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
+
+        from vllm_ascend.ops.triton.kda_state_copy_jit import StateCopyJitKernel
+        from vllm_ascend.ops.triton.kda_state_copy_kernel import (
+            DEFAULT_KDA_BLOCK_SIZE,
+            _configuration,
+            _kda_state_copy_kernel,
+            _validate_cache_layout,
+        )
+
         if type(max_selected) is not int or max_selected <= 0:
             raise ValueError("max_selected must be a positive scheduler limit")
         payload, rows, page_stride = _validate_cache_layout(state)
@@ -199,6 +161,8 @@ class KDAStateCopyPlan:
         Serving resolves cached compiled executors through the kernel owner.
         Independent worker lifecycles can coexist in one process.
         """
+        from vllm_ascend.ops.triton.kda_state_copy_kernel import _configuration, _kda_state_copy_kernel
+
         if self._configuration != _configuration():
             raise RuntimeError("KDA compiler/runtime configuration changed during preparation")
         if _kda_state_copy_kernel.pre_run_hooks:
@@ -207,6 +171,8 @@ class KDAStateCopyPlan:
 
     def _indices(self, state: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
         """Fail closed before launch, then normalize supported index metadata."""
+        from vllm_ascend.ops.triton.kda_state_copy_kernel import _kda_state_copy_kernel
+
         if not self._sealed:
             raise RuntimeError("strict KDA plan must be sealed before serving")
         if cache_signature(state) != self._signature:
@@ -295,6 +261,15 @@ class StridedKDAFallbackPlan:
     @classmethod
     def prepare(cls, state: torch.Tensor, max_selected: int) -> StridedKDAFallbackPlan:
         """Validate pages and register one byte-copy key without live pointers."""
+        if not supports_triton():
+            raise ValueError("KDA state-copy plans require Triton-capable hardware; select a supported model on 310P")
+
+        from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
+
+        from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
+        from vllm_ascend.ops.triton.kda_state_copy_jit import StateCopyJitKernel
+        from vllm_ascend.ops.triton.kda_state_copy_kernel import _configuration
+
         if type(max_selected) is not int or max_selected <= 0:
             raise ValueError("max_selected must be a positive scheduler limit")
         if state.device.type != "npu" or state.ndim != 4 or state.shape[0] <= 0:
@@ -327,12 +302,17 @@ class StridedKDAFallbackPlan:
 
     def seal(self):
         """Reject startup configuration drift before publishing the fallback."""
+        from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
+        from vllm_ascend.ops.triton.kda_state_copy_kernel import _configuration
+
         if self._configuration != _configuration() or batch_memcpy_kernel.pre_run_hooks:
             raise RuntimeError("KDA fallback configuration/hooks changed during preparation")
         self._sealed = True
 
     def _copy(self, state, packed, indices, *, to_cache):
         """Build byte-pointer vectors as the PR does and use a compiled launch."""
+        from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
+
         if not self._sealed or cache_signature(state) != self._signature:
             raise RuntimeError("unprepared KDA fallback cache layout")
         if batch_memcpy_kernel.pre_run_hooks:

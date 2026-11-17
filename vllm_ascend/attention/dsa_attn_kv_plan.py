@@ -18,7 +18,6 @@ from vllm_ascend.attention.mixed_quant_sparse_flash_mla import (
 )
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
 
 # "auto" means the model dtype, bfloat16, so it selects the bfloat16 layout on A5 and
@@ -101,6 +100,8 @@ def _write_dsa_cache(
 
 def write_dsa_cache(cache: torch.Tensor, updates: torch.Tensor, slots: torch.Tensor) -> None:
     """Write valid DSA slots while preserving packed physical-page strides."""
+    from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
     if cache.ndim != 4 or cache.shape[2] != 1 or cache.stride(-1) != 1:
         raise ValueError("Cache must be [pages, page_size, 1, width] with contiguous rows")
     if updates.ndim not in (2, 3) or (updates.ndim == 3 and updates.shape[1] != 1):

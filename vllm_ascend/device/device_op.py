@@ -23,16 +23,13 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch.nn.functional as F
 import torch_npu
-from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device import utils as device_utils
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.paged_mla_cache_read import try_load_strided_mla_cache
-from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
-from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
-from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import QUANT_DTYPES, get_dynamic_mx_quant_scale_alg
+from vllm_ascend.utils import supports_triton
 
 if TYPE_CHECKING:
     from vllm_ascend.models.deepseek_v41.mixed_quant_attention import MixedQuantPackedCacheOps
@@ -44,9 +41,15 @@ _SFA_MAX_GENERIC_QUERY_GROUP_SIZE = 64
 _SFA_PADDED_QUERY_GROUP_SIZE = 128
 
 
-if HAS_TRITON:
+if supports_triton():
+    from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
+    from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
+    from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
 else:
+    chunk_scaled_dot_kkt_fwd_kernel = None  # type: ignore
+    solve_tril_16x16_kernel = None  # type: ignore
+    fused_gdn_gating_patch = None  # type: ignore
     triton_q_rms = None  # type: ignore
 
 

@@ -36,8 +36,6 @@ from vllm.third_party.flash_linear_attention.ops.layernorm_guard import layernor
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
-from vllm_ascend.ops.triton.mamba.lightning_attn import AscendLightningAttentionKernel
-
 
 class AscendBailingMoELinearAttention(BailingMoELinearAttention):
     """NPU-friendly drop-in replacement for BailingMoELinearAttention.
@@ -50,6 +48,8 @@ class AscendBailingMoELinearAttention(BailingMoELinearAttention):
     """
 
     def _prefill_and_mix_infer(self, q, k, v, kv_cache, state_indices_tensor, attn_metadata):
+        from vllm_ascend.ops.triton.mamba.lightning_attn import AscendLightningAttentionKernel
+
         return linear_attention_prefill_and_mix(
             q=q,
             k=k,

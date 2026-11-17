@@ -89,7 +89,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -116,7 +115,7 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _register_m3_sparse_packed_modules,
     _use_fused_qkv_indexer,
 )
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, supports_triton
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
     add_pp_transport_tensors,
@@ -485,7 +484,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # ahead of the separate prepare/cache chain through 256K-token prefill;
         # retain the fallback beyond the validated range.
         return (
-            HAS_TRITON
+            supports_triton()
             and hidden_states.shape[0] <= _MAX_FUSED_QKNORM_ROPE_CACHE_INSERT_TOKENS
             and hidden_states.device.type == "npu"
             and hidden_states.dtype == torch.bfloat16

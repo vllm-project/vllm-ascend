@@ -6,8 +6,10 @@ from vllm import envs
 from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 from vllm.logger import logger
 
-import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
-from vllm_ascend.utils import enable_sfa, model_uses_kpool_indexer
+from vllm_ascend.utils import enable_sfa, model_uses_kpool_indexer, supports_triton
+
+if supports_triton():
+    import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 
 
 def use_dcp_q_replicate(vllm_config) -> bool:

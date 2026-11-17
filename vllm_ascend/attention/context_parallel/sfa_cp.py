@@ -8,7 +8,6 @@ from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
@@ -44,6 +43,7 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_force_tmajor_restore,
     enable_sfa_dcp_sharded_indexer,
     is_pd_decode_recompute_scheduler_enabled,
+    supports_triton,
 )
 
 
@@ -756,9 +756,26 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         if topk_indices.numel() == 0:
             return topk_indices
 
-        from vllm_ascend.ops.triton.sparse_index_remap import remap_sparse_indices_triton
+        if supports_triton() and topk_indices.is_npu:
+            from vllm_ascend.ops.triton.sparse_index_remap import remap_sparse_indices_triton
 
-        return remap_sparse_indices_triton(topk_indices, self.dcp_size, self.dcp_rank, self._dcp_interleave_size)
+            return remap_sparse_indices_triton(
+                topk_indices,
+                self.dcp_size,
+                self.dcp_rank,
+                self._dcp_interleave_size,
+            )
+
+        # Keep integer indices exact, including INT64 values above 2**24.
+        blocks = torch.div(topk_indices, self._dcp_interleave_size, rounding_mode="floor")
+        valid = (topk_indices >= 0) & (blocks.remainder(self.dcp_size) == self.dcp_rank)
+        local = torch.div(blocks, self.dcp_size, rounding_mode="floor") * self._dcp_interleave_size
+        local = local + topk_indices.remainder(self._dcp_interleave_size)
+        remapped = torch.where(valid, local, -1)
+        # Sort unique position keys to preserve each rank's original top-k order.
+        order = torch.arange(topk_count, device=topk_indices.device, dtype=torch.int64)
+        pack_order = (order + (~valid).to(torch.int64) * topk_count).argsort(dim=-1)
+        return torch.gather(remapped, dim=-1, index=pack_order)
 
     def _merge_dcp_outputs(
         self,
@@ -810,9 +827,12 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         # Query heads are replicated across physical PCP ranks, including
         # when the MTP draft has logical PCP disabled. Gather only distinct
         # TP head shards; DCP == PCP already owns one complete TP shard.
-        from vllm_ascend.ops.triton.query_gather_prep import prep_query_head_major
+        if supports_triton():
+            from vllm_ascend.ops.triton.query_gather_prep import prep_query_head_major
 
-        fused_q = prep_query_head_major(ql_nope, q_pe)
+            fused_q = prep_query_head_major(ql_nope, q_pe)
+        else:
+            fused_q = torch.cat((ql_nope, q_pe), dim=-1).transpose(0, 1).contiguous()
         pcp_size = get_pcp_group().world_size
         if pcp_size > 1 and self.dcp_size == pcp_size:
             gathered, handle = fused_q, None
