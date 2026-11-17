@@ -1,0 +1,9 @@
+pr: 21630
+entries:
+  - category: bugfix
+    text: >-
+      Enabled replicated DFlash and DFlash2 drafts with PCP on Model Runner V2,
+      including global draft batch sizing, proposal synchronization compatible
+      with vLLM 0.33.0 and inherited from upstream on other supported versions,
+      and DFlash2 candidate
+      selection with packed score/token-ID gathering across PCP-sharded vocabulary weights.

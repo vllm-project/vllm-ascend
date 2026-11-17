@@ -51,7 +51,7 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
     UpdatableGraph attention-parameter updates on replay).
     """
 
-    if not vllm_version_is("0.32.0"):
+    if not vllm_version_is("0.33.0"):
 
         def supports_batch_sharded_draft_logits(self) -> bool:
             # NPU draft-logits kernels index the cache by request state.
@@ -123,11 +123,16 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
             cudagraph_mode = (
                 CUDAGraphMode.FULL_DECODE_ONLY if cudagraph_mode.has_full_cudagraphs() else CUDAGraphMode.NONE
             )
+        decode_query_lens = (
+            self.num_speculative_steps + 1
+            if vllm_version_is("0.33.0")
+            else self.vllm_config.get_decode_cudagraph_query_lens(self.num_speculative_steps + 1)
+        )
         self.cudagraph_manager = AutoRegressiveAclGraphManager(
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            self.num_speculative_steps + 1,
+            decode_query_lens,
         )
         # The Ascend manager needs this speculator to rebuild draft metadata
         # and FIA graph-update params on replay (mirrors

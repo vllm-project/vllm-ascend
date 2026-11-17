@@ -18,7 +18,10 @@ import torch
 import torch_npu
 from vllm.config import set_current_vllm_config
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
-from vllm.v1.core import kv_cache_utils
+
+# vLLM #61183 moved the KV-cache planning helpers to `kv_cache_planning` on
+# main; the v0.33.0 lane still ships them in `kv_cache_utils`.
+from vllm.v1.core import kv_cache_planning, kv_cache_utils
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from tests.deepseek_v41_utils import (
@@ -57,18 +60,7 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
 )
 from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
 from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41SWACache, build_layer_plan
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage
-
-# vLLM #61183 moved the KV-cache planning helpers to `kv_cache_planning` on
-# main; the v0.32.0 lane still ships them in `kv_cache_utils`.
-if vllm_version_is("0.32.0"):
-    from vllm.v1.core import kv_cache_utils as kv_cache_planning
-else:
-    from vllm.v1.core import kv_cache_planning
-
-# v0.32.0 keeps the two-argument admission API; verified main requires a builder.
-_UPSTREAM_MAX_MEMORY_TAKES_BUILDER = not vllm_version_is("0.32.0")
 
 
 def _pool_bytes_per_block(runtime, groups):
@@ -84,8 +76,6 @@ def _max_memory_usage_bytes_from_groups(runtime, groups):
     the upstream formula; that formula sizes the pool through the builder hook,
     so feed it the Ascend V4.1 per-block cost.
     """
-    if not _UPSTREAM_MAX_MEMORY_TAKES_BUILDER:
-        return kv_cache_planning._max_memory_usage_bytes_from_groups(runtime, groups)
     builder = MagicMock()
     builder._get_pool_bytes_per_block.return_value = get_deepseek_v41_pool_bytes_per_block(groups)
     return kv_cache_planning._max_memory_usage_bytes_from_groups(builder, runtime, groups)
@@ -138,7 +128,9 @@ def config():
 @pytest.fixture
 def runtime(config):
     return SimpleNamespace(
-        model_config=SimpleNamespace(hf_text_config=config, enforce_eager=True),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="deepseek_v41"), hf_text_config=config, enforce_eager=True
+        ),
         cache_config=SimpleNamespace(
             block_size=64,
             enable_prefix_caching=False,
@@ -396,19 +388,6 @@ def test_shared_slots_isolate_groups_and_recycled_ids(config, runtime):
             torch.testing.assert_close(gather_cache_rows(view, slots), value)
 
 
-def test_view_with_nonzero_backing_storage_offset():
-    from vllm_ascend.worker.v1.model_runner import NPUModelRunner
-
-    spec = AscendMLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=4, dtype=torch.bfloat16)
-    backing = torch.zeros(16 + 2 * 256, dtype=torch.uint8)
-    raw = backing[16:]
-    cache = NPUModelRunner._adjust_kv_layout(None, raw, [(2, 16, 1, 4)], [spec.dtype], 256, initial_offset_bytes=32)[0]
-    cache[1].fill_(7)
-    assert cache.data_ptr() == backing.data_ptr() + 48
-    torch.testing.assert_close(backing[304:432].view(torch.bfloat16), torch.full((64,), 7, dtype=torch.bfloat16))
-    assert not backing[:48].any()
-
-
 def test_v2_view_with_nonzero_initial_offset():
     from vllm_ascend.worker.v2.attn_utils import _adjust_dsv4_kv_layout
 
@@ -425,15 +404,6 @@ def test_v2_view_with_nonzero_initial_offset():
     assert cache.data_ptr() == backing.data_ptr() + 48
     torch.testing.assert_close(backing[304:432].view(torch.bfloat16), torch.full((64,), 7, dtype=torch.bfloat16))
     assert not backing[:48].any()
-
-
-def test_view_accepts_latest_vllm_int8_backing_storage():
-    from vllm_ascend.worker.v1.model_runner import NPUModelRunner
-
-    spec = AscendMLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=4, dtype=torch.bfloat16)
-    raw = torch.zeros(2 * 256, dtype=torch.int8)
-    cache = NPUModelRunner._adjust_kv_layout(None, raw, [(2, 16, 1, 4)], [spec.dtype], 256, initial_offset_bytes=32)[0]
-    assert cache.shape == (2, 16, 1, 4)
 
 
 def test_request_accounting_counts_merged_full_context_once(runtime):
@@ -981,7 +951,8 @@ def test_batch_metadata_reuses_work_and_keeps_group_slots_separate(runtime, monk
 
     def build_batch(lengths, block_offset=0, idle=False):
         batch_shared: dict[str, Any] = {}
-        results, tasks = [], []
+        results = []
+        tasks: list[Any] = []
         positions = torch.tensor(
             [*range(lengths[0] - query_len, lengths[0]), *range(lengths[1] - query_len, lengths[1]), 0]
         )
@@ -1216,7 +1187,8 @@ def test_ring_source_reuses_prepared_store_coordinates(monkeypatch, num_tokens, 
     hidden_states = torch.randn(num_tokens, 8, dtype=dtype)
     original_hidden_states = hidden_states.clone()
 
-    def pool(kv, score, metadata):
+    def pool(kv, score, metadata, *, prev_rows, prev_row_indices):
+        assert prev_rows is prev_row_indices is None
         assert kv.dtype == score.dtype == torch.float32
         # Identity projections must receive the same FP32 conversion.
         assert kv is score
@@ -1256,13 +1228,13 @@ def test_ring_source_reuses_prepared_store_coordinates(monkeypatch, num_tokens, 
     )
     impl = object.__new__(AscendDSAV41Impl)
     impl.role = SimpleNamespace(compress_ratio=2)
-    AscendDSAV41Impl._write_compressed_source(
+    AscendDSAV41Impl._compress_and_write_caches(
         impl,
         attn,
         hidden_states,
-        positions,
         rope,
         rope,
+        metadata,
         metadata,
     )
     assert events == ["wait", "pool", "index", "kv"]
@@ -1282,28 +1254,39 @@ def test_state_uses_one_ring_page_and_block_table_entry(config, runtime):
     assert spec.max_memory_usage_bytes(runtime) == spec.page_size_bytes
 
 
-def test_projected_model_entry_keeps_fp32_state_and_existing_norm(config, monkeypatch):
+@pytest.mark.parametrize("pcp", [False, True])
+def test_projected_model_entry_keeps_fp32_state_and_existing_norm(config, monkeypatch, pcp):
     compressor = DeepseekV41Compressor(config, 2)
     compressor.register_buffer("_ring_pooled", torch.empty(4, 8, dtype=torch.bfloat16), persistent=False)
     compressor._ring_num_cores = 1
     state = torch.zeros(3, 32, 1, 16, dtype=torch.float32)
-    compressor.state_cache = SimpleNamespace(kv_cache=[state])
+    monkeypatch.setattr(compressor, "state_cache", SimpleNamespace(kv_cache=[state]), raising=False)
     metadata = SimpleNamespace(c2_ring_metadata=torch.zeros(5, 1, dtype=torch.int32), max_query_len=2)
     pooled = torch.randn(2, 8, dtype=torch.bfloat16)
     expected = compressor.norm(pooled).clone()
     pointer = compressor._ring_pooled.data_ptr()
+    prev_rows = torch.randn(2, 16) if pcp else None
+    prev_row_indices = torch.tensor([1]) if pcp else None
 
     def kernel(kv, scores, state_view, controls, out, **kwargs):
         assert kv.dtype == scores.dtype == state_view.dtype == torch.float32
         assert state_view.data_ptr() == state.data_ptr()
         assert controls is metadata.c2_ring_metadata
         assert out.data_ptr() == pointer and out.dtype == torch.bfloat16
+        assert kwargs["prev_rows"] is prev_rows
+        assert kwargs["prev_row_indices"] is prev_row_indices
         out.copy_(pooled)
         return out
 
     monkeypatch.setattr("vllm_ascend.ops.triton.compressor.compressor_triton.compressor_from_projected", kernel)
     hidden = torch.randn(2, 16, dtype=torch.bfloat16)
-    actual = compressor.pool_projected(compressor.wkv(hidden.float()), compressor.wgate(hidden.float()), metadata)
+    actual = compressor.pool_projected(
+        compressor.wkv(hidden.float()),
+        compressor.wgate(hidden.float()),
+        metadata,
+        prev_rows=prev_rows,
+        prev_row_indices=prev_row_indices,
+    )
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert compressor.wkv.weight.dtype == compressor.wgate.weight.dtype == torch.float32
 
@@ -1612,3 +1595,18 @@ def test_the_swa_cache_carries_the_replay_flag_into_its_spec(monkeypatch):
     assert spec.bounded_replay
     assert not spec.prefix_cacheable
     assert spec.prefix_replay_tokens == REPLAY_WINDOW
+
+
+@pytest.mark.parametrize("block_size", [16, 256])
+def test_swa_cache_uses_configured_block_size(block_size, monkeypatch):
+    monkeypatch.setattr("vllm_ascend.models.deepseek_v41.cache_config.uses_a5_packed_cache", lambda: False)
+    cache = AscendDeepseekV41SWACache(
+        head_dim=8,
+        window_size=128,
+        dtype=torch.bfloat16,
+        prefix="model.layers.0.self_attn.swa_cache",
+        cache_config=SimpleNamespace(block_size=block_size, cache_dtype="bfloat16"),
+    )
+
+    assert cache.block_size == block_size
+    assert cache.get_kv_cache_spec(None).block_size == block_size

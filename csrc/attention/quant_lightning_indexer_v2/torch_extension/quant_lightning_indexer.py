@@ -16,6 +16,21 @@ QLI_METADATA_SIZE = 1024
 QLI_METADATA_OP_NAME = "quant_lightning_indexer_metadata"
 
 
+def _arch22_score_is_fp32():
+    """910B/910_93(arch22) 的 score 输出为 FP32, 950(arch35) 为 BF16。
+
+    Meta 实现要与 C++ 适配层的 score 分配 dtype 保持一致;
+    查不到芯片型号时按 arch22 处理 (score 输出主要用于 DCP 跨 rank 归并)。
+    """
+    try:
+        import torch_npu  # noqa: F401
+
+        name = torch.npu.get_device_name(0)
+    except Exception:
+        return True
+    return "Ascend950" not in str(name)
+
+
 class QuantLightningIndexerOpBuilder(OpBuilder):
     def __init__(self):
         super().__init__("quant_lightning_indexer", category="attention")
@@ -29,15 +44,18 @@ class QuantLightningIndexerOpBuilder(OpBuilder):
         return [
             "quant_lightning_indexer_metadata(int num_heads_q, int num_heads_k, int head_dim, int topk, "
             "int quant_mode, *, Tensor? cu_seqlens_q=None, Tensor? cu_seqlens_k=None, Tensor? seqused_q=None,"
-            "Tensor? seqused_k=None, Tensor? cmp_residual_k=None, int? batch_size=None, int? max_seqlen_q=None,"
-            "int? max_seqlen_k=None, str? layout_q=None, str? layout_k=None, int? mask_mode=None, "
-            "int? cmp_ratio=None) -> Tensor",
+            "Tensor? seqused_k=None, Tensor? cmp_residual_k=None, Tensor? causal_seqlens_kv_global=None, "
+            "int? batch_size=None, int? max_seqlen_q=None, int? max_seqlen_k=None, str? layout_q=None, "
+            "str? layout_k=None, int? mask_mode=None, int? cmp_ratio=None, bool? enable_dcp=None, "
+            "int? cp_world=None, int? cp_rank=None, int? cp_kv_cache_interleave_size=None) -> Tensor",
             "quant_lightning_indexer(Tensor query, Tensor key, Tensor weights, Tensor query_dequant_scale, "
             "Tensor key_dequant_scale, int topk, int quant_mode, *, Tensor? cu_seqlens_q=None, "
             "Tensor? cu_seqlens_k=None, Tensor? seqused_q=None, Tensor? seqused_k=None, Tensor? "
             "cmp_residual_k = None, Tensor? block_table=None, Tensor? output_idx_offset=None, Tensor? metadata=None, "
+            "Tensor? causal_seqlens_kv_global=None, "
             'int max_seqlen_q=-1, str layout_q="BSND", str layout_k="BSND", int mask_mode=0, '
-            "int cmp_ratio=1, int return_value=0) -> (Tensor, Tensor)",
+            "int cmp_ratio=1, int return_value=0, bool enable_dcp=False, int cp_world=1, int cp_rank=0, "
+            "int cp_kv_cache_interleave_size=1) -> (Tensor, Tensor)",
             # O1 方案b: candidate 两级TopK 新入口 (三元组), 旧 schema 保持不变
             "quant_lightning_indexer_candidate(Tensor query, Tensor key, Tensor weights, "
             "Tensor query_dequant_scale, Tensor key_dequant_scale, int topk, int quant_mode, *, "
@@ -67,6 +85,7 @@ class QuantLightningIndexerOpBuilder(OpBuilder):
             seqused_q: torch.Tensor | None = None,
             seqused_k: torch.Tensor | None = None,
             cmp_residual_k: torch.Tensor | None = None,
+            causal_seqlens_kv_global: torch.Tensor | None = None,
             batch_size: int | None = None,
             max_seqlen_q: int | None = None,
             max_seqlen_k: int | None = None,
@@ -74,6 +93,10 @@ class QuantLightningIndexerOpBuilder(OpBuilder):
             layout_k: str | None = None,
             mask_mode: int | None = None,
             cmp_ratio: int | None = None,
+            enable_dcp: bool | None = None,
+            cp_world: int | None = None,
+            cp_rank: int | None = None,
+            cp_kv_cache_interleave_size: int | None = None,
         ):
             return torch.empty((QLI_METADATA_SIZE), dtype=torch.int32, device="npu")
 
@@ -95,12 +118,17 @@ class QuantLightningIndexerOpBuilder(OpBuilder):
             block_table=None,
             output_idx_offset=None,
             metadata=None,
+            causal_seqlens_kv_global=None,
             max_seqlen_q=-1,
             layout_q="BSND",
             layout_k="BSND",
             mask_mode=0,
             cmp_ratio=1,
             return_value=0,
+            enable_dcp=False,
+            cp_world=1,
+            cp_rank=0,
+            cp_kv_cache_interleave_size=1,
         ):
             key_head_num = key.shape[1] if layout_k == "TND" else key.shape[2]
 
@@ -117,16 +145,17 @@ class QuantLightningIndexerOpBuilder(OpBuilder):
                     device="meta",
                 )
             if return_value:
+                value_dtype = torch.float32 if _arch22_score_is_fp32() else torch.bfloat16
                 if layout_q == "BSND":
                     sparse_values_out = torch.empty(
                         [query.shape[0], query.shape[1], key_head_num, topk],
-                        dtype=torch.bfloat16,
+                        dtype=value_dtype,
                         device="meta",
                     )
                 else:
                     sparse_values_out = torch.empty(
                         [query.shape[0], key_head_num, topk],
-                        dtype=torch.bfloat16,
+                        dtype=value_dtype,
                         device="meta",
                     )
             else:
@@ -210,6 +239,7 @@ def quant_lightning_indexer_metadata(
     seqused_q: torch.Tensor | None = None,
     seqused_k: torch.Tensor | None = None,
     cmp_residual_k: torch.Tensor | None = None,
+    causal_seqlens_kv_global: torch.Tensor | None = None,
     batch_size: int | None = None,
     max_seqlen_q: int | None = None,
     max_seqlen_k: int | None = None,
@@ -217,6 +247,10 @@ def quant_lightning_indexer_metadata(
     layout_k: str | None = None,
     mask_mode: int | None = None,
     cmp_ratio: int | None = None,
+    enable_dcp: bool | None = None,
+    cp_world: int | None = None,
+    cp_rank: int | None = None,
+    cp_kv_cache_interleave_size: int | None = None,
 ):
     """
     dispatcher implementation for NPU.zhe
@@ -229,6 +263,10 @@ def quant_lightning_indexer_metadata(
     layout_k = "BSND" if layout_k is None else layout_k
     mask_mode = 0 if mask_mode is None else mask_mode
     cmp_ratio = 1 if cmp_ratio is None else cmp_ratio
+    enable_dcp = False if enable_dcp is None else enable_dcp
+    cp_world = 1 if cp_world is None else cp_world
+    cp_rank = 0 if cp_rank is None else cp_rank
+    cp_kv_cache_interleave_size = 1 if cp_kv_cache_interleave_size is None else cp_kv_cache_interleave_size
 
     op_module = quant_lightning_indexer_op_builder.load()
     return op_module.quant_lightning_indexer_metadata(
@@ -242,6 +280,7 @@ def quant_lightning_indexer_metadata(
         seqused_q,
         seqused_k,
         cmp_residual_k,
+        causal_seqlens_kv_global,
         batch_size,
         max_seqlen_q,
         max_seqlen_k,
@@ -249,6 +288,10 @@ def quant_lightning_indexer_metadata(
         layout_k,
         mask_mode,
         cmp_ratio,
+        enable_dcp,
+        cp_world,
+        cp_rank,
+        cp_kv_cache_interleave_size,
     )
 
 
@@ -264,6 +307,7 @@ def quant_lightning_indexer_metadata_fallback(
     seqused_q: torch.Tensor | None = None,
     seqused_k: torch.Tensor | None = None,
     cmp_residual_k: torch.Tensor | None = None,
+    causal_seqlens_kv_global: torch.Tensor | None = None,
     batch_size: int | None = None,
     max_seqlen_q: int | None = None,
     max_seqlen_k: int | None = None,
@@ -271,6 +315,10 @@ def quant_lightning_indexer_metadata_fallback(
     layout_k: str | None = None,
     mask_mode: int | None = None,
     cmp_ratio: int | None = None,
+    enable_dcp: bool | None = None,
+    cp_world: int | None = None,
+    cp_rank: int | None = None,
+    cp_kv_cache_interleave_size: int | None = None,
 ):
     # 处理所有 tensor 都为 None 的情况
     # 调用 NPU 实现
@@ -285,6 +333,7 @@ def quant_lightning_indexer_metadata_fallback(
         seqused_q,
         seqused_k,
         cmp_residual_k,
+        causal_seqlens_kv_global,
         batch_size,
         max_seqlen_q,
         max_seqlen_k,
@@ -292,6 +341,10 @@ def quant_lightning_indexer_metadata_fallback(
         layout_k,
         mask_mode,
         cmp_ratio,
+        enable_dcp,
+        cp_world,
+        cp_rank,
+        cp_kv_cache_interleave_size,
     )
 
 
@@ -377,12 +430,17 @@ def quant_lightning_indexer(
     block_table=None,
     output_idx_offset=None,
     metadata=None,
+    causal_seqlens_kv_global=None,
     max_seqlen_q=-1,
     layout_q="BSND",
     layout_k="BSND",
     mask_mode=0,
     cmp_ratio=1,
     return_value=0,
+    enable_dcp=False,
+    cp_world=1,
+    cp_rank=0,
+    cp_kv_cache_interleave_size=1,
 ):
     """
     dispatcher implementation for NPU.zhe
@@ -405,12 +463,17 @@ def quant_lightning_indexer(
         block_table,
         output_idx_offset,
         metadata,
+        causal_seqlens_kv_global,
         max_seqlen_q,
         layout_q,
         layout_k,
         mask_mode,
         cmp_ratio,
         return_value,
+        enable_dcp,
+        cp_world,
+        cp_rank,
+        cp_kv_cache_interleave_size,
     )
 
 

@@ -15,8 +15,6 @@
 # limitations under the License.
 #
 import torch
-from vllm.config import get_current_vllm_config
-from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
@@ -56,36 +54,6 @@ def _build_or_get_topk(
         )
         cache[key] = table
     return table
-
-
-def build_force_eplb_topk(
-    device: torch.device,
-    max_num_tokens: int,
-) -> None:
-    """Build force-EPLB tables before ACLGraph capture."""
-    forward_context = get_forward_context()
-    moe_comm_method = forward_context.moe_comm_method
-    if moe_comm_method is None:
-        return
-
-    vllm_config = get_current_vllm_config()
-    capture_sizes = {int(size) for size in (vllm_config.compilation_config.cudagraph_capture_sizes or [])}
-    if not capture_sizes:
-        capture_sizes.add(int(max_num_tokens))
-
-    moe_config = moe_comm_method.moe_config
-    top_k = int(moe_config.experts_per_token)
-    num_logical_experts = int(moe_config.num_logical_experts)
-    for num_tokens in capture_sizes:
-        for dtype in (torch.int32, torch.int64):
-            _build_or_get_topk(
-                moe_comm_method,
-                num_tokens=int(num_tokens),
-                top_k=top_k,
-                num_logical_experts=num_logical_experts,
-                dtype=dtype,
-                device=device,
-            )
 
 
 def get_force_eplb_topk(

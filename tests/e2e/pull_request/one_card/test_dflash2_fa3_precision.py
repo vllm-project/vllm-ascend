@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch_npu  # noqa: F401
+from vllm.config.compilation import CUDAGraphMode
 
 from tests.e2e.pull_request.one_card.test_flash_attn_precision import golden
 from vllm_ascend.attention.flash_attention_v3 import (
@@ -69,11 +70,18 @@ def test_dflash2_fa3_rejection_and_padded_graph_replay(
     impl = AscendFlashAttentionImpl(
         num_heads, head_size, head_size**-0.5, num_kv_heads=num_kv_heads, sliding_window=window
     )
-    builder = AscendFlashAttentionMetadataBuilder.__new__(AscendFlashAttentionMetadataBuilder)
-    builder.block_size = block_size
-    builder.scheduler_specs = {(num_heads, num_kv_heads, head_size, dtype, impl.scale, 0.0, window)}
-    builder.scheduler_buffers = {}
-    builder.use_graph_buffers = True
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(method="dflash", enforce_eager=False, num_speculative_tokens=query_len - 1),
+        scheduler_config=SimpleNamespace(max_num_seqs=num_reqs),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+            cudagraph_capture_sizes=[query.shape[0]],
+            static_forward_context={"draft.attn": SimpleNamespace(impl=impl)},
+        ),
+    )
+    builder = AscendFlashAttentionMetadataBuilder(
+        SimpleNamespace(block_size=block_size, dtype=dtype), ["draft.attn"], config, torch.device(device)
+    )
     layer = SimpleNamespace(layer_name="draft.attn", _k_scale_float=1.0, _v_scale_float=1.0)
     cache = (key, value)
     output = torch.empty_like(query)

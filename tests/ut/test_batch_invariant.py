@@ -129,7 +129,8 @@ class TestBatchInvariant:
 
     @patch("vllm_ascend.batch_invariant.HAS_TRITON", True)
     @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", False)
-    def test_enable_batch_invariant_mode_triton_path(self):
+    @patch("vllm_ascend.batch_invariant.torch_npu")
+    def test_enable_batch_invariant_mode_triton_path(self, mock_torch_npu):
         """Test enable_batch_invariant_mode with only Triton available"""
         # Mock dependencies
         mock_library = MagicMock()
@@ -147,6 +148,7 @@ class TestBatchInvariant:
         batch_invariant.enable_batch_invariant_mode()
 
         # Verify operator registrations
+        assert mock_torch_npu.npu_add_rms_norm is batch_invariant.add_rms_norm
         assert mock_library.impl.call_count == 7
         mock_library.impl.assert_any_call("aten::addmm", batch_invariant.addmm_batch_invariant, "NPU")
         mock_library.impl.assert_any_call("aten::bmm", batch_invariant.bmm_batch_invariant, "NPU")

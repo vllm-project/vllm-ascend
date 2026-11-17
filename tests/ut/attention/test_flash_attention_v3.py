@@ -60,10 +60,11 @@ def runtime(monkeypatch):
     return SimpleNamespace(**namespace, ops=ops, cache_write=cache_write, notify=notify)
 
 
-def make_builder(runtime, *, window=None, eager=False):
+def make_builder(runtime, *, window=None, eager=False, method="dflash"):
     impl = runtime.AscendFlashAttentionImpl(8, 192, 192**-0.5, num_kv_heads=2, sliding_window=window)
     config = SimpleNamespace(
-        speculative_config=SimpleNamespace(enforce_eager=eager),
+        speculative_config=SimpleNamespace(method=method, enforce_eager=eager, num_speculative_tokens=3),
+        scheduler_config=SimpleNamespace(max_num_seqs=4),
         compilation_config=SimpleNamespace(
             cudagraph_mode=SimpleNamespace(decode_mode=lambda: "full"),
             # A target bucket of 15 can round to a 16-token DFlash graph.
@@ -99,10 +100,11 @@ def test_qwen_target_updates_padded_tables_and_lengths_at_captured_addresses(run
 
     impl = runtime.AscendFlashAttentionImpl(16, 256, 256**-0.5, num_kv_heads=2)
     config = SimpleNamespace(
-        speculative_config=SimpleNamespace(enforce_eager=True, num_speculative_tokens=7),
+        speculative_config=SimpleNamespace(method="dflash", enforce_eager=True, num_speculative_tokens=7),
         scheduler_config=SimpleNamespace(max_num_seqs=4),
         compilation_config=SimpleNamespace(
             cudagraph_mode=Mode(capture_mode),
+            cudagraph_capture_sizes=[16],
             static_forward_context={"target.0": SimpleNamespace(impl=impl)},
         ),
     )
@@ -232,7 +234,8 @@ def test_distinct_capture_contexts_do_not_overwrite_each_other(runtime, change):
     assert captured.scheduler_metadata[spec].data_ptr() != other.scheduler_metadata[spec].data_ptr()
 
 
-def test_dummy_batch_has_one_empty_request_and_layout_changes_fail_closed(runtime):
+@pytest.mark.parametrize("change", ["capacity", "dtype"])
+def test_dummy_batch_has_one_empty_request_and_invalid_tiling_changes_fail_closed(runtime, change):
     builder, _ = make_builder(runtime)
     common = make_common()
     common.query_start_loc_cpu.zero_()
@@ -240,8 +243,13 @@ def test_dummy_batch_has_one_empty_request_and_layout_changes_fail_closed(runtim
     common.seq_lens.zero_()
     builder.build(0, common)
     assert runtime.ops.get_scheduler_metadata.call_args.kwargs["batch_size"] == 1
-    runtime.ops.get_scheduler_metadata.side_effect = lambda **kwargs: torch.zeros(9, dtype=torch.uint8)
-    with pytest.raises(RuntimeError, match="layout changed"):
+    if change == "capacity":
+        runtime.ops.get_scheduler_metadata.side_effect = lambda **kwargs: torch.zeros(1024, dtype=torch.uint8)
+        error = "graph-stable buffer capacity"
+    else:
+        runtime.ops.get_scheduler_metadata.side_effect = lambda **kwargs: torch.zeros(8, dtype=torch.int32)
+        error = "layout changed"
+    with pytest.raises(RuntimeError, match=error):
         builder.build(0, common)
 
 
@@ -253,6 +261,23 @@ def test_eager_builds_do_not_retain_tiling_for_every_batch_shape(runtime):
     spec = next(iter(first.scheduler_metadata))
     assert first.scheduler_metadata[spec] is not second.scheduler_metadata[spec]
     assert not builder.scheduler_buffers
+
+
+def test_dspark_keeps_upstream_capture_bucket_bounds_and_draft_capture_entrypoint(runtime):
+    builder, _ = make_builder(runtime, method="dspark")
+    common = make_common()
+    builder.build(0, common)
+    assert not builder.scheduler_buffers  # A DSpark shape must match its capture buckets.
+    builder.capture_sizes.add(16)
+    captured = builder.build_for_graph_capture(common)
+    assert captured.max_query_len == 16
+    common.max_query_len = 2
+    common.query_start_loc_cpu.copy_(torch.tensor([0, 2, 2, 2, 2]))
+    common.query_start_loc.copy_(common.query_start_loc_cpu)
+    replay = builder.build(0, common)
+    spec = next(iter(captured.scheduler_metadata))
+    assert replay.max_query_len == 16
+    assert replay.scheduler_metadata[spec] is captured.scheduler_metadata[spec]
 
 
 @pytest.mark.parametrize("offsets", [[0, 3, 8, 12, 16], [0, 4, 4, 8, 12]])
@@ -331,3 +356,21 @@ def test_shared_cache_and_profile_forward_skip_cache_writes(runtime):
     assert impl.forward(layer, None, None, None, None, None, output) is output
     assert torch.count_nonzero(output) == 0
     runtime.ops.flash_attn_with_kvcache.assert_not_called()
+
+
+def test_zero_token_forward_and_context_update_skip_cache_writes(runtime):
+    builder, impl = make_builder(runtime)
+    common = make_common()
+    common.num_actual_tokens = 0
+    common.query_start_loc_cpu.zero_()
+    common.query_start_loc.zero_()
+    metadata = builder.build(0, common)
+    query = torch.zeros(16, 8, 192, dtype=torch.bfloat16)
+    key = torch.zeros(16, 2, 192, dtype=query.dtype)
+    cache = (torch.empty(1, 128, 2, 192), torch.empty(1, 128, 2, 192))
+    layer = SimpleNamespace(layer_name="draft.0", _k_scale_float=1.0, _v_scale_float=1.0)
+    impl.forward(layer, query, key, key, cache, metadata, torch.empty_like(query))
+    impl.do_kv_cache_update(layer, key[:0], key[:0], cache, common.slot_mapping[:0])
+    runtime.cache_write.assert_not_called()
+    runtime.notify.assert_not_called()
+    runtime.ops.flash_attn_with_kvcache.assert_called_once()

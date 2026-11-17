@@ -60,10 +60,11 @@ def test_qwen_full_attention_keeps_exact_device_lengths(dtype, capacity, num_kv_
     )
     impl = AscendFlashAttentionImpl(num_heads, head_size, head_size**-0.5, num_kv_heads=num_kv_heads)
     config = SimpleNamespace(
-        speculative_config=SimpleNamespace(enforce_eager=True, num_speculative_tokens=7),
+        speculative_config=SimpleNamespace(method="dflash", enforce_eager=True, num_speculative_tokens=7),
         scheduler_config=SimpleNamespace(max_num_seqs=max_reqs),
         compilation_config=SimpleNamespace(
             cudagraph_mode=CUDAGraphMode.FULL if prefill else CUDAGraphMode.FULL_DECODE_ONLY,
+            cudagraph_capture_sizes=[token_capacity],
             static_forward_context={"target.attn": SimpleNamespace(impl=impl)},
         ),
     )
