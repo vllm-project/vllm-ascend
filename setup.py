@@ -452,7 +452,7 @@ _RARE_FEED_NATIVE_SRC = os.path.join(
 _RARE_FEED_NATIVE_EXT = Extension(
     name="vllm_ascend.observability.runtime_guard.detector.rare.rare_feed_native",
     sources=[_RARE_FEED_NATIVE_SRC],
-    extra_compile_args=["-O3"] if sys.platform != "win32" else [],
+    extra_compile_args=["-O3", "-Wall"] if sys.platform != "win32" else [],
 )
 
 ext_modules: list[Extension] = [_RARE_FEED_NATIVE_EXT]

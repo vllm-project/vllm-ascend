@@ -103,6 +103,8 @@ typedef struct {
     const int32_t *rule_begin;
     const int32_t *rule_end;
     const uint8_t *rule_strict;
+    Py_ssize_t bflat_nbytes;
+    Py_ssize_t qleaf_nbytes;
     Py_buffer bufs[MAX_BUF];
     int nbuf;
 } Ctx;
@@ -142,6 +144,93 @@ static int take(Ctx *c, PyObject *obj, Py_ssize_t nbytes, void **out) {
     return 0;
 }
 
+/* Reject corrupt tables before any GIL-released feed can OOB-read. */
+static int ctx_validate(Ctx *c) {
+    int64_t i;
+    int t, a, r;
+    Py_ssize_t n_leaves;
+
+    if (c->boff[0] != 0) {
+        PyErr_SetString(PyExc_ValueError, "rare feed ctx: boff[0] must be 0");
+        return -1;
+    }
+    for (i = 1; i <= (int64_t)c->V; i++) {
+        if (c->boff[i] < c->boff[i - 1]) {
+            PyErr_SetString(PyExc_ValueError, "rare feed ctx: boff not monotonic");
+            return -1;
+        }
+    }
+    if ((Py_ssize_t)c->boff[c->V] > c->bflat_nbytes) {
+        PyErr_SetString(PyExc_ValueError, "rare feed ctx: boff exceeds bflat");
+        return -1;
+    }
+
+    if (c->qstart[0] != 0 || c->qstart[c->n_trees] != c->n_nodes) {
+        PyErr_SetString(PyExc_ValueError, "rare feed ctx: bad qstart span");
+        return -1;
+    }
+    for (t = 0; t < c->n_trees; t++) {
+        if (c->qstart[t] > c->qstart[t + 1]) {
+            PyErr_SetString(PyExc_ValueError, "rare feed ctx: qstart not monotonic");
+            return -1;
+        }
+    }
+    for (i = 0; i < c->n_nodes; i++) {
+        if (c->qfeat[i] < 0 || c->qfeat[i] >= c->n_in) {
+            PyErr_SetString(PyExc_ValueError, "rare feed ctx: qfeat out of range");
+            return -1;
+        }
+    }
+
+    if (c->qleaf_nbytes % (Py_ssize_t)sizeof(double) != 0) {
+        PyErr_SetString(PyExc_ValueError, "rare feed ctx: qleaf size not multiple of float64");
+        return -1;
+    }
+    n_leaves = c->qleaf_nbytes / (Py_ssize_t)sizeof(double);
+    if (n_leaves < 1) {
+        PyErr_SetString(PyExc_ValueError, "rare feed ctx: empty qleaf");
+        return -1;
+    }
+    for (t = 0; t < c->n_trees; t++) {
+        int32_t start = c->qleaf0[t];
+        int32_t end = (t + 1 < c->n_trees) ? c->qleaf0[t + 1] : (int32_t)n_leaves;
+        int nleaf;
+        if (start < 0 || end < start || (Py_ssize_t)end > n_leaves) {
+            PyErr_SetString(PyExc_ValueError, "rare feed ctx: bad qleaf0");
+            return -1;
+        }
+        nleaf = (int)(end - start);
+        if (nleaf < 1 || nleaf > 63) {
+            PyErr_SetString(PyExc_ValueError, "rare feed ctx: tree leaf count out of range");
+            return -1;
+        }
+    }
+
+    for (a = 0; a < c->n_atoms; a++) {
+        if (c->atom_feat[a] < 0 || c->atom_feat[a] >= FEAT_N) {
+            PyErr_SetString(PyExc_ValueError, "rare feed ctx: atom_feat out of range");
+            return -1;
+        }
+        if (c->atom_kind[a] < 0 || c->atom_kind[a] > 2) {
+            PyErr_SetString(PyExc_ValueError, "rare feed ctx: atom_kind out of range");
+            return -1;
+        }
+    }
+    for (r = 0; r < c->n_rules; r++) {
+        if (c->rule_begin[r] < 0 || c->rule_end[r] < c->rule_begin[r] || c->rule_end[r] > c->n_atoms) {
+            PyErr_SetString(PyExc_ValueError, "rare feed ctx: bad rule atom span");
+            return -1;
+        }
+    }
+    for (i = 0; i < c->n_in; i++) {
+        if (c->in_kind[i] < 0 || c->in_kind[i] >= IN_N) {
+            PyErr_SetString(PyExc_ValueError, "rare feed ctx: in_kind out of range");
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static PyObject *make_ctx(PyObject *self, PyObject *args) {
     PyObject *rcls, *first, *last, *lead, *u8, *boff, *bflat, *lit;
     PyObject *lcat, *fcat, *is_letter, *in_kind;
@@ -163,7 +252,8 @@ static PyObject *make_ctx(PyObject *self, PyObject *args) {
             &atom_feat, &atom_kind, &atom_thr, &rule_begin, &rule_end, &rule_strict)) {
         return NULL;
     }
-    if (V < 1 || ncls < 1 || n_in < 1 || n_in > IN_N || n_trees < 1 || n_rules < 1) {
+    if (V < 1 || ncls < 1 || n_in < 1 || n_in > IN_N || n_nodes < 1 || n_trees < 1 || n_atoms < 1 ||
+        n_rules < 1) {
         PyErr_SetString(PyExc_ValueError, "rare feed ctx: bad dimensions");
         return NULL;
     }
@@ -202,6 +292,7 @@ static PyObject *make_ctx(PyObject *self, PyObject *args) {
     TAKE(u8, (Py_ssize_t)V, u8);
     TAKE(boff, (Py_ssize_t)(V + 1) * (Py_ssize_t)sizeof(int64_t), boff);
     TAKE(bflat, 0, bflat);
+    c->bflat_nbytes = c->bufs[c->nbuf - 1].len;
     TAKE(lit, (Py_ssize_t)V, lit_fffd);
     TAKE(lcat, (Py_ssize_t)(V + 1) * (Py_ssize_t)sizeof(int64_t), lcat);
     TAKE(fcat, (Py_ssize_t)(V + 1) * (Py_ssize_t)sizeof(int64_t), fcat);
@@ -214,6 +305,7 @@ static PyObject *make_ctx(PyObject *self, PyObject *args) {
     TAKE(qrule, (Py_ssize_t)n_nodes * (Py_ssize_t)sizeof(int64_t), qrule);
     TAKE(qstart, (Py_ssize_t)(n_trees + 1) * (Py_ssize_t)sizeof(int32_t), qstart);
     TAKE(qleaf, 0, qleaf);
+    c->qleaf_nbytes = c->bufs[c->nbuf - 1].len;
     TAKE(qleaf0, (Py_ssize_t)n_trees * (Py_ssize_t)sizeof(int32_t), qleaf0);
     TAKE(atom_feat, (Py_ssize_t)n_atoms * (Py_ssize_t)sizeof(int16_t), atom_feat);
     TAKE(atom_kind, (Py_ssize_t)n_atoms, atom_kind);
@@ -222,6 +314,11 @@ static PyObject *make_ctx(PyObject *self, PyObject *args) {
     TAKE(rule_end, (Py_ssize_t)n_rules * (Py_ssize_t)sizeof(int32_t), rule_end);
     TAKE(rule_strict, (Py_ssize_t)n_rules, rule_strict);
 #undef TAKE
+
+    if (ctx_validate(c) < 0) {
+        ctx_release(c);
+        return NULL;
+    }
 
     cap = PyCapsule_New(c, "rare_feed_ctx", ctx_capsule_destroy);
     if (cap == NULL) {
@@ -1064,7 +1161,7 @@ static PyObject *map_lookup(PyObject *self, PyObject *args) {
             return NULL;
         }
     }
-    Py_BEGIN_ALLOW_THREADS
+    /* Keep the GIL: map_put/map_del may mutate the same IdMap from another thread. */
     for (i = 0; i < n; i++) {
         int found = 0;
         int at;
@@ -1075,7 +1172,6 @@ static PyObject *map_lookup(PyObject *self, PyObject *args) {
         at = id_probe(m, id_hash(ps[i], ls[i]), ps[i], (uint32_t)ls[i], &found);
         rows[i] = found ? m->slot[at].row : -1;
     }
-    Py_END_ALLOW_THREADS
     out = PyBytes_FromStringAndSize((const char *)rows, n * (Py_ssize_t)sizeof(int32_t));
     PyMem_Free(ps);
     PyMem_Free(ls);
@@ -1251,7 +1347,7 @@ static PyMethodDef methods[] = {
     {"map_new", map_new, METH_NOARGS, "req_id to row map."},
     {"map_put", map_put, METH_VARARGS, "Insert req_id."},
     {"map_del", map_del, METH_VARARGS, "Remove req_id."},
-    {"map_lookup", map_lookup, METH_VARARGS, "Resolve req ids. GIL released for the probe."},
+    {"map_lookup", map_lookup, METH_VARARGS, "Resolve req ids (GIL held; IdMap not thread-safe)."},
     {NULL, NULL, 0, NULL},
 };
 

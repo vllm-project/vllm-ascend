@@ -12,20 +12,39 @@ form built at load (``GB._quickscorer``).
   leaf  [T, 2^D]      leaf values
 score = base + sum of reached leaves; quant rounds lp1 / lpc / gap inputs.
 """
+from __future__ import annotations
+
+import os
+
 import numpy as np
+
+_GB_REQUIRED = ("depth", "feat", "thr", "cat", "mask", "leaf", "base", "inputs")
 
 
 class GB:
     def __init__(self, spec):
-        self.depth = int(spec['depth'])
-        self.feat = np.asarray(spec['feat'], np.int64)
-        self.thr = np.asarray(spec['thr'], np.float64)
-        self.cat = np.asarray(spec['cat'], bool)
-        self.mask = np.asarray(spec['mask'], np.int64)
-        self.leaf = np.asarray(spec['leaf'], np.float64)
-        self.base = float(spec['base'])
-        self.inputs = [str(x) for x in spec['inputs']]
-        self.quant = float(spec.get('quant', 0.0))     # lp1 / lpc / gap inputs rounded to this step (detector/rare.py gb_inputs)
+        self.depth = int(np.asarray(spec["depth"]).reshape(-1)[0])
+        # Packaged mech model uses depth=8; QuickScorer still caps real leaves at 63.
+        if self.depth < 1 or self.depth > 16:
+            raise ValueError(f"rare gb depth out of range: {self.depth}")
+        n_int = 2**self.depth - 1
+        n_leaf = 2**self.depth
+        self.feat = np.asarray(spec["feat"], np.int64)
+        self.thr = np.asarray(spec["thr"], np.float64)
+        self.cat = np.asarray(spec["cat"], bool)
+        self.mask = np.asarray(spec["mask"], np.int64)
+        self.leaf = np.asarray(spec["leaf"], np.float64)
+        if self.feat.ndim != 2 or self.feat.shape[1] != n_int:
+            raise ValueError(f"rare gb feat shape {self.feat.shape} incompatible with depth={self.depth}")
+        if self.thr.shape != self.feat.shape or self.cat.shape != self.feat.shape or self.mask.shape != self.feat.shape:
+            raise ValueError("rare gb thr/cat/mask shapes must match feat")
+        if self.leaf.ndim != 2 or self.leaf.shape[0] != self.feat.shape[0] or self.leaf.shape[1] != n_leaf:
+            raise ValueError(f"rare gb leaf shape {self.leaf.shape} incompatible with depth={self.depth}")
+        self.base = float(np.asarray(spec["base"]).reshape(-1)[0])
+        self.inputs = [str(x) for x in np.asarray(spec["inputs"]).tolist()]
+        if not self.inputs:
+            raise ValueError("rare gb inputs must be non-empty")
+        self.quant = float(np.asarray(spec.get("quant", 0.0)).reshape(-1)[0])
         self._quickscorer()
 
     def _quickscorer(self):
@@ -99,7 +118,15 @@ class GB:
 
     @classmethod
     def load(cls, path):
-        z = np.load(path)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"rare gb model not found: {path}")
+        try:
+            z = np.load(path)
+        except Exception as exc:
+            raise ValueError(f"rare gb npz unreadable: {path}: {exc}") from exc
+        missing = [k for k in _GB_REQUIRED if k not in z.files]
+        if missing:
+            raise ValueError(f"rare gb npz missing keys {missing}: {path}")
         return cls({k: z[k] for k in z.files})
 
 
