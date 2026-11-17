@@ -338,7 +338,9 @@ class NPUPlatform(Platform):
 
         if _validate_flash_attn_npu_3(backend_key, attn_selector_config):
             return "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
-        if _validate_flash_attn_npu_3(backend_key, attn_selector_config, model_tag="backbone"):
+        if _validate_qwen_flash_attn_npu_3(backend_key, attn_selector_config):
+            return "vllm_ascend.attention.flash_attention_v3.AscendDFlash2FlashAttentionBackend"
+        if _validate_qwen_flash_attn_npu_3(backend_key, attn_selector_config, model_tag="backbone"):
             return "vllm_ascend.attention.flash_attention_v3.AscendQwenFlashAttentionBackend"
 
         backend_map = {
@@ -1854,14 +1856,6 @@ def _validate_minimax_dspark_flash_attn(config, selector) -> bool:
     )
 
 
-def _validate_flash_attn_npu_3(backend_key, selector, model_tag="dflash_head") -> bool:
-    """Keep Qwen/DFlash2 and MiniMax FA3 eligibility independent."""
-    if _validate_qwen_flash_attn_npu_3(backend_key, selector, model_tag):
-        return True
-    # The backbone subclass is specific to Qwen hybrid attention.
-    return model_tag == "dflash_head" and _validate_minimax_flash_attn_npu_3(backend_key, selector)
-
-
 def _validate_qwen_flash_attn_npu_3(backend_key, selector, model_tag="dflash_head") -> bool:
     """Use A2/A3 FA3 for the audited Qwen3.5 target and V2 DFlash2 draft."""
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
@@ -1882,8 +1876,7 @@ def _validate_qwen_flash_attn_npu_3(backend_key, selector, model_tag="dflash_hea
 
     from vllm.compilation import backends
 
-    # The verified Qwen3.8 checkpoint declares this dense Qwen3.5 architecture.
-    # Read the target explicitly: a loader scope can expose the draft config.
+    # Loader scopes can expose the draft config, so check the target explicitly.
     if (
         getattr(spec.target_model_config, "architecture", None) != "Qwen3_5ForConditionalGeneration"
         or spec.draft_model_config is None
@@ -1929,7 +1922,7 @@ def _validate_qwen_flash_attn_npu_3(backend_key, selector, model_tag="dflash_hea
     )
 
 
-def _validate_minimax_flash_attn_npu_3(backend_key, selector) -> bool:
+def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
     """Select the optional A2/A3 FA3 ABI only for compatible MiniMax attention."""
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
         HardwareCapability.FLASH_ATTN_NPU_3
@@ -1942,7 +1935,7 @@ def _validate_minimax_flash_attn_npu_3(backend_key, selector) -> bool:
 
     config = get_current_vllm_config_or_none()
     spec = config.speculative_config if config is not None else None
-    if spec is None or spec.method != "dspark" or spec.draft_model_config is None:
+    if spec is None or spec.draft_model_config is None:
         return False
     if config is None or config.model_config is None or not _uses_minimax_fa3(config):
         return False
@@ -1976,11 +1969,8 @@ def _validate_minimax_flash_attn_npu_3(backend_key, selector) -> bool:
 
 def _uses_minimax_fa3(config) -> bool:
     """Keep unrelated models and drafts on their configured attention backend."""
+    architectures = config.model_config.hf_config.architectures or ()
     spec = config.speculative_config
-    if getattr(spec, "method", None) != "dspark":
-        return False
-    model_hf = getattr(config.model_config, "hf_config", None)
-    architectures = getattr(model_hf, "architectures", None) or ()
     target = getattr(spec, "target_model_config", None)
     target_hf = getattr(target, "hf_config", None)
     draft_architectures = {
@@ -1989,8 +1979,10 @@ def _uses_minimax_fa3(config) -> bool:
         "Qwen3DSparkModel",
         "Qwen3OmniDSparkModel",
     }
-    return bool(draft_architectures.intersection(architectures)) and bool(
-        _MINIMAX_M3_ARCHITECTURES.intersection(getattr(target_hf, "architectures", None) or ())
+    return (
+        getattr(spec, "method", None) in ("dspark",)
+        and bool(draft_architectures.intersection(architectures))
+        and bool(_MINIMAX_M3_ARCHITECTURES.intersection(getattr(target_hf, "architectures", None) or ()))
     )
 
 

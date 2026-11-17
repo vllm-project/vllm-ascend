@@ -11,8 +11,8 @@ from vllm.config.compilation import CUDAGraphMode
 
 from tests.e2e.pull_request.one_card.test_flash_attn_precision import golden
 from vllm_ascend.attention.flash_attention_v3 import (
+    AscendDFlash2FlashAttentionMetadataBuilder,
     AscendFlashAttentionImpl,
-    AscendFlashAttentionMetadataBuilder,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
@@ -79,7 +79,7 @@ def test_dflash2_fa3_rejection_and_padded_graph_replay(
             static_forward_context={"draft.attn": SimpleNamespace(impl=impl)},
         ),
     )
-    builder = AscendFlashAttentionMetadataBuilder(
+    builder = AscendDFlash2FlashAttentionMetadataBuilder(
         SimpleNamespace(block_size=block_size, dtype=dtype), ["draft.attn"], config, torch.device(device)
     )
     layer = SimpleNamespace(layer_name="draft.attn", _k_scale_float=1.0, _v_scale_float=1.0)

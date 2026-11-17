@@ -29,8 +29,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
-from vllm_ascend.attention.flash_attention_v3 import AscendFlashAttentionBackend as AscendFA3Backend
-from vllm_ascend.attention.flash_attention_v3 import AscendQwenFlashAttentionBackend
+from vllm_ascend.attention.flash_attention_v3 import AscendDFlash2FlashAttentionBackend, AscendQwenFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
 from vllm_ascend.utils import vllm_version_is
@@ -2173,73 +2172,33 @@ def _qwen_dflash2_device_length_runner():
     )
     runner.speculative_config.parallel_drafting = True
     runner.speculative_config.enable_adaptive_verification = False
-    runner.speculator = SimpleNamespace(attn_backends={"draft.0": AscendFA3Backend})
+    runner.speculator = SimpleNamespace(attn_backends={"draft.0": AscendDFlash2FlashAttentionBackend})
     runner.attn_groups = [
         [SimpleNamespace(backend=backend)]
-        for backend in (AscendAttentionBackend, AscendGDNFusedAttentionBackend, AscendFA3Backend)
+        for backend in (AscendQwenFlashAttentionBackend, AscendGDNFusedAttentionBackend)
     ]
     return runner, output, batch
 
 
-@pytest.mark.parametrize(
-    "unsupported",
-    [
-        None,
-        "no_draft_backends",
-        "mixed_draft_backends",
-        "no_target_groups",
-        "uninitialized_target",
-        "target_backend",
-        "no_gdn",
-        "model_state",
-        "uninitialized_model_state",
-        "parallel_drafting",
-        "pipeline_parallel_size",
-        "prefill_context_parallel_size",
-        "decode_context_parallel_size",
-        "kvpp",
-        "kv_transfer",
-        "sparse_offload",
-        "adaptive",
-        "pp_exact_counts",
-    ],
-)
 @pytest.mark.parametrize("target_backend", [AscendAttentionBackend, AscendQwenFlashAttentionBackend])
-def test_qwen_dflash2_length_snapshot_and_wait_share_backend_guard(unsupported, target_backend):
+@pytest.mark.parametrize("blocked", [None, "draft_backend", "target_backend", "model_state", "pp", "kv_transfer"])
+def test_qwen_dflash2_length_snapshot_and_wait_share_backend_guard(target_backend, blocked):
     runner, output, batch = _qwen_dflash2_device_length_runner()
     runner.attn_groups[0][0].backend = target_backend
-    if unsupported == "no_draft_backends":
-        del runner.speculator.attn_backends
-    elif unsupported == "mixed_draft_backends":
-        runner.speculator.attn_backends["draft.1"] = AscendAttentionBackend
-    elif unsupported == "no_target_groups":
-        runner.attn_groups = []
-    elif unsupported == "uninitialized_target":
-        del runner.attn_groups
-    elif unsupported == "target_backend":
+    if blocked == "draft_backend":
+        runner.speculator.attn_backends["draft.0"] = AscendAttentionBackend
+    elif blocked == "target_backend":
         runner.attn_groups[0][0].backend = AscendMLABackend
-    elif unsupported == "no_gdn":
-        runner.attn_groups[1][0].backend = AscendAttentionBackend
-    elif unsupported == "model_state":
+    elif blocked == "model_state":
         runner.model_state = object()
-    elif unsupported == "uninitialized_model_state":
-        del runner.model_state
-    elif unsupported == "parallel_drafting":
-        runner.speculative_config.parallel_drafting = False
-    elif unsupported and unsupported.endswith("parallel_size"):
-        setattr(runner.parallel_config, unsupported, 2)
-    elif unsupported == "kvpp":
-        runner.ascend_config.kvpp_config.size = 2
-    elif unsupported == "kv_transfer":
-        runner.vllm_config.kv_transfer_config = object()
-    elif unsupported == "sparse_offload":
-        runner.ascend_config.sparse_kv_offload_config.enabled = True
-    elif unsupported == "adaptive":
-        runner.speculative_config.enable_adaptive_verification = True
-    elif unsupported == "pp_exact_counts":
-        runner.sync_spec_pp_cpu_counts = True
-    eligible = unsupported is None
+    elif blocked == "pp":
+        runner.parallel_config.pipeline_parallel_size = 2
+    elif blocked == "kv_transfer":
+        runner.vllm_config.kv_transfer_config = SimpleNamespace(kv_role="kv_consumer")
+    eligible = blocked is None
     assert runner._can_skip_spec_cpu_length_sync() is eligible
+    runner.req_states.num_computed_tokens.gpu[:] = torch.tensor([98, 195, 0, 0])
+    runner.num_computed_tokens_cpu.fill_(-1)
     runner.num_computed_tokens_stream = Mock()
     with (
         patch.object(GPUModelRunner, "postprocess_sampled") as update_device,
@@ -2252,28 +2211,13 @@ def test_qwen_dflash2_length_snapshot_and_wait_share_backend_guard(unsupported, 
     assert runner.num_computed_tokens_stream.wait_stream.call_count == int(not eligible)
     assert runner.num_computed_tokens_event.record.call_count == int(not eligible)
     assert runner.num_computed_tokens_event.synchronize.call_count == int(not eligible)
-
-
-@pytest.mark.parametrize("kv_role", ["kv_producer", "kv_consumer"])
-def test_qwen_dflash2_kv_transfer_retains_cpu_length_snapshot_and_wait(kv_role):
-    runner, output, batch = _qwen_dflash2_device_length_runner()
-    runner.vllm_config.kv_transfer_config = SimpleNamespace(kv_role=kv_role)
-    runner.req_states.num_computed_tokens.gpu[:] = torch.tensor([98, 195, 0, 0])
-    runner.num_computed_tokens_stream = Mock()
-    assert runner._can_skip_spec_cpu_length_sync() is False
-    with (
-        patch.object(GPUModelRunner, "postprocess_sampled"),
-        patch("torch.cuda.current_stream"),
-        patch("torch.npu.stream", return_value=nullcontext()),
-    ):
-        runner.postprocess_sampled(None, None, 2, 1)
-    runner._update_seq_lens_cpu(output, batch.req_ids)
-    runner.num_computed_tokens_event.record.assert_called_once_with()
-    runner.num_computed_tokens_event.synchronize.assert_called_once_with()
-    torch.testing.assert_close(runner.num_computed_tokens_cpu, runner.req_states.num_computed_tokens.gpu)
-    # Only cached requests consume the mirror; new/prefill rows keep host state.
-    assert runner.req_states.num_computed_tokens_cpu.tolist() == [98, 2, 0, 0]
-    assert runner.input_buffers.seq_lens_cpu[0] == 100
+    # Only cached requests consume the snapshot; new/prefill rows retain host state.
+    assert runner.req_states.num_computed_tokens_cpu.tolist() == ([1, 2, 0, 0] if eligible else [98, 2, 0, 0])
+    assert runner.input_buffers.seq_lens_cpu[0] == (3 if eligible else 100)
+    if eligible:
+        assert runner.num_computed_tokens_cpu.tolist() == [-1] * 4
+    else:
+        torch.testing.assert_close(runner.num_computed_tokens_cpu, runner.req_states.num_computed_tokens.gpu)
 
 
 @pytest.mark.parametrize(
@@ -2333,42 +2277,14 @@ def m3_device_length_runner():
     return _m3_device_length_runner()
 
 
-@pytest.mark.parametrize("draft_architecture", ["MiniMaxM31FlashA3DSparkModel", "DSparkMiniMaxDraftModel"])
-@pytest.mark.parametrize("target_backend", [AscendFlashAttentionBackend, AscendFA3Backend])
-@pytest.mark.parametrize("cpu_consumer", [False, True])
-def test_minimax_flash_length_snapshot_and_wait_share_backend_guard(
-    m3_device_length_runner, draft_architecture, target_backend, cpu_consumer
-):
-    runner, output, batch = m3_device_length_runner
-    runner.model_config.hf_text_config.model_type = "minimax_m3_text"
-    runner.speculative_config.draft_model_config.architectures = [draft_architecture]
-    runner.attn_groups = [[SimpleNamespace(backend=target_backend)]]
-    if cpu_consumer:
-        runner.attn_groups[0].append(SimpleNamespace(backend=AscendAttentionBackend))
-    assert runner._can_skip_spec_cpu_length_sync() is (not cpu_consumer)
-    runner.num_computed_tokens_stream = Mock()
-    with (
-        patch.object(GPUModelRunner, "postprocess_sampled"),
-        patch("torch.cuda.current_stream"),
-        patch("torch.npu.stream", return_value=nullcontext()),
-    ):
-        runner.postprocess_sampled(None, None, 2, 1)
-    runner._update_seq_lens_cpu(output, batch.req_ids)
-    assert runner.num_computed_tokens_stream.wait_stream.call_count == int(cpu_consumer)
-    assert runner.num_computed_tokens_event.record.call_count == int(cpu_consumer)
-    assert runner.num_computed_tokens_event.synchronize.call_count == int(cpu_consumer)
-
-
 @pytest.mark.parametrize(
     "architecture", ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration", "GlmMoeDsaForCausalLM"]
 )
 @pytest.mark.parametrize("eager", [False, True])
 @pytest.mark.parametrize("kv_role", [None, "kv_producer", "kv_consumer"])
-@pytest.mark.parametrize("draft_backend", [AscendFlashAttentionBackend, AscendFA3Backend])
-def test_m3_dspark_device_length_policy(m3_device_length_runner, architecture, eager, kv_role, draft_backend):
+def test_m3_dspark_device_length_policy(m3_device_length_runner, architecture, eager, kv_role):
     runner, _, _ = m3_device_length_runner
     runner.model_config.architecture = architecture
-    runner.speculator.attn_backends = {"draft.0": draft_backend, "draft.1": draft_backend}
     runner.speculative_config.enforce_eager = eager
     runner.vllm_config.kv_transfer_config = None if kv_role is None else SimpleNamespace(kv_role=kv_role)
     assert runner._can_skip_spec_cpu_length_sync() is True
@@ -2396,11 +2312,9 @@ def test_m3_dspark_device_length_policy(m3_device_length_runner, architecture, e
     ],
 )
 @pytest.mark.parametrize("architecture", ["MiniMaxM3SparseForCausalLM", "GlmMoeDsaForCausalLM"])
-@pytest.mark.parametrize("draft_backend", [AscendFlashAttentionBackend, AscendFA3Backend])
-def test_m3_dspark_device_length_policy_falls_back(m3_device_length_runner, unsupported, architecture, draft_backend):
+def test_m3_dspark_device_length_policy_falls_back(m3_device_length_runner, unsupported, architecture):
     runner, _, _ = m3_device_length_runner
     runner.model_config.architecture = architecture
-    runner.speculator.attn_backends = {"draft.0": draft_backend, "draft.1": draft_backend}
     runner.vllm_config.kv_transfer_config = SimpleNamespace(kv_role="kv_consumer")
     spec = runner.speculative_config
     if unsupported == "no_spec_config":
@@ -2577,20 +2491,11 @@ def test_mla_dspark_fallback_copies_and_waits(target):
 
 
 @pytest.mark.parametrize("rejected", [0, 1, 5])
-@pytest.mark.parametrize(
-    "draft,kv_role",
-    [
-        (draft, kv_role)
-        for draft in ("dflash", "m3_dspark", "glm_dspark", "glm_mla_dspark", "kimi_k31_dspark")
-        for kv_role in (None, "kv_producer", "kv_consumer")
-    ]
-    + [("qwen_dflash2", None)],
-)
+@pytest.mark.parametrize("draft", ["dflash", "m3_dspark", "glm_dspark", "glm_mla_dspark", "kimi_k31_dspark"])
+@pytest.mark.parametrize("kv_role", [None, "kv_producer", "kv_consumer"])
 def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected, draft, kv_role):
     runner, output, _ = _device_length_runner() if draft == "dflash" else _m3_device_length_runner()
-    if draft == "qwen_dflash2":
-        runner, output, _ = _qwen_dflash2_device_length_runner()
-    elif draft == "glm_dspark":
+    if draft == "glm_dspark":
         runner.model_config.architecture = "GlmMoeDsaForCausalLM"
     elif draft == "glm_mla_dspark":
         runner, output, _ = _glm_mla_device_length_runner()

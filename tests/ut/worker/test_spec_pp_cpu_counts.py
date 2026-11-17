@@ -63,11 +63,7 @@ def runner_cls(mamba_state_cls):
             self.num_computed_tokens_cpu[0] = self.device_count
             self.events.append("copy")
 
-    namespace = {
-        "Parent": Parent,
-        "MambaHybridModelState": mamba_state_cls,
-        "AscendFA3Backend": type("FA3Backend", (), {}),
-    }
+    namespace = {"Parent": Parent, "MambaHybridModelState": mamba_state_cls}
     utils = ast.parse((source.parents[2] / "utils.py").read_text())
     predicate = next(
         node for node in utils.body if isinstance(node, ast.FunctionDef) and node.name == "is_deepseek_v41"
@@ -184,21 +180,17 @@ def test_deferred_mamba_postprocess_restores_batch_rows(
 
 
 @pytest.mark.parametrize("architecture", ["MiniMaxM31FlashA3DSparkModel", "DSparkMiniMaxDraftModel"])
-@pytest.mark.parametrize("backend_name", ["AscendFlashAttentionBackend", "AscendFA3Backend"])
 @pytest.mark.parametrize("cpu_consumer", [False, True])
 @pytest.mark.parametrize("sync_pp", [False, True])
 def test_minimax_dspark_skips_sync_only_without_cpu_consumers(
-    runner_cls, monkeypatch, architecture, backend_name, cpu_consumer, sync_pp
+    runner_cls, monkeypatch, architecture, cpu_consumer, sync_pp
 ):
     flash_backend = type("FlashBackend", (), {})
-    fa3_backend = type("FA3Backend", (), {})
     sparse_backend = type("SparseBackend", (), {"get_name": staticmethod(lambda: "ASCEND_MINIMAX_M3_SPARSE")})
     dense_backend = type("DenseBackend", (), {"get_name": staticmethod(lambda: "ASCEND")})
     monkeypatch.setitem(
         runner_cls._can_skip_spec_cpu_length_sync.__globals__, "AscendFlashAttentionBackend", flash_backend
     )
-    monkeypatch.setitem(runner_cls._can_skip_spec_cpu_length_sync.__globals__, "AscendFA3Backend", fa3_backend)
-    backend = flash_backend if backend_name == "AscendFlashAttentionBackend" else fa3_backend
     runner = runner_cls.__new__(runner_cls)
     runner.sync_spec_pp_cpu_counts = sync_pp
     runner.speculator = object()
@@ -209,7 +201,7 @@ def test_minimax_dspark_skips_sync_only_without_cpu_consumers(
     runner.speculative_config = SimpleNamespace(
         method="dspark", draft_model_config=SimpleNamespace(architectures=[architecture])
     )
-    runner.attn_groups = [[SimpleNamespace(backend=backend), SimpleNamespace(backend=sparse_backend)]]
+    runner.attn_groups = [[SimpleNamespace(backend=flash_backend), SimpleNamespace(backend=sparse_backend)]]
     if cpu_consumer:
         runner.attn_groups[0].append(SimpleNamespace(backend=dense_backend))
     assert runner._can_skip_spec_cpu_length_sync() is (not cpu_consumer and not sync_pp)
@@ -232,13 +224,10 @@ def test_dflash_cpu_sync_policy_is_retained(runner_cls):
 
 
 @pytest.mark.parametrize("eager", [False, True])
-@pytest.mark.parametrize("backend_name", ["AscendFlashAttentionBackend", "AscendFA3Backend"])
 @pytest.mark.parametrize("blocked", [None, "sparse_offload", "adaptive", "pp", "mixed_backends"])
-def test_original_m3_dspark_cpu_sync_guards_are_retained(runner_cls, monkeypatch, eager, backend_name, blocked):
+def test_original_m3_dspark_cpu_sync_guards_are_retained(runner_cls, monkeypatch, eager, blocked):
     flash = type("FlashBackend", (), {})
-    fa3 = type("FA3Backend", (), {})
     monkeypatch.setitem(runner_cls._can_skip_spec_cpu_length_sync.__globals__, "AscendFlashAttentionBackend", flash)
-    monkeypatch.setitem(runner_cls._can_skip_spec_cpu_length_sync.__globals__, "AscendFA3Backend", fa3)
     runner = runner_cls.__new__(runner_cls)
     runner.sync_spec_pp_cpu_counts = False
     runner.model_config = SimpleNamespace(
@@ -252,8 +241,7 @@ def test_original_m3_dspark_cpu_sync_guards_are_retained(runner_cls, monkeypatch
         enable_adaptive_verification=blocked == "adaptive",
         draft_model_config=SimpleNamespace(architectures=["Qwen3DSparkModel"]),
     )
-    backend = flash if backend_name == "AscendFlashAttentionBackend" else fa3
-    runner.speculator = SimpleNamespace(attn_backends={"draft.0": backend})
+    runner.speculator = SimpleNamespace(attn_backends={"draft.0": flash})
     if blocked == "mixed_backends":
         runner.speculator.attn_backends["draft.1"] = object()
     runner.parallel_config = SimpleNamespace(

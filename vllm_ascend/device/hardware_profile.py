@@ -76,8 +76,8 @@ class HardwareCapability(Enum):
     CHUNKED_PREFILL_PHASE_SPLIT = auto()
     # CANN device-side FlashAttn metadata with strided paged GQA K/V.
     DEVICE_LENGTH_FLASH_ATTN = auto()
-    # Optional flash_attn_npu_3 device tiling for audited Qwen target and
-    # DFlash2/MiniMax draft attention on A2/A3; A5 uses the CANN backend.
+    # Optional flash_attn_npu_3 device-tiling ABI for ordinary MiniMax target/draft
+    # attention. Restricted to A2/A3; A5 uses the CANN backend instead.
     FLASH_ATTN_NPU_3 = auto()
     # Build CPU-affinity pools from the cluster-aware CPU topology.
     CLUSTER_CPU_TOPOLOGY = auto()

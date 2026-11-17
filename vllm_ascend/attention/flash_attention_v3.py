@@ -44,19 +44,6 @@ class AscendFlashAttentionBackend(AttentionBackend):
     def get_name() -> str:
         return "CUSTOM"
 
-    @classmethod
-    def supports_head_size(cls, head_size: int) -> bool:
-        # The 910 FA3 ABI supports native widths through 256, including 192.
-        return 1 <= head_size <= 256
-
-    @classmethod
-    def supports_non_causal(cls) -> bool:
-        return True
-
-    @classmethod
-    def supports_sliding_window(cls) -> bool:
-        return True
-
     @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
@@ -113,13 +100,9 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         self.device = device
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.capture_sizes = set(vllm_config.compilation_config.cudagraph_capture_sizes or [])
-        speculative = vllm_config.speculative_config
-        self.is_dflash = speculative is not None and speculative.method == "dflash"
-        self.use_graph_buffers = (
-            speculative is None or not speculative.enforce_eager
-        ) and vllm_config.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
         self.capture_query_len = None
         if vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+            speculative = vllm_config.speculative_config
             self.capture_query_len = 1 + (speculative.num_speculative_tokens if speculative else 0)
         self.block_size = kv_cache_spec.block_size
         # Deduplicate layer parameters so identical layers share one tiling call.
@@ -155,22 +138,22 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
     def _prepare_block_tables(self, block_tables: torch.Tensor, active_reqs: int) -> tuple[torch.Tensor, int | None]:
         return block_tables[:active_reqs], None
 
-    def _is_graph_capture_size(self, common: AscendCommonAttentionMetadata, num_input_tokens: int) -> bool:
-        # DFlash rounds target buckets to whole draft queries (e.g. 15 -> 16).
-        # Those actual graph shapes need stable storage even when absent from
-        # the target's capture-size list. Other drafts retain their own bounds.
-        if self.is_dflash:
-            return self.use_graph_buffers
-        return (
-            self.use_graph_buffers
-            and num_input_tokens in self.capture_sizes
-            and (self.capture_query_len is None or common.max_query_len <= self.capture_query_len)
+    def _get_active_reqs(self, common: AscendCommonAttentionMetadata) -> int:
+        return max(
+            1,
+            int(torch.searchsorted(common.query_start_loc_cpu[: common.num_reqs + 1], common.num_actual_tokens)),
         )
 
-    def _get_max_query_len(self, common: AscendCommonAttentionMetadata, num_input_tokens: int) -> int:
-        if not self.is_dflash and self._is_graph_capture_size(common, num_input_tokens):
-            return min(num_input_tokens, self.capture_query_len or num_input_tokens)
-        return common.max_query_len
+    def _get_graph_params(self, common: AscendCommonAttentionMetadata, num_input_tokens: int) -> tuple[bool, int]:
+        is_graph_capture_size = num_input_tokens in self.capture_sizes and (
+            self.capture_query_len is None or common.max_query_len <= self.capture_query_len
+        )
+        max_query_len = (
+            min(num_input_tokens, self.capture_query_len or num_input_tokens)
+            if is_graph_capture_size
+            else common.max_query_len
+        )
+        return is_graph_capture_size, max_query_len
 
     def build(
         self,
@@ -185,22 +168,17 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         # The runner can append zero-length or dummy requests for graph padding.
         # Its CPU offsets identify the active prefix without a device sync.
         # Keep one empty request for dummy forwards: the operator requires B > 0.
-        offsets_cpu = common.query_start_loc_cpu[: common.num_reqs + 1]
-        # FULL draft metadata may report padded tokens while CPU offsets end
-        # at the real query extent; searching the padded token count includes
-        # inactive requests and can even run past the last request.
-        active_reqs = max(1, int(torch.searchsorted(offsets_cpu, offsets_cpu[-1])))
+        active_reqs = self._get_active_reqs(common)
         # The runner owns graph-stable buffers. Device tiling limits reads to
         # active_reqs, so padding rows need neither copying nor sanitizing.
         query_start_loc = common.query_start_loc[: active_reqs + 1]
         seq_lens = common.seq_lens[:active_reqs]
         block_tables, full_attention_window = self._prepare_block_tables(common.block_table_tensor, active_reqs)
         num_input_tokens = common.num_input_tokens or common.num_actual_tokens
-        is_graph_capture_size = self._is_graph_capture_size(common, num_input_tokens)
         # FA3 sizes split workspace from the per-request query bound. Using the
         # entire batch token count for decode overallocates by the batch size.
         # Prefill can share a token bucket but must retain its own query length.
-        max_query_len = self._get_max_query_len(common, num_input_tokens)
+        is_graph_capture_size, max_query_len = self._get_graph_params(common, num_input_tokens)
         if is_graph_capture_size:
             # Distinct input buffers (including draft steps) and token buckets
             # must retain independent tiling storage even for identical specs.
@@ -241,16 +219,13 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
             )
             if spec in scheduler_metadata:
                 buffer = scheduler_metadata[spec]
-                if buffer.dtype != tiling.dtype:
-                    raise RuntimeError("FA3 scheduler metadata layout changed for a captured shape")
                 if tiling.numel() * tiling.element_size() > buffer.untyped_storage().nbytes():
                     raise RuntimeError("FA3 scheduler metadata exceeds its graph-stable buffer capacity")
                 buffer.resize_(tiling.shape).copy_(tiling)
             elif is_graph_capture_size:
                 # 950 metadata appends an int32 KV offset per request. Reserve
                 # that tail once so changing active batch size keeps the address.
-                reserve_bytes = self.max_num_reqs * common.seq_lens.element_size()
-                reserve = (reserve_bytes + tiling.element_size() - 1) // tiling.element_size()
+                reserve = self.max_num_reqs * common.seq_lens.element_size()
                 buffer = tiling.new_empty(tiling.numel() + reserve)
                 scheduler_metadata[spec] = buffer[: tiling.numel()].copy_(tiling)
             else:
@@ -279,7 +254,25 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         return self.build(0, common_attn_metadata)
 
 
-class AscendQwenFlashAttentionMetadataBuilder(AscendFlashAttentionMetadataBuilder):
+class AscendDFlash2FlashAttentionMetadataBuilder(AscendFlashAttentionMetadataBuilder):
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.use_graph_buffers = (
+            not vllm_config.speculative_config.enforce_eager
+            and vllm_config.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+        )
+
+    def _get_active_reqs(self, common):
+        # Draft graph padding can exceed the real query extent recorded on CPU.
+        offsets = common.query_start_loc_cpu[: common.num_reqs + 1]
+        return max(1, int(torch.searchsorted(offsets, offsets[-1])))
+
+    def _get_graph_params(self, common, num_input_tokens):
+        # DFlash rounds target buckets to complete draft queries (e.g. 15 -> 16).
+        return self.use_graph_buffers, common.max_query_len
+
+
+class AscendQwenFlashAttentionMetadataBuilder(AscendDFlash2FlashAttentionMetadataBuilder):
     """Keep full attention on the device-length path of the 910 FA3 ABI."""
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
@@ -290,11 +283,9 @@ class AscendQwenFlashAttentionMetadataBuilder(AscendFlashAttentionMetadataBuilde
         self.block_table_buffers: dict[tuple, torch.Tensor] = {}
 
     def _prepare_block_tables(self, block_tables, active_reqs):
-        # A window covering the original page-table capacity includes every
-        # valid KV token, so it is exactly full attention. Add an unused column
-        # to keep FA3 0.5.0 from normalizing that window back to global attention:
-        # the global TND branch synchronously reads lengths to select FlashDecode.
-        # Exact seq_lens are unchanged; the extra column is never accessed.
+        # Cover the original capacity to preserve full attention. The extra
+        # column keeps FA3 0.5.0 off its global TND branch, which reads lengths
+        # back to the host; exact seq_lens never address the added column.
         key = (block_tables.data_ptr(), block_tables.shape[1])
         if key not in self.block_table_buffers:
             self.block_table_buffers[key] = block_tables.new_zeros((self.max_num_reqs, block_tables.shape[1] + 1))
@@ -302,18 +293,36 @@ class AscendQwenFlashAttentionMetadataBuilder(AscendFlashAttentionMetadataBuilde
         padded[:, :-1].copy_(block_tables[:active_reqs])
         return padded, block_tables.shape[1] * self.block_size
 
-    def _get_max_query_len(self, common, num_input_tokens):
+    def _get_graph_params(self, common, num_input_tokens):
         # A captured decode bucket can be replayed with fewer valid query
         # tokens after rejection. Retain its scalar Q bound and tiling buffer.
         if self.use_graph_buffers:
             if self.capture_query_len is None:
-                return num_input_tokens
+                return True, num_input_tokens
             if common.max_query_len <= self.capture_query_len:
-                return self.capture_query_len
-        return common.max_query_len
+                return True, self.capture_query_len
+        return self.use_graph_buffers, common.max_query_len
 
 
-class AscendQwenFlashAttentionBackend(AscendFlashAttentionBackend):
+class AscendDFlash2FlashAttentionBackend(AscendFlashAttentionBackend):
+    @classmethod
+    def supports_head_size(cls, head_size: int) -> bool:
+        return 1 <= head_size <= 256
+
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return True
+
+    @staticmethod
+    def get_builder_cls():
+        return AscendDFlash2FlashAttentionMetadataBuilder
+
+
+class AscendQwenFlashAttentionBackend(AscendDFlash2FlashAttentionBackend):
     @staticmethod
     def get_builder_cls():
         return AscendQwenFlashAttentionMetadataBuilder
@@ -332,11 +341,9 @@ class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):
         logits_soft_cap: float | None = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
-        sinks: torch.Tensor | None = None,
+        sinks: torch.Tensor = None,
         **kwargs,
     ):
-        if attn_type != AttentionType.DECODER or alibi_slopes is not None or sinks is not None:
-            raise ValueError("Ascend FA3 requires decoder attention without ALiBi or sinks")
         logger.info_once("Using Ascend FA3 attention backend.", scope="process")
         self.num_heads = num_heads
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
@@ -371,7 +378,7 @@ class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):
         slot_mapping: torch.Tensor,
     ) -> None:
         # Also used by speculative proposers that insert context K/V separately.
-        if self.kv_sharing_target_layer_name is not None or key.shape[0] == 0:
+        if self.kv_sharing_target_layer_name is not None:
             return
         DeviceOperator.reshape_and_cache(
             key=key,

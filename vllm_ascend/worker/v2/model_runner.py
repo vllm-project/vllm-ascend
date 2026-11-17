@@ -71,7 +71,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
-from vllm_ascend.attention.flash_attention_v3 import AscendFlashAttentionBackend as AscendFA3Backend
+from vllm_ascend.attention.flash_attention_v3 import AscendDFlash2FlashAttentionBackend as AscendFA3Backend
 from vllm_ascend.attention.flash_attention_v3 import AscendQwenFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
@@ -1374,11 +1374,8 @@ class NPUModelRunner(GPUModelRunner):
             and spec.draft_model_config is not None
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
         ):
-            # Qwen's GDN state updates use device counts; its host metadata
-            # needs only length upper bounds. FA3 consumes device lengths;
-            # fallback FIA materializes its own exact device seq_lens.
-            # Require the initialized FA3 draft and audited target backends,
-            # so both the snapshot producer and consumer can skip together.
+            # Qwen GDN and the initialized FA3 draft use exact device counts.
+            # Skip the snapshot and Event together only for audited consumers.
             draft_backends = getattr(self.speculator, "attn_backends", {})
             backends = [group.backend for groups in getattr(self, "attn_groups", []) for group in groups]
             parallel = self.parallel_config
@@ -1421,8 +1418,8 @@ class NPUModelRunner(GPUModelRunner):
             # Flash's sparse target uses device lengths, but a mixed target
             # GQA backend still consumes the shared CPU length mirror.
             backends = [group.backend for groups in self.attn_groups for group in groups]
-            return any(backend in (AscendFlashAttentionBackend, AscendFA3Backend) for backend in backends) and all(
-                backend in (AscendFlashAttentionBackend, AscendFA3Backend)
+            return AscendFlashAttentionBackend in backends and all(
+                backend is AscendFlashAttentionBackend
                 or backend.get_name() in ("ASCEND_MINIMAX_M3_SPARSE", "ASCEND_MINIMAX_M3_SPARSE_INDEXER")
                 for backend in backends
             )
@@ -1462,7 +1459,7 @@ class NPUModelRunner(GPUModelRunner):
         return (
             bool(draft_backends)
             and (
-                all(backend in (AscendFlashAttentionBackend, AscendFA3Backend) for backend in draft_backends.values())
+                all(backend is AscendFlashAttentionBackend for backend in draft_backends.values())
                 or getattr(self.speculator, "use_flashmla", False)
             )
             and parallel_config.pipeline_parallel_size == 1

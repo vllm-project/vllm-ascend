@@ -81,14 +81,7 @@ def selection(monkeypatch, profiles):
     }
     path = ROOT / "vllm_ascend/platform.py"
     execute_nodes(
-        path,
-        {
-            "_validate_flash_attn_npu_3",
-            "_validate_qwen_flash_attn_npu_3",
-            "_validate_minimax_flash_attn_npu_3",
-            "_uses_minimax_fa3",
-        },
-        namespace,
+        path, {"_validate_flash_attn_npu_3", "_validate_qwen_flash_attn_npu_3", "_uses_minimax_fa3"}, namespace
     )
     cls = next(n for n in ast.parse(path.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "NPUPlatform")
     method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_select_attn_backend_cls")
@@ -178,26 +171,6 @@ def test_unsupported_configurations_fall_back(selection, fault):
         assert fault in ("use_sparse", "use_compress")
     else:
         assert "flash_attention_v3" not in result
-
-
-@pytest.mark.parametrize("method", ["dflash", "dspark"])
-@pytest.mark.parametrize("hf_state", ["missing", "none", "no_architectures"])
-def test_incomplete_model_config_and_rejected_qwen_fall_back_safely(selection, monkeypatch, method, hf_state):
-    r = selection
-    target = NS(architecture="Qwen3_5ForConditionalGeneration")
-    if hf_state != "missing":
-        target.hf_config = None if hf_state == "none" else NS()
-    r.config.use_v2_model_runner = True
-    r.config.model_config = target
-    r.config.speculative_config.method = method
-    r.config.speculative_config.target_model_config = target
-    r.config.speculative_config.draft_model_config = NS(
-        architectures=["DFlash2DraftModel" if method == "dflash" else "DSparkMiniMaxDraftModel"]
-    )
-    r.selector.head_size = 128
-    r.selector.dtype = torch.float32  # Reject Qwen before considering the MiniMax fallback.
-    monkeypatch.setitem(sys.modules, "vllm.compilation", NS(backends=NS(model_tag="dflash_head")))
-    assert "flash_attention_v3" not in r.select()
 
 
 @pytest.fixture
@@ -338,7 +311,6 @@ def test_graph_fusion_pass_registration(monkeypatch, method, enabled):
 def test_prefill_bounds_causal_storage_and_oversized_tiling(fa3):
     builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
     builder.capture_sizes, builder.capture_query_len = {16}, 8
-    builder.is_dflash, builder.use_graph_buffers = False, True
     builder.max_num_reqs, builder.block_size = 2, 128
     spec = (4, 1, 128, torch.bfloat16, 0.1, 0.0, None)
     builder.scheduler_specs, builder.scheduler_buffers = {spec}, {}
@@ -380,7 +352,6 @@ def test_minimax_fa3_scheduler_api(fa3, causal, padded, softcap):
     builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
     builder.device = torch.device("cpu")
     builder.capture_sizes = set()
-    builder.is_dflash, builder.use_graph_buffers = False, False
     builder.capture_query_len = None
     builder.block_size = 128
     builder.max_num_reqs = 3
@@ -437,7 +408,6 @@ def test_minimax_fa3_graph_metadata_keeps_storage_across_batch_sizes(fa3):
     builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
     builder.device = torch.device("cpu")
     builder.capture_sizes = {16, 24}
-    builder.is_dflash, builder.use_graph_buffers = False, True
     builder.capture_query_len = 8
     builder.max_num_reqs = 3
     builder.block_size = 128
