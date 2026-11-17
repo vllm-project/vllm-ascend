@@ -458,6 +458,36 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
 
         return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce)
 
+    def prepare_low_latency(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Gather only the activations consumed by MegaMoeLowLatency.
+
+        The fused operator computes routing scores from ``hidden_states`` and
+        the gate weight.  Gathering a router-logit placeholder would add a
+        second collective whose result is never consumed.
+        """
+        if self._use_ep_sequence_parallel():
+            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states)
+            self.num_tokens = hidden_states.shape[0]
+            return hidden_states
+
+        if self.moe_config.dp_size > 1:
+            max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
+            self.num_tokens = hidden_states.shape[0]
+            pad_size = max_tokens_across_dp - self.num_tokens
+            if pad_size > 0:
+                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
+            hidden_states = self.moe_config.dp_group.all_gather(hidden_states, 0)
+
+        if self.moe_config.pcp_size > 1:
+            max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp
+            self.num_tokens_pcp = hidden_states.shape[0]
+            pad_size = max_tokens_across_pcp - self.num_tokens_pcp
+            if pad_size > 0:
+                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
+            hidden_states = get_pcp_group().all_gather(hidden_states, dim=0)
+
+        return hidden_states
+
     def _prepare_with_ep_group(
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor, quant_type=QuantType.NONE
     ) -> MoEPrepareOutput:

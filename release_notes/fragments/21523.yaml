@@ -1,0 +1,10 @@
+pr: 21523
+entries:
+  - category: feature
+    text: >-
+      Added MegaMoeLowLatency support for compatible MXFP-quantized MoE models
+      on Ascend 950, including fused shared-expert execution.
+  - category: performance
+    text: >-
+      Reduced MegaMoeLowLatency decode overhead by gathering only hidden states
+      and fusing routing and shared-expert work into the operator.

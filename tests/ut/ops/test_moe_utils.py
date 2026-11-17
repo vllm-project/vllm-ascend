@@ -12,7 +12,10 @@ from vllm_ascend.ops.fused_moe.moe_utils import (
     _get_cann_mega_moe_quant_settings,
     _prepare_dequant_swiglu_weight_scale,
     cumsum_group_list,
+    interleave_mega_moe_low_latency_w1,
     load_cann_mega_moe_ops,
+    load_cann_mega_moe_low_latency_op,
+    load_cann_mega_moe_low_latency_with_shared_op,
     select_mega_moe_activation_kwargs,
 )
 from vllm_ascend.quantization.quant_type import QuantType
@@ -79,12 +82,97 @@ class TestSwigluScaleHelpers(unittest.TestCase):
 
 
 class TestMegaMoeLoading(unittest.TestCase):
+    def test_loads_low_latency_op_from_public_package(self):
+        op = object()
+        with patch(
+            "vllm_ascend.ops.fused_moe.moe_utils.import_module",
+            return_value=SimpleNamespace(mega_moe_low_latency=op),
+        ):
+            self.assertIs(load_cann_mega_moe_low_latency_op(), op)
+
+    def test_low_latency_op_requires_public_symbol(self):
+        with (
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_utils.import_module",
+                return_value=SimpleNamespace(),
+            ),
+            self.assertRaisesRegex(RuntimeError, "does not export"),
+        ):
+            load_cann_mega_moe_low_latency_op()
+
+    def test_loads_low_latency_with_shared_op_from_public_package(self):
+        op = object()
+        with patch(
+            "vllm_ascend.ops.fused_moe.moe_utils.import_module",
+            return_value=SimpleNamespace(mega_moe_low_latency_with_shared=op),
+        ):
+            self.assertIs(load_cann_mega_moe_low_latency_with_shared_op(), op)
+
+    def test_low_latency_with_shared_op_requires_public_symbol(self):
+        with (
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_utils.import_module",
+                return_value=SimpleNamespace(),
+            ),
+            self.assertRaisesRegex(RuntimeError, "Shared API v6"),
+        ):
+            load_cann_mega_moe_low_latency_with_shared_op()
+
     def test_preloads_current_comm_extension(self):
         ops = SimpleNamespace(get_symm_buffer_for_mega_moe=object(), mega_moe=object())
         comm = SimpleNamespace(comm_context_op_builder=MagicMock())
         with patch("vllm_ascend.ops.fused_moe.moe_utils.import_module", side_effect=[ops, comm]):
             self.assertEqual(load_cann_mega_moe_ops(), (ops.get_symm_buffer_for_mega_moe, ops.mega_moe))
         comm.comm_context_op_builder.load.assert_called_once_with()
+
+
+class TestMegaMoeLowLatencyPrepack(unittest.TestCase):
+    def test_interleaves_weight_and_scale_rows_together(self):
+        weight = torch.arange(2 * 1024 * 4).reshape(2, 1024, 4)
+        scale = torch.arange(2 * 1024 * 3 * 2).reshape(2, 1024, 3, 2)
+
+        packed_weight, packed_scale = interleave_mega_moe_low_latency_w1(weight, scale)
+
+        expected_rows = torch.cat(
+            tuple(
+                block
+                for tile in range(4)
+                for block in (
+                    torch.arange(tile * 128, (tile + 1) * 128),
+                    torch.arange(512 + tile * 128, 640 + tile * 128),
+                )
+            )
+        )
+        self.assertTrue(torch.equal(packed_weight[0, :, 0], weight[0, expected_rows, 0]))
+        self.assertTrue(torch.equal(packed_scale[1, :, 0, 0], scale[1, expected_rows, 0, 0]))
+        self.assertTrue(packed_weight.is_contiguous())
+        self.assertTrue(packed_scale.is_contiguous())
+
+    def test_interleaves_multiple_gate_up_tiles(self):
+        weight = torch.arange(2048).reshape(1, 2048, 1)
+        scale = torch.arange(2048 * 2).reshape(1, 2048, 1, 2)
+
+        packed_weight, packed_scale = interleave_mega_moe_low_latency_w1(weight, scale)
+
+        expected = torch.cat(
+            tuple(
+                block
+                for tile in range(8)
+                for block in (
+                    torch.arange(tile * 128, (tile + 1) * 128),
+                    torch.arange(1024 + tile * 128, 1152 + tile * 128),
+                )
+            )
+        )
+        self.assertTrue(torch.equal(packed_weight.flatten(), expected))
+        self.assertTrue(torch.equal(packed_scale[0, :, 0, 0], scale[0, expected, 0, 0]))
+
+    def test_rejects_non_tile_aligned_intermediate(self):
+        with self.assertRaisesRegex(ValueError, "divisible by 128"):
+            interleave_mega_moe_low_latency_w1(
+                torch.empty(1, 384, 2),
+                torch.empty(1, 384, 1, 2),
+            )
 
     def test_preloads_legacy_comm_extension(self):
         ops = SimpleNamespace(get_symm_buffer_for_mega_moe=object(), mega_moe=object())

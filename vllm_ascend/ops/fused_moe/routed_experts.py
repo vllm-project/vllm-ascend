@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import math
 from collections.abc import Iterable
 from copy import copy
 from types import SimpleNamespace
@@ -30,7 +31,7 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import Un
 from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
@@ -687,6 +688,73 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         return topk_weights, topk_ids
 
+    def can_use_mega_moe_low_latency(self, hidden_states: torch.Tensor) -> bool:
+        """Check the complete per-layer/per-forward operator contract.
+
+        The feature is opt-in, but a layer that does not satisfy the native
+        ABI keeps the regular AllGather MoE path and its original weights.
+        """
+        if getattr(get_ascend_config(), "enable_mega_moe_low_latency", False) is not True:
+            return False
+        gate = getattr(self, "_mega_moe_low_latency_gate", None)
+        router = self.router
+        quant_method = getattr(self.quant_method, "quant_method", self.quant_method)
+        if (
+            _EXTRA_CTX.moe_comm_type != MoECommType.ALLGATHER
+            or self.quant_type not in (QuantType.W4A4MXFP, QuantType.W8A8MXFP)
+            or not hasattr(quant_method, "get_mega_moe_low_latency_weights")
+            or getattr(quant_method, "group_size", None) != 32
+            or gate is None
+            or router is None
+            or getattr(self, "_ascend_moe_lora_context", None) is not None
+            or self.apply_router_weight_on_input
+            or self.dynamic_eplb
+            or self.log2phy is not None
+            or getattr(self, "mix_placement", False)
+            or _EXTRA_CTX.in_profile_run
+        ):
+            return False
+        gate_weight = getattr(gate, "weight", None)
+        if gate_weight is None or gate_weight.dtype != torch.bfloat16 or getattr(gate, "bias", None) is not None:
+            return False
+        score_bias = getattr(router, "e_score_correction_bias", None)
+        if score_bias is not None and score_bias.dtype != torch.float32:
+            return False
+        if hidden_states.ndim != 2 or hidden_states.dtype != torch.bfloat16:
+            return False
+        num_tokens, hidden_size = hidden_states.shape
+        shared = getattr(self, "mega_moe_low_latency_shared_fusion", None)
+        if getattr(self, "mega_moe_low_latency_has_shared_experts", False):
+            if shared is None or not shared.ready or num_tokens > 16:
+                return False
+        num_experts = gate_weight.shape[0]
+        if (
+            num_tokens == 0
+            or hidden_size < 1024
+            or hidden_size > 8192
+            or hidden_size % 1024 != 0
+            or num_experts < 1
+            or num_experts > 1024
+            or num_experts % 32 != 0
+            or self.moe_config.num_local_experts not in range(1, 129)
+        ):
+            return False
+        if (
+            not getattr(router, "renormalize", False)
+            or getattr(router, "use_grouped_topk", False)
+            or getattr(router, "custom_routing_function", None) is not None
+            or getattr(router, "num_fused_shared_experts", 0) != 0
+            or getattr(router, "tid2eid", None) is not None
+            or getattr(router, "bias_vl", None) is not None
+            or getattr(router, "scoring_func", None) not in ("softmax", "sigmoid")
+            or not 1 <= getattr(router, "top_k", 0) <= min(num_experts, 32)
+            or getattr(router, "routed_scaling_factor", 0.0) <= 0
+            or not math.isfinite(getattr(router, "routed_scaling_factor", 0.0))
+        ):
+            return False
+        activation = getattr(self.activation, "value", self.activation)
+        return activation == "silu"
+
     def forward_impl(
         self,
         *,
@@ -712,6 +780,33 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             sync_lora_context(self.quant_method, lora_context)
 
         num_source_tokens = hidden_states.shape[0]
+        use_low_latency = self.can_use_mega_moe_low_latency(hidden_states)
+        if use_low_latency:
+            # MegaMoeLowLatency owns gate matmul and routing.  Gather only the
+            # BF16 activations it consumes; the generic AllGather preparation
+            # would also gather an unused router-logit placeholder.
+            hidden_states = moe_comm_method.prepare_low_latency(hidden_states)
+            quant_method = getattr(self.quant_method, "quant_method", self.quant_method)
+            fused_experts_results = moe_comm_method.fused_experts_low_latency(
+                layer=self,
+                hidden_states=hidden_states,
+                gate=self._mega_moe_low_latency_gate,
+                router=self.router,
+                quant_method=quant_method,
+            )
+            routed_out = moe_comm_method.finalize(
+                hidden_states=fused_experts_results.routed_out,
+                reduce_results=True,
+                padded_hidden_states_shape=None,
+            )
+            if self.return_with_event:
+                return routed_out, RoutedMoEMilestones(
+                    routed_dispatch_start=fused_experts_results.before_dispatch_evt,
+                    shared_activation_overlap_start=fused_experts_results.shared_activation_overlap_start_evt,
+                    routed_combine_start=fused_experts_results.before_combine_evt,
+                )
+            return routed_out
+
         prepare_output = moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,

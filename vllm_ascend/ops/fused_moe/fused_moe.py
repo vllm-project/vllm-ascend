@@ -115,6 +115,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
         self.quant_type = routed_experts.quant_type
         self.routed_experts.router = router
+        # Keep a non-owning reference. Assigning an nn.Module normally would
+        # register the gate a second time below routed_experts and duplicate
+        # checkpoint/state_dict names.
+        object.__setattr__(self.routed_experts, "_mega_moe_low_latency_gate", gate)
+        self.routed_experts.mega_moe_low_latency_has_shared_experts = shared_experts is not None
 
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
@@ -137,6 +142,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             # layer is the only module the quant methods
             # (``get_fused_mc2_weights``) and the MegaMoe communicator see.
             self.routed_experts.ascend_megamoe_shared_fusion = self.ascend_shared_experts.megamoe_shared_fusion()
+            self.routed_experts.mega_moe_low_latency_shared_fusion = (
+                self.ascend_shared_experts.mega_moe_low_latency_shared_fusion()
+            )
             if self._can_overlap_sp_shared_with(self.routed_input_transform):
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
@@ -178,6 +186,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         the superkernel integration, upstream's plain add becomes the fast
         path and this override can be dropped.
         """
+        self.routed_experts.mega_moe_low_latency_shared_active = False
+
         # Apply transform for routed experts (e.g., latent projection for
         # latent MoE). When the caller pre-applies the routed input transform
         # outside the runner (e.g. to overlap it on a separate stream), it
@@ -204,6 +214,19 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = self._maybe_pad_hidden_states(
             shared_experts_input,
             hidden_states,
+        )
+
+        # Decide this before entering the custom op. The outer compiled graph
+        # must specialize away the standalone shared-output add when the v6
+        # operator already folded that contribution into routed_out. Setting
+        # the marker only inside _forward_impl is too late: the fake custom-op
+        # result advertises two tensors and Dynamo then captures
+        # foreach_add([shared_output], ...), while eager replay returns None.
+        low_latency_shared = getattr(self.routed_experts, "mega_moe_low_latency_shared_fusion", None)
+        self.routed_experts.mega_moe_low_latency_shared_active = bool(
+            low_latency_shared is not None
+            and low_latency_shared.ready
+            and self.routed_experts.can_use_mega_moe_low_latency(hidden_states)
         )
 
         result = self._forward_entry(
@@ -335,7 +358,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             and getattr(shared_experts, "megamoe_shared_weights_ready", False)
             and not getattr(shared_experts, "_megamoe_shared_fusion_disabled", False)
             and _EXTRA_CTX.moe_comm_type is MoECommType.FUSED_MC2
-        )
+        ) or getattr(self.routed_experts, "mega_moe_low_latency_shared_active", False)
 
     @property
     def local_num_experts(self) -> int:
@@ -548,13 +571,21 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         with self._sequence_parallel_context():
             shared_hidden_states = shared_experts_input if shared_experts_input is not None else hidden_states
             if self.ascend_shared_experts is None:
-                if self.is_internal_router:
+                if self.is_internal_router and not self.routed_experts.can_use_mega_moe_low_latency(hidden_states):
                     router_logits = self._compute_router_logits(hidden_states, router_logits)
                 return self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
                     router_logits=router_logits,
                     input_ids=input_ids,
                 )
+            if getattr(self.routed_experts, "mega_moe_low_latency_shared_active", False):
+                routed_out, milestones = self.routed_experts.forward_impl(
+                    hidden_states=hidden_states,
+                    router_logits=router_logits,
+                    input_ids=input_ids,
+                )
+                assert isinstance(milestones, RoutedMoEMilestones)
+                return None, routed_out
             shared_input_is_gathered = self._can_overlap_sp_shared_with(self.routed_input_transform)
             defer_shared_output_wait = self._can_overlap_sp_shared_with(self.routed_output_transform)
             prepared_shared_input = (
