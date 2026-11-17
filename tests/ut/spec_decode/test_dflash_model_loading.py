@@ -1,72 +1,191 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
-from unittest.mock import Mock
+import sys
+from copy import copy
+from importlib.machinery import ModuleSpec
+from types import ModuleType, SimpleNamespace
 
 import pytest
-from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+from torch import nn
+from transformers import Qwen3MoeConfig
+from vllm.config import DeviceConfig, ModelConfig, SpeculativeConfig, VllmConfig, replace
+from vllm.config.parallel import ParallelConfig
+from vllm.model_executor import model_loader
+from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.spec_decode import utils as spec_utils
+from vllm.v1.worker.gpu.spec_decode.dflash import utils as dflash_utils
+from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 
-from vllm_ascend import ascend_config
+from vllm_ascend import ascend_config, ascend_forward_context, utils
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.patch.worker import patch_dspark
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import AscendDFlash2Speculator
+from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
+from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
+from vllm_ascend.worker.v2.spec_decode.pcp_utils import build_dspark_draft_config
 
 
-@pytest.mark.parametrize("speculator_cls", [AscendDFlashSpeculator, AscendDFlash2Speculator])
-@pytest.mark.parametrize("outcome", ["success", "no_hook", "load_error", "hook_error"])
-def test_draft_post_process_uses_restored_target_config(monkeypatch, speculator_cls, outcome):
-    config = SimpleNamespace(
-        quant_config=object(),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=2),
+@pytest.fixture
+def megamoe_target(tmp_path, monkeypatch):
+    monkeypatch.setattr(ascend_config, "_ASCEND_CONFIG", None)
+    monkeypatch.setattr(ascend_config, "_INIT_VLLM_CONFIG", None)
+    monkeypatch.setattr(ascend_config, "_MEGA_MOE_SUPPORTED", None)
+    monkeypatch.setattr(utils, "_IS_MOE_MODEL", None)
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    cann_ops = ModuleType("cann_ops_transformer")
+    cann_ops.__spec__ = ModuleSpec(cann_ops.__name__, loader=None)
+    monkeypatch.setitem(sys.modules, cann_ops.__name__, cann_ops)
+    monkeypatch.setattr(
+        ascend_forward_context, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3)
     )
-    spec = speculator_cls.__new__(speculator_cls)
-    spec.vllm_config = config
-    target = object()
-    names = {"target.attention"}
-    draft = SimpleNamespace()
-    target_ascend_config = SimpleNamespace(ascend_compilation_config=object(), eplb_config=object())
-    draft_ascend_config = SimpleNamespace(ascend_compilation_config=object(), eplb_config=object())
-    monkeypatch.setattr(ascend_config, "_ASCEND_CONFIG", target_ascend_config)
-    monkeypatch.setattr(ascend_config, "_INIT_VLLM_CONFIG", config)
-    monkeypatch.setattr(ascend_config, "_MEGA_MOE_SUPPORTED", True)
+    monkeypatch.setattr(ascend_forward_context, "get_ep_group", lambda: SimpleNamespace(world_size=8))
+    for module in (spec_utils, eagle_utils, patch_dspark):
+        monkeypatch.setattr(module, "get_pp_group", lambda: SimpleNamespace(world_size=2))
 
-    def assert_target_config_restored():
+    # On CPU, wire the real factory into the platform hook used by VllmConfig.
+    # Keep each returned config so the test can inspect the draft's own derivation.
+    initialized = []
+
+    def check_and_update_config(config):
+        initialized.append(ascend_config.init_ascend_config(config))
+
+    monkeypatch.setattr(current_platform, "check_and_update_config", check_and_update_config)
+    monkeypatch.setattr(current_platform, "uses_standalone_cpu_model_runner", lambda: False, raising=False)
+
+    Qwen3MoeConfig(
+        architectures=["Qwen3MoeForCausalLM"],
+        vocab_size=32,
+        hidden_size=1024,
+        intermediate_size=2048,
+        moe_intermediate_size=512,
+        num_hidden_layers=2,
+        num_attention_heads=8,
+        num_key_value_heads=8,
+        head_dim=128,
+        num_experts=8,
+        num_experts_per_tok=2,
+        max_position_embeddings=128,
+    ).save_pretrained(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path), skip_tokenizer_init=True, enforce_eager=True, max_model_len=128, dtype="bfloat16"
+    )
+    parallel_config = ParallelConfig(
+        pipeline_parallel_size=2, prefill_context_parallel_size=8, enable_expert_parallel=True
+    )
+    # Resolve metadata locally, without downloading a draft checkpoint.
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+        target_model_config=model_config,
+        target_parallel_config=parallel_config,
+    )
+    speculative_config.draft_model_config = copy(model_config)
+    speculative_config.draft_parallel_config = parallel_config
+    config = VllmConfig(
+        model_config=model_config,
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=parallel_config,
+        speculative_config=speculative_config,
+        additional_config={"enable_fused_mc2": 2},
+    )
+    target_ascend_config = ascend_config.get_ascend_config()
+    assert initialized == [target_ascend_config]
+
+    def assert_target_active():
         assert ascend_config.get_ascend_config() is target_ascend_config
         assert ascend_config._INIT_VLLM_CONFIG is config
-        assert ascend_config.is_mega_moe_supported()
+        assert ascend_config._MEGA_MOE_SUPPORTED is True
+        assert ascend_forward_context.use_cann_megamoe(config)
 
-    def post_process(received):
-        assert received is config
-        assert_target_config_restored()
-        if outcome == "hook_error":
-            raise ValueError("post process failed")
+    assert_target_active()
+    return config, initialized, assert_target_active
 
-    hook = Mock(side_effect=post_process)
-    if outcome != "no_hook":
-        draft.post_process = hook
 
-    def load(self, received_target, received_names):
-        assert self is spec
-        assert received_target is target
-        assert received_names is names
-        # Draft platform validation can replace the singleton and disable MegaMoE.
-        monkeypatch.setattr(ascend_config, "_ASCEND_CONFIG", draft_ascend_config)
-        monkeypatch.setattr(ascend_config, "_INIT_VLLM_CONFIG", object())
-        monkeypatch.setattr(ascend_config, "_MEGA_MOE_SUPPORTED", False)
+@pytest.mark.parametrize(
+    ("method", "speculator_cls", "outcome"),
+    [
+        pytest.param("dflash", AscendDFlashSpeculator, "success", id="dflash"),
+        pytest.param("dflash", AscendDFlash2Speculator, "success", id="dflash2"),
+        pytest.param("dflash", AscendDFlashSpeculator, "no_hook", id="dflash-no-hook"),
+        pytest.param("dflash", AscendDFlash2Speculator, "no_hook", id="dflash2-no-hook"),
+        pytest.param("dflash", AscendDFlashSpeculator, "load_error", id="dflash-load-error"),
+        pytest.param("dflash", AscendDFlash2Speculator, "load_error", id="dflash2-load-error"),
+        pytest.param("dflash", AscendDFlashSpeculator, "hook_error", id="dflash-post-process-error"),
+        pytest.param("dflash", AscendDFlash2Speculator, "hook_error", id="dflash2-post-process-error"),
+        pytest.param("dspark", AscendDSparkSpeculator, "no_hook", id="dspark"),
+        pytest.param("mtp", AscendMTPSpeculator, "no_hook", id="mtp"),
+    ],
+)
+def test_draft_loading_preserves_target_megamoe(monkeypatch, megamoe_target, method, speculator_cls, outcome):
+    target_config, initialized, assert_target_active = megamoe_target
+    target_config.speculative_config.method = method
+    target = nn.Module()
+    target.model = nn.Module()
+    draft = nn.Module()
+    draft.model = nn.Module()
+    draft_config = copy(build_dspark_draft_config(target_config) if method == "dspark" else target_config)
+    if method != "mtp":
+        # Upstream DFlash initialization replicates DFlash, DFlash2 and DSpark
+        # drafts across target PCP ranks. Start at the loader to avoid GPU buffers.
+        draft_config.parallel_config = replace(draft_config.parallel_config, prefill_context_parallel_size=1)
+
+    calls = []
+
+    def get_model(*, vllm_config, model_config):
+        assert ascend_config.is_draft_config_context()
+        assert_target_active()
+        assert not utils.lmhead_tp_enable()
+        assert model_config is target_config.speculative_config.draft_model_config
+        assert vllm_config is not target_config
+        assert vllm_config.parallel_config.prefill_context_parallel_size == (8 if method == "mtp" else 1)
+        # The replica's EP=1 downgrade belongs to the draft configuration.
+        assert initialized[-1] is not initialized[0]
+        assert initialized[-1].enable_fused_mc2 == (1 if method == "mtp" else 0)
+        calls.append("get_model")
         if outcome == "load_error":
-            raise ValueError("load failed")
+            raise RuntimeError("draft load failed")
         return draft
 
-    monkeypatch.setattr(DFlashSpeculator, "load_draft_model", load)
-    if outcome in ("load_error", "hook_error"):
-        message = "load failed" if outcome == "load_error" else "post process failed"
-        with pytest.raises(ValueError, match=message):
-            spec.load_draft_model(target, names)
-    else:
-        assert spec.load_draft_model(target, names) is draft
+    def post_process(config):
+        assert config is draft_config
+        assert not ascend_config.is_draft_config_context()
+        assert_target_active()
+        calls.append("post_process")
+        if outcome == "hook_error":
+            raise RuntimeError("draft post-process failed")
 
-    assert_target_config_restored()
-    if outcome in ("success", "hook_error"):
-        hook.assert_called_once_with(config)
+    if method == "dflash" and outcome != "no_hook":
+        draft.post_process = post_process
+
+    # Stop before model construction and checkpoint I/O. Keep the real
+    # upstream loaders and VllmConfig and AscendConfig initialization.
+    for module in (dflash_utils, eagle_utils, model_loader):
+        monkeypatch.setattr(module, "get_model", get_model)
+
+    spec = speculator_cls.__new__(speculator_cls)
+    spec.vllm_config = draft_config
+    if method == "dspark":
+        spec.use_draft_logits = False
+        spec.enable_adaptive_verification = False
+    if method == "mtp":
+        spec.method = method
+        spec.draft_model_config = target_config.speculative_config.draft_model_config
+        # Trigger a second reconstruction inside the real MTP weight loader.
+        target_config.speculative_config.moe_backend = "auto"
+        spec.draft_vllm_config = spec._create_draft_vllm_config()
+        assert len(initialized) == 2
+        assert_target_active()
+    if outcome in ("load_error", "hook_error"):
+        message = "draft load failed" if outcome == "load_error" else "draft post-process failed"
+        with pytest.raises(RuntimeError, match=message):
+            spec.load_draft_model(target, set())
     else:
-        hook.assert_not_called()
+        assert spec.load_draft_model(target, set()) is draft
+
+    assert len(initialized) == (3 if method == "mtp" else 2)
+    assert calls == (["get_model", "post_process"] if outcome in ("success", "hook_error") else ["get_model"])
+    assert not ascend_config.is_draft_config_context()
+    assert_target_active()

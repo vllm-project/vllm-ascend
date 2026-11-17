@@ -16,7 +16,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
-from vllm_ascend.ascend_config import preserve_target_ascend_config
+from vllm_ascend.ascend_config import draft_config_context
 from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
@@ -150,10 +150,10 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        with preserve_target_ascend_config():
+        with draft_config_context():
             model = super().load_draft_model(target_model, target_attn_layer_names)
         # QuaRot targets require draft weights to be aligned after sharing
-        # target layers, using the restored target configuration.
+        # target layers, using the target Ascend configuration.
         if hasattr(model, "post_process"):
             model.post_process(self.vllm_config)
         return model
