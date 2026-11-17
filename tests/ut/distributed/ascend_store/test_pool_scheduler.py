@@ -532,7 +532,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         for lookup_hit, computed, load_async, expected in cases:
             with self.subTest(lookup_hit=lookup_hit, computed=computed, load_async=load_async):
                 mock_client_cls.reset_mock()
-                mock_client_cls.return_value.lookup.return_value = lookup_hit
+                mock_client_cls.return_value.lookup.return_value = StoreLookupResult(lookup_hit)
                 config = self._make_config(extra_config={"load_async": True} if load_async else None)
                 scheduler = KVPoolScheduler(
                     config, kv_cache_config=make_resolved_cache_config(config), use_layerwise=False
@@ -548,7 +548,7 @@ class TestKVPoolScheduler(unittest.TestCase):
             for token_count, lookup_hit in [(5083, 4096), (5083, 0), (4083, 0), (8275, 4096)]:
                 with self.subTest(token_count=token_count, use_eagle=use_eagle):
                     mock_client_cls.reset_mock()
-                    mock_client_cls.return_value.lookup.return_value = lookup_hit
+                    mock_client_cls.return_value.lookup.return_value = StoreLookupResult(lookup_hit)
                     scheduler = KVPoolScheduler(
                         self._make_config(block_size=4096),
                         kv_cache_config=make_resolved_cache_config(self._make_config(block_size=4096)),
@@ -584,7 +584,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         for token_count, lookup_hit, expected in cases:
             with self.subTest(token_count=token_count):
                 mock_client_cls.reset_mock()
-                mock_client_cls.return_value.lookup.return_value = lookup_hit
+                mock_client_cls.return_value.lookup.return_value = StoreLookupResult(lookup_hit)
                 scheduler = KVPoolScheduler(
                     self._make_config(block_size=4096),
                     kv_cache_config=make_resolved_cache_config(self._make_config(block_size=4096)),
@@ -608,7 +608,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         config = self._make_config(block_size=16)
         scheduler = KVPoolScheduler(config, kv_cache_config=make_resolved_cache_config(config), use_layerwise=False)
         # When external hit equals num_tokens, reduce by 1
-        mock_client_cls.return_value.lookup.return_value = 64
+        mock_client_cls.return_value.lookup.return_value = StoreLookupResult(64)
 
         request = MagicMock()
         request.prompt_token_ids = list(range(64))
@@ -711,7 +711,7 @@ class TestKVPoolScheduler(unittest.TestCase):
     def test_update_state_after_alloc_with_load(self, mock_client_cls):
         config = self._make_config(block_size=16)
         scheduler = KVPoolScheduler(config, kv_cache_config=make_resolved_cache_config(config), use_layerwise=False)
-        mock_client_cls.return_value.lookup.return_value = 32
+        mock_client_cls.return_value.lookup.return_value = StoreLookupResult(32)
 
         request = MagicMock()
         request.prompt_token_ids = list(range(64))
@@ -799,7 +799,7 @@ class TestKVPoolScheduler(unittest.TestCase):
     def test_get_num_new_matched_tokens_async(self, mock_client_cls):
         config = self._make_config(extra_config={"load_async": True})
         scheduler = KVPoolScheduler(config, kv_cache_config=make_resolved_cache_config(config), use_layerwise=False)
-        mock_client_cls.return_value.lookup.return_value = 48
+        mock_client_cls.return_value.lookup.return_value = StoreLookupResult(48)
 
         request = MagicMock()
         request.prompt_token_ids = list(range(64))
@@ -1316,7 +1316,7 @@ class TestLookupKeyClient(unittest.TestCase):
         mock_encoder_cls.return_value.encode.side_effect = [[b"hashes"], [b"groups"]]
 
         client = LookupKeyClient(config)
-        self.assertEqual(client.lookup(64, [b"\\xaa\\xbb"], hbm_hit_tokens=16), 32)
+        self.assertEqual(client.lookup(64, [b"\\xaa\\xbb"], hbm_hit_tokens=16), StoreLookupResult(32))
         mock_socket.send_multipart.assert_called_once()
         frames = mock_socket.send_multipart.call_args.args[0]
         self.assertEqual(frames[0], b"lookup")
@@ -1341,10 +1341,12 @@ class TestLookupKeyClient(unittest.TestCase):
         mock_encoder_cls.return_value.encode.side_effect = [[b"hashes"], [b"groups"]]
 
         client = LookupKeyClient(config)
-        self.assertEqual(client.lookup(64, [b"\\xaa\\xbb"], hbm_hit_tokens=16), 0)
+        self.assertEqual(client.lookup(64, [b"\\xaa\\xbb"], hbm_hit_tokens=16), StoreLookupResult(0))
         self.assertTrue(client.closed)
         mock_socket.close.assert_called_once_with(linger=0)
         client.ctx.term.assert_called_once_with()
+        self.assertEqual(client.lookup(64, []), StoreLookupResult(0))
+        mock_socket.send_multipart.assert_called_once()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Context")
@@ -1376,10 +1378,10 @@ class TestLookupKeyClient(unittest.TestCase):
 
         first_client = MagicMock()
         first_client.closed = True
-        first_client.lookup.return_value = 0
+        first_client.lookup.return_value = StoreLookupResult(0)
         second_client = MagicMock()
         second_client.closed = False
-        second_client.lookup.return_value = 32
+        second_client.lookup.return_value = StoreLookupResult(32)
         mock_client_cls.side_effect = [first_client, second_client]
 
         self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (0, False))
@@ -2222,6 +2224,25 @@ def test_lookup_early_return_discards_stale_load_spec(early_return):
     assert request.request_id not in scheduler.load_specs
 
 
+@pytest.mark.parametrize("boundaries", [(), (TailKeyBoundary(0, 36), TailKeyBoundary(1, 32))])
+@patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
+@patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Context")
+def test_lookup_returns_length_and_tail_boundaries(mock_context_cls, mock_make_socket, boundaries):
+    config = MagicMock()
+    config.parallel_config.data_parallel_rank = 0
+    config.parallel_config.data_parallel_index = 0
+    config.kv_transfer_config.kv_connector_extra_config = {}
+    socket = mock_make_socket.return_value
+    socket.recv.return_value = (32).to_bytes(4, "big") + b"".join(
+        boundary.group_id.to_bytes(4, "big") + boundary.num_tokens.to_bytes(4, "big") for boundary in boundaries
+    )
+    client = LookupKeyClient(config)
+    try:
+        assert client.lookup(48, [b"hash"], [0, 1], hbm_hit_tokens=16) == StoreLookupResult(32, boundaries)
+    finally:
+        client.close()
+
+
 @pytest.mark.parametrize("partial", [False, True])
 @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
 def test_bulk_lookup_passes_result_directly_to_load_spec(mock_client_cls, partial):
@@ -2233,8 +2254,7 @@ def test_bulk_lookup_passes_result_directly_to_load_spec(mock_client_cls, partia
     client = mock_client_cls.return_value
     client.closed = False
     boundaries = (TailKeyBoundary(0, 36),) if partial else ()
-    client.lookup_result.return_value = StoreLookupResult(32, boundaries)
-    client.lookup.return_value = 32
+    client.lookup.return_value = StoreLookupResult(32, boundaries)
     request = SimpleNamespace(request_id="lookup", prompt_token_ids=list(range(48)), num_tokens=48, block_hashes=[])
 
     result = scheduler._lookup_external_hit_tokens(request, 16)
@@ -2242,8 +2262,7 @@ def test_bulk_lookup_passes_result_directly_to_load_spec(mock_client_cls, partia
     assert scheduler.get_num_new_matched_tokens(request, 16) == (16, False)
     assert scheduler.load_specs["lookup"].tail_key_boundaries == boundaries
 
-    client.lookup_result.return_value = StoreLookupResult(0)
-    client.lookup.return_value = 0
+    client.lookup.return_value = StoreLookupResult(0)
     assert scheduler.get_num_new_matched_tokens(request, 16) == (0, False)
     assert "lookup" not in scheduler.load_specs
 

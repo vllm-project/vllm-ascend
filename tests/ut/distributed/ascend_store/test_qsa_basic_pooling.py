@@ -186,13 +186,17 @@ def test_private_state_lookup_queries_the_restorable_boundary(backend_name, prom
         patch(module + ".LookupKeyClient") as client,
     ):
         scheduler_cls = LayerwiseKVPoolScheduler if layerwise else scheduler_tests.KVPoolScheduler
-        scheduler = scheduler_cls(config, use_layerwise=layerwise)
+        scheduler = scheduler_cls(
+            config, use_layerwise=layerwise, kv_cache_config=scheduler_tests.make_resolved_cache_config(config)
+        )
         scheduler.cacheable_group_ids = [0]
         scheduler.original_block_size = [1536, 4]
         scheduler.kv_cache_group_ids = [0]
         scheduler.use_eagle = False
         client.return_value.closed = False
-        client.return_value.lookup.side_effect = lambda token_len, *args, **kwargs: token_len
+        client.return_value.lookup.side_effect = lambda token_len, *args, **kwargs: scheduler_tests.StoreLookupResult(
+            token_len
+        )
         request = SimpleNamespace(
             request_id="private-tail",
             prompt_token_ids=[0] * prompt_tokens,

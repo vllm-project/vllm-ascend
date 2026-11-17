@@ -1006,7 +1006,7 @@ class KVPoolScheduler(BaseKVPoolScheduler):
                 return None
             if self.client is None or self.client.closed:
                 self.client = LookupKeyClient(self.vllm_config)
-            return self.client.lookup_result(
+            return self.client.lookup(
                 prompt_token_len,
                 request.block_hashes,
                 self.kv_cache_group_ids,
@@ -1025,11 +1025,9 @@ class KVPoolScheduler(BaseKVPoolScheduler):
             return None
         if self.client is None or self.client.closed:
             self.client = LookupKeyClient(self.vllm_config)
-        return StoreLookupResult(
-            self.client.lookup(
-                token_len,
-                request.block_hashes,
-                self.kv_cache_group_ids,
-                hbm_hit_tokens=num_computed_tokens,
-            )
+        return self.client.lookup(
+            token_len,
+            request.block_hashes,
+            self.kv_cache_group_ids,
+            hbm_hit_tokens=num_computed_tokens,
         )

@@ -186,10 +186,7 @@ class TestGLM53Store(unittest.TestCase):
                 for prompt_len, hit, expected in ((512, 512, 0), (1024, 1024, 512), (1025, 1024, 1024)):
                     scheduler.client = MagicMock()
                     scheduler.client.closed = False
-                    scheduler.client.lookup.return_value = hit
-                    scheduler.client.lookup_result.return_value = SimpleNamespace(
-                        hit_length=hit, tail_key_boundaries=()
-                    )
+                    scheduler.client.lookup.return_value = SimpleNamespace(hit_length=hit, tail_key_boundaries=())
                     request = SimpleNamespace(
                         request_id="hit", prompt_token_ids=[1] * prompt_len, num_tokens=prompt_len, block_hashes=[]
                     )

@@ -64,16 +64,8 @@ class LookupKeyClient:
         block_hashes: list[BlockHash],
         kv_cache_group_ids: list[int] | None = None,
         hbm_hit_tokens: int = 0,
-    ) -> int:
-        return self.lookup_result(token_len, block_hashes, kv_cache_group_ids, hbm_hit_tokens).hit_length
-
-    def lookup_result(
-        self,
-        token_len: int,
-        block_hashes: list[BlockHash],
-        kv_cache_group_ids: list[int] | None = None,
-        hbm_hit_tokens: int = 0,
     ) -> StoreLookupResult:
+        """Return the recoverable prefix length and per-group tail-key boundaries."""
         if self._closed:
             return StoreLookupResult(0)
 
