@@ -6,6 +6,7 @@ import torch_npu  # noqa: F401
 from vllm.triton_utils import triton
 
 from vllm_ascend.distributed.eplb.tensor_ops import count_allgather_tokens as count_allgather_tokens_triton
+from vllm_ascend.ops.triton import eplb_count
 from vllm_ascend.ops.triton.eplb_count import MAX_REDUCE_ELEMENTS, _reduce_allgather_counts_kernel
 
 
@@ -120,6 +121,16 @@ def test_reduce_large_int64_counts(rows, bins):
     )
     expected = torch.full((bins,), rows * (2**31 + 17), dtype=torch.int64)
     torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+
+def test_int64_counter_fallback(monkeypatch):
+    # Exercise the full INT64 path without allocating over 2**31 route IDs.
+    monkeypatch.setattr(eplb_count, "MAX_INT32_COUNT", 0)
+    ids = (torch.arange(2050).reshape(1025, 2) % 21 + 1).to(torch.int64)
+    mask = torch.arange(1025) % 3 != 0
+    expected = reference(ids, mask, 3, 17)
+    actual = count_allgather_tokens_triton(ids.npu(), mask.npu(), 3, 17)
+    torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("tokens,experts,calls", [(65, 17, 1), (10240, 128, 20), (1088, 512, 20), (10240, 512, 20)])

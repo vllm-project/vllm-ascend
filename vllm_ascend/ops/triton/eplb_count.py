@@ -7,8 +7,9 @@ from vllm.triton_utils import tl, triton
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 ASSIGNMENTS_PER_TILE = 512
-# 64 KiB of INT64 partial counts, leaving room for reduction temporaries.
+# At most 64 KiB of partial counts, leaving room for reduction temporaries.
 MAX_REDUCE_ELEMENTS = 8192
+MAX_INT32_COUNT = (1 << 31) - 1
 
 
 @triton.jit(do_not_specialize=["num_assignments", "local_start", "local_count"])
@@ -33,7 +34,7 @@ def _count_allgather_kernel(
     remainder = tiles % programs
     first = pid * quotient + tl.minimum(pid, remainder)
     count = quotient + (pid < remainder)
-    local_counts = tl.full((NUM_BINS,), 0, tl.int64)
+    local_counts = tl.full((NUM_BINS,), 0, partial_counts_ptr.dtype.element_ty)
     for tile in range(first, first + count):
         offsets = tile.to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         rows = offsets // TOPK
@@ -43,7 +44,7 @@ def _count_allgather_kernel(
         local_ids = physical_ids - local_start.to(tl.int64)
         eligible = in_bounds & valid_token & (local_ids >= 0) & (local_ids < local_count)
         safe_ids = tl.where(eligible, local_ids, 0).to(tl.int32)
-        local_counts += tl.histogram(safe_ids, NUM_BINS, mask=eligible).to(tl.int64)
+        local_counts += tl.histogram(safe_ids, NUM_BINS, mask=eligible).to(local_counts.dtype)
     bins = tl.arange(0, NUM_BINS)
     tl.store(partial_counts_ptr + pid * NUM_BINS + bins, local_counts)
     # Multiple row tiles merge atomically; stream order places initialization
@@ -72,7 +73,7 @@ def _reduce_allgather_counts_kernel(
         mask=(tile_rows[:, None] < ROWS_PER_TILE) & (rows[:, None] < NUM_PARTIAL_ROWS),
         other=0,
     )
-    counts = tl.sum(partial_counts, axis=0)
+    counts = tl.sum(partial_counts, axis=0).to(tl.int64)
     if SINGLE_REDUCER:
         tl.store(counts_ptr + bins, counts, mask=bins < LOCAL_COUNT)
     else:
@@ -108,7 +109,9 @@ def count_allgather_tokens_triton(
     programs = min(vector_cores, triton.cdiv(num_assignments, ASSIGNMENTS_PER_TILE))
     # Keep a vector accumulator: the backend cannot lower a one-element loop-carried tensor.
     num_bins = max(2, triton.next_power_of_2(local_expert_count))
-    partial_counts = torch.empty((programs, num_bins), dtype=torch.int64, device=topk_ids.device)
+    # Each route contributes at most one, bounding every intermediate count.
+    partial_dtype = torch.int32 if num_assignments <= MAX_INT32_COUNT else torch.int64
+    partial_counts = torch.empty((programs, num_bins), dtype=partial_dtype, device=topk_ids.device)
     counts = torch.empty(local_expert_count, dtype=torch.int64, device=topk_ids.device)
     reduce_rows = min(programs, max(1, MAX_REDUCE_ELEMENTS // num_bins))
     reduce_tiles = triton.cdiv(programs, reduce_rows)
