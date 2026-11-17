@@ -108,8 +108,9 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" \
     python3 -m pip install --force-reinstall --no-deps \
         "${FLA_PACKAGE}===${FLA_VERSION}" && \
-    # Use the installed torch/torch_npu and CANN for the optional attention package.
+    # Install flash-attention-npu from the Ascend mirror
     source /usr/local/Ascend/cann/set_env.sh && \
+    PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" \
     python3 -m pip install --no-build-isolation --no-deps \
         "flash-attn-npu==${FLASH_ATTN_NPU_VERSION}" && \
     # Install mooncake-transfer-engine-npu from the Ascend nightly mirror
