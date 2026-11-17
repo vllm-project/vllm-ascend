@@ -57,6 +57,7 @@ def test_adaptive_verification_backend_capabilities(
             enable_adaptive_verification=adaptive,
             num_speculative_tokens=num_speculative_tokens,
             parallel_drafting=method in ("dflash2", "dspark"),
+            max_num_new_slots_for_drafting=0,
         )
     )
     config = SimpleNamespace(speculative_config=speculative_config, use_v2_model_runner=True)
@@ -222,7 +223,9 @@ def _adaptive_manager_kwargs(groups, enabled=True, steps=3):
     )
     config = SimpleNamespace(
         use_v2_model_runner=True,
-        speculative_config=SimpleNamespace(num_speculative_tokens=3, parallel_drafting=False),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=3, parallel_drafting=False, max_num_new_slots_for_drafting=0
+        ),
     )
     return dict(
         enable_adaptive_verification=enabled,
