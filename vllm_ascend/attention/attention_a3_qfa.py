@@ -323,6 +323,25 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
                 "decode and prefill alike."
             )
             AscendQFA3Int8Impl._logged = True
+        # Capture-safe constants: created lazily on first use (the eager
+        # warmup run always precedes graph capture) and then reused at a
+        # stable address -- replaying a graph must never repeat a
+        # host->device copy (aclrtMemcpy is rejected in GLOBAL capture).
+        self._p_scale = None
+        self._idx_n = None
+        self._idx_df = None
+        self._ones_v_scale = None
+
+    def _capture_safe_constants(self, device):
+        """p_scale / write-path index constants, built once per device."""
+        if self._p_scale is None or self._p_scale.device != device:
+            self._p_scale = torch.tensor(
+                [QFA_INT8_SCALE_LEVEL], dtype=torch.float32, device=device
+            )
+            self._idx_n = torch.arange(self.num_kv_heads, device=device).view(1, self.num_kv_heads, 1)
+            num_frags = self.head_size // QFA_INT8_NZ_DIM_FRAG
+            self._idx_df = torch.arange(num_frags, device=device).view(1, 1, num_frags)
+        return self._p_scale, self._idx_n, self._idx_df
 
     # ------------------------------------------------------------------
     # per-step derivations (graph-replay safe; shared across layers via
@@ -423,10 +442,9 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
         # the 32-wide fragment axis implicit. The 3-index form leaves
         # (Bs, 32) as the trailing dims and mismatches the [T, N, Df, 32]
         # payload (probe v2 verified index_put on the 4-D BNBD layout, not
-        # this 5-D NZ one).
-        num_frags = head_dim // nz_last
-        idx_n = torch.arange(n_heads, device=pages.device).view(1, n_heads, 1)
-        idx_df = torch.arange(num_frags, device=pages.device).view(1, 1, num_frags)
+        # this 5-D NZ one). The index constants come from the cached
+        # capture-safe set (torch.arange inside capture may host-generate).
+        _, idx_n, idx_df = self._capture_safe_constants(pages.device)
         nz_index = (
             pages.view(num_tokens, 1, 1).expand(num_tokens, n_heads, num_frags),
             idx_n.expand(num_tokens, n_heads, num_frags),
@@ -452,15 +470,19 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
         """Static per-head V scale for the current layer.
 
         Reads layer.v_cache_scale when present (fa_v.scale channel; per-head
-        [Hkv] after Step 3's weights) and falls back to a ones tensor for
-        bring-up. The layer object is not threaded into reshape_and_cache on
-        this code path, so resolve it through the forward context.
+        [Hkv] after Step 3's weights) and falls back to a ones tensor when
+        the checkpoint carries no calibrated keys. The fallback tensor is
+        cached (capture-safe); with the fa_v weights in place this branch
+        never runs.
         """
         layer = getattr(attn_metadata, "qfa_int8_current_layer", None)
         scale = getattr(layer, "v_cache_scale", None) if layer is not None else None
         if scale is not None and scale.numel() == self.num_kv_heads:
             return scale.data.to(torch.float32)
-        return torch.ones(self.num_kv_heads, dtype=torch.float32, device="npu")
+        device = scale.device if scale is not None else torch.npu.current_device()
+        if self._ones_v_scale is None or self._ones_v_scale.device != device:
+            self._ones_v_scale = torch.ones(self.num_kv_heads, dtype=torch.float32, device=device)
+        return self._ones_v_scale
 
     # ------------------------------------------------------------------
     # read path: one QFA call per step for the whole batch
@@ -527,7 +549,10 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
         q_descale_nt = q_descale.t().contiguous()  # NT: (Q_N, Q_T)
 
         v_scale = self._layer_v_scale(attn_metadata)
-        p_scale = torch.tensor([QFA_INT8_SCALE_LEVEL], dtype=torch.float32, device=query.device)
+        # Cached capture-safe constant: torch.tensor(..., device=npu) is a
+        # host->device copy, rejected under aclgraph capture (GLOBAL mode);
+        # the eager warmup run that always precedes capture creates it once.
+        p_scale, _, _ = self._capture_safe_constants(query.device)
 
         cu_seqlens_q, seqused_kv = self._step_lengths(attn_metadata, num_tokens)
         max_seqlen_q = attn_metadata.max_query_len or num_tokens
@@ -552,12 +577,14 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
             win_left=-1,
             win_right=-1,
             max_seqlen_q=max_seqlen_q,
-            # The decode-operator probes always passed the real max KV
-            # length (never -1); the wrapper's tiling consumes it, so keep
-            # the probe-verified contract. Eager bring-up tolerates the
-            # one .item() sync; a device-side derivation replaces it before
-            # graph capture.
-            max_seqlen_kv=int(seqused_kv[:batch_size].max().item()),
+            # Contract: an int upper bound on the real max KV length, used
+            # for tiling planning ("not smaller than the actual max"). The
+            # -1 default produces corrupted numerics on this build (probe
+            # 2026-11-17: rel_fro 1588%) and a per-step .item() is a D2H
+            # sync that graph capture rejects -- so pin the model-length
+            # constant, which the contract admits and capture freezes
+            # safely.
+            max_seqlen_kv=int(self.vllm_config.model_config.max_model_len),
             layout_q="TND",
             layout_q_descale="NT",
             layout_kv="PA_NZ",
