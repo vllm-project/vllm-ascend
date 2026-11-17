@@ -7,6 +7,7 @@ from vllm.triton_utils import tl, triton
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 ASSIGNMENTS_PER_TILE = 512
+MAX_BINS_PER_REDUCE = 128
 
 
 @triton.jit(do_not_specialize=["num_assignments", "local_start", "local_count"])
@@ -52,12 +53,13 @@ def _reduce_allgather_counts_kernel(
     NUM_BINS: tl.constexpr,
     LOCAL_COUNT: tl.constexpr,
     REDUCE_SIZE: tl.constexpr,
+    BLOCK_BINS: tl.constexpr,
 ):
     programs = tl.arange(0, REDUCE_SIZE)
-    bins = tl.arange(0, NUM_BINS)
+    bins = tl.program_id(0) * BLOCK_BINS + tl.arange(0, BLOCK_BINS)
     partial_counts = tl.load(
         partial_counts_ptr + programs[:, None] * NUM_BINS + bins[None, :],
-        mask=programs[:, None] < NUM_PROGRAMS,
+        mask=(programs[:, None] < NUM_PROGRAMS) & (bins[None, :] < NUM_BINS),
         other=0,
     )
     counts = tl.sum(partial_counts, axis=0)
@@ -108,13 +110,16 @@ def count_allgather_tokens_triton(
         NUM_BINS=num_bins,
         compile_mode="simd",
     )
-    _reduce_allgather_counts_kernel[(1,)](
+    # Bound the INT64 reduction matrix to fit A3 UB for larger expert counts.
+    block_bins = min(num_bins, MAX_BINS_PER_REDUCE)
+    _reduce_allgather_counts_kernel[(triton.cdiv(num_bins, block_bins),)](
         partial_counts,
         counts,
         NUM_PROGRAMS=programs,
         NUM_BINS=num_bins,
         LOCAL_COUNT=local_expert_count,
         REDUCE_SIZE=triton.next_power_of_2(programs),
+        BLOCK_BINS=block_bins,
         compile_mode="simd",
     )
     return counts
