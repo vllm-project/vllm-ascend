@@ -597,8 +597,10 @@ class MooncakeBackend(Backend):
         inner_timeout_ms = int(os.getenv("ASCEND_TRANSFER_TIMEOUT", "10000"))
         if inner_timeout_ms <= 0 or outer_timeout_ms <= 2 * inner_timeout_ms:
             raise ValueError(
-                "HiSparse with Mooncake requires MC_TRANSFER_TIMEOUT (seconds) to exceed "
-                "twice ASCEND_TRANSFER_TIMEOUT (milliseconds)"
+                "HiSparse with Mooncake requires MC_TRANSFER_TIMEOUT (seconds) to be strictly greater "
+                f"than twice ASCEND_TRANSFER_TIMEOUT (milliseconds): {outer_timeout_ms}ms <= "
+                f"2 * {inner_timeout_ms}ms. Increase MC_TRANSFER_TIMEOUT to cover both inner attempts "
+                "and prevent reuse of a buffer with an outstanding transfer."
             )
 
     def register_bulk_buffers(self, ptrs: list[int], lengths: list[int], *, host_ranges: dict[int, int]) -> None:
@@ -609,31 +611,37 @@ class MooncakeBackend(Backend):
         self.ensure_initialized()
         assert self.store is not None
         bulk = MooncakeMixedBulk(self.store, host_ranges)
+        self._mixed_bulk = bulk
         try:
             bulk.register(ptrs, lengths)
         except Exception:
             try:
-                bulk.close()
+                self.close()
             except Exception:
                 logger.exception("Mooncake mixed bulk registration rollback raised")
-            else:
-                self.store = None
-                self._store_initialized = False
             raise
-        self._mixed_bulk = bulk
 
     def close(self) -> None:
-        if self._mixed_bulk is not None:
-            self._mixed_bulk.close()
+        bulk = self._mixed_bulk
+        store = self.store
+        try:
+            if bulk is not None:
+                bulk.close()
+        finally:
+            # This backend owns the Store. If deregistration failed, shut its
+            # engine down before releasing memory it may still have registered.
+            if store is not None:
+                store.close()
+            if bulk is not None:
+                bulk.release_staging()
             self._mixed_bulk = None
             self.store = None
+            self._store_initialized = False
 
-    def get_bulk(
-        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host_keys: list[bool]
-    ) -> list[int]:
+    def get_bulk(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool) -> list[int]:
         if self._mixed_bulk is None:
             raise RuntimeError("Mooncake mixed bulk buffers have not been registered")
-        return self._mixed_bulk.get(keys, addrs, sizes, host_keys=host_keys)
+        return self._mixed_bulk.get(keys, addrs, sizes, host=host)
 
     def put_bulk(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool) -> list[bool]:
         if self._mixed_bulk is None:

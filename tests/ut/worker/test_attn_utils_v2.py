@@ -2969,6 +2969,7 @@ def _run_get_kv_cache_spec(monkeypatch, vllm_config, spec) -> dict:
 
 
 def test_hisparse_group_resolution_registers_worker_indexer_spec(monkeypatch):
+    pytest.importorskip("vllm.v1.hisparse.backend")
     from vllm.platforms import current_platform
     from vllm.v1 import kv_cache_spec_registry
     from vllm.v1.hisparse import binding
@@ -2976,6 +2977,7 @@ def test_hisparse_group_resolution_registers_worker_indexer_spec(monkeypatch):
     from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
 
     monkeypatch.setattr(kv_cache_spec_registry, "_REGISTRY_KVCACHESPEC_LIST", {})
+    monkeypatch.setattr(kv_cache_spec_registry, "_REGISTRY_ROLE_MANAGERS", {})
     monkeypatch.setattr(current_platform, "register_custom_kv_cache_specs", lambda _: register_ascend_kv_cache_specs())
     cfg = _c8_mxfp_vllm_config(cache_dtype="auto")
     cfg.attention_config.hisparse_config = object()

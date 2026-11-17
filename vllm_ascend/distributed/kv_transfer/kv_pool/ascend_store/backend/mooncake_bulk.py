@@ -15,8 +15,20 @@ from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import require_aligned_batch_results
 
-# One reusable DDR buffer per worker, shared by the send/receive threads.
+# Each direction owns a bounded buffer; network waits never serialize PUT and GET.
 _HOST_STAGING_BYTES = 64 * 1024 * 1024
+
+
+class _HostStaging:
+    def __init__(self) -> None:
+        self.buffer = mmap.mmap(-1, _HOST_STAGING_BYTES)
+        self.base = ctypes.addressof(ctypes.c_ubyte.from_buffer(self.buffer))
+        self.lock = threading.Lock()
+
+    def prepare(self) -> None:
+        # Fault pages in once at registration, outside the transfer hot path.
+        # Store/HIXL owns transport registration; do not double-register with ACL.
+        ctypes.memset(self.base, 0, _HOST_STAGING_BYTES)
 
 
 class MooncakeMixedBulk:
@@ -24,10 +36,13 @@ class MooncakeMixedBulk:
         self.store = store
         self._host_ranges = host_ranges.copy()
         self._host_bases = sorted(host_ranges)
-        self._lock = threading.Lock()
         self._registered: dict[int, int] = {}
-        self._staging = mmap.mmap(-1, _HOST_STAGING_BYTES)
-        self._staging_base = ctypes.addressof(ctypes.c_ubyte.from_buffer(self._staging))
+        self._send = _HostStaging()
+        try:
+            self._recv = _HostStaging()
+        except Exception:
+            self._send.buffer.close()
+            raise
 
     def register(self, ptrs: list[int], lengths: list[int]) -> None:
         if len(ptrs) != len(lengths):
@@ -39,7 +54,9 @@ class MooncakeMixedBulk:
             raise ValueError("Mooncake bulk buffer pointers must be distinct and sizes positive")
         # HIXL cannot register HiSparse's already mapped/pinned pages (Resource_Busy).
         # Use ordinary DDR for Store and keep the Indexer slab on the direct device path.
-        self._register(self._staging_base, _HOST_STAGING_BYTES)
+        for staging in (self._send, self._recv):
+            staging.prepare()
+            self._register(staging.base, _HOST_STAGING_BYTES)
         for ptr, size in regions.items():
             if ptr not in self._host_ranges:
                 self._register(ptr, size)
@@ -52,18 +69,28 @@ class MooncakeMixedBulk:
 
     def close(self) -> None:
         # Worker shutdown stops the transfer threads before releasing this buffer.
-        for ptr in reversed(self._registered):
+        failures = []
+        for ptr in reversed(tuple(self._registered)):
             try:
                 rc = self.store.unregister_buffer(ptr)
                 if rc != 0:
                     logger.error("Mooncake bulk buffer unregister failed: status=%s", rc)
+                    failures.append(ptr)
+                else:
+                    del self._registered[ptr]
             except Exception:
                 logger.exception("Mooncake bulk buffer unregister raised")
+                failures.append(ptr)
+        if failures:
+            # Keep the buffers alive until their owner has closed the Store.
+            raise RuntimeError(f"Mooncake could not unregister {len(failures)} bulk buffers")
+        self.release_staging()
+
+    def release_staging(self) -> None:
+        """Release memory after successful deregistration or backend Store shutdown."""
         self._registered.clear()
-        try:
-            self.store.close()
-        finally:
-            self._staging.close()
+        self._recv.buffer.close()
+        self._send.buffer.close()
 
     def _validate_host_key(self, addrs: list[int], sizes: list[int]) -> int:
         if not addrs or len(addrs) != len(sizes):
@@ -81,17 +108,17 @@ class MooncakeMixedBulk:
         return key_bytes
 
     def _host_batches(
-        self, addrs: list[list[int]], sizes: list[list[int]]
+        self, addrs: list[list[int]], sizes: list[list[int]], staging: _HostStaging
     ) -> Iterator[tuple[int, int, list[list[int]]]]:
         # Validate all ranges before any copy; addresses are raw pointers.
         totals = [self._validate_host_key(a, s) for a, s in zip(addrs, sizes, strict=True)]
         begin = 0
-        cursor = self._staging_base
+        cursor = staging.base
         staged: list[list[int]] = []
         for index, (parts, total) in enumerate(zip(sizes, totals, strict=True)):
-            if cursor + total > self._staging_base + _HOST_STAGING_BYTES:
+            if cursor + total > staging.base + _HOST_STAGING_BYTES:
                 yield begin, index, staged
-                begin, cursor, staged = index, self._staging_base, []
+                begin, cursor, staged = index, staging.base, []
             spans = []
             for size in parts:
                 spans.append(cursor)
@@ -108,8 +135,8 @@ class MooncakeMixedBulk:
         if not host:
             return self._put(keys, addrs, sizes, config)
         result = []
-        with self._lock:
-            for begin, end, staged in self._host_batches(addrs, sizes):
+        with self._send.lock:
+            for begin, end, staged in self._host_batches(addrs, sizes, self._send):
                 for src, dst, lengths in zip(addrs[begin:end], staged, sizes[begin:end], strict=True):
                     for source, target, length in zip(src, dst, lengths, strict=True):
                         ctypes.memmove(target, source, length)
@@ -122,30 +149,21 @@ class MooncakeMixedBulk:
         )
         return [rc == 0 for rc in codes]
 
-    def get(
-        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host_keys: list[bool]
-    ) -> list[int]:
-        if not len(keys) == len(addrs) == len(sizes) == len(host_keys):
-            raise ValueError("Mooncake bulk GET requires one buffer list and memory kind per key")
-        results = [-1] * len(keys)
-        device = [i for i, is_host in enumerate(host_keys) if not is_host]
-        host = [i for i, is_host in enumerate(host_keys) if is_host]
-        if device:
-            codes = self._get([keys[i] for i in device], [addrs[i] for i in device], [sizes[i] for i in device])
-            for index, code in zip(device, codes, strict=True):
-                results[index] = code
-        if host:
-            host_addrs, host_sizes = [addrs[i] for i in host], [sizes[i] for i in host]
-            with self._lock:
-                for begin, end, staged in self._host_batches(host_addrs, host_sizes):
-                    indices = host[begin:end]
-                    lengths = host_sizes[begin:end]
-                    codes = self._get([keys[i] for i in indices], staged, lengths)
-                    for i, src, spans, code in zip(indices, staged, lengths, codes, strict=True):
-                        if code == 0:
-                            for source, target, length in zip(src, addrs[i], spans, strict=True):
-                                ctypes.memmove(target, source, length)
-                        results[i] = code
+    def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool) -> list[int]:
+        if not len(keys) == len(addrs) == len(sizes):
+            raise ValueError("Mooncake bulk GET requires one buffer list per key")
+        if not host:
+            return self._get(keys, addrs, sizes)
+        results = []
+        with self._recv.lock:
+            for begin, end, staged in self._host_batches(addrs, sizes, self._recv):
+                lengths = sizes[begin:end]
+                codes = self._get(keys[begin:end], staged, lengths)
+                for src, dst, spans, code in zip(staged, addrs[begin:end], lengths, codes, strict=True):
+                    if code == 0:
+                        for source, target, length in zip(src, dst, spans, strict=True):
+                            ctypes.memmove(target, source, length)
+                results.extend(codes)
         return results
 
     def _get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[int]:

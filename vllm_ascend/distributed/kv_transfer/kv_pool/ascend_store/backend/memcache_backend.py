@@ -267,9 +267,38 @@ class MemcacheBackend(Backend):
         self.register_buffer(ptrs, lengths, check_result=True)
 
     def get_bulk(
-        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host_keys: list[bool]
+        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool
     ) -> list[int] | None:
-        return self.get(keys, addrs, sizes, host_keys=host_keys)
+        if not len(keys) == len(addrs) == len(sizes):
+            raise ValueError("MemCache bulk GET requires one buffer list per key")
+        self.ensure_initialized()
+        assert self.store is not None
+        direction = MmcDirect.COPY_G2H if host else MmcDirect.COPY_G2L
+        result = []
+        begin, batch_bytes = 0, 0
+        try:
+            for end in range(len(keys) + 1):
+                key_bytes = sum(sizes[end]) if end < len(keys) else 0
+                # Only Host GETs hold a host_tcp lease. An indivisible key
+                # larger than the lease batch budget is transferred alone.
+                if end > begin and (
+                    end == len(keys) or (host and batch_bytes + key_bytes > _HISPARSE_HOST_GET_MAX_BYTES)
+                ):
+                    result.extend(
+                        require_aligned_batch_results(
+                            "HiSparse Memcache GET",
+                            keys[begin:end],
+                            self.store.batch_get_into_layers(
+                                keys[begin:end], addrs[begin:end], sizes[begin:end], direction.value
+                            ),
+                        )
+                    )
+                    begin, batch_bytes = end, 0
+                batch_bytes += key_bytes
+            return result
+        except Exception:
+            logger.exception("MemCache bulk GET failed for %d keys", len(keys))
+            return None
 
     def put_bulk(
         self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool
@@ -281,55 +310,6 @@ class MemcacheBackend(Backend):
             raise ValueError("HiSparse MemCache buffer pointers and sizes must have the same length.")
         self._pending_buffers = (list(ptrs), list(sizes), check_result)
         self._register_buffers_if_needed()
-
-    def _get_hisparse(
-        self,
-        keys: list[str],
-        addrs: list[list[int]],
-        sizes: list[list[int]],
-        host_keys: list[bool],
-    ) -> list[int]:
-        store = self.store
-        assert store is not None
-        results = [-1] * len(keys)
-
-        def get_batch(indices: list[int], direction: MmcDirect) -> None:
-            selected_keys = [keys[index] for index in indices]
-            batch_results = require_aligned_batch_results(
-                "HiSparse Memcache GET",
-                selected_keys,
-                store.batch_get_into_layers(
-                    selected_keys,
-                    [addrs[index] for index in indices],
-                    [sizes[index] for index in indices],
-                    direction.value,
-                ),
-            )
-            for index, result in zip(indices, batch_results, strict=True):
-                results[index] = result
-
-        device_indices = [index for index, is_host in enumerate(host_keys) if not is_host]
-        if device_indices:
-            get_batch(device_indices, MmcDirect.COPY_G2L)
-
-        # Bound the copy time under a Host Source host_tcp lease. Device GETs
-        # use the G2L path and are outside this Host Source lease budget.
-        # A single key cannot be split, so an oversized key gets its own batch.
-        host_indices: list[int] = []
-        host_bytes = 0
-        for index, is_host in enumerate(host_keys):
-            if not is_host:
-                continue
-            key_bytes = sum(sizes[index])
-            if host_indices and host_bytes + key_bytes > _HISPARSE_HOST_GET_MAX_BYTES:
-                get_batch(host_indices, MmcDirect.COPY_G2H)
-                host_indices = []
-                host_bytes = 0
-            host_indices.append(index)
-            host_bytes += key_bytes
-        if host_indices:
-            get_batch(host_indices, MmcDirect.COPY_G2H)
-        return results
 
     def unregister_buffer(self, ptrs: list[int], sizes: list[int]):
         if len(ptrs) != len(sizes):
@@ -534,14 +514,7 @@ class MemcacheBackend(Backend):
         key: list[str],
         addr: list[list[int]],
         size: list[list[int]],
-        *,
-        host_keys: list[bool] | None = None,
     ):
-        if host_keys is not None and not (len(host_keys) == len(key) == len(addr) == len(size)):
-            logger.error(
-                "Invalid HiSparse MemCache GET metadata: expected one memory location, address and size per key"
-            )
-            return None
         if self._lazy_init and not self._store_initialized:
             logger.error(
                 "Failed to get %d keys out of %d. Store is not initialized; "
@@ -553,11 +526,7 @@ class MemcacheBackend(Backend):
             return
         assert self.store is not None
         try:
-            res = (
-                self._get_hisparse(key, addr, size, host_keys)
-                if host_keys is not None
-                else self.store.batch_get_into_layers(key, addr, size, MmcDirect.COPY_G2L.value)
-            )
+            res = self.store.batch_get_into_layers(key, addr, size, MmcDirect.COPY_G2L.value)
             failed_codes = [int(value) for value in res if value != 0]
             failed_count = len(failed_codes)
             if failed_count:
