@@ -104,7 +104,9 @@ class GB:
                 right[self._qcat] = self._qclut[self._qcrow, np.clip(x[self._qcfeat], 0, 31).astype(np.int64)]
             m = np.bitwise_and.reduceat(np.where(right, self._qrule, self._qfull), self._qstart)
             low = m & -m
-            return np.array([self.base + self._qleaf[self._qleaf0 + np.frexp(low.astype(np.float64))[1] - 1].sum()])
+            # mask==0 (corrupt rules) → leaf 0; frexp(0) would yield index -1 and wrap.
+            idx = np.where(low == 0, 0, np.frexp(low.astype(np.float64))[1] - 1)
+            return np.array([self.base + self._qleaf[self._qleaf0 + idx].sum()])
         XT = np.ascontiguousarray(X.T)                   # inputs x rows: the gathers below are row takes
         right = XT.take(self._qfeat, 0) > self._qthr[:, None]   # numeric test: go right iff x > thr
         if len(self._qcat):
@@ -112,7 +114,7 @@ class GB:
             right[self._qcat] = ((self._qcmask[:, None] >> c) & 1) == 0
         m = np.bitwise_and.reduceat(np.where(right, self._qrule[:, None], self._qfull), self._qstart, axis=0)
         low = m & -m                                     # lowest set bit = the exit leaf
-        idx = np.frexp(low.astype(np.float64))[1] - 1    # its position (an exact power of two)
+        idx = np.where(low == 0, 0, np.frexp(low.astype(np.float64))[1] - 1)
         leaves = np.ascontiguousarray(self._qleaf[self._qleaf0[:, None] + idx].T)
         return self.base + leaves.sum(1)                 # same summation order as the one-row path (row sums)
 

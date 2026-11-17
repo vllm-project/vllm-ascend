@@ -423,7 +423,12 @@ static int utf8_feed(unsigned char *pend, uint8_t *pn, const unsigned char *byte
 
 static int lowbit(int64_t mask) {
     int idx = 0;
-    uint64_t u = (uint64_t)(mask & -mask);
+    uint64_t u;
+    /* Corrupt / empty QuickScorer mask: treat as leaf 0 (matches a safe fallback). */
+    if (mask == 0) {
+        return 0;
+    }
+    u = (uint64_t)(mask & -mask);
     while (u > 1ull) {
         u >>= 1;
         idx++;
@@ -519,10 +524,13 @@ static int atom_ok(const Feat *f, int feat, int kind, double thr) {
 static void fill_gb(const Ctx *c, Feat *f, int64_t tok, int64_t prv, int64_t nxt, double *x) {
     int i;
     double cls = (double)c->rcls[tok];
-    double pcls = prv < 0 ? 31.0 : (double)c->rcls[prv];
-    double ncls = nxt < 0 ? 31.0 : (double)c->rcls[nxt];
-    double pcat = (double)c->lcat[prv < 0 ? c->V : prv];
-    double ncat = (double)c->fcat[nxt < 0 ? c->V : nxt];
+    /* Sentinel (-1) or OOB neighbour → class/cat code 31 / V (same as numpy path). */
+    int64_t p = (prv < 0 || prv >= c->V) ? -1 : prv;
+    int64_t n = (nxt < 0 || nxt >= c->V) ? -1 : nxt;
+    double pcls = p < 0 ? 31.0 : (double)c->rcls[p];
+    double ncls = n < 0 ? 31.0 : (double)c->rcls[n];
+    double pcat = (double)c->lcat[p < 0 ? c->V : p];
+    double ncat = (double)c->fcat[n < 0 ? c->V : n];
     double lp1q = quantize(f->lp1, c->quant);
     double lpcq = quantize(f->lpc, c->quant);
     double gapq = quantize(f->gap, c->quant);

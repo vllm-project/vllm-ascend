@@ -25,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .rare import LN10, WIN, describe
+from .rare import GB_GATE, LN10, WIN, describe
 from .rare_vocab import CI
 from .result import Result
 
@@ -211,7 +211,7 @@ class NativeFeed:
             float(LN10),
             float(gbm.quant),
             float(gbm.base),
-            0.05,
+            float(GB_GATE["fs"]),
             self._keep["rcls"],
             self._keep["first"],
             self._keep["last"],
