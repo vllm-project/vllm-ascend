@@ -1,0 +1,24 @@
+# KV Pool. Per-key put results returned by the Ascend store backends, the
+# blocks that failed to load back into the engine, and the layerwise load
+# dispatch that bypasses the connector metric. Per-layer histograms are detail.
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend:MemcacheBackend.put
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_pool_put_failure_handler
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend:MooncakeBackend.put
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_pool_put_failure_handler
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend:YuanrongBackend.put
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_pool_put_failure_handler
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker:BaseKVPoolWorker.get_block_ids_with_load_errors
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_pool_load_error_handler
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer:KVCacheStoreLayerRecvingThread._copy_gva_layers
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_pool_layerwise_gva_load_handler
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer:KVCacheStoreLayerRecvingThread._handle_range_layer_task
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_pool_layerwise_range_load_handler
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer:KVCacheStoreKeyLayerRecvingThread._handle_request
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_pool_layerwise_key_load_handler

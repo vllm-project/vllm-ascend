@@ -1,0 +1,17 @@
+# Release note fragment. See release_notes/README.md.
+pr: 22053
+entries:
+  - category: feature
+    text: >
+      Add KV Pool transfer failure metrics: kvpool:put_failure_keys_total
+      counts keys whose KV Pool store write failed from the per-key result
+      returned by the Ascend store backends, with a normalized backend label
+      (memcache/mooncake/yuanrong), and kvpool:load_error_blocks_total counts
+      blocks that failed to load back into the engine, so KV Pool transfer
+      failures are visible.
+  - category: feature
+    text: >
+      Add the layerwise KV pool load histogram kvpool:layerwise_load_get_duration_ms,
+      labeled by transfer mode (gva/range/key) and recorded at the detail metric
+      level, so layerwise AscendStore loads that bypass the connector metric are
+      visible per layer.
