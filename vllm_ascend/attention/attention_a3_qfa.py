@@ -370,9 +370,13 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Quantize and scatter K/V (+ K descale) into the packet cache."""
+        # The stock call site passes ``output`` as the 6th positional argument
+        # (``self.reshape_and_cache(q, k, v, kv_cache, meta, output)``), so it
+        # lands in ``*args`` here, not ``kwargs``.
+        output = args[0] if args else kwargs.get("output", None)
         num_actual_tokens = attn_metadata.num_actual_tokens
         if key is None or value is None or num_actual_tokens == 0:
-            return query, key, value, kwargs.get("output", None)
+            return query, key, value, output
 
         if len(kv_cache) != 3:
             raise RuntimeError(
@@ -417,7 +421,7 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
         from vllm_ascend.attention.attention_v1 import notify_kv_cache_written
 
         notify_kv_cache_written()
-        return query, key, value, kwargs.get("output", None)
+        return query, key, value, output
 
     def _layer_v_scale(self, attn_metadata: AscendMetadata) -> torch.Tensor:
         """Static per-head V scale for the current layer.
@@ -469,8 +473,7 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
                 f"got length {len(kv_cache)}."
             )
 
-        # Expose the layer for the write path's V scale resolution, then run
-        # the generic forward (reshape_and_cache via unified_kv_cache_update).
+        # Expose the layer for the write path's V scale resolution.
         attn_metadata.qfa_int8_current_layer = layer
 
         num_tokens = attn_metadata.num_actual_tokens
@@ -481,8 +484,14 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
         self.key_cache = k_nz
         self.value_cache = v_nz
 
-        # K/V writes happen inside the stock forward's cache-update hook.
-        super().forward(query, key, value, kv_cache, attn_metadata, output)
+        # Direct-write mode (c8_mxfp pattern): quantize and scatter K/V plus
+        # the K descale through this impl's own reshape_and_cache. The stock
+        # forward cannot be reused here -- past its cache-update hook it runs
+        # the BF16 FIA/paged-attention kernels against the int8 packet views.
+        # KV-sharing consumer layers reuse another layer's cache; writing
+        # their (dummy) K/V would corrupt the shared slots.
+        if key is not None and value is not None and self.kv_sharing_target_layer_name is None:
+            self.reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
 
         # Attention on the quantized cache.
         from cann_ops_transformer.ops import quant_flash_attn
