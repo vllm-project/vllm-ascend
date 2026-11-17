@@ -227,10 +227,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if self.kv_cache_config is not None:
             if self.use_layerwise_transfer:
                 self._layerwise_reuse_layout = get_layerwise_reuse_layout(self.kv_cache_config)
-                if self._layerwise_reuse_layout is not None:
-                    self._dspark_draft_layer_names.update(self._layerwise_reuse_layout.draft_entry_names)
-                elif (
-                    getattr(self, "_dspark_draft_layer_names", ())
+                if (
+                    self._layerwise_reuse_layout is None
+                    and getattr(self, "_dspark_draft_layer_names", ())
                     and getattr(self, "_dspark_prefix_keys", None) is None
                 ):
                     # Without scratch reuse, retain the original target+draft
@@ -293,7 +292,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     )
 
         if self._layerwise_reuse_layout is not None:
-            self.num_layers = self.layerwise_key_layers = len(self._layerwise_reuse_layout.layers)
+            self.layerwise_key_layers = self.num_layers
         self.layer_load_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
         self.layer_save_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
         self.layer_load_finished_events: list[threading.Event] | None = None
@@ -316,7 +315,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 self.num_prefetch_layers = layerwise_settings.num_prefetch_layers
             else:
                 self.prefetch_layer_map = self._remap_layout_to_stage_local(
-                    self._layerwise_reuse_layout.prefetch_layer_map, self._layerwise_reuse_layout.layers
+                    self._layerwise_reuse_layout.prefetch_layer_map, tuple(self._global_to_local_layer)
                 )
                 self.layerwise_offload = self._layerwise_reuse_layout.has_layer_reuse
                 self.num_prefetch_layers = self._layerwise_reuse_layout.num_prefetch_layers
