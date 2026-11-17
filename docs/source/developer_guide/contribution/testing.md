@@ -286,8 +286,6 @@ How tests are selected:
 1. `test_selector.py` builds a mapping of test cases to the source lines they cover from historical CI coverage data, then recommends the tests affected by the PR's changed lines (line → function → file granularity fallback).
 2. `select_tests.py` routes each recommended test path to a runner by directory convention (`tests/ut/<module>/` → CPU, `tests/ut/<module>/a2/` → A2, `tests/e2e/pull_request/{one,two,four,eight}_card/` → A3, `_310p` → 310P), balances the load via estimated times, and emits the CI matrix.
 
-CPU UT does not start when the PR pipeline is triggered. It runs after this selection, and only when the selected cases include UT. E2E starts after that UT job succeeds. A selection with no UT skips CPU UT and runs E2E directly. On `main`, a selected UT run still executes once on the verified vLLM main commit and once on the matched release tag.
-
 Adding a new test requires no configuration change: place the UT file under the
 matching `tests/ut/<module>[/<npu>]` directory or the E2E file under the matching
 `tests/e2e/pull_request/<card>` directory, and CI picks it up automatically from
@@ -302,10 +300,8 @@ You can preview locally which runners a set of tests would be routed to:
 python3 .github/workflows/scripts/select_tests.py \
   --explicit-e2e-tests tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py
 
-# Full suite routing (mirrors the main2main full-suite mode).
-# --separate-cpu-ut is what the PR workflow passes: CPU UT is reported
-# as has_ut / ut_test_groups, and test_groups stays the E2E matrix.
-python3 .github/workflows/scripts/select_tests.py --all-tests --separate-cpu-ut
+# Full suite routing (mirrors the main2main full-suite mode)
+python3 .github/workflows/scripts/select_tests.py --all-tests
 ```
 
 For debugging a specific test on CI hardware before requesting a label, see
