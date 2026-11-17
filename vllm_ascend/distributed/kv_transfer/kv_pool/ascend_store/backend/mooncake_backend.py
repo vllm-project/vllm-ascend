@@ -27,6 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     set_scheduler_device,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_bulk import MooncakeMixedBulk
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_sharded_mamba_group_ids
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
@@ -424,6 +425,7 @@ class MooncakeBackend(Backend):
         self._contribute_memory = contribute_memory
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
+        self._mixed_bulk: MooncakeMixedBulk | None = None
         self._prefetch_conf = SsdPrefetchConf.disabled()
 
         if not self._lazy_init:
@@ -580,6 +582,63 @@ class MooncakeBackend(Backend):
 
     def set_device(self):
         torch.npu.set_device(self.device_id)
+
+    @classmethod
+    def validate_mixed_bulk_config(cls) -> None:
+        config = MooncakeStoreConfig.load_from_env()
+        if config.protocol != "ascend" or not os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG"):
+            raise ValueError("HiSparse with Mooncake requires protocol=ascend and a Store-owned transfer engine")
+        if os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM") == "1" or config.enable_ssd_offload or config.enable_ssd_prefetch:
+            raise ValueError("HiSparse with Mooncake requires a DDR Store without FabricMem or SSD spilling/prefetch")
+
+        # A premature outer timeout can leave writes to the reusable staging
+        # buffer in flight. Allow both attempts of the inner Ascend transfer.
+        outer_timeout_ms = 1000 * int(os.getenv("MC_TRANSFER_TIMEOUT", "30"))
+        inner_timeout_ms = int(os.getenv("ASCEND_TRANSFER_TIMEOUT", "10000"))
+        if inner_timeout_ms <= 0 or outer_timeout_ms <= 2 * inner_timeout_ms:
+            raise ValueError(
+                "HiSparse with Mooncake requires MC_TRANSFER_TIMEOUT (seconds) to exceed "
+                "twice ASCEND_TRANSFER_TIMEOUT (milliseconds)"
+            )
+
+    def register_bulk_buffers(self, ptrs: list[int], lengths: list[int], *, host_ranges: dict[int, int]) -> None:
+        if not self._use_store_independent_te:
+            raise RuntimeError("Mooncake mixed bulk registration requires a Store-owned transfer engine")
+        if self._mixed_bulk is not None:
+            raise RuntimeError("Mooncake mixed bulk buffers are already registered")
+        self.ensure_initialized()
+        assert self.store is not None
+        bulk = MooncakeMixedBulk(self.store, host_ranges)
+        try:
+            bulk.register(ptrs, lengths)
+        except Exception:
+            try:
+                bulk.close()
+            except Exception:
+                logger.exception("Mooncake mixed bulk registration rollback raised")
+            else:
+                self.store = None
+                self._store_initialized = False
+            raise
+        self._mixed_bulk = bulk
+
+    def close(self) -> None:
+        if self._mixed_bulk is not None:
+            self._mixed_bulk.close()
+            self._mixed_bulk = None
+            self.store = None
+
+    def get_bulk(
+        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host_keys: list[bool]
+    ) -> list[int]:
+        if self._mixed_bulk is None:
+            raise RuntimeError("Mooncake mixed bulk buffers have not been registered")
+        return self._mixed_bulk.get(keys, addrs, sizes, host_keys=host_keys)
+
+    def put_bulk(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool) -> list[bool]:
+        if self._mixed_bulk is None:
+            raise RuntimeError("Mooncake mixed bulk buffers have not been registered")
+        return self._mixed_bulk.put(keys, addrs, sizes, self._build_replicate_config(), host=host)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
         if self._use_store_independent_te or self._prefetch_conf.use_dict_setup:

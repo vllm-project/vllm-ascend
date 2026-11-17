@@ -24,8 +24,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_b
     MemcacheBackend,
     MmcDirect,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import (
+    hisparse_layout_id,
+    with_aligned_hisparse_slab,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-from vllm_ascend.hisparse.binding import prepare_hisparse_cache_views, reserve_hisparse_slab_alignment
+from vllm_ascend.hisparse.binding import prepare_hisparse_cache_views
 
 SLAB_ALIGNMENT = 2 * 1024 * 1024
 
@@ -109,15 +113,16 @@ def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool,
     owner = torch.empty(0, dtype=torch.int8).set_(storage[begin : begin + padded_size], 0, (padded_size,), (1,))
     assert owner.data_ptr() % SLAB_ALIGNMENT == misalignment
     context = {source_name: SimpleNamespace(), indexer_name: SimpleNamespace()}
-    with (
-        reserve_hisparse_slab_alignment(cache_config),
-        patch("vllm.v1.worker.utils.torch.zeros", return_value=owner) as allocate,
-    ):
-        assert [tensor.size for tensor in cache_config.kv_cache_tensors] == [host_tensor.size, *([padded_size] * 3)]
-        device_config = replace(cache_config, kv_cache_tensors=cache_config.kv_cache_tensors[1:])
+    allocation_config = with_aligned_hisparse_slab(cache_config)
+    with patch("vllm.v1.worker.utils.torch.zeros", return_value=owner) as allocate:
+        assert [tensor.size for tensor in allocation_config.kv_cache_tensors] == [
+            host_tensor.size,
+            *([padded_size] * 3),
+        ]
+        device_config = replace(allocation_config, kv_cache_tensors=allocation_config.kv_cache_tensors[1:])
         caches = allocate_kv_cache(device_config, torch.device("cpu"), KVCacheLayout.BLHNC)
         caches[source_name] = source
-        AscendHiSparseBackend().prepare_kv_cache_views(cache_config, caches, context)
+        AscendHiSparseBackend().prepare_kv_cache_views(allocation_config, caches, context)
         allocate.assert_called_once_with(padded_size, dtype=torch.int8, device=torch.device("cpu"))
     raw = caches[resident_name]
     assert raw.data_ptr() == owner.data_ptr() + (-owner.data_ptr() % SLAB_ALIGNMENT)
@@ -162,11 +167,14 @@ def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool,
     assert worker.group_block_len[1] == ([16384, 512] if indexer_c8 else [32768])
     assert worker.group_block_stride[1] == ([17408, 17408] if indexer_c8 else [98304])
     assert all(worker.group_block_len[index] == [] for index in range(2, len(groups)))
-    worker.m_store.register_buffer.assert_called_once()
-    ptrs, lengths = worker.m_store.register_buffer.call_args.args
-    assert worker.m_store.register_buffer.call_args.kwargs == {"check_result": True}
+    worker.m_store.register_bulk_buffers.assert_called_once()
+    ptrs, lengths = worker.m_store.register_bulk_buffers.call_args.args
+    assert worker.m_store.register_bulk_buffers.call_args.kwargs == {
+        "host_ranges": {source.data_ptr(): num_host_blocks * 32768},
+    }
     assert lengths[ptrs.index(source.data_ptr())] == num_host_blocks * 32768
-    assert worker._hisparse_host_resident_groups == frozenset({0})
+    assert worker._transfer_layout is not None
+    assert worker._transfer_layout.host_groups == frozenset({0})
     if indexer_c8:
         assert lengths[ptrs.index(raw.data_ptr())] == indexer_offset + (num_device_blocks - 1) * 17408 + 16896
     worker.kv_cache_config.kv_cache_tensors = [
@@ -178,12 +186,12 @@ def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool,
             block_stride=17408 if indexer_c8 else 98304,
         ),
     ]
-    layout_id = worker._hisparse_layout_id()
+    layout_id = hisparse_layout_id(worker.kv_cache_config, worker.dcp_size, worker.cache_transfer_granularity)
     worker.kv_cache_config.num_blocks += 1
     worker.kv_cache_config.hisparse_host_num_blocks += 1
-    assert worker._hisparse_layout_id() == layout_id
+    assert hisparse_layout_id(worker.kv_cache_config, worker.dcp_size, worker.cache_transfer_granularity) == layout_id
     worker.kv_cache_config.kv_cache_tensors[1].block_stride += 512
-    assert worker._hisparse_layout_id() != layout_id
+    assert hisparse_layout_id(worker.kv_cache_config, worker.dcp_size, worker.cache_transfer_granularity) != layout_id
     worker.kv_cache_config.kv_cache_tensors[1].block_stride -= 512
     spec = groups[1].kv_cache_spec
     replacement = replace(indexer_spec, block_size=64)
@@ -192,7 +200,7 @@ def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool,
         if isinstance(spec, UniformTypeKVCacheSpecs)
         else replacement
     )
-    assert worker._hisparse_layout_id() != layout_id
+    assert hisparse_layout_id(worker.kv_cache_config, worker.dcp_size, worker.cache_transfer_granularity) != layout_id
 
 
 def test_hisparse_alignment_is_scoped_to_the_padded_allocation():
@@ -202,8 +210,8 @@ def test_hisparse_alignment_is_scoped_to_the_padded_allocation():
     caches = {"cache": original}
     prepare_hisparse_cache_views(config, caches, {})
     assert caches["cache"] is original
-    with pytest.raises(ValueError, match="reserved alignment padding"), reserve_hisparse_slab_alignment(config):
-        prepare_hisparse_cache_views(config, caches, {})
+    with pytest.raises(ValueError, match="reserved alignment padding"):
+        prepare_hisparse_cache_views(with_aligned_hisparse_slab(config), caches, {})
     prepare_hisparse_cache_views(config, caches, {})
     assert caches["cache"] is original
 
@@ -228,12 +236,12 @@ def test_hisparse_late_view_failure_leaves_all_bindings_untouched(wrong_storage)
     context = {name: SimpleNamespace(hisparse_block_stride=99) for name in names}
     message = "share one backing allocation" if wrong_storage else "Unexpected HiSparse indexer cache shape"
 
-    with reserve_hisparse_slab_alignment(config):
-        with pytest.raises(ValueError, match=message):
-            prepare_hisparse_cache_views(config, caches, context)
-        assert all(caches[name] is original[name] for name in names)
-        assert [tensor.size for tensor in config.kv_cache_tensors] == [padded_size, padded_size]
-        assert all(layer.hisparse_block_stride == 99 for layer in context.values())
+    allocation_config = with_aligned_hisparse_slab(config)
+    with pytest.raises(ValueError, match=message):
+        prepare_hisparse_cache_views(allocation_config, caches, context)
+    assert all(caches[name] is original[name] for name in names)
+    assert [tensor.size for tensor in allocation_config.kv_cache_tensors] == [padded_size, padded_size]
+    assert all(layer.hisparse_block_stride == 99 for layer in context.values())
     assert config.kv_cache_tensors is tensors
     assert [tensor.size for tensor in tensors] == [size, size]
 
@@ -316,7 +324,7 @@ def test_memcache_hisparse_get_fails_when_sdk_result_count_differs(memcache_back
 @pytest.mark.parametrize(
     ("extra_config", "kv_role"),
     [
-        ({"backend": "mooncake"}, "kv_both"),
+        ({"backend": "mooncake", "use_layerwise": True}, "kv_both"),
         ({"backend": "memcache", "use_layerwise": True}, "kv_both"),
         ({"backend": "memcache"}, "kv_consumer"),
     ],
@@ -327,7 +335,7 @@ def test_hisparse_rejects_unsupported_store_mode(extra_config, kv_role):
         kv_transfer_config=SimpleNamespace(kv_role=kv_role, kv_connector_extra_config=extra_config),
     )
     cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role="hisparse_source", layer_names=[])])
-    with pytest.raises(ValueError, match="requires bulk MemCache transfers"):
+    with pytest.raises(ValueError, match="requires whole-block transfers"):
         AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
 
 
@@ -357,7 +365,7 @@ def test_hisparse_reports_all_incompatible_bulk_store_options(monkeypatch, tmp_p
     with pytest.raises(ValueError) as error:
         AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
     message = str(error.value)
-    assert "requires bulk MemCache transfers with kv_role=kv_both" in message
+    assert "requires whole-block transfers with kv_role=kv_both" in message
     assert "requires load_async=true" in message
     assert "ock.mmc.local_service.protocol=host_tcp" in message
     assert "device_sdma" in message

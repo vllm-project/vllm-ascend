@@ -1728,7 +1728,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
 
         from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import AscendMultiConnector
-        from vllm_ascend.hisparse import host_mirror
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import hisparse as host_mirror
 
         source = HiSparseConnector.__new__(HiSparseConnector)
 
@@ -1801,7 +1801,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         connector = AscendMultiConnector.__new__(AscendMultiConnector)
         # Both stores share a fence regardless of their place in the connector list.
         connector._connectors = [stores[0], source, stores[1]]
-        connector._configure_hisparse_host_save_fence()
+        connector._configure_bulk_save_fence()
 
         with (
             patch.object(host_mirror.torch.accelerator, "current_stream", return_value=compute_stream),
@@ -1845,7 +1845,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(mirror._post_forward_transfers, [page_transfer])
 
     def test_hisparse_bulk_save_records_event_without_draft_dma(self):
-        from vllm_ascend.hisparse import host_mirror
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import hisparse as host_mirror
 
         worker = self._make_worker()
         worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
@@ -1859,7 +1859,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
                     _dma_submitted=False,
                     host_write_event=object(),
                 )
-                worker.set_hisparse_host_save_fence(partial(host_mirror.finish_draft_host_mirror_for_save, mirror))
+                worker.set_bulk_save_fence(partial(host_mirror.finish_draft_host_mirror_for_save, mirror))
                 req = ReqMeta(req_id="r1", token_len_chunk=16, block_ids=[1], block_hashes=["h0"], can_save=True)
                 meta = AscendConnectorMetadata(set(), set())
                 meta.add_request(req)
@@ -1882,7 +1882,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
                 self.assertFalse(mirror._draft_mirror_pending)
 
     def test_hisparse_bulk_save_rejects_incompatible_core_worker(self):
-        from vllm_ascend.hisparse.host_mirror import finish_draft_host_mirror_for_save
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import finish_draft_host_mirror_for_save
 
         with self.assertRaisesRegex(RuntimeError, "requires Core's _draft_mirror_pending flag"):
             finish_draft_host_mirror_for_save(SimpleNamespace())
@@ -1910,7 +1910,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         meta = AscendConnectorMetadata(set(), set())
         meta.add_request(req)
         fence = MagicMock()
-        worker.set_hisparse_host_save_fence(fence)
+        worker.set_bulk_save_fence(fence)
         worker.wait_for_save(meta)
         fence.assert_not_called()
         worker.kv_send_thread.raise_if_failed.assert_called_once_with()

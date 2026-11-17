@@ -71,6 +71,51 @@ options with:
 These options select KV-cache quantization independently of model-weight
 quantization; keep the weight-quantization options required by the model.
 
+### Combining HiSparse with AscendStore
+
+Use the whole-block AscendStore pool on a single Ascend 950 node with
+colocated Prefill and Decode. HiSparse continues to own the Host Source and the NPU Resident
+and Hot buffers. AscendStore saves and restores the transferable Host Source
+and NPU Indexer pages; Resident and Hot pages stay in HiSparse.
+
+Keep the attention options above and replace the transfer configuration with:
+
+```json
+{
+  "kv_connector": "MultiConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "connectors": [
+      {
+        "kv_connector": "HiSparseConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"host_pool_gib": 4}
+      },
+      {
+        "kv_connector": "AscendStoreConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"backend": "mooncake", "load_async": true}
+      }
+    ]
+  }
+}
+```
+
+See [KV Cache Pool](kv_cache_pool_ascend_store.md) for Store setup. For
+Mooncake, use an Ascend Direct client and matching master, set
+`protocol=ascend` in the Mooncake configuration, and set
+`ASCEND_GLOBAL_RESOURCE_CONFIG` for the Store-owned transfer engine. On an A5
+UB setup, use `ASCEND_GLOBAL_RESOURCE_CONFIG='{}'` and
+`ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'`. Budget an extra 64 MiB of DDR
+per worker for its reusable Host Source staging buffer. The Indexer slab
+transfers directly. Set `MC_TRANSFER_TIMEOUT` (seconds) to more than twice
+`ASCEND_TRANSFER_TIMEOUT` (milliseconds) after converting to the same unit.
+
+To use MemCache instead, set `backend` to `memcache` and use the
+`host_tcp` protocol in its local configuration. Keep `load_async=true` on
+either backend. This combination does not support external PD transport,
+layerwise transfer, or Mooncake FabricMem or SSD modes.
+
 ### Verifying the Feature
 
 Send a request and check the server's metrics endpoint for the HiSparse miss

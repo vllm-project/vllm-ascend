@@ -257,6 +257,25 @@ class MemcacheBackend(Backend):
     def set_device(self):
         torch.npu.set_device(self.device_id)
 
+    strict_bulk_get = True
+
+    @classmethod
+    def validate_mixed_bulk_config(cls) -> None:
+        require_hisparse_host_tcp()
+
+    def register_bulk_buffers(self, ptrs: list[int], lengths: list[int], *, host_ranges: dict[int, int]) -> None:
+        self.register_buffer(ptrs, lengths, check_result=True)
+
+    def get_bulk(
+        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host_keys: list[bool]
+    ) -> list[int] | None:
+        return self.get(keys, addrs, sizes, host_keys=host_keys)
+
+    def put_bulk(
+        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool
+    ) -> list[bool] | bool | None:
+        return self.put(keys, addrs, sizes, host=host)
+
     def register_buffer(self, ptrs: list[int], sizes: list[int], *, check_result: bool = False):
         if check_result and len(ptrs) != len(sizes):
             raise ValueError("HiSparse MemCache buffer pointers and sizes must have the same length.")

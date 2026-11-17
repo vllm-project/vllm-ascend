@@ -124,7 +124,7 @@ def test_hisparse_save_fence_requires_worker_with_speculation_and_host_pool(
     )
     with (
         patch.object(MultiConnector, "__init__", return_value=None),
-        patch.object(AscendMultiConnector, "_configure_hisparse_host_save_fence") as configure,
+        patch.object(AscendMultiConnector, "_configure_bulk_save_fence") as configure,
     ):
         connector = AscendMultiConnector.__new__(AscendMultiConnector)
         connector._connectors = []
