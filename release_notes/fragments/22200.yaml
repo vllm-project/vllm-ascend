@@ -1,0 +1,4 @@
+pr: 22200
+entries:
+  - category: bugfix
+    text: Fixed an inference hang with fine-grained embedding TP when some data-parallel ranks are idle and MRV2 uses multimodal or prompt embeddings.
