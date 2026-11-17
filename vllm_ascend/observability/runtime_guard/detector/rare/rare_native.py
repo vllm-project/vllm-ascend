@@ -25,9 +25,13 @@ from pathlib import Path
 
 import numpy as np
 
+from vllm_ascend.logger import init_logger_ascend
+
 from .rare import GB_GATE, LN10, WIN, describe
 from .rare_vocab import CI
 from .result import Result
+
+logger = init_logger_ascend(__name__)
 
 # Rule features. Must match FT_* in rare_feed_native.c.
 _FEAT = {
@@ -125,6 +129,9 @@ class NativeFeed:
             raise RuntimeError("native feed requires category tables")
         rcls = np.ascontiguousarray(table["rcls"], np.int8)
         n = int(rcls.shape[0])
+        self._V = n
+        # Cumulative token ids outside [0, V) skipped by native apply_token.
+        self.oob_tokens = 0
         boff = np.ascontiguousarray(table["boff"], np.int64)
         bflat = np.ascontiguousarray(table["bflat"], np.uint8)
         if boff.shape[0] != n + 1:
@@ -318,6 +325,17 @@ class NativeFeed:
         n = int(rows.shape[0])
         if n == 0:
             return []
+        if not finish:
+            # Match C apply_token: tok < 0 || tok >= V is skipped (no hold/decide).
+            n_oob = int(np.count_nonzero((token_ids < 0) | (token_ids >= self._V)))
+            if n_oob:
+                self.oob_tokens += n_oob
+                logger.debug(
+                    "[rare_feed] skipped %s OOB token id(s); cumulative=%s vocab=%s",
+                    n_oob,
+                    self.oob_tokens,
+                    self._V,
+                )
         self._ensure_hits(n)
         bound = self._ensure_bound(batch)
         if bound is not None:
