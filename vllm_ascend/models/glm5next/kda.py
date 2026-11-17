@@ -314,8 +314,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.conv_size = config.linear_conv_kernel_dim
         if self.num_heads % self.tp_size:
             raise ValueError(
-                f"GLM KDA head count ({self.num_heads}) must be divisible by "
-                f"the TP x PCP shard count ({self.tp_size})."
+                f"GLM KDA head count ({self.num_heads}) must be divisible by the TP x PCP shard count ({self.tp_size})."
             )
         self.local_num_heads = divide(self.num_heads, self.tp_size)
 
