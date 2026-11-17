@@ -10,6 +10,10 @@ Decode Context Parallel shards the KV cache along the sequence dimension across 
 
 This document describes PCP execution and DCP cache sharding. See the [PCP/DCP RFC](https://github.com/vllm-project/vllm-ascend/issues/12622) for the design rationale.
 
+!!! warning "GQA DCP Support Removed"
+
+    Decode Context Parallelism (DCP) for GQA models has been removed. GQA draft models maintain native TP sharding under target DCP. DCP for MLA and SFA models remains fully supported. See [RFC #21305](https://github.com/vllm-project/vllm-ascend/issues/21305).
+
 ## KV-cache layout
 
 DCP stores tokens in an interleaved layout across ranks. The interleaving granularity is controlled by `cp_kv_cache_interleave_size`, whose declared default is `1`.
@@ -99,12 +103,12 @@ Attention metadata distinguishes global request order, local query order, and ga
 
 ### Backend structure
 
-DCP specializes the corresponding MLA or SFA attention backend:
+DCP is implemented as a specialization of the corresponding v1 attention backend rather than as a parallel copy of it:
 
 - `DCPMetadataBuilderMixin` owns DCP group/rank discovery.
 - `DCPImplMixin` owns DCP collectives and the common partial-output/LSE merge.
-- MLA and SFA DCP builders inherit their base metadata builders. They only add DCP metadata fields or temporarily expose the DCP-specific cache view.
-- MLA and SFA DCP implementations inherit their base implementations and override only the kernel stages whose communication or cache layout differs.
+- MLA and SFA DCP builders inherit their v1 metadata builders. They only add DCP metadata fields or temporarily expose the DCP-specific cache view.
+- MLA and SFA DCP implementations inherit their v1 implementations and override only the kernel stages whose communication or cache layout differs.
 
 The normal v1 builders remain the source of truth for request classification, padding, masks, graph metadata, and common KV-cache metadata. DCP-specific metadata is kept out of the normal v1 metadata schemas.
 
