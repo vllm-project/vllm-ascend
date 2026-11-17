@@ -120,7 +120,10 @@ from vllm_ascend.utils import (
 )
 
 if TYPE_CHECKING:
+    from vllm.config.profiler import ProfilerConfig
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
+    from vllm.distributed.parallel_state import Handle
+    from vllm.distributed.weight_transfer import WeightTransferEngine
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -206,6 +209,16 @@ class NPUWorker(GPUWorker):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+
+        # Shared worker state is initialized and owned by GPUWorker.__init__.
+        # These are annotation-only declarations (no runtime assignment) so that
+        # mypy keeps the inherited types: it runs with --follow-imports=skip and
+        # the vLLM base class body is not analyzed.
+        self.profiler_config: ProfilerConfig | None
+        self.profiler: TorchNPUProfilerWrapper | None
+        self.weight_transfer_engine: WeightTransferEngine | None
+        self._weight_update_active: bool
+        self._pp_send_work: list[Handle]
 
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
