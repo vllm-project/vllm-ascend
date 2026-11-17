@@ -158,6 +158,12 @@ class NPUModelRunner(GPUModelRunner):
     max_num_reqs: int
     max_num_tokens: int
 
+    def get_max_num_reqs(self) -> int:
+        return self.max_num_reqs
+
+    def get_max_num_tokens(self) -> int:
+        return self.max_num_tokens
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
