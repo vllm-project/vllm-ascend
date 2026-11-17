@@ -34,7 +34,7 @@ def _draft_groups_disjoint(handles, draft_layers):
 
 def _source_layout_valid(worker):
     """Check per-page layer ranges; HMA owns live physical block IDs across groups."""
-    backing = worker.hot_backing
+    backing = worker.cache_handles[0].runtime.hot_backing
     if backing.ndim != 1 or not backing.is_contiguous() or backing.storage_offset() != 0:
         return False
     base = backing.data_ptr()
@@ -92,15 +92,12 @@ class _DirectMirrorSources:
         self._targets = targets
 
     @classmethod
-    def bind(cls, worker, speculator):
-        names = worker.cache_layer_names
+    def bind(cls, worker):
         draft = set(worker._draft_layers)
-        expected = set(getattr(speculator, "draft_attn_layer_names", ())) & set(names)
-        targets = tuple(index for index in range(len(names)) if index not in draft)
+        targets = tuple(index for index in range(len(worker.cache_handles)) if index not in draft)
         if (
             not draft
             or not targets
-            or {names[index] for index in draft} != expected
             or not _draft_groups_disjoint(worker.cache_handles, draft)
             or not _host_disjoint(worker.host_caches, draft)
             or not _source_layout_valid(worker)
@@ -261,10 +258,10 @@ def overlap_target_host_mirror(runner):
         or not isinstance(worker.backend, AscendHiSparseBackend)
         or worker.shared_host_region is not None
         or not worker.is_host_writer
-        or worker.hot_backing.device.type != "npu"
+        or worker.cache_handles[0].runtime.device.type != "npu"
     ):
         return connector
-    sources = _DirectMirrorSources.bind(worker, runner.speculator)
+    sources = _DirectMirrorSources.bind(worker)
     if sources is None:
         return connector
     output = runner.output_copy_stream
@@ -274,7 +271,7 @@ def overlap_target_host_mirror(runner):
     compute_stream = torch.accelerator.current_stream()
     if (
         output_stream.device != compute_stream.device
-        or compute_stream.device != worker.hot_backing.device
+        or compute_stream.device != worker.cache_handles[0].runtime.device
         or output_stream == compute_stream
     ):
         return connector

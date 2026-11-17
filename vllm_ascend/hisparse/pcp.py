@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Separate PCP query rows from rank-major HiSparse KV writes.
-
-C8 PCP prefill and replicated decode, including full graphs.
-Core retains residency scheduling, DMA and the Host write completion fence.
-"""
+"""Separate PCP query rows from rank-major HiSparse KV writes."""
 
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
@@ -26,7 +22,6 @@ def prepare_pcp_query_metadata(metadata, states, valid_rows, local_states, world
 
 
 def get_pcp_write_request_ids(global_batch, gather_indices, write_mask):
-    """Map gathered KV writes to canonical requests, shared by all layers."""
     rows = torch.bucketize(gather_indices.contiguous(), global_batch.query_start_loc[1:].contiguous(), right=True).to(
         torch.int32
     )
@@ -86,8 +81,7 @@ class PCPHiSparseConnector(ActiveKVConnector):
         for cache, hot_group in zip(worker.cache_handles, hot_groups, strict=True):
             self._pcp_bindings.append((cache, resident_groups[cache.runtime.resident_source_index], hot_group))
         self._pcp_host_group_id = host_group_id
-        # Graph warmup/capture bypasses connector.pre_forward. Bind the PCP
-        # persistent storage now so capture and replay use identical addresses.
+        # Bind before graph capture, which bypasses connector.pre_forward.
         slots = manager._gathered_kv_slot_mappings
         tables = manager._local_block_tables
         assert slots is not None and tables is not None
@@ -97,13 +91,11 @@ class PCPHiSparseConnector(ActiveKVConnector):
     def _bind_cache_layout(self, cache, group_id, hot_group_id, slots, tables):
         cache.slot_mapping = slots[group_id]
         cache.mirror_slot_mapping = slots[self._pcp_host_group_id]
-        # Source and Hot use local query request rows. Resident residency uses
-        # persistent state slots and must retain its original block table.
+        # Resident keeps its persistent state table; Source/Hot use query rows.
         cache.source_block_table = tables[self._pcp_host_group_id]
         cache.runtime.hot_block_table = tables[hot_group_id]
 
     def prepare_draft_prefill(self):
-        """Draft prefill reuses the target's PCP query and gathered KV layout."""
         slots = self._pcp_manager._gathered_kv_slot_mappings
         tables = self._pcp_manager._local_block_tables
         for cache, group_id, hot_group_id in self._pcp_bindings:
@@ -125,8 +117,6 @@ class PCPHiSparseConnector(ActiveKVConnector):
         self._pcp_attn_metadata = {}
         if input_batch is None:
             return super()._build_load_kwargs(scheduler_output, input_batch, attn_metadata)
-        # The eager runner passes metadata through the active forward context;
-        # only graph capture supplies it explicitly to this connector.
         if attn_metadata is None and is_forward_context_available():
             attn_metadata = get_forward_context().attn_metadata
         manager = self._pcp_manager
@@ -136,35 +126,30 @@ class PCPHiSparseConnector(ActiveKVConnector):
             write_request_ids = get_pcp_write_request_ids(
                 global_batch, manager._padded_gather_idx, manager._gathered_kv_write_mask
             )
-        # Replicated decode reuses attention's canonical request rows and padding.
         count = write_request_ids.numel() if write_request_ids is not None else input_batch.num_tokens_after_padding
-        for metadata in (attn_metadata or {}).values():
+        for name, _ in self.kv_connector.connector_worker._group_leaders:
+            metadata = (attn_metadata or {}).get(name)
+            if metadata is None:
+                continue
             metadata.hisparse_write_req_id_per_token = (
                 metadata.req_id_per_token if write_request_ids is None else write_request_ids
             )
         self._pcp_attn_metadata = attn_metadata or {}
-        # Core owns request lifecycle and load scheduling. Only its load kwargs
-        # need canonical requests and a gathered Resident slot snapshot length.
+        # Keep Core's lifecycle canonical and snapshot all gathered slots.
         load_kwargs = super()._build_load_kwargs(scheduler_output, global_batch, attn_metadata)
         load_kwargs["num_tokens"] = count
         return load_kwargs
 
     def _start_load_kv(self):
         super()._start_load_kv()
-        # Core prepares handles even for FULL replay, where attention.forward
-        # does not run in Python. Keep its request lifecycle canonical while
-        # the resolver addresses the local PCP query rows.
+        self.prepare_draft_prefill()
+        # FULL replay also needs the resolver bound to local query states.
         for name, cache in self.kv_connector.connector_worker._group_leaders:
             metadata = self._pcp_attn_metadata.get(name)
             if metadata is not None:
                 prepare_pcp_query_states(cache, metadata)
 
     def prepare_host_mirror(self):
-        """Project write rows only after attention has finished using query rows.
-
-        Core's mirror and clear methods then consume their original fields;
-        residency, DMA submission and completion fences remain unchanged.
-        """
         for name, leader in self.kv_connector.connector_worker._group_leaders:
             metadata = self._pcp_attn_metadata.get(name)
             if metadata is None:

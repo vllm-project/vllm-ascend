@@ -140,21 +140,18 @@ class HiSparseNPUOps:
         request_state_indices,
         region_stride,
         max_union_rows,
-        miss_mask,
         stats,
         attention_indices,
         attention_block_stride,
         request_ids,
         source_block_table,
         source_block_size,
-        resolved_global_indices,
         valid_counts,
         swap_host_physical_rows,
         swap_device_physical_rows,
         swap_counts,
         resident_block_table,
         resident_block_size,
-        resident_null_block=0,
         num_valid_rows=None,
     ) -> None:
         """Resolve logical selections and prepare resident/hot-cache refill plans.
@@ -198,7 +195,6 @@ class HiSparseNPUOps:
             raise ValueError("HiSparse host row IDs must fit int32")
         for name, tensor in (
             ("hot_indices", hot_indices),
-            ("resolved_global_indices", resolved_global_indices),
             ("swap_host_physical_rows", swap_host_physical_rows),
             ("swap_device_physical_rows", swap_device_physical_rows),
         ):
@@ -232,8 +228,6 @@ class HiSparseNPUOps:
             )
             if attention_indices.stride(1) != 1 or attention_block_stride < hot_cache.size(1):
                 raise ValueError("HiSparse attention indices require dense columns and a valid block stride")
-        if miss_mask is not None:
-            _check_tensor(miss_mask, "miss_mask", device, (torch.uint8, torch.bool, torch.int32), shape=(rows, topk))
         if valid_counts is not None:
             _check_tensor(valid_counts, "valid_counts", device, (torch.int32,), contiguous=False)
             if tuple(valid_counts.shape) not in ((rows,), (rows, 1)):
@@ -256,9 +250,7 @@ class HiSparseNPUOps:
         Callers must destroy graphs before releasing or rebinding those owners.
         """
         rows, topk = arguments["global_indices"].shape
-        resolved = arguments["resolved_global_indices"]
-        if resolved is None:
-            resolved = workspace.first_refs[: rows * topk].view(rows, topk)
+        resolved = workspace.first_refs[: rows * topk].view(rows, topk)
         workspace.native.hisparse_resolve_residency(
             arguments["global_indices"],
             arguments["hot_block_table"],
@@ -277,13 +269,13 @@ class HiSparseNPUOps:
             arguments["swap_host_physical_rows"],
             arguments["swap_device_physical_rows"],
             arguments["swap_counts"],
-            arguments["miss_mask"],
+            None,
             arguments["stats"],
             arguments["host_cache"].shape[0],
             arguments["hot_cache"].shape[1],
             arguments["source_block_size"],
             arguments["resident_block_size"],
-            arguments["resident_null_block"],
+            0,
             arguments["attention_block_stride"] if self.attention_block_stride is None else self.attention_block_stride,
             arguments["max_union_rows"],
             self.attention_capacity,
