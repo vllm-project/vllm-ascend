@@ -26,7 +26,7 @@ from contextvars import ContextVar
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, TypeAdapter, field_validator, model_validator
+from pydantic import ConfigDict, Field, StrictInt, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -373,6 +373,13 @@ class RejectionSamplerConfig:
         if self.posterior_alpha < 0:
             raise ValueError(f"rejection_sampler_config.posterior_alpha must be >= 0, got {self.posterior_alpha}")
         return self
+
+
+@config
+class ExpertReductionConfig:
+    """Functional debugging only; currently supported by Qwen3.5 MoE."""
+
+    num_experts: StrictInt = Field(default=0, ge=0)
 
 
 @config
@@ -723,6 +730,7 @@ class AscendConfig:
     ascend_warmup_config: AscendWarmupConfig = dataclasses.field(default_factory=AscendWarmupConfig)
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
+    expert_reduction: ExpertReductionConfig = dataclasses.field(default_factory=ExpertReductionConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
     quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)
 

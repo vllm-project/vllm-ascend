@@ -359,3 +359,35 @@ convolution allocates its output separately.
 Small prefix match units can increase checkpoint traffic.
 
 Validate correctness, quality and performance on the deployment hardware before deploying in production.
+
+## Reduced-expert functional debugging
+
+| Key | Type | Default | Behavior |
+| --- | --- | --- | --- |
+| `expert_reduction.num_experts` | integer | `0` | Keep the first N routed experts in Qwen3.5 MoE, including its MTP model. Zero disables reduction. |
+
+For example, merge this key into the additional config used by your service:
+
+```bash
+vllm serve /path/to/Qwen3.5-MoE \
+    --additional-config '{"expert_reduction": {"num_experts": 10}}'
+```
+
+Use the original checkpoint with real weight loading. The adapter reduces the
+expert count before allocation, slices router rows, and filters excluded experts
+and their quantization tensors before the upstream loader runs. Shared experts,
+decoder layers, and routing top-k are unchanged. The checkpoint is not modified.
+
+N must be between the routing top-k and the original expert count. With expert
+parallelism, N must be divisible by the EP world size. EPLB is not supported.
+Only checkpoints with individually named experts (`mlp.experts.<index>.*`)
+are supported; packed expert tensors are rejected. Checkpoint I/O is not
+optimized: the loader still iterates over the original checkpoint.
+
+This changes model outputs and is intended only for functional debugging.
+For Qwen3.5-397B with top-k 10, reducing to 10 selects all retained experts on
+every token. It does not preserve full-model accuracy. MTP uses the same
+additional config and reduction. No GDN stub, scheduler change, or upstream
+vLLM source modification is required. The previous local
+`VLLM_QWEN35_NUM_EXPERTS` experiment is not used by this adapter; run with
+unmodified upstream vLLM model files.
