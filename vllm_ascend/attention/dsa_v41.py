@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# [Role] Build V4.1 attention metadata and execute the cache-plane contract.
+# [Invariants] Replay visibility follows query coordinates and the request floor.
+# [Timeouts & Locks] Metadata tasks use the worker's bounded stream/event lifecycle.
+# [Side-Effect Policy] Update per-batch metadata and persistent device buffers only.
 """DeepSeek V4.1 DSA metadata and fused attention execution.
 
 The model file owns the network topology and projection modules.  This module
@@ -1239,13 +1244,30 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         replay_start = getattr(common, "replay_start", None)
         replay_visible_lens = None
         if replay_start is not None and cache_kind == "swa":
-            replay_visible_lens = build_replay_swa_visible_lens(
+            # Visibility depends on query coordinates and the replay floor,
+            # independently of physical KV blocks. Share only within this build.
+            replay_key = (
                 window_size,
-                common.query_start_loc[: num_reqs + 1],
-                seq_lens,
-                replay_start,
+                num_reqs,
                 num_actual_tokens,
+                common.query_start_loc.data_ptr(),
+                seq_lens.data_ptr(),
+                replay_start.data_ptr(),
             )
+            replay_masks = batch_shared.setdefault("replay_swa_visible_lens", {})
+            cached_replay = replay_masks.get(replay_key)
+            if cached_replay is None:
+                replay_visible_lens = build_replay_swa_visible_lens(
+                    window_size,
+                    common.query_start_loc[: num_reqs + 1],
+                    seq_lens,
+                    replay_start,
+                    num_actual_tokens,
+                )
+                # Keep inputs alive so allocator reuse cannot alias a pointer key.
+                replay_masks[replay_key] = (replay_visible_lens, common.query_start_loc, seq_lens, replay_start)
+            else:
+                replay_visible_lens = cached_replay[0]
         # In band mode this tensor is the per-token visible length; the sparse
         # path above is its other producer, and that one pairs it with an index
         # list. The operator's mask mode is therefore the band in both cases.
