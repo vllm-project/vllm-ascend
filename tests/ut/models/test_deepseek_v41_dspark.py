@@ -329,7 +329,8 @@ def test_context_wkv_weights_load_into_the_matching_merged_shard(monkeypatch):
 
 
 def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
-    monkeypatch.setattr(deepseek_v41_dspark_module.ascend_envs, "VLLM_ASCEND_DSPARK_CONTEXT_KV_FUSION", False)
+    can_fuse = MagicMock(return_value=False)
+    monkeypatch.setattr(deepseek_v41_dspark_module, "can_fuse_dspark_context_kv", can_fuse)
     projection_calls = []
     rope_calls = []
     rope = object()
@@ -389,10 +390,10 @@ def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
     assert [call[3] for call in projected] == [rope, rope]
     assert stored[0][1] is slot_mappings[0]
     assert stored[1][1] is slot_mappings[2]
+    can_fuse.assert_called_once()
 
 
 def test_context_kv_fuses_selected_layers_without_projecting_intermediates(monkeypatch):
-    monkeypatch.setattr(deepseek_v41_dspark_module.ascend_envs, "VLLM_ASCEND_DSPARK_CONTEXT_KV_FUSION", True)
     monkeypatch.setattr(deepseek_v41_dspark_module, "get_cos_and_sin_dsa", lambda *a, **kw: "rope")
     monkeypatch.setattr(deepseek_v41_dspark_module, "can_fuse_dspark_context_kv", lambda *a: True)
     fused = MagicMock()
@@ -421,13 +422,12 @@ def test_context_kv_fuses_selected_layers_without_projecting_intermediates(monke
 
 
 def test_context_kv_uses_per_layer_path_above_fused_token_limit(monkeypatch):
-    monkeypatch.setattr(deepseek_v41_dspark_module.ascend_envs, "VLLM_ASCEND_DSPARK_CONTEXT_KV_FUSION", True)
     monkeypatch.setattr(deepseek_v41_dspark_module, "get_cos_and_sin_dsa", lambda *a, **kw: "rope")
     can_fuse = MagicMock(return_value=True)
     fused = MagicMock()
     monkeypatch.setattr(deepseek_v41_dspark_module, "can_fuse_dspark_context_kv", can_fuse)
     monkeypatch.setattr(deepseek_v41_dspark_module, "fused_dspark_context_kv", fused)
-    num_tokens = deepseek_v41_dspark_module.MAX_FUSED_CONTEXT_TOKENS + 1
+    num_tokens = 4097
     layers = {
         str(i): SimpleNamespace(self_attn=SimpleNamespace(rotary_emb=SimpleNamespace(layername=str(i))))
         for i in range(3)

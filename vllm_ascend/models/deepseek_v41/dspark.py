@@ -34,7 +34,6 @@ from vllm.model_executor.models.qwen3_dspark import DSparkConfidenceHead, DSpark
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix, process_eagle_weight
 from vllm.platforms import current_platform
 
-from vllm_ascend import envs as ascend_envs
 from vllm_ascend.attention.context_parallel.dsa_v41_cp import get_v41_cp_classes
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend, scatter_cache_sk
@@ -58,8 +57,6 @@ from vllm_ascend.ops.triton.dspark_context_kv import can_fuse_dspark_context_kv,
 from vllm_ascend.utils import normalize_deepseek_v41_config
 
 from .model import DeepseekV41MixtureOfExperts, DeepseekV41MoE
-
-MAX_FUSED_CONTEXT_TOKENS = 4096
 
 
 def _apply_dsv4_rope(
@@ -351,9 +348,8 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         rope = get_cos_and_sin_dsa(context_positions, layer_names=rope_layers)
         layers = list(self.layers.values())
         fused_indices = []
-        # Keep larger token batches on the original path until the partial
-        # RoPE kernel is validated beyond this measured range.
-        if ascend_envs.VLLM_ASCEND_DSPARK_CONTEXT_KV_FUSION and all_kv.shape[0] <= MAX_FUSED_CONTEXT_TOKENS:
+        # Keep larger token batches on the original path.
+        if all_kv.shape[0] <= 4096:
             fused_indices = [
                 idx for idx, mapping in enumerate(context_slot_mapping[: len(layers)]) if mapping is not None
             ]
@@ -364,15 +360,24 @@ class DeepseekV41DSparkModel(torch.nn.Module):
                 rope,
             ):
                 fused_indices = []
-        if fused_indices:
-            fused_dspark_context_kv(
-                all_kv,
-                [layers[idx] for idx in fused_indices],
-                [context_slot_mapping[idx] for idx in fused_indices],
-                rope,
-                fused_indices,
-                partial_rope=True,
-            )
+        if not fused_indices:
+            for layer_idx, (layer, kv) in enumerate(zip(self.layers.values(), all_kv.unbind(1), strict=True)):
+                layer_context_slot_mapping = context_slot_mapping[layer_idx]
+                if layer_context_slot_mapping is None:
+                    continue
+                attn = layer.self_attn
+                shared_kv = self._project_shared_kv(kv, context_positions, attn, rope=rope)
+                self._store_standard_swa_kv(shared_kv, layer_context_slot_mapping, attn)
+            return
+
+        fused_dspark_context_kv(
+            all_kv,
+            [layers[idx] for idx in fused_indices],
+            [context_slot_mapping[idx] for idx in fused_indices],
+            rope,
+            fused_indices,
+            partial_rope=True,
+        )
         for layer_idx, layer in enumerate(layers):
             if layer_idx in fused_indices:
                 continue
