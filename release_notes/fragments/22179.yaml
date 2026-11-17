@@ -1,0 +1,4 @@
+pr: 22179
+entries:
+  - category: bugfix
+    text: KV cache dtypes registered at runtime by platform backends are accepted again while vllm-ascend is loaded, and `--kv-cache-dtype int8` / `mxfp8` keep working.
