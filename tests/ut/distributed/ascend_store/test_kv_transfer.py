@@ -626,6 +626,27 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 self.assertTrue(all(stored_sizes))
                 self.assertEqual(thread.get_saved_offset(request.req_id), 16)
 
+    def test_put_rejects_invalid_block_group_without_advancing_progress(self):
+        for group_id in (-1, 2):
+            with self.subTest(group_id=group_id):
+                thread, store = self._make_thread()
+                request = ReqMeta(
+                    req_id="bad-put",
+                    token_len_chunk=16,
+                    block_ids_by_group=[[1], [2]],
+                    block_hashes=["h0"],
+                    kv_cache_group_ids=[0, group_id],
+                )
+                thread.add_stored_request(request)
+                thread.request_queue.put(request)
+
+                thread._handle_request(request)
+
+                self.assertEqual(store.put_calls, [])
+                self.assertEqual(thread.get_saved_offset(request.req_id), 0)
+                self.assertEqual(thread.get_and_clear_finished_requests(), {request.req_id})
+                self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+
     def test_save_keeps_checks_for_align_state_slots(self):
         thread, store = self._make_thread()
         thread.group_uses_align_state = [True]
@@ -1270,6 +1291,40 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         self.assertEqual(len(keys), 1)
         self.assertEqual(len(addrs), 1)
         self.assertEqual(len(sizes), 1)
+
+    def test_async_get_rejects_invalid_block_group_and_finishes(self):
+        cases = [([[1], [2]], [0, -1], False), ([[1], [2]], [0, 2], False), ([], None, True)]
+        for block_ids_by_group, group_ids, tp_mismatch in cases:
+            with self.subTest(group_ids=group_ids, tp_mismatch=tp_mismatch):
+                store = FakeStore()
+                worker = MagicMock(tp_mismatch=True) if tp_mismatch else None
+                thread = KVCacheStoreRecvingThread(
+                    m_store=store,
+                    token_database=FakeTokenDatabase(),
+                    block_size=16,
+                    tp_rank=0,
+                    dcp_size=1,
+                    ready_event=threading.Event(),
+                    worker=worker,
+                )
+                request = ReqMeta(
+                    req_id="bad-get",
+                    token_len_chunk=16,
+                    block_ids_by_group=block_ids_by_group,
+                    block_hashes=["h0"],
+                    load_spec=LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=16, can_load=True, token_len=16),
+                    kv_cache_group_ids=group_ids,
+                )
+                thread.request_queue.put(request)
+
+                thread._handle_request(request)
+
+                self.assertEqual(store.get_calls, [])
+                if worker is not None:
+                    worker._load_kv_tp_mismatch.assert_not_called()
+                self.assertEqual(thread.get_and_clear_failed_requests(), {request.req_id})
+                self.assertEqual(thread.get_and_clear_finished_requests(), {request.req_id})
+                self.assertEqual(thread.request_queue.unfinished_tasks, 0)
 
 
 class TestLayerBatchBuilder(unittest.TestCase):

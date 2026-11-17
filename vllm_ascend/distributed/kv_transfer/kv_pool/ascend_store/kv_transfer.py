@@ -65,12 +65,26 @@ class KVTransferThread(threading.Thread):
         self.save_disabled = threading.Event()
         self.load_disabled = threading.Event()
 
+    def _validate_block_group_ids(self, request: ReqMeta, group_ids: list[int]) -> bool:
+        num_groups = len(request.block_ids_by_group)
+        for group_id in group_ids:
+            if not 0 <= group_id < num_groups:
+                logger.error(
+                    "Invalid KV pool block group: request=%s group=%d num_block_groups=%d",
+                    request.req_id,
+                    group_id,
+                    num_groups,
+                )
+                return False
+        return True
+
     def _mark_failed_requests(self, requests: list[ReqMeta]) -> None:
         logger.error("Memcache transfer failed for requests=%s", [request.req_id for request in requests])
         for request in requests:
             request.can_save = False
         with self.done_task_lock:
-            self.failed_requests.update(request.req_id for request in requests if len(request.block_ids_by_group) > 1)
+            # An empty block list also needs request-level failure reporting.
+            self.failed_requests.update(request.req_id for request in requests if len(request.block_ids_by_group) != 1)
         self.save_disabled.set()
         with self._invalid_block_ids_lock:
             self._invalid_block_ids.update(
@@ -757,6 +771,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
         """Store missing KV chunks; log validation/PUT failures and return False."""
         if req_meta.can_save is False:
             return False
+        group_ids = req_meta.kv_cache_group_ids or [0]
+        if not self._validate_block_group_ids(req_meta, group_ids):
+            return False
         token_len = req_meta.token_len_chunk
         req_id = req_meta.req_id
         current_event = req_meta.current_event
@@ -788,7 +805,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return True
             return skip_end > skip_start and start >= skip_start and end <= skip_end
 
-        for group_id in req_meta.kv_cache_group_ids or [0]:
+        for group_id in group_ids:
             if not self.token_database.has_local_kv_group(group_id):
                 logger.debug("Skipping KV pool put for PP-local empty group: request=%s group=%d", req_id, group_id)
                 continue
@@ -1036,8 +1053,15 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 self.set_finished_request(req_id)
                 return
 
+            tp_mismatch = self.worker is not None and getattr(self.worker, "tp_mismatch", False)
+            group_ids = [0] if tp_mismatch else req_meta.kv_cache_group_ids or [0]
+            if not self._validate_block_group_ids(req_meta, group_ids):
+                self._mark_failed_requests([req_meta])
+                self.set_finished_request(req_id)
+                return
+
             token_len = load_spec.token_len
-            if self.worker is not None and getattr(self.worker, "tp_mismatch", False):
+            if tp_mismatch:
                 group_block_size = self._get_block_size(0)
                 mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size
                 loaded = self.worker._load_kv_tp_mismatch(
@@ -1055,7 +1079,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             size_list = []
             key_list = []
             block_id_list: list[int] = []
-            group_ids = req_meta.kv_cache_group_ids or [0]
             load_masks = self.token_database.load_mask(req_meta.block_hashes, token_len)
             for group_id in group_ids:
                 if not self.token_database.has_local_kv_group(group_id):
