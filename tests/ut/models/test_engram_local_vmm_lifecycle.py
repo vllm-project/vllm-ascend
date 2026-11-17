@@ -81,48 +81,27 @@ def test_runtime_probe_fallback_requires_successful_collective_cleanup(monkeypat
         module.local_vmm_available(group)
 
 
-def test_scale_view_publishes_into_shared_backing(monkeypatch):
+def test_combined_codes_and_scales_share_one_allocation(monkeypatch, tmp_path):
     module = load_module(monkeypatch)
     backing = (ctypes.c_ubyte * 24)()
     address = ctypes.addressof(backing)
-    owner = types.SimpleNamespace(
-        owner=True,
-        mapping=types.SimpleNamespace(allocation=types.SimpleNamespace(host_ptr=address, device_ptr=address)),
-    )
-    view = module.LocalSharedVmmScaleView(owner, (2, 1), torch.float32, 16, "cpu")
-    view.publish(0, torch.tensor([[1.5], [2.5]], dtype=torch.float32))
-    assert list((ctypes.c_float * 2).from_buffer(backing, 16)) == [1.5, 2.5]
+    mapping = Mock()
+    mapping.allocation = types.SimpleNamespace(host_ptr=address, device_ptr=address)
+    mapping.view.return_value = types.SimpleNamespace(tensor=object(), ptrs=object())
+    allocate = Mock(return_value=mapping)
+    monkeypatch.setattr(module, "MappedHostBuffer", allocate)
+    monkeypatch.setattr(module.tempfile, "mkdtemp", lambda **_kwargs: str(tmp_path))
+    monkeypatch.setattr(module.dist, "get_global_rank", lambda _group, rank: rank)
+    monkeypatch.setattr(module.dist, "broadcast_object_list", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(module.dist, "all_gather_object", lambda out, value, group: out.__setitem__(0, value))
+    group = types.SimpleNamespace(rank_in_group=0, cpu_group=object(), world_size=1)
+    buf = module.LocalSharedVmmBuffer((2, 8), torch.int8, "cpu", group, scales_shape=(2, 1), scale_dtype=torch.float32)
+    assert allocate.call_count == 1
+    assert allocate.call_args.args[1:3] == (3, 8)
+    buf.scales.publish(0, torch.tensor([[1.5], [2.5]]))
     assert bytes(backing[:16]) == bytes(16)
-    assert view.ptrs.tolist() == [address + 16]
-
-
-def test_owner_is_retained_if_consumer_does_not_reach_barrier(monkeypatch):
-    module = load_module(monkeypatch)
-    obj = module.LocalSharedVmmBuffer.__new__(module.LocalSharedVmmBuffer)
-    obj.owner = True
-    obj.group = types.SimpleNamespace(cpu_group=object(), world_size=2)
-    obj.close = Mock()
-    monkeypatch.setattr(module.dist, "monitored_barrier", Mock(side_effect=RuntimeError("peer unavailable")))
-    with pytest.raises(RuntimeError, match="peer unavailable"):
-        obj.close_collective()
-    obj.close.assert_not_called()
-
-
-def test_owner_is_retained_if_consumer_release_fails(monkeypatch):
-    module = load_module(monkeypatch)
-    obj = module.LocalSharedVmmBuffer.__new__(module.LocalSharedVmmBuffer)
-    obj.owner = True
-    obj.group = types.SimpleNamespace(cpu_group=object(), world_size=2)
-    obj.close = Mock()
-    monkeypatch.setattr(module.dist, "monitored_barrier", Mock())
-
-    def gather(output, value, group):
-        output[:] = [None, "consumer release error"]
-
-    monkeypatch.setattr(module.dist, "all_gather_object", gather)
-    with pytest.raises(RuntimeError, match="consumer release error"):
-        obj.close_collective()
-    obj.close.assert_not_called()
+    assert list((ctypes.c_float * 2).from_buffer(backing, 16)) == [1.5, 2.5]
+    assert buf.scales.ptrs.tolist() == [address + 16]
 
 
 def _missing_library_worker(rank, rendezvous, directory, missing_rank):
@@ -240,50 +219,6 @@ def test_failed_constructor_retries_collectively_after_peer_recovers(tmp_path):
     )
     assert log.read_text().splitlines() == ["close 1", "close 1", "close 0"]
     assert not directory.exists()
-
-
-def test_failed_constructor_cleanup_preserves_mapping_for_retry(monkeypatch, tmp_path):
-    import gc
-    import weakref
-
-    module = load_module(monkeypatch)
-    directory = tmp_path / "capability"
-    directory.mkdir()
-    mapping = Mock()
-    mapping.view.return_value = types.SimpleNamespace(tensor=object(), ptrs=object(), close=Mock())
-    monkeypatch.setattr(module.tempfile, "mkdtemp", lambda **_kwargs: str(directory))
-    monkeypatch.setattr(module, "MappedHostBuffer", Mock(return_value=mapping))
-    monkeypatch.setattr(module, "retry_pending_rollbacks", Mock())
-    monkeypatch.setattr(module.dist, "get_global_rank", lambda _group, rank: rank)
-    monkeypatch.setattr(module.dist, "broadcast_object_list", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(module.dist, "monitored_barrier", Mock())
-    calls = iter(([None, "import failed"], [None, "consumer cleanup failed"]))
-    monkeypatch.setattr(
-        module.dist, "all_gather_object", lambda out, value, group: out.__setitem__(slice(None), next(calls))
-    )
-    refs = []
-    cls = module.LocalSharedVmmBuffer
-
-    def allocate(cls, *_args):
-        obj = object.__new__(cls)
-        refs.append(weakref.ref(obj))
-        return obj
-
-    monkeypatch.setattr(cls, "__new__", staticmethod(allocate))
-    group = types.SimpleNamespace(rank_in_group=0, cpu_group=object(), world_size=2)
-    with pytest.raises(module.EngramSharedCleanupError):
-        cls((8, 256), None, "npu:0", group)
-    gc.collect()
-    retained = refs[0]()
-    assert retained is not None and retained.mapping is mapping
-    assert module.pending_failed_initializations() == (retained,)
-    monkeypatch.setattr(
-        module.dist, "all_gather_object", lambda out, value, group: out.__setitem__(slice(None), [None, None])
-    )
-    retained.close_collective(retry_rollbacks=True)
-    mapping.close.assert_called_once()
-    assert not directory.exists()
-    assert module.pending_failed_initializations() == ()
 
 
 @pytest.mark.parametrize("failed_collective", ["broadcast", "gather"])

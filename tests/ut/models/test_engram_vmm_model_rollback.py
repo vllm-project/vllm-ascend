@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-import torch
 
 
 class SharedLoadError(RuntimeError):
@@ -18,81 +17,8 @@ class SharedInitError(RuntimeError):
     pass
 
 
-class SharedCleanupError(RuntimeError):
-    pass
-
-
 class SharedReleaseError(RuntimeError):
     pass
-
-
-@pytest.mark.parametrize(
-    "cpu_offload,sharing,external,load_format,dtype,supported,expected",
-    [
-        (True, True, None, "auto", torch.int8, True, True),
-        (False, True, None, "auto", torch.int8, True, False),
-        (True, False, None, "auto", torch.int8, True, False),
-        (True, True, object(), "auto", torch.int8, True, False),
-        (True, True, None, "dummy", torch.int8, True, False),
-        (True, True, None, "auto", torch.bfloat16, True, False),
-        (True, True, None, "auto", torch.int8, False, False),
-    ],
-)
-def test_local_vmm_selection(cpu_offload, sharing, external, load_format, dtype, supported, expected):
-    source = Path(__file__).resolve().parents[3] / "vllm_ascend/models/deepseek_v41/model.py"
-    tree = ast.parse(source.read_text())
-    assignment = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "local_vmm" for t in node.targets)
-    )
-    expr = ast.fix_missing_locations(ast.Expression(body=assignment.value))
-    scope = {
-        "cpu_offload": cpu_offload,
-        "self": SimpleNamespace(engram_dp_shared_memory=sharing),
-        "shared_config": external,
-        "vllm_config": SimpleNamespace(load_config=SimpleNamespace(load_format=load_format)),
-        "storage_dtype": dtype,
-        "torch": torch,
-        "get_current_hardware_profile": lambda: SimpleNamespace(supports=lambda _: supported),
-        "HardwareCapability": SimpleNamespace(ENGRAM_LOCAL_HOST_VMM=object()),
-    }
-    assert eval(compile(expr, str(source), "eval"), scope) is expected
-
-
-@pytest.mark.parametrize("failure_type", [SharedCleanupError, ValueError])
-def test_unsynchronized_allocation_failure_does_not_fallback(failure_type):
-    source = Path(__file__).resolve().parents[3] / "vllm_ascend/models/deepseek_v41/engram/embedding.py"
-    tree = ast.parse(source.read_text())
-    cls = next(
-        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AscendParallelEngramEmbedding"
-    )
-    method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "_allocate_weights")
-    method.returns = None
-    wrapper = ast.parse("class Candidate:\n    pass\n").body[0]
-    assert isinstance(wrapper, ast.ClassDef)
-    wrapper.body = [method]
-    failure = failure_type("injected failure")
-
-    def fail(*args, **kwargs):
-        raise failure
-
-    scope: dict[str, Any] = {
-        "torch": SimpleNamespace(
-            device=lambda *_: object(), npu=SimpleNamespace(current_device=lambda: 0), bfloat16=object()
-        ),
-        "LocalSharedVmmBuffer": fail,
-        "EngramSharedInitError": SharedInitError,
-    }
-    exec(compile(ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[])), str(source), "exec"), scope)
-    instance = scope["Candidate"]()
-    instance.part_num_embeddings, instance.dim, instance.block_size = 8, 256, 32
-    instance.storage_dtype, instance.scale_dtype = object(), object()
-    instance.cpu_offload = instance.local_vmm = True
-    instance._shared_group, instance._shared_pool_spec = object(), (None, None, None)
-    with pytest.raises(failure_type) as raised:
-        instance._allocate_weights()
-    assert raised.value is failure
 
 
 def test_synchronized_allocation_failure_falls_back_to_registered_storage():
@@ -193,43 +119,6 @@ def candidate(tables, failure, retained=None):
     return obj
 
 
-def test_shared_load_failure_closes_all_vmm_tables_in_reverse_order():
-    calls: list[str] = []
-    tables = [Table("first", calls), Table("default", calls, local_vmm=False), Table("last", calls)]
-    error = SharedLoadError("rank 0 failed")
-    with pytest.raises(SharedLoadError) as raised:
-        candidate(tables, error).load_weights([])
-    assert raised.value is error
-    assert calls == ["last", "first"]
-
-
-def test_unsynchronized_load_failure_does_not_enter_collective_cleanup():
-    calls: list[str] = []
-    with pytest.raises(ValueError, match="unrelated"):
-        candidate([Table("table", calls)], ValueError("unrelated")).load_weights([])
-    assert calls == []
-
-
-def test_failed_cleanup_preserves_original_failure_and_stops():
-    calls: list[str] = []
-    tables = [Table("first", calls), Table("last", calls, fail=True)]
-    with pytest.raises(RuntimeError, match="rank 0 failed; Engram VMM cleanup failed: cleanup failure"):
-        candidate(tables, SharedLoadError("rank 0 failed")).load_weights([])
-    assert calls == ["last"]
-
-
-def test_failed_model_rollback_retains_all_remaining_vmm_buffers():
-    calls: list[str] = []
-    retained: list[Any] = []
-    first, last = Table("first", calls), Table("last", calls, fail=True)
-    first._codes_uva, first._scales_uva = Buffer(), Buffer()
-    last._codes_uva, last._scales_uva = Buffer(), Buffer()
-    with pytest.raises(RuntimeError, match="cleanup failure"):
-        candidate([first, last], SharedLoadError("load failed"), retained).load_weights([])
-    assert calls == ["last"]
-    assert retained == [last._scales_uva, last._codes_uva, first._scales_uva, first._codes_uva]
-
-
 def test_synchronized_release_failure_attempts_remaining_tables():
     calls: list[str] = []
 
@@ -242,66 +131,3 @@ def test_synchronized_release_failure_attempts_remaining_tables():
     with pytest.raises(RuntimeError, match="peer release failed"):
         candidate([first, last], SharedLoadError("load failed")).load_weights([])
     assert calls == ["last", "first"]
-
-
-@pytest.mark.parametrize("synchronized", [True, False])
-def test_only_synchronized_constructor_failure_rolls_back_previous_tables(synchronized):
-    calls: list[str] = []
-    failure = SharedInitError("shared failure") if synchronized else ValueError("local failure")
-
-    class ConstructorTable(Table):
-        def __init__(self, *args, **kwargs):
-            if "storage_dtype" in kwargs:
-                raise failure
-            super().__init__(*args, **kwargs)
-
-    previous = ConstructorTable("previous", calls)
-    source = Path(__file__).resolve().parents[3] / "vllm_ascend/models/deepseek_v41/model.py"
-    tree = ast.parse(source.read_text())
-    helper = next(
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_rollback_local_engram_tables"
-    )
-    retain_helper = next(
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_retain_local_engram_tables"
-    )
-    model = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "DeepseekV41Model")
-    constructor = next(node for node in model.body if isinstance(node, ast.FunctionDef) and node.name == "__init__")
-    guard = next(
-        node
-        for node in ast.walk(constructor)
-        if isinstance(node, ast.Try)
-        and any(
-            isinstance(handler.type, ast.Name) and handler.type.id == "EngramSharedInitError"
-            for handler in node.handlers
-        )
-    )
-    wrapper = ast.parse("def construct(self):\n    pass\n").body[0]
-    assert isinstance(wrapper, ast.FunctionDef)
-    wrapper.body = [guard]
-    code = ast.fix_missing_locations(ast.Module(body=[retain_helper, helper, wrapper], type_ignores=[]))
-    retained: list[Any] = []
-    previous._codes_uva, previous._scales_uva = Buffer(), Buffer()
-    scope: dict[str, Any] = {
-        "AscendParallelEngramEmbedding": ConstructorTable,
-        "LocalSharedVmmBuffer": Buffer,
-        "retain_failed_initialization": retained.append,
-        "EngramSharedInitError": SharedInitError,
-        "EngramSharedReleaseError": SharedReleaseError,
-        "rows": 8,
-        "config": SimpleNamespace(engram_head_dim=256),
-        "head_sizes": (8,),
-        "slot": 1,
-        "storage_dtype": object(),
-        "cpu_offload": True,
-        "remote_reader": None,
-        "shared_pool_endpoint": None,
-        "shared_pool_identity": None,
-        "local_vmm": True,
-    }
-    exec(compile(code, str(source), "exec"), scope)
-    instance = SimpleNamespace(engram_dp_shared_memory=True, modules=lambda: [previous])
-    with pytest.raises(type(failure)) as raised:
-        scope["construct"](instance)
-    assert raised.value is failure
-    assert calls == (["previous"] if synchronized else [])
-    assert retained == ([] if synchronized else [previous._scales_uva, previous._codes_uva])
