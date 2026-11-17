@@ -1165,9 +1165,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 save_start_block = max(save_start_block, hit_full_blocks)
             if partial_block_index is None:
                 partial_block_index = request.partial_block_index
-            if self.layerwise_offload and not request.save_private_snapshot:
-                partial_block_index = None
-                save_end_block = min(save_end_block, len(group_block_hashes))
             num_allocated_blocks = (
                 len(request.block_ids_by_group_np[group_id])
                 if request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np)
@@ -1338,8 +1335,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 if block_ids_by_group is None:
                     raise RuntimeError(f"Block IDs are not initialized for request {request.req_id}")
                 save_owner = self._is_layerwise_save_owner(group_id)
-                keep_snapshot = self.layerwise_offload and request.save_private_snapshot
-                if group_id not in self.cacheable_group_ids or (not save_owner and not keep_snapshot):
+                if group_id not in self.cacheable_group_ids or (not save_owner and not self.layerwise_offload):
                     all_group_gvas.append(np.zeros(len(block_ids_by_group), dtype=np.int64))
                     all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
                     continue
@@ -1372,11 +1368,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     else None
                 )
                 end_limit = min(save_end_block, len(block_ids_by_group))
-                if not (
-                    self.layerwise_offload
-                    and request.save_private_snapshot
-                    and not self.group_uses_align_state[group_id]
-                ):
+                if not self.layerwise_offload or self.group_uses_align_state[group_id]:
                     end_limit = min(end_limit, len(group_block_hashes))
                 candidate_blocks = [
                     block_idx
@@ -1395,11 +1387,15 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                             candidate_public_keys.add(key)
                     candidate_keys.append(key)
                 partial_key = None
-                if keep_snapshot and partial_block_index is not None and partial_block_index < len(block_ids_by_group):
+                if (
+                    self.layerwise_offload
+                    and partial_block_index is not None
+                    and partial_block_index < len(block_ids_by_group)
+                ):
                     partial_key = self._make_layerwise_partial_key(
                         request, group_id, partial_block_index, request.target_token_len
                     )
-                if keep_snapshot:
+                if self.layerwise_offload:
                     pages = self._snapshot_keys.setdefault(request.req_id, {}).setdefault(group_id, {})
                     if self.group_uses_align_state[group_id] and (candidate_blocks or partial_key is not None):
                         pages.clear()

@@ -934,7 +934,6 @@ class ReqMeta:
     block_ids_by_group: list[list[int]]
 
     block_hashes: list[BlockHash]
-    save_private_snapshot: bool = True
 
     # First token that has not been saved before this metadata was built.
     save_start_token: int = 0
@@ -1002,12 +1001,10 @@ class ReqMeta:
         load_key_block_offset: int = 0,
         load_last_block_key: str | None = None,
         load_keys: list[str] | None = None,
-        save_private_snapshot: bool = True,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
         self.req_id = req_id
-        self.save_private_snapshot = save_private_snapshot
         self.token_len_chunk = token_len_chunk
         self.save_end_token = token_len_chunk if save_end_token is None else save_end_token
         self.target_token_len = token_len_chunk if target_token_len is None else target_token_len
