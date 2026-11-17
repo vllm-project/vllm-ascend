@@ -219,7 +219,7 @@ def build_qsa_union_batch_inputs(
     # Padding is per request, never across a request boundary. Keep actual Q
     # unpadded; metadata uses its original cu_seqlens_q to locate union groups.
     padded_rows = 0
-    destinations = []
+    destinations: list[int] = []
     for length in lengths:
         start = padded_rows
         destinations.extend(range(start, start + length))
