@@ -19,7 +19,10 @@ def test_dspark_draft_partition_isolation(monkeypatch, inherits_quant, pp_size, 
         parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
         model_config=SimpleNamespace(model="target", architecture=architecture),
         speculative_config=SimpleNamespace(
-            method="dspark", draft_model_config=SimpleNamespace(model="target" if inherits_quant else "draft")
+            method="dspark",
+            draft_model_config=SimpleNamespace(
+                model="target" if inherits_quant else "draft",
+            ),
         ),
         quant_config=object(),
     )
