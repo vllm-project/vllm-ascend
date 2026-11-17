@@ -14,11 +14,13 @@ from vllm_ascend.ops.triton.qwen4_exp.ple_lookup import lookup
 @pytest.mark.parametrize("graph", [False, True])
 def test_host_lookup(graph):
     torch.npu.set_device(0)
-    table = HostUvaBuffer((513, 160), torch.bfloat16, "npu:0")
+    table = HostUvaBuffer((513, 160), torch.bfloat16, "npu:0", "_host_table", torch.nn.Module())
     try:
         values = torch.arange(513 * 160).reshape(513, 160).remainder(127).bfloat16()
+        assert table.tensor is not None
         table.tensor.copy_(values)
         # Exercise pointer boundaries without allocating a multi-GiB table.
+        assert table.ptrs is not None
         base = table.ptrs[0].item()
         pointers = torch.tensor([base + i * 160 * 2 for i in range(0, 513, 128)], device="npu", dtype=torch.int64)
         ids = torch.tensor([[9, 10, 137, 138, 521, 522, 523, -1] * 2], device="npu")
@@ -54,7 +56,7 @@ def test_embedding_close_after_graph_releases_host_owner():
     torch.npu.set_device(0)
     embedding = object.__new__(AscendPLEHostEmbedding)
     torch.nn.Module.__init__(embedding)
-    table = HostUvaBuffer((32, 160), torch.bfloat16, "npu:0")
+    table = HostUvaBuffer((32, 160), torch.bfloat16, "npu:0", "_host_table", torch.nn.Module())
     embedding._host_table = table
     embedding.weight = torch.nn.Parameter(table.tensor, requires_grad=False)
     embedding.embedding_dim = 160
@@ -63,6 +65,7 @@ def test_embedding_close_after_graph_releases_host_owner():
     embedding.shard_indices = SimpleNamespace(org_vocab_start_index=10, org_vocab_end_index=42)
     graph = torch.npu.NPUGraph()
     try:
+        assert table.tensor is not None
         table.tensor.fill_(3)
         ids = torch.tensor([[10, 41, 42]], device="npu")
         for _ in range(3):
@@ -83,8 +86,9 @@ def test_embedding_close_after_graph_releases_host_owner():
 
 def test_empty_and_noncontiguous_ids():
     torch.npu.set_device(0)
-    table = HostUvaBuffer((32, 160), torch.bfloat16, "npu:0")
+    table = HostUvaBuffer((32, 160), torch.bfloat16, "npu:0", "_host_table", torch.nn.Module())
     try:
+        assert table.tensor is not None
         table.tensor.fill_(7)
         ids = torch.tensor([[0, 99, 31, 99, -1, 99]], device="npu")[:, ::2]
         output = torch.empty((1, 3, 160), dtype=torch.bfloat16, device="npu")
