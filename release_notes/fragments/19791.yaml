@@ -1,0 +1,4 @@
+pr: 19791
+entries:
+  - category: bugfix
+    text: Fixed MXFP8 shared-expert overlap handling of already prepared quantized inputs.
