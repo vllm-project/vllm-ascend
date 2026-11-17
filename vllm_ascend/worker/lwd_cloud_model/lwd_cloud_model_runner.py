@@ -828,10 +828,13 @@ class LwdCloudModelRunner(LwdBaseModelRunner):
 
         The check compares the first 16 destination elements with the same
         source elements, including matching NaNs. All-zero and zero-sum data
-        therefore pass. ``strict=False`` is for the expert-ID tail: retry a
-        mismatch once, but never fail; the retry is idempotent. The standing
-        cost is one blocking copy plus a bounded sample comparison on the H2D
-        stream.
+        therefore pass the element-wise comparison — but a full-buffer
+        absolute-sum guard catches the case where a lost copy leaves dst
+        all-zero while src is non-zero and the head-16 sample happens to
+        match (both zero).  ``strict=False`` is for the expert-ID tail: retry
+        a mismatch once, but never fail; the retry is idempotent. The
+        standing cost is one blocking copy plus a bounded sample comparison
+        and one reduction on the H2D stream.
 
         Sync scope: the read-back only needs the *issuing* stream drained,
         which the blocking ``copy_`` already guarantees, so a stream-level
@@ -849,6 +852,11 @@ class LwdCloudModelRunner(LwdBaseModelRunner):
         src_sample = src[:_LWD_H2D_VERIFY_ELEMENTS]
 
         def samples_match() -> bool:
+            # Full-buffer guard: a silently dropped copy_ leaves dst all
+            # zero; if src is non-zero this is always a failure even when
+            # the head-16 sample happens to match (both zero).
+            if float(src.abs().sum()) != 0.0 and float(dst.abs().sum()) == 0.0:
+                return False
             try:
                 if torch.equal(dst_sample, src_sample):
                     return True

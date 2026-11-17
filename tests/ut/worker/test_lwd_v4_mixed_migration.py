@@ -307,6 +307,19 @@ class TestH2DCopyVerified(unittest.TestCase):
         self.assertEqual(self.stream.synchronize.call_count, 2)
         self.logger.warning.assert_called_once()
 
+    def test_head16_zero_but_full_window_loss_is_retried(self):
+        # src 前 16 元素为零，但整个窗口非零；dst 第一次 copy_ 被丢弃（全零）。
+        # 旧的前 16 校验会误判通过（前 16 都是零），全窗口守卫应判失败并重试。
+        src = FakeCopyTensor(torch.cat([torch.zeros(16), torch.tensor([1.0])]))
+        dst = FakeCopyTensor(torch.zeros(17), drop_first=True)
+
+        self.copy(src, dst)
+
+        self.assertEqual(dst.copies, 2)
+        self.assertTrue(torch.equal(dst.value, src.value))
+        self.assertEqual(self.stream.synchronize.call_count, 2)
+        self.logger.warning.assert_called_once()
+
     def test_repeated_mismatch_honors_strict_mode(self):
         src = FakeCopyTensor(torch.arange(4, dtype=torch.float32))
         for strict in (True, False):
