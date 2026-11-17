@@ -103,6 +103,8 @@ class HardwareCapability(Enum):
     DYNAMIC_MX_QUANT_SCALE_ALG_ONE = auto()
     # Allow GDN prefill to use the external FLA NPU fused operator.
     FLA_GDN_PREFILL = auto()
+    # Hardware eligibility for A5 chunk32.
+    FLA_GDN_PREFILL_CHUNK32 = auto()
     # Enable the FP8/C8 attention KV-cache ABI and matching attention preprocess paths.
     # This is not a general statement that every FP8 operation is supported.
     FP8_ATTENTION = auto()
@@ -497,6 +499,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
                     HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
                     HardwareCapability.FLA_GDN_PREFILL,
+                    HardwareCapability.FLA_GDN_PREFILL_CHUNK32,
                     HardwareCapability.FP8_ATTENTION,
                     HardwareCapability.INDEXER_QUANT_CACHE,
                     HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
