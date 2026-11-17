@@ -292,10 +292,14 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             kv_cache_spec.update(mamba_specs)
 
     if vllm_config.attention_config.hisparse_config is not None:
+        from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
         from vllm.v1.hisparse.binding import resolve_hisparse_specs
 
         from vllm_ascend.hisparse.binding import align_hisparse_indexer_specs
 
+        # HiSparse resolves groups in each worker before the scheduler has
+        # registered cache specs in its own process.
+        register_all_kvcache_specs(vllm_config)
         packed_row_bytes = None
         if get_ascend_config().enable_sparse_sfa_c8:
             from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
