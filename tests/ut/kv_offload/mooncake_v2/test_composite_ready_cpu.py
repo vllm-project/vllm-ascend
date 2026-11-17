@@ -62,22 +62,37 @@ def test_target_and_draft_use_their_own_ready_hooks(draft_alias):
     assert state.available_layers["draft"][1] is not state.available_layers["model.layers.2.long"][1]
 
 
-def test_composite_prefix_uses_existing_push_readiness():
+@pytest.mark.parametrize("num_external_tokens", [8, 16])
+def test_hbm_prefix_is_ready_while_external_prefix_waits_in_same_batch(num_external_tokens):
     obj = worker()
     load(PUSH, "_register_composite_layer_aliases", {}, OWNER)(obj)
-    state = SimpleNamespace(destinations={1: object()}, available_layers={}, local_request_id="p")
-    obj._reqs_send_state = {"r": state}
+    states = {
+        name: SimpleNamespace(destinations={1: object()}, available_layers={}, local_request_id=name, error=None)
+        for name in ("hbm", "pool")
+    }
+    obj._reqs_send_state = states
     meta = SimpleNamespace(
-        push_send_requests={"p": SimpleNamespace(request_id="r", num_computed_tokens=16)},
+        push_send_requests={
+            name: SimpleNamespace(
+                request_id=name, num_computed_tokens=16, num_external_tokens=external, num_scheduled_tokens=16
+            )
+            for name, external in (("hbm", 0), ("pool", num_external_tokens))
+        },
         requests_to_send={},
         push_aborted_requests={},
     )
     start = load(
         PUSH,
         "start_load_kv",
-        {"torch": SimpleNamespace(npu=SimpleNamespace(Event=Mock)), "SendReqInfo": lambda _: state},
+        {"torch": SimpleNamespace(npu=SimpleNamespace(Event=Mock)), "SendReqInfo": lambda name: states[name]},
         OWNER,
     )
     start(obj, meta)
-    assert {name: end for name, (end, _) in state.available_layers.items()} == {name: 16 for name in obj._layer_indices}
-    obj._process_sending_requests.assert_called_once_with()
+    ready_prefix = {name: end for name, (end, _) in states["hbm"].available_layers.items()}
+    assert ready_prefix == dict.fromkeys(obj._layer_indices, 16)
+    assert not states["pool"].available_layers
+    save = load(PUSH, "save_kv_layer", {"torch": SimpleNamespace(npu=SimpleNamespace(Event=Mock))}, OWNER)
+    save(obj, "model.layers.2.v41_attn")
+    for state in states.values():
+        assert state.available_layers["model.layers.2.long"][0] == 32
+        assert state.available_layers["model.layers.2.swa"][0] == 32

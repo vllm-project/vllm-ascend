@@ -280,8 +280,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 state.metadata = request
                 if not state.destinations:
                     self._prepare_destinations(state, request)
-                # A prefix hit is already resident before this forward.
-                if not state.available_layers and request.num_computed_tokens:
+                # External hits still need loading on P; HBM hits are ready now.
+                if not request.num_external_tokens and not state.available_layers and request.num_computed_tokens:
                     event = torch.npu.Event()
                     event.record()
                     state.available_layers = {
