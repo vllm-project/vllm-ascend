@@ -156,44 +156,6 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
     def get_cudagraph_support(cls, vllm_config: VllmConfig, kv_cache_spec: AttentionSpec) -> AttentionCGSupport:
         return AttentionCGSupport.ALWAYS
 
-    def _prepare_block_tables(self, block_tables: torch.Tensor, active_reqs: int) -> tuple[torch.Tensor, int | None]:
-        if not self.is_qwen_target:
-            return block_tables[:active_reqs], None
-        # Cover the original capacity to preserve full attention. The extra
-        # column avoids FA3's global TND branch, which reads device lengths on the host.
-        key = (block_tables.data_ptr(), block_tables.shape[1])
-        if key not in self.block_table_buffers:
-            self.block_table_buffers[key] = block_tables.new_zeros((self.max_num_reqs, block_tables.shape[1] + 1))
-        padded = self.block_table_buffers[key][:active_reqs]
-        padded[:, :-1].copy_(block_tables[:active_reqs])
-        return padded, block_tables.shape[1] * self.block_size
-
-    def _get_active_reqs(self, common: AscendCommonAttentionMetadata) -> int:
-        offsets = common.query_start_loc_cpu[: common.num_reqs + 1]
-        # DFlash graph padding may exceed the real query extent recorded on CPU.
-        extent = offsets[-1] if self.is_dflash else common.num_actual_tokens
-        return max(1, int(torch.searchsorted(offsets, extent)))
-
-    def _get_graph_params(self, common: AscendCommonAttentionMetadata, num_input_tokens: int) -> tuple[bool, int]:
-        if self.is_dflash:
-            # DFlash rounds target buckets to whole draft queries (e.g. 15 -> 16).
-            max_query_len = common.max_query_len
-            if self.use_graph_buffers and self.is_qwen_target:
-                if self.capture_query_len is None:
-                    max_query_len = num_input_tokens
-                elif common.max_query_len <= self.capture_query_len:
-                    max_query_len = self.capture_query_len
-            return self.use_graph_buffers, max_query_len
-        is_graph_capture_size = num_input_tokens in self.capture_sizes and (
-            self.capture_query_len is None or common.max_query_len <= self.capture_query_len
-        )
-        max_query_len = (
-            min(num_input_tokens, self.capture_query_len or num_input_tokens)
-            if is_graph_capture_size
-            else common.max_query_len
-        )
-        return is_graph_capture_size, max_query_len
-
     def build(
         self,
         common_prefix_len: int,
@@ -204,20 +166,47 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         from flash_attn_npu_3 import get_scheduler_metadata
 
         common = common_attn_metadata
+        num_reqs = common.num_reqs
         # The runner can append zero-length or dummy requests for graph padding.
         # Its CPU offsets identify the active prefix without a device sync.
         # Keep one empty request for dummy forwards: the operator requires B > 0.
-        active_reqs = self._get_active_reqs(common)
+        offsets_cpu = common.query_start_loc_cpu[: num_reqs + 1]
+        query_extent = offsets_cpu[-1] if self.is_dflash else common.num_actual_tokens
+        active_reqs = max(1, int(torch.searchsorted(offsets_cpu, query_extent)))
         # The runner owns graph-stable buffers. Device tiling limits reads to
         # active_reqs, so padding rows need neither copying nor sanitizing.
         query_start_loc = common.query_start_loc[: active_reqs + 1]
         seq_lens = common.seq_lens[:active_reqs]
-        block_tables, full_attention_window = self._prepare_block_tables(common.block_table_tensor, active_reqs)
+        block_tables = common.block_table_tensor[:active_reqs]
+        full_attention_window = None
+        if self.is_qwen_target:
+            # The extra column keeps full attention on FA3's device-length window path.
+            full_attention_window = block_tables.shape[1] * self.block_size
+            key = (block_tables.data_ptr(), block_tables.shape[1])
+            if key not in self.block_table_buffers:
+                self.block_table_buffers[key] = block_tables.new_zeros((self.max_num_reqs, block_tables.shape[1] + 1))
+            padded = self.block_table_buffers[key][:active_reqs]
+            padded[:, :-1].copy_(block_tables)
+            block_tables = padded
         num_input_tokens = common.num_input_tokens or common.num_actual_tokens
+        is_graph_capture_size = num_input_tokens in self.capture_sizes and (
+            self.capture_query_len is None or common.max_query_len <= self.capture_query_len
+        )
         # FA3 sizes split workspace from the per-request query bound. Using the
         # entire batch token count for decode overallocates by the batch size.
         # Prefill can share a token bucket but must retain its own query length.
-        is_graph_capture_size, max_query_len = self._get_graph_params(common, num_input_tokens)
+        max_query_len = (
+            min(num_input_tokens, self.capture_query_len or num_input_tokens)
+            if is_graph_capture_size
+            else common.max_query_len
+        )
+        if self.is_dflash:
+            # Draft buckets can round beyond capture_sizes; target query bounds stay fixed.
+            is_graph_capture_size = self.use_graph_buffers
+            max_query_len = common.max_query_len
+            if self.is_qwen_target and is_graph_capture_size:
+                bound = self.capture_query_len
+                max_query_len = num_input_tokens if bound is None else max(max_query_len, bound)
         if is_graph_capture_size:
             # Distinct input buffers (including draft steps) and token buckets
             # must retain independent tiling storage even for identical specs.
