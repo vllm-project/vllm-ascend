@@ -1638,7 +1638,7 @@ def _copied_scheduler_mode(ascend_config) -> str | None:
 
 def _validate_copied_scheduler_async_kv_limit(vllm_config: VllmConfig, ascend_config) -> None:
     """Reject the new async-queue opt-in until copied schedulers drain it."""
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         return
     if getattr(vllm_config.scheduler_config, "max_async_kv_loads_per_step", None) is None:
         return
