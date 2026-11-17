@@ -10,7 +10,7 @@ import torch_npu  # noqa: F401
 
 from vllm_ascend.hisparse.cache_ops import HiSparseNPUOps, ResolverWorkspace
 from vllm_ascend.hisparse.host_pool import allocate_mapped_host
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 
 
 @pytest.fixture(autouse=True)
@@ -26,6 +26,8 @@ def _require_arch22():
 
 @pytest.mark.parametrize("graph_producer,shared_group", [(False, True), (True, False)])
 def test_direct_target_mirror_survives_draft_writes(graph_producer, shared_group, record_property):
+    if vllm_version_is("0.33.0"):
+        pytest.skip("HiSparse host-mirror plumbing is unsupported on vLLM v0.33.0")
     from tests.e2e.pull_request.one_card.test_hisparse_integration import (
         test_direct_target_mirror_survives_legal_draft_writes,
     )
@@ -131,20 +133,20 @@ def test_random_request_unions(capture, compact):
             states,
             hot_size,
             hot_size,
+            miss,
             stats,
             attention,
             2 * block if compact else block,
             requests,
             source_n,
             block,
+            resolved,
             counts,
             sh,
             sd,
             sc,
             resident,
             block,
-            None,
-            miss_mask=miss,
         )
         ops.hisparse_gather_compact(host, hot, sh, sd, sc)
 
@@ -343,6 +345,7 @@ def test_topk_2048_speculative_union_graph(query_rows, hot_size, cross_stream, d
     attention = torch.empty_like(indices) if dtype == torch.int8 else None
     counts = torch.empty(query_rows, dtype=torch.int32, device="npu")
     sh, sd, sc = torch.empty_like(out), torch.empty_like(out), torch.empty_like(counts)
+    resolved = torch.empty_like(indices)
     stats_backing = torch.full((6,), -73, dtype=torch.int64, device="npu")
     stats = stats_backing[1:3]
     stats.zero_()
