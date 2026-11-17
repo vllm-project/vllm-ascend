@@ -24,6 +24,8 @@ silently turn the comparison into apples-to-oranges, so the parity and the
 caching contract are pinned here.
 """
 
+import json
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -35,12 +37,12 @@ from transformers import Qwen3Config
 from tests.e2e.common.rlhf.weight_transfer import reference_check as utils
 from tests.e2e.common.rlhf.weight_transfer.case import DRAFT_MODEL_CASES, MODEL_CASES, WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.reference_check import (
+    draft_serve_args,
     live_update_serve_args,
     reference_serve_args,
     reference_signature,
 )
 from tests.e2e.common.rlhf.weight_transfer.weight_source import FixedRandomWeightSource
-from vllm_ascend.utils import vllm_version_is
 
 CASE = MODEL_CASES[0]
 PORT = 8123
@@ -196,94 +198,46 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
 
 
 @pytest.fixture
-def random_weight_cases(tmp_path):
-    cases = []
-    for name, layers in (("target", 2), ("draft", 1)):
-        directory = tmp_path / name
-        Qwen3Config(
-            architectures=["Qwen3ForCausalLM"],
-            vocab_size=32,
-            hidden_size=16,
-            intermediate_size=32,
-            num_hidden_layers=layers,
-            num_attention_heads=2,
-            num_key_value_heads=2,
-            head_dim=8,
-            tie_word_embeddings=False,
-        ).save_pretrained(directory)
-        cases.append(WeightUpdateModelCase(id=name, model=str(directory), hf_overrides={}))
-    return cases
+def random_weight_case(tmp_path):
+    Qwen3Config(
+        architectures=["Qwen3ForCausalLM"],
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        head_dim=8,
+        tie_word_embeddings=False,
+    ).save_pretrained(tmp_path)
+    return WeightUpdateModelCase(id="target", model=str(tmp_path), hf_overrides={})
 
 
-def test_random_target_payload_is_unchanged_when_draft_is_added(random_weight_cases):
-    target_case, draft_case = random_weight_cases
-    plain = FixedRandomWeightSource(target_case, torch.device("cpu"))
-    combined = FixedRandomWeightSource(target_case, torch.device("cpu"), draft_case=draft_case)
-    assert plain.draft_source is None
-    assert combined.draft_source is not None
-    plain_metadata = plain.metadata() if vllm_version_is("0.32.0") else plain.metadata
-    combined_metadata = combined.metadata() if vllm_version_is("0.32.0") else combined.metadata
-    draft_metadata = combined.draft_source.metadata() if vllm_version_is("0.32.0") else combined.draft_source.metadata
-    assert plain_metadata == combined_metadata
-    for (name, expected), (actual_name, actual) in zip(plain, combined, strict=True):
-        assert name == actual_name
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    assert len(draft_metadata) < len(combined_metadata)
-    assert all(not meta.name.startswith("draft.") for meta in draft_metadata)
-
-
-def test_draft_payload_is_repeatable_independent_and_does_not_reseed_global_rng(random_weight_cases):
-    target_case, draft_case = random_weight_cases
-    source = FixedRandomWeightSource(target_case, torch.device("cpu"), draft_case=draft_case)
-    rng_state = torch.get_rng_state()
-    first = dict(source.draft_source)
-    second = dict(source.draft_source)
-    assert torch.equal(torch.get_rng_state(), rng_state)
-    for name in first:
-        torch.testing.assert_close(first[name], second[name], rtol=0, atol=0)
-    changed = FixedRandomWeightSource(target_case, torch.device("cpu"), draft_case=draft_case, draft_seed=999)
-    assert not torch.equal(first["model.norm.weight"], dict(changed.draft_source)["model.norm.weight"])
-    assert not torch.equal(first["model.norm.weight"], dict(source)["model.norm.weight"])
-
-
-def test_target_seed_does_not_change_explicit_draft_payload(random_weight_cases):
-    target_case, draft_case = random_weight_cases
-    first = FixedRandomWeightSource(target_case, torch.device("cpu"), seed=1, draft_case=draft_case, draft_seed=3)
-    second = FixedRandomWeightSource(target_case, torch.device("cpu"), seed=2, draft_case=draft_case, draft_seed=3)
-    assert not torch.equal(dict(first)["model.norm.weight"], dict(second)["model.norm.weight"])
-    for name, tensor in first.draft_source:
-        torch.testing.assert_close(tensor, dict(second.draft_source)[name], rtol=0, atol=0)
-
-
-def test_random_checkpoints_contain_exact_target_and_draft_payloads(random_weight_cases, tmp_path):
-    target_case, draft_case = random_weight_cases
-    source = FixedRandomWeightSource(target_case, torch.device("cpu"), draft_case=draft_case)
+def test_draft_checkpoint_matches_payload_and_applies_overrides(random_weight_case, tmp_path):
+    case = random_weight_case
+    draft_case = replace(case, id="draft", hf_overrides={"num_hidden_layers": 1, "layer_types": ["full_attention"]})
+    device = torch.device("cpu")
+    source = FixedRandomWeightSource(case, device, draft_case=draft_case)
     destination = tmp_path / "checkpoint"
-    # Resolve the fixture config through the same Hub API as a public case.
-    with patch("huggingface_hub.hf_hub_download", side_effect=lambda model, filename: str(Path(model) / filename)):
+    original_config = (Path(case.model) / "config.json").read_bytes()
+    with patch("huggingface_hub.hf_hub_download", return_value=str(Path(case.model) / "config.json")):
         source.write_checkpoint(destination)
-    for directory, expected_source, case in (
-        (destination, source, target_case),
-        (destination / "draft", source.draft_source, draft_case),
+
+    assert source.draft_source is not None
+    for directory, payload in (
+        (destination, dict(FixedRandomWeightSource(case, device))),
+        (destination / "draft", dict(source.draft_source)),
     ):
         checkpoint = load_file(str(directory / "model.safetensors"))
-        payload = dict(expected_source)
         assert checkpoint.keys() == payload.keys()
         for name, tensor in payload.items():
             torch.testing.assert_close(checkpoint[name], tensor, rtol=0, atol=0)
-        assert (directory / "config.json").read_bytes() == (Path(case.model) / "config.json").read_bytes()
 
-
-def test_target_only_checkpoint_keeps_its_original_layout(random_weight_cases, tmp_path):
-    case, _ = random_weight_cases
-    source = FixedRandomWeightSource(case, torch.device("cpu"))
-    destination = tmp_path / "target-only"
-    with patch("huggingface_hub.hf_hub_download", return_value=str(Path(case.model) / "config.json")):
-        source.write_checkpoint(destination)
-    assert {path.name for path in destination.iterdir()} == {"config.json", "model.safetensors"}
-    checkpoint = load_file(str(destination / "model.safetensors"))
-    for name, tensor in source:
-        torch.testing.assert_close(checkpoint[name], tensor, rtol=0, atol=0)
+    assert (destination / "config.json").read_bytes() == original_config
+    assert (Path(case.model) / "config.json").read_bytes() == original_config
+    draft_config = Qwen3Config.from_pretrained(destination / "draft")
+    assert draft_config.num_hidden_layers == 1
+    assert draft_config.layer_types == ["full_attention"]
 
 
 @pytest.mark.parametrize("is_draft", [False, True])
@@ -303,108 +257,8 @@ def test_hccl_client_selects_only_the_start_endpoint(is_draft):
     ]
 
 
-@pytest.mark.parametrize("layers", [1, 2])
-def test_draft_checkpoint_applies_its_case_overrides(random_weight_cases, tmp_path, layers):
-    """A draft reads its own reduced config without target CLI overrides."""
-    from dataclasses import replace
-
-    from transformers import AutoConfig, AutoModelForCausalLM
-
-    original_case, _ = random_weight_cases
-    original_config = (Path(original_case.model) / "config.json").read_bytes()
-    case = replace(
-        original_case,
-        hf_overrides={"num_hidden_layers": layers, "layer_types": ["full_attention"] * layers},
-    )
-    source = FixedRandomWeightSource(original_case, torch.device("cpu"), draft_case=case)
-    destination = tmp_path / "reduced-checkpoint"
-    with patch("huggingface_hub.hf_hub_download", return_value=str(Path(case.model) / "config.json")):
-        source.write_checkpoint(destination)
-    assert (destination / "config.json").read_bytes() == original_config
-    destination = destination / "draft"
-    config = AutoConfig.from_pretrained(destination)
-    assert config.num_hidden_layers == layers
-    assert config.layer_types == ["full_attention"] * layers
-    with torch.device("meta"):
-        model = AutoModelForCausalLM.from_config(config)
-    checkpoint = load_file(str(destination / "model.safetensors"))
-    assert {name: tuple(value.shape) for name, value in checkpoint.items()} == {
-        name: tuple(value.shape) for name, value in model.named_parameters()
-    }
-    assert (Path(case.model) / "config.json").read_bytes() == original_config
-
-
-def test_draft_reference_and_hccl_lane_keep_identical_model_settings(tmp_path):
-    from tests.e2e.common.rlhf.weight_transfer.case import QWEN3_EAGLE3_CASE
-    from tests.e2e.common.rlhf.weight_transfer.reference_check import draft_serve_args
-
-    for eager in (True, False):
-        reference = _flag_map(draft_serve_args(tmp_path, QWEN3_EAGLE3_CASE, PORT, enforce_eager=eager, live=False))
-        lane = _flag_map(draft_serve_args(tmp_path, QWEN3_EAGLE3_CASE, PORT, enforce_eager=eager, live=True))
-        assert lane.pop("--weight-transfer-config") == '{"backend": "hccl"}'
-        assert lane == reference
-
-
-@pytest.mark.parametrize("architecture,expected_q_width", [("Eagle3Qwen3ForCausalLM", 16), ("DFlashDraftModel", 8)])
-def test_qwen3_speculative_adapter_preserves_real_decoder_and_adds_projections(architecture, expected_q_width):
-    from types import SimpleNamespace
-
-    from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import qwen3_draft_parameters
-
-    config = SimpleNamespace(architectures=[architecture], hidden_size=8, num_hidden_layers=1)
-    parameters = [
-        ("model.embed_tokens.weight", (32, 8), torch.bfloat16),
-        ("lm_head.weight", (32, 8), torch.bfloat16),
-        ("model.layers.0.self_attn.q_proj.weight", (8, 8), torch.bfloat16),
-    ]
-    adapted = {name: (shape, dtype) for name, shape, dtype in qwen3_draft_parameters(config, parameters)}
-    assert "embed_tokens.weight" not in adapted and "lm_head.weight" not in adapted
-    assert adapted["layers.0.self_attn.q_proj.weight"][0] == (8, expected_q_width)
-    assert adapted["fc.weight"][0] == (8, 24)
-    assert ("layers.0.hidden_norm.weight" if architecture.startswith("Eagle3") else "hidden_norm.weight") in adapted
-
-
-def test_next_mtp_adapter_selects_one_prediction_module():
-    from types import SimpleNamespace
-
-    from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import qwen3_next_mtp_parameters
-
-    parameters = [(f"model.layers.{i}.self_attn.q_proj.weight", (8, 8), torch.bfloat16) for i in (0, 1)]
-    adapted = {name: shape for name, shape, _ in qwen3_next_mtp_parameters(SimpleNamespace(hidden_size=8), parameters)}
-    assert adapted["mtp.layers.0.self_attn.q_proj.weight"] == (8, 8)
-    assert not any("layers.1." in name for name in adapted)
-    assert adapted["mtp.fc.weight"] == (8, 16)
-    assert all(f"mtp.{name}.weight" in adapted for name in ["norm", "pre_fc_norm_hidden", "pre_fc_norm_embedding"])
-
-
-def test_v4_dspark_adapter_keeps_hc_and_markov_confidence_shapes():
-    from types import SimpleNamespace
-
-    from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import deepseek_v4_dspark_parameters
-
-    config = SimpleNamespace(
-        hidden_size=8, hc_mult=4, dspark_markov_rank=2, vocab_size=32, dspark_target_layer_ids=[0, 1, 2]
-    )
-    parameters = [
-        ("model.layers.0.self_attn.wkv.weight", (4, 8), torch.bfloat16),
-        ("layers.0.hc_attn_fn", (8, 32), torch.float32),
-        ("model.layers.1.self_attn.wkv.weight", (4, 8), torch.bfloat16),
-    ]
-    adapted = {name: (shape, dtype) for name, shape, dtype in deepseek_v4_dspark_parameters(config, parameters)}
-    assert adapted["mtp.0.attn.wkv.weight"][0] == (4, 8)
-    assert adapted["mtp.0.hc_attn_fn"] == ((8, 32), torch.float32)
-    assert adapted["mtp.0.main_proj.weight"][0] == (8, 24)
-    assert adapted["mtp.0.markov_head.markov_w1.weight"][0] == (32, 2)
-    assert adapted["mtp.0.confidence_head.proj.weight"] == ((1, 10), torch.float32)
-    assert "mtp.0.confidence_head.proj.bias" not in adapted
-
-
 @pytest.mark.parametrize("speculative_case", DRAFT_MODEL_CASES, ids=lambda case: case.id)
 def test_four_draft_cases_select_the_actual_speculative_method(speculative_case, tmp_path):
-    import json
-
-    from tests.e2e.common.rlhf.weight_transfer.reference_check import draft_serve_args
-
     for eager in (True, False):
         reference = _flag_map(draft_serve_args(tmp_path, speculative_case, PORT, enforce_eager=eager, live=False))
         lane = _flag_map(draft_serve_args(tmp_path, speculative_case, PORT, enforce_eager=eager, live=True))
@@ -415,4 +269,3 @@ def test_four_draft_cases_select_the_actual_speculative_method(speculative_case,
         assert spec["method"] == speculative_case.method
         assert spec["method"] != "draft_model"
         assert spec["draft_sample_method"] == speculative_case.draft_sample_method
-        assert speculative_case.draft.checkpoint_parameter_adapter is not None

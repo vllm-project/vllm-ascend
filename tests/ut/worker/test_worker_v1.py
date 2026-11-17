@@ -1,5 +1,6 @@
 import importlib
 import unittest
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
@@ -311,6 +312,7 @@ class TestNPUWorker(TestBase):
                 6172,
             )
 
+    @patch("vllm_ascend.worker.worker.get_current_hardware_profile")
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.ops")
     @patch("vllm_ascend.worker.worker._register_atb_extensions")
@@ -331,9 +333,11 @@ class TestNPUWorker(TestBase):
         mock_register_atb_extensions,
         mock_ops,
         mock_adapt_patch,
+        mock_hardware_profile,
     ):
         """Test NPUWorker normal initialization"""
         # Setup mock behavior
+        mock_hardware_profile.return_value = get_hardware_profile(AscendDeviceType.A2)
         self.model_config_mock.enable_sleep_mode = False
         mock_ops.register_dummy_fusion_op.return_value = None
         mock_ascend_config = MagicMock()
@@ -2220,10 +2224,14 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker.weight_transfer_engine = engine
         worker._weight_update_active = False
         worker._weight_update_is_draft = False
+        worker._incomplete_weight_updates = set()
+        worker._kv_cache_reclaimable = False
+        worker._weight_update_kv_cache_loan = ExitStack()
         worker.vllm_config = SimpleNamespace()
         worker.device = torch.device("cpu")
         worker.model_runner = MagicMock()
         worker.model_runner.model = MagicMock()
+        worker.model_runner.extensible_kv_cache = None
         worker.model_config = MagicMock()
         return worker
 

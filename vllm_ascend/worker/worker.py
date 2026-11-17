@@ -21,7 +21,7 @@ import copy
 import gc
 import logging
 from collections.abc import Iterator
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from fnmatch import filter as fnmatch_filter
 from threading import RLock
 from types import NoneType
@@ -52,7 +52,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandsha
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.layers.quantization.online.lm_head import restore_quantized_lm_heads
 from vllm.model_executor.model_loader.weight_checksum import compute_tensor_digests, zero_weights
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -273,6 +272,9 @@ class NPUWorker(GPUWorker):
         self.weight_transfer_engine = None
         self._weight_update_active = False
         self._weight_update_is_draft = False
+        self._incomplete_weight_updates: set[bool] = set()
+        self._kv_cache_reclaimable = False
+        self._weight_update_kv_cache_loan = ExitStack()
 
         # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
         from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
@@ -544,6 +546,11 @@ class NPUWorker(GPUWorker):
     _set_draft_weight_update_target = VllmWorker._set_draft_weight_update_target
     start_weight_update = VllmWorker.start_weight_update
     start_draft_weight_update = VllmWorker.start_draft_weight_update
+    update_weights = VllmWorker.update_weights
+    finish_weight_update = VllmWorker.finish_weight_update
+    _end_weight_update = VllmWorker._end_weight_update
+    has_incomplete_weight_update = VllmWorker.has_incomplete_weight_update
+    set_kv_cache_reclaimable = VllmWorker.set_kv_cache_reclaimable
 
     def _check_nz_disabled(self) -> None:
         if get_ascend_config().weight_nz_mode:
@@ -560,45 +567,6 @@ class NPUWorker(GPUWorker):
         self._check_weight_transfer_engine()
         self._check_nz_disabled()
         VllmWorker._start_weight_update(self, is_draft=is_draft)
-
-    def update_weights(self, update_info: dict | list[dict]) -> None:
-        """Use upstream DP payload selection and transfer-failure cleanup."""
-        try:
-            VllmWorker.update_weights(self, update_info)
-        except BaseException:
-            # Upstream restores routing/heads and clears the active flag on
-            # transfer failure. Also clear our session-type bookkeeping.
-            if not self._weight_update_active:
-                self._weight_update_is_draft = False
-            raise
-
-    def finish_weight_update(self) -> None:
-        """Finish reload and restore heads/routing even if the backend fails.
-
-        Upstream vLLM v0.33.0 does not clean up sessions on FINISH errors.
-        """
-        self._check_weight_transfer_engine()
-        if not self._weight_update_active:
-            raise RuntimeError("start_weight_update must be called before finish_weight_update.")
-        assert self.weight_transfer_engine is not None
-        is_draft = self._weight_update_is_draft
-        draft_model = self.get_draft_model() if is_draft else None
-        with set_current_vllm_config(self.vllm_config):
-            try:
-                self.weight_transfer_engine.finish_weight_update()
-            except BaseException:
-                if draft_model is not None:
-                    restore_quantized_lm_heads(draft_model, refresh=False)
-                raise
-            else:
-                if draft_model is not None:
-                    restore_quantized_lm_heads(draft_model)
-                if not is_draft:
-                    self.model_runner.reset_lora_state()
-            finally:
-                self.weight_transfer_engine.reset_weight_update_target()
-                self._weight_update_active = False
-                self._weight_update_is_draft = False
 
     def shutdown(self) -> None:
         model = getattr(getattr(self, "model_runner", None), "model", None)
