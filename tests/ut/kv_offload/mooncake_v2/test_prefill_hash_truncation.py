@@ -21,6 +21,12 @@ def initialize_hash_state():
     init_none_hash(sha256)
 
 
+@pytest.fixture
+def require_native_hash_truncation():
+    if not callable(getattr(Request, "truncate_block_hashes", None)):
+        pytest.skip("Requires vLLM Request.truncate_block_hashes")
+
+
 def make_hash_scheduler(block_size, lookahead):
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.need_truncate = True
@@ -68,8 +74,9 @@ def test_hashes_equal_independent_full_rebuild(block_size, lookahead, n):
     assert request.block_hashes == reference.block_hashes
     assert request.prompt_token_ids == reference.prompt_token_ids
     assert request.num_prompt_tokens == n - 1 and request.max_tokens == 1
-    valid = max(0, (n - 1 - lookahead) // block_size)
-    assert all(a is b for a, b in zip(request.block_hashes[:valid], existing[:valid]))
+    if callable(getattr(request, "truncate_block_hashes", None)):
+        valid = max(0, (n - 1 - lookahead) // block_size)
+        assert all(a is b for a, b in zip(request.block_hashes[:valid], existing[:valid]))
 
 
 @pytest.mark.parametrize("block_size", [2, 16])
@@ -86,12 +93,15 @@ def test_prompt_embeddings_match_full_rebuild(block_size, lookahead, n):
 
 @pytest.mark.parametrize("n", [131154, 131155])
 @pytest.mark.parametrize("lookahead", [0, 1, 5])
-def test_long_context_does_not_rehash_preserved_prefix(n, lookahead):
+def test_long_context_hashes_match_full_rebuild(n, lookahead):
     counted = Mock(side_effect=sha256)
     request = make_hashed_request(n, 2, lookahead, counted)
     counted.reset_mock()
     make_hash_scheduler(2, lookahead).on_new_request(request)
-    assert counted.call_count == 0
+    if callable(getattr(request, "truncate_block_hashes", None)):
+        assert counted.call_count == 0
+    else:
+        assert counted.call_count == len(request.block_hashes)
     reference = make_hashed_request(n, 2, lookahead)
     truncate_with_full_rebuild(reference)
     assert request.block_hashes == reference.block_hashes
@@ -116,7 +126,7 @@ def test_repeated_hook_is_idempotent():
     assert state == (request._all_token_ids, request.block_hashes)
 
 
-def test_embedding_hash_memo_is_invalidated_like_upstream_api():
+def test_embedding_hash_memo_is_invalidated_like_upstream_api(require_native_hash_truncation):
     request = make_hashed_request(33, 2, 0, embeds=True)
     assert request._prompt_embeds_per_block_hashes
     make_hash_scheduler(2, 0).on_new_request(request)
@@ -125,7 +135,7 @@ def test_embedding_hash_memo_is_invalidated_like_upstream_api():
 
 @pytest.mark.parametrize("block_size", [2, 16])
 @pytest.mark.parametrize("lookahead", [0, 1, 5])
-def test_uses_native_truncation_api(block_size, lookahead):
+def test_uses_native_truncation_api(block_size, lookahead, require_native_hash_truncation):
     request = make_hashed_request(33, block_size, lookahead)
     request.truncate_block_hashes = Mock(wraps=request.truncate_block_hashes)
     reference = make_hashed_request(33, block_size, lookahead)
@@ -145,10 +155,10 @@ def test_unavailable_native_api_uses_safe_full_rebuild(monkeypatch, native_api, 
     request = make_hashed_request(33, 2, lookahead, counted, embeds=embeds)
     reference = make_hashed_request(33, 2, lookahead, embeds=embeds)
     if native_api == "missing":
-        monkeypatch.delattr(Request, "truncate_block_hashes")
+        monkeypatch.delattr(Request, "truncate_block_hashes", raising=False)
         assert not hasattr(request, "truncate_block_hashes")
     else:
-        monkeypatch.setattr(request, "truncate_block_hashes", native_api)
+        monkeypatch.setattr(request, "truncate_block_hashes", native_api, raising=False)
     counted.reset_mock()
 
     scheduler = make_hash_scheduler(2, lookahead)
