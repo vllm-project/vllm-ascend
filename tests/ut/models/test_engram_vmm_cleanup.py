@@ -49,22 +49,13 @@ template<class... T> int aclrtReserveMemAddress(T...) { return 0; }
 #include "csrc/engram_vmm/native.cpp"
 #include <cassert>
 int main(int argc, char** argv) {
-  LocalMapping a, b, c, d;
-  a.logical_device = 1; b.logical_device = 2; c.logical_device = 3; d.logical_device = 4;
-  g_mappings.emplace(1, a); g_mappings.emplace(2, b);
+  LocalMapping c, d;
+  c.logical_device = 3; d.logical_device = 4;
   g_pending.push_back(c); g_pending.push_back(d);
-  assert(host_vmm_close_all() == 101);
-  assert(g_error.find("acl=101") != std::string::npos);
-  assert(g_mappings.size() == 1 && g_mappings.count(1));
-  assert(g_pending.size() == 1 && g_pending[0].logical_device == 3);
-  assert(g_free_calls == 1 && host_vmm_live_mappings() == 2);
-  g_pending.push_back(d);
   assert(host_vmm_retry_rollbacks() == 103);
   assert(g_pending.size() == 1 && g_pending[0].logical_device == 3);
   fail_devices = false;
   assert(host_vmm_retry_rollbacks() == 0 && g_pending.empty());
-  assert(host_vmm_close_all() == 0);
-  assert(host_vmm_live_mappings() == 0 && g_free_calls == 2);
   // A failed unmap invalidates publication and closes the fd, while the
   // exclusive descriptor claim and dependent device resources survive retry.
   std::string path = std::string(argv[1]) + "/descriptor";

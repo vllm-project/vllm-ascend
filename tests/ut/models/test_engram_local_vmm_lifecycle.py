@@ -35,8 +35,7 @@ def load_module(monkeypatch):
     return module
 
 
-@pytest.mark.parametrize("rank_errors,expected", [([None, None], True), ([None, "missing library"], False)])
-def test_backend_selection_requires_library_on_all_ranks(monkeypatch, rank_errors, expected):
+def test_backend_probe_is_cached_without_extra_collective(monkeypatch):
     module = load_module(monkeypatch)
     monkeypatch.setattr(module, "_library", Mock())
     monkeypatch.setattr(
@@ -48,14 +47,33 @@ def test_backend_selection_requires_library_on_all_ranks(monkeypatch, rank_error
     )
     constructor = Mock()
     monkeypatch.setattr(module, "LocalSharedVmmBuffer", constructor)
-    monkeypatch.setattr(
-        module.dist, "all_gather_object", lambda out, value, group: out.__setitem__(slice(None), rank_errors)
-    )
+    gather = Mock(side_effect=AssertionError("unexpected extra collective"))
+    monkeypatch.setattr(module.dist, "all_gather_object", gather)
     group = types.SimpleNamespace(cpu_group=object(), world_size=2)
-    assert module.local_vmm_available(group) is expected
-    assert constructor.called is expected
-    if expected:
-        constructor.return_value.close_collective.assert_called_once()
+    assert module.local_vmm_available(group) is True
+    assert module.local_vmm_available(group) is True
+    constructor.assert_called_once()
+    constructor.return_value.close_collective.assert_called_once()
+    gather.assert_not_called()
+
+
+def test_missing_library_reaches_collective_fallback(monkeypatch):
+    module = load_module(monkeypatch)
+    monkeypatch.setattr(module, "_library", Mock(side_effect=OSError("missing library")))
+    monkeypatch.setattr(
+        module,
+        "torch",
+        types.SimpleNamespace(
+            int8=object(), device=lambda *args: object(), npu=types.SimpleNamespace(current_device=lambda: 0)
+        ),
+    )
+    constructor = Mock(side_effect=module.EngramSharedInitError("probe failed"))
+    monkeypatch.setattr(module, "LocalSharedVmmBuffer", constructor)
+    group = types.SimpleNamespace(cpu_group=object(), world_size=2)
+    assert module.local_vmm_available(group) is False
+    assert "missing library" in constructor.call_args.kwargs["library_error"]
+    assert module.local_vmm_available(group) is False
+    constructor.assert_called_once()
 
 
 def test_runtime_probe_fallback_requires_successful_collective_cleanup(monkeypatch):
@@ -77,6 +95,7 @@ def test_runtime_probe_fallback_requires_successful_collective_cleanup(monkeypat
     monkeypatch.setattr(
         module, "LocalSharedVmmBuffer", Mock(side_effect=module.EngramSharedCleanupError("cleanup failed"))
     )
+    group = types.SimpleNamespace(cpu_group=object(), world_size=2)
     with pytest.raises(module.EngramSharedCleanupError):
         module.local_vmm_available(group)
 
@@ -165,6 +184,51 @@ def test_constructor_retains_owner_when_consumer_rollback_fails(monkeypatch, tmp
     mapping.close.assert_not_called()
     retry.assert_not_called()
     assert directory.exists()
+
+
+def _missing_library_worker(rank, rendezvous, directory, missing_rank):
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        module = load_module(monkeypatch)
+        dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=2)
+        monkeypatch.setattr(module.tempfile, "mkdtemp", lambda **_kwargs: directory)
+        monkeypatch.setattr(module, "retry_pending_rollbacks", lambda: None)
+
+        class Mapping:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def view(self, *_args):
+                return types.SimpleNamespace(tensor=object(), ptrs=object(), close=lambda: None)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(module, "MappedHostBuffer", Mapping)
+        group = types.SimpleNamespace(rank_in_group=rank, cpu_group=dist.group.WORLD, world_size=2)
+        try:
+            with pytest.raises(module.EngramSharedInitError, match="missing library"):
+                module.LocalSharedVmmBuffer(
+                    (8, 256),
+                    None,
+                    "npu:0",
+                    group,
+                    library_error="missing library" if rank == missing_rank else None,
+                )
+        finally:
+            dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("missing_rank", [0, 1])
+def test_missing_library_falls_back_on_both_ranks(tmp_path, missing_rank):
+    directory = tmp_path / "capability"
+    directory.mkdir()
+    mp.spawn(
+        _missing_library_worker,
+        args=(str(tmp_path / "rendezvous"), str(directory), missing_rank),
+        nprocs=2,
+        join=True,
+    )
+    assert not directory.exists() if missing_rank == 1 else directory.exists()
 
 
 def _rollback_worker(rank, rendezvous, directory, log_path, fail_consumer_close, retry_after=False):

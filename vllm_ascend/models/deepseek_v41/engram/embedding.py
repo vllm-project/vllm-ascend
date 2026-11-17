@@ -250,6 +250,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             except EngramSharedInitError as exc:
                 logger.warning("Engram Host VMM allocation failed; using HostRegister: %s", exc)
                 self.local_vmm = False
+                self._shared_group._engram_local_vmm_available = False
             else:
                 self._codes_uva = codes
                 assert codes.scales is not None

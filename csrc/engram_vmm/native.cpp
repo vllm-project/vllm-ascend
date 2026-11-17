@@ -47,8 +47,6 @@ std::unordered_map<uint64_t, LocalMapping> g_mappings;
 uint64_t g_next_token = 0;
 std::vector<LocalMapping> g_pending;
 std::mutex g_mutex;
-uint64_t g_alloc_calls = 0;
-uint64_t g_free_calls = 0;
 
 void SetError(const std::string& message) { g_error = message; }
 
@@ -170,16 +168,6 @@ extern "C" {
 
 int host_vmm_abi_version() { return 2; }
 
-uint64_t host_vmm_lifecycle_counts() {
-  std::lock_guard<std::mutex> lock(g_mutex);
-  return (g_alloc_calls << 32) | g_free_calls;
-}
-
-uint64_t host_vmm_live_mappings() {
-  std::lock_guard<std::mutex> lock(g_mutex);
-  return g_mappings.size() + g_pending.size();
-}
-
 int host_vmm_retry_rollbacks() {
   std::lock_guard<std::mutex> lock(g_mutex);
   int first_rc = 0;
@@ -191,40 +179,6 @@ int host_vmm_retry_rollbacks() {
         first_rc = rc;
         first_error = g_error;
       }
-      ++it;
-    } else {
-      it = g_pending.erase(it);
-    }
-  }
-  if (first_rc) SetError(first_error);
-  return first_rc;
-}
-
-// Only after every user has stopped; also retries failed allocation rollbacks.
-int host_vmm_close_all() {
-  std::lock_guard<std::mutex> lock(g_mutex);
-  int first_rc = 0;
-  std::string first_error;
-  auto record_error = [&](int rc) {
-    if (rc && !first_rc) {
-      first_rc = rc;
-      first_error = g_error;
-    }
-  };
-  for (auto it = g_mappings.begin(); it != g_mappings.end();) {
-    int rc = ReleaseLocal(it->second);
-    if (rc) {
-      record_error(rc);
-      ++it;
-      continue;
-    }
-    ++g_free_calls;
-    it = g_mappings.erase(it);
-  }
-  for (auto it = g_pending.begin(); it != g_pending.end();) {
-    int rc = ReleaseLocal(*it);
-    if (rc) {
-      record_error(rc);
       ++it;
     } else {
       it = g_pending.erase(it);
@@ -256,7 +210,6 @@ const char* host_shared_last_error() {
 int host_shared_registered_alloc(size_t size, int32_t logical_device, const char* path, int32_t owner,
                                  HostSharedRegisteredResult* result) {
   std::lock_guard<std::mutex> lock(g_mutex);
-  ++g_alloc_calls;
   if (size == 0 || path == nullptr || path[0] == '\0' || result == nullptr) {
     SetError("invalid host_shared_registered_alloc argument");
     return -1;
@@ -417,7 +370,6 @@ int host_shared_registered_alloc(size_t size, int32_t logical_device, const char
 
 int host_shared_registered_free(HostSharedRegisteredResult* result) {
   std::lock_guard<std::mutex> lock(g_mutex);
-  ++g_free_calls;
   if (result == nullptr || result->device_ptr == nullptr || result->size == 0) {
     SetError("invalid host_shared_registered_free argument");
     return -1;
@@ -434,19 +386,6 @@ int host_shared_registered_free(HostSharedRegisteredResult* result) {
   result->device_ptr = nullptr;
   result->token = 0;
   return ACL_ERROR_NONE;
-}
-
-// Construction never returned a tensor to a caller, but rollback failed.
-// Transfer ownership to the native retry list rather than orphaning a token.
-int host_shared_registered_defer_free(HostSharedRegisteredResult* result) {
-  std::lock_guard<std::mutex> lock(g_mutex);
-  if (!result) return -EINVAL;
-  auto found = g_mappings.find(result->token);
-  if (found == g_mappings.end()) return -ENOENT;
-  g_pending.push_back(std::move(found->second));
-  g_mappings.erase(found);
-  *result = {};
-  return 0;
 }
 
 }  // extern "C"

@@ -75,7 +75,7 @@ void reset_fault(int kind, int occurrence = 1) {
 }
 void check_empty(const std::string& path) {
   assert(physical.empty() && reserved.empty() && mapped.empty());
-  assert(host_vmm_live_mappings() == 0);
+  assert(g_mappings.empty() && g_pending.empty());
   assert(access(path.c_str(), F_OK) != 0 && access((path + ".ready").c_str(), F_OK) != 0);
 }
 int main(int argc, char** argv) {
@@ -103,7 +103,7 @@ int main(int argc, char** argv) {
     reset_fault(kind);
     assert(host_shared_registered_alloc(4096, 0, path.c_str(), 0, &consumer) != 0);
     assert(physical == owner_physical && reserved == owner_reserved && mapped == owner_mapped);
-    assert(host_vmm_live_mappings() == 1 && access((path + ".ready").c_str(), F_OK) == 0);
+    assert(g_mappings.size() + g_pending.size() == 1 && access((path + ".ready").c_str(), F_OK) == 0);
     reset_fault(0);
     assert(host_shared_registered_free(&owner) == 0);
     check_empty(path);
@@ -114,7 +114,7 @@ int main(int argc, char** argv) {
   HostSharedRegisteredResult result{};
   reset_fault(3); fail_release = true;
   assert(host_shared_registered_alloc(4096, 0, path.c_str(), 1, &result) == 93);
-  assert(host_vmm_live_mappings() == 1 && access(path.c_str(), F_OK) == 0);
+  assert(g_mappings.size() + g_pending.size() == 1 && access(path.c_str(), F_OK) == 0);
   assert(!reserved.empty() && !physical.empty());
   fail_release = false; reset_fault(0);
   assert(host_vmm_retry_rollbacks() == 0);

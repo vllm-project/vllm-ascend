@@ -18,23 +18,25 @@ _failed_initializations: list["LocalSharedVmmBuffer"] = []
 
 def local_vmm_available(group):
     """Select the same backend on every rank before allocating any table."""
+    cached = getattr(group, "_engram_local_vmm_available", None)
+    if cached is not None:
+        return cached
     path = Path(__file__).resolve().parents[3] / "libengram_host_vmm.so"
     error = None
     try:
         _library(path)
-    except (OSError, RuntimeError, AttributeError) as exc:
+    except Exception as exc:  # noqa: BLE001 - propagate through the collective probe
         error = f"{type(exc).__name__}: {exc}"
-    errors = [None] * group.world_size
-    dist.all_gather_object(errors, error, group=group.cpu_group)
-    if any(errors):
-        logger.warning("Engram Host VMM unavailable; using HostRegister: %s", errors)
-        return False
     try:
-        probe = LocalSharedVmmBuffer((1, 1), torch.int8, torch.device("npu", torch.npu.current_device()), group)
+        probe = LocalSharedVmmBuffer(
+            (1, 1), torch.int8, torch.device("npu", torch.npu.current_device()), group, library_error=error
+        )
     except EngramSharedInitError as exc:
         logger.warning("Engram Host VMM runtime probe failed; using HostRegister: %s", exc)
+        group._engram_local_vmm_available = False
         return False
     probe.close_collective()
+    group._engram_local_vmm_available = True
     return True
 
 
@@ -104,7 +106,7 @@ class LocalSharedVmmBuffer:
     consumers before closing the creator.
     """
 
-    def __init__(self, shape, dtype, device, group, *, scales_shape=None, scale_dtype=None):
+    def __init__(self, shape, dtype, device, group, *, scales_shape=None, scale_dtype=None, library_error=None):
         self.group = group
         self.mapping = None
         self.view = None
@@ -113,6 +115,7 @@ class LocalSharedVmmBuffer:
         self.scales: LocalSharedVmmScaleView | None = None
         self.directory = None
         self.owner = group.rank_in_group == 0
+        self._library_unavailable = library_error is not None
         allocation_shape = shape
         scale_offset = shape[0] * shape[1] * torch.empty((), dtype=dtype).element_size()
         if scales_shape is not None:
@@ -124,6 +127,8 @@ class LocalSharedVmmBuffer:
         payload: list[str | None] = [None]
         if self.owner:
             try:
+                if library_error is not None:
+                    raise RuntimeError(library_error)
                 self.directory = tempfile.mkdtemp(prefix="engram-vmm-", dir="/dev/shm")
                 owner_path = os.path.join(self.directory, "buffer")
                 self.mapping = MappedHostBuffer(
@@ -147,6 +152,8 @@ class LocalSharedVmmBuffer:
         error: str | None = None
         if not path or path.startswith("ERROR:"):
             error = path or "owner did not publish a VMM descriptor"
+        elif library_error is not None:
+            error = library_error
         else:
             try:
                 if not self.owner:
@@ -223,7 +230,11 @@ class LocalSharedVmmBuffer:
 
     def _close_with_rollbacks(self, retry_rollbacks):
         errors = []
-        for cleanup in (retry_pending_rollbacks, self.close) if retry_rollbacks else (self.close,):
+        for cleanup in (
+            (retry_pending_rollbacks, self.close)
+            if retry_rollbacks and not getattr(self, "_library_unavailable", False)
+            else (self.close,)
+        ):
             try:
                 cleanup()
             except Exception as exc:  # noqa: BLE001 - attempt both cleanup steps

@@ -130,8 +130,9 @@ def test_synchronized_allocation_failure_falls_back_to_registered_storage():
     instance.part_num_embeddings, instance.dim, instance.block_size = 8, 256, 32
     instance.storage_dtype, instance.scale_dtype = object(), object()
     instance.cpu_offload = instance.local_vmm = True
-    instance._shared_group, instance._shared_pool_spec = object(), (None, None, None)
+    instance._shared_group, instance._shared_pool_spec = SimpleNamespace(), (None, None, None)
     codes, scales = instance._allocate_weights()
+    assert instance._shared_group._engram_local_vmm_available is False
     assert not instance.local_vmm
     assert len(allocations) == 2 and (codes, scales) == (allocations[0].tensor, allocations[1].tensor)
 
