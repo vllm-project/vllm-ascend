@@ -358,10 +358,10 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
 
     @contextmanager
     def factory(positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None):
-        if architecture == "MLA":
-            assert seq_lens_cpu.tolist() == [5, 0]
-        else:
-            assert seq_lens_cpu is None
+        # Every architecture now receives the exact CPU copy of the draft
+        # device lengths; the optimistic target bound is never passed here.
+        assert seq_lens_cpu is not None
+        assert seq_lens_cpu.tolist() == [5, 0]
         assert parallel_config is spec.vllm_config.parallel_config
         captured.update(pad=pad, is_prefilling=is_prefilling, attn_state=attn_state)
         yield

@@ -59,9 +59,14 @@ def test_padded_idle_has_zero_valid_lengths():
 
 
 @pytest.mark.parametrize("architecture", ["GQA", "SFA", None])
-def test_non_mla_unchanged(architecture):
+def test_non_mla_gets_exact_cpu_view(architecture):
+    # The device-side draft lengths are the authoritative source regardless of
+    # the attention architecture; every non-DCP path materializes them.
     actual, prefilling = _spec([73], architecture=architecture)._prepare_draft_dcp_metadata_inputs(1, 2, 8)
-    assert actual is None
+    assert actual is not None
+    assert actual.device.type == "cpu"
+    assert actual.dtype == torch.int32
+    assert actual.tolist() == [73, 0]
     assert not prefilling.any()
 
 
@@ -79,15 +84,16 @@ def test_dcp_existing_delegate(device_lengths):
 
 
 @pytest.mark.parametrize("num_reqs,padded", [(0, 4), (1, 1), (2, 4)])
-def test_flashmla_uses_device_lengths_without_reading_host_mirror(num_reqs, padded):
+def test_flashmla_still_gets_exact_cpu_view(num_reqs, padded):
     spec = _spec([73, 81, 99999, 99999])
     spec._draft_mla_uses_device_lengths = True
-    # The FlashMLA branch must not copy either the device lengths or the
-    # optimistic target CPU mirror into a separate draft host-length view.
-    spec.input_buffers = object()
+    # FlashMLA keeps reading device lengths in the kernel, but the exact CPU
+    # view is still materialized from them; the optimistic target mirror is
+    # never consulted.
     spec.target_input_buffers = object()
     actual, prefilling = spec._prepare_draft_dcp_metadata_inputs(num_reqs, padded, 8)
-    assert actual is None
+    assert actual is not None
+    assert actual.tolist() == [73, 81][:num_reqs] + [0] * (padded - num_reqs)
     assert prefilling.dtype == torch.bool
     assert prefilling.shape == (padded,)
     assert not prefilling.any()

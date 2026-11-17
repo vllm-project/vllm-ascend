@@ -205,8 +205,8 @@ def _configure_kimi_dspark_context_parallel(self: SpeculativeConfig) -> None:
     draft_model_config = self.draft_model_config
     if (
         target_parallel_config is None
-        or target_parallel_config.prefill_context_parallel_size <= 1
-        or self.draft_parallel_config is None
+        or getattr(target_parallel_config, "prefill_context_parallel_size", 1) <= 1
+        or getattr(self, "draft_parallel_config", None) is None
         or getattr(getattr(draft_model_config, "hf_config", None), "model_type", None) != "k3_dspark"
     ):
         return
