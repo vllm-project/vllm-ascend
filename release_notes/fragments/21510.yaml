@@ -2,18 +2,13 @@ pr: 21510
 entries:
   - category: feature
     text: >-
-      GLM-5.3-Flash now supports joint tensor parallelism (TP) and prefill context
-      parallelism (PCP), reducing per-device KDA weight and recurrent-state memory.
-      This takes effect automatically when `--tensor-parallel-size` and
-      `--prefill-context-parallel-size` are both greater than 1.
-      The KDA head count must be divisible by TP x PCP.
-    model: glm-5.3-flash
-  - category: feature
-    text: >-
-      Experimental GLM-5.3-Flash RecoverSSM now supports TP > 1 with PCP > 1 on
-      prefill producers.
-      Enable it with `--use-replayssm` (off by default) alongside speculative
-      decoding, keeping `--pipeline-parallel-size` and
-      `--decode-context-parallel-size` at 1.
-      PCP decode consumers and colocated PCP execution remain unsupported.
+      GLM-5.3-Flash now reduces per-device KDA weight and recurrent-state memory
+      automatically when `--tensor-parallel-size` (TP) and
+      `--prefill-context-parallel-size` (PCP) are both greater than 1; the KDA head
+      count must be divisible by TP x PCP.
+      Experimental RecoverSSM also supports this topology on prefill producers
+      via `--use-replayssm` (off by default) with speculative decoding.
+      RecoverSSM requires `--pipeline-parallel-size` and
+      `--decode-context-parallel-size` to remain 1, and does not support PCP decode
+      consumers or colocated PCP execution.
     model: glm-5.3-flash
