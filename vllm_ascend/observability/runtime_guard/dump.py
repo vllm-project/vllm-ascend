@@ -464,8 +464,14 @@ def _blocks_per_kv_block_for_group(runner: Any, kv_cache_group: int) -> int:
         return 1
     try:
         return max(1, int(ratios[kv_cache_group]))
-    except (TypeError, ValueError, IndexError):
+    except IndexError:
         return 1
+    except (TypeError, ValueError):
+        # Some builds expose a scalar ratio shared by all groups.
+        try:
+            return max(1, int(ratios))
+        except (TypeError, ValueError):
+            return 1
 
 
 def expand_manager_block_ids(block_ids: list[int], blocks_per_kv_block: int) -> list[int]:
