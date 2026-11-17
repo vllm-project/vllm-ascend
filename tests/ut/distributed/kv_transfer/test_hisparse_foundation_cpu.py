@@ -8,6 +8,8 @@ from types import SimpleNamespace as NS
 
 import pytest
 import torch
+
+pytest.importorskip("vllm.v1.hisparse.backend")
 from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
@@ -28,6 +30,7 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.hisparse import cache_ops as hisparse_ops
 from vllm_ascend.hisparse import host_pool
+from vllm_ascend.hisparse.backend import AscendHiSparseBackend  # noqa: E402
 from vllm_ascend.hisparse.binding import (
     _bind_indexer_views,
     align_hisparse_indexer_specs,
@@ -39,9 +42,6 @@ from vllm_ascend.hisparse.c8 import (
     pack_c8_components,
 )
 from vllm_ascend.ops.triton import sfa_indexer_store
-
-pytest.importorskip("vllm.v1.hisparse.backend")
-from vllm_ascend.hisparse.backend import AscendHiSparseBackend  # noqa: E402
 
 
 @pytest.fixture(params=[False, True], ids=["standalone", "profiled"])

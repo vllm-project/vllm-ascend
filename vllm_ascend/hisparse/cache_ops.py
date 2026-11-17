@@ -140,21 +140,18 @@ class HiSparseNPUOps:
         request_state_indices,
         region_stride,
         max_union_rows,
-        miss_mask,
         stats,
         attention_indices,
         attention_block_stride,
         request_ids,
         source_block_table,
         source_block_size,
-        resolved_global_indices,
         valid_counts,
         swap_host_physical_rows,
         swap_device_physical_rows,
         swap_counts,
         resident_block_table,
         resident_block_size,
-        resident_null_block=0,
         num_valid_rows=None,
     ) -> None:
         """Resolve logical selections and prepare resident/hot-cache refill plans.
@@ -198,7 +195,6 @@ class HiSparseNPUOps:
             raise ValueError("HiSparse host row IDs must fit int32")
         for name, tensor in (
             ("hot_indices", hot_indices),
-            ("resolved_global_indices", resolved_global_indices),
             ("swap_host_physical_rows", swap_host_physical_rows),
             ("swap_device_physical_rows", swap_device_physical_rows),
         ):
@@ -232,8 +228,6 @@ class HiSparseNPUOps:
             )
             if attention_indices.stride(1) != 1 or attention_block_stride < hot_cache.size(1):
                 raise ValueError("HiSparse attention indices require dense columns and a valid block stride")
-        if miss_mask is not None:
-            _check_tensor(miss_mask, "miss_mask", device, (torch.uint8, torch.bool, torch.int32), shape=(rows, topk))
         if valid_counts is not None:
             _check_tensor(valid_counts, "valid_counts", device, (torch.int32,), contiguous=False)
             if tuple(valid_counts.shape) not in ((rows,), (rows, 1)):
@@ -247,46 +241,38 @@ class HiSparseNPUOps:
             != 1
         ):
             raise ValueError("All three compact HiSparse swap outputs are required together")
-        self._resolve(workspace, locals())
-
-    def _resolve(self, workspace: ResolverWorkspace, arguments) -> None:
-        """Dispatch live tensors to the native request-union resolver.
-
-        During replay, external tensors remain owned by the runtime/workspace.
-        Callers must destroy graphs before releasing or rebinding those owners.
-        """
-        rows, topk = arguments["global_indices"].shape
-        resolved = arguments["resolved_global_indices"]
-        if resolved is None:
-            resolved = workspace.first_refs[: rows * topk].view(rows, topk)
+        # Core uses compact swap outputs and reserves block 0 as the null block.
+        resolved = workspace.first_refs[: rows * topk].view(rows, topk)
         workspace.native.hisparse_resolve_residency(
-            arguments["global_indices"],
-            arguments["hot_block_table"],
-            arguments["request_ids"],
-            arguments["request_state_indices"],
-            arguments["source_block_table"],
-            arguments["resident_block_table"],
-            arguments["num_valid_rows"],
-            arguments["device_global_indices"],
-            arguments["lru_slots"],
-            arguments["hot_indices"],
-            resolved,
-            workspace.errors[:rows],
-            arguments["attention_indices"],
-            arguments["valid_counts"],
-            arguments["swap_host_physical_rows"],
-            arguments["swap_device_physical_rows"],
-            arguments["swap_counts"],
-            arguments["miss_mask"],
-            arguments["stats"],
-            arguments["host_cache"].shape[0],
-            arguments["hot_cache"].shape[1],
-            arguments["source_block_size"],
-            arguments["resident_block_size"],
-            arguments["resident_null_block"],
-            arguments["attention_block_stride"] if self.attention_block_stride is None else self.attention_block_stride,
-            arguments["max_union_rows"],
-            self.attention_capacity,
+            logical=global_indices,
+            hot_table=hot_block_table,
+            requests=request_ids,
+            states=request_state_indices,
+            source=source_block_table,
+            resident=resident_block_table,
+            valid_rows=num_valid_rows,
+            dgi=device_global_indices,
+            lru=lru_slots,
+            output=hot_indices,
+            resolved=resolved,
+            errors=workspace.errors[:rows],
+            attention=attention_indices,
+            counts=valid_counts,
+            swap_host=swap_host_physical_rows,
+            swap_device=swap_device_physical_rows,
+            swap_counts=swap_counts,
+            miss_mask=None,
+            stats=stats,
+            host_rows=host_cache.shape[0],
+            hot_block_size=hot_cache.shape[1],
+            source_block_size=source_block_size,
+            resident_block_size=resident_block_size,
+            resident_null_block=0,
+            attention_block_stride=(
+                attention_block_stride if self.attention_block_stride is None else self.attention_block_stride
+            ),
+            union_rows=max_union_rows,
+            attention_capacity=self.attention_capacity,
         )
 
     def hisparse_gather_compact(
