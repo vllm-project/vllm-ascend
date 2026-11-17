@@ -1750,6 +1750,23 @@
 #       Remove this patch once vllm-ascend's bundled PyTorch >= 2.13.0
 #       (which, like upstream, allows eps >= 0 for inference).
 #
+# ** 34. File: worker/patch_worker_profiler.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.profiler.wrapper.validate_worker_profiler_config`
+#      `vllm.v1.worker.gpu_worker.validate_worker_profiler_config`
+#    Why:
+#       The upstream profiler support table has no NPU entry, so enabled
+#       profiling prevents NPUWorker from using the parent constructor.
+#    How:
+#       Rebind the validator and its GPUWorker import before parent construction.
+#       Accept disabled/torch profiling on NPU and preserve upstream validation
+#       for other platforms. Elastic EP initialization remains upstream-owned.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/65565
+#    Future Plan:
+#       Once #65565 is included in all supported vLLM versions, remove this
+#       patch and implement the NPUWorker profiler-validation hook instead.
+#
 # ** 35. File: platform/patch_parallel_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
