@@ -227,17 +227,37 @@ def test_v2_glm_shared_slots_reject_missing_layers(v2_glm_cache_plan):
         attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
 
 
-@pytest.mark.parametrize("kernel_size", [4, 8])
-def test_glm_fp8_indexer_keys_and_scales_share_padded_pages_without_overlapping(monkeypatch, kernel_size):
+@pytest.mark.parametrize(
+    ("logical_block_size", "kernel_size", "ratio", "transfer", "indexer_block_size"),
+    [
+        (8, 4, 2, False, 4),
+        (8, 8, 2, False, 8),
+        (512, 128, 4, False, 512),
+        (1152, 128, 4, False, 384),
+        (1152, 128, 4, True, 128),
+    ],
+)
+def test_glm_fp8_indexer_keys_and_scales_share_padded_pages_without_overlapping(
+    monkeypatch, logical_block_size, kernel_size, ratio, transfer, indexer_block_size
+):
     config = _make_config()
+    if transfer:
+        config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2", kv_connector_extra_config={})
     specs = _make_specs()
+    specs[MAIN] = replace(specs[MAIN], block_size=logical_block_size)
+    specs[MAMBA] = replace(specs[MAMBA], block_size=logical_block_size)
+    specs[STATE] = replace(
+        specs[STATE], block_size=ratio, ring_capacity=ratio, sliding_window=ratio, compress_ratio=ratio
+    )
     specs[INDEXER] = replace(
         specs[INDEXER],
+        block_size=logical_block_size,
         head_size=128,
         dtype=torch.float8_e4m3fn,
         scale_dim=1,
         scale_dtype=torch.float32,
-        page_size_padded=640,
+        page_size_padded=640 if logical_block_size == 8 else None,
+        **_ratio_kwargs(ratio),
     )
     register_all_kvcache_specs(None)
     groups = get_glm5_next_kv_cache_groups(config, specs)
@@ -255,12 +275,14 @@ def test_glm_fp8_indexer_keys_and_scales_share_padded_pages_without_overlapping(
     page_bytes = next(
         d.size // plan.num_blocks for d in plan.kv_cache_tensors if INDEXER in get_kv_cache_tensor_layers(d)
     )
-    rows = kernel_size // 2
-    assert key.shape == (3 * 8 // kernel_size, rows, 1, 128)
-    assert scale.shape == (3 * 8 // kernel_size, rows, 1, 1)
+    rows = indexer_block_size // ratio
+    pages_per_block = logical_block_size // indexer_block_size
+    assert key.shape == (plan.num_blocks * pages_per_block, rows, 1, 128)
+    assert scale.shape == (plan.num_blocks * pages_per_block, rows, 1, 1)
     assert key.dtype == torch.float8_e4m3fn and scale.dtype == torch.float32
-    assert key.stride(0) == scale.stride(0) * scale.element_size() == page_bytes // (8 // kernel_size)
+    assert key.stride(0) == scale.stride(0) * scale.element_size() == page_bytes // pages_per_block
     assert scale.data_ptr() - key.data_ptr() == rows * 128
+    assert key[pages_per_block].data_ptr() == raw[STATE].data_ptr() + page_bytes
     key[1].view(torch.uint8).fill_(23)
     scale[2].fill_(7)
     assert torch.count_nonzero(key[2].view(torch.uint8)) == 0

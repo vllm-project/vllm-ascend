@@ -40,9 +40,9 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.models.glm5next.cache_views import get_wide_indexer_block_size
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
-GLM5_NEXT_WIDE_INDEXER_BLOCK_SIZES = (512, 384)
 
 # Below this many query rows per rank, keep every rank scoring the whole
 # batch: short batches spend more on the extra TP gather than the removed
@@ -300,10 +300,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         # MTP tables count expanded kernel pages.
         self.kernel_blocks_per_logical_block = self.logical_block_size // GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE
         self.scoring_block_table_stride = 1
-        scoring_block_size = next(
-            (size for size in GLM5_NEXT_WIDE_INDEXER_BLOCK_SIZES if self.logical_block_size % size == 0),
-            GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE,
-        )
+        scoring_block_size = get_wide_indexer_block_size(self.logical_block_size, GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE)
         if (
             scoring_block_size != GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE
             and kv_cache_spec.dtype == torch.bfloat16
@@ -1148,14 +1145,16 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             assert indexer_scale_cache is not None
             query = q_values
             indexer_op = partial(self._pool_key_indexer_fp8, k_descale=indexer_scale_cache[..., 0])
+            table_stride, extra_rows = divmod(indexer_cache.shape[1], indexer_metadata.block_size)
+            if extra_rows or not table_stride:
+                raise ValueError("FP8 KeyPool pages must contain whole block-table subpages.")
         else:
             query = q_values.to(indexer_cache.dtype)
             indexer_op = self._cann_pool_key_indexer
-        table_stride = indexer_metadata.scoring_block_table_stride
-        if table_stride > 1:
-            # The shared SFA table and the cache writer keep their original
-            # pages. Consecutive subpages within a logical block share storage.
-            indexer_cache = indexer_cache.view(-1, indexer_cache.shape[1] * table_stride, *indexer_cache.shape[2:])
+            table_stride = indexer_metadata.scoring_block_table_stride
+            if table_stride > 1:
+                # Consecutive BF16 subpages within a logical block share contiguous storage.
+                indexer_cache = indexer_cache.view(-1, indexer_cache.shape[1] * table_stride, *indexer_cache.shape[2:])
         indices, _ = self._pool_key_indexer(
             indexer_op,
             query,

@@ -76,6 +76,8 @@ def prepare_nonempty_keypool_inputs(query, weights, ends, lengths, tails, table,
     tokens, heads, dim = query.shape
     requests = ends.numel()
     table_rows, source_table_cols = table.shape
+    if source_table_cols % block_table_stride:
+        raise ValueError("KeyPool block table rows must align to scoring pages.")
     table_cols = source_table_cols // block_table_stride
     padded_query = query.new_empty((tokens + 1, heads, dim))
     padded_weights = weights.new_empty((tokens + 1, heads))
