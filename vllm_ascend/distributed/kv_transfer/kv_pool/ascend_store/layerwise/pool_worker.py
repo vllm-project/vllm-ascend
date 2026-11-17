@@ -224,18 +224,15 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self.layerwise_key_layers = self.num_layers
             self.layerwise_key_layer_offset = 0
 
+        if self.kv_cache_config is not None and self.use_layerwise_transfer:
+            layout = get_layerwise_reuse_layout(self.kv_cache_config)
+            if layout is not None:
+                self._dspark_draft_layer_names.update(layout.draft_entry_names)
+            elif getattr(self, "_dspark_draft_layer_names", ()) and getattr(self, "_dspark_prefix_keys", None) is None:
+                # Without scratch reuse, retain the original target+draft
+                # pool for prefix storage and load/save addressing.
+                self._dspark_draft_layer_names = set()
         if self.kv_cache_config is not None:
-            if self.use_layerwise_transfer:
-                layout = get_layerwise_reuse_layout(self.kv_cache_config)
-                if layout is not None:
-                    self._dspark_draft_layer_names.update(layout.draft_entry_names)
-                elif (
-                    getattr(self, "_dspark_draft_layer_names", ())
-                    and getattr(self, "_dspark_prefix_keys", None) is None
-                ):
-                    # Without scratch reuse, retain the original target+draft
-                    # pool for prefix storage and load/save addressing.
-                    self._dspark_draft_layer_names = set()
             draft_names = getattr(self, "_dspark_draft_layer_names", ())
             layer_specs = get_layerwise_kv_cache_specs(self.kv_cache_config)
             target_specs = {name: spec for name, spec in layer_specs.items() if name not in draft_names}
