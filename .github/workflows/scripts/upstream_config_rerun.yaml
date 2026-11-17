@@ -2,20 +2,68 @@ e2e-upstream_pr:
   - name: tests/v1/worker/test_mamba_utils.py
     estimated_time: 20
 e2e-upstream_singlecard:
-  - name: tests/v1/e2e/test_replayssm_decode.py
+  - name: tests/config/test_speculative_draft_max_position_embeddings.py
     estimated_time: 20
-  - name: tests/models/multimodal/processing/test_qwen3_omni.py
+  - name: tests/entrypoints/generate/structured_decisions/test_strategies.py
     estimated_time: 20
-  - name: tests/entrypoints/launchers/test_run_batch.py
+  - name: tests/entrypoints/multimodal/openai/chat_completion/test_video.py
     estimated_time: 20
-  - name: tests/v1/spec_decode/test_dflash_prepare_inputs.py
+  - name: tests/entrypoints/pooling/classify/test_online_vision.py
     estimated_time: 20
-  - name: tests/v1/worker/test_gpu_warmup_blocks.py
+  - name: tests/entrypoints/pooling/scoring/test_cross_encoder_online_vision.py
     estimated_time: 20
-  - name: tests/v1/worker/test_gpu_warmup_blocks.py
+  - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_utils.py
+    estimated_time: 20
+  - name: tests/model_executor/model_loader/runai_streamer_loader/test_weight_utils.py
+    estimated_time: 20
+  - name: tests/model_executor/model_loader/test_ep_weight_filter.py
+    estimated_time: 20
+  - name: tests/models/multimodal/processing/test_gemma4.py
+    estimated_time: 20
+  - name: tests/models/multimodal/processing/test_glm5next.py
+    estimated_time: 20
+  - name: tests/models/multimodal/processing/test_minicpmv.py
+    estimated_time: 20
+  - name: tests/models/multimodal/processing/test_qwen2_vl.py
+    estimated_time: 20
+  - name: tests/models/multimodal/processing/test_transformers_video.py
+    estimated_time: 20
+  - name: tests/multimodal/test_cache.py
+    estimated_time: 20
+  - name: tests/renderers/test_prompt_embeds_payload_validation.py
+    estimated_time: 20
+  - name: tests/v1/core/test_priority_preemption_bug.py
+    estimated_time: 20
+  - name: tests/v1/core/test_scheduler.py
     estimated_time: 20
 e2e-upstream_online_1:
+  - name: tests/tokenizers_/test_mistral.py
+    estimated_time: 20
+  - name: tests/evals/mrcr/test_mrcr_correctness.py
+    estimated_time: 20
+  - name: tests/plugins_tests/lora_resolvers/test_hf_hub_resolver.py
+    estimated_time: 20
+  - name: tests/entrypoints/llm/offline_mode/test_offline_mode.py
+    estimated_time: 20
+  - name: tests/model_executor/test_model_load_with_params.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/parser/test_harmony_render_parity.py
+    estimated_time: 20
+  - name: tests/parser/test_harmony.py
+    estimated_time: 20
+  - name: tests/models/language/generation/test_granite.py
+    estimated_time: 20
+  - name: tests/entrypoints/pooling/basic/test_tiling_engine.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/completion/test_token_in_token_out.py
+    estimated_time: 20
   - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_s3.py
+    estimated_time: 20
+  - name: tests/models/multimodal/processing/test_moondream3.py
+    estimated_time: 20
+  - name: tests/tokenizers_/test_basic.py
+    estimated_time: 20
+  - name: tests/v1/structured_output/test_backend_guidance.py
     estimated_time: 20
 e2e-upstream_a2_2:
   - name: tests/v1/distributed/test_async_llm_dp.py
