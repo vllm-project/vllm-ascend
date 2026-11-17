@@ -415,8 +415,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
     def configure_dspark_prefix_cache(self, keys: DSparkPrefixKeys) -> None:
         self._dspark_prefix_keys = keys
         self._dspark_draft_layer_names = set(getattr(self.kv_cache_config, "dspark_draft_layer_names", ()))
-        if self._layerwise_reuse_layout is not None:
-            self._dspark_draft_layer_names.update(self._layerwise_reuse_layout.draft_entry_names)
         assert self.kv_cache_config is not None
         # Companion objects own draft-only groups; retain original group IDs
         # and the existing cacheability policy for the ordinary target pool.
