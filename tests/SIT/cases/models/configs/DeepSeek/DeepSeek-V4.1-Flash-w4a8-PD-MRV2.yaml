@@ -23,10 +23,10 @@ config:
   - node_index: 1
     port_start: 7100
     dp_rpc_port: 12321
-    dp_size: 16
-    dp_size_local: 16
+    dp_size: 8
+    dp_size_local: 8
     dp_rank_start: 0
-    tp_size: 1
+    tp_size: 2
     cp_size: 1
     dp_address: "${NODE_1_IP}"
 
@@ -119,7 +119,7 @@ templates:
       - --additional-config
       - '{"enable_cpu_binding": true, "enable_fused_mc2": 2, "enable_flashcomm1": false, "multistream_overlap_shared_expert": false}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 1}, "decode": {"dp_size": 16, "tp_size": 1}}}'
+      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 1}, "decode": {"dp_size": 8, "tp_size": 2}}}'
 
   - node_index: 1
     envs:
@@ -174,7 +174,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 1}, "decode": {"dp_size": 16, "tp_size": 1}}}'
+      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 1}, "decode": {"dp_size": 8, "tp_size": 2}}}'
       - --engram-config
       - '{"cpu_offload": true, "dp_shared_memory": true}'
       - --additional-config
