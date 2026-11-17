@@ -149,6 +149,36 @@ def test_uses_native_truncation_api(block_size, lookahead):
     assert request.block_hashes == reference.block_hashes
 
 
+@pytest.mark.parametrize("native_api", ["missing", None, False])
+@pytest.mark.parametrize("embeds", [False, True])
+@pytest.mark.parametrize("lookahead", [0, 1, 5])
+def test_unavailable_native_api_uses_safe_full_rebuild(monkeypatch, native_api, embeds, lookahead):
+    counted = Mock(side_effect=sha256)
+    request = make_hashed_request(33, 2, lookahead, counted, embeds=embeds)
+    reference = make_hashed_request(33, 2, lookahead, embeds=embeds)
+    if native_api == "missing":
+        monkeypatch.delattr(Request, "truncate_block_hashes")
+        assert not hasattr(request, "truncate_block_hashes")
+    else:
+        monkeypatch.setattr(request, "truncate_block_hashes", native_api)
+    counted.reset_mock()
+
+    scheduler = make_hash_scheduler(2, lookahead)
+    scheduler.on_new_request(request)
+    truncate_with_full_rebuild(reference)
+
+    assert counted.call_count > 0
+    assert request.block_hashes == reference.block_hashes
+    assert request._all_token_ids == reference._all_token_ids
+    assert request.num_prompt_tokens == 32 and request.max_tokens == 1
+    assert request.kv_transfer_params["_p_side_truncated"] is True
+    counted.reset_mock()
+    scheduler.on_new_request(request)
+    assert counted.call_count == 0
+    assert request.block_hashes == reference.block_hashes
+    assert request.num_prompt_tokens == 32
+
+
 def test_consumer_is_unchanged():
     scheduler = make_hash_scheduler(2, 0)
     request = make_hashed_request(33, 2, 0)

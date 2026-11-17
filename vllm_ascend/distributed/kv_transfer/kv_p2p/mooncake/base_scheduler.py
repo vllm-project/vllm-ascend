@@ -534,10 +534,17 @@ class MooncakeBaseConnectorScheduler:
         hash_block_size = getattr(kv_cache_config, "hash_block_size", None)
         vllm_config = getattr(self, "vllm_config", None)
         lookahead = getattr(vllm_config, "num_hash_lookahead_tokens", None)
-        if isinstance(hash_block_size, int) and hash_block_size > 0 and isinstance(lookahead, int) and lookahead >= 0:
-            request.truncate_block_hashes(hash_block_size, lookahead)
+        truncate_hashes = getattr(request, "truncate_block_hashes", None)
+        if (
+            callable(truncate_hashes)
+            and isinstance(hash_block_size, int)
+            and hash_block_size > 0
+            and isinstance(lookahead, int)
+            and lookahead >= 0
+        ):
+            truncate_hashes(hash_block_size, lookahead)
         else:
-            # Unresolved geometry cannot safely identify reusable hashes.
+            # Older cores or unresolved geometry retain the safe full rebuild.
             request.block_hashes.clear()
         request.update_block_hashes()
         params["_p_side_truncated"] = True
