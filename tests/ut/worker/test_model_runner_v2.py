@@ -2033,78 +2033,50 @@ def test_shutdown_releases_c8_views_and_unwraps_zeroer():
     assert runner.kv_block_zeroer is delegate
 
 
-def test_shutdown_retains_vmm_owner_until_parent_graph_teardown():
-    runner = NPUModelRunner.__new__(NPUModelRunner)
-    events = []
-    table = SimpleNamespace(local_vmm=True, close_host_offload=Mock(side_effect=lambda: events.append("close")))
-    runner.model = SimpleNamespace(modules=lambda: [table])
-
-    def shutdown_parent(_runner):
-        events.append("parent")
-        _runner.model = None
-
-    with patch.object(GPUModelRunner, "shutdown", shutdown_parent):
-        runner.shutdown()
-
-    assert events == ["parent", "close"]
-    assert runner._shared_engram_shutdown_pending == []
-
-
-def test_shutdown_retries_failed_vmm_close_and_keeps_default_untouched():
-    runner = NPUModelRunner.__new__(NPUModelRunner)
-    table = SimpleNamespace(local_vmm=True, close_host_offload=Mock(side_effect=[RuntimeError("peer lost"), None]))
-    runner.model = SimpleNamespace(modules=lambda: [table])
-    with patch.object(GPUModelRunner, "shutdown"):
-        with pytest.raises(RuntimeError, match="peer lost"):
-            runner.shutdown()
-        assert runner._shared_engram_shutdown_pending == [table]
-        runner.model = None
-        runner.shutdown()
-    assert runner._shared_engram_shutdown_pending == []
-    assert table.close_host_offload.call_count == 2
-
-    default_runner = NPUModelRunner.__new__(NPUModelRunner)
-    default_runner.model = SimpleNamespace(modules=Mock(return_value=[]))
-    with patch.object(GPUModelRunner, "shutdown"):
-        default_runner.shutdown()
-    assert default_runner.model.modules.call_count == 1
-
-
-def test_shutdown_does_not_release_vmm_when_parent_teardown_fails():
-    runner = NPUModelRunner.__new__(NPUModelRunner)
-    table = SimpleNamespace(local_vmm=True, close_host_offload=Mock())
-    runner.model = SimpleNamespace(modules=lambda: [table])
-    with (
-        patch.object(GPUModelRunner, "shutdown", side_effect=RuntimeError("graph teardown failed")),
-        pytest.raises(RuntimeError, match="graph teardown failed"),
-    ):
-        runner.shutdown()
-    table.close_host_offload.assert_not_called()
-    assert runner._shared_engram_shutdown_pending == [table]
-
-
-def test_shutdown_continues_after_synchronized_vmm_release_failure():
+@pytest.mark.parametrize("failure", [None, "parent", "unsynchronized", "synchronized"])
+def test_vmm_shutdown_orders_and_retains_failures(failure):
     from vllm_ascend.models.deepseek_v41.engram.local_shared_vmm import EngramSharedReleaseError
 
     runner = NPUModelRunner.__new__(NPUModelRunner)
-    first = SimpleNamespace(local_vmm=True, close_host_offload=Mock())
-    last = SimpleNamespace(local_vmm=True, close_host_offload=Mock(side_effect=EngramSharedReleaseError("failed")))
+    events = []
+    first = SimpleNamespace(local_vmm=True, close_host_offload=Mock(side_effect=lambda: events.append("first")))
+    error = EngramSharedReleaseError("sync") if failure == "synchronized" else RuntimeError("peer")
+    last = SimpleNamespace(local_vmm=True, close_host_offload=Mock())
+
+    def close_last():
+        events.append("last")
+        if failure in ("unsynchronized", "synchronized"):
+            raise error
+
+    last.close_host_offload.side_effect = close_last
     runner.model = SimpleNamespace(modules=lambda: [first, last])
-    with patch.object(GPUModelRunner, "shutdown"), pytest.raises(EngramSharedReleaseError, match="failed"):
-        runner.shutdown()
-    first.close_host_offload.assert_called_once()
-    assert runner._shared_engram_shutdown_pending == [last]
+    runner._shared_engram_shutdown_pending = [first]
 
+    def parent(_runner):
+        events.append("parent")
+        if failure == "parent":
+            raise RuntimeError("parent")
 
-def test_shutdown_deduplicates_pending_local_vmm_owner():
-    runner = NPUModelRunner.__new__(NPUModelRunner)
-    table = SimpleNamespace(local_vmm=True, close_host_offload=Mock())
-    runner.model = SimpleNamespace(modules=lambda: [table])
-    runner._shared_engram_shutdown_pending = [table]
-    with patch.object(GPUModelRunner, "shutdown"):
-        runner.shutdown()
-    table.close_host_offload.assert_called_once_with()
-    assert runner._shared_engram_shutdown_pending == []
+    with patch.object(GPUModelRunner, "shutdown", parent):
+        if failure:
+            with pytest.raises(RuntimeError):
+                runner.shutdown()
+        else:
+            runner.shutdown()
+    assert events[0] == "parent"
+    assert events[1:] == ([] if failure == "parent" else ["last"] if failure == "unsynchronized" else ["last", "first"])
+    if failure in ("unsynchronized", "synchronized"):
+        assert runner._shared_engram_shutdown_pending == ([first, last] if failure == "unsynchronized" else [last])
+        last.close_host_offload.side_effect = lambda: events.append("retry")
+        runner.model = None
+        with patch.object(GPUModelRunner, "shutdown"):
+            runner.shutdown()
+        assert runner._shared_engram_shutdown_pending == []
+        assert first.close_host_offload.call_count == 1
+    elif failure == "parent":
+        assert runner._shared_engram_shutdown_pending == [first, last]
+    else:
+        assert runner._shared_engram_shutdown_pending == []
 
 
 def test_shutdown_releases_shared_engram_after_parent_cleanup():

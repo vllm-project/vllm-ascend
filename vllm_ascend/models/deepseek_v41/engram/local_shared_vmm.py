@@ -38,15 +38,6 @@ def retain_failed_initialization(buffer):
         _failed_initializations.append(buffer)
 
 
-def pending_failed_initializations():
-    """Return failed constructors retained for explicit collective recovery.
-
-    All members of the original sharing group must coordinate any retry.
-    Process exit or peer loss is not made safe by retaining Python objects.
-    """
-    return tuple(_failed_initializations)
-
-
 class EngramSharedInitError(RuntimeError):
     """A VMM initialization error was reported to the entire sharing group."""
 
