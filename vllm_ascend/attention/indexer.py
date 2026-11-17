@@ -437,7 +437,10 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             return None
 
         kv_cache = self.k_cache.kv_cache
-        if indexer_metadata.kv_gather_block_ids is not None:
+        # The gather dictionary is identical on every rank (it is derived
+        # from the gathered global block table), so an empty dictionary skips
+        # the collective symmetrically on all senders.
+        if indexer_metadata.kv_gather_block_ids is not None and indexer_metadata.kv_gather_block_ids.numel() > 0:
             gathered_cache, handles = [], []
             for cache in kv_cache:
                 blocks = _index_select_kv_blocks(cache, indexer_metadata.kv_gather_block_ids)
@@ -522,7 +525,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             q_li_scale,
             q_li_shape_ori,
             weights,
-            self.k_cache.kv_cache,
+            kv_cache,
             INDEXER_K_CACHE_SLOT,
             INDEXER_SCALE_CACHE_SLOT,
             indexer_metadata,

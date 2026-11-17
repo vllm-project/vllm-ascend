@@ -1493,7 +1493,9 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         assert isinstance(attn_metadata, AscendSFADCPMetadata)
         assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
         valid_block_ids = attn_metadata.dcp_context.kv_gather_block_ids
-        if valid_block_ids is None:
+        # An empty dictionary is identical on every rank (it is derived from
+        # the gathered global block table), so skipping stays collective-safe.
+        if valid_block_ids is None or valid_block_ids.numel() == 0:
             return
         assert self.dcp_group is not None, "DCP SFA requires dcp_group when dcp_size > 1."
 
