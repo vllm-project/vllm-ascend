@@ -404,6 +404,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
             topk=1,
             use_fused_overlap=False,
             use_fused_copy_sfa=False,
+            use_side_stream_onboard=False,
             dram_size_per_dp_GB=dram_size_per_dp_gb,
             store_port_base=store_port_base,
         )
@@ -564,6 +565,9 @@ class TestHostKVRegistration(unittest.TestCase):
                 manager.tp_rank = rank
                 manager.num_layers = 1
                 manager.offload_layer_names = ["layer.0"]
+                # register_kv_caches publishes full-resident HBM bases; the
+                # mocked _register_offload_layers would normally set this.
+                manager.full_resident_layer_names = []
                 manager.kv_cache_config = SimpleNamespace(num_blocks=3)
                 manager.topk_buffer_size = 256
                 manager.block_size = 128
