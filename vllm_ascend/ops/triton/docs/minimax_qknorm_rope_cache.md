@@ -5,7 +5,7 @@
 - **Function**: `minimax_qknorm_rope_cache` applies four Gemma RMSNorms, partial NeoX RoPE, and three cache writes in one Triton kernel. Only Q and index Q are returned. K, V, and index K are written directly into their paged caches.
 - **Location**: `vllm_ascend/ops/triton/msa/minimax_qknorm_rope_cache.py` — `_minimax_qknorm_rope_cache_kernel`, wrapper `minimax_qknorm_rope_cache`.
 - **Algorithm flow**:
-  1. Each program handles one token and vectorizes Q/K and index Q/K along contiguous head rows.
+  1. The grid uses `min(num_tokens, vector_core_count)` programs. Each program handles tokens cyclically and vectorizes Q/K and index Q/K along contiguous head rows. The four normalization weights and Gemma scales are prepared before the token loop and reused across its iterations.
   2. Cos/sin is loaded from the RoPE cache by `positions`. No external gather, slice-contiguous, or cache-scatter kernel is launched.
   3. The model calls this through the opaque op `minimax_m3_fused_sparse_forward`, then runs the indexer and sparse attention. The original cache-insertion path is not called again.
 - **Supported modes**: BF16 NPU input, main and index head dimension 128, at most 262144 tokens including graph padding. Packed `[Q | K | V | index Q | index K]` projections and separate QKV/index projections are both supported. Other shapes keep the existing prepare path.
@@ -26,7 +26,7 @@
 
 ## Constraints
 
-- `NUM_SLOTS` is a runtime scalar with `do_not_specialize`, so varying the actual token count does not create a specialization for each value.
+- `NUM_SLOTS` and `NUM_TOKENS` are runtime scalars with `do_not_specialize`, so varying the actual token count or loop bound does not create a specialization for each value.
 - `num_blocks` is the runtime cache capacity. It is not hardcoded and is not a kernel compile parameter. Main and index block sizes may differ.
 - Cache writes use the actual tensor strides, including block padding.
 - Slots outside `num_actual_tokens`, and negative slots, do not update a cache. The caller must keep valid slots in range and must not write the same destination twice in one call.

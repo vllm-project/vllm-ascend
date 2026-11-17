@@ -6,7 +6,7 @@ This document outlines the benchmarking methodology for vllm-ascend, aimed at ev
 
 ## Overview
 
-**Benchmarking Coverage**: We measure latency, throughput, and fixed-QPS serving on the Atlas 800I A2 (see [quick_start](../docs/source/quick_start.md) to learn more supported devices list), with different models(coming soon).
+**Benchmarking Coverage**: We measure latency, throughput, and fixed-QPS serving on the Atlas 800I A2 (see [quick_start](../docs/source/getting_started/quick_start.md) to learn more supported devices list), with different models(coming soon).
 
 - Latency tests
     - Input length: 32 tokens.
@@ -183,3 +183,70 @@ Similarly, let's take `Qwen2.5-VL-7B-Instruct` benchmark as an example:
   --model Qwen/Qwen2.5-7B-Instruct --tensor-parallel-size 1 \
   --load-format dummy --num-iters-warmup 5 --num-iters 15
   ```
+
+## KV-pool CPU metadata microbenchmark
+
+[`benchmark_kv_pool_metadata.py`](benchmark_kv_pool_metadata.py) compares two
+AscendStore implementations of scheduler request filtering and layerwise leased
+GVA (global virtual address) preparation. It loads the actual source modules and
+uses real NumPy arrays with an immediate mock store. It does not start a model,
+contact a storage service, or execute NPU operations. Its timings cover CPU
+metadata preparation, not KV transfer, serving throughput, TTFT, or a complete
+scheduler step.
+
+### Environment and usage
+
+Use a configured vLLM/vLLM-Ascend environment with NumPy and the dependencies
+needed to import the scheduler and worker modules. Both source revisions must
+be compatible with the same installed vLLM and dependency versions. A standalone
+Python installation is insufficient even though the measured work runs on CPU.
+
+Run from the candidate vLLM-Ascend checkout. The following Linux shell example
+uses the revision before the metadata lookup optimization as its baseline;
+replace `BASELINE_REF` to compare another compatible revision:
+
+```shell
+BASELINE_REF=24a76e84394ae3427195e3715fc08e90769d398c
+git worktree add --detach ../vllm-ascend-kv-pool-baseline "$BASELINE_REF"
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0 VLLM_TARGET_DEVICE=empty
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
+python3 benchmarks/benchmark_kv_pool_metadata.py \
+  --baseline-root ../vllm-ascend-kv-pool-baseline \
+  --candidate-root . \
+  --warmup 3 --rounds 5 --iterations 3 \
+  --output benchmarks/results/kv-pool-metadata.json
+```
+
+`--baseline-root`, `--candidate-root`, and `--output` are required. The positive
+integer options `--warmup`, `--rounds`, and `--iterations` default to 3, 5, and 3.
+Each round runs baseline, candidate, candidate, baseline (ABBA), giving 30 timed
+samples per variant and scenario with the defaults. Reset and result validation
+run outside the timing window; only the target method call is timed. The
+scheduler's asynchronous-load callback is replaced with an ID recorder to
+isolate filtering work.
+
+### Scenarios and results
+
+The script runs 26 scenarios:
+
+- Eight filtering cases: 128/512/1,024/4,096 unfinished requests, with all or half
+  already present in the scheduled cached-request list. This is a scheduling
+  relationship, not a measured external KV-cache hit rate.
+- Fourteen sparse filtering cases: 128 or 4,096 scheduled cached IDs and 0, 1, or
+  4 unfinished IDs. Nonempty cases match the head or tail of the cached list, or
+  remain pending because their IDs are absent from it.
+- Four layerwise GVA cases: 128/512/2,048/8,192 restored blocks.
+
+Read `cases[].baseline` and `cases[].candidate` in the output JSON for
+`median_ms`, interpolated `p95_ms`, `samples`, and every raw sample in `raw_ms`.
+Each case also records `verified_operations`: callback count/order fingerprints
+or GVA fingerprints and store operation counts. Assertions check equivalent
+results between variants and validate each timed call; there is no automatic
+performance pass/fail threshold.
+
+The JSON records Python/platform information, source roots, target-file SHA256
+hashes, loaded module paths, and Git revisions when available. Use these fields
+to verify which implementations were compared. Compare results within the same
+environment and workload, including sparse cases that may have constant-factor
+tradeoffs; local metadata speedups do not establish end-to-end serving gains.

@@ -53,6 +53,7 @@ def _scheduler(
         block_size=128,
         use_eagle=True,
         use_eagle_block_drop=True,
+        num_hash_lookahead_tokens=0,
         max_num_scheduled_tokens=8192,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         hash_block_size=384,
@@ -150,6 +151,19 @@ def test_producer_decode_fast_path_remains_unsplit():
     )
 
     assert result == 8
+
+
+@pytest.mark.parametrize("length,expected", [(384, 384), (768, 384), (1536, 1152), (1537, 1536)])
+def test_producer_materializes_resend_checkpoint_for_aligned_prompt(length, expected):
+    scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True)
+    request = _request(num_computed_tokens=0, num_prompt_tokens=length, num_tokens=length)
+    assert _mamba_block_aligned_split(scheduler, request, num_new_tokens=length) == expected
+
+
+def test_producer_finishes_after_materializing_resend_checkpoint():
+    scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True)
+    request = _request(num_computed_tokens=384, num_prompt_tokens=768, num_tokens=768)
+    assert _mamba_block_aligned_split(scheduler, request, num_new_tokens=384) == 384
 
 
 def test_sparse_index_kpool_prefill_uses_resolved_common_block_size():

@@ -4,17 +4,22 @@
 
 import contextlib
 import hashlib
+import queue
 import struct
+import threading
 import time
 from collections import OrderedDict
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
+import httpx
 import numpy as np
 import numpy.typing as npt
 import torch
 import zmq
+from vllm import envs
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
 
@@ -29,6 +34,93 @@ if TYPE_CHECKING:
 
 
 KV_CACHE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
+
+
+class MooncakeMetaserverClient:
+    """Submit D metadata in the background and surface failures to the scheduler."""
+
+    def __init__(self) -> None:
+        # The metaserver responds after P finishes, not when it accepts D's
+        # metadata. Allow the request lifetime for that response.
+        self.client = httpx.Client(
+            timeout=httpx.Timeout(
+                envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
+                connect=envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT,
+            )
+        )
+        # Each D DP engine has its own pool: at most 32 metaserver POSTs can
+        # run concurrently, and each occupies a thread until P finishes.
+        # TODO: decouple metadata acceptance from P completion. A multi-prompt
+        # batch can exhaust this pool while the proxy waits for its remaining
+        # queued metadata, causing all involved POSTs to wait until timeout.
+        self.executor = ThreadPoolExecutor(max_workers=32, thread_name_prefix="MooncakeMetaserver")
+        self._results: queue.SimpleQueue = queue.SimpleQueue()
+
+    def submit(self, request_id: str, url: str | None, message: dict[str, Any]) -> None:
+        try:
+            if not isinstance(url, str):
+                raise ValueError("Metaserver URL is missing or is not a string")
+            parsed_url = httpx.URL(url)
+            if parsed_url.scheme not in ("http", "https") or not parsed_url.host:
+                raise ValueError("Metaserver requires an absolute HTTP(S) URL")
+        except (TypeError, ValueError, httpx.InvalidURL) as error:
+            self._results.put((request_id, error, True))
+            return
+
+        # submit() can enqueue work before starting a thread raises. Gate the
+        # HTTP call so a rejected submission can never publish D block addresses.
+        submitted = threading.Event()
+        accepted = False
+
+        def send() -> None:
+            submitted.wait()
+            if accepted:
+                self._access_metaserver(url, message)
+
+        try:
+            future = self.executor.submit(send)
+        except RuntimeError as error:
+            self._results.put((request_id, error, True))
+        else:
+            accepted = True
+            future.add_done_callback(lambda result: self._on_done(request_id, result))
+        finally:
+            submitted.set()
+
+    def _access_metaserver(self, url: str, message: dict[str, Any]) -> None:
+        # Only connection establishment is retried: a lost response may follow
+        # a successful P dispatch, so do not replay the request after a timeout.
+        for attempt in range(3):
+            try:
+                response = self.client.post(url, json=message)
+                response.raise_for_status()
+                return
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                if attempt == 2:
+                    raise
+
+    def _on_done(self, request_id: str, future: Future) -> None:
+        if not future.cancelled() and (error := future.exception()) is not None:
+            not_dispatched = isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout))
+            self._results.put((request_id, error, not_dispatched))
+
+    def get_failed_requests(self) -> dict[str, bool]:
+        """Return failed D requests and whether P dispatch can be ruled out."""
+        failed_requests: dict[str, bool] = {}
+        while True:
+            try:
+                request_id, error, not_dispatched = self._results.get_nowait()
+            except queue.Empty:
+                return failed_requests
+            logger.error("Mooncake metaserver dispatch failed for %s: %s", request_id, error)
+            # Preserve uncertainty if more than one failure was recorded.
+            failed_requests[request_id] = failed_requests.get(request_id, True) and not_dispatched
+
+    def shutdown(self) -> None:
+        try:
+            self.executor.shutdown(wait=True, cancel_futures=True)
+        finally:
+            self.client.close()
 
 
 @contextlib.contextmanager

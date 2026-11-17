@@ -62,6 +62,26 @@ For non-layerwise complete-block transfers, adjacent MLA components sharing one 
 
 This bulk fast path uses physical-page-major object contents instead of the previous component-major segmented contents. A fresh namespace is required even when upgrading from the earlier segmented version of this fix. Writers and readers must agree on transfer mode and cache layout; do not share these objects with layerwise readers or workers using a different component layout.
 
+### Prefix Cache Retention
+
+Configure retention with the upstream vLLM argument `--prefix-cache-retention-interval`.
+The Ascend hybrid HBM coordinator and AscendStore scheduler/worker use the parsed
+configuration. The former `VLLM_PREFIX_CACHE_RETENTION_INTERVAL` environment variable
+was removed from vLLM and no longer configures retention.
+
+| Value | Sliding-window / Mamba checkpoint retention |
+| :--- | :--- |
+| `0` (upstream default) | Retain checkpoints required for prompt replay, without periodic checkpoints. |
+| Positive integer, e.g. `4096` | Also retain periodic checkpoints; the interval must be a multiple of the scheduler block size. |
+| `None` | Retain all reachable checkpoints densely. |
+
+Full-attention groups retain their dense prefix-cache behavior. The setting controls
+checkpoint retention, not the configured HBM or external pool capacity. To preserve
+dense retention when upgrading from the stale environment-variable reader, explicitly
+pass `--prefix-cache-retention-interval None`; omitting the argument selects `0`.
+To migrate an intended interval of `4096`, pass `--prefix-cache-retention-interval 4096`
+on the same instances that previously exported the environment variable.
+
 ## Scenario 1: Mooncake Backend
 
 ### Configuration Examples
@@ -90,10 +110,10 @@ This bulk fast path uses physical-page-major object contents instead of the prev
     ldd --version
     ```
 
-2. Install Mooncake:
+2. The vllm-ascend Docker images install Mooncake. Verify the installation:
 
     ```shell
-    python3 -m pip install mooncake-transfer-engine-npu==0.3.11.post1 --extra-index-url https://mirrors.aliyun.com/pypi/web/simple
+    python3 -m pip show mooncake-transfer-engine-npu
     ```
 
 #### Step 2: Configure mooncake.json and Start mooncake_master
@@ -253,7 +273,6 @@ This bulk fast path uses physical-page-major object contents instead of the prev
         # parameters required for kv pool and Mooncake
         export PYTHONHASHSEED=0
         export MOONCAKE_CONFIG_PATH="<config_dir>/mooncake.json"
-        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
         if [ "$ROLE" == "prefill" ]; then
             KV_ROLE="kv_producer"
@@ -417,7 +436,6 @@ This bulk fast path uses physical-page-major object contents instead of the prev
     # parameters required for kv pool and Mooncake
     export PYTHONHASHSEED=0
     export MOONCAKE_CONFIG_PATH="<config_dir>/mooncake.json"
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     echo "Starting vLLM on Series: $HARDWARE_SERIES"
 

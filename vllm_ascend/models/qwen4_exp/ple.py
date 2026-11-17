@@ -18,13 +18,29 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import wraps
-from typing import Any
+from typing import Any, Literal
 
 import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.logger import logger
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+from vllm_ascend.attention.utils import wait_for_kv_layer_from_connector
+from vllm_ascend.ops.triton_ple import (
+    ple_conv_decode,
+    ple_conv_prefill,
+    ple_conv_spec,
+)
+
+
+def _ple_conv_ascend(*args: Any, mode: Literal["decode", "spec", "prefill"], **kwargs: Any) -> None:
+    if mode == "prefill":
+        ple_conv_prefill(*args, **kwargs)
+    elif mode == "decode":
+        ple_conv_decode(*args, **kwargs)
+    else:
+        ple_conv_spec(*args, **kwargs)
 
 
 def _get_allow_internal_format() -> bool:
@@ -199,22 +215,92 @@ def _short_conv_dilated_prefill_batched(
 
 
 def _wrap_ple_short_conv(original: Callable[..., Any]) -> Callable[..., Any]:
-    """Run only the PLE depthwise convolution with internal formats disabled.
+    """Replace the upstream PLE short convolution with the Ascend SD path.
 
-    With internal formats enabled, torch-npu lowers PLE's dilated depthwise
-    ``F.conv1d`` to the legacy ACLop Conv2D path. ACLop operators cannot run
-    during NPU graph capture. Disabling internal formats selects the graph-safe
-    path, but changing the process-wide option permanently would regress other
-    Ascend kernels. Keep the override scoped to the upstream PLE custom op and
-    restore the previous value even when convolution raises.
+    Upstream canonicalizes the conv-state cache to the DS layout
+    ``[slot, channel, window]`` (window innermost) before dispatch. On Ascend
+    the triton kernels expect the SD layout ``[slot, window, channel]``
+    (channel innermost), so transposing there is wasted work. This override
+    keeps the cache in SD and dispatches directly to
+    ``_short_conv_dilated_dispatch``, whose ``ple_conv`` is already replaced
+    by ``_ple_conv_ascend``. It also disables internal formats so torch-npu
+    does not lower PLE's dilated depthwise ``F.conv1d`` to the ACLop Conv2D
+    path, which cannot run during NPU graph capture. The option is restored
+    even when convolution raises so the process-wide value is preserved.
     """
 
     @wraps(original)
-    def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+    def wrapped(
+        self: Any,
+        inputs: torch.Tensor,
+        residual: torch.Tensor,
+        outer_residual: torch.Tensor | None,
+    ) -> None:
+        # PLE runs before attention in the same decoder layer.
+        wait_for_kv_layer_from_connector(self.prefix)
         previous = _get_allow_internal_format()
         _set_allow_internal_format(False)
         try:
-            return original(self, *args, **kwargs)
+            from vllm.forward_context import get_forward_context
+            from vllm.model_executor.layers.mamba.mamba_utils import (
+                is_conv_state_dim_first,
+            )
+            from vllm.v1.attention.backends.short_conv_attn import (
+                PleShortConvAttentionMetadata,
+            )
+
+            forward_context = get_forward_context()
+            attn_metadata = forward_context.attn_metadata
+            # Profiling omits all metadata or this Mamba entry. Short
+            # convolution is a no-op there, but preserve the outer residual.
+            if attn_metadata is None:
+                if outer_residual is not None:
+                    residual.add_(outer_residual)
+                return None
+            if not isinstance(attn_metadata, dict):
+                raise RuntimeError(
+                    "PLE short-conv expects per-layer attention metadata dict "
+                    f"during inference, got {type(attn_metadata).__name__}."
+                )
+
+            layer_attn_metadata = attn_metadata.get(self.prefix)
+            if layer_attn_metadata is None:
+                if outer_residual is not None:
+                    residual.add_(outer_residual)
+                return None
+            if not isinstance(layer_attn_metadata, PleShortConvAttentionMetadata):
+                raise TypeError(
+                    "Expected PleShortConvAttentionMetadata for layer "
+                    f"'{self.prefix}', got "
+                    f"{type(layer_attn_metadata).__name__}."
+                )
+
+            conv_state = self.kv_cache[0]
+            # Canonicalize both backend cache layouts to [slot, window,
+            # channel], keeping the channel as the innermost contiguous
+            # dimension so the triton kernels index it without a transpose.
+            if is_conv_state_dim_first():
+                conv_state = conv_state.transpose(-1, -2)
+            conv_weights = self.conv1d.weight.squeeze(1)
+
+            state_capacity = self.conv_state_len + self.num_spec_tokens
+            if state_capacity > 0:
+                if conv_state.size(1) < state_capacity:
+                    raise RuntimeError(
+                        "PLE short-conv cache is smaller than expected for "
+                        f"dilated convolution: got {conv_state.size(1)}, "
+                        f"expect at least {state_capacity}."
+                    )
+                conv_state = conv_state[:, -state_capacity:, :]
+            self._short_conv_dilated_dispatch(
+                inputs=inputs,
+                residual=residual,
+                outer_residual=outer_residual,
+                metadata=layer_attn_metadata,
+                conv_state=conv_state,
+                conv_weights=conv_weights.to(dtype=inputs.dtype),
+            )
+            return None
         finally:
             _set_allow_internal_format(previous)
 
@@ -240,6 +326,7 @@ def _patch_legacy_prefill(ple_layer_cls: type[Any]) -> None:
 
 def patch_upstream_ple_short_conv() -> None:
     """Install Ascend PLE runtime adaptations on the upstream classes."""
+    from vllm.models.qwen4_exp.amd import ple_layer as upstream_ple_layer
     from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
     from vllm.models.qwen4_exp.common.ngram_embedding import (
         Qwen4ExpPLEEmbeddingMethod,
@@ -249,6 +336,10 @@ def patch_upstream_ple_short_conv() -> None:
     from vllm_ascend.quantization.configs.modelslim_config import (
         AscendModelSlimConfig,
     )
+
+    # The AMD PLE class binds this function at module import time.  Replace
+    # only that model-local binding; other platforms keep the upstream kernel.
+    upstream_ple_layer.ple_conv = _ple_conv_ascend
 
     original_attr = "_ascend_original_short_conv"
     if not hasattr(Qwen4ExpPLELayer, original_attr):

@@ -28,6 +28,7 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
     get_backend_class,
+    resolve_backend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import base as backend_base
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import memcache_backend as memcache_module
@@ -165,6 +166,20 @@ class TestBackendRegistry(unittest.TestCase):
     def test_get_backend_class_returns_none_for_unknown_backend(self):
         self.assertIsNone(get_backend_class("nonexistent"))
         self.assertIsNone(get_backend_class("yuanrong").layerwise_data_plane)
+
+    def test_resolve_backend_defaults_to_mooncake_and_accepts_mixed_case(self):
+        for extra_config, expected in (
+            ({}, ("mooncake", MooncakeBackend)),
+            ({"backend": "Mooncake"}, ("mooncake", MooncakeBackend)),
+            ({"backend": "MEMCACHE"}, ("memcache", MemcacheBackend)),
+        ):
+            with self.subTest(extra_config=extra_config):
+                self.assertEqual(resolve_backend(extra_config), expected)
+
+    def test_resolve_backend_preserves_rejection_of_unknown_and_padded_names(self):
+        for backend_name in ("unknown", " Mooncake "):
+            with self.subTest(backend=backend_name):
+                self.assertEqual(resolve_backend({"backend": backend_name}), (backend_name.lower(), None))
 
 
 def _make_mooncake_store_config(**overrides) -> MooncakeStoreConfig:

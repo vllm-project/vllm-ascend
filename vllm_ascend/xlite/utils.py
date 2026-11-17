@@ -18,7 +18,6 @@
 import threading
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
 from logging import Logger
 from typing import Any, Literal, TypedDict, cast
 
@@ -27,10 +26,6 @@ import torch.nn as nn
 import torch_npu
 from vllm.logger import logger
 from xlite._C import Model, ModelConfig
-
-from vllm_ascend.attention.attention_v1 import AscendMetadata
-from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
-from vllm_ascend.attention.sfa_v1 import AscendSFAMetadata
 
 _MISSING = object()
 """Unique sentinel for missing attributes in this module."""
@@ -52,6 +47,23 @@ def set_dummy_tensor(tensor: torch.Tensor) -> None:
     """
     global _DUMMY_TENSOR
     _DUMMY_TENSOR = tensor
+
+
+def is_dummy_tensor(tensor: torch.Tensor) -> bool:
+    """Check whether ``tensor`` is the :data:`_DUMMY_TENSOR` placeholder.
+
+    A tensor is considered dummy when it is either the exact placeholder object (same :meth:`data_ptr`) or an empty
+    tensor (``numel() == 0``). The two conditions cover both the default ``torch.empty(0)`` placeholder and any
+    non-empty placeholder (e.g. ``torch.empty(1, ...)``) rebound via :func:`set_dummy_tensor`, so callers do not need
+    to know which shape the placeholder currently has.
+
+    Args:
+        tensor (torch.Tensor): The tensor to test.
+
+    Returns:
+        bool: True if ``tensor`` is the dummy placeholder (by identity or by being empty).
+    """
+    return tensor.numel() == 0 or tensor.data_ptr() == _DUMMY_TENSOR.data_ptr()
 
 
 class _TensorRepr:
@@ -268,154 +280,6 @@ class XModel(AttributeSetterMixin, Model):
 
 class XModelConfig(AttributeSetterMixin, ModelConfig):
     """:mod:`xlite._C.ModelConfig` subclass with safe attribute setting for better backwards compatibility."""
-
-
-@dataclass
-class AttnMetadataRouter:
-    """A router for attention metadata objects of different types. This is used to handle the differences in attention
-    metadata across different model architectures and vLLM/vLLM-ascend versions in a more robust way.
-
-    The router provides unified access to commonly used attention metadata attributes (e.g., actual sequence lengths for
-    query and block tables) via properties.
-
-    Currently included metadata types:
-
-    - `AscendMetadata`
-    - `AscendMLAMetadata`
-    - `AscendSFAMetadata`
-
-    Typically, the attention metadata has the following notations::
-
-        |---------- N-1 iteration --------|
-        |---------------- N iteration ---------------------|
-        |- tokenA -|......................|-- newTokens ---|
-        |---------- context_len ----------|
-        |-------------------- seq_len ---------------------|
-                                          |-- query_len ---|
-    """
-
-    attn_metadata: Any
-    """The attention metadata object to route, e.g., an instance of `AscendMetadata` or `AscendSFAMetadata`."""
-    device: str | torch.device | int | None = "cpu"
-    """Device specification for the returned tensors. If None, the tensors will be on the same device as the original
-    metadata tensors. The current implementation assumes `cpu` device for minimal data transfer."""
-
-    @contextmanager
-    def on_device(self, device: str | torch.device | int | None) -> Generator["AttnMetadataRouter", None, None]:
-        """Context manager to temporarily set the device for the router. This is useful for cases where we want to
-        access multiple properties on the same device without repeatedly specifying the device.
-
-        Usage::
-
-            with router.on_device("cpu"):
-                query_lens = router.cu_query_lens  # on cpu
-                block_tables = router.block_tables  # also on cpu
-        """
-        original_device = self.device
-        self.device = device
-        try:
-            yield self
-        finally:
-            self.device = original_device
-
-    def __getattr__(self, name: str) -> Any:
-        """Route attribute access to the appropriate handler method based on the attribute name."""
-        if (value := getattr(self.attn_metadata, name, _MISSING)) is not _MISSING:
-            return value
-
-        raise AttributeError(f"{type(self.attn_metadata).__name__} has no attribute {name}.")
-
-    @property
-    def cu_query_lens(self) -> torch.Tensor:
-        """Get the cumulative query lengths from the attention metadata, if available."""
-        if isinstance(self.attn_metadata, (AscendMetadata, AscendMLAMetadata)):
-            return torch.as_tensor(self.attn_metadata.query_start_loc, device=self.device)
-
-        if isinstance(self.attn_metadata, AscendSFAMetadata):
-            return torch.as_tensor(self.attn_metadata.cum_query_lens, device=self.device)
-
-        for candidate in ["query_start_loc", "cum_query_lens", "actual_seq_lengths_q"]:
-            if (lengths := getattr(self.attn_metadata, candidate, None)) is not None:
-                return torch.as_tensor(lengths, device=self.device)
-
-        raise ValueError(
-            f"Cannot find actual sequence lengths for query in attention metadata of type {type(self.attn_metadata)}."
-        )
-
-    @property
-    def block_tables(self) -> torch.Tensor:
-        """Get the block tables from the attention metadata, if available."""
-        if isinstance(self.attn_metadata, AscendMetadata):
-            return torch.as_tensor(self.attn_metadata.block_tables, device=self.device)
-
-        if isinstance(self.attn_metadata, AscendSFAMetadata):
-            return torch.as_tensor(self.attn_metadata.block_table, device=self.device)
-
-        if isinstance(self.attn_metadata, AscendMLAMetadata):
-            # AscendMLAMetadataBuilder.build_decode_metadata breaks `AscendMLAMetadata.block_tables`
-            # thus we may need to patch together block tables from prefill and decode metadata if available
-            block_tables = []
-            if self.attn_metadata.decode is not None:
-                block_tables.append(torch.as_tensor(self.attn_metadata.decode.block_table, device=self.device))
-            if self.attn_metadata.prefill is not None:
-                block_tables.append(torch.as_tensor(self.attn_metadata.prefill.block_table, device=self.device))
-            if block_tables:
-                return torch.concat(block_tables, dim=0)
-            return torch.as_tensor(self.attn_metadata.block_tables, device=self.device)
-
-        for candidate in ["block_tables", "block_table"]:
-            if (tables := getattr(self.attn_metadata, candidate)) is not None:
-                return torch.as_tensor(tables, device=self.device)
-
-        raise ValueError(f"Cannot find block tables in attention metadata of type {type(self.attn_metadata)}.")
-
-    @property
-    def seq_lens(self) -> torch.Tensor:
-        """Return the per-sequence `seq_lens` tensor in a device-safe torch.Tensor form."""
-        if isinstance(self.attn_metadata, (AscendMetadata, AscendSFAMetadata)):
-            return torch.as_tensor(self.attn_metadata.seq_lens_cpu, device=self.device)
-
-        if isinstance(self.attn_metadata, AscendMLAMetadata):
-            # AscendMLAMetadataBuilder.build_decode_metadata breaks `AscendMLAMetadata.seq_lens`
-            # thus prefill metadata's seq_lens is preferentially used if available
-            if self.attn_metadata.prefill is not None:
-                return torch.as_tensor(self.attn_metadata.prefill.seq_lens, device=self.device)
-            return torch.as_tensor(self.attn_metadata.seq_lens_cpu, device=self.device)
-
-        for candidate in ["seq_lens_cpu", "seq_lens"]:
-            if (s := getattr(self.attn_metadata, candidate)) is not None:
-                return torch.as_tensor(s, device=self.device)
-
-        raise ValueError(f"Cannot find seq_lens in attention metadata of type {type(self.attn_metadata)}.")
-
-    @property
-    def num_prefills(self) -> int:
-        for candidate in ["num_prefills"]:
-            if (num_prefills := getattr(self.attn_metadata, candidate)) is not None:
-                return int(num_prefills)
-        return 0
-
-    @property
-    def num_decodes(self) -> int:
-        for candidate in ["num_decodes"]:
-            if (num_decodes := getattr(self.attn_metadata, candidate)) is not None:
-                return int(num_decodes)
-        return 0
-
-    @property
-    def num_decode_tokens(self) -> int:
-        for candidate in ["num_decode_tokens"]:
-            if (num_decode_tokens := getattr(self.attn_metadata, candidate, None)) is not None:
-                return int(num_decode_tokens)
-        return 0
-
-    @property
-    def num_actual_tokens(self) -> int:
-        """Return the number of actual tokens (excluding padding)."""
-        for candidate in ["num_actual_tokens"]:
-            if (num_actual_tokens := getattr(self.attn_metadata, candidate)) is not None:
-                return int(num_actual_tokens)
-        raise ValueError(f"Cannot find num_actual_tokens in attention metadata of type {type(self.attn_metadata)}.")
 
 
 def get_nested_attr(obj: Any, /, *attrs: str, default: Any = None, raises: bool = False) -> Any:

@@ -7,10 +7,7 @@ from unittest.mock import MagicMock, patch
 import torch
 from vllm.forward_context import ForwardContext, override_forward_context
 
-from vllm_ascend.attention.dsa_v1 import (
-    get_or_compute_compressor_metadata,
-    reset_compressor_metadata_cache,
-)
+from vllm_ascend.attention.dsa_v1 import get_or_compute_compressor_metadata
 
 
 def _make_forward_context() -> ForwardContext:
@@ -22,7 +19,7 @@ def _make_forward_context() -> ForwardContext:
     )
 
 
-def test_reuses_by_cache_group_and_resets_between_substeps():
+def test_reuses_by_cache_group_only():
     metadata = SimpleNamespace(
         cache_group_key="model.layers.0.self_attn.attn",
         full_compress_cos=torch.zeros((2, 1, 1, 4)),
@@ -41,7 +38,7 @@ def test_reuses_by_cache_group_and_resets_between_substeps():
             "cache_group_key": "model.layers.0.self_attn.indexer.k_cache",
         }
     )
-    outputs = [(torch.full((1,), value),) * 3 for value in range(4)]
+    outputs = [(torch.full((1,), value),) * 3 for value in range(3)]
 
     kv_plan = MagicMock()
     kv_plan.get_dsa_compressor_slot_mapping_format.return_value = 0
@@ -63,13 +60,10 @@ def test_reuses_by_cache_group_and_resets_between_substeps():
             first = get_or_compute_compressor_metadata(metadata, 4, vllm_config)
             reused = get_or_compute_compressor_metadata(same_group_metadata, 4, vllm_config)
             isolated = get_or_compute_compressor_metadata(other_group_metadata, 4, vllm_config)
-            reset_compressor_metadata_cache()
-            next_substep = get_or_compute_compressor_metadata(metadata, 4, vllm_config)
         with override_forward_context(_make_forward_context()):
             next_forward = get_or_compute_compressor_metadata(metadata, 4, vllm_config)
 
     assert first is reused
     assert isolated is not first
-    assert next_substep is not first
     assert next_forward is not first
-    assert metadata_op.call_count == 4
+    assert metadata_op.call_count == 3

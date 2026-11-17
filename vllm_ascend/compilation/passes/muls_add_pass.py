@@ -73,10 +73,34 @@ class MulsAddPattern(BasePattern):
         return replacement
 
 
+class MulsAddSharedFirstPattern(MulsAddPattern):
+    def get_pattern(self):
+        def pattern(x: torch.Tensor, y: torch.Tensor):
+            return y + x * self.scale
+
+        return pattern
+
+
+class MulsForeachAddPattern(MulsAddPattern):
+    def get_pattern(self):
+        def pattern(x: torch.Tensor, y: torch.Tensor):
+            return torch._foreach_add([x * self.scale], [y])[0]
+
+        return pattern
+
+
+class MulsForeachAddSharedFirstPattern(MulsAddPattern):
+    def get_pattern(self):
+        def pattern(x: torch.Tensor, y: torch.Tensor):
+            return torch._foreach_add([y], [x * self.scale])[0]
+
+        return pattern
+
+
 class MulsAddFusionPass(VllmInductorPass):
     """
-    A fusion pass that replaces simple element-wise x * scale + y patterns
-    with the Triton-based muls_add_triton kernel on Ascend.
+    Fuse out-of-place scalar mul followed by add or singleton foreach_add,
+    in either add operand order, with the Triton muls_add kernel on Ascend.
     """
 
     def __init__(self, vllm_config: VllmConfig):
@@ -91,7 +115,15 @@ class MulsAddFusionPass(VllmInductorPass):
             return
 
         routed_scaling_factor = getattr(vllm_config.model_config.hf_text_config, "routed_scaling_factor", 1.0)
-        MulsAddPattern(vllm_config, scale=routed_scaling_factor).register(self.pattern_match_passes)
+        # Match functionalized muls only. Replacing a raw mul_ would discard
+        # the mutation observed by aliases of the routed output.
+        for pattern_type in (
+            MulsAddPattern,
+            MulsAddSharedFirstPattern,
+            MulsForeachAddPattern,
+            MulsForeachAddSharedFirstPattern,
+        ):
+            pattern_type(vllm_config, scale=routed_scaling_factor).register(self.pattern_match_passes)
 
     def __call__(self, graph: torch.fx.Graph) -> None:  # type: ignore[override]
         self.begin()

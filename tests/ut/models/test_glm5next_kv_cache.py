@@ -12,8 +12,8 @@ import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.worker.utils import select_common_block_size
 
-import vllm_ascend.attention.indexer_kpool as backend_module
 from vllm_ascend.attention.attention_v1 import AscendCommonAttentionMetadata
 from vllm_ascend.attention.indexer_kpool import (
     AscendIndexerKPoolBackend,
@@ -36,7 +36,6 @@ from vllm_ascend.models.glm5next.kv_cache import (
     format_indexer_kpool_slot_mapping,
     get_kpool_tail_ring_capacity,
 )
-from vllm_ascend.worker.v1.spec_decode.multi_kv_cache_group_proposer import AscendMultiKVCacheGroupMTPProposer
 
 pytestmark = pytest.mark.usefixtures("keypool_kernels")
 
@@ -57,11 +56,6 @@ def keypool_kernels(monkeypatch):
     return kernels
 
 
-@pytest.fixture(autouse=True)
-def default_dsa_cp_disabled(monkeypatch):
-    monkeypatch.setattr("vllm_ascend.attention.indexer_kpool.enable_dsa_cp", lambda: False)
-
-
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
     return {"tokens_per_state": ratio}
 
@@ -74,11 +68,12 @@ def test_tail_ring_capacity_retains_speculative_lookahead(pool, lookahead, capac
     assert get_kpool_tail_ring_capacity(config, pool) == capacity
 
 
-@pytest.mark.parametrize("capacity", [4, 12])
+@pytest.mark.parametrize("capacity", [4, 9, 12])
 def test_tail_uses_one_full_precision_page(capacity):
     register_ascend_kv_cache_specs()
     spec = AscendIndexerKPoolTailSpec(
-        block_size=capacity,
+        block_size=4,
+        ring_capacity=capacity,
         sliding_window=4,
         compress_ratio=4,
         num_kv_heads=1,
@@ -86,6 +81,13 @@ def test_tail_uses_one_full_precision_page(capacity):
         dtype=torch.float32,
     )
     assert spec.page_size_bytes == 2 * capacity * 128 * 4
+    assert spec.block_size == spec.compress_ratio == 4
+    assert spec.num_states == spec.get_num_kernel_states(4) == get_storage_block_size(spec) == capacity
+    assert not spec.dcp_sharded
+    assert spec.uses_slot_mapping
+    kernel_block_size = select_common_block_size(4, [AscendIndexerKPoolTailBackend], [spec])
+    assert kernel_block_size == 4
+    assert spec.copy_with_new_block_size(kernel_block_size) == spec
     assert spec.real_page_size_bytes == spec.unpadded_page_size_bytes == spec.page_size_bytes
     padded_spec = replace(spec, page_size_padded=spec.page_size_bytes + 256)
     assert padded_spec.page_size_bytes == spec.page_size_bytes + 256
@@ -96,6 +98,10 @@ def test_tail_uses_one_full_precision_page(capacity):
     assert merged_spec == spec and merged_spec is not spec
     with pytest.raises(AssertionError):
         AscendIndexerKPoolTailSpec.merge([spec, padded_spec])
+    larger_ring = replace(spec, ring_capacity=capacity + 1)
+    assert not spec.is_uniform_with_collection({"larger_ring": larger_ring})
+    with pytest.raises(AssertionError):
+        AscendIndexerKPoolTailSpec.merge([spec, larger_ring])
     with pytest.raises(AssertionError):
         AscendIndexerKPoolTailSpec.merge([object()])
     assert KVCacheSpecRegistry.get_manager_class(spec) is KpoolTailManager
@@ -124,7 +130,8 @@ def test_tail_uses_one_full_precision_page(capacity):
 def test_invalid_state_layout_is_rejected(dtype, block_size, sliding_window):
     with pytest.raises(ValueError):
         AscendIndexerKPoolTailSpec(
-            block_size=block_size,
+            block_size=4,
+            ring_capacity=block_size,
             sliding_window=sliding_window,
             compress_ratio=4,
             num_kv_heads=1,
@@ -143,6 +150,7 @@ def test_completed_pool_slots_preserve_logical_block_padding():
 def test_tail_manager_retains_one_private_block_until_free():
     spec = AscendIndexerKPoolTailSpec(
         block_size=4,
+        ring_capacity=4,
         sliding_window=4,
         compress_ratio=4,
         num_kv_heads=1,
@@ -180,6 +188,7 @@ def test_tail_manager_retains_one_private_block_until_free():
 def test_tail_manager_prefix_hit_has_no_shared_blocks():
     spec = AscendIndexerKPoolTailSpec(
         block_size=4,
+        ring_capacity=4,
         sliding_window=4,
         compress_ratio=4,
         num_kv_heads=1,
@@ -268,74 +277,9 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
     torch.testing.assert_close(draft.block_table, common.block_table_tensor[:1])
 
 
-def test_dsacp_indexer_shards_queries_and_keeps_global_cache_metadata(monkeypatch, keypool_kernels):
-    monkeypatch.setattr("vllm_ascend.attention.indexer_kpool.enable_dsa_cp", lambda: True)
-    monkeypatch.setattr(
-        "vllm_ascend.attention.indexer_kpool.get_tp_group",
-        lambda: SimpleNamespace(world_size=2, rank_in_group=1),
-    )
-    config = SimpleNamespace(
-        cache_config=SimpleNamespace(block_size=128),
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=5, max_num_seqs=2),
-        model_config=SimpleNamespace(max_model_len=256),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
-    )
-    spec = AscendMLAAttentionSpec(
-        block_size=128,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.bfloat16,
-        tokens_per_state=4,
-        model_version="glm5_next",
-    )
-    tail_spec = AscendIndexerKPoolTailSpec(
-        block_size=4,
-        sliding_window=4,
-        compress_ratio=4,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.float32,
-    )
-    builder = AscendIndexerKPoolMetadataBuilder(spec, ["layer.indexer.k_cache"], config, torch.device("cpu"))
-    tail_builder = AscendIndexerKPoolTailMetadataBuilder(
-        tail_spec, ["layer.indexer.tail_cache"], config, torch.device("cpu")
-    )
-    common = SimpleNamespace(
-        pcp_context=None,
-        pcp_cache_group_idx=None,
-        num_reqs=2,
-        num_input_tokens=5,
-        num_actual_tokens=5,
-        query_start_loc=torch.tensor([0, 4, 5], dtype=torch.int32),
-        seq_lens=torch.tensor([4, 1], dtype=torch.int32),
-        _seq_lens_cpu=None,
-        seq_lens_cpu=None,
-        positions=torch.tensor([0, 1, 2, 3, 0]),
-        slot_mapping=torch.tensor([0, 1, 2, 3, 128]),
-        block_table_tensor=torch.tensor([[0], [1]], dtype=torch.int32),
-    )
-    metadata = builder.build(0, common)
-    tail = tail_builder.build(0, common)
-    assert keypool_kernels.build_keypool_metadata.call_args.args[:4] == (
-        common,
-        builder._metadata_buffers[common.slot_mapping.data_ptr()],
-        6,
-        5,
-    )
-    assert metadata.positions.shape == metadata.slot_mapping.shape == (6,)
-    query = metadata.query_metadata
-    assert query.num_actual_tokens == 2
-    assert query.positions.data_ptr() == metadata.positions[3:].data_ptr()
-    assert query.cum_query_lens.shape == (2,)
-    assert keypool_kernels.build_keypool_metadata.call_args.kwargs["local_start"] == 3
-    torch.testing.assert_close(tail.slot_mapping, common.slot_mapping)
-    refreshed = builder.build(0, common).query_metadata
-    assert refreshed.cum_query_lens.data_ptr() == query.cum_query_lens.data_ptr()
-    assert refreshed.positions.data_ptr() == query.positions.data_ptr()
-    assert tail_builder.build(0, common).slot_mapping.data_ptr() == tail.slot_mapping.data_ptr()
-
-
-def test_model_cache_layers_publish_source_compatible_specs():
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("lookahead", [0, 5])
+def test_model_cache_layers_publish_source_compatible_specs(dtype, lookahead):
     current_config = SimpleNamespace(
         parallel_config=SimpleNamespace(pipeline_parallel_size=2),
         compilation_config=SimpleNamespace(static_forward_context={}),
@@ -347,7 +291,7 @@ def test_model_cache_layers_publish_source_compatible_specs():
     ):
         indexer = Glm5NextIndexerCache(
             head_dim=128,
-            dtype=torch.bfloat16,
+            dtype=dtype,
             cache_role="indexer",
             cache_config=cache_config,
             prefix="model.layers.0.indexer.k_cache",
@@ -358,6 +302,7 @@ def test_model_cache_layers_publish_source_compatible_specs():
             dtype=torch.float32,
             compress_ratio=16,
             prefix="model.layers.0.indexer.tail_cache",
+            ring_capacity=16 + lookahead,
         )
 
     indexer_spec = indexer.get_kv_cache_spec(None)
@@ -369,7 +314,13 @@ def test_model_cache_layers_publish_source_compatible_specs():
     assert get_kv_cache_compression_ratio(indexer_spec) == 16
     assert indexer_spec.model_version == "glm5_next"
     assert indexer_spec.indexes_kv_by_block_stride
+    assert indexer_spec.dtype == dtype
+    assert indexer_spec.scale_dim == (1 if dtype == torch.float8_e4m3fn else 0)
+    if dtype == torch.float8_e4m3fn:
+        assert indexer_spec.scale_dtype == torch.float32
+        assert indexer_spec.real_page_size_bytes == 16 * (128 + 4)
     assert state_spec.block_size == state_spec.sliding_window == 16
+    assert state_spec.ring_capacity == state_spec.num_states == 16 + lookahead
     assert state_spec.head_size == 128
     assert state_spec.dtype == torch.float32
     assert state_spec.model_version == "glm5_next"
@@ -380,6 +331,18 @@ def test_model_cache_layers_publish_source_compatible_specs():
         indexer.prefix,
         state.prefix,
     }
+
+
+def test_indexer_cache_rejects_unsupported_dtype():
+    with pytest.raises(ValueError, match="BF16 or FP8"):
+        Glm5NextIndexerCache(
+            head_dim=128,
+            dtype=torch.float16,
+            cache_role="indexer",
+            cache_config=SimpleNamespace(block_size=128),
+            prefix="indexer.k_cache",
+            compress_ratio=4,
+        )
 
 
 def test_indexer_metadata_preserves_raw_request_boundaries(keypool_kernels):
@@ -539,6 +502,7 @@ def test_pcp_kpool_metadata_writes_global_token_order(keypool_kernels, capture, 
     tail_builder = AscendIndexerKPoolTailMetadataBuilder(
         AscendIndexerKPoolTailSpec(
             block_size=4,
+            ring_capacity=4,
             sliding_window=4,
             compress_ratio=4,
             num_kv_heads=1,
@@ -737,12 +701,7 @@ def _common():
 
 @pytest.mark.parametrize("input_tokens", [9, 10])
 @pytest.mark.parametrize("unpadded", [None, "positions", "slot_mapping"])
-@pytest.mark.parametrize("dsa_cp", [False, True])
-def test_metadata_delegates_to_kernel_and_keeps_capture_storage(
-    input_tokens, unpadded, dsa_cp, keypool_kernels, monkeypatch
-):
-    monkeypatch.setattr(backend_module, "enable_dsa_cp", lambda: dsa_cp)
-    monkeypatch.setattr(backend_module, "get_tp_group", lambda: SimpleNamespace(world_size=2, rank_in_group=1))
+def test_metadata_delegates_to_kernel_and_keeps_capture_storage(input_tokens, unpadded, keypool_kernels, monkeypatch):
     builder, common = _builder(_config()), _common()
     common.num_input_tokens = input_tokens
     if unpadded:
@@ -750,18 +709,11 @@ def test_metadata_delegates_to_kernel_and_keeps_capture_storage(
     first = builder.build(0, common)
     args = keypool_kernels.build_keypool_metadata.call_args.args
     assert args[0] is common
-    cache_tokens = backend_module._round_up(input_tokens, 2 if dsa_cp else 1)
+    cache_tokens = input_tokens
     assert args[2:] == (cache_tokens, 8 if unpadded else input_tokens, 128, 4)
     assert first.num_actual_tokens == common.num_actual_tokens
     kwargs = keypool_kernels.build_keypool_metadata.call_args.kwargs
-    assert kwargs["query_metadata"] is first.query_metadata
-    assert kwargs["local_start"] == (5 if dsa_cp else 0)
-    if dsa_cp:
-        assert first.query_metadata.positions.data_ptr() == first.positions[5:].data_ptr()
-        assert first.query_metadata.positions.shape == (5,)
-        assert first.query_metadata.num_actual_tokens == 3
-        for field in ("cum_query_lens", "seq_lens", "pool_tail"):
-            assert getattr(first.query_metadata, field).dtype == torch.int64
+    assert not kwargs
     assert first.keypool_state_table.tolist() == [[1, 3, 3, 3], [2, 4, 4, 4]]
     fields = ("start_pos", "query_start_loc", "pool_tail", "pooled_slot_mapping", "keypool_state_table")
     pointers = [getattr(first, f).data_ptr() for f in fields]
@@ -769,18 +721,15 @@ def test_metadata_delegates_to_kernel_and_keeps_capture_storage(
     common.positions.add_(1)
     second = builder.build(0, common)
     assert pointers == [getattr(second, f).data_ptr() for f in fields]
-    if dsa_cp:
-        for field in ("positions", "cum_query_lens", "seq_lens", "pool_tail"):
-            assert getattr(first.query_metadata, field).data_ptr() == getattr(second.query_metadata, field).data_ptr()
 
 
 @pytest.mark.parametrize("width", [1, 4])
-@pytest.mark.parametrize("dsa_cp", [False, True])
-def test_tail_inputs_pass_page_stride_and_isolate_step_buffers(width, dsa_cp, keypool_kernels, monkeypatch):
-    monkeypatch.setattr(backend_module, "enable_dsa_cp", lambda: dsa_cp)
+@pytest.mark.parametrize("ring_capacity", [7, 9])
+def test_tail_inputs_pass_page_stride_and_isolate_step_buffers(width, ring_capacity, keypool_kernels, monkeypatch):
     config, common = _config(), _common()
     spec = AscendIndexerKPoolTailSpec(
-        block_size=7,
+        block_size=4,
+        ring_capacity=ring_capacity,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.float32,
@@ -797,7 +746,8 @@ def test_tail_inputs_pass_page_stride_and_isolate_step_buffers(width, dsa_cp, ke
     first = builder.build(0, common)
     args = keypool_kernels.build_tail_inputs.call_args.args
     assert args[0] is common
-    assert args[1:5] == (4, 7, 80, width)
+    assert args[1:5] == (4, ring_capacity, 80, width)
+    assert first.block_size == ring_capacity
     assert first.cann_inputs is keypool_kernels.build_tail_inputs.return_value
     assert first.slot_mapping.data_ptr() == common.slot_mapping.data_ptr()
     first_buffers = args[5]
@@ -820,32 +770,3 @@ def test_incomplete_inputs_fail_before_kernel_launch(field, keypool_kernels):
     with pytest.raises(ValueError, match="must cover every actual token"):
         _builder(_config()).build(0, common)
     keypool_kernels.build_keypool_metadata.assert_not_called()
-
-
-@pytest.mark.parametrize("logical,primary", [(128, True), (256, False), (1152, False)])
-def test_mtp_preserves_expanded_kernel_pages(logical, primary):
-    config, common = _config(), _common()
-    config.cache_config.block_size = logical
-    config.parallel_config = SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1)
-    config.speculative_config = SimpleNamespace(num_speculative_tokens=3)
-    builder = _builder(config)
-    split, width = logical // 128, (8192 + logical - 1) // logical
-    physical = torch.arange(1, 2 * width + 1, dtype=torch.int32).view(2, width)
-    table = (physical[:, :, None] * split + torch.arange(split)).reshape(2, -1)
-    common.block_table_tensor = table
-    proposer = AscendMultiKVCacheGroupMTPProposer.__new__(AscendMultiKVCacheGroupMTPProposer)
-    proposer._uses_multi_group_kv_cache, proposer.kv_cache_gid, proposer.max_model_len = True, 0, 8192
-    proposer.vllm_config = config
-    gid = 0 if primary else 1
-    proposer._multi_group_slot_mapping_buffers = {(gid, 0): common.slot_mapping.clone()}
-    proposer._multi_group_block_table_buffers = {gid: torch.zeros_like(table)}
-    cache = SimpleNamespace(
-        is_circular_group=False,
-        compute_slot_mapping=lambda *_: None,
-        get_device_tensor=lambda: table,
-        slot_mapping=SimpleNamespace(gpu=common.slot_mapping),
-    )
-    proposer.runner = SimpleNamespace(input_batch=SimpleNamespace(block_table=[cache, cache]))
-    group = SimpleNamespace(kv_cache_group_id=gid, get_metadata_builder=lambda: builder)
-    draft = proposer._common_attn_metadata_for_draft_group(common, group, common.num_input_tokens)
-    torch.testing.assert_close(builder.build(0, draft).block_table, table)

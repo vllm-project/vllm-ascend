@@ -395,9 +395,8 @@ deviation is a bug.
    when off (including PD-disaggregated recompute / `AsyncRecomputeScheduler`,
    which is already mutually exclusive with balance via `platform.py`; this is a
    second layer of defense).
-5. **Existing constraints still apply.** The `profiling_chunk_config` mutex (see
-   `vllm_ascend/ascend_config.py`) and the PD-mixed-mode restriction (see
-   `vllm_ascend/platform.py`) are still enforced where they were.
+5. **Existing constraints still apply.** The PD-mixed-mode restriction (see
+   `vllm_ascend/platform.py`) is still enforced where it was.
 
 ## Post-refactor file shape
 

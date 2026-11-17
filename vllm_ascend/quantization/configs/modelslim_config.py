@@ -27,6 +27,7 @@ import os
 from collections.abc import Callable
 from copy import deepcopy
 from functools import wraps
+from types import MethodType
 from typing import Any, Optional
 
 import regex as re
@@ -76,13 +77,53 @@ _MXFP_C8_UNUSED_FA_SUFFIXES = (
 )
 
 
+def _map_modelslim_moe_weight_name(weight_name: str) -> str:
+    """Rewrite a ModelSlim MoE scale-bias name to the upstream scale path."""
+    prefix, separator, param_name = weight_name.rpartition(".")
+    mapped_name = _MOE_WEIGHT_LOADER_NAME_MAP.get(param_name, param_name)
+    return f"{prefix}{separator}{mapped_name}"
+
+
 def _make_modelslim_moe_weight_loader(
     weight_loader: Callable[..., bool | None],
 ) -> Callable[..., bool | None]:
-    """Map ModelSlim MoE scale-bias names to the upstream scale path."""
+    """Map ModelSlim MoE scale-bias names to the upstream scale path.
 
-    @wraps(weight_loader)
+    When ``weight_loader`` is a bound method, the mapped loader is bound to the
+    same owning layer instead of closing over the bound method. vLLM copies
+    parameter attributes into ``LAYERWISE_INFO`` reload metadata while building
+    the meta tensors, and ``sanitize_layer_refs`` only breaks the
+    ``metadata -> tensor -> weight_loader -> layer`` cycle for attributes that
+    are bound methods of that layer. A plain closure keeps the discarded layer
+    (and its real weights) alive through its closure/``__wrapped__`` cell.
+    """
+    if not isinstance(weight_loader, MethodType):
+        # Preserve the existing interface for callables without a bound owner.
+        @wraps(weight_loader)
+        def plain_weight_loader(
+            param: torch.nn.Parameter,
+            loaded_weight: torch.Tensor,
+            weight_name: str,
+            shard_id: str,
+            expert_id: int,
+            return_success: bool = False,
+        ) -> bool | None:
+            return weight_loader(
+                param=param,
+                loaded_weight=loaded_weight,
+                weight_name=_map_modelslim_moe_weight_name(weight_name),
+                shard_id=shard_id,
+                expert_id=expert_id,
+                return_success=return_success,
+            )
+
+        return plain_weight_loader
+
+    owner = weight_loader.__self__
+    unbound_loader = weight_loader.__func__
+
     def modelslim_moe_weight_loader(
+        self: Any,
         param: torch.nn.Parameter,
         loaded_weight: torch.Tensor,
         weight_name: str,
@@ -90,19 +131,32 @@ def _make_modelslim_moe_weight_loader(
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        prefix, separator, param_name = weight_name.rpartition(".")
-        mapped_name = _MOE_WEIGHT_LOADER_NAME_MAP.get(param_name, param_name)
-        mapped_weight_name = f"{prefix}{separator}{mapped_name}"
-        return weight_loader(
+        return unbound_loader(
+            self,
             param=param,
             loaded_weight=loaded_weight,
-            weight_name=mapped_weight_name,
+            weight_name=_map_modelslim_moe_weight_name(weight_name),
             shard_id=shard_id,
             expert_id=expert_id,
             return_success=return_success,
         )
 
-    return modelslim_moe_weight_loader
+    # Copy the metadata by hand: `functools.wraps` would also set
+    # `__wrapped__` to the bound method and reintroduce the layer reference.
+    # Preserve its `__dict__` merge semantics for loader flags such as
+    # `supports_moe_loading` without retaining the bound method.
+    modelslim_moe_weight_loader.__module__ = getattr(
+        unbound_loader, "__module__", modelslim_moe_weight_loader.__module__
+    )
+    modelslim_moe_weight_loader.__name__ = getattr(unbound_loader, "__name__", modelslim_moe_weight_loader.__name__)
+    modelslim_moe_weight_loader.__qualname__ = getattr(
+        unbound_loader, "__qualname__", modelslim_moe_weight_loader.__qualname__
+    )
+    modelslim_moe_weight_loader.__doc__ = getattr(unbound_loader, "__doc__", None)
+    modelslim_moe_weight_loader.__annotations__ = getattr(unbound_loader, "__annotations__", {})
+    modelslim_moe_weight_loader.__dict__.update(getattr(unbound_loader, "__dict__", {}))
+
+    return MethodType(modelslim_moe_weight_loader, owner)
 
 
 # The config filename that ModelSlim generates after quantizing a model.
@@ -605,6 +659,16 @@ class AscendModelSlimConfig(QuantizationConfig):
         gate_types = {quant_types[name] for name in ("g_proj", "f_a_proj", "b_proj")}
         return len(qkv_types) == 1 and None not in qkv_types and qkv_types != {"FLOAT"} and gate_types == {"FLOAT"}
 
+    def uses_kimi_k3_mixed_mla_projection(self, prefix: str) -> bool:
+        """Keep differently quantized MLA output gates out of the Q/KV pack."""
+        quant_types = []
+        for name in ("q_a_proj", "kv_a_proj_with_mqa", "g_proj"):
+            shard_prefix = self.quant_prefix_mapper("kimi_k3", f"{prefix}.{name}")
+            key = _find_quant_description_key(self.quant_description, shard_prefix)
+            quant_types.append(self.quant_description.get(key) if key is not None else None)
+        # Missing descriptions retain the ordinary packed-layer validation.
+        return None not in quant_types and quant_types[0] == quant_types[1] and quant_types[0] != quant_types[2]
+
     def _has_quant_weight(self, prefix: str) -> bool:
         if _find_quant_description_key(self.quant_description, prefix) is not None:
             return True
@@ -720,6 +784,9 @@ class AscendModelSlimConfig(QuantizationConfig):
                 }
             )
             self.packed_modules_mapping.update(mapping)
+        elif model_type == "kimi_k3_mtp":
+            # MTP uses the same MLA pair without the target's KDA mappings.
+            self.packed_modules_mapping["fused_qkv_a_proj"] = ["q_a_proj", "kv_a_proj_with_mqa"]
         if "experts" not in self.packed_modules_mapping:
             shard_names: set[str] = set()
             for key in self.quant_description:
@@ -729,7 +796,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             if shard_names:
                 self.packed_modules_mapping["experts"] = [f"experts.0.{name}" for name in sorted(shard_names)]
 
-    def get_quant_method(self, layer: torch.nn.Module, prefix: str, tid2eid=None) -> Optional["QuantizeMethodBase"]:
+    def get_quant_method(self, layer: torch.nn.Module, prefix: str) -> Optional["QuantizeMethodBase"]:
         from ..method_adapters import (
             AscendEmbeddingMethod,
             AscendFusedMoEMethod,
@@ -764,10 +831,23 @@ class AscendModelSlimConfig(QuantizationConfig):
         if model_type in ("kimi_k3", "kimi_linear") and self.uses_kimi_k3_mixed_kda_projection(prefix):
             quant_type = None
         else:
+            packed_modules_mapping = self.packed_modules_mapping
+            if (
+                model_type in ("kimi_k3", "kimi_linear", "kimi_k3_mtp")
+                and runtime_prefix.endswith(".fused_qkv_a_proj")
+                and len(getattr(layer, "output_sizes", ())) == 3
+            ):
+                # AMD Kimi includes a third gate shard under the same name as
+                # the two-shard draft projection. Validate the actual layout
+                # without changing the shared mapping used by ungated layers.
+                packed_modules_mapping = {
+                    **packed_modules_mapping,
+                    "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa", "g_proj"],
+                }
             quant_type = get_quant_type_for_layer(
                 self.quant_description,
                 runtime_prefix,
-                self.packed_modules_mapping,
+                packed_modules_mapping,
                 prefix_mapper=lambda name: self.quant_prefix_mapper(model_type, name),
             )
 
@@ -831,7 +911,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             layer.weight_loader = _make_modelslim_moe_weight_loader(layer.weight_loader)
             scheme = create_scheme_for_layer(quant_type, prefix, "moe")
             logger.debug("Select AscendFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
-            return AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid)
+            return AscendFusedMoEMethod(scheme, layer.moe_config)
         elif isinstance(layer, VocabParallelEmbedding):
             if quant_type is None:
                 logger.debug("Select UnquantizedEmbeddingMethod for %s (layer=%s)", prefix, "VocabParallelEmbedding")

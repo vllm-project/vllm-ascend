@@ -35,10 +35,7 @@ def test_deepseek_v41_model_call_sites_use_compiled_operator_layouts():
 
 
 def test_compressor_call_sites_use_compiled_modes():
-    for filename, count in (
-        ("models/deepseek_v4/compressor.py", 1),
-        ("attention/context_parallel/dsa_cp.py", 2),
-    ):
+    for filename, count in (("models/deepseek_v4/compressor.py", 1),):
         source = ast.parse((REPO_ROOT / "vllm_ascend" / filename).read_text())
         calls = [
             node

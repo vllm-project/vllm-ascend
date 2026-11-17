@@ -8,24 +8,96 @@ the Ascend token history lives in ``hash_state`` next to the SWA slot cache,
 which is where upstream keeps it too.
 """
 
+from functools import lru_cache
 from pathlib import Path
 
 import torch
 from safetensors import safe_open
 
+_ROTATION_BLOCK_SIZE = 32
+
+
+@lru_cache(maxsize=1)
+@torch.inference_mode()
+def warmup_shared_engram_aicpu() -> None:
+    """Bind the model's AICPU scheduler before importing remote BM mappings.
+
+    On the tested A3 stack, lazy sibling binding after BM imports fails with
+    halMemBindSibling/ioctl errors and stalls decode graph capture. Use the
+    same metadata operator as the model, without touching model weights/RNG.
+    """
+    from vllm_ascend.attention.mixed_quant_sparse_flash_mla import _get_mixed_quant_sparse_flash_mla_ops
+
+    metadata = _get_mixed_quant_sparse_flash_mla_ops()[1]
+    lengths = torch.tensor([128], dtype=torch.int32, device="npu")
+    cu = torch.tensor([0, 1], dtype=torch.int32, device="npu")
+    metadata(
+        64,
+        1,
+        512,
+        3,
+        cu_seqlens_q=cu,
+        seqused_ori_kv=lengths,
+        seqused_cmp_kv=lengths // 4,
+        cmp_residual_kv=lengths % 4,
+        batch_size=1,
+        max_seqlen_q=1,
+        max_seqlen_ori_kv=128,
+        max_seqlen_cmp_kv=32,
+        ori_topk=0,
+        cmp_topk=0,
+        rope_head_dim=64,
+        cmp_ratio=4,
+        ori_mask_mode=4,
+        cmp_mask_mode=3,
+        ori_win_left=127,
+        ori_win_right=0,
+        layout_q="TND",
+        layout_kv="PA_BBND",
+        has_ori_kv=True,
+        has_cmp_kv=True,
+    )
+    torch.npu.synchronize()
+
 
 def load_engram_rotation_block(model_root: str, hidden_size: int, rotation_path: Path | None = None) -> torch.Tensor:
     """Use the A3 Quarot basis, or the native A5 identity basis."""
+    declared = rotation_path is not None
     rotation_path = rotation_path or Path(model_root) / "optional/quarot.safetensors"
     if not rotation_path.is_file():
-        return torch.eye(32)
+        if declared:
+            raise FileNotFoundError(
+                "The checkpoint declares a QuaRot global rotation "
+                "(optional.quarot.rotation_map.global_rotation), but the referenced file is "
+                f"missing: {rotation_path}. Copy optional/quarot.safetensors from the "
+                "checkpoint repository into the model directory before serving. Falling "
+                "back to an identity rotation corrupts Engram gating silently: the trunk "
+                "still generates fluent text while the n-gram branch contributes wrong "
+                "values."
+            )
+        return torch.eye(_ROTATION_BLOCK_SIZE)
     with safe_open(rotation_path, framework="pt") as checkpoint:
         rotation = checkpoint.get_tensor("global_rotation")
-    block = rotation[:32, :32].contiguous()
-    expected = torch.block_diag(*[block] * (hidden_size // 32))
-    if not torch.equal(rotation, expected):
-        raise ValueError("Engram gate requires repeated block32 global rotation")
-    return block
+    if rotation.shape != (hidden_size, hidden_size):
+        raise ValueError(f"Expected global_rotation shape {(hidden_size, hidden_size)}, but got {rotation.shape}")
+    if hidden_size % _ROTATION_BLOCK_SIZE != 0:
+        raise ValueError("Engram gate requires hidden_size divisible by block32")
+
+    num_blocks = hidden_size // _ROTATION_BLOCK_SIZE
+    blocks = rotation.reshape(
+        num_blocks,
+        _ROTATION_BLOCK_SIZE,
+        num_blocks,
+        _ROTATION_BLOCK_SIZE,
+    ).permute(0, 2, 1, 3)
+    diag_blocks = blocks[torch.arange(num_blocks), torch.arange(num_blocks)].contiguous()
+    expected_blocks = torch.zeros_like(blocks)
+    expected_blocks[torch.arange(num_blocks), torch.arange(num_blocks)] = diag_blocks
+    if not torch.equal(blocks, expected_blocks):
+        raise ValueError("Engram gate requires block-diagonal global rotation")
+    if torch.equal(diag_blocks, diag_blocks[:1].expand_as(diag_blocks)):
+        return diag_blocks[0]
+    return diag_blocks
 
 
 def engram_enabled(text_config) -> bool:
@@ -61,7 +133,19 @@ def engram_gate(
     dim = hidden.shape[-1]
     original = hidden.float()
     if rotation_block is not None:
-        original = (original.unflatten(-1, (-1, rotation_block.shape[0])) @ rotation_block.float().T).flatten(-2)
+        if rotation_block.ndim == 2:
+            original = (original.unflatten(-1, (-1, rotation_block.shape[0])) @ rotation_block.float().T).flatten(-2)
+        elif rotation_block.ndim == 3:
+            original = (
+                torch.matmul(
+                    original.unflatten(-1, (rotation_block.shape[0], _ROTATION_BLOCK_SIZE)).unsqueeze(-2),
+                    rotation_block.float().transpose(-1, -2),
+                )
+                .squeeze(-2)
+                .flatten(-2)
+            )
+        else:
+            raise ValueError("Engram gate rotation must be a block or block table")
     key = key.float()
     rstd = torch.rsqrt(original.square().mean(-1) + eps)
     rstd *= torch.rsqrt(key.square().mean(-1) + eps)

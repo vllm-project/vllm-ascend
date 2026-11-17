@@ -28,6 +28,7 @@ def _make_impl(impl_cls=AscendAttentionBackendImpl):
     impl.key_cache = None
     impl.value_cache = None
     impl.sliding_window = None
+    impl._non_causal_swa_attn_mask = None
     impl.sinks = None
     impl.enable_c8_quant = False
     impl._use_max_workspace_for_fia_graph = False
@@ -142,6 +143,9 @@ def test_forward_non_pa_branches_receive_contiguous_kv(branch, contiguous, cross
 
     selected_fia.assert_called_once()
     kwargs = selected_fia.call_args.kwargs
+    if branch == "non_causal":
+        assert kwargs["sparse_mode"] == 0
+        assert "atten_mask" not in kwargs
     assert kwargs["block_table"] is None
     assert kwargs["actual_seq_lengths_kv"] == ([5] if cross_attention else [3])
     for name, original in (("key", key), ("value", value)):
@@ -150,6 +154,26 @@ def test_forward_non_pa_branches_receive_contiguous_kv(branch, contiguous, cross
         assert (kwargs[name].data_ptr() == original.data_ptr()) == contiguous
     assert result is output
     torch.testing.assert_close(output, torch.ones_like(query))
+
+
+@pytest.mark.parametrize("window,expected_mode,expected_tokens", [(None, 0, attn_module.SWA_INT_MAX), (3, 4, 2)])
+def test_non_causal_fia_mask_params(window, expected_mode, expected_tokens):
+    impl = _make_impl()
+    impl.sliding_window = window
+    metadata = _make_metadata()
+    metadata.causal = False
+    mask = object()
+    builder = SimpleNamespace(get_splitfuse_attn_mask=lambda: mask)
+    with patch.object(attn_module, "AttentionMaskBuilder", return_value=builder) as builder_cls:
+        actual = impl._get_fia_mask_params(metadata, torch.device("cpu"))
+        repeated = impl._get_fia_mask_params(metadata, torch.device("cpu"))
+
+    assert actual == (mask if window is not None else None, expected_mode, expected_tokens, expected_tokens)
+    assert repeated == actual
+    if window is None:
+        builder_cls.assert_not_called()
+    else:
+        builder_cls.assert_called_once()
 
 
 @pytest.mark.parametrize("v2", [False, True])
