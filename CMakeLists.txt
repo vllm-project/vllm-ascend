@@ -235,7 +235,7 @@ if(SOC_VERSION MATCHES "ascend910_93.*")
       aclrtMemFabricHandle handle{};
       (void)handle;
       (void)ACL_MEM_P2P_HUGE1G;
-      (void)ACL_MEM_LOCATION_TYPE_HOST_NUMA;
+      (void)ACL_MEM_LOCATION_TYPE_HOST;
       (void)ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION;
       (void)aclrtMemExportToShareableHandleV2;
       (void)aclrtMemImportFromShareableHandleV2;

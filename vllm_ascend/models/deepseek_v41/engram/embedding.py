@@ -315,10 +315,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             buffer = getattr(self, name)
             if buffer is None:
                 continue
-            if isinstance(buffer, LocalSharedVmmBuffer):
-                buffer.close_collective()
-            else:
-                buffer.close()
+            buffer.close()
             setattr(self, name, None)
             param = getattr(self, alias)
             setattr(
