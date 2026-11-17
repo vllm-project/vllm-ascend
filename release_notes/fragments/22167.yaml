@@ -1,0 +1,4 @@
+pr: 22167
+entries:
+  - category: performance
+    text: Reduced scheduler CPU work for long-context Mooncake V2 P/D requests on Ascend by avoiding repeated hashing of unchanged prompt prefixes after producer-side truncation. No configuration changes are required.
