@@ -775,6 +775,11 @@ def test_split_decode_packs_on_main_overlapping_current_attention(dcp_size, dcp_
     impl._run_dcp_mtp_split_attention_op = attention
     impl._v_up_proj_batch_major = Mock(side_effect=lambda x: x)
     with (
+        patch.object(
+            mla_cp,
+            "_EXTRA_CTX",
+            SimpleNamespace(capturing=False, is_draft_model=False, is_draft_model_prefill=False),
+        ),
         patch.object(mla_cp, "cp_decode_comm_stream", return_value=attn),
         patch.object(torch.npu, "current_stream", return_value=main),
         patch.object(torch.npu, "stream", side_effect=on_stream),

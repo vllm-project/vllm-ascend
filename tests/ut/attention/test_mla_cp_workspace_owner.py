@@ -21,8 +21,8 @@ from vllm_ascend.compilation import updatable_graph
 def test_fia_workspace_is_owned_and_reused_by_selected_graph(draft, prefill):
     def registry():
         graph = SimpleNamespace(capture_resources={})
-        graph.get_capture_resource = lambda key, factory: updatable_graph.UpdatableGraph.get_capture_resource(
-            graph, key, factory
+        graph.get_capture_resource = lambda key, factory, use_max_workspace=False: (
+            updatable_graph.UpdatableGraph.get_capture_resource(graph, key, factory, use_max_workspace)
         )
         graph.register_task = lambda operation, kwargs, provider: operation(**kwargs)
         return graph
