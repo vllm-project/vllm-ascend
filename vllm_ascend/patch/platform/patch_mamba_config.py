@@ -124,7 +124,14 @@ def verify_and_update_config(cls, vllm_config) -> None:
         min_block_size = cdiv(mamba_raw_page_size, attn_token_page_size)
         requested_block_size = cache_config.block_size or kernel_block_size
         attn_block_size = alignment_tokens * cdiv(max(requested_block_size, min_block_size), alignment_tokens)
-        if sfa_c8_packed:
+        kv_transfer = vllm_config.kv_transfer_config
+        preserve_mooncake_block_size = (
+            getattr(cache_config, "user_specified_block_size", False)
+            and kv_transfer is not None
+            and kv_transfer.kv_connector == "MooncakeConnectorV2"
+        )
+        # Mooncake peers with different state shards need a shared state block size.
+        if sfa_c8_packed and not preserve_mooncake_block_size:
             # The packed C8 page must cover the mamba state page, otherwise
             # the page-strided KV view gains a per-block hole and the CANN
             # operator's AutoContiguous copies the whole KV pool once per

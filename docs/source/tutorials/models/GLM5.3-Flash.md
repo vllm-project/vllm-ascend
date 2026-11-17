@@ -37,6 +37,12 @@ Decode keeps PCP1.
 The [A3 ordinary PD examples](#glm53-flash-5-3-a3) use Prefill Context
 Parallelism (PCP) and BF16 SSM state (`--mamba-ssm-cache-dtype bfloat16`).
 
+Model runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`) can skip redundant KPool query selection for full-visible query prefixes in pure prefill batches. On A3 with TP8, PCP1, DCP1 and `--kv-cache-dtype int8`, eligible prefill batches use projected K/V and request-local masked MHA while preserving KPool selection. Other eligible full-visible prefixes use dense FIA. Routing uses measured shape and workspace limits. In PD deployments, these optimizations apply only to the KV producer. KV consumers, decode and mixed prefill/decode batches retain the existing paths, including MTP decode.
+
+PCP-sharded and TP row-sharded query layouts retain normal KPool query selection. The TP8 attention optimization uses PCP1 and does not apply to the PCP8/TP1 PD examples below.
+
+Mooncake P/D peers with different TP/PCP layouts must use the same explicit `--block-size`, large enough for both recurrent-state pages. C8 preserves this shared block size for state handoff.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight

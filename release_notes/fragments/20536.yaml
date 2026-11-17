@@ -1,0 +1,12 @@
+pr: 20536
+entries:
+  - category: performance
+    text: >-
+      Improved GLM-5.3-Flash C8 prefill latency for eligible pure prefill batches
+      on A3 with model runner V2 and TP8, including PD producers.
+    model: GLM-5.3-Flash
+    hardware: [A3]
+  - category: bugfix
+    text: >-
+      Preserved explicit shared C8 block sizes for Mooncake P/D peers with
+      different TP/PCP layouts.
