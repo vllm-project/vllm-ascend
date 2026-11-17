@@ -225,6 +225,12 @@ else()
   )
 endif()
 
+# A2/A3 build the arch22 HiSparse kernels through the standard aclnn op
+# pipeline; the flag only switches the host-side adapter branches.
+if(SOC_VERSION MATCHES "ascend910b.*|ascend910_93.*")
+  target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_HISPARSE_ARCH22)
+endif()
+
 target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/custom_transformer/op_api/lib")
 
 if(EXISTS "${ASCEND_HOME_PATH}/include/hixl/hixl.h")

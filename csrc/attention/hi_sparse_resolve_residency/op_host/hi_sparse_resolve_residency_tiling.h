@@ -8,7 +8,14 @@
 
 namespace optiling {
 
+// Launch modes carried in the `mode` attribute: one def/kernel/aclnn wrapper
+// serves all three HiSparse launches.
+constexpr uint32_t kHiSparseModeResolve = 0;
+constexpr uint32_t kHiSparseModeInvalidate = 1;
+constexpr uint32_t kHiSparseModeAccumulate = 2;
+
 BEGIN_TILING_DATA_DEF(HiSparseResolveResidencyTilingData)
+TILING_DATA_FIELD_DEF(uint32_t, mode);
 TILING_DATA_FIELD_DEF(uint64_t, rows);
 TILING_DATA_FIELD_DEF(uint64_t, topk);
 TILING_DATA_FIELD_DEF(uint64_t, hotSlots);
@@ -35,6 +42,12 @@ TILING_DATA_FIELD_DEF(uint64_t, hashSize);
 TILING_DATA_FIELD_DEF(uint64_t, attentionCapacity);
 TILING_DATA_FIELD_DEF(uint64_t, byteMissMask);
 TILING_DATA_FIELD_DEF(uint32_t, ubBytes);
+TILING_DATA_FIELD_DEF(uint32_t, invalidateWritten64);
+TILING_DATA_FIELD_DEF(uint64_t, invalidateGroupCount);
+TILING_DATA_FIELD_DEF(uint64_t, invalidateRequestCount);
+TILING_DATA_FIELD_DEF(uint64_t, invalidateStateCount);
+TILING_DATA_FIELD_DEF(uint64_t, invalidateTokens);
+TILING_DATA_FIELD_DEF(uint64_t, invalidateRegion);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(HiSparseResolveResidency, HiSparseResolveResidencyTilingData)
