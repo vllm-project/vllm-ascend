@@ -99,10 +99,6 @@ PARTIAL_LEASE_RETRY_INTERVAL_S = 0.001
 SAVE_BATCH_FAILURE_POLL_INTERVAL_S = 1.0
 
 
-# (GVA output array, request block indices, pool keys, last key uses the tail GVA)
-_GroupLoadPlan = tuple[np.ndarray, list[int], list[str], bool]
-
-
 class LayerwiseKVPoolWorker(BaseKVPoolWorker):
     def __init__(
         self,
@@ -1718,6 +1714,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             cached_full_blocks = cached_tokens // block_size
             full_blocks = min(cached_full_blocks, len(group_block_hashes))
             if self.layerwise_offload and request.load_spec.layerwise_previous_step:
+                if not reuses_buffer:
+                    continue
                 full_blocks = 0 if self.group_uses_align_state[group_id] else cached_full_blocks
             partial_block_index, _ = self._resolve_layerwise_load_partial(
                 request,
@@ -1822,218 +1820,266 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         return partial_block_index, cached_tokens
 
     def _prepare_load_gvas(self, requests: list[ReqMeta]) -> bool | None:
+        """Fetch per-rank GVA and acquire read lease for the load path.
+
+        memcache requires batch_copy (read) to find the blob in the per-process
+        gvaBlobTracker with a valid lease. The scheduler only checks existence
+        (batch_is_exist) to decide the load range; before batch_copy(G2L) the
+        worker must, for its own per-rank keys:
+          1. Rewarm SSD-only keys through the backend, then query a resident GVA.
+          2. Acquire a read lease and refresh the GVA while its allocation is pinned.
+        """
         if not self.use_layerwise_transfer:
+            return None
+
+        def prepare_request(request: ReqMeta) -> bool | None:
+            assert request.load_spec is not None
+            cached_tokens = request.load_spec.kvpool_cached_tokens
+            if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
+                cached_tokens = request.load_spec.kvpool_store_skip_tokens
+            if (
+                getattr(self, "use_eagle", False)
+                and request.load_spec.kvpool_cached_tokens == request.target_token_len - 1
+            ):
+                # Full-hit path: the trailing block is recomputed and will be
+                # re-stored by the normal save path, so never skip it here.
+                logger.debug(
+                    "Reqid: %s full-hit tail recompute path, tail block will be re-stored",
+                    request.req_id,
+                )
+            block_hashes = request.block_hashes
+            request.load_masks = self._compute_reachable_load_masks(request, cached_tokens)
+
+            # One entry per group: allocated block IDs, load indices, keys and trailing slot.
+            groups: list[tuple[np.ndarray | None, list[int], list[str], int | None]] = []
+            restore_previous_step = self.layerwise_offload and request.load_spec.layerwise_previous_step
+            for group_id in range(self.num_kv_cache_groups):
+                if group_id not in self.cacheable_group_ids:
+                    groups.append((None, [], [], None))
+                    continue
+                group_block_size = self.grouped_block_size[group_id]
+                effective_block_size = group_block_size
+
+                group_block_hashes = get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)
+                load_start_block = (
+                    0 if self.layerwise_offload else request.load_spec.vllm_cached_tokens // effective_block_size
+                )
+                cached_full_blocks = cached_tokens // effective_block_size
+                full_blocks = min(cached_full_blocks, len(group_block_hashes))
+                get_saved_key = None
+                if restore_previous_step:
+                    snapshot = self._get_layerwise_load_snapshot(request, group_id, cached_tokens, group_block_hashes)
+                    if snapshot is None:
+                        groups.append((None, [], [], None))
+                        continue
+                    full_blocks, get_saved_key = snapshot
+
+                block_ids_by_group = (
+                    request.block_ids_by_group_np[group_id]
+                    if (request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np))
+                    else request.block_ids_np
+                )
+                if block_ids_by_group is None:
+                    if get_saved_key is not None:
+                        return False
+                    groups.append((None, [], [], None))
+                    continue
+                full_len = len(block_ids_by_group)
+
+                partial_block_index, partial_end_token = self._resolve_layerwise_load_partial(
+                    request,
+                    group_id,
+                    cached_tokens,
+                    effective_block_size,
+                    len(group_block_hashes),
+                )
+                if partial_block_index is not None and (
+                    partial_block_index < load_start_block or partial_block_index >= full_len
+                ):
+                    if get_saved_key is not None:
+                        return False
+                    partial_block_index = None
+
+                if load_start_block >= full_blocks and partial_block_index is None:
+                    groups.append((block_ids_by_group, [], [], None))
+                    continue
+
+                group_load_mask = (
+                    request.load_masks[group_id]
+                    if request.load_masks is not None and group_id < len(request.load_masks)
+                    else None
+                )
+                block_indices = [
+                    block_idx
+                    for block_idx in range(load_start_block, full_blocks)
+                    if block_idx != partial_block_index
+                    and (group_load_mask is None or block_idx >= len(group_load_mask) or group_load_mask[block_idx])
+                ]
+                if any(block_idx >= full_len for block_idx in block_indices):
+                    logger.error(
+                        "Memcache load range exceeds allocated blocks: req=%s group=%d "
+                        "load_blocks=[%d,%d) allocated_blocks=%d",
+                        request.req_id,
+                        group_id,
+                        load_start_block,
+                        full_blocks,
+                        full_len,
+                    )
+                    return False
+
+                keys = []
+                if partial_block_index is not None:
+                    block_indices.append(partial_block_index)
+                for block_idx in block_indices:
+                    if get_saved_key is not None:
+                        key = get_saved_key(block_idx)
+                        if key is None:
+                            return False
+                    elif block_idx == partial_block_index:
+                        key = self._make_layerwise_partial_key(request, group_id, block_idx, partial_end_token)
+                    else:
+                        block_hash = block_hash_to_str(group_block_hashes[block_idx])
+                        key = self._make_layerwise_full_key(group_id, block_hash)
+                    keys.append(key)
+                groups.append((block_ids_by_group, block_indices, keys, partial_block_index))
+
+            all_group_load_gvas: list[np.ndarray] = []
+            all_group_load_keys: list[str] = []
+            partial_load_gvas = [0] * self.num_kv_cache_groups
+            for group_id, (block_ids_by_group, block_indices, keys, partial_block_index) in enumerate(groups):
+                if block_ids_by_group is None:
+                    all_group_load_gvas.append(np.zeros(0, dtype=np.int64))
+                    continue
+                full_len = len(block_ids_by_group)
+                if not keys:
+                    all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
+                    continue
+                has_partial_key = partial_block_index is not None
+                key_infos = self.m_store.batch_get_key_info(keys, for_load=True)
+                if key_infos is None or len(key_infos) != len(keys):
+                    return False
+                gvas = []
+                valid_gva_indices = []
+                invalid_block_ids: list[int] = []
+                for ki, key, block_idx in zip(key_infos, keys, block_indices):
+                    # A None entry means the key is absent from the store;
+                    # treat it like an unreadable block (gva=0) below.
+                    sizes = ki.size() if ki is not None else 0
+                    gva = next((address for address in ki.gva_list() if address > 0), 0) if sizes and sizes > 0 else 0
+                    gvas.append(gva)
+                    if gva > 0:
+                        valid_gva_indices.append(len(gvas) - 1)
+                    else:
+                        if block_idx < len(block_ids_by_group):
+                            invalid_block_ids.append(int(block_ids_by_group[block_idx]))
+                        logger.warning(
+                            "load_gvas: req=%s group=%d got invalid gva=%d (size=%d), block_id=%s load failed",
+                            request.req_id,
+                            group_id,
+                            gva,
+                            sizes if sizes else 0,
+                            int(block_ids_by_group[block_idx]) if block_idx < len(block_ids_by_group) else "N/A",
+                        )
+
+                # Only call batch_add_lease for keys with valid size.
+                valid_keys = [keys[index] for index in valid_gva_indices]
+                if valid_keys:
+                    lease_results = self.m_store.batch_add_lease(valid_keys, LAYERWISE_READ_LEASE_TTL_MS)
+                    if lease_results is None or len(lease_results) != len(valid_keys):
+                        return False
+                    for key, res in zip(valid_keys, lease_results):
+                        if res == 0:
+                            self._step_load_keys.add(key)
+                    leased_keys = []
+                    for gva_index, lease_res in zip(valid_gva_indices, lease_results):
+                        block_idx = block_indices[gva_index]
+                        if lease_res == MEMCACHE_UNMATCHED_STATE and block_idx == partial_block_index:
+                            partial_key = keys[gva_index]
+                            for retry in range(1, PARTIAL_LEASE_RETRY_COUNT + 1):
+                                time.sleep(PARTIAL_LEASE_RETRY_INTERVAL_S)
+                                retry_results = self.m_store.batch_add_lease(
+                                    [partial_key],
+                                    LAYERWISE_READ_LEASE_TTL_MS,
+                                )
+                                if retry_results is None or len(retry_results) != 1:
+                                    return False
+                                lease_res = retry_results[0]
+                                if lease_res == 0:
+                                    self._step_load_keys.add(partial_key)
+                                if lease_res != MEMCACHE_UNMATCHED_STATE:
+                                    break
+                        block_id = int(block_ids_by_group[block_idx]) if block_idx < len(block_ids_by_group) else None
+                        if lease_res == 0:
+                            leased_keys.append(keys[gva_index])
+                        else:
+                            gvas[gva_index] = 0
+                            if block_id is not None:
+                                invalid_block_ids.append(block_id)
+                            logger.warning(
+                                "load_gvas: req=%s group=%d lease failed result=%d, block_id=%s load failed",
+                                request.req_id,
+                                group_id,
+                                lease_res,
+                                block_id,
+                            )
+                else:
+                    lease_results = []
+                    leased_keys = []
+
+                # Query under the acquired lease: rewarm can leave the SSD
+                # descriptor first, and its GVA is zero. The lease pins the
+                # current DRAM allocation until all layer copies finish.
+                if leased_keys:
+                    leased_infos = self.m_store.batch_get_key_info(leased_keys)
+                    if leased_infos is None or len(leased_infos) != len(leased_keys):
+                        return False
+                    key_indices: dict[str, int] = {}
+                    for index, key in enumerate(keys):
+                        # Preserve keys.index()'s first occurrence for repeated keys.
+                        key_indices.setdefault(key, index)
+                    for key, info in zip(leased_keys, leased_infos, strict=True):
+                        index = key_indices[key]
+                        gvas[index] = (
+                            next((address for address in info.gva_list() if address > 0), 0) if info is not None else 0
+                        )
+                        if not gvas[index]:
+                            invalid_block_ids.append(int(block_ids_by_group[block_indices[index]]))
+
+                if invalid_block_ids:
+                    return False
+                all_group_load_keys.extend(leased_keys)
+
+                # Pad to match block_ids_by_group length, filling only the
+                # positions whose keys were actually queried (the trailing
+                # partial key is excluded from the per-position fill).
+                full_gvas = [0] * full_len
+                full_key_count = len(block_indices) - (1 if has_partial_key else 0)
+                for gva_index in range(full_key_count):
+                    block_idx = block_indices[gva_index]
+                    if block_idx < len(full_gvas):
+                        full_gvas[block_idx] = gvas[gva_index]
+                all_group_load_gvas.append(np.asarray(full_gvas, dtype=np.int64))
+                if has_partial_key and gvas:
+                    partial_load_gvas[group_id] = gvas[-1]
+
+            if all_group_load_gvas:
+                request.load_keys = all_group_load_keys
+                request.load_block_gvas_by_group_np = all_group_load_gvas
+                request.load_block_gvas_np = all_group_load_gvas[0]
+                request.partial_load_gva_per_group = partial_load_gvas
+                request.load_gva_block_offset = 0
             return None
 
         failed = False
         for request in requests:
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
-            groups = self._plan_load_gvas_for_request(request)
-            if groups is None:
-                self._fail_load_preparation(request)
+            if prepare_request(request) is False:
+                logger.error("Memcache load preparation failed for %s", request.req_id)
+                self._record_failed_request(request)
+                request.load_spec.can_load = False
                 failed = True
-                continue
-
-            group_gvas = []
-            load_keys = []
-            partial_gvas = []
-            for gvas, block_indices, keys, has_partial in groups:
-                values = self._lease_load_gvas(keys, {len(keys) - 1} if has_partial else None)
-                if values is None or not all(values):
-                    self._fail_load_preparation(request)
-                    failed = True
-                    break
-                if has_partial:
-                    gvas[block_indices[:-1]] = values[:-1]
-                    partial_gvas.append(values[-1])
-                else:
-                    gvas[block_indices] = values
-                    partial_gvas.append(0)
-                group_gvas.append(gvas)
-                load_keys.extend(keys)
-            else:
-                if group_gvas:
-                    request.load_keys = load_keys
-                    request.load_block_gvas_by_group_np = group_gvas
-                    request.load_block_gvas_np = group_gvas[0]
-                    request.partial_load_gva_per_group = partial_gvas
-                    request.load_gva_block_offset = 0
         return False if failed else None
-
-    def _fail_load_preparation(self, request: ReqMeta) -> None:
-        logger.error("Memcache load preparation failed for %s", request.req_id)
-        self._record_failed_request(request)
-        assert request.load_spec is not None
-        request.load_spec.can_load = False
-
-    def _lease_load_gvas(self, keys: list[str], partial_slots: set[int] | None = None) -> list[int] | None:
-        if not keys:
-            return []
-        infos = self.m_store.batch_get_key_info(keys, for_load=True)
-        if infos is None or len(infos) != len(keys):
-            return None
-        gvas = []
-        readable_indices = []
-        for index, (key, info) in enumerate(zip(keys, infos, strict=True)):
-            size = info.size() if info is not None else 0
-            address = next((gva for gva in info.gva_list() if gva > 0), 0) if size and size > 0 else 0
-            gvas.append(address)
-            if address:
-                readable_indices.append(index)
-            else:
-                logger.warning("load_gvas: key=%s has no readable GVA", key)
-        if not readable_indices:
-            return gvas
-
-        readable_keys = [keys[index] for index in readable_indices]
-        results = self.m_store.batch_add_lease(readable_keys, LAYERWISE_READ_LEASE_TTL_MS)
-        if results is None or len(results) != len(readable_keys):
-            return None
-        self._step_load_keys.update(key for key, result in zip(readable_keys, results, strict=True) if result == 0)
-        leased_keys = []
-        for index, result in zip(readable_indices, results, strict=True):
-            key = keys[index]
-            if result == MEMCACHE_UNMATCHED_STATE and partial_slots is not None and index in partial_slots:
-                for _ in range(PARTIAL_LEASE_RETRY_COUNT):
-                    time.sleep(PARTIAL_LEASE_RETRY_INTERVAL_S)
-                    retry = self.m_store.batch_add_lease([key], LAYERWISE_READ_LEASE_TTL_MS)
-                    if retry is None or len(retry) != 1:
-                        return None
-                    result = retry[0]
-                    if result == 0:
-                        self._step_load_keys.add(key)
-                    if result != MEMCACHE_UNMATCHED_STATE:
-                        break
-            if result == 0:
-                leased_keys.append(key)
-            else:
-                gvas[index] = 0
-                logger.warning("load_gvas: key=%s lease failed result=%s", key, result)
-        if not leased_keys:
-            return gvas
-
-        # Refresh only after the lease pins the current allocation.
-        infos = self.m_store.batch_get_key_info(leased_keys)
-        if infos is None or len(infos) != len(leased_keys):
-            return None
-        key_indices: dict[str, int] = {}
-        for index, key in enumerate(keys):
-            key_indices.setdefault(key, index)
-        for key, info in zip(leased_keys, infos, strict=True):
-            address = next((gva for gva in info.gva_list() if gva > 0), 0) if info is not None else 0
-            if address == 0:
-                return None
-            gvas[key_indices[key]] = address
-        return gvas
-
-    def _plan_load_gvas_for_request(self, request: ReqMeta) -> list[_GroupLoadPlan] | None:
-        assert request.load_spec is not None
-        cached_tokens = request.load_spec.kvpool_cached_tokens
-        if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
-            cached_tokens = request.load_spec.kvpool_store_skip_tokens
-        if getattr(self, "use_eagle", False) and request.load_spec.kvpool_cached_tokens == request.target_token_len - 1:
-            # Full-hit path: the trailing block is recomputed and will be
-            # re-stored by the normal save path, so never skip it here.
-            logger.debug(
-                "Reqid: %s full-hit tail recompute path, tail block will be re-stored",
-                request.req_id,
-            )
-        block_hashes = request.block_hashes
-        request.load_masks = self._compute_reachable_load_masks(request, cached_tokens)
-
-        groups: list[_GroupLoadPlan] = []
-        restore_previous_step = self.layerwise_offload and request.load_spec.layerwise_previous_step
-        for group_id in range(self.num_kv_cache_groups):
-            if group_id not in self.cacheable_group_ids:
-                groups.append((np.zeros(0, dtype=np.int64), [], [], False))
-                continue
-            group_block_size = self.grouped_block_size[group_id]
-            effective_block_size = group_block_size
-
-            group_block_hashes = get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)
-            load_start_block = (
-                0 if self.layerwise_offload else request.load_spec.vllm_cached_tokens // effective_block_size
-            )
-            cached_full_blocks = cached_tokens // effective_block_size
-            full_blocks = min(cached_full_blocks, len(group_block_hashes))
-            get_saved_key = None
-            if restore_previous_step:
-                snapshot = self._get_layerwise_load_snapshot(request, group_id, cached_tokens, group_block_hashes)
-                if snapshot is None:
-                    groups.append((np.zeros(0, dtype=np.int64), [], [], False))
-                    continue
-                full_blocks, get_saved_key = snapshot
-
-            block_ids_by_group = (
-                request.block_ids_by_group_np[group_id]
-                if (request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np))
-                else request.block_ids_np
-            )
-            if block_ids_by_group is None:
-                if get_saved_key is not None:
-                    return None
-                groups.append((np.zeros(0, dtype=np.int64), [], [], False))
-                continue
-            full_len = len(block_ids_by_group)
-
-            partial_block_index, partial_end_token = self._resolve_layerwise_load_partial(
-                request,
-                group_id,
-                cached_tokens,
-                effective_block_size,
-                len(group_block_hashes),
-            )
-            if partial_block_index is not None and (
-                partial_block_index < load_start_block or partial_block_index >= full_len
-            ):
-                if get_saved_key is not None:
-                    return None
-                partial_block_index = None
-
-            if load_start_block >= full_blocks and partial_block_index is None:
-                groups.append((np.zeros(full_len, dtype=np.int64), [], [], False))
-                continue
-
-            group_load_mask = (
-                request.load_masks[group_id]
-                if request.load_masks is not None and group_id < len(request.load_masks)
-                else None
-            )
-            block_indices = [
-                block_idx
-                for block_idx in range(load_start_block, full_blocks)
-                if block_idx != partial_block_index
-                and (group_load_mask is None or block_idx >= len(group_load_mask) or group_load_mask[block_idx])
-            ]
-            if any(block_idx >= full_len for block_idx in block_indices):
-                logger.error(
-                    "Memcache load range exceeds allocated blocks: req=%s group=%d "
-                    "load_blocks=[%d,%d) allocated_blocks=%d",
-                    request.req_id,
-                    group_id,
-                    load_start_block,
-                    full_blocks,
-                    full_len,
-                )
-                return None
-
-            keys = []
-            if partial_block_index is not None:
-                block_indices.append(partial_block_index)
-            for block_idx in block_indices:
-                if get_saved_key is not None:
-                    key = get_saved_key(block_idx)
-                    if key is None:
-                        return None
-                elif block_idx == partial_block_index:
-                    key = self._make_layerwise_partial_key(request, group_id, block_idx, partial_end_token)
-                else:
-                    block_hash = block_hash_to_str(group_block_hashes[block_idx])
-                    key = self._make_layerwise_full_key(group_id, block_hash)
-                keys.append(key)
-            groups.append((np.zeros(full_len, dtype=np.int64), block_indices, keys, partial_block_index is not None))
-        return groups
 
     def _check_hybrid_load_errors(self) -> None:
         # Memcache reports invalid blocks through the existing scheduler policy.
