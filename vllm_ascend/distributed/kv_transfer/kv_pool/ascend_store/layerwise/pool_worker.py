@@ -2303,6 +2303,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             return True
 
         if getattr(self, "has_shared_kv", False):
+            assert self.hf_config is not None
             source_layers = self.hf_config.kv_source_layer_ids
             window_end = self.current_layer
             if self.current_layer >= source_layers[-1]:
