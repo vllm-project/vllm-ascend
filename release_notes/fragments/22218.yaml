@@ -1,0 +1,7 @@
+pr: 22218
+entries:
+  - category: feature
+    text: >-
+      Added opt-in prefix expert reduction for Qwen3.5 MoE and MTP functional
+      debugging through additional_config.expert_reduction.num_experts.
+      This changes model outputs and does not preserve full-model accuracy.
