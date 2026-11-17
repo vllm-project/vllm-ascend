@@ -1827,3 +1827,18 @@
 #    Future Plan:
 #      Remove when upstream adds dirty tracking to UvaBackedTensor flushes.
 #
+# ** 37. File: worker/patch_encoder_runner.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.mm.encoder_runner.PIN_MEMORY`
+#    Why:
+#      Large multimodal inputs can exhaust the NPU driver's pinned-host pool
+#      during encoder profiling and request processing.
+#    How:
+#      Use pageable host staging for encoder H2D transfers and embedding-index
+#      buffers, without changing unrelated pinned-memory users.
+#    Related PR:
+#      No upstream PR; the encoder currently has no backend-specific staging hook.
+#    Future Plan:
+#      Remove this override when upstream provides a backend-specific encoder
+#      host-staging policy.
+#
