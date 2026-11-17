@@ -29,7 +29,7 @@ def _fake_ops(calls, prefix):
 
 
 def test_dispatch_prefers_the_ascend_operator(monkeypatch):
-    calls = []
+    calls: list[tuple[str, tuple]] = []
     monkeypatch.setattr(patch_indexer_topk, "_LOOKUP", _fake_ops(calls, "ascend").get)
 
     target = types.SimpleNamespace(**_fake_ops(calls, "vllm"))
@@ -43,7 +43,7 @@ def test_dispatch_prefers_the_ascend_operator(monkeypatch):
 
 def test_dispatch_falls_back_while_the_operator_is_not_registered(monkeypatch):
     """Before ``vllm_ascend_C`` is imported the patch must not change behaviour."""
-    calls = []
+    calls: list[tuple[str, tuple]] = []
     monkeypatch.setattr(patch_indexer_topk, "_LOOKUP", lambda name: None)
 
     target = types.SimpleNamespace(**_fake_ops(calls, "vllm"))
@@ -85,7 +85,7 @@ def test_auto_backend_resolves_to_per_row_without_cuda():
 
 def test_indexer_per_row_backend_reaches_the_ascend_operator(monkeypatch):
     """vLLM's indexer must end up calling the AscendC operator, unmodified."""
-    calls = []
+    calls: list[tuple[str, tuple]] = []
     monkeypatch.setattr(patch_indexer_topk, "_LOOKUP", _fake_ops(calls, "ascend").get)
 
     num_rows, width, topk_tokens, next_n = 2, 8, 3, 1
