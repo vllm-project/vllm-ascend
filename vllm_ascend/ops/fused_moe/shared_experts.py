@@ -49,7 +49,12 @@ from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
 from vllm_ascend.ops.linear_op import SharedExpertColumnParallelOp, SharedExpertRowParallelOp
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, npu_stream_switch, shared_experts_calculation_stream
+from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_NZ,
+    npu_stream_switch,
+    shared_expert_tp_enable,
+    shared_experts_calculation_stream,
+)
 
 # CANN uses 36 to select FP8 E4M3FN output for situ_mx_quant.
 SITU_MX_DST_TYPE_E4M3FN = 36
@@ -146,7 +151,7 @@ class AscendSharedExperts:
         self.multistream_overlap = ascend_config.multistream_overlap_shared_expert
         self.weights_replicated = ascend_config.enable_shared_expert_dp
         self.finegrained_tp_group = None
-        if ascend_config.finegrained_tp_config.shared_expert_tensor_parallel_size > 1:
+        if shared_expert_tp_enable():
             if not isinstance(
                 getattr(layer.gate_up_proj, "custom_op", None), SharedExpertColumnParallelOp
             ) or not isinstance(getattr(layer.down_proj, "custom_op", None), SharedExpertRowParallelOp):

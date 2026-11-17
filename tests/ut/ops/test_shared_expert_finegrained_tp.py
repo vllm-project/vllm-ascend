@@ -103,6 +103,7 @@ def test_shared_runner_checks_linear_layout(monkeypatch, gather_output, input_is
         is_sequence_parallel=False,
     )
     monkeypatch.setattr(shared_module, "get_ascend_config", lambda: config)
+    monkeypatch.setattr("vllm_ascend.utils.get_ascend_config", lambda: config)
     monkeypatch.setattr(shared_module, "get_shared_expert_tp_group", lambda: group)
     if gather_output or not input_is_parallel:
         with pytest.raises(ValueError, match="partitioned down input"):
