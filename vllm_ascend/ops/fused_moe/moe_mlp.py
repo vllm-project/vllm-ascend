@@ -93,6 +93,8 @@ def _unified_apply_activation(
     elif activation == MoEActivation.SWIGLUOAI:
         weights = quant_method.get_mlp_weights(mlp_compute_input.layer)
         w1 = weights.w1
+        if isinstance(w1, list):
+            w1 = w1[0]
         _, _, hidden_size = w1.shape
         hidden_states = AscendSwigluOAIAndMul.swiglu_oai_forward(hidden_states.view(-1, hidden_size))
     elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:

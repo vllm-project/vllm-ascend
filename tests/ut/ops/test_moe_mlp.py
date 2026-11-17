@@ -653,6 +653,21 @@ class TestUnifiedApplyActivation(unittest.TestCase):
         self.assertEqual(out, "out")
         mock_act.assert_called_once()
 
+    def test_swigluoai_uses_first_expert_weight_shape(self):
+        quant_method = self._quant_method()
+        quant_method.get_mlp_weights.return_value = MoEWeights(
+            w1=[torch.randn(2, 8, 16)], w2=[torch.randn(2, 16, 8)]
+        )
+        with patch(f"{MOE_MLP}.AscendSwigluOAIAndMul.swiglu_oai_forward", return_value="out") as mock_act:
+            out = _unified_apply_activation(
+                _mlp_compute_input(activation=MoEActivation.SWIGLUOAI),
+                torch.randn(2, 32),
+                quant_method,
+            )
+
+        self.assertEqual(out, "out")
+        self.assertEqual(mock_act.call_args.args[0].shape, torch.Size([4, 16]))
+
 
 if __name__ == "__main__":
     unittest.main()
