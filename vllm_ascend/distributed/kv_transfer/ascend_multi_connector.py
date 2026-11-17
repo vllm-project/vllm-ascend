@@ -20,13 +20,39 @@ if TYPE_CHECKING:
 
 class AscendMultiConnector(MultiConnector, SupportsHMA):
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole, kv_cache_config: "KVCacheConfig"):
+        transfer = vllm_config.kv_transfer_config
+        assert transfer is not None
+        children = transfer.kv_connector_extra_config.get("connectors", ())
+        names = {child.get("kv_connector") for child in children}
+        colocated_pair = {"HiSparseConnector", "AscendStoreConnector"}
+        if colocated_pair <= names:
+            # Both children share the local Host Source and Indexer import path.
+            # Reject other transfer topologies before creating any child.
+            if transfer.kv_role != "kv_both" or any(child.get("kv_role") != "kv_both" for child in children):
+                raise ValueError(
+                    "HiSparse with AscendStore requires kv_role='kv_both' on MultiConnector and all children. "
+                    "PD disaggregation is unsupported."
+                )
+            if names != colocated_pair:
+                raise ValueError(
+                    "HiSparse with AscendStore supports only HiSparseConnector and AscendStoreConnector children."
+                )
+            nnodes = vllm_config.parallel_config.nnodes
+            if role == KVConnectorRole.WORKER and nnodes == 1:
+                from vllm.distributed.parallel_state import get_node_count
+
+                nnodes = get_node_count()
+            if nnodes != 1:
+                raise ValueError(
+                    f"HiSparse with AscendStore requires single-node colocated Prefill and Decode, got {nnodes} nodes."
+                )
+
         super().__init__(
             vllm_config=vllm_config,
             role=role,
             kv_cache_config=kv_cache_config,
         )
 
-        transfer = vllm_config.kv_transfer_config
         self._requires_full_dspark_prompt = (
             uses_sfa_dspark_kv_transfer(vllm_config) and transfer.is_kv_producer and not transfer.is_kv_consumer
         )
