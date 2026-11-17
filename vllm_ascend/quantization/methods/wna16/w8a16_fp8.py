@@ -41,8 +41,11 @@ class AscendW8A16FP8FusedMoEMethod(AscendMoEScheme):
     - Weights are stored in torch.float8_e4m3fn, activations remain bf16/fp16.
     - Dequant is fused into npu_grouped_matmul via antiquant_scale; float
       formats are symmetric around 0, so no antiquant_offset is passed.
-    - Per-channel scales use the activation dtype (bfloat16/float16) with
-      shape [num_experts, output_channels].
+    - Per-channel scales follow the ModelSlim checkpoint contract (same
+      layout as W8A16 int8): ``float32`` with shape ``[N, 1]`` per expert.
+      They are converted to the activation dtype (bfloat16/float16) and
+      squeezed to ``[num_experts, output_channels]`` in
+      :meth:`process_weights_after_loading`.
 
     After :meth:`process_weights_after_loading`, ``apply`` consumes:
 
@@ -65,6 +68,7 @@ class AscendW8A16FP8FusedMoEMethod(AscendMoEScheme):
 
     def __init__(self) -> None:
         vllm_config = get_current_vllm_config()
+        self.params_dtype = vllm_config.model_config.dtype
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else get_ascend_config().eplb_config.dynamic_eplb
 
     def get_weight(
@@ -102,20 +106,25 @@ class AscendW8A16FP8FusedMoEMethod(AscendMoEScheme):
     ) -> dict[str, Any]:
         """Create per-channel weight scale tensors.
 
-        For W8A16FP per-channel dequant, the scale shape is [E, N] (one scale
-        per output channel per expert) and the dtype matches the activation
-        dtype (bfloat16/float16).
+        ModelSlim checkpoints store the per-channel scale as ``float32``
+        with shape ``[N, 1]`` per expert (the same layout as W8A16 int8),
+        so the fused parameter keeps that contract: ``float32`` with shape
+        ``[E, N, 1]``. The scale is converted to the activation dtype
+        (bfloat16/float16) and squeezed to ``[E, N]`` in
+        :meth:`process_weights_after_loading`.
         """
         param_dict = {}
         param_dict["w13_weight_scale"] = torch.empty(
             num_experts,
             2 * intermediate_size_per_partition,
-            dtype=params_dtype,
+            1,
+            dtype=torch.float32,
         )
         param_dict["w2_weight_scale"] = torch.empty(
             num_experts,
             hidden_sizes,
-            dtype=params_dtype,
+            1,
+            dtype=torch.float32,
         )
         return param_dict
 
@@ -150,15 +159,17 @@ class AscendW8A16FP8FusedMoEMethod(AscendMoEScheme):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Prepare weights for NPU grouped matmul.
 
-        Only transpose + contiguous for per-channel antiquant_scale alignment.
+        Transpose weights for per-channel antiquant_scale alignment, and
+        convert the ModelSlim ``float32 [E, N, 1]`` scales to the activation
+        dtype with shape ``[E, N]``.
         """
         # w13_weight: [E, 2N, K] -> [E, K, 2N] (transpose for per-channel dequant)
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
         # w2_weight: [E, K, N] -> [E, N, K]
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
 
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.contiguous()
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.contiguous()
+        layer.w13_weight_scale.data = layer.w13_weight_scale.data.squeeze(-1).to(self.params_dtype).contiguous()
+        layer.w2_weight_scale.data = layer.w2_weight_scale.data.squeeze(-1).to(self.params_dtype).contiguous()
 
     def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
         layer = mlp_compute_input.layer

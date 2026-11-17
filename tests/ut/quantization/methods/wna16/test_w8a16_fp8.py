@@ -37,10 +37,10 @@ class TestAscendW8A16FP8MoEMethod(TestBase):
         result = self.scheme.get_dynamic_quant_param(
             self.num_experts, self.intermediate_size, self.hidden_size, torch.bfloat16
         )
-        self.assertEqual(result["w13_weight_scale"].shape, (self.num_experts, 2 * self.intermediate_size))
-        self.assertEqual(result["w2_weight_scale"].shape, (self.num_experts, self.hidden_size))
-        self.assertEqual(result["w13_weight_scale"].dtype, torch.bfloat16)
-        self.assertEqual(result["w2_weight_scale"].dtype, torch.bfloat16)
+        self.assertEqual(result["w13_weight_scale"].shape, (self.num_experts, 2 * self.intermediate_size, 1))
+        self.assertEqual(result["w2_weight_scale"].shape, (self.num_experts, self.hidden_size, 1))
+        self.assertEqual(result["w13_weight_scale"].dtype, torch.float32)
+        self.assertEqual(result["w2_weight_scale"].dtype, torch.float32)
 
     def test_process_weights_transposes_weights(self):
         layer = nn.Module()
@@ -63,11 +63,11 @@ class TestAscendW8A16FP8MoEMethod(TestBase):
             requires_grad=False,
         )
         layer.w13_weight_scale = nn.Parameter(
-            torch.empty(self.num_experts, 2 * self.intermediate_size, dtype=torch.bfloat16),
+            torch.ones(self.num_experts, 2 * self.intermediate_size, 1, dtype=torch.float32),
             requires_grad=False,
         )
         layer.w2_weight_scale = nn.Parameter(
-            torch.empty(self.num_experts, self.hidden_size, dtype=torch.bfloat16),
+            torch.ones(self.num_experts, self.hidden_size, 1, dtype=torch.float32),
             requires_grad=False,
         )
 
@@ -83,6 +83,8 @@ class TestAscendW8A16FP8MoEMethod(TestBase):
         )
         self.assertEqual(layer.w13_weight_scale.shape, (self.num_experts, 2 * self.intermediate_size))
         self.assertEqual(layer.w2_weight_scale.shape, (self.num_experts, self.hidden_size))
+        self.assertEqual(layer.w13_weight_scale.dtype, torch.bfloat16)
+        self.assertEqual(layer.w2_weight_scale.dtype, torch.bfloat16)
         self.assertTrue(layer.w13_weight_scale.is_contiguous())
         self.assertTrue(layer.w2_weight_scale.is_contiguous())
 
