@@ -55,9 +55,9 @@ def test_receiver_prepares_host_arrays_early_but_keeps_all_device_fences(monkeyp
     monkeypatch.setattr(kv_transfer.np, "concatenate", assemble)
     receiver._batch_copy_with_limits = copy
     assert receiver._copy_gva_layers(data) == (reuse_ready and gate_ready)
-    expected = ["reuse_fence"]
+    expected = ["host_assembly"] * 3 + ["reuse_fence"]
     if reuse_ready:
-        expected += ["host_assembly"] * 3 + ["compute_gate"]
+        expected += ["compute_gate"]
         if gate_ready:
             expected += ["external_readers", "device_copy"]
     assert trace == expected

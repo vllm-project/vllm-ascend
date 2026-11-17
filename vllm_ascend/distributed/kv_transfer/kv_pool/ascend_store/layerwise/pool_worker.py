@@ -1428,8 +1428,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             end_limit = min(end_limit, len(group_block_hashes))
         candidate_blocks = [
             block_idx
-            for block_idx in range(save_start_block, end_limit)
-            if group_store_mask is None or block_idx >= len(group_store_mask) or group_store_mask[block_idx]
+            for start, end in masked_block_runs(group_store_mask, save_start_block, end_limit)
+            for block_idx in range(start, end)
         ]
         candidate_keys: list[str] = []
         candidate_public_keys: set[str] = set()
@@ -2198,9 +2198,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             )
             block_indices = [
                 block_idx
-                for block_idx in range(load_start_block, full_blocks)
+                for start, end in masked_block_runs(group_load_mask, load_start_block, full_blocks)
+                for block_idx in range(start, end)
                 if block_idx != partial_block_index
-                and (group_load_mask is None or block_idx >= len(group_load_mask) or group_load_mask[block_idx])
             ]
             if any(block_idx >= full_len for block_idx in block_indices):
                 logger.error(

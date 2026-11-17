@@ -48,6 +48,15 @@ class TestWindowSnapshotRanges(unittest.TestCase):
             "block_hash_to_str": str,
             "get_partial_block_index": lambda end, size, hashes, offload: end // size if end % size else None,
         }
+        metadata_tree = ast.parse((base / "layerwise/metadata.py").read_text(encoding="utf-8"))
+        runs = next(
+            node
+            for node in metadata_tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "masked_block_runs"
+        )
+        exec(
+            compile(ast.fix_missing_locations(ast.Module(body=[runs], type_ignores=[])), "metadata", "exec"), namespace
+        )
         # Preserve the actual plan definition as well as its methods.
         tree = ast.parse((base / "layerwise/pool_worker.py").read_text(encoding="utf-8"))
         plan = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "_SaveGroupPlan")

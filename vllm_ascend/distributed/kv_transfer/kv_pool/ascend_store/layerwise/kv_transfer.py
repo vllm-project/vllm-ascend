@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from collections import defaultdict
@@ -124,6 +125,11 @@ class LayerBatchBuilder:
                 min(layer * caches_per_layer, self._block_len_np.shape[0]) for layer in range(num_layers + 1)
             ]
         self._layer_cache_entry_offsets_np = np.asarray(layer_cache_entry_offsets, dtype=np.int64)
+        # Cache only immutable layout arithmetic. Pool addresses and request
+        # block IDs are refreshed each step and must never be cached here.
+        self._cache_byte_offsets_np = np.concatenate(
+            (np.zeros(1, dtype=np.int64), np.cumsum(self._block_len_np, dtype=np.int64))
+        )
         self._block_ids_buf: np.ndarray | None = None
         self._block_gvas_buf: np.ndarray | None = None
 
@@ -168,11 +174,11 @@ class LayerBatchBuilder:
         layer_block_len = self._block_len_np[base_offset:end_offset]
         layer_block_stride = self._block_stride_np[base_offset:end_offset]
         # Per-cache inner offsets within one layer's page: [0, len0, len0+len1, ...].
-        layer_inner_offsets = np.concatenate(
-            (np.zeros(1, dtype=np.int64), np.cumsum(layer_block_len[:-1], dtype=np.int64))
+        layer_inner_offsets = (
+            self._cache_byte_offsets_np[base_offset:end_offset] - self._cache_byte_offsets_np[base_offset]
         )
-        rank_layer_offset = self.layer_byte_offset + int(self._block_len_np[:base_offset].sum())
-        if base_gvas_arr.size > 0 and np.any(base_gvas_arr <= 0):
+        rank_layer_offset = self.layer_byte_offset + int(self._cache_byte_offsets_np[base_offset])
+        if logger.isEnabledFor(logging.DEBUG) and base_gvas_arr.size > 0 and np.any(base_gvas_arr <= 0):
             # Zero GVAs here are expected: blocks already committed in the
             # pool or excluded by masks are intentionally not allocated.
             # Real batch_alloc failures are logged as errors by the caller.
@@ -184,18 +190,19 @@ class LayerBatchBuilder:
                 zero_count,
                 base_gvas_arr[:5].tolist(),
             )
-        logger.debug(
-            "[KVPOOL] build_transfer layer=%d page_size=%d caches_per_layer=%d "
-            "rank_layer_offset=%d layer_block_len=%s layer_inner_offsets=%s "
-            "base_gvas=%s",
-            layer_id,
-            self.page_size_bytes,
-            end_offset - base_offset,
-            rank_layer_offset,
-            layer_block_len.tolist(),
-            layer_inner_offsets.tolist(),
-            base_gvas_arr.tolist(),
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[KVPOOL] build_transfer layer=%d page_size=%d caches_per_layer=%d "
+                "rank_layer_offset=%d layer_block_len=%s layer_inner_offsets=%s "
+                "base_gvas=%s",
+                layer_id,
+                self.page_size_bytes,
+                end_offset - base_offset,
+                rank_layer_offset,
+                layer_block_len.tolist(),
+                layer_inner_offsets.tolist(),
+                base_gvas_arr.tolist(),
+            )
 
         addr_arr = layer_base_addrs[None, :] + block_ids_arr[:, None] * layer_block_stride[None, :]
         size_arr = np.broadcast_to(layer_block_len, addr_arr.shape)
@@ -275,6 +282,7 @@ class LayerBatchBuilder:
         is_last_chunks: list[bool | None] = []
         all_save_keys: list[str] = []
         all_load_keys: list[str] = []
+        collected_save_keys_request_ids: set[int] = set()
         collected_load_keys_request_ids: set[int] = set()
         offset = 0
 
@@ -282,7 +290,8 @@ class LayerBatchBuilder:
             request = block_range.request
             req_ids.append(request.req_id)
             is_last_chunks.append(request.is_last_chunk)
-            if request.save_keys:
+            if request.save_keys and id(request) not in collected_save_keys_request_ids:
+                collected_save_keys_request_ids.add(id(request))
                 all_save_keys.extend(request.save_keys)
             if request.load_keys and id(request) not in collected_load_keys_request_ids:
                 # Avoid collecting the same request's load_keys multiple times
@@ -344,12 +353,13 @@ class LayerBatchBuilder:
 
         block_ids_arr, block_gvas_arr = self._dedupe_transfer_blocks(block_ids_slice, block_gvas_slice)
 
-        logger.debug(
-            "[KVPOOL] build_shared req_ids=%s block_gvas_arr=%s block_ids_arr=%s",
-            req_ids,
-            block_gvas_arr.tolist(),
-            block_ids_arr.tolist(),
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[KVPOOL] build_shared req_ids=%s block_gvas_arr=%s block_ids_arr=%s",
+                req_ids,
+                block_gvas_arr.tolist(),
+                block_ids_arr.tolist(),
+            )
         return SharedBlockData(
             block_ids_arr=block_ids_arr,
             block_gvas_arr=block_gvas_arr,
@@ -467,11 +477,7 @@ class LayerBatchBuilder:
             layer_base_addrs = self._kv_caches_base_addr_np[base_offset:end_offset]
             layer_block_len = self._block_len_np[base_offset:end_offset]
             layer_block_stride = self._block_stride_np[base_offset:end_offset]
-            layer_inner_offsets = np.concatenate(
-                (np.zeros(1, dtype=np.int64), np.cumsum(layer_block_len[:-1], dtype=np.int64))
-            )
-            layer_object_offset = int(self._block_len_np[:base_offset].sum())
-            offsets = (layer_object_offset + layer_inner_offsets).tolist()
+            offsets = self._cache_byte_offsets_np[base_offset:end_offset].tolist()
             sizes = layer_block_len.tolist()
             all_buffers = [
                 (layer_base_addrs + block_id * layer_block_stride).tolist() for block_id in shared.block_ids_arr
@@ -1058,10 +1064,12 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
             all_addrs.append(req_meta.addr_array)
             all_sizes.append(req_meta.size_array)
         if has_any_save:
-            self.sync_save_events[physical_layer].synchronize()
             gvas_array = np.concatenate(all_gvas) if len(all_gvas) > 1 else all_gvas[0]
             addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
             size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
+            # Host address arithmetic can overlap the outstanding compute;
+            # device access still waits until every source cache write is done.
+            self.sync_save_events[physical_layer].synchronize()
             res = self._batch_copy_with_limits(
                 gvas_array,
                 addr_array,
@@ -1323,15 +1331,16 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         transfer_tasks = data.transfer_tasks
         layer_id = data.layer_id
         attention_start_gate = data.attention_start_gate
-        if not self._wait_for_reuse_saves(data):
-            return False
-
         if self.load_disabled.is_set():
+            if not self._wait_for_reuse_saves(data):
+                return False
             if self.external_slot_release_waiter is not None:
                 self.external_slot_release_waiter(layer_id)
             return False
 
         if len(transfer_tasks) == 0:
+            if not self._wait_for_reuse_saves(data):
+                return False
             if self.external_slot_release_waiter is not None:
                 self.external_slot_release_waiter(layer_id)
             assert not self.layer_load_finished_events[layer_id].is_set()
@@ -1357,6 +1366,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 task_metas.append((task, req_meta))
 
         if not task_metas:
+            if not self._wait_for_reuse_saves(data):
+                return False
             if self.external_slot_release_waiter is not None:
                 self.external_slot_release_waiter(layer_id)
             assert not self.layer_load_finished_events[layer_id].is_set()
@@ -1382,6 +1393,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
         # Assemble host-only metadata before the compute boundary opens. The
         # gate protects device access, not this immutable address arithmetic.
+        if not self._wait_for_reuse_saves(data):
+            return False
         if attention_start_gate is not None:
             if not self._wait_for_event(attention_start_gate):
                 return False

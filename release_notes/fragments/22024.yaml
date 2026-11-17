@@ -14,6 +14,9 @@ entries:
       queues attention before notifying transfer threads, while retaining the
       pre-attention device dependency. End-to-end speedups require hardware
       validation; no latency improvement is claimed from CPU tests.
+      Transfer preparation skips disabled debug-list construction and masked
+      history entries, reuses immutable layout offsets, and assembles host
+      addresses before waiting for device reuse and save dependencies.
     model: deepseek-v4
   - category: bugfix
     text: >-
