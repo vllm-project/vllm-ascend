@@ -25,19 +25,21 @@ layout or operation; it does not enable a kernel on additional hardware.
 
 | Source / entry point | Current call path |
 | --- | --- |
-| `packed_cache_slot_mapping.py` | A5 packed cache only, selected by the packed cache backend. A3 keeps its existing slot mapping path. |
+| `packed_cache_slot_mapping.py` | Shared slot-mapping path, selected by the kernel contract (`compress_ratio` in 1/2, positions present for ratio 2) rather than by the packed cache backend. A2/A3 run the same kernel; the eager chain stays as the fallback when the contract is not met. |
 | `build_window_indices.py` | A5 causal sliding-window indices through the packed cache backend. |
-| `c2_ring_metadata.py` | A5 packed cache compressor metadata branch with device RoPE inputs. |
+| `c2_ring_metadata.py` | Shared compressor metadata path, selected by the presence of the full-source RoPE buffers rather than by the packed cache backend. |
 | `quantize_mxfp4_indexer.py` (query quantization and cache writes) | A5 MXFP4 packed indexer path. A3 uses its existing non-packed quantization path. |
 | `fold_indexer_cache.py` | A5 folded packed indexer cache. |
 | `prepare_indexer_indices.py` | Shared index preparation, including the A3 non-packed indexer path. |
 | `spec_decode/dspark_swa_indices.py` | Shared DSpark logical-index fast path; selected by request and Triton/NPU conditions, with no A5-only gate. |
 | `compressor/compressor_triton.py` | Shared compressor cache reads and updates, including A3. |
 
-The packed cache backend is selected through `DSV41_PACKED_CACHE`, currently
-provided by the A5 hardware profile. Shared call paths still require their
-model and execution conditions; this table is not evidence of A3 runtime
-validation or CI coverage.
+The packed cache layout is selected through `DSV41_PACKED_CACHE`, currently
+provided by the A5 hardware profile. The slot-mapping and C2 ring-metadata
+kernels are not gated on it: both are selected by their own input contract, so
+A2 and A3 run the same kernels and keep the eager chains only as fallbacks.
+Shared call paths still require their model and execution conditions; this
+table is not evidence of A3 runtime validation or CI coverage.
 
 ## Execution and correctness
 
