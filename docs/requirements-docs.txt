@@ -5,4 +5,5 @@ mkdocs>=1.6
 mkdocs-material
 mkdocs-macros-plugin
 polib
+pymdown-multimd-table
 regex

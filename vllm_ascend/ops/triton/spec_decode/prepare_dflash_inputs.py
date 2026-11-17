@@ -415,3 +415,9 @@ def prepare_dflash_inputs_triton(
         SAMPLE_PADDING_BLOCK_SIZE=_SAMPLE_PADDING_BLOCK_SIZE,
         QUERY_PADDING_BLOCK_SIZE=_QUERY_PADDING_BLOCK_SIZE,
     )
+    # Upstream's prepare kernel also writes is_padding: the query rows above are
+    # real and the rest up to max_num_tokens is padding. MoE layers in the draft
+    # read it to skip padding rows, and graph capture leaves it all True.
+    num_query_tokens = num_reqs * num_query_per_req
+    input_buffers.is_padding[:num_query_tokens].fill_(False)
+    input_buffers.is_padding[num_query_tokens:max_num_tokens].fill_(True)

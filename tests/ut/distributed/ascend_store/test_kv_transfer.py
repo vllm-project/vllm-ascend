@@ -662,7 +662,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 req = ReqMeta(
                     req_id="r1",
                     token_len_chunk=16 * len(exists),
-                    block_ids=list(range(len(exists))),
+                    block_ids=list(range(1, len(exists) + 1)),
                     block_hashes=[f"h{i}" for i in range(len(exists))],
                     current_event=None,
                 )
@@ -681,7 +681,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
-            block_ids=[0, 1],
+            block_ids=[1, 2],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             current_event=None,
         )
@@ -722,7 +722,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids=[1],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             current_event=None,
             token_ids=list(range(16)),
@@ -755,7 +755,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             req_id="r1",
             token_len_chunk=16,
             save_start_token=0,
-            block_ids=[0],
+            block_ids=[1],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             token_ids=list(range(16)),
             original_block_size=16,
@@ -773,7 +773,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             req_id="r1",
             token_len_chunk=32,
             save_start_token=16,
-            block_ids=[0, 1],
+            block_ids=[1, 2],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             token_ids=list(range(16, 32)),
             original_block_size=16,
@@ -923,7 +923,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 req = ReqMeta(
                     "r1",
                     token_len_chunk=32,
-                    block_ids=[0, 1],
+                    block_ids=[1, 2],
                     block_hashes=[b"h0", b"h1"],
                     token_ids=list(range(32)),
                     original_block_size=16,
@@ -972,7 +972,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids=[1],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             current_event=event,
         )
@@ -997,7 +997,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
-            block_ids=[0, 1],
+            block_ids=[1, 2],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             current_event=None,
         )
@@ -1319,7 +1319,7 @@ class TestKVTransferTpMismatchDispatch(unittest.TestCase):
                             ReqMeta(
                                 req_id="r1",
                                 token_len_chunk=16,
-                                block_ids=[0],
+                                block_ids=[1],
                                 block_hashes=[b"h0"],
                                 event_id=chunk,
                             )

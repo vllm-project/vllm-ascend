@@ -6,11 +6,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadat
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
+    RSWASpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     get_mamba_prefill_checkpoint_position,
 )
@@ -107,6 +109,21 @@ class BaseKVPoolScheduler(ABC):
             vllm_config, kv_cache_config, use_layerwise=use_layerwise
         )
         self.cacheable_group_ids = list(self.pool_cache_geometry.cacheable_group_ids)
+        self.swa_group_ids = {
+            group_id
+            for group_id in self.cacheable_group_ids
+            if kv_cache_groups is not None
+            and (
+                isinstance(kv_cache_groups[group_id].kv_cache_spec, (SlidingWindowSpec, RSWASpec))
+                or (
+                    isinstance(kv_cache_groups[group_id].kv_cache_spec, UniformTypeKVCacheSpecs)
+                    and any(
+                        isinstance(spec, (SlidingWindowSpec, RSWASpec))
+                        for spec in kv_cache_groups[group_id].kv_cache_spec.kv_cache_specs.values()
+                    )
+                )
+            )
+        }
         self.enable_partial_hash_hits = self.pool_cache_geometry.partial_hits
         self._lookup_tail_boundaries = {}
         if self.enable_partial_hash_hits:
@@ -129,6 +146,7 @@ class BaseKVPoolScheduler(ABC):
         self._async_loading_req_ids: set[str] = set()
 
         self._block_pool: BlockPool | None = None
+        self._kv_cache_manager: KVCacheManager | None = None
 
         use_mla = getattr(vllm_config.model_config, "use_mla", False)
         tp_mismatch_info = infer_tp_mismatch_info(
@@ -551,6 +569,7 @@ class BaseKVPoolScheduler(ABC):
             raise ValueError(f"Request {req_id} is not in _unfinished_requests, but it is scheduled to be cached")
         if new_block_ids is not None:
             request_tracker.update(new_block_ids, request.num_computed_tokens)
+        self._sync_swa_block_ids(request_tracker)
         load_spec = self._running_load_spec(request_tracker, num_current_tokens)
         # save_decode_cache is intentionally narrower than
         # consumer_is_to_put: a consumer keeps skipping prefill writes and is
@@ -563,6 +582,16 @@ class BaseKVPoolScheduler(ABC):
             request.prompt_token_ids,
             skip_save,
         )
+
+    def _sync_swa_block_ids(self, tracker: RequestTracker) -> None:
+        """Use the current request table rather than retained SWA block IDs."""
+        if not self.swa_group_ids:
+            return
+        assert self._kv_cache_manager is not None
+        current_ids = self._kv_cache_manager.get_block_ids(tracker.req_id)
+        for group_id in self.swa_group_ids:
+            if group_id < len(current_ids) and group_id < len(tracker.allocated_block_ids_by_group):
+                tracker.allocated_block_ids_by_group[group_id][:] = current_ids[group_id]
 
     def _process_async_load_request(
         self,
@@ -733,6 +762,9 @@ class BaseKVPoolScheduler(ABC):
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         self._block_pool = gpu_block_pool
 
+    def bind_kv_cache_manager(self, kv_cache_manager: KVCacheManager) -> None:
+        self._kv_cache_manager = kv_cache_manager
+
     def reset_store(self) -> bool:
         """Drain the send queue and ``remove_all`` when no in-flight blocks are held."""
         stale_ids = bool(self._async_loading_req_ids)
@@ -802,13 +834,12 @@ class KVPoolScheduler(BaseKVPoolScheduler):
 
     def retain_blocks_for_save(self, req_meta: ReqMeta) -> None:
         """Keep non-null Mamba blocks alive until their bulk save completes."""
-        if self.use_hybrid or self.enable_partial_hash_hits:
-            self._in_flight_save_blocks.retain(
-                req_meta,
-                self.num_speculative_blocks_by_group,
-                self._block_pool,
-                retain_all=self.enable_partial_hash_hits,
-            )
+        self._in_flight_save_blocks.retain(
+            req_meta,
+            self.num_speculative_blocks_by_group,
+            self._block_pool,
+            retain_all=self.enable_partial_hash_hits,
+        )
 
     def _partial_tail_puts(self, req_meta: ReqMeta) -> list[BoundaryPut]:
         """Publish Attention proof under the same boundary as Core's state."""

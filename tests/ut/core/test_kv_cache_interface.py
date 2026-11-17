@@ -102,6 +102,33 @@ def test_mla_merge_preserves_draft_only_ownership_without_changing_grouping(draf
     assert is_kv_cache_spec_uniform(dict(zip(("layer0", "layer1"), specs)))
 
 
+@pytest.mark.parametrize("dcp_sharded", [True, False])
+@pytest.mark.parametrize("spec_type", [AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec])
+def test_ascend_spec_merge_preserves_dcp_layout(spec_type, dcp_sharded):
+    kwargs = {"sliding_window": 128} if spec_type is AscendSlidingWindowMLASpec else {}
+    spec = spec_type(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        dcp_sharded=dcp_sharded,
+        **kwargs,
+    )
+    assert spec_type.merge([spec, spec]).dcp_sharded is dcp_sharded
+    with pytest.raises(AssertionError):
+        spec_type.merge([spec, replace(spec, dcp_sharded=not dcp_sharded)])
+
+
+@pytest.mark.parametrize("dcp_sharded,expected_blocks", [(True, 3), (False, 9)])
+def test_ascend_mla_memory_uses_spec_dcp_layout(dcp_sharded, expected_blocks):
+    spec = replace(_mla_spec(), dcp_sharded=dcp_sharded)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=129),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=4),
+    )
+    assert spec.max_memory_usage_bytes(config) == expected_blocks * spec.page_size_bytes
+
+
 def test_get_storage_block_size_and_dcp_memory():
     spec = _mla_spec()
     # On main, storage_block_size is an optional dataclass field and may be

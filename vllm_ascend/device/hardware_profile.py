@@ -183,6 +183,36 @@ class HardwareCapability(Enum):
     UNRESTRICTED_MLAPO = auto()
 
 
+class WeightFormat(Enum):
+    """Data formats a SoC can execute in its matmul units.
+
+    ``FP8`` names the OCP 8-bit floating point family the way checkpoints
+    declare it (``quant_method: fp8``), covering both E4M3 and E5M2 instead of
+    pinning one element dtype; Ascend's own ``hifloat8`` is a different numeric
+    format and keeps its own ``HIF8`` member so callers never have to guess
+    which one a device means. The MX members keep their OCP names because they
+    name a format *and* a scale scheme: ``MXFP8`` is ``FP8`` with one ``E8M0``
+    scale per 32 elements, and ``MXFP4`` is the FP4 E2M1 element format with the
+    same scaling. ``INT4`` covers the integer 4-bit matmul that both ``W4A8``
+    (int4 weights, int8 activations) and ``W4A4`` (int4 weights and activations)
+    build on; it is not interchangeable with the block-scaled ``MXFP4``.
+
+    Format support is a property of the silicon, not of the checkpoint: A5 adds
+    FP8 and the block-scaled MX variants on top of the formats every generation
+    has, so business logic that picks an execution path must ask for the format
+    instead of inferring it from the device identity.
+    """
+
+    BF16 = auto()
+    FP16 = auto()
+    INT8 = auto()
+    INT4 = auto()
+    FP8 = auto()
+    HIF8 = auto()
+    MXFP8 = auto()
+    MXFP4 = auto()
+
+
 class AttentionBackendFamily(Enum):
     """Attention backend implementation families selected by the platform."""
 
@@ -255,6 +285,7 @@ class HardwareProfile:
     weight_layout_policy: WeightLayoutPolicy
     moe_comm_policy: MoECommPolicy
     quantization_backend_family: QuantizationBackendFamily
+    native_weight_formats: frozenset[WeightFormat]
     # Independent, additive contracts queried with ``supports``.
     capabilities: frozenset[HardwareCapability]
 
@@ -272,6 +303,30 @@ class HardwareProfile:
         """Return whether the exact documented ``capability`` contract is available."""
 
         return capability in self.capabilities
+
+    def supports_weight_format(self, weight_format: WeightFormat) -> bool:
+        """Return whether this hardware family can execute ``weight_format``."""
+
+        return weight_format in self.native_weight_formats
+
+
+_STANDARD_WEIGHT_FORMATS = frozenset(
+    {
+        WeightFormat.BF16,
+        WeightFormat.FP16,
+        WeightFormat.INT8,
+    }
+)
+# A2/A3/A5 run int4 weights through the W4A8 quantized matmul; 310P only ships
+# INT8 quantized kernels.
+_INT4_WEIGHT_FORMATS = _STANDARD_WEIGHT_FORMATS | {WeightFormat.INT4}
+# A5 adds the FP8 and block-scaled MX formats on top of the int4 set.
+_FP8_WEIGHT_FORMATS = _INT4_WEIGHT_FORMATS | {
+    WeightFormat.FP8,
+    WeightFormat.HIF8,
+    WeightFormat.MXFP8,
+    WeightFormat.MXFP4,
+}
 
 
 _STANDARD_CAPABILITIES = frozenset(
@@ -329,6 +384,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
+            native_weight_formats=_INT4_WEIGHT_FORMATS,
             capabilities=_STANDARD_CAPABILITIES
             | {HardwareCapability.RMS_NORM_CAST, HardwareCapability.NPU_TOP_K_TOP_P},
         ),
@@ -342,6 +398,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.FUSED_OR_CAPACITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
+            native_weight_formats=_INT4_WEIGHT_FORMATS,
             capabilities=_A3_CAPABILITIES
             | {
                 HardwareCapability.CANN_MEGAMOE,
@@ -359,6 +416,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.FORCE_NZ,
             moe_comm_policy=MoECommPolicy.ALLGATHER,
             quantization_backend_family=QuantizationBackendFamily.COMPATIBILITY,
+            native_weight_formats=_STANDARD_WEIGHT_FORMATS,
             capabilities=frozenset(
                 {
                     HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS,
@@ -384,6 +442,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_WORLD_SIZE,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
+            native_weight_formats=_FP8_WEIGHT_FORMATS,
             capabilities=frozenset(
                 {
                     HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,

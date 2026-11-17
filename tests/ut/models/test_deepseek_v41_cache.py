@@ -951,7 +951,8 @@ def test_batch_metadata_reuses_work_and_keeps_group_slots_separate(runtime, monk
 
     def build_batch(lengths, block_offset=0, idle=False):
         batch_shared: dict[str, Any] = {}
-        results, tasks = [], []
+        results = []
+        tasks: list[Any] = []
         positions = torch.tensor(
             [*range(lengths[0] - query_len, lengths[0]), *range(lengths[1] - query_len, lengths[1]), 0]
         )
@@ -1186,7 +1187,8 @@ def test_ring_source_reuses_prepared_store_coordinates(monkeypatch, num_tokens, 
     hidden_states = torch.randn(num_tokens, 8, dtype=dtype)
     original_hidden_states = hidden_states.clone()
 
-    def pool(kv, score, metadata):
+    def pool(kv, score, metadata, *, prev_rows, prev_row_indices):
+        assert prev_rows is prev_row_indices is None
         assert kv.dtype == score.dtype == torch.float32
         # Identity projections must receive the same FP32 conversion.
         assert kv is score
@@ -1226,13 +1228,13 @@ def test_ring_source_reuses_prepared_store_coordinates(monkeypatch, num_tokens, 
     )
     impl = object.__new__(AscendDSAV41Impl)
     impl.role = SimpleNamespace(compress_ratio=2)
-    AscendDSAV41Impl._write_compressed_source(
+    AscendDSAV41Impl._compress_and_write_caches(
         impl,
         attn,
         hidden_states,
-        positions,
         rope,
         rope,
+        metadata,
         metadata,
     )
     assert events == ["wait", "pool", "index", "kv"]
@@ -1252,28 +1254,39 @@ def test_state_uses_one_ring_page_and_block_table_entry(config, runtime):
     assert spec.max_memory_usage_bytes(runtime) == spec.page_size_bytes
 
 
-def test_projected_model_entry_keeps_fp32_state_and_existing_norm(config, monkeypatch):
+@pytest.mark.parametrize("pcp", [False, True])
+def test_projected_model_entry_keeps_fp32_state_and_existing_norm(config, monkeypatch, pcp):
     compressor = DeepseekV41Compressor(config, 2)
     compressor.register_buffer("_ring_pooled", torch.empty(4, 8, dtype=torch.bfloat16), persistent=False)
     compressor._ring_num_cores = 1
     state = torch.zeros(3, 32, 1, 16, dtype=torch.float32)
-    compressor.state_cache = SimpleNamespace(kv_cache=[state])
+    monkeypatch.setattr(compressor, "state_cache", SimpleNamespace(kv_cache=[state]), raising=False)
     metadata = SimpleNamespace(c2_ring_metadata=torch.zeros(5, 1, dtype=torch.int32), max_query_len=2)
     pooled = torch.randn(2, 8, dtype=torch.bfloat16)
     expected = compressor.norm(pooled).clone()
     pointer = compressor._ring_pooled.data_ptr()
+    prev_rows = torch.randn(2, 16) if pcp else None
+    prev_row_indices = torch.tensor([1]) if pcp else None
 
     def kernel(kv, scores, state_view, controls, out, **kwargs):
         assert kv.dtype == scores.dtype == state_view.dtype == torch.float32
         assert state_view.data_ptr() == state.data_ptr()
         assert controls is metadata.c2_ring_metadata
         assert out.data_ptr() == pointer and out.dtype == torch.bfloat16
+        assert kwargs["prev_rows"] is prev_rows
+        assert kwargs["prev_row_indices"] is prev_row_indices
         out.copy_(pooled)
         return out
 
     monkeypatch.setattr("vllm_ascend.ops.triton.compressor.compressor_triton.compressor_from_projected", kernel)
     hidden = torch.randn(2, 16, dtype=torch.bfloat16)
-    actual = compressor.pool_projected(compressor.wkv(hidden.float()), compressor.wgate(hidden.float()), metadata)
+    actual = compressor.pool_projected(
+        compressor.wkv(hidden.float()),
+        compressor.wgate(hidden.float()),
+        metadata,
+        prev_rows=prev_rows,
+        prev_row_indices=prev_row_indices,
+    )
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert compressor.wkv.weight.dtype == compressor.wgate.weight.dtype == torch.float32
 

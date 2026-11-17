@@ -19,6 +19,11 @@ name: E2E
 
 on:
   pull_request:
+    # `synchronize` is temporarily kept so that pushing a commit still starts
+    # E2E while `/run` (see pr_run_command.yml) is being validated on main. It
+    # will be removed once /run is proven, after which a commit is tested only
+    # on opened/reopened, on a label, or when a `/run` comment re-emits the
+    # `labeled` event.
     types:
       - opened
       - synchronize
@@ -28,6 +33,15 @@ on:
       - 'main'
       - '*-dev'
       - 'releases/v*'
+  # Re-evaluates the codeowner approval gate when a review is submitted or
+  # dismissed. Heavy jobs are gated on github.event_name == 'pull_request' so a
+  # review event only re-runs the lightweight codeowner-approval job and the
+  # ci-gate summary; prior UT/E2E results on the same head sha are carried
+  # forward by ci-gate instead of being re-executed.
+  pull_request_review:
+    types:
+      - submitted
+      - dismissed
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -37,11 +51,20 @@ defaults:
     shell: bash -el {0}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Split the group by event so a `pull_request_review` run never cancels the
+  # in-flight `pull_request` CI run. The review-event ci-gate carries the
+  # pull_request run's verdict forward (see the ci-gate job), so cancelling
+  # that run here used to leave the review gate with only a `cancelled`
+  # conclusion to read, deadlocking it until a manual re-run.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   pre-commit:
+    # Only real PR events run the CI pipeline. On pull_request_review events
+    # every job in this workflow is skipped (they all transitively depend on
+    # pre-commit) except codeowner-approval and ci-gate.
+    if: ${{ github.event_name == 'pull_request' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -319,7 +342,7 @@ jobs:
     name: Recommend tests
     needs: [pre-commit]
     # The recommendation only runs under the ready-precise label. Runs without
-    # that label skip this job, including ready-all and main2main alone.
+    # that label skip this job, including main2main alone.
     # Prepare E2E tests in parallel with CPU UT after pre-commit succeeds;
     # each NPU entry point separately requires CPU UT to succeed.
     if: >-
@@ -459,7 +482,7 @@ jobs:
       - pre-commit
       - recommend-tests
     # select-tests is the single producer of test_groups / base_sha / has_tests.
-    # It runs only when a run-enabling label (ready-precise / ready-all /
+    # It runs only when a run-enabling label (ready-precise /
     # main2main) asks for test execution; unlabeled runs skip it and ci-gate
     # decides whether that is allowed (no src paths) or requires a label (src or
     # ci_pipeline paths present). !cancelled() allows skipped recommendations
@@ -469,7 +492,7 @@ jobs:
     # The src/ci_pipeline path categories are computed by the paths-filter step
     # in pre-commit. Modes:
     #   recommended - recommend job succeeded with coverage paths (ready-precise)
-    #   all         - ready-all or main2main forced, or the PR touches the CI
+    #   all         - main2main forced, or the PR touches the CI
     #                 pipeline itself
     #   none        - ready-precise on a PR whose diff recommends no tests
     if: >-
@@ -478,8 +501,7 @@ jobs:
         needs.pre-commit.result == 'success' &&
         (
           contains(github.event.pull_request.labels.*.name, 'main2main') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-all')
+          contains(github.event.pull_request.labels.*.name, 'ready-precise')
         )
       }}
     runs-on: linux-amd64-cpu-2-hk
@@ -544,7 +566,6 @@ jobs:
         env:
           HAS_MAIN2MAIN: ${{ contains(github.event.pull_request.labels.*.name, 'main2main') }}
           HAS_READY_PRECISE: ${{ contains(github.event.pull_request.labels.*.name, 'ready-precise') }}
-          HAS_READY_ALL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-all') }}
           # Reported by the paths-filter step in the pre-commit job; this job
           # does not run its own filter. Both are diagnostic only here (they
           # decide which modes are *allowed* in ci-gate), the labels above
@@ -559,8 +580,6 @@ jobs:
             # The main2main label requests the full suite on both the verified
             # vLLM main commit and the release tag, so the coverage-based
             # recommendation cannot be used: select the whole suite instead.
-            MODE="all"
-          elif [ "${HAS_READY_ALL}" = "true" ]; then
             MODE="all"
           elif [ "${CI_PIPELINE}" = "true" ]; then
             # The PR changes the test selection/execution pipeline itself,
@@ -662,7 +681,7 @@ jobs:
     needs:
       - select-tests
     # !cancelled() is required: select-tests depends on recommend-tests,
-    # which is skipped under ready-all or main2main. Without a status check
+    # which is skipped under main2main. Without a status check
     # function, the skipped need propagates transitively and skips this job
     # even when select-tests succeeded.
     if: >-
@@ -672,8 +691,7 @@ jobs:
         (
           contains(github.event.pull_request.labels.*.name, 'main2main') ||
           contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-a5') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-all')
+          contains(github.event.pull_request.labels.*.name, 'ready-a5')
         )
       }}
     uses: ./.github/workflows/_ensure_csrc_cache.yaml
@@ -691,7 +709,7 @@ jobs:
       - prepare-csrc-cache
     # Require both CPU UT versions before allocating NPU runners.
     # !cancelled() overrides transitive skip-propagation from recommend-tests
-    # (skipped under ready-all or main2main) through select-tests, without
+    # (skipped under main2main) through select-tests, without
     # running after workflow cancel.
     if: >-
       ${{
@@ -702,8 +720,7 @@ jobs:
         needs.prepare-csrc-cache.result == 'success' &&
         (
           contains(github.event.pull_request.labels.*.name, 'main2main') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-all')
+          contains(github.event.pull_request.labels.*.name, 'ready-precise')
         ) &&
         needs.select-tests.outputs.has_tests == 'true'
       }}
@@ -732,7 +749,7 @@ jobs:
       - prepare-csrc-cache
     # Require both CPU UT versions before allocating NPU runners.
     # !cancelled() overrides transitive skip-propagation from recommend-tests
-    # (skipped under ready-all) through select-tests, without running after workflow cancel.
+    # (recommend-tests is skipped without ready-precise) through select-tests, without running after workflow cancel.
     if: >-
       ${{
         !cancelled() &&
@@ -760,7 +777,7 @@ jobs:
     needs: [pre-commit, cpu-ut, select-tests]
     # Require both CPU UT versions before allocating NPU runners.
     # !cancelled() overrides transitive skip-propagation from recommend-tests
-    # (skipped under ready-all) through select-tests, without running after workflow cancel.
+    # (recommend-tests is skipped without ready-precise) through select-tests, without running after workflow cancel.
     if: >-
       ${{
         !cancelled() &&
@@ -782,29 +799,266 @@ jobs:
       base_ref: ${{ github.base_ref }}
       test_groups: ${{ needs.select-tests.outputs.test_groups_a5 }}
 
+  # Lightweight CODEOWNERS gate: every changed file needs an approval from one
+  # of its CODEOWNERS owners. Runs on pull_request AND pull_request_review
+  # events so submitting/dismissing a review re-evaluates the gate without
+  # re-running the heavy CI jobs. Owners without org membership or write
+  # access count as approvers on purpose (this is why the native
+  # require_code_owner_review is not used).
+  codeowner-approval:
+    # Skip on bot reviews (they never change the approval state) and on
+    # /run-triggered runs (a `ci-run` labeled pull_request event): codeowner
+    # approval is a merge-review concern and is evaluated when reviews are
+    # submitted, not when tests are requested manually.
+    if: >-
+      ${{
+        (github.event_name != 'pull_request_review' || github.event.review.user.type != 'Bot') &&
+        github.event.label.name != 'ci-run'
+      }}
+    runs-on: linux-amd64-cpu-2-hk
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: CODEOWNERS coverage check
+        env:
+          COVERAGE_ERRORS_OUT: ${{ runner.temp }}/coverage_errors.txt
+        run: python3 .github/workflows/scripts/codeowner_gate.py check-coverage
+
+      - name: CODEOWNERS approval check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UNCLAIMED_OUT: ${{ runner.temp }}/unclaimed_files.txt
+          SELF_OWNED_OUT: ${{ runner.temp }}/self_owned_files.txt
+          APPROVAL_FAILURES_OUT: ${{ runner.temp }}/approval_failures.txt
+        run: |
+          python3 .github/workflows/scripts/codeowner_gate.py check-approvals \
+            --pr "${{ github.event.pull_request.number }}"
+
+      - name: Upload gate details for the comment bot
+        # Per-PR details for the failure comment: which files lack an owner
+        # (no approval required) and which files are missing owner approvals
+        # (with the exact owners to ask). Always uploaded so the bot can read
+        # empty lists too.
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeowner-details-${{ github.run_id }}
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/unclaimed_files.txt
+            ${{ runner.temp }}/self_owned_files.txt
+            ${{ runner.temp }}/approval_failures.txt
+            ${{ runner.temp }}/coverage_errors.txt
+
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
-    needs: [pre-commit, cpu-ut, select-tests, run-selected-tests, run-selected-tests-a5]
-    if: ${{ !cancelled() }}
+    needs: [pre-commit, cpu-ut, select-tests, run-selected-tests, run-selected-tests-a5, codeowner-approval]
+    # Skip bot-review-triggered runs too: bot reviews carry no approval state,
+    # so they cannot change the gate verdict, and a skipped required check
+    # still satisfies branch protection. This avoids spawning a review run
+    # that would otherwise idle on a runner while polling the in-flight
+    # pull_request CI.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request_review' || github.event.review.user.type != 'Bot') }}
     runs-on: linux-amd64-cpu-2-hk
+    # On review events this job may wait for an in-flight pull_request CI run to
+    # finish before carrying its verdict forward (see the Check step).
+    timeout-minutes: 360
+    permissions:
+      # Post/delete the gate-failure PR comment (issue comments).
+      issues: write
+      pull-requests: write
+      # Read the latest pull_request E2E run + its jobs to carry the code-CI
+      # verdict forward on review events (Actions REST API).
+      actions: read
+    env:
+      EVENT_NAME: ${{ github.event_name }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      RUN_ID: ${{ github.run_id }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Maximum time (seconds) a review-event ci-gate waits for the latest
+      # pull_request CI run to complete before giving up.
+      GATE_WAIT_SECONDS: "7200"
     steps:
       - name: Check all required jobs
+        id: check
         env:
           HAS_MAIN2MAIN_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'main2main') }}
           HAS_READY_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-precise') }}
-          HAS_READY_ALL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-all') }}
           HAS_READY_A5_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
           SELECTION_SOURCE: ${{ needs.select-tests.outputs.source }}
           MATCHED_MODULES: ${{ needs.select-tests.outputs.matched_modules }}
         run: |
           set -euo pipefail
 
+          # Collect a short human-readable failure reason; the step below posts
+          # (or updates) the PR comment from this file when the gate fails.
+          FAILURE_FILE="${RUNNER_TEMP}/ci_gate_failure_reason.txt"
+          rm -f "${FAILURE_FILE}"
+          # shellcheck disable=SC2317  # fail() is only invoked conditionally
+          fail() {
+            echo "$1" >> "${FAILURE_FILE}"
+            echo "::error::${1}"
+            exit 1
+          }
+
+          OWNER_RESULT="${{ needs.codeowner-approval.result }}"
+
+          # On review events the heavy jobs above are skipped, so this gate
+          # carries forward the verdict of the latest `pull_request` E2E run on
+          # this same head sha. That run is the authoritative code-CI result and
+          # is never cancelled by the review event (concurrency groups are
+          # split per event). If the pull_request CI is still running when the
+          # review lands, wait for it to finish here instead of reading a stale
+          # or cancelled result, so approving mid-CI (or right after an infra
+          # flake is retried) resolves automatically without a manual re-run.
+          if [ "${EVENT_NAME}" = "pull_request_review" ]; then
+            if [ "${OWNER_RESULT}" != "success" ]; then
+              fail "CODEOWNERS approval gate failed: every changed file needs an approval from one of its owners. Approvals survive pushes; an owner can withdraw one by submitting a review that requests changes."
+            fi
+            export GATE_VERDICT_FILE="${RUNNER_TEMP}/gate_verdict.txt"
+            python3 - <<'PY'
+          import json, os, time, urllib.request
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          sha = os.environ["HEAD_SHA"]
+          token = os.environ["GH_TOKEN"]
+
+
+          def get(url):
+              request = urllib.request.Request(url, headers={
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+              })
+              with urllib.request.urlopen(request) as response:
+                  return json.load(response)
+
+
+          def latest_pull_request_run():
+              data = get(
+                  f"https://api.github.com/repos/{repo}/actions/runs"
+                  f"?head_sha={sha}&per_page=100"
+              )
+              runs = [
+                  r for r in data.get("workflow_runs", [])
+                  if r.get("name") == "E2E" and r.get("event") == "pull_request"
+              ]
+              runs.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+              return runs[0] if runs else None
+
+
+          def verdict(name, detail=""):
+              with open(os.environ["GATE_VERDICT_FILE"], "w") as f:
+                  f.write(name + "\n" + detail + "\n")
+
+
+          # A code job that never ran (skipped) or is still absent does not
+          # count as a failure; anything else that is not success does.
+          def is_gate_job(name):
+              return (
+                  name in ("pre-commit", "select-tests")
+                  or name.startswith("run-selected-tests (vllm@")
+                  or name.startswith("run-selected-tests-a5 (vllm@")
+                  or (name.startswith("cpu-ut (vllm@") and " / cpu-ut card" in name)
+              )
+
+
+          deadline = time.time() + float(os.environ["GATE_WAIT_SECONDS"])
+          run = latest_pull_request_run()
+          while run and run.get("status") in (
+              "queued", "requested", "waiting", "in_progress"
+          ):
+              if time.time() > deadline:
+                  verdict("ci-still-running")
+                  raise SystemExit(0)
+              time.sleep(60)
+              run = latest_pull_request_run()
+
+          if run is None:
+              verdict("no-ci")
+          elif run.get("conclusion") == "success":
+              # The whole pull_request run was green, so ci-gate passed too.
+              verdict("success")
+          else:
+              jobs = get(run["jobs_url"] + "?per_page=100").get("jobs", [])
+              ci_gate_job = next(
+                  (j for j in jobs if j.get("name") == "ci-gate"), None)
+              owner_job = next(
+                  (j for j in jobs if j.get("name") == "codeowner-approval"), None)
+              select_job = next(
+                  (j for j in jobs if j.get("name") == "select-tests"), None)
+              bad = [
+                  f"{j.get('name')}:{j.get('conclusion')}"
+                  for j in jobs
+                  if is_gate_job(j.get("name", ""))
+                  and j.get("conclusion") not in (None, "skipped", "success")
+              ]
+              gate_conclusion = ci_gate_job.get("conclusion") if ci_gate_job else None
+              if bad:
+                  verdict("code-failure", ", ".join(bad))
+              elif gate_conclusion == "success":
+                  verdict("success")
+              elif gate_conclusion == "failure":
+                  if select_job and select_job.get("conclusion") == "skipped":
+                      verdict("tests-not-run")
+                  elif owner_job and owner_job.get("conclusion") == "failure":
+                      # The only blocker in the previous run was the (then
+                      # missing) CODEOWNERS approval, which now exists.
+                      verdict("owner-resolved")
+                  else:
+                      verdict("gate-failed")
+              else:
+                  verdict("cancelled", f"ci-gate={gate_conclusion}")
+          PY
+            VERDICT="$(sed -n '1p' "${GATE_VERDICT_FILE}")"
+            VERDICT_DETAIL="$(sed -n '2p' "${GATE_VERDICT_FILE}")"
+            case "${VERDICT}" in
+              success|owner-resolved)
+                echo "=== CI Gate: PASSED (review event, prior code CI green + owner approval) ==="
+                exit 0
+                ;;
+              no-ci)
+                fail "A review was submitted before any pull_request CI run existed for this commit (${HEAD_SHA}). CI must run first; no re-review is needed."
+                ;;
+              ci-still-running)
+                fail "A review was submitted, but the pull_request CI for this commit (${HEAD_SHA}) was still running after ${GATE_WAIT_SECONDS}s and the gate cannot carry its verdict forward. Wait for CI to finish, then re-submit the review (no new code push is needed)."
+                ;;
+              code-failure)
+                fail "A review was submitted, but the code CI for this commit did not pass (failed: ${VERDICT_DETAIL}). Fix/re-run the failing job(s); the gate will pass once CI is green and no re-review is needed."
+                ;;
+              tests-not-run)
+                fail "The previous CI run did not execute tests (select-tests was skipped), so its result cannot be carried forward. A maintainer must add the 'ready-precise' label and re-run CI."
+                ;;
+              gate-failed)
+                fail "A review was submitted, but the previous ci-gate failed for a reason other than owner approval. Open the failed pull_request CI run for this commit for details."
+                ;;
+              cancelled)
+                fail "The latest pull_request CI run for this commit was cancelled (${VERDICT_DETAIL}), so it cannot be carried forward. Re-run the pull_request CI; no re-review is needed."
+                ;;
+              *)
+                fail "A review was submitted, but the CI state for this commit could not be determined (verdict: '${VERDICT}'). Check the pull_request CI run for this commit."
+                ;;
+            esac
+          fi
+
+          # /run-triggered runs skip the codeowner-approval job on purpose
+          # (see the job condition); the gate still passes here and owner
+          # approval is evaluated when reviews are submitted.
+          if [ "${{ github.event.label.name }}" = "ci-run" ]; then
+            echo "codeowner-approval: skipped (/run requested; evaluated when reviews are submitted)"
+          elif [ "${OWNER_RESULT}" != "success" ]; then
+            fail "CODEOWNERS approval gate failed: at least one changed file has no approval from its owner(s). Open the 'codeowner-approval' job above to see which files are missing approvals and who can approve."
+          fi
+
           PRE_COMMIT_RESULT="${{ needs.pre-commit.result }}"
           CPU_UT_RESULT="${{ needs.cpu-ut.result }}"
           SELECT_TESTS_RESULT="${{ needs.select-tests.result }}"
           HAS_TESTS="${{ needs.select-tests.outputs.has_tests == 'true' }}"
-          HAS_TESTS_A5="${{ needs.select-tests.outputs.has_tests_a5 }}"
+          HAS_TESTS_A5="${{ needs.select-tests.outputs.has_tests_a5 == 'true' }}"
 
           echo "=== CI Gate Summary ==="
           echo "pre-commit: ${PRE_COMMIT_RESULT}"
@@ -815,26 +1069,22 @@ jobs:
           echo "select-tests: ${SELECT_TESTS_RESULT} (source: ${SELECTION_SOURCE:-unknown})"
           echo "has_tests: ${HAS_TESTS}"
           echo "has_tests_a5: ${HAS_TESTS_A5}"
-          echo "labels: main2main=${HAS_MAIN2MAIN_LABEL} ready-precise=${HAS_READY_LABEL} ready-all=${HAS_READY_ALL_LABEL} ready-a5=${HAS_READY_A5_LABEL}"
+          echo "labels: main2main=${HAS_MAIN2MAIN_LABEL} ready-precise=${HAS_READY_LABEL} ready-a5=${HAS_READY_A5_LABEL}"
           if [ "${SELECT_TESTS_RESULT}" = "success" ] && [ -n "${MATCHED_MODULES// /}" ]; then
             echo "matched_modules: ${MATCHED_MODULES}"
           fi
 
           if [ "${PRE_COMMIT_RESULT}" != "success" ]; then
-            echo "::error::pre-commit did not succeed (result: ${PRE_COMMIT_RESULT})."
-            echo "::error::This job runs lint / markdownlint / mypy / gitleaks on all files. Open the failed 'pre-commit' job above, fix the reported issues in your PR, and push again. No test label is needed for this failure."
-            exit 1
+            fail "pre-commit failed (lint / markdownlint / mypy / gitleaks). Open the failed 'pre-commit' job above, fix the reported issues in your PR, and push again. No test label is needed for this failure."
           fi
 
           if [ "${CPU_UT_RESULT}" != "success" ]; then
-            echo "::error::cpu-ut did not succeed (result: ${CPU_UT_RESULT})."
-            echo "::error::Open the failed 'cpu-ut' job above, fix the failing test(s) and push again."
-            exit 1
+            fail "cpu-ut failed. Open the failed 'cpu-ut' job above, fix the failing test(s) and push again."
           fi
 
           if [ "${SELECT_TESTS_RESULT}" = "skipped" ]; then
             # select-tests only runs under a run-enabling label
-            # (ready-precise / ready-all / main2main). An unlabeled run
+            # (ready-precise / main2main). An unlabeled run
             # passes the gate when (and only when) the paths-filter in
             # pre-commit found no src or ci_pipeline paths in the diff.
             SRC_FILTER="${{ needs.pre-commit.outputs.src }}"
@@ -844,50 +1094,35 @@ jobs:
               echo "=== CI Gate: PASSED ==="
               exit 0
             fi
-            echo "::error::This PR touches source code (src=${SRC_FILTER}, ci_pipeline=${CI_PIPELINE_FILTER}), so precision/full tests are required before merge."
-            echo "::error::How to fix: a maintainer adds exactly one label to this PR - 'ready-precise' to run the selected tests (recommended), 'ready-all' to run the full suite, or 'main2main' to run the full suite against both the vLLM main commit and the release tag. The workflow reruns automatically once the label is added."
-            exit 1
+            fail "This PR touches source code (src=${SRC_FILTER}, ci_pipeline=${CI_PIPELINE_FILTER}), so precision/full tests are required before merge. Fix: a maintainer adds the 'ready-precise' label; the workflow reruns automatically once the label is added."
           fi
 
           if [ "${SELECT_TESTS_RESULT}" != "success" ]; then
-            echo "::error::select-tests did not succeed (result: ${SELECT_TESTS_RESULT})."
-            echo "::error::Open the failed 'select-tests' job above to see which step failed (checkout/rebase, coverage config validation, or test selection). Fix the reported issue and push again."
-            exit 1
+            fail "select-tests failed. Open the failed 'select-tests' job above to see which step failed (checkout/rebase, coverage config validation, or test selection)."
           fi
 
           # Even after successful test selection, only explicit true/false
           # values are valid. A missing output must not mean no tests.
           if [ "${HAS_TESTS}" != "true" ] && [ "${HAS_TESTS}" != "false" ]; then
-            echo "::error::Invalid or missing has_tests output: '${HAS_TESTS}'"
-            exit 1
+            fail "Invalid or missing has_tests output: '${HAS_TESTS}'"
           fi
 
           if [ "${HAS_TESTS_A5}" != "true" ] && [ "${HAS_TESTS_A5}" != "false" ]; then
-            echo "::error::Invalid or missing has_tests_a5 output: '${HAS_TESTS_A5}'"
-            exit 1
+            fail "Invalid or missing has_tests_a5 output: '${HAS_TESTS_A5}'"
           fi
 
           if [ "${HAS_TESTS}" = "true" ]; then
             TESTS_RESULT="${{ needs.run-selected-tests.result }}"
             echo "run-selected-tests: ${TESTS_RESULT}"
-            if [ "${HAS_MAIN2MAIN_LABEL}" != "true" ] && [ "${HAS_READY_LABEL}" != "true" ] && [ "${HAS_READY_ALL_LABEL}" != "true" ]; then
-              echo "::error::This PR touches source code (test selection source: ${SELECTION_SOURCE:-unknown}), so precision/full tests are required before merge."
-              if [ -n "${MATCHED_MODULES// /}" ]; then
-                echo "::error::Affected modules: ${MATCHED_MODULES}"
-              fi
-              echo "::error::How to fix: a maintainer adds exactly one label to this PR - 'ready-precise' to run the selected tests (recommended), 'ready-all' to run the full suite, or 'main2main' to run the full suite against both the vLLM main commit and the release tag. The workflow reruns automatically once the label is added."
-              exit 1
+            if [ "${HAS_MAIN2MAIN_LABEL}" != "true" ] && [ "${HAS_READY_LABEL}" != "true" ]; then
+              fail "This PR touches source code (test selection source: ${SELECTION_SOURCE:-unknown}), so precision/full tests are required before merge.${MATCHED_MODULES:+ Affected modules: ${MATCHED_MODULES}.} Fix: a maintainer adds the 'ready-precise' label."
             fi
             if [ "${TESTS_RESULT}" != "success" ]; then
-              echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})."
               if [ "${HAS_MAIN2MAIN_LABEL}" = "true" ]; then
-                echo "::error::The 'main2main' dual-version suite failed. Open the failed job(s) inside the run-selected-tests matrix above (one per vLLM version) and fix the failing test(s) or the code change that broke them."
-              elif [ "${HAS_READY_ALL_LABEL}" = "true" ]; then
-                echo "::error::The 'ready-all' suite failed. Open the failed job(s) inside the run-selected-tests matrix above and fix the failing test(s) or the code change that broke them."
+                fail "The 'main2main' dual-version E2E suite failed. Open the failed job(s) inside the run-selected-tests matrix above (one per vLLM version) and fix the failing test(s) or the code change that broke them."
               else
-                echo "::error::The 'ready-precise' selected tests failed. Open the failed job(s) inside the run-selected-tests matrix above. If you believe the failures are unrelated to your change, you may ask a maintainer to switch to 'ready-all' for a broader comparison."
+                fail "The 'ready-precise' selected tests failed. Open the failed job(s) inside the run-selected-tests matrix above and fix the failing test(s) or the code change that broke them."
               fi
-              exit 1
             fi
           fi
 
@@ -897,10 +1132,51 @@ jobs:
             if [ "${TESTS_A5_RESULT}" = "skipped" ] && [ "${HAS_READY_A5_LABEL}" != "true" ]; then
               echo "::notice::run-selected-tests-a5 was skipped because ready-a5 is not set"
             elif [ "${TESTS_A5_RESULT}" != "success" ]; then
-              echo "::error::run-selected-tests-a5 did not succeed (result: ${TESTS_A5_RESULT})."
-              echo "::error::The A5 test suite failed. Open the failed run-selected-tests-a5 job above for details."
-              exit 1
+              fail "The A5 test suite failed. Open the failed run-selected-tests-a5 job above for details."
             fi
           fi
 
           echo "=== CI Gate: PASSED ==="
+
+      - name: Package gate result
+        if: ${{ always() }}
+        env:
+          CHECK_OUTCOME: ${{ steps.check.outcome }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          result_dir = os.path.join(os.environ["RUNNER_TEMP"], "ci-gate-result")
+          os.makedirs(result_dir, exist_ok=True)
+          reason_file = os.path.join(
+              os.environ["RUNNER_TEMP"], "ci_gate_failure_reason.txt")
+          try:
+              with open(reason_file) as f:
+                  reason = f.read().strip()
+          except OSError:
+              reason = ""
+          result = {
+              "conclusion": os.environ["CHECK_OUTCOME"],
+              "reason": reason,
+              "pr": int(os.environ["PR_NUMBER"]),
+              "head_sha": os.environ["HEAD_SHA"],
+          }
+          with open(os.path.join(result_dir, "ci-gate-result.json"), "w") as f:
+              json.dump(result, f)
+          PY
+
+      - name: Upload gate result for the comment bot
+        # The PR comment is posted by bot_ci_gate_comment.yml (workflow_run)
+        # in the base repo context: fork PRs get a read-only GITHUB_TOKEN
+        # here, so this job must not depend on write access. The bot never
+        # touches PR code, so its write token is safe.
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-gate-result-${{ github.run_id }}
+          retention-days: 1
+          if-no-files-found: error
+          path: ${{ runner.temp }}/ci-gate-result/ci-gate-result.json
+

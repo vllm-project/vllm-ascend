@@ -90,7 +90,12 @@ on:
         required: false
         default: 120
         type: string
-        description: test case execution timeout period,default:120 minutes
+        description: test run timeout in minutes, default 120 (2h)
+      job_timeout:
+        required: false
+        default: 360
+        type: number
+        description: overall job timeout in minutes, default 360 (6h); weekly multi-node callers pass 1200 (20h)
       aop_multi_enabled:
         required: false
         type: boolean
@@ -171,6 +176,14 @@ concurrency:
 jobs:
   e2e:
     name: ${{ inputs.config_file_path }}
+    # Stream logs enforces the test-run budget (120 min for scheduled runs,
+    # 240 min or 1440 min with AOP for PR runs). The job timeout is the overall
+    # budget and must also cover checkout, LWS creation, NPU queue wait and log
+    # collection/upload, otherwise GitHub cancels the job mid-test.
+    timeout-minutes: >-
+      ${{ inputs.request_id != '' &&
+          (inputs.aop_multi_enabled && 1560 || 360) ||
+          inputs.job_timeout }}
     # This is the runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
@@ -200,13 +213,35 @@ jobs:
         id: vars
         run: |
           # Derive a unique, valid k8s resource name from config_file_path.
-          # Append 6-char random suffix to avoid conflicts; total length capped at 63 chars.
+          # Append 6-char random suffix to avoid conflicts.
 
           config_file="${{ inputs.config_file_path }}"
           config_stem="${config_file%.yaml}"
           lws_suffix=$(echo "$config_stem" | tr '[:upper:]' '[:lower:]' | tr '._' '-' | cut -c1-43)
           rand_suffix=$(tr -d '-' < /proc/sys/kernel/random/uuid | cut -c1-6)
           LWS_NAME="vllm-${lws_suffix}-${rand_suffix}"
+
+          # LWS pods are managed by StatefulSets and named
+          # "<LWS_NAME>-<replica>" (leader) or "<LWS_NAME>-<replica>-<worker>"
+          # (workers). StatefulSet copies the pod name into a label and adds
+          # "controller-revision-hash: <worker-sts>-<10-char hash>", both of which
+          # are limited to 63 chars. A pod name limited to 53 chars keeps every
+          # derived name and label valid, and fails fast instead of hanging in
+          # "Wait for pods ready" after a silent StatefulSet pod-creation error.
+          max_pod_name_len=53
+          size="${{ inputs.size }}"
+          size="${size:-2}"
+          replicas="${{ inputs.replicas }}"
+          replicas="${replicas:-1}"
+
+          leader_pod="${LWS_NAME}-$((replicas - 1))"
+          worker_pod="${leader_pod}-$((size - 1))"
+          for pod_name in "$leader_pod" "$worker_pod"; do
+            if [ "${#pod_name}" -gt "$max_pod_name_len" ]; then
+              echo "::error::Pod name '${pod_name}' is ${#pod_name} chars, over the ${max_pod_name_len}-char limit (config_file_path: ${config_file}). Shorten the config file name."
+              exit 1
+            fi
+          done
 
           branch="${{ inputs.vllm_ascend_branch }}"
           if [ -n "$branch" ]; then
