@@ -1590,7 +1590,7 @@ def test_hisparse_sharded_dummy_preserves_local_request_states(query_len):
         patch("vllm_ascend.worker.v2.pcp_manager.update_cos_sin"),
     ):
         dummy = AscendInputBatch.make_dummy(2, 2 * query_len, local_buffers, max_query_len=query_len)
-        context = manager.build_attention_context(dummy)
+        context = manager.build_attention_context(dummy, (), manager._global_batch_slot_mappings)
     assert context.local_request_state_indices is dummy.idx_mapping
     assert context.global_batch.num_reqs == 4
     assert context.local_num_tokens == 2 * query_len
