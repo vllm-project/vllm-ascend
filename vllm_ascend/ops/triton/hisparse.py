@@ -154,7 +154,9 @@ def invalidate_written_slots_sorted(
         query = (state.to(tl.int64) << _HOST_SLOT_BITS) | cached.to(tl.int64)
         low = tl.full((TILE,), 0, tl.int32)
         high = tl.full((TILE,), ROWS, tl.int32)
-        # A3 requires a loop for masked indirect loads.
+        # Keep low/high loop-carried on arch22: fully unrolling this masked
+        # binary search fails Triton-Ascend's TritonToUnstructure pass.
+        # Ascend 950 retains the existing unrolled search.
         for _ in tl.range(STEPS, loop_unroll_factor=STEPS if UNROLL_SEARCH else 1):
             active = valid & (low < high)
             mid = low + (high - low) // 2
