@@ -465,7 +465,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                     QuantFlashMLAConfig(
                         impl.num_heads,
                         impl.scale,
-                        return_softmax_lse=False,
+                        return_softmax_lse=vllm_config.parallel_config.decode_context_parallel_size > 1,
                     )
                 )
             self.flashmla_state = FlashMLAMetadataBuilder(
@@ -1194,10 +1194,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             or self.enable_kv_nz
         ):
             return False
-        # The full-quant operator can return LSE, but the existing DCP merge
-        # path does not carry q/k descales. Keep K3 C8 on single-rank decode
-        # until that scale contract is added to context_parallel/mla_cp.py.
-        if self.use_pcp or config.parallel_config.decode_context_parallel_size != 1:
+        # DCP history consumes all group heads; the current chunk keeps the
+        # local heads. Both adapters must accept their actual head counts.
+        dcp_size = config.parallel_config.decode_context_parallel_size
+        if self.use_pcp or self.num_heads * dcp_size not in QUANT_FLASHMLA_SUPPORTED_Q_HEADS:
             return False
         if not supports_component_major_mla_pd(config):
             return False
@@ -1806,6 +1806,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_no_split: torch.Tensor,
         kv_cache: tuple,
         slots: torch.Tensor,
+        *,
+        return_quantized_current: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Normalize and cache K3 MLA KV without rotating its raw slice."""
         assert self.kv_a_layernorm is not None
@@ -1839,6 +1841,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             value_cache=kv_cache[1],
             slot_mapping=slots,
         )
+        if return_quantized_current:
+            return k_pe.to(kv_cache[1].dtype), cache_k_nope
         return k_pe, kv_c_normed
 
     def _exec_kv_mla_nope(self, kv_no_split, kv_cache, slots, is_prefill: bool, skip_padding_slots: bool = False):
@@ -1890,12 +1894,19 @@ class AscendMLAImpl(MLAAttentionImpl):
                 return kv_cache[1], kv_cache[0], current_k_pe, current_k_nope
             return kv_cache[1], kv_cache[0]
         if not self.use_mla_rope:
-            current_k_pe, current_k_nope = self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
+            current_k_pe, current_k_nope = self._exec_kv_no_rope(
+                kv_no_split,
+                kv_cache,
+                slots,
+                return_quantized_current=return_current_kv and self.use_quant_flashmla,
+            )
             if return_current_kv:
                 return kv_cache[1], kv_cache[0], current_k_pe, current_k_nope
             return kv_cache[1], kv_cache[0]
         if getattr(self, "use_quant_flashmla", False) and any(not cache.is_contiguous() for cache in kv_cache):
-            current_k_pe, current_k_nope = self._exec_quant_flashmla_kv_writer(kv_no_split, cos, sin, kv_cache, slots)
+            current_k_pe, current_k_nope = self._exec_quant_flashmla_kv_writer(
+                kv_no_split, cos, sin, kv_cache, slots, return_quantized_current=return_current_kv
+            )
             if return_current_kv:
                 return kv_cache[1], kv_cache[0], current_k_pe, current_k_nope
             return kv_cache[1], kv_cache[0]
@@ -2074,7 +2085,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
         return current_rope, current_nope
 
-    def _exec_quant_flashmla_kv_writer(self, kv_no_split, cos, sin, kv_cache, slots):
+    def _exec_quant_flashmla_kv_writer(self, kv_no_split, cos, sin, kv_cache, slots, *, return_quantized_current=False):
         """Quantize into dense staging pages, then scatter into fused FP8 pages.
 
         ``npu_kv_rmsnorm_rope_cache`` may materialize its non-contiguous cache
@@ -2121,6 +2132,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             value_cache=kv_cache[1],
             slot_mapping=slots,
         )
+        if return_quantized_current:
+            # DCP's replicated current cache must consume the same FP8 rows
+            # as the persistent history cache, including rank-unowned slots.
+            return rope.flatten(0, 1)[:num_tokens], nope.flatten(0, 1)[:num_tokens]
         return current_rope, current_nope
 
     def _prepare_prolog_v3_weights(self) -> dict[str, Any]:

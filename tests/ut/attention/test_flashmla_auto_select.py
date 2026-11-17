@@ -148,7 +148,10 @@ def test_quant_flashmla_selection_is_k3_c8_mrv2_only(monkeypatch):
     assert not AscendMLAImpl._can_use_quant_flashmla(impl)
     impl.fa_quant_layer = True
     config.parallel_config.decode_context_parallel_size = 2
+    assert AscendMLAImpl._can_use_quant_flashmla(impl)
+    impl.num_heads = 96
     assert not AscendMLAImpl._can_use_quant_flashmla(impl)
+    impl.num_heads = 8
     config.parallel_config.decode_context_parallel_size = 1
     monkeypatch.setattr(mla_v1, "get_quant_flashmla_ops", lambda: None)
     assert not AscendMLAImpl._can_use_quant_flashmla(impl)

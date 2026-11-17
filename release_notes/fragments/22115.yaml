@@ -3,7 +3,7 @@ entries:
   - category: feature
     text: >-
       Added QuantFlashMLA decode for compatible Kimi DSpark C8 drafts on Ascend A5 with Model Runner V2.
-      Use a C8 draft checkpoint with speculative quantization set to ascend and an operator package exposing both QuantFlashMLA APIs; PCP/DCP greater than one is not enabled by this change.
+      Use a C8 draft checkpoint with speculative quantization set to ascend and an operator package exposing both QuantFlashMLA APIs; compatible DCP head geometries are enabled, while PCP greater than one remains excluded.
     model: kimi-dspark
     hardware: [A5]
   - category: bugfix

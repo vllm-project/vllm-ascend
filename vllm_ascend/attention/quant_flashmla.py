@@ -68,6 +68,9 @@ class QuantFlashMLAImpl:
         cache_seqlens: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
         seqused_q: torch.Tensor | None = None,
+        *,
+        max_seqlen_q: int = -1,
+        max_seqlen_kv: int = -1,
     ) -> torch.Tensor:
         """Build the AICPU/device tiling schedule for the current batch."""
         _check_lengths(cache_seqlens, cu_seqlens_q, seqused_q)
@@ -78,8 +81,8 @@ class QuantFlashMLAImpl:
             self.config.quant_mode,
             cu_seqlens_q=cu_seqlens_q,
             seqused_q=seqused_q,
-            max_seqlen_q=-1,
-            max_seqlen_kv=-1,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
             head_dim_qk=FLASHMLA_QK_DIM,
             head_dim_v=FLASHMLA_V_DIM,
             mask_mode=self.config.mask_mode,

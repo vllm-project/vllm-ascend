@@ -34,10 +34,16 @@ tag, installation-directory name, or Python wheel version alone does not
 identify those interfaces. Check the selected attention backend; unavailable
 operators or unsupported geometry do not exercise this integration.
 
-PCP/DCP greater than one remains excluded from QuantFlashMLA selection. This
-change does not implement the scale propagation, current-token FP8 cache or
-LSE combination required for that distributed path. Ordinary DSpark/DCP support
-is a separate path and is not removed.
+DCP is supported when both the local current-query head count and the gathered
+history-query head count are supported by QuantFlashMLA. PCP greater than one
+remains excluded. The DCP path propagates query descales along the same head
+axes as the query, uses the writer's actual FP8 rows for replicated current KV,
+and requests LSE for the existing distributed attention merge.
+
+For the bounded TP2/DCP2 eager validation, add
+`--decode-context-parallel-size 2 --attention_config.indexer_kv_dtype fp8`
+and use `num_speculative_tokens=3`. This is not a claim that arbitrary TP/DCP
+head geometries or PD/graph combinations are validated.
 
 Real prefill attention retains the existing FIA path. Draft context-KV writes
 may produce FP8 cache through the writer, but this is not a QuantFlashMLA
@@ -130,8 +136,54 @@ current main PROLOG page limit.
 Before leaving Draft, run the affected pytest suites with the main-pinned vLLM
 revision, native writer and QuantFlashMLA checks, and the default-configuration
 three-state model comparison on the exact proposed revision and native package.
-Also complete repository format/CI checks. DCP adaptation, a new operator
-package's device compatibility, random-sampling distribution tests, long
+Also complete repository format/CI checks. Expanded DCP and combined PD/graph
+validation, package compatibility beyond the checks below, random-sampling distribution tests, long
 contexts, full-expert acceptance rates and uninstrumented performance remain
 separate validation work. Raw model data and deployment logs are not included
 in this repository.
+
+## Current integration checks
+
+The two DCP CPU contract suites were rerun against this integrated source in an
+isolated CPU-only container: 29 passed. The four changed production files are
+AST-identical to the sealed device-tested DCP overlay (formatting may differ).
+This is not whole-tree equivalence or a new model/NPU run. Ruff lint/format and
+`git diff --check` passed. `bash format.sh ci` was attempted but blocked because
+`pre-commit` is unavailable.
+
+## Bounded DCP validation (2026-11-17)
+
+The isolated tested source used vLLM
+`4ba787ec9959e566d3b587a796dff07673324da5` and Ascend main
+`568d12495214ea4a06bbc4721d40ca4a01d7621c`, with R1-R5 and the DCP
+increment. Its image was
+`sha256:b235e6cd7795575ff26289c2fac5a77e691ea07ab29c44637474e8caeb4efc30`,
+using ops-transformer 9.3.0 (`20261031_220309764`). These are experimental
+provenance pins, not minimum supported versions. This PR is based on a different
+main commit; exact-revision framework/NPU reruns remain required.
+
+- TP2/DCP2, eager, 93-layer/eight-expert target, five-layer draft and three
+  speculative tokens: target-only, BF16 draft and C8 draft each completed four
+  requests (two raw-token inputs repeated twice), 64 output tokens, and exit 0.
+  Both draft states matched the same-topology target tokens and repeated exactly.
+- Both C8 ranks executed QuantFlashMLA with LSE for history (96 heads) and current
+  (48 heads), 190 calls per path per rank. FP8 query/cache and corresponding
+  descale shapes were observed; no floating FlashMLA calls were recorded.
+- 29 CPU contracts, ten native LSE cases including empty histories, and actual
+  FP8 current-writer byte checks passed on the isolated source. CPU contracts
+  extract production methods with mocked dependencies; they are not full
+  framework or native-kernel tests.
+- Metadata uses explicit query/cache capacity bounds while retaining actual
+  zero cache lengths and used-query counts. It does not insert a fake key.
+- In a separate target-only four-group comparison, original main and the R1-R5
+  candidate matched tokens and returned top-five logprobs at each matching DCP
+  setting. Both exhibited the same DCP1-versus-DCP2 difference on one input.
+  This is not an explanation of the numerical difference or a quality claim.
+
+The later TP4/DCP4 BF16 MooncakeConnectorV2 PD experiment completed requests,
+real KV transfers and decode graph replay, but some outputs differed from the
+matched non-PD reference. Input/transfer attribution was interrupted before
+requests completed. C8 PD+DCP4+graph, effective prefix hits and expanded boundary
+coverage remain unvalidated. No deployment/observer scripts from those
+experiments are included here. The DCP eager result must not be presented as
+acceptance of that combined PD case.
