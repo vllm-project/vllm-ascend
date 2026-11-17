@@ -228,8 +228,11 @@ class MoETokenCutRuntimeConfig:
     @model_validator(mode="after")
     def _validate_values(self):
         if self.graph_mode == "full_decode" and (
-            not self.enabled or self.mode != "apply" or self.rebatch_backend != "native"
-            or not self.native_combined or self.rebatch_overlap
+            not self.enabled
+            or self.mode != "apply"
+            or self.rebatch_backend != "native"
+            or not self.native_combined
+            or self.rebatch_overlap
         ):
             raise ValueError("full_decode graph requires enabled native combined apply mode with rebatch_overlap=False")
         if self.rebatch_backend == "native" and self.mode != "apply":

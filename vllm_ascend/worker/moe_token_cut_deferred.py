@@ -66,19 +66,14 @@ class MoETokenDeferredStore:
         else:
             self._validate_storage_compatibility(storage, batch)
 
-        duplicate_ids = set(storage.request_ids[: storage.count]).intersection(
-            batch.request_ids
-        )
+        duplicate_ids = set(storage.request_ids[: storage.count]).intersection(batch.request_ids)
         if duplicate_ids:
             duplicate = min(duplicate_ids)
-            raise ValueError(
-                f"request {duplicate!r} is already deferred at layer {batch.layer_idx}"
-            )
+            raise ValueError(f"request {duplicate!r} is already deferred at layer {batch.layer_idx}")
         end = storage.count + row_count
         if end > self.capacity_per_layer:
             raise OverflowError(
-                f"layer {batch.layer_idx} deferred capacity exceeded: "
-                f"{end} > {self.capacity_per_layer}"
+                f"layer {batch.layer_idx} deferred capacity exceeded: {end} > {self.capacity_per_layer}"
             )
 
         destination = slice(storage.count, end)
@@ -86,7 +81,7 @@ class MoETokenDeferredStore:
         storage.residuals[destination].copy_(batch.residuals)
         storage.topk_ids[destination].copy_(batch.topk_ids)
         storage.topk_weights[destination].copy_(batch.topk_weights)
-        storage.request_ids[storage.count:end] = batch.request_ids
+        storage.request_ids[storage.count : end] = batch.request_ids
         storage.count = end
 
     def peek(self, layer_idx: int, max_rows: int | None = None) -> MoETokenDeferredBatch:
@@ -138,14 +133,10 @@ class MoETokenDeferredStore:
                     dtype=torch.long,
                     device=storage.hidden_states.device,
                 )
-                storage.hidden_states[:new_count].copy_(
-                    storage.hidden_states.index_select(0, indices)
-                )
+                storage.hidden_states[:new_count].copy_(storage.hidden_states.index_select(0, indices))
                 storage.residuals[:new_count].copy_(storage.residuals.index_select(0, indices))
                 storage.topk_ids[:new_count].copy_(storage.topk_ids.index_select(0, indices))
-                storage.topk_weights[:new_count].copy_(
-                    storage.topk_weights.index_select(0, indices)
-                )
+                storage.topk_weights[:new_count].copy_(storage.topk_weights.index_select(0, indices))
             kept_ids = [storage.request_ids[index] for index in keep_rows]
             storage.request_ids[:new_count] = kept_ids
             storage.request_ids[new_count:old_count] = [""] * (old_count - new_count)
@@ -209,9 +200,7 @@ class MoETokenDeferredStore:
             (storage.topk_weights, batch.topk_weights),
         )
         if any(
-            stored.shape[1:] != incoming.shape[1:]
-            or stored.dtype != incoming.dtype
-            or stored.device != incoming.device
+            stored.shape[1:] != incoming.shape[1:] or stored.dtype != incoming.dtype or stored.device != incoming.device
             for stored, incoming in pairs
         ):
             raise ValueError("deferred tensor shape, dtype, or device changed")

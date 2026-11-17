@@ -52,19 +52,13 @@ def build_scheduler_projection(
     scheduled = set(request_ids)
     unknown = set(deferred_request_ids).difference(scheduled)
     if unknown:
-        raise ValueError(
-            f"deferred requests are not present in the scheduled batch: {sorted(unknown)!r}"
-        )
+        raise ValueError(f"deferred requests are not present in the scheduled batch: {sorted(unknown)!r}")
     deferred = set(deferred_request_ids)
-    kept_indices = tuple(
-        index for index, request_id in enumerate(request_ids) if request_id not in deferred
-    )
+    kept_indices = tuple(index for index, request_id in enumerate(request_ids) if request_id not in deferred)
     return MoETokenSchedulerProjection(
         original_request_ids=request_ids,
         kept_request_ids=tuple(request_ids[index] for index in kept_indices),
-        deferred_request_ids=tuple(
-            request_id for request_id in request_ids if request_id in deferred
-        ),
+        deferred_request_ids=tuple(request_id for request_id in request_ids if request_id in deferred),
         kept_indices=kept_indices,
     )
 
@@ -102,22 +96,16 @@ def prepare_scheduler_rollbacks(
     scheduled_spec = scheduler_output.scheduled_spec_decode_tokens
     unexpected_spec = set(deferred_request_ids).intersection(scheduled_spec)
     if unexpected_spec:
-        raise ValueError(
-            "token-cut deferred handoff does not support speculative tokens: "
-            f"{sorted(unexpected_spec)!r}"
-        )
+        raise ValueError(f"token-cut deferred handoff does not support speculative tokens: {sorted(unexpected_spec)!r}")
     scheduled_encoder_inputs = getattr(
         scheduler_output,
         "scheduled_encoder_inputs",
         {},
     )
-    unexpected_encoder_inputs = set(deferred_request_ids).intersection(
-        scheduled_encoder_inputs
-    )
+    unexpected_encoder_inputs = set(deferred_request_ids).intersection(scheduled_encoder_inputs)
     if unexpected_encoder_inputs:
         raise ValueError(
-            "token-cut deferred handoff does not support encoder inputs: "
-            f"{sorted(unexpected_encoder_inputs)!r}"
+            f"token-cut deferred handoff does not support encoder inputs: {sorted(unexpected_encoder_inputs)!r}"
         )
     if getattr(model_runner_output, "kv_connector_output", None) is not None:
         raise ValueError("token-cut deferred handoff does not support KV connectors")
@@ -135,74 +123,43 @@ def prepare_scheduler_rollbacks(
         num_tokens = scheduler_output.num_scheduled_tokens.get(request_id)
         if num_tokens != 1:
             raise ValueError(
-                "token-cut deferred handoff requires one scheduled token for "
-                f"{request_id!r}; got {num_tokens!r}"
+                f"token-cut deferred handoff requires one scheduled token for {request_id!r}; got {num_tokens!r}"
             )
         request = scheduler.requests.get(request_id)
         if request is None or request.is_finished():
-            raise ValueError(
-                f"deferred request {request_id!r} is absent or already finished"
-            )
+            raise ValueError(f"deferred request {request_id!r} is absent or already finished")
         if getattr(request, "num_output_placeholders", 0):
-            raise ValueError(
-                f"deferred request {request_id!r} has async output placeholders"
-            )
+            raise ValueError(f"deferred request {request_id!r} has async output placeholders")
         if getattr(request, "num_in_flight_tokens", num_tokens) < num_tokens:
-            raise ValueError(
-                f"deferred request {request_id!r} has insufficient in-flight tokens"
-            )
+            raise ValueError(f"deferred request {request_id!r} has insufficient in-flight tokens")
         if request.num_computed_tokens < num_tokens:
-            raise ValueError(
-                f"deferred request {request_id!r} has insufficient computed tokens"
-            )
+            raise ValueError(f"deferred request {request_id!r} has insufficient computed tokens")
         num_prompt_tokens = getattr(request, "num_prompt_tokens", None)
-        if (
-            num_prompt_tokens is not None
-            and request.num_computed_tokens <= num_prompt_tokens
-        ):
-            raise ValueError(
-                f"deferred request {request_id!r} is not in decode state"
-            )
+        if num_prompt_tokens is not None and request.num_computed_tokens <= num_prompt_tokens:
+            raise ValueError(f"deferred request {request_id!r} is not in decode state")
 
         request_index = model_runner_output.req_id_to_index.get(request_id)
         if request_index is None:
             raise ValueError(f"deferred request {request_id!r} has no output row")
         if request_index < 0 or request_index >= len(sampled_token_ids):
-            raise ValueError(
-                f"deferred request {request_id!r} has invalid output row "
-                f"{request_index}"
-            )
+            raise ValueError(f"deferred request {request_id!r} has invalid output row {request_index}")
         if (
             request_index >= len(model_runner_output.req_ids)
             or model_runner_output.req_ids[request_index] != request_id
         ):
-            raise ValueError(
-                f"deferred request {request_id!r} has an inconsistent output mapping"
-            )
+            raise ValueError(f"deferred request {request_id!r} has an inconsistent output mapping")
         if sampled_token_ids[request_index]:
-            raise ValueError(
-                f"deferred request {request_id!r} still has sampled tokens"
-            )
+            raise ValueError(f"deferred request {request_id!r} still has sampled tokens")
         if pooler_output:
             if request_index >= len(pooler_output):
-                raise ValueError(
-                    f"deferred request {request_id!r} has no pooling-output row"
-                )
+                raise ValueError(f"deferred request {request_id!r} has no pooling-output row")
             if pooler_output[request_index] is not None:
-                raise ValueError(
-                    f"deferred request {request_id!r} has a pooling output"
-                )
+                raise ValueError(f"deferred request {request_id!r} has a pooling output")
         if prompt_logprobs.get(request_id) is not None:
-            raise ValueError(
-                f"deferred request {request_id!r} has prompt logprobs"
-            )
+            raise ValueError(f"deferred request {request_id!r} has prompt logprobs")
         if request_id in num_nans:
-            raise ValueError(
-                f"deferred request {request_id!r} has logits diagnostics"
-            )
-        rollbacks.append(
-            MoETokenSchedulerRollback(request_id, request, num_tokens)
-        )
+            raise ValueError(f"deferred request {request_id!r} has logits diagnostics")
+        rollbacks.append(MoETokenSchedulerRollback(request_id, request, num_tokens))
     return tuple(rollbacks)
 
 
@@ -238,13 +195,9 @@ def project_scheduler_output(
     cached = scheduler_output.scheduled_cached_reqs
     if tuple(cached.req_ids) != projection.original_request_ids:
         raise ValueError("cached request order does not match the token-cut projection")
-    missing_counts = set(projection.original_request_ids).difference(
-        scheduler_output.num_scheduled_tokens
-    )
+    missing_counts = set(projection.original_request_ids).difference(scheduler_output.num_scheduled_tokens)
     if missing_counts:
-        raise ValueError(
-            f"scheduled token counts are missing requests: {sorted(missing_counts)!r}"
-        )
+        raise ValueError(f"scheduled token counts are missing requests: {sorted(missing_counts)!r}")
     non_decode_counts = {
         request_id: scheduler_output.num_scheduled_tokens[request_id]
         for request_id in projection.original_request_ids
@@ -252,15 +205,13 @@ def project_scheduler_output(
     }
     if non_decode_counts:
         raise ValueError(
-            "token-cut scheduler projection requires one scheduled token per request; "
-            f"got {non_decode_counts!r}"
+            f"token-cut scheduler projection requires one scheduled token per request; got {non_decode_counts!r}"
         )
 
     projected_cached = _project_cached_requests(cached, projection)
     kept = set(projection.kept_request_ids)
     num_scheduled_tokens = {
-        request_id: scheduler_output.num_scheduled_tokens[request_id]
-        for request_id in projection.kept_request_ids
+        request_id: scheduler_output.num_scheduled_tokens[request_id] for request_id in projection.kept_request_ids
     }
     return replace(
         scheduler_output,
@@ -294,10 +245,7 @@ def _project_cached_requests(
         if allow_empty and not values:
             return []
         if len(values) != row_count:
-            raise ValueError(
-                f"cached request field {field_name!r} has {len(values)} rows; "
-                f"expected {row_count}"
-            )
+            raise ValueError(f"cached request field {field_name!r} has {len(values)} rows; expected {row_count}")
         return [values[index] for index in projection.kept_indices]
 
     kept = set(projection.kept_request_ids)
@@ -310,11 +258,7 @@ def _project_cached_requests(
             "new_token_ids",
             allow_empty=True,
         ),
-        all_token_ids={
-            request_id: value
-            for request_id, value in cached.all_token_ids.items()
-            if request_id in kept
-        },
+        all_token_ids={request_id: value for request_id, value in cached.all_token_ids.items() if request_id in kept},
         new_block_ids=project_rows(cached.new_block_ids, "new_block_ids"),
         num_computed_tokens=project_rows(
             cached.num_computed_tokens,

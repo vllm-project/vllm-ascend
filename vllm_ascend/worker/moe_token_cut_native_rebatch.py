@@ -343,9 +343,9 @@ class NativeRebatchStore:
         )
         if restore_rows is not None:
             self._restore_payload(values, work, cache, cache_ids, cache_count)
-        print("rebatch_call before", flush = True)
+        print("rebatch_call before", flush=True)
         invoke_native_op(REBATCH_AND_UPDATE_SCHEMA, values)
-        print("rebatch_call after", flush = True)
+        print("rebatch_call after", flush=True)
         work.positions, work.slots = output_positions, output_slots
         work.seq_lens, work.block_tables = output_seq, output_blocks
         return work

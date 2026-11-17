@@ -138,10 +138,7 @@ class MoECommMethod(ABC):
             fused_experts_input=fused_experts_input,
         )
         token_cut_state = getattr(_EXTRA_CTX, "moe_token_cut_state", None)
-        if (
-            token_cut_state is not None
-            and isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
-        ):
+        if token_cut_state is not None and isinstance(self.token_dispatcher, TokenDispatcherWithMC2):
             token_dispatch_input = token_cut_state.apply_saved_routing(
                 token_dispatch_input,
                 rank_id=self.token_dispatcher.ep_rank_id,
@@ -156,10 +153,7 @@ class MoECommMethod(ABC):
         )
         if apply_token_cut:
             if self.token_dispatcher.global_bs != 0:
-                raise RuntimeError(
-                    "MoE token-cut apply mode requires MC2 uniform mode with "
-                    "x_active_mask support"
-                )
+                raise RuntimeError("MoE token-cut apply mode requires MC2 uniform mode with x_active_mask support")
             token_dispatch_input = token_cut_output.dispatch_input
         token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 

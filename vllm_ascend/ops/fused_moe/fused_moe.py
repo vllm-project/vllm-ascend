@@ -301,16 +301,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         """Reuse saved routes and evaluate the gate only for fresh rows."""
         state = getattr(_EXTRA_CTX, "moe_token_cut_state", None)
         fresh_rows = (
-            state.fresh_router_row_indices(hidden_states.shape[0], hidden_states.device)
-            if state is not None else None
+            state.fresh_router_row_indices(hidden_states.shape[0], hidden_states.device) if state is not None else None
         )
         gate = self.gate
         weight = gate.weight_fp32 if hasattr(gate, "weight_fp32") else gate.weight.float()
         if fresh_rows is None:
             return F.linear(hidden_states.float(), weight)
-        output = torch.zeros(
-            (hidden_states.shape[0], weight.shape[0]), dtype=weight.dtype, device=hidden_states.device
-        )
+        output = torch.zeros((hidden_states.shape[0], weight.shape[0]), dtype=weight.dtype, device=hidden_states.device)
         if fresh_rows.numel():
             logits = F.linear(hidden_states.index_select(0, fresh_rows).float(), weight)
             output.index_copy_(0, fresh_rows, logits)

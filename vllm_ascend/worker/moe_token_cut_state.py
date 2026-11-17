@@ -944,8 +944,11 @@ class MoETokenCutState:
         """Execute one shadow cut decision without changing dispatch data."""
         if self.model_graph_frame is not None:
             return self.model_graph_frame.dispatch(
-                token_dispatch_input, group_ep=group_ep, rank_id=rank_id,
-                rank_num=rank_num, expert_num=expert_num,
+                token_dispatch_input,
+                group_ep=group_ep,
+                rank_id=rank_id,
+                rank_num=rank_num,
+                expert_num=expert_num,
             )
         if self.config.graph_mode == "full_decode":
             # Prefill/profile fallback never creates eager checkpoints inside

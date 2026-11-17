@@ -2024,11 +2024,7 @@ void combine_and_dispatch_rebatch_meta(
     int64_t max_bs,
     int64_t k)
 {
-    // int64_t hidden_size = batch_before_dispatch.size(1);
 
-    // at::Tensor rebatch_residuals = at::empty({max_bs, hidden_size},
-    //                                          residuals_before_dispatch.options().device(at::kMeta));
-    // return {rebatch_output, rebatch_residuals};
 }
 
 void rebatch_and_update_meta(

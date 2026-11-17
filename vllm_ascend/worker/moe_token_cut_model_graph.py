@@ -697,6 +697,7 @@ class MoETokenCutModelGraph:
 
         if type(runner.model) is not ACLGraphWrapper:
             raise RuntimeError("token-cut full_decode requires the standard ACLGraphWrapper")
+
         def run_model():
             # v0.27 resolves "from_forward_context" MoE ops with a per-forward
             # cursor. Two warmups and capture share this context, but each is
@@ -705,6 +706,7 @@ class MoETokenCutModelGraph:
             context.moe_layer_index = 0
             # Positional inputs enable the wrapper's Tensor address checks.
             return runner.model(frame.input_ids, frame.positions)
+
         with self.activate(context):
             entry = runner.model.concrete_aclgraph_entries.get(context.batch_descriptor)
             captured = entry is not None and entry.aclgraph is not None

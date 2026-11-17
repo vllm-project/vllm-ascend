@@ -34,19 +34,11 @@ class MoETokenRestorePlan:
 
     @property
     def kept_request_ids(self) -> tuple[str, ...]:
-        return tuple(
-            self.request_ids[index]
-            for index in self.kept_indices.tolist()
-            if self.request_ids[index]
-        )
+        return tuple(self.request_ids[index] for index in self.kept_indices.tolist() if self.request_ids[index])
 
     @property
     def deferred_request_ids(self) -> tuple[str, ...]:
-        return tuple(
-            self.request_ids[index]
-            for index in self.deferred_indices.tolist()
-            if self.request_ids[index]
-        )
+        return tuple(self.request_ids[index] for index in self.deferred_indices.tolist() if self.request_ids[index])
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,46 +68,33 @@ def build_restore_plan(capture: MoETokenCutLayerCapture) -> MoETokenRestorePlan:
     """Validate a captured device decision and build its reference row map."""
     batch_size = len(capture.request_ids)
     cut_idx = capture.cut_idx.detach().to(device="cpu", dtype=torch.int64)
-    prefix_index = capture.prefix_index[:batch_size].detach().to(
-        device="cpu", dtype=torch.int64
-    )
+    prefix_index = capture.prefix_index[:batch_size].detach().to(device="cpu", dtype=torch.int64)
     active_mask = capture.active_mask.detach().to(device="cpu", dtype=torch.bool)
     actual_bs = int(capture.actual_bs.detach().to(device="cpu").reshape(-1)[0])
 
     if cut_idx.shape != (batch_size,):
-        raise ValueError(
-            f"layer {capture.layer_idx}: cut_idx must have {batch_size} entries"
-        )
+        raise ValueError(f"layer {capture.layer_idx}: cut_idx must have {batch_size} entries")
     if torch.any((cut_idx != 0) & (cut_idx != 1)):
         raise ValueError(f"layer {capture.layer_idx}: cut_idx must be binary")
 
     expected_prefix = torch.cumsum(cut_idx, dim=0)
     if not torch.equal(prefix_index, expected_prefix):
-        raise ValueError(
-            f"layer {capture.layer_idx}: prefix_index does not match cut_idx"
-        )
+        raise ValueError(f"layer {capture.layer_idx}: prefix_index does not match cut_idx")
     expected_actual_bs = int(expected_prefix[-1]) if batch_size else 0
     if actual_bs != expected_actual_bs:
         raise ValueError(
-            f"layer {capture.layer_idx}: actual_bs={actual_bs} does not match "
-            f"the {expected_actual_bs} kept rows"
+            f"layer {capture.layer_idx}: actual_bs={actual_bs} does not match the {expected_actual_bs} kept rows"
         )
     expected_active_mask = torch.arange(batch_size) < actual_bs
-    if active_mask.shape != (batch_size,) or not torch.equal(
-        active_mask, expected_active_mask
-    ):
-        raise ValueError(
-            f"layer {capture.layer_idx}: active_mask must mark the compacted prefix"
-        )
+    if active_mask.shape != (batch_size,) or not torch.equal(active_mask, expected_active_mask):
+        raise ValueError(f"layer {capture.layer_idx}: active_mask must mark the compacted prefix")
 
     request_mask = torch.tensor(
         [bool(request_id) for request_id in capture.request_ids],
         dtype=torch.bool,
     )
     if torch.any((cut_idx != 0) & ~request_mask):
-        raise ValueError(
-            f"layer {capture.layer_idx}: padding rows cannot be marked as kept"
-        )
+        raise ValueError(f"layer {capture.layer_idx}: padding rows cannot be marked as kept")
     kept_indices = torch.nonzero((cut_idx != 0) & request_mask, as_tuple=False).flatten()
     deferred_indices = torch.nonzero((cut_idx == 0) & request_mask, as_tuple=False).flatten()
     padding_indices = torch.nonzero(~request_mask, as_tuple=False).flatten()

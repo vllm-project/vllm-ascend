@@ -532,30 +532,20 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if fresh_rows.numel() > 0:
             fresh_input_ids = input_ids
             if input_ids is not None and input_ids.shape[0] == hidden_states.shape[0]:
-                fresh_input_ids = input_ids.index_select(
-                    0, fresh_rows.to(device=input_ids.device)
-                )
+                fresh_input_ids = input_ids.index_select(0, fresh_rows.to(device=input_ids.device))
             fresh_weights, fresh_ids = self._select_experts(
                 hidden_states.index_select(0, fresh_rows),
                 router_logits.index_select(0, fresh_rows),
                 enable_force_load_balance,
                 fresh_input_ids,
             )
-            topk_ids = fresh_ids.new_empty(
-                (hidden_states.shape[0], *fresh_ids.shape[1:])
-            )
-            topk_weights = fresh_weights.new_empty(
-                (hidden_states.shape[0], *fresh_weights.shape[1:])
-            )
+            topk_ids = fresh_ids.new_empty((hidden_states.shape[0], *fresh_ids.shape[1:]))
+            topk_weights = fresh_weights.new_empty((hidden_states.shape[0], *fresh_weights.shape[1:]))
             topk_ids.index_copy_(0, fresh_rows, fresh_ids)
             topk_weights.index_copy_(0, fresh_rows, fresh_weights)
         else:
-            topk_ids = saved_ids.new_empty(
-                (hidden_states.shape[0], *saved_ids.shape[1:])
-            )
-            topk_weights = saved_weights.new_empty(
-                (hidden_states.shape[0], *saved_weights.shape[1:])
-            )
+            topk_ids = saved_ids.new_empty((hidden_states.shape[0], *saved_ids.shape[1:]))
+            topk_weights = saved_weights.new_empty((hidden_states.shape[0], *saved_weights.shape[1:]))
         if topk_ids.shape[1:] != saved_ids.shape[1:]:
             raise RuntimeError("saved MoE route shape changed while request was parked")
         if topk_weights.shape[1:] != saved_weights.shape[1:]:

@@ -54,9 +54,7 @@ def _patch_scheduler_update_from_output() -> None:
                 scheduler_output,
                 model_runner_output,
             )
-            self._moe_token_cut_parked_request_ids = update_parked_request_ids(
-                parked, scheduled, deferred
-            )
+            self._moe_token_cut_parked_request_ids = update_parked_request_ids(parked, scheduled, deferred)
             return result
 
         apply_scheduler_rollbacks(rollbacks)
@@ -68,9 +66,7 @@ def _patch_scheduler_update_from_output() -> None:
                 scheduler_output,
                 model_runner_output,
             )
-            self._moe_token_cut_parked_request_ids = update_parked_request_ids(
-                parked, scheduled, deferred
-            )
+            self._moe_token_cut_parked_request_ids = update_parked_request_ids(parked, scheduled, deferred)
             return result
         except Exception:
             # Undo only the mutation owned by this wrapper. The caller retains
@@ -101,10 +97,7 @@ def _patch_scheduler_update_from_output() -> None:
     def _patched_preempt_request(self, request, *args, **kwargs):
         parked = getattr(self, "_moe_token_cut_parked_request_ids", ())
         if request.request_id in parked:
-            raise RuntimeError(
-                "cannot preempt a MoE token-cut request before its saved "
-                "cross-layer state is restored"
-            )
+            raise RuntimeError("cannot preempt a MoE token-cut request before its saved cross-layer state is restored")
         return current_preempt(self, request, *args, **kwargs)
 
     Scheduler._preempt_request = _patched_preempt_request
