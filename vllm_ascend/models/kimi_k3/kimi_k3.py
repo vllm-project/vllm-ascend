@@ -16,7 +16,6 @@ from typing import Any, ClassVar, Literal, TypeVar, cast
 import torch
 import vllm.envs as envs
 from torch import nn
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_pp_group,
@@ -88,24 +87,21 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.distributed.parallel_state import get_gproj_tp_group, get_mlp_tp_group
+from vllm_ascend.distributed.parallel_state import get_gproj_tp_group
 from vllm_ascend.ops.finegrained_tp import (
-    ChunkedMLPTP,
     FullRankGateTP,
     ProjectionColumnParallelLinear,
-    uses_aiv_communication,
 )
 from vllm_ascend.ops.kda_parallel import KDARowParallelLinear, get_kda_state_shape
 from vllm_ascend.ops.kimi_kda import (
     AscendKimiK3DeltaAttention as AscendKimiK3DeltaAttentionBase,
 )
 from vllm_ascend.ops.kimi_pixel_norm import build_kimi_pixel_norm
-from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp, MLPColumnParallelOp
+from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
 from vllm_ascend.quantization.configs.modelslim_config import AscendModelSlimConfig
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
@@ -296,27 +292,8 @@ class AscendKimiMLP(KimiMLP):
             activation_situ_linear_beta=activation_situ_linear_beta,
         )
         self.use_sequence_parallel = use_sequence_parallel
-        self._finegrained_mlp = None
-        if isinstance(getattr(self.gate_up_proj, "custom_op", None), MLPColumnParallelOp):
-            group = get_mlp_tp_group()
-            # Pipelined AG/RS can overlap the next chunk's quant/activation
-            # Vector work. AIV uses the original ordered linear collectives.
-            if not uses_aiv_communication(group):
-                self._finegrained_mlp = ChunkedMLPTP(group)
-                self._finegrained_prefix = prefix
-                context = get_current_vllm_config().compilation_config.static_forward_context
-                if prefix in context:
-                    raise ValueError(f"Duplicate fine-grained MLP layer name: {prefix}")
-                context[prefix] = self
-
-    def _prepare_down_input(self, gate_up: torch.Tensor) -> torch.Tensor:
-        return self.act_fn(gate_up)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self._finegrained_mlp is not None:
-            output = torch.empty_like(x)
-            torch.ops.vllm.kimi_mlp_finegrained_forward(x, output, self._finegrained_prefix)
-            return output
         if self.use_sequence_parallel:
             # All weight shards must operate on the same tokens. Reducing
             # different sequence shards would mix live and padding rows.
@@ -1575,21 +1552,3 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
 
     def set_dspark_aux_capture_materialized(self, enabled: bool) -> None:
         self.language_model.set_dspark_aux_capture_materialized(enabled)
-
-
-@eager_break_during_capture
-def kimi_mlp_finegrained_forward(hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str) -> None:
-    layer = get_forward_context().no_compile_layers[layer_name]
-    output.copy_(layer._finegrained_mlp.forward(layer, hidden_states))
-
-
-def kimi_mlp_finegrained_forward_fake(hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="kimi_mlp_finegrained_forward",
-    op_func=kimi_mlp_finegrained_forward,
-    mutates_args=["output"],
-    fake_impl=kimi_mlp_finegrained_forward_fake,
-)

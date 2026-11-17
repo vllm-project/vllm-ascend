@@ -69,49 +69,28 @@ def cpu_streams(monkeypatch):
 
 @pytest.mark.parametrize("capacity", [1, 3, 8])
 @pytest.mark.parametrize("size", [2, 4])
-@pytest.mark.parametrize("component", ["embedding", "mlp"])
-def test_chunked_collectives_preserve_owner_rows(monkeypatch, capacity, size, component):
+def test_chunked_embedding_collectives_preserve_owner_rows(monkeypatch, capacity, size):
     world = CollectiveWorld(size)
-    monkeypatch.setattr(tp, "projection_capacity", lambda hidden: capacity)
-    monkeypatch.setattr(tp, "uses_aiv_communication", lambda group: False)
     # Include an idle DP owner and unequal live rows, while communication
     # spans and ordering remain identical on every rank.
     lengths = [0] + [max(1, capacity - rank) for rank in range(1, size)]
-    vocab, hidden, intermediate = size * 8, 3, size * 2
+    vocab, hidden = size * 8, 3
     weight = torch.arange(vocab * hidden, dtype=torch.float32).reshape(vocab, hidden) / 10
-    up_weight = torch.arange(hidden * intermediate, dtype=torch.float32).reshape(hidden, intermediate) / 20
-    down_weight = torch.arange(intermediate * hidden, dtype=torch.float32).reshape(intermediate, hidden) / 30
 
     def run(rank):
         group = SimpleNamespace(world_size=size, rank_in_group=rank)
         communication = world.communication(rank)
         rows = lengths[rank]
-        owner = torch.arange(capacity * hidden, dtype=torch.float32).reshape(capacity, hidden) + rank
-        if component == "embedding":
-            executor = tp.ChunkedEmbeddingTP(group)
-            ids = (torch.arange(capacity) + rank * 5) % vocab
-            shard = vocab // size
+        executor = tp.ChunkedEmbeddingTP(group)
+        ids = (torch.arange(capacity) + rank * 5) % vocab
+        shard = vocab // size
 
-            def lookup(ids):
-                return weight[ids] * ((ids >= rank * shard) & (ids < (rank + 1) * shard)).unsqueeze(-1)
+        def lookup(ids):
+            return weight[ids] * ((ids >= rank * shard) & (ids < (rank + 1) * shard)).unsqueeze(-1)
 
-            layer = SimpleNamespace(_lookup_partition=lookup)
-            expected = weight[ids][:rows]
-            execute = lambda: executor.forward(layer, ids)[:rows]
-        else:
-            executor = tp.ChunkedMLPTP(group)
-            begin, end = rank * 2, (rank + 1) * 2
-            # Bias on the down projection must be contributed only once.
-            bias = torch.ones(hidden)
-            up = SimpleNamespace(bias=None)
-            down = SimpleNamespace(bias=bias)
-            up.quant_method = SimpleNamespace(apply=lambda layer, x, bias: x @ up_weight[:, begin:end])
-            down.quant_method = SimpleNamespace(
-                apply=lambda layer, x, bias: x @ down_weight[begin:end] + (bias if bias is not None else 0)
-            )
-            layer = SimpleNamespace(gate_up_proj=up, down_proj=down, _prepare_down_input=torch.relu)
-            expected = torch.relu(owner[:rows] @ up_weight) @ down_weight + bias
-            execute = lambda: executor.forward(layer, owner[:rows])
+        layer = SimpleNamespace(_lookup_partition=lookup)
+        expected = weight[ids][:rows]
+        execute = lambda: executor.forward(layer, ids)[:rows]
         executor.communication = communication
         torch.testing.assert_close(execute(), expected)
 

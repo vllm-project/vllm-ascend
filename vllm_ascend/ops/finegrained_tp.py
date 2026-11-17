@@ -308,28 +308,3 @@ class ChunkedEmbeddingTP:
         # Copy chunk0 while the final CCU RS is still pending. All ranks
         # submit AG0, AG1, RS0, RS1, including padded and idle owners.
         return _restore_owner_chunks(outputs, owner.shape[0])
-
-
-class ChunkedMLPTP:
-    """Pipeline CCU collectives with quantization and MLP activation work."""
-
-    def __init__(self, group):
-        self.group = group
-        self.communication = TPCommunication()
-
-    def forward(self, layer, hidden):
-        rows = hidden.shape[0]
-        capacity = projection_capacity(hidden)
-        owner = F.pad(hidden, (0, 0, 0, capacity - rows))
-        chunks = owner.tensor_split(2) if capacity > 1 else (owner,)
-        gathered = [self.communication.gather(chunk.contiguous(), self.group) for chunk in chunks]
-        outputs = []
-        for pending in gathered:
-            up, down = layer.gate_up_proj, layer.down_proj
-            projected = up.quant_method.apply(up, pending.wait(), bias=up.bias)
-            down_input = layer._prepare_down_input(projected)
-            bias = down.bias if self.group.rank_in_group == 0 else None
-            partial = down.quant_method.apply(down, down_input, bias=bias)
-            outputs.append(self.communication.scatter(partial, self.group))
-        # AG0, AG1, RS0, RS1 are launched in the same order on every rank.
-        return _restore_owner_chunks(outputs, rows)
