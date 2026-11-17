@@ -186,7 +186,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             )
 
     def _init_layerwise_config(self) -> None:
-        layout = None
+        self._layerwise_reuse_layout = None
 
         # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
         # layer_idx_in_group is the index of the physical layer within the
@@ -226,9 +226,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
 
         if self.kv_cache_config is not None:
             if self.use_layerwise_transfer:
-                layout = get_layerwise_reuse_layout(self.kv_cache_config)
-                if layout is not None:
-                    self._dspark_draft_layer_names.update(layout.draft_entry_names)
+                self._layerwise_reuse_layout = get_layerwise_reuse_layout(self.kv_cache_config)
+                if self._layerwise_reuse_layout is not None:
+                    self._dspark_draft_layer_names.update(self._layerwise_reuse_layout.draft_entry_names)
                 elif (
                     getattr(self, "_dspark_draft_layer_names", ())
                     and getattr(self, "_dspark_prefix_keys", None) is None
@@ -256,7 +256,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         if isinstance(spec, MambaSpec)
                     }
                 effective_num_layers = max(self.num_layers, len(physical_layers))
-                if layout is None and effective_num_layers != self.num_layers:
+                if self._layerwise_reuse_layout is None and effective_num_layers != self.num_layers:
                     logger.info(
                         "KVPoolWorker: updated num_layers %d -> %d from cache group layout.",
                         self.num_layers,
@@ -292,9 +292,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         len(phys_to_layer_idx),
                     )
 
-        self._layerwise_reuse_layout = layout
-        if layout is not None:
-            self.num_layers = self.layerwise_key_layers = len(layout.layers)
+        if self._layerwise_reuse_layout is not None:
+            self.num_layers = self.layerwise_key_layers = len(self._layerwise_reuse_layout.layers)
         self.layer_load_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
         self.layer_save_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
         self.layer_load_finished_events: list[threading.Event] | None = None
@@ -304,7 +303,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.layerwise_offload = False
         self.prefetch_layer_map: dict[int, tuple[int, ...]] = {}
         if self.use_layerwise_transfer:
-            if layout is None:
+            if self._layerwise_reuse_layout is None:
                 stage_start = self.layerwise_key_layer_offset
                 stage_layers = range(stage_start, stage_start + stage_num_layers)
                 total_layers = getattr(self, "total_layers", None)
@@ -316,14 +315,16 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 )
                 self.num_prefetch_layers = layerwise_settings.num_prefetch_layers
             else:
-                self.prefetch_layer_map = self._remap_layout_to_stage_local(layout.prefetch_layer_map, layout.layers)
-                self.layerwise_offload = layout.has_layer_reuse
-                self.num_prefetch_layers = layout.num_prefetch_layers
+                self.prefetch_layer_map = self._remap_layout_to_stage_local(
+                    self._layerwise_reuse_layout.prefetch_layer_map, self._layerwise_reuse_layout.layers
+                )
+                self.layerwise_offload = self._layerwise_reuse_layout.has_layer_reuse
+                self.num_prefetch_layers = self._layerwise_reuse_layout.num_prefetch_layers
                 for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups):
                     layers = {
-                        self._global_to_local_layer[layout.cache_layer_indices[name]]
+                        self._global_to_local_layer[self._layerwise_reuse_layout.cache_layer_indices[name]]
                         for name in group.layer_names
-                        if name in layout.reused_cache_names
+                        if name in self._layerwise_reuse_layout.reused_cache_names
                     }
                     if layers:
                         self._reused_layers_by_group[group_id] = layers
