@@ -46,6 +46,13 @@ from typing import Any
 
 from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.ops.triton.apply_grammar_bitmask import apply_grammar_bitmask_npu
+from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
+from vllm_ascend.ops.triton.kda.kda import (
+    chunk_kda,
+    chunk_kda_with_fused_gate,
+    fused_kda_gate,
+    fused_recurrent_kda,
+)
 from vllm_ascend.ops.triton.mamba.precopy import precopy_mamba_align_fused_npu
 from vllm_ascend.ops.triton.metrics.num_nans import get_num_nans
 from vllm_ascend.ops.triton.sample.categorical_sample import categorical_sample
@@ -132,6 +139,24 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
     "vllm.v1.sample.ops.topk_topp_triton.apply_top_k_top_p_triton": apply_top_k_top_p,
     "vllm.v1.worker.gpu.structured_outputs._apply_grammar_bitmask_kernel": apply_grammar_bitmask_npu,
     "vllm.v1.worker.mamba_utils.precopy_mamba_align_fused_kernel": precopy_mamba_align_fused_npu,
+    # ---- vllm.third_party.flash_linear_attention.* ------------------------
+    # chunk_gated_delta_rule is defined in ops/chunk.py; the ops package
+    # re-exports it and the olmo/qwen GDN layers import that copy. The
+    # identity sweep rebinds every copy (the retired patch reassigned the
+    # package attribute directly).
+    "vllm.third_party.flash_linear_attention.ops.chunk.chunk_gated_delta_rule": (  # noqa: E501
+        chunk_gated_delta_rule
+    ),
+    # The KDA primitives are defined in ops/kda.py; bailing_moe_v3 and the
+    # Kimi GDN layers from-import them directly from the module.
+    "vllm.third_party.flash_linear_attention.ops.kda.chunk_kda": chunk_kda,
+    "vllm.third_party.flash_linear_attention.ops.kda.chunk_kda_with_fused_gate": (  # noqa: E501
+        chunk_kda_with_fused_gate
+    ),
+    "vllm.third_party.flash_linear_attention.ops.kda.fused_kda_gate": fused_kda_gate,
+    "vllm.third_party.flash_linear_attention.ops.kda.fused_recurrent_kda": (  # noqa: E501
+        fused_recurrent_kda
+    ),
 }
 
 

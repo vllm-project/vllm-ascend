@@ -35,7 +35,9 @@ from vllm_ascend.triton_kernel_overrides import (
 # dispatcher's identity sweep collapses the fan-out into 17 registrations
 # plus one device-function swap (device functions are inlined by the
 # Triton compiler and cannot be wrapped -- see _DEVICE_FUNCTION_SWAPS).
-EXPECTED_OVERRIDE_COUNT = 17
+# The five flash_linear_attention entries absorb the FLA and KDA swaps
+# that the retired patch gained from upstream syncs.
+EXPECTED_OVERRIDE_COUNT = 22
 
 # Device functions (helpers called inside a @triton.jit kernel body) are
 # inlined by the Triton compiler, which resolves the callee from the
@@ -167,3 +169,32 @@ def test_class_mount_receives_no_implicit_cls():
     Mount.from_logits(42)
     # Exactly the explicit argument: no implicit class/host argument.
     assert received == [(42,)]
+
+
+def test_fla_ops_reexport_is_identity_sweepable():
+    """The multi-hop FLA re-export must stay identity-sweepable.
+
+    chunk_gated_delta_rule is the only multi-hop chain in the table: the
+    ops package re-exports it from ops/chunk.py and the GDN layers
+    from-import the package copy. The dispatcher's sweep rebinds holders
+    by matching the original object's identity, so the package copy must
+    be the very object the key's defining attribute holds; if upstream
+    ever wraps or rebinds the package copy, the sweep silently misses it
+    and the GDN layers keep the upstream kernel.
+
+    Unregistered sessions (this suite) pin the sweepable precondition;
+    registered sessions (the e2e conftest) additionally check the
+    installed wrapper delegates to the NPU implementation. Invoking
+    register_kernels here would repeat the environment-sensitive sweep
+    that the class-mount test above avoids.
+    """
+    import vllm.third_party.flash_linear_attention.ops as fla_ops
+    import vllm.third_party.flash_linear_attention.ops.chunk as chunk_mod
+    from vllm.triton_utils.dispatcher import KernelOverride
+
+    from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
+
+    shared = chunk_mod.chunk_gated_delta_rule
+    assert fla_ops.chunk_gated_delta_rule is shared
+    if isinstance(shared, KernelOverride):
+        assert shared.func is chunk_gated_delta_rule
