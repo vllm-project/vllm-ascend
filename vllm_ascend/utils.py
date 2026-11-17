@@ -1944,11 +1944,7 @@ def use_updatable_graph(
         return True
     from vllm_ascend.attention.mla_v1 import AscendMLABackend
 
-    if issubclass(attn_backend, AscendMLABackend):
-        from vllm.distributed import get_dcp_group
-
-        return get_dcp_group().world_size > 1
-    return False
+    return issubclass(attn_backend, AscendMLABackend)
 
 
 def _is_glm_model(model_config) -> bool:
