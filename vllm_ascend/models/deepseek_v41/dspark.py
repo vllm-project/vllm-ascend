@@ -349,7 +349,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         layers = list(self.layers.values())
         fused_indices = []
         # Keep larger token batches on the original path.
-        if all_kv.shape[0] <= 4096:
+        if all_kv.shape[0] <= 4096 and all_kv.shape[1] == len(layers) and len(context_slot_mapping) >= len(layers):
             fused_indices = [
                 idx for idx, mapping in enumerate(context_slot_mapping[: len(layers)]) if mapping is not None
             ]
@@ -378,15 +378,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
             fused_indices,
             partial_rope=True,
         )
-        for layer_idx, layer in enumerate(layers):
-            if layer_idx in fused_indices:
-                continue
-            layer_context_slot_mapping = context_slot_mapping[layer_idx]
-            if layer_context_slot_mapping is None:
-                continue
-            attn = layer.self_attn
-            shared_kv = self._project_shared_kv(all_kv[:, layer_idx], context_positions, attn, rope=rope)
-            self._store_standard_swa_kv(shared_kv, layer_context_slot_mapping, attn)
+        return
 
     def hc_head(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
         shape, dtype = x.size(), x.dtype
