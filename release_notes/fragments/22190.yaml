@@ -1,0 +1,4 @@
+pr: 22190
+entries:
+  - category: performance
+    text: Reduced indexing overhead for small-batch, long-context MLA prefill with strided KV caches on Ascend A3.
