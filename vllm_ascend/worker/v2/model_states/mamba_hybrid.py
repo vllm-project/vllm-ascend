@@ -89,6 +89,11 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
     _mamba_ctx: MambaSpecDecodeGPUContext | None
     _mamba_state_copy_funcs: Any
 
+    def supports_spec_device_lengths(self) -> bool:
+        # Metadata and recurrent-state preprocessing consume corrected device
+        # counts. RecoverSSM/custom states need their own consumer audit.
+        return type(self) is AscendMambaHybridModelState and self.recoverssm is None
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._layerwise_mamba_copy: _LayerwiseMambaCopyState | None = None

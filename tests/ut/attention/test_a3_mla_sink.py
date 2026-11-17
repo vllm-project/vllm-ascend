@@ -1,0 +1,449 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""CPU selection, cache layout and host-sync policy checks.
+
+These checks execute framework code without calling an attention kernel.
+Native numerical and graph coverage lives in test_a3_mla_sink_native.py.
+"""
+
+import ast
+import importlib.util
+import math
+import sys
+from contextlib import nullcontext
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+def load_source(path, name):
+    spec = importlib.util.spec_from_file_location(name, ROOT / path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+sink = load_source("vllm_ascend/attention/a3_mla_sink.py", "a3_mla_cpu_contract")
+
+
+def ast_symbols(path, names, scope):
+    nodes = ast.parse((ROOT / path).read_text(encoding="utf-8")).body
+    chosen = []
+    for node in nodes:
+        name = getattr(node, "name", None)
+        if (
+            name in names
+            or isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id in names for t in node.targets)
+        ):
+            chosen.append(node)
+    assert len(chosen) == len(names), (path, names)
+    exec(compile(ast.Module(body=chosen, type_ignores=[]), str(ROOT / path), "exec"), scope)
+    return scope
+
+
+def ast_method(path, owner, name, scope):
+    module = ast.parse((ROOT / path).read_text(encoding="utf-8"))
+    cls = next(n for n in module.body if isinstance(n, ast.ClassDef) and n.name == owner)
+    fn = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == name)
+    fn.decorator_list = []
+    # Keep implementation intact; remove annotations requiring unavailable vLLM types.
+    fn.returns = None
+    for arg in (*fn.args.posonlyargs, *fn.args.args, *fn.args.kwonlyargs):
+        arg.annotation = None
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), str(ROOT / path), "exec"), scope)
+    return scope[name]
+
+
+def common(lengths=(15, 7), prefixes=(0, 2, 3), capacity=8):
+    return SimpleNamespace(
+        num_actual_tokens=prefixes[-1],
+        num_input_tokens=capacity,
+        causal=False,
+        seq_lens=torch.tensor(lengths, dtype=torch.int32),
+        query_start_loc=torch.tensor(prefixes, dtype=torch.int32),
+        block_table_tensor=torch.tensor([[0], [1]], dtype=torch.int32),
+        slot_mapping=torch.arange(prefixes[-1]),
+        positions=torch.arange(prefixes[-1]),
+    )
+
+
+def selection_impl():
+    return SimpleNamespace(
+        num_kv_heads=1,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        fa_quant_layer=False,
+        dtype=torch.bfloat16,
+        enable_kv_nz=False,
+        use_pcp=False,
+        vllm_config=SimpleNamespace(
+            use_v2_model_runner=True,
+            speculative_config=SimpleNamespace(method="dspark", enforce_eager=True),
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(model_type="kimi_k31"), max_model_len=16384, enforce_eager=True
+            ),
+            cache_config=SimpleNamespace(block_size=128),
+            kv_transfer_config=None,
+            parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+        ),
+    )
+
+
+@pytest.mark.parametrize("is_a3,is_draft", [(False, False), (False, True), (True, False), (True, True)])
+def test_selection_is_hardware_and_model_scoped(is_a3, is_draft):
+    assert sink.supports_a3_mla(selection_impl(), is_a3=is_a3, is_draft=is_draft) is (is_a3 and is_draft)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "model",
+        "runner",
+        "method",
+        "no_spec",
+        "page",
+        "quant",
+        "dtype",
+        "nz",
+        "pcp",
+        "pp",
+        "pd",
+        "dimensions",
+        "kv_heads",
+    ],
+)
+def test_unsupported_config_retains_fia(reason):
+    impl = selection_impl()
+    cfg = impl.vllm_config
+    if reason == "model":
+        cfg.model_config.hf_config.model_type = "deepseek_v3"
+    elif reason == "runner":
+        cfg.use_v2_model_runner = False
+    elif reason == "method":
+        cfg.speculative_config.method = "eagle"
+    elif reason == "no_spec":
+        cfg.speculative_config = None
+    elif reason == "page":
+        cfg.cache_config.block_size = 192
+    elif reason == "quant":
+        impl.fa_quant_layer = True
+    elif reason == "dtype":
+        impl.dtype = torch.float32
+    elif reason == "nz":
+        impl.enable_kv_nz = True
+    elif reason == "pcp":
+        impl.use_pcp = True
+    elif reason == "pp":
+        cfg.parallel_config.pipeline_parallel_size = 2
+    elif reason == "pd":
+        cfg.kv_transfer_config = object()
+    elif reason == "dimensions":
+        impl.qk_rope_head_dim = 0
+    else:
+        impl.num_kv_heads = 2
+    assert not sink.supports_a3_mla(impl, is_a3=True, is_draft=True)
+
+
+@pytest.mark.parametrize("eager", [False, True])
+def test_uses_existing_execution_config_and_page_capacity(eager):
+    impl = selection_impl()
+    impl.vllm_config.model_config.enforce_eager = eager
+    impl.vllm_config.speculative_config.enforce_eager = eager
+    impl.vllm_config.model_config.max_model_len = 131072
+    impl.vllm_config.cache_config.block_size = 1536
+    assert sink.supports_a3_mla(impl, is_a3=True, is_draft=True)
+    adapter = sink.A3MLAAdapter(sink.A3MLAConfig(8, 192**-0.5), None, None).for_capacity(1024, 16)
+    assert adapter.config.max_seqlen_k == 131072
+    assert adapter.config.max_seqlen_q == 16
+
+
+@pytest.mark.parametrize("missing", ["flash_attn_npu_3", sink.OPERATOR_MODULE])
+def test_missing_package_retains_fia(monkeypatch, missing):
+    def unavailable(name):
+        assert name == sink.OPERATOR_MODULE
+        raise ModuleNotFoundError(name=missing)
+
+    monkeypatch.setattr(sink, "import_module", unavailable)
+    assert sink.get_a3_mla_ops() is None
+    with pytest.raises(ImportError, match="A3 MLA requires"):
+        sink.A3MLAAdapter.load(sink.A3MLAConfig(8, 0.125))
+
+
+def test_installed_package_dependency_error_is_not_swallowed(monkeypatch):
+    def broken(name):
+        raise ModuleNotFoundError(name="flash_attn_3_npu")
+
+    monkeypatch.setattr(sink, "import_module", broken)
+    with pytest.raises(ModuleNotFoundError):
+        sink.get_a3_mla_ops()
+
+
+def test_load_binds_only_the_fixed_public_api(monkeypatch):
+    def never_execute(*args, **kwargs):
+        pytest.fail("CPU contract checks must not execute an attention kernel")
+
+    module = SimpleNamespace(flash_attn_with_kvcache=never_execute, get_scheduler_metadata=never_execute)
+    monkeypatch.setattr(sink, "import_module", lambda name: module)
+    adapter = sink.A3MLAAdapter.load(sink.A3MLAConfig(8, 0.125))
+    assert adapter.attention_op is module.flash_attn_with_kvcache
+    assert adapter.metadata_op is module.get_scheduler_metadata
+    del module.get_scheduler_metadata
+    assert sink.get_a3_mla_ops() is None
+
+
+def test_cpu_inputs_cannot_execute_native_metadata():
+    adapter = sink.A3MLAAdapter(sink.A3MLAConfig(8, 0.125), None, None)
+    with pytest.raises(ValueError, match="NPU"):
+        adapter.build_metadata(torch.tensor([3], dtype=torch.int32), torch.tensor([0, 1], dtype=torch.int32))
+    with pytest.raises(ValueError, match="nonempty"):
+        adapter.build_metadata(torch.empty(0, dtype=torch.int32), torch.zeros(1, dtype=torch.int32))
+
+
+def test_padding_masks_lengths_without_reading_host_values():
+    lengths = torch.tensor([17, 29, 0], dtype=torch.int32)
+    used = torch.tensor([2, 0, 0], dtype=torch.int32)
+    assert sink.A3MLAAdapter._effective_lengths(lengths, used).tolist() == [17, 0, 0]
+    assert sink.A3MLAAdapter._effective_lengths(lengths, None) is lengths
+    assert lengths.tolist() == [17, 29, 0]
+
+
+def test_current_and_persistent_caches_preserve_packed_components():
+    adapter = sink.A3MLAAdapter(sink.A3MLAConfig(8, 0.125), None, None)
+    content, rope = adapter.allocate_cache(12, device="cpu")
+    assert content.shape == (12, 128, 1, 512) and rope.shape == (12, 128, 1, 64)
+    assert content.is_contiguous() and rope.is_contiguous()
+    assert content.untyped_storage().data_ptr() != rope.untyped_storage().data_ptr()
+    scope = {"torch": torch, "math": math, "get_dtype_size": lambda dtype: torch.empty(0, dtype=dtype).element_size()}
+    ast_symbols("vllm_ascend/worker/v2/attn_utils.py", ["_reshape_combined_mla_kv_cache"], scope)
+    page_bytes = 128 * 576 * 2 + 64
+    raw = torch.full((12 * page_bytes,), 91, dtype=torch.uint8)
+    content, rope = scope["_reshape_combined_mla_kv_cache"](
+        raw, (12, 128, 1, 512), (12, 128, 1, 64), torch.bfloat16, 12 * page_bytes, 12
+    )
+    assert content.stride()[1:] == (512, 512, 1)
+    assert rope.stride()[1:] == (64, 64, 1)
+    content.fill_(1)
+    rope.fill_(2)
+    assert torch.all(content == 1) and torch.all(rope == 2)
+    assert torch.all(raw.view(12, page_bytes)[:, -64:] == 91)
+
+
+def runner(ready=True):
+    backend = type("UnknownBackend", (), {})
+    provider = SimpleNamespace(supports_spec_device_lengths=lambda: ready)
+    group = SimpleNamespace(layer_names=("target.0",), get_metadata_builder=lambda index: provider)
+    state = SimpleNamespace(supports_spec_device_lengths=lambda: True)
+    speculator = SimpleNamespace(
+        use_flashmla=False, use_a3_mla_sink=True, draft_attn_layer_names={"draft.0"}, attn_backends={"draft.0": backend}
+    )
+    spec = SimpleNamespace(
+        method="dspark",
+        draft_model_config=SimpleNamespace(architectures=["K3DSparkModel"]),
+        enable_adaptive_verification=False,
+    )
+    instance = SimpleNamespace(
+        sync_spec_pp_cpu_counts=False,
+        model_state=state,
+        attn_groups=[[group]],
+        speculator=speculator,
+        speculative_config=spec,
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(), architecture="KimiK31ForConditionalGeneration"),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=8
+        ),
+        ascend_config=SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False)),
+        vllm_config=SimpleNamespace(kv_transfer_config=None),
+    )
+    scope = dict(
+        torch=torch,
+        is_deepseek_v41=lambda cfg: False,
+        AscendFlashAttentionBackend=backend,
+        a3_target_device_lengths_ready=sink.a3_target_device_lengths_ready,
+    )
+    path = "vllm_ascend/worker/v2/model_runner.py"
+    fn = ast_method(path, "NPUModelRunner", "_can_skip_spec_cpu_length_sync", scope)
+    instance._can_skip_spec_cpu_length_sync = lambda: fn(instance)
+    return instance, scope
+
+
+@pytest.mark.parametrize("ready", [False, True])
+def test_real_runner_copy_and_wait_share_the_same_predicate(monkeypatch, ready):
+    instance, scope = runner(ready)
+    assert instance._can_skip_spec_cpu_length_sync() is ready
+    instance.req_states = SimpleNamespace(
+        num_computed_tokens=SimpleNamespace(gpu=torch.tensor([98, 195])),
+        num_computed_tokens_cpu=torch.tensor([100, 200]),
+        req_id_to_index={"a": 0, "b": 1},
+    )
+    instance.num_computed_tokens_cpu = torch.full((2,), -99)
+    events = []
+    instance.num_computed_tokens_stream = SimpleNamespace(wait_stream=lambda stream: events.append("wait"))
+    instance.num_computed_tokens_event = SimpleNamespace(
+        record=lambda: events.append("record"), synchronize=lambda: events.append("synchronize")
+    )
+    instance.input_buffers = SimpleNamespace(seq_lens_cpu=torch.zeros(2, dtype=torch.int32))
+    scheduler = SimpleNamespace(
+        num_scheduled_tokens={"a": 4, "b": 4}, scheduled_cached_reqs=SimpleNamespace(req_ids=["b", "a"])
+    )
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: object())
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(stream=lambda stream: nullcontext()), raising=False)
+    path = "vllm_ascend/worker/v2/model_runner.py"
+    copy = ast_method(path, "NPUModelRunner", "_copy_num_computed_tokens_to_cpu", scope)
+    update = ast_method(path, "NPUModelRunner", "_update_seq_lens_cpu", scope)
+    copy(instance)
+    update(instance, scheduler, ["b", "a"])
+    assert events.count("synchronize") == int(not ready)
+    assert events.count("record") == int(not ready)
+    assert instance.num_computed_tokens_cpu.tolist() == ([-99, -99] if ready else [98, 195])
+    assert instance.input_buffers.seq_lens_cpu.tolist() == ([204, 104] if ready else [199, 102])
+
+
+@pytest.mark.parametrize(
+    "reason", ["unknown", "no_groups", "only_draft", "pp", "pcp", "offload", "adaptive", "pd", "fia"]
+)
+def test_sync_fallback_for_every_unsupported_consumer(reason):
+    instance, _ = runner()
+    if reason == "unknown":
+        instance.attn_groups[0][0].get_metadata_builder = lambda index: object()
+    elif reason == "no_groups":
+        instance.attn_groups = []
+    elif reason == "only_draft":
+        instance.attn_groups[0][0].layer_names = ("draft.0",)
+    elif reason == "pp":
+        instance.parallel_config.pipeline_parallel_size = 2
+    elif reason == "pcp":
+        instance.parallel_config.prefill_context_parallel_size = 2
+    elif reason == "offload":
+        instance.ascend_config.sparse_kv_offload_config.enabled = True
+    elif reason == "adaptive":
+        instance.speculative_config.enable_adaptive_verification = True
+    elif reason == "pd":
+        instance.vllm_config.kv_transfer_config = object()
+    else:
+        instance.speculator.use_a3_mla_sink = False
+    assert instance._can_skip_spec_cpu_length_sync() is False
+
+
+@pytest.mark.parametrize(
+    "path,owner,field,ready,blocked",
+    [
+        ("attention/sfa_v1.py", "AscendSFAMetadataBuilder", "use_pcp", False, True),
+        ("attention/context_parallel/sfa_cp.py", "AscendSFADCPMetadataBuilder", "use_pcp", False, True),
+        ("attention/indexer.py", "AscendSFAIndexerMetadataBuilder", "use_pcp", False, True),
+        ("ops/kda_pcp.py", "KimiKDAHostMetadataBuilder", "pcp_size", 1, 2),
+        ("worker/v2/model_states/mamba_hybrid.py", "AscendMambaHybridModelState", "recoverssm", None, object()),
+    ],
+)
+def test_reviewed_consumers_require_exact_type_and_supported_mode(path, owner, field, ready, blocked):
+    cls = type(owner, (), {})
+    method = ast_method("vllm_ascend/" + path, owner, "supports_spec_device_lengths", {owner: cls})
+    instance = cls()
+    setattr(instance, field, ready)
+    assert method(instance) is True
+    setattr(instance, field, blocked)
+    assert method(instance) is False
+    unknown = type("UnreviewedSubclass", (cls,), {})()
+    setattr(unknown, field, ready)
+    assert method(unknown) is False
+
+
+def test_unknown_model_state_keeps_cpu_sync():
+    instance, _ = runner()
+    instance.model_state = SimpleNamespace()
+    assert instance._can_skip_spec_cpu_length_sync() is False
+
+
+@pytest.mark.parametrize("has_device_metadata", [False, True])
+def test_a5_sync_policy_retains_original_target_producer_requirement(has_device_metadata):
+    instance, _ = runner(False)
+    instance.speculator.use_a3_mla_sink = False
+    instance.speculator.use_flashmla = True
+    instance.model_state = SimpleNamespace(device_metadata=object() if has_device_metadata else None)
+    # A5 must not inspect the A3 consumer declarations or require A3 groups.
+    del instance.attn_groups
+    assert instance._can_skip_spec_cpu_length_sync() is has_device_metadata
+
+
+@pytest.mark.parametrize("host_mirror", [None, 9999])
+def test_sfa_build_consumes_device_lengths_without_exact_cpu_mirror(monkeypatch, host_mirror):
+    cls = type("AscendSFAMetadataBuilder", (), {})
+    scope = {
+        "AscendSFAMetadataBuilder": cls,
+        "get_cos_and_sin_mla": lambda *args, **kwargs: (torch.zeros(3, 64), torch.zeros(3, 64)),
+        "split_decodes_and_prefills": lambda *args, **kwargs: (2, 0, 3, 0),
+    }
+    cls.supports_spec_device_lengths = ast_method(
+        "vllm_ascend/attention/sfa_v1.py",
+        cls.__name__,
+        "supports_spec_device_lengths",
+        scope,
+    )
+    build = ast_method("vllm_ascend/attention/sfa_v1.py", cls.__name__, "_build", scope)
+    instance = cls()
+    instance.use_pcp = instance.nope = instance.use_rope = False
+    instance.allow_a3_device_lengths = True
+    instance.kernel_block_size = 128
+    instance.decode_threshold = 8
+    instance.metadata_cls = SimpleNamespace
+    instance.model_config = SimpleNamespace(get_head_size=lambda: 576)
+    instance.attn_mask_builder = SimpleNamespace(get_attention_mask=lambda *args: None)
+    inputs = common(capacity=3)
+    inputs.num_reqs = 2
+    inputs._seq_lens_cpu = None if host_mirror is None else torch.full((2,), host_mirror)
+    inputs.seq_lens_cpu = None
+    inputs.attn_state = object()
+    inputs.max_query_len = 2
+    inputs.max_seq_len = 16384
+    original_to = torch.Tensor.to
+
+    def no_cpu_copy(tensor, *args, **kwargs):
+        if args and str(args[0]) == "cpu" or str(kwargs.get("device")) == "cpu":
+            pytest.fail("SFA rebuilt an exact CPU sequence-length mirror")
+        return original_to(tensor, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "to", no_cpu_copy)
+    actual = build(instance, inputs)
+    assert actual.seq_lens.tolist() == [15, 7]
+    assert actual.cum_query_lens.tolist() == [2, 3]
+    assert actual.seq_lens.data_ptr() == inputs.seq_lens.data_ptr()
+    if host_mirror is None:
+        assert actual.seq_lens_cpu is None
+        # Other model/hardware paths retain the pre-existing fallback.
+        instance.allow_a3_device_lengths = False
+        monkeypatch.setattr(torch.Tensor, "to", original_to)
+        fallback = build(instance, inputs)
+        assert fallback.seq_lens_cpu.tolist() == [15, 7]
+    else:
+        assert actual.seq_lens_cpu.tolist() == [9999, 9999]
+
+
+@pytest.mark.parametrize("dcp", [False, True])
+def test_dspark_does_not_read_host_lengths_when_a3_selected(dcp):
+    method = ast_method(
+        "vllm_ascend/worker/v2/spec_decode/dspark/speculator.py",
+        "AscendDSparkSpeculator",
+        "_prepare_draft_dcp_metadata_inputs",
+        {"torch": torch},
+    )
+    # No input buffers or DCP manager are provided: touching either fails.
+    instance = SimpleNamespace(use_a3_mla_sink=True, use_dcp=dcp)
+    lengths, prefilling = method(instance, 2, 4, 8)
+    assert lengths is None
+    assert prefilling.tolist() == [False] * 4
+    # Keep the old FIA path's exact-length copy and the A5 no-copy behavior.
+    instance.use_a3_mla_sink = False
+    instance.use_dcp = False
+    instance.use_flashmla = False
+    instance.attn_architecture = "MLA"
+    instance.input_buffers = SimpleNamespace(seq_lens=torch.tensor([17, 33, 9999, 9999]))
+    lengths, _ = method(instance, 2, 4, 8)
+    assert lengths.tolist() == [17, 33, 0, 0]
+    instance.use_flashmla = True
+    lengths, _ = method(instance, 2, 4, 8)
+    assert lengths is None

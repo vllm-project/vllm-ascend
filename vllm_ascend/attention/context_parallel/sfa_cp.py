@@ -97,6 +97,10 @@ class AscendSFADCPMetadataBuilder(
     DCPMetadataBuilderMixin,
     AscendSFAMetadataBuilder,
 ):
+    def supports_spec_device_lengths(self) -> bool:
+        # DCP-local lengths are derived from the corrected device sequence.
+        return type(self) is AscendSFADCPMetadataBuilder and not self.use_pcp
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,

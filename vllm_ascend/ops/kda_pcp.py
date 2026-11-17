@@ -13,6 +13,11 @@ from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend, Ascen
 
 
 class KimiKDAHostMetadataBuilder(AscendGDNHostMetadataBuilder):
+    def supports_spec_device_lengths(self) -> bool:
+        # Host metadata describes scheduled query groups, not exact KV length.
+        # prepare_gdn consumes corrected m.seq_lens and accepted counts on device.
+        return type(self) is KimiKDAHostMetadataBuilder and self.pcp_size == 1
+
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         if pcp_size > 1:
