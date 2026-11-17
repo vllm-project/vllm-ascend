@@ -283,7 +283,7 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         disable_tp: bool = False,
         padding_size: int = 0,
     ):
-        if vllm_version_is("0.33.0") and padding_size:
+        if vllm_version_is("0.34.0") and padding_size:
             raise ValueError("Merged-linear output padding requires the verified vLLM main revision")
         # #66784's inherited weight loaders read this even without padding.
         self.padding_size = padding_size
