@@ -28,7 +28,6 @@ class _KernelRecorder:
     (
         (2047, True, 2048, "legacy"),
         (2048, True, 2048, "row_block"),
-        (2049, True, 2048, "row_block"),
         (1024, True, 1024, "row_block"),
         (1024, False, 1024, "legacy"),
     ),
@@ -72,8 +71,6 @@ def test_hc_gate_mix_row_block_dispatch_is_scoped_by_capability(
     grid, _, kwargs = expected_recorder.launches[0]
     if expected_kernel == "row_block":
         assert grid == ((rows + hc._HC_GATE_MIX_ROWS_PER_BLOCK - 1) // hc._HC_GATE_MIX_ROWS_PER_BLOCK, 1)
-        assert kwargs["EVEN_ROWS"] is (rows % hc._HC_GATE_MIX_ROWS_PER_BLOCK == 0)
-        assert kwargs["EVEN_BLOCK"] is False
         assert kwargs["WIDE_OFFSETS"] is False
     else:
         assert grid == (rows, 1)

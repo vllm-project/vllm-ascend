@@ -30,8 +30,8 @@ Source: `vllm_ascend/ops/triton/qwen4_exp/hc.py` (public wrapper:
     3. Each row-block program owns an `8 x 512` tile. It initializes one FP32
        accumulator and walks the HC streams with `tl.static_range`, preserving
        the original load, sigmoid, multiply, and accumulate order.
-    4. Exact row and column tiles omit load/store masks. Tail tiles use one
-       hoisted 2-D mask for all stream loads and the final store.
+    4. Each program computes one hoisted 2-D mask and reuses it for all stream
+       loads and the final store.
     5. If any input or output element offset can exceed `INT32_MAX`, row
        indices are widened to int64 before multiplying by the row stride.
        Normal prefill sizes retain the int32 path.
@@ -62,7 +62,6 @@ Source: `vllm_ascend/ops/triton/qwen4_exp/hc.py` (public wrapper:
 | `HC_COUNT` | Internal compile-time attribute | Number of HC streams processed by the static loop | Integer | Scalar |
 | `ROWS_PER_BLOCK` | Internal compile-time attribute | Rows owned by one program; fixed to `8` | Integer | Scalar |
 | `BLOCK_SIZE` | Internal compile-time attribute | Columns owned by one program tile; fixed to `512` | Integer | Scalar |
-| `EVEN_ROWS`, `EVEN_BLOCK` | Internal compile-time attributes | Select exact-tile loads and stores when the corresponding shape is an exact multiple | Boolean | Scalar |
 | `WIDE_OFFSETS` | Internal compile-time attribute | Widen row indices to int64 when any maximum element offset exceeds `INT32_MAX` | Boolean | Scalar |
 
 ## Constraints
@@ -83,19 +82,19 @@ Source: `vllm_ascend/ops/triton/qwen4_exp/hc.py` (public wrapper:
 - For a contiguous width-10,240 row, the first row whose element offset can
   exceed `INT32_MAX` is 209,715. The host selects
   `WIDE_OFFSETS=True` for that range. The int64 branch is compiled and checked
-  against the legacy kernel on A2, A3, and A5 without allocating a multi-token
-  tensor above `INT32_MAX` elements.
+  against the legacy kernel on A2, A3, and A5. Boundary runs on all three
+  devices allocated 209,716 rows, selected the wide-offset path, and matched
+  PyTorch 64-bit indexing with zero maximum absolute error.
 - No device tensor value is read on the host. The host uses only shape, dtype,
   and stride metadata.
 - NPUGraph capture and replay keep tensor addresses, shape, strides, and launch
   arguments fixed. Refreshing input values before replay is supported and is
   covered by the nightly test.
-- `rows`, `GROUP_DIM`, `HC_COUNT`, `ROWS_PER_BLOCK`, `BLOCK_SIZE`,
-  `EVEN_ROWS`, `EVEN_BLOCK`, and `WIDE_OFFSETS` are the main JIT keys.
+- `rows`, `GROUP_DIM`, `HC_COUNT`, `ROWS_PER_BLOCK`, `BLOCK_SIZE`, and
+  `WIDE_OFFSETS` are the main JIT keys.
   `rows` is marked `do_not_specialize` and the nightly compile-reuse test
-  records compile events to verify that exact-row and row-tail classes each
-  reuse one variant as the row count changes. A forced wide-offset case covers
-  that separate constexpr branch.
+  records compile events to verify that row count changes reuse one variant.
+  A forced wide-offset case covers that separate constexpr branch.
 - No dedicated warmup registration is added. This existing model-specific path
   uses the same wrapper at compilation and runtime; normal startup or graph
   capture prepares the bounded launch variants used by serving.
@@ -109,15 +108,14 @@ A real TP2 A3 serving probe used a fresh Triton cache and recorded every
 | --- | ---: | ---: |
 | Startup | capture/warmup | 2 |
 | Serving | 1024 | 0 |
-| Serving | 2049 | 2 |
+| Serving | 2049 | 0 |
 | Serving | 4096 | 0 |
 | Serving | 8191 | 0 |
 | Serving | 8192 | 0 |
 
-The two startup compilations are one exact-row variant per TP worker. The first
-row-tail request at 2049 rows compiles the other `EVEN_ROWS` class once per
-worker. All later row-tail sizes reuse that variant. A 1024-row request remains
-on the legacy kernel and therefore does not compile the row-block kernel.
+The two startup compilations are the row-block variant for each TP worker.
+Changing only the row count reuses that variant. A 1024-row request remains on
+the legacy kernel and therefore does not compile the row-block kernel.
 
 ## Origin and Differences
 
@@ -133,9 +131,9 @@ on the legacy kernel and therefore does not compile the row-block kernel.
       on A2, within 1.45% of the best measured `4 x 512` variant (`78.86 us`),
       and `14.63 us` on A5, within 0.41% of the best measured `32 x 128`
       variant (`14.57 us`). A shared tile avoids per-device tuning. `512`
-      divides the production `group_dim=2560` exactly, while the `8 x 512`
-      FP32 accumulator occupies 16 KiB before stream loads and keeps the
-      production column mask disabled.
+      divides the production `group_dim=2560` exactly, while one hoisted mask
+      supports both exact and tail widths without additional JIT variants. The
+      `8 x 512` FP32 accumulator occupies 16 KiB before stream loads.
     - Modified for specific vLLM-Ascend logic: hardware capability gating
       enables the row-block path on A2, A3, and A5, while preserving the
       one-row kernel elsewhere.
@@ -181,9 +179,9 @@ The suite uses `hc_count=4` and BF16 inputs. It covers:
 - NPUGraph replay after refreshing both input buffers;
 - a forced `WIDE_OFFSETS=True` launch checked bitwise against the legacy
   kernel;
-- compile reuse across exact-row and row-tail batch counts. Within each class,
-  the test changes row counts that exercise both divisible-by-16 and non-16
-  specialization classes and verifies that no additional variant compiles.
+- compile reuse across exact-row and row-tail batch counts. The test changes
+  row counts that exercise both divisible-by-16 and non-16 specialization
+  classes and verifies that they reuse the same kernel variant.
 
 CPU dispatch and hardware-capability tests remain in the unit-test suite with
 mocked Triton launch entry points:

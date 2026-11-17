@@ -86,8 +86,6 @@ def _row_block_gate_mix(
         HC_COUNT=HC_COUNT,
         ROWS_PER_BLOCK=_HC_GATE_MIX_ROWS_PER_BLOCK,
         BLOCK_SIZE=_HC_GATE_MIX_BLOCK_SIZE,
-        EVEN_ROWS=x.shape[0] % _HC_GATE_MIX_ROWS_PER_BLOCK == 0,
-        EVEN_BLOCK=group_dim % _HC_GATE_MIX_BLOCK_SIZE == 0,
         WIDE_OFFSETS=wide_offsets,
     )
     return output
@@ -187,17 +185,10 @@ def test_hc_gate_mix_row_counts_reuse_compilation(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(isolated_kernel, "_do_compile", record_compile)
     monkeypatch.setattr(hc_module, "_hc_gate_mix_row_block_kernel", isolated_kernel)
 
-    for expected_compile_count, row_counts in enumerate(
-        (
-            (2048, 2056),
-            (2049, 2057),
-        ),
-        start=1,
-    ):
-        for rows in row_counts:
-            x = x_backing[:rows]
-            gate = gate_backing[:rows]
-            hc_gate_mix(x, gate, HC_COUNT)
-            torch.npu.synchronize()
+    for rows in (2048, 2049, 2056, 2057):
+        x = x_backing[:rows]
+        gate = gate_backing[:rows]
+        hc_gate_mix(x, gate, HC_COUNT)
+        torch.npu.synchronize()
 
-            assert len(compile_events) == expected_compile_count, (rows, compile_events)
+        assert len(compile_events) == 1, (rows, compile_events)
