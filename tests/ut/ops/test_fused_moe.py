@@ -3381,7 +3381,7 @@ def test_maybe_all_reduce_graph_replay_preserves_shared_and_routed_outputs(
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("with_shared", [False, True])
 def test_runner_preserves_native_routed_scale_mode(monkeypatch, mode_name, dtype, with_shared):
-    main = not vllm_version_is("0.33.0")
+    main = not vllm_version_is("0.34.0")
     mode = None
     if main:
         from vllm.model_executor.layers.fused_moe.config import RoutedScaleMode

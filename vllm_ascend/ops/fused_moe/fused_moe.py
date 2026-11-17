@@ -101,7 +101,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         routed_scale_mode=None,
     ):
         scaling_kwargs = {}
-        if not vllm_version_is("0.33.0"):
+        if not vllm_version_is("0.34.0"):
             from vllm.model_executor.layers.fused_moe.config import RoutedScaleMode
 
             if routed_scale_mode is None:

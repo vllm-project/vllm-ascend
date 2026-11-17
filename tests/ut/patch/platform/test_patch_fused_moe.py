@@ -254,7 +254,7 @@ def test_factory_maps_legacy_scaling_to_the_active_native_contract(scale_output,
             divide_shared_output_in_fp16=guard_shared,
         )
     kwargs = original_factory.call_args.kwargs
-    if patch_fused_moe.vllm_version_is("0.33.0"):
+    if patch_fused_moe.vllm_version_is("0.34.0"):
         assert kwargs["apply_routed_scale_to_output"] is scale_output
         assert "routed_scale_mode" not in kwargs
         assert "divide_shared_output_in_fp16" not in kwargs
@@ -278,7 +278,7 @@ def test_factory_preserves_native_scaling_modes(mode_name):
     config = SimpleNamespace(
         eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_path=None, num_redundant_experts=0)
     )
-    main = not patch_fused_moe.vllm_version_is("0.33.0")
+    main = not patch_fused_moe.vllm_version_is("0.34.0")
     scaling: dict[str, Any] = {}
     if main:
         from vllm.model_executor.layers.fused_moe.config import RoutedScaleMode
