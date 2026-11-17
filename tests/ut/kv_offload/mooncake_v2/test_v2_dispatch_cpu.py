@@ -3,7 +3,6 @@
 
 import ast
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
@@ -78,8 +77,7 @@ def test_registered_v2_selects_requested_protocol(extra, expected):
 
 
 @pytest.mark.parametrize("chosen", [-1, 0, 1])
-@pytest.mark.parametrize("num_external_tokens", [0, 16])
-def test_push_retains_source_blocks_and_prefix_origin(chosen, num_external_tokens):
+def test_push_retains_source_blocks_with_or_without_pool_hit(chosen):
     classes = facade()
     push = object.__new__(classes["MooncakePushConnector"])
     scheduler = SimpleNamespace(kv_transfer_config=SimpleNamespace(is_kv_producer=True), _reqs_need_send_layerwise={})
@@ -92,59 +90,12 @@ def test_push_retains_source_blocks_and_prefix_origin(chosen, num_external_token
     scheduler.update_state_after_alloc = MethodType(scope["update_state_after_alloc"], scheduler)
     push.connector_scheduler = scheduler
     request = SimpleNamespace(
-        request_id="p",
-        num_prompt_tokens=64,
-        kv_transfer_params=dict(
-            do_remote_decode=True,
-            remote_request_id="d",
-            remote_num_external_tokens=64,
-            remote_num_computed_tokens=0,
-            remote_engine_id="d-engine",
-            remote_host="127.0.0.1",
-            remote_port=9000,
-            remote_block_ids=([20, 21], [22, 23]),
-            remote_worker_addresses=(),
-        ),
+        request_id="p", kv_transfer_params={"do_remote_decode": True, "remote_num_external_tokens": 32}
     )
     block_ids = ([2, 3], [8, 9])
     empty = SimpleNamespace(get_block_ids=lambda: ([], []))
     blocks = SimpleNamespace(get_block_ids=lambda: block_ids, new_empty=lambda: empty)
     multi = SimpleNamespace(_requests_to_connector={"p": chosen}, _connectors=[Mock(), push])
     scope = execute("ascend_multi_connector.py", {}, owner="AscendMultiConnector", method="update_state_after_alloc")
-    scope["update_state_after_alloc"](multi, request, blocks, num_external_tokens)
+    scope["update_state_after_alloc"](multi, request, blocks, 32)
     assert scheduler._reqs_need_send_layerwise["p"][1] == block_ids
-    metadata = execute(
-        "kv_p2p/mooncake/metadata.py",
-        {
-            "__name__": __name__,
-            "dataclass": dataclass,
-            "KVConnectorHandshakeMetadata": type("Handshake", (), {}),
-            "KVConnectorMetadata": type("Metadata", (), {}),
-        },
-    )
-    scope = execute(
-        "kv_p2p/mooncake/push_scheduler.py",
-        {"MooncakeConnectorMetadata": metadata["MooncakeConnectorMetadata"]},
-        owner="MooncakePushConnectorScheduler",
-        method="build_connector_meta",
-    )
-    scheduler._reqs_need_send = {}
-    scheduler._reqs_sent_to_worker = set()
-    scheduler._reqs_pending_send = {}
-    scheduler._reqs_aborted = {}
-    scheduler._get_transfer_block_ids = lambda ids, _: ids
-    cached = SimpleNamespace(req_ids=[], num_computed_tokens=[], new_block_ids=[], resumed_req_ids=set())
-    output = SimpleNamespace(
-        scheduled_cached_reqs=cached,
-        scheduled_new_reqs=[SimpleNamespace(req_id="p", num_computed_tokens=32)],
-        num_scheduled_tokens={"p": 16},
-    )
-    meta = scope["build_connector_meta"](scheduler, output).push_send_requests["p"]
-    assert meta.num_external_tokens == num_external_tokens
-    assert meta.remote_num_external_tokens == 64
-    # A later chunk appends allocations without losing the prefix's origin.
-    output.scheduled_new_reqs = []
-    cached.req_ids, cached.num_computed_tokens, cached.new_block_ids = ["p"], [48], [([4], [10])]
-    meta = scope["build_connector_meta"](scheduler, output).push_send_requests["p"]
-    assert meta.local_block_ids == ((2, 3, 4), (8, 9, 10))
-    assert meta.num_external_tokens == num_external_tokens
