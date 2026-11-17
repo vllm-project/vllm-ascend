@@ -28,6 +28,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import (
     hisparse_layout_id,
     with_aligned_hisparse_slab,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import get_bulk_by_residency
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 from vllm_ascend.hisparse.binding import prepare_hisparse_cache_views
 
@@ -256,14 +257,14 @@ def test_memcache_splits_host_and_device_batches_without_reordering(memcache_bac
     backend.store.batch_put_from_layers.return_value = [0]
     assert backend.put(keys[:1], addresses[:1], sizes[:1], host=True) == [True]
     backend.store.batch_put_from_layers.assert_called_once_with(["host"], [[1100]], [[100]], MmcDirect.COPY_H2G.value)
-    assert backend.get(keys, addresses, sizes, host_keys=[True, False, False]) == [0, 0, -7]
+    assert get_bulk_by_residency(backend, keys, addresses, sizes, host_keys=[True, False, False]) == [0, 0, -7]
     assert backend.store.batch_get_into_layers.call_args_list == [
         call(["device1", "device2"], [[1100], [4000]], [[100], [100]], MmcDirect.COPY_G2L.value),
         call(["host"], [[1100]], [[100]], MmcDirect.COPY_G2H.value),
     ]
-    assert backend.get(keys, addresses, sizes, host_keys=[True]) is None
+    with pytest.raises(ValueError, match="memory kind per key"):
+        get_bulk_by_residency(backend, keys, addresses, sizes, host_keys=[True])
     assert backend.put(keys, addresses[:1], sizes, host=True) is False
-    assert "Invalid HiSparse MemCache GET metadata" in caplog.text
     assert "Invalid HiSparse MemCache PUT metadata" in caplog.text
 
 
@@ -272,7 +273,9 @@ def test_memcache_bounds_each_hisparse_host_get_lease(memcache_backend) -> None:
     backend.store.batch_get_into_layers.side_effect = [[0], [-3106], [0]]
     key_size = 130 * 1024 * 1024
 
-    assert backend.get(["one", "two", "three"], [[1], [2], [3]], [[key_size]] * 3, host_keys=[True] * 3) == [
+    assert get_bulk_by_residency(
+        backend, ["one", "two", "three"], [[1], [2], [3]], [[key_size]] * 3, host_keys=[True] * 3
+    ) == [
         0,
         -3106,
         0,
@@ -290,7 +293,8 @@ def test_memcache_oversized_hisparse_get_only_splits_the_host_batch(memcache_bac
     host_size = 257 * mib
     backend.store.batch_get_into_layers.side_effect = [[0, 0], [0], [0], [0]]
 
-    results = backend.get(
+    results = get_bulk_by_residency(
+        backend,
         ["device1", "host1", "host-large", "device2", "host2"],
         [[1], [2], [3, 4], [5], [6]],
         [[device_size], [mib], [host_size - mib, mib], [device_size], [mib]],
@@ -310,7 +314,8 @@ def test_memcache_hisparse_get_fails_when_sdk_result_count_differs(memcache_back
     backend = memcache_backend
     backend.store.batch_get_into_layers.side_effect = [[0], results]
 
-    result = backend.get(
+    result = get_bulk_by_residency(
+        backend,
         ["host1", "device", "host2"],
         [[1], [2], [3]],
         [[100]] * 3,

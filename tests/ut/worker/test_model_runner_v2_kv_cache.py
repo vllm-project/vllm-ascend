@@ -16,6 +16,7 @@ from vllm_ascend.utils import vllm_version_is
 
 
 def test_initialize_hisparse_slab_padding_survives_both_runner_copies():
+    pytest.importorskip("vllm.v1.hisparse.backend")
     pytest.importorskip("vllm.v1.hisparse.binding")
     from vllm.v1.hisparse.binding import allocate_hisparse_kv_caches
     from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheLayout, KVCacheTensor, SparseCacheRole

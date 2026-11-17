@@ -106,8 +106,8 @@ Mooncake, use an Ascend Direct client and matching master, set
 `protocol=ascend` in the Mooncake configuration, and set
 `ASCEND_GLOBAL_RESOURCE_CONFIG` for the Store-owned transfer engine. On an A5
 UB setup, use `ASCEND_GLOBAL_RESOURCE_CONFIG='{}'` and
-`ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'`. Budget an extra 64 MiB of DDR
-per worker for its reusable Host Source staging buffer. The Indexer slab
+`ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'`. Budget an extra 128 MiB of DDR
+per worker for its separate Host Source send and receive buffers. The Indexer slab
 transfers directly. Set `MC_TRANSFER_TIMEOUT` (seconds) to more than twice
 `ASCEND_TRANSFER_TIMEOUT` (milliseconds) after converting to the same unit.
 

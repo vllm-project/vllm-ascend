@@ -70,7 +70,7 @@ def _cache_configs(
     hot_units=1,
     other_connector=None,
 ):
-    # The combined builder imports the Ascend spec, which registers at import time.
+    # Register Core types before the combined builder adds its import-only spec.
     register_all_kvcache_specs(None)
     hf_text_config = SimpleNamespace(model_type="glm_moe_dsa", index_topk=16)
     config = SimpleNamespace(
@@ -136,7 +136,9 @@ def test_registry_changes_only_the_resident_spec(other_connector):
     _, original = _cache_configs(store=False, hot_units=2, other_connector=other_connector)
     _, combined = _cache_configs(hot_units=2)
     _, store_only = _cache_configs(hisparse=False)
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import AscendStoreHiSparseResidentSpec
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse_admission import (
+        AscendStoreHiSparseResidentSpec,
+    )
 
     assert not any(isinstance(group.kv_cache_spec, HiSparseResidentSpec) for group in store_only.kv_cache_groups)
     assert original.kv_cache_tensors == combined.kv_cache_tensors
@@ -162,7 +164,9 @@ def test_registry_changes_only_the_resident_spec(other_connector):
 @pytest.mark.parametrize(("window", "sizing_pages"), [(0, 1), (2, 3), (8, 8), (12, 8)])
 def test_registry_shares_the_spec_window_and_sizes_for_the_import_tail(window, sizing_pages):
     config, cache = _cache_configs(in_flight_blocks=window)
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import AscendStoreHiSparseResidentManager
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse_admission import (
+        AscendStoreHiSparseResidentManager,
+    )
 
     (manager,) = get_hisparse_coordinator(_cache_manager(config, cache)).resident_managers
     assert type(manager) is AscendStoreHiSparseResidentManager
@@ -270,7 +274,9 @@ def test_registered_resident_admission(tokens, computed, local, admission, tail_
 )
 def test_scheduler_cache_manager_admits_partial_import(store, host_blocks, admitted):
     config, cache = _cache_configs(store=store, host_blocks=host_blocks)
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import AscendStoreHiSparseResidentManager
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse_admission import (
+        AscendStoreHiSparseResidentManager,
+    )
 
     manager = _cache_manager(config, cache)
     (resident_manager,) = get_hisparse_coordinator(manager).resident_managers
@@ -353,3 +359,17 @@ def test_hisparse_slab_padding_is_idempotent():
     repeated = with_aligned_hisparse_slab(aligned)
     assert [t.size for t in repeated.kv_cache_tensors] == [t.size for t in aligned.kv_cache_tensors]
     assert [t.size for t in cache.kv_cache_tensors] != [t.size for t in aligned.kv_cache_tensors]
+
+
+def test_pool_layout_import_does_not_preempt_core_spec_registration(monkeypatch):
+    import runpy
+
+    from vllm.v1 import kv_cache_spec_registry
+
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import hisparse
+
+    monkeypatch.setattr(kv_cache_spec_registry, "_REGISTRY_KVCACHESPEC_LIST", {})
+    monkeypatch.setattr(kv_cache_spec_registry, "_REGISTRY_ROLE_MANAGERS", {})
+    runpy.run_path(hisparse.__file__)
+    assert kv_cache_spec_registry._REGISTRY_KVCACHESPEC_LIST == {}
+    assert kv_cache_spec_registry._REGISTRY_ROLE_MANAGERS == {}

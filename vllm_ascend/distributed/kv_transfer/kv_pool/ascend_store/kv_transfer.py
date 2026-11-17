@@ -13,7 +13,10 @@ from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
+    Backend,
+    require_aligned_batch_results,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     ReqMeta,
@@ -21,6 +24,34 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 
 _TRANSFER_SHUTDOWN_POLL_S = 0.1
+
+
+def get_bulk_by_residency(
+    backend: Backend,
+    keys: list[str],
+    addrs: list[list[int]],
+    sizes: list[list[int]],
+    *,
+    host_keys: list[bool],
+    tp_rank: int = 0,
+) -> list[int] | None:
+    """Group and rotate homogeneous batches, then restore input key order."""
+    if not len(keys) == len(addrs) == len(sizes) == len(host_keys):
+        raise ValueError("Bulk GET requires one buffer list and memory kind per key")
+    results = [-1] * len(keys)
+    for host in (False, True):
+        indices = [i for i, is_host in enumerate(host_keys) if is_host == host]
+        if not indices:
+            continue
+        rotation = tp_rank % len(indices)
+        indices = indices[rotation:] + indices[:rotation]
+        batch_keys = [keys[i] for i in indices]
+        codes = backend.get_bulk(batch_keys, [addrs[i] for i in indices], [sizes[i] for i in indices], host=host)
+        if codes is None:
+            return None
+        for i, code in zip(indices, require_aligned_batch_results("Bulk GET", batch_keys, codes), strict=True):
+            results[i] = code
+    return results
 
 
 class KVTransferThread(threading.Thread):
@@ -1157,9 +1188,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             if host_keys is None:
                 ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
             else:
-                rotation = self.tp_rank % len(host_keys)
-                ret = self.m_store.get_bulk(
-                    key_list_c, addr_list_c, size_list_c, host_keys=host_keys[rotation:] + host_keys[:rotation]
+                ret = get_bulk_by_residency(
+                    self.m_store, key_list, addr_list, size_list, tp_rank=self.tp_rank, host_keys=host_keys
                 )
             if self._record_operation_cb is not None:
                 self._record_operation_cb(

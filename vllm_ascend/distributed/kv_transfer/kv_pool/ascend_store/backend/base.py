@@ -87,7 +87,7 @@ class Backend(ABC):
         raise NotImplementedError
 
     def get_bulk(
-        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host_keys: list[bool]
+        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool
     ) -> list[int] | None:
         """Return one status per key (zero on complete read)."""
         raise NotImplementedError
