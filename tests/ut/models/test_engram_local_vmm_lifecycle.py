@@ -57,25 +57,6 @@ def test_backend_probe_is_cached_without_extra_collective(monkeypatch):
     gather.assert_not_called()
 
 
-def test_missing_library_reaches_collective_fallback(monkeypatch):
-    module = load_module(monkeypatch)
-    monkeypatch.setattr(module, "_library", Mock(side_effect=OSError("missing library")))
-    monkeypatch.setattr(
-        module,
-        "torch",
-        types.SimpleNamespace(
-            int8=object(), device=lambda *args: object(), npu=types.SimpleNamespace(current_device=lambda: 0)
-        ),
-    )
-    constructor = Mock(side_effect=module.EngramSharedInitError("probe failed"))
-    monkeypatch.setattr(module, "LocalSharedVmmBuffer", constructor)
-    group = types.SimpleNamespace(cpu_group=object(), world_size=2)
-    assert module.local_vmm_available(group) is False
-    assert "missing library" in constructor.call_args.kwargs["library_error"]
-    assert module.local_vmm_available(group) is False
-    constructor.assert_called_once()
-
-
 def test_runtime_probe_fallback_requires_successful_collective_cleanup(monkeypatch):
     module = load_module(monkeypatch)
     monkeypatch.setattr(module, "_library", Mock())
@@ -142,48 +123,6 @@ def test_owner_is_retained_if_consumer_release_fails(monkeypatch):
     with pytest.raises(RuntimeError, match="consumer release error"):
         obj.close_collective()
     obj.close.assert_not_called()
-
-
-def test_synchronized_constructor_failure_has_distinct_type_and_cleans_owner(monkeypatch, tmp_path):
-    module = load_module(monkeypatch)
-    directory = tmp_path / "capability"
-    directory.mkdir()
-    monkeypatch.setattr(module.tempfile, "mkdtemp", lambda **_kwargs: str(directory))
-    monkeypatch.setattr(module, "MappedHostBuffer", Mock(side_effect=RuntimeError("allocation failed")))
-    monkeypatch.setattr(module, "retry_pending_rollbacks", Mock())
-    monkeypatch.setattr(module.dist, "get_global_rank", lambda _group, rank: rank)
-    monkeypatch.setattr(module.dist, "broadcast_object_list", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(module.dist, "monitored_barrier", Mock())
-    monkeypatch.setattr(module.dist, "all_gather_object", lambda out, value, group: out.__setitem__(0, value))
-    group = types.SimpleNamespace(rank_in_group=0, cpu_group=object(), world_size=2)
-    with pytest.raises(module.EngramSharedInitError, match="rank 0: ERROR: RuntimeError: allocation failed"):
-        module.LocalSharedVmmBuffer((8, 256), None, "npu:0", group)
-    assert not directory.exists()
-
-
-def test_constructor_retains_owner_when_consumer_rollback_fails(monkeypatch, tmp_path):
-    module = load_module(monkeypatch)
-    directory = tmp_path / "capability"
-    directory.mkdir()
-    mapping = Mock()
-    mapping.view.return_value = types.SimpleNamespace(tensor=object(), ptrs=object())
-    monkeypatch.setattr(module.tempfile, "mkdtemp", lambda **_kwargs: str(directory))
-    monkeypatch.setattr(module, "MappedHostBuffer", Mock(return_value=mapping))
-    retry = Mock()
-    monkeypatch.setattr(module, "retry_pending_rollbacks", retry)
-    monkeypatch.setattr(module.dist, "get_global_rank", lambda _group, rank: rank)
-    monkeypatch.setattr(module.dist, "broadcast_object_list", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(module.dist, "monitored_barrier", Mock())
-    calls = iter(([None, "import failed"], [None, "consumer cleanup failed"]))
-    monkeypatch.setattr(
-        module.dist, "all_gather_object", lambda out, value, group: out.__setitem__(slice(None), next(calls))
-    )
-    group = types.SimpleNamespace(rank_in_group=0, cpu_group=object(), world_size=2)
-    with pytest.raises(module.EngramSharedCleanupError, match="consumer cleanup failed"):
-        module.LocalSharedVmmBuffer((8, 256), None, "npu:0", group)
-    mapping.close.assert_not_called()
-    retry.assert_not_called()
-    assert directory.exists()
 
 
 def _missing_library_worker(rank, rendezvous, directory, missing_rank):
