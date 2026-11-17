@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, replace
 from importlib.util import find_spec
 from typing import Any
 
@@ -24,7 +24,7 @@ from vllm.v1.attention.backend import (
     max_decode_query_len,
 )
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, replace_as
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.utils import select_common_block_size
 
@@ -391,9 +391,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         # The collector calls this hook again without per-layer overrides.
         if isinstance(spec, AscendSFAIndexerCacheSpec) and not overrides:
             return spec
-        spec_fields = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
-        spec_fields.update(overrides)
-        return AscendSFAIndexerCacheSpec(**spec_fields)
+        return replace_as(spec, AscendSFAIndexerCacheSpec, **overrides)
 
     def process_weights_after_loading(self) -> None:
         if not self.enable_sparse_li_quant:

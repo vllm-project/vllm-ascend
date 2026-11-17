@@ -1,5 +1,5 @@
 from copy import copy
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from typing import Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
@@ -27,7 +27,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec, replace_as
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -165,7 +165,6 @@ class AscendMLAAttention(MLAAttention):
         spec = super().get_kv_cache_spec(vllm_config)
         if getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None:
             return spec
-        values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
         model_type = getattr(vllm_config.model_config.hf_text_config, "model_type", None)
         storage_heads = self.num_heads
         if model_type == "kimi_linear":
@@ -175,7 +174,9 @@ class AscendMLAAttention(MLAAttention):
 
         # Preserve upstream metadata and apply all owner fields together.
         # Reuse the physical packing selected by the execution implementation.
-        values.update(
+        return replace_as(
+            spec,
+            AscendMLAAttentionSpec,
             num_heads=storage_heads,
             model_version=spec.model_version or getattr(self, "model_version", None),
             indexes_kv_by_block_stride=bool(
@@ -190,7 +191,6 @@ class AscendMLAAttention(MLAAttention):
             dtype=dtype,
             cache_dtype_str=cache_dtype_str,
         )
-        return AscendMLAAttentionSpec(**values)
 
     def _get_kv_cache_format(self, spec: MLAAttentionSpec) -> tuple[int, torch.dtype, str | None, bool, bool]:
         """Resolve cache dimensions, dtype and SFA flags from the execution format."""
