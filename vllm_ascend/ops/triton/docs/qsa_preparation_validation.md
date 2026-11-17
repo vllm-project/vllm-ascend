@@ -17,10 +17,10 @@ Public wrappers own allocation and launch geometry. New paths do not read
 device values with `.item()` or copy request metadata to the CPU. Shape/dtype
 checks are host metadata checks, not checks of device tensor contents.
 
-The compression model dispatch now separately checks ratio 4 and contiguous,
-matching-width norm weights before selecting the combined kernel. The ordinary
-pooling interface accepts other positive ratios, whereas the combined wrapper
-rejects them. This distinction must remain separate from Q-only Norm eligibility.
+The model uses a fixed compression ratio of 4; dispatch does not recheck it.
+Compression dispatch uses the original `_fused_norm_rope_eligible` predicate.
+The ordinary pooling interface accepts other positive ratios, whereas the
+combined wrapper rejects them.
 Cache shape/device errors are still wrapper errors, not silent fallback.
 
 ## Coverage matrix and gaps

@@ -47,9 +47,9 @@ passed explicitly; padded row layouts are supported. Metadata is device-local
 and follows the model's request/slot mapping contract. This wrapper is not a
 general validator of arbitrary metadata contents or overlapping storage.
 
-The model checks ratio and norm-weight layout before selecting the combined
-path, in addition to norm/RoPE eligibility. Unsupported fusion configurations
-use the decomposed path; malformed inputs can still be rejected by that path.
+The model uses a fixed compression ratio of 4 and selects the combined path
+using `_fused_norm_rope_eligible`. When this predicate is false, it uses the
+decomposed path; malformed inputs can still be rejected by either path.
 The public wrapper rejects unsupported fused arguments rather than silently
 falling back. Empty rows produce no launch. Rotary positions are clamped; output
 slots outside cache capacity are masked. Valid active rows must not race on the
