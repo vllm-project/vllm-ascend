@@ -193,19 +193,3 @@ def test_failed_save_acknowledges_without_advancing_saved_offset():
     send._handle_request(send.request_queue.get())
     assert send.take_save_outcomes() == ({3: 1}, {3})
     assert send.get_saved_offset("failed") == 0
-
-
-def test_close_cancels_queued_save_jobs_with_failed_completion():
-    db = Mock(cache_coordinator=None, group_block_len={0: [64]})
-    send = KVCacheStoreSendingThread(Mock(), db, [16], tp_rank=0)
-    requests = [metadata.ReqMeta(str(i), can_save=True, event_id=i) for i in range(2)]
-    fence = send.add_save_batch(requests)
-    send._handle_cancelled_request(send.request_queue.get())
-    assert fence.done.is_set()
-    assert send.take_save_outcomes() == ({0: 1, 1: 1}, {0, 1})
-    assert send.request_queue.unfinished_tasks == 0
-    assert all(send.get_saved_offset(req.req_id) == 0 for req in requests)
-    send.stop()
-    rejected = metadata.ReqMeta("late", can_save=True, event_id=2)
-    assert send.add_save_batch([rejected]).done.is_set()
-    assert send.take_save_outcomes() == ({2: 1}, {2})

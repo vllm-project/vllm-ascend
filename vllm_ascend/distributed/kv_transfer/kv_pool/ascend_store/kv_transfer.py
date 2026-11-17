@@ -323,13 +323,11 @@ class KVTransferThread(threading.Thread):
             request_data = None
             try:
                 request_data = self.request_queue.get()
-                if request_data is None:
+                if request_data is None or self._stopping.is_set():
                     self.request_queue.task_done()
-                    return
-                if self._stopping.is_set():
-                    with self._request_submit_lock:
-                        self._handle_cancelled_request(request_data)
-                    return
+                    if request_data is None:
+                        return
+                    continue
                 self._handle_request(request_data)
             except Exception as e:
                 with self._request_submit_lock:
@@ -352,9 +350,6 @@ class KVTransferThread(threading.Thread):
     def _handle_request_exception(self, request_data: Any):
         """Allow subclasses to complete queue/request bookkeeping on errors."""
         pass
-
-    def _handle_cancelled_request(self, request_data: Any) -> None:
-        self.request_queue.task_done()
 
     def lookup(
         self,
@@ -557,7 +552,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # to a fatal state mutually exclusive. A failed consumer therefore
         # either drains this complete batch or rejects it before registration.
         with self._request_submit_lock:
-            if self._stopping.is_set() or self._fatal_error is not None:
+            if self._stopping.is_set():
+                save_batch.done.set()
+                return save_batch
+            if self._fatal_error is not None:
                 logger.error("Reject KV save batch to failed thread %s: %s", self.name, self._fatal_error)
                 # No source KV is read, but completion must release Scheduler pins.
                 # Reject without registering jobs, advancing offsets, or emitting BlockStored.
@@ -710,11 +708,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 break
             finish_failed_request(queued_request)
             self.request_queue.task_done()
-
-    def _handle_cancelled_request(self, request_data: Any) -> None:
-        # Only this consumer drains queued jobs, after any active device IO
-        # has returned. Each failed ACK can then safely release its source.
-        self._handle_request_exception(request_data)
 
     def _handle_request(self, req_meta: ReqMeta | KVCacheStoreBatch):
         if isinstance(req_meta, KVCacheStoreBatch):
