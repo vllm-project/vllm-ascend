@@ -309,6 +309,7 @@ def test_graph_fusion_pass_registration(monkeypatch, method, enabled):
 
 def test_prefill_bounds_causal_storage_and_oversized_tiling(fa3):
     builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
+    builder.is_dflash = builder.is_qwen_target = False
     builder.capture_sizes, builder.capture_query_len = {16}, 8
     builder.max_num_reqs, builder.block_size = 2, 128
     spec = (4, 1, 128, torch.bfloat16, 0.1, 0.0, None)
@@ -349,6 +350,7 @@ def test_prefill_bounds_causal_storage_and_oversized_tiling(fa3):
 @pytest.mark.parametrize("softcap", [0.0, 30.0])
 def test_minimax_fa3_scheduler_api(fa3, causal, padded, softcap):
     builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
+    builder.is_dflash = builder.is_qwen_target = False
     builder.device = torch.device("cpu")
     builder.capture_sizes = set()
     builder.capture_query_len = None
@@ -405,6 +407,7 @@ def test_minimax_fa3_scheduler_api(fa3, causal, padded, softcap):
 
 def test_minimax_fa3_graph_metadata_keeps_storage_across_batch_sizes(fa3):
     builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
+    builder.is_dflash = builder.is_qwen_target = False
     builder.device = torch.device("cpu")
     builder.capture_sizes = {16, 24}
     builder.capture_query_len = 8

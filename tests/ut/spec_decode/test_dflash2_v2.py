@@ -263,8 +263,8 @@ def test_qwen_fa3_metadata_keeps_rejected_lengths_on_device(monkeypatch, mode):
     from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
     from vllm_ascend.attention.flash_attention_v3 import (
-        AscendDFlash2FlashAttentionMetadataBuilder,
         AscendFlashAttentionImpl,
+        AscendFlashAttentionMetadataBuilder,
     )
 
     names = [f"draft.layers.{i}" for i in range(6)]
@@ -273,14 +273,14 @@ def test_qwen_fa3_metadata_keeps_rejected_lengths_on_device(monkeypatch, mode):
         compilation_config=SimpleNamespace(
             cudagraph_mode=mode,
             cudagraph_capture_sizes=[8, 16],
-            static_forward_context={name: SimpleNamespace(impl=impl) for name in names},
+            static_forward_context={name: SimpleNamespace(impl=impl, is_draft_layer=True) for name in names},
         ),
         scheduler_config=SimpleNamespace(max_num_seqs=4),
         speculative_config=SimpleNamespace(method="dflash", num_speculative_tokens=5, enforce_eager=False),
         model_config=SimpleNamespace(max_model_len=1024),
     )
     kv_spec = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
-    builder = AscendDFlash2FlashAttentionMetadataBuilder(kv_spec, names, config, torch.device("cpu"))
+    builder = AscendFlashAttentionMetadataBuilder(kv_spec, names, config, torch.device("cpu"))
     tiling = MagicMock(side_effect=lambda **_: torch.empty(16, dtype=torch.int32))
     monkeypatch.setitem(sys.modules, "flash_attn_npu_3", SimpleNamespace(get_scheduler_metadata=tiling))
     speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)

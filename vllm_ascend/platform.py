@@ -1886,13 +1886,11 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> str | None:
 
         from vllm.compilation import backends
 
-        if backends.model_tag == "dflash_head":
-            backend = "vllm_ascend.attention.flash_attention_v3.AscendDFlash2FlashAttentionBackend"
-        elif backends.model_tag == "backbone" and architecture in _FA3_TARGET_MODEL_ALLOWLIST:
-            backend = "vllm_ascend.attention.flash_attention_v3.AscendQwenFlashAttentionBackend"
-        else:
+        if backends.model_tag != "dflash_head" and (
+            backends.model_tag != "backbone" or architecture not in _FA3_TARGET_MODEL_ALLOWLIST
+        ):
             return None
-    elif (
+    elif not (
         spec.method == "dspark"
         and config.model_config is not None
         and _uses_minimax_fa3(config)
@@ -1900,8 +1898,6 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> str | None:
         and not getattr(config.quant_config, "enable_c8_quant", False)
     ):
         # Keep MiniMax's cache guards separate: a Qwen draft can have a quantized target.
-        backend = "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
-    else:
         return None
 
     parallel = config.parallel_config
@@ -1937,7 +1933,7 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> str | None:
             getattr(module, "flash_attn_with_kvcache", None)
         ):
             return None
-    return backend
+    return "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
 
 
 def _uses_minimax_fa3(config) -> bool:

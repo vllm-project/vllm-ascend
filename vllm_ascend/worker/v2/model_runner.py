@@ -71,8 +71,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
-from vllm_ascend.attention.flash_attention_v3 import AscendDFlash2FlashAttentionBackend as AscendFA3Backend
-from vllm_ascend.attention.flash_attention_v3 import AscendQwenFlashAttentionBackend
+from vllm_ascend.attention.flash_attention_v3 import AscendFlashAttentionBackend as AscendFA3Backend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
@@ -1384,13 +1383,12 @@ class NPUModelRunner(GPUModelRunner):
                 and isinstance(getattr(self, "model_state", None), MambaHybridModelState)
                 and bool(draft_backends)
                 and all(backend is AscendFA3Backend for backend in draft_backends.values())
-                and any(backend in (AscendAttentionBackend, AscendQwenFlashAttentionBackend) for backend in backends)
+                and any(backend in (AscendAttentionBackend, AscendFA3Backend) for backend in backends)
                 and AscendGDNFusedAttentionBackend in backends
                 and all(
                     backend
                     in (
                         AscendAttentionBackend,
-                        AscendQwenFlashAttentionBackend,
                         AscendGDNFusedAttentionBackend,
                         AscendFA3Backend,
                     )

@@ -12,7 +12,7 @@ from vllm.config.compilation import CUDAGraphMode
 from tests.e2e.pull_request.one_card.test_flash_attn_precision import golden
 from vllm_ascend.attention.flash_attention_v3 import (
     AscendFlashAttentionImpl,
-    AscendQwenFlashAttentionMetadataBuilder,
+    AscendFlashAttentionMetadataBuilder,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
@@ -65,11 +65,11 @@ def test_qwen_full_attention_keeps_exact_device_lengths(dtype, capacity, num_kv_
         compilation_config=SimpleNamespace(
             cudagraph_mode=CUDAGraphMode.FULL if prefill else CUDAGraphMode.FULL_DECODE_ONLY,
             cudagraph_capture_sizes=[token_capacity],
-            static_forward_context={"target.attn": SimpleNamespace(impl=impl)},
+            static_forward_context={"target.attn": SimpleNamespace(impl=impl, is_draft_layer=False)},
         ),
     )
     spec = SimpleNamespace(block_size=page, dtype=dtype)
-    builder = AscendQwenFlashAttentionMetadataBuilder(spec, ["target.attn"], config, torch.device("npu"))
+    builder = AscendFlashAttentionMetadataBuilder(spec, ["target.attn"], config, torch.device("npu"))
     layer = SimpleNamespace(layer_name="target.attn", _k_scale_float=1.0, _v_scale_float=1.0)
     capture_metadata = builder.build(0, common)
     output = torch.empty_like(query)

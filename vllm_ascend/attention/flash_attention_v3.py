@@ -44,6 +44,14 @@ class AscendFlashAttentionBackend(AttentionBackend):
     def get_name() -> str:
         return "CUSTOM"
 
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return True
+
     @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
@@ -100,6 +108,19 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         self.device = device
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.capture_sizes = set(vllm_config.compilation_config.cudagraph_capture_sizes or [])
+        speculative = vllm_config.speculative_config
+        self.is_dflash = speculative is not None and speculative.method == "dflash"
+        # Layer ownership survives loader scopes and cache-spec merging. The
+        # speculator builds a separate draft-only group; mixed groups serve target forwards.
+        self.is_qwen_target = self.is_dflash and not all(
+            vllm_config.compilation_config.static_forward_context[name].is_draft_layer for name in layer_names
+        )
+        self.use_graph_buffers = (
+            self.is_dflash
+            and vllm_config.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and (self.is_qwen_target or not speculative.enforce_eager)
+        )
+        self.block_table_buffers: dict[tuple, torch.Tensor] = {}
         self.capture_query_len = None
         if vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
             speculative = vllm_config.speculative_config
@@ -136,15 +157,33 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         return AttentionCGSupport.ALWAYS
 
     def _prepare_block_tables(self, block_tables: torch.Tensor, active_reqs: int) -> tuple[torch.Tensor, int | None]:
-        return block_tables[:active_reqs], None
+        if not self.is_qwen_target:
+            return block_tables[:active_reqs], None
+        # Cover the original capacity to preserve full attention. The extra
+        # column avoids FA3's global TND branch, which reads device lengths on the host.
+        key = (block_tables.data_ptr(), block_tables.shape[1])
+        if key not in self.block_table_buffers:
+            self.block_table_buffers[key] = block_tables.new_zeros((self.max_num_reqs, block_tables.shape[1] + 1))
+        padded = self.block_table_buffers[key][:active_reqs]
+        padded[:, :-1].copy_(block_tables[:active_reqs])
+        return padded, block_tables.shape[1] * self.block_size
 
     def _get_active_reqs(self, common: AscendCommonAttentionMetadata) -> int:
-        return max(
-            1,
-            int(torch.searchsorted(common.query_start_loc_cpu[: common.num_reqs + 1], common.num_actual_tokens)),
-        )
+        offsets = common.query_start_loc_cpu[: common.num_reqs + 1]
+        # DFlash graph padding may exceed the real query extent recorded on CPU.
+        extent = offsets[-1] if self.is_dflash else common.num_actual_tokens
+        return max(1, int(torch.searchsorted(offsets, extent)))
 
     def _get_graph_params(self, common: AscendCommonAttentionMetadata, num_input_tokens: int) -> tuple[bool, int]:
+        if self.is_dflash:
+            # DFlash rounds target buckets to whole draft queries (e.g. 15 -> 16).
+            max_query_len = common.max_query_len
+            if self.use_graph_buffers and self.is_qwen_target:
+                if self.capture_query_len is None:
+                    max_query_len = num_input_tokens
+                elif common.max_query_len <= self.capture_query_len:
+                    max_query_len = self.capture_query_len
+            return self.use_graph_buffers, max_query_len
         is_graph_capture_size = num_input_tokens in self.capture_sizes and (
             self.capture_query_len is None or common.max_query_len <= self.capture_query_len
         )
@@ -252,80 +291,6 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         # calls build directly. FA3 uses paged attention for all scheduling
         # states, so neither capture path needs to consume attn_state.
         return self.build(0, common_attn_metadata)
-
-
-class AscendDFlash2FlashAttentionMetadataBuilder(AscendFlashAttentionMetadataBuilder):
-    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
-        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.use_graph_buffers = (
-            not vllm_config.speculative_config.enforce_eager
-            and vllm_config.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-        )
-
-    def _get_active_reqs(self, common):
-        # Draft graph padding can exceed the real query extent recorded on CPU.
-        offsets = common.query_start_loc_cpu[: common.num_reqs + 1]
-        return max(1, int(torch.searchsorted(offsets, offsets[-1])))
-
-    def _get_graph_params(self, common, num_input_tokens):
-        # DFlash rounds target buckets to complete draft queries (e.g. 15 -> 16).
-        return self.use_graph_buffers, common.max_query_len
-
-
-class AscendQwenFlashAttentionMetadataBuilder(AscendDFlash2FlashAttentionMetadataBuilder):
-    """Keep full attention on the device-length path of the 910 FA3 ABI."""
-
-    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
-        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        mode = vllm_config.compilation_config.cudagraph_mode
-        # Target graphs remain enabled when only the draft enforces eager.
-        self.use_graph_buffers = mode.decode_mode() == CUDAGraphMode.FULL
-        self.block_table_buffers: dict[tuple, torch.Tensor] = {}
-
-    def _prepare_block_tables(self, block_tables, active_reqs):
-        # Cover the original capacity to preserve full attention. The extra
-        # column keeps FA3 0.5.0 off its global TND branch, which reads lengths
-        # back to the host; exact seq_lens never address the added column.
-        key = (block_tables.data_ptr(), block_tables.shape[1])
-        if key not in self.block_table_buffers:
-            self.block_table_buffers[key] = block_tables.new_zeros((self.max_num_reqs, block_tables.shape[1] + 1))
-        padded = self.block_table_buffers[key][:active_reqs]
-        padded[:, :-1].copy_(block_tables[:active_reqs])
-        return padded, block_tables.shape[1] * self.block_size
-
-    def _get_graph_params(self, common, num_input_tokens):
-        # A captured decode bucket can be replayed with fewer valid query
-        # tokens after rejection. Retain its scalar Q bound and tiling buffer.
-        if self.use_graph_buffers:
-            if self.capture_query_len is None:
-                return True, num_input_tokens
-            if common.max_query_len <= self.capture_query_len:
-                return True, self.capture_query_len
-        return self.use_graph_buffers, common.max_query_len
-
-
-class AscendDFlash2FlashAttentionBackend(AscendFlashAttentionBackend):
-    @classmethod
-    def supports_head_size(cls, head_size: int) -> bool:
-        return 1 <= head_size <= 256
-
-    @classmethod
-    def supports_non_causal(cls) -> bool:
-        return True
-
-    @classmethod
-    def supports_sliding_window(cls) -> bool:
-        return True
-
-    @staticmethod
-    def get_builder_cls():
-        return AscendDFlash2FlashAttentionMetadataBuilder
-
-
-class AscendQwenFlashAttentionBackend(AscendDFlash2FlashAttentionBackend):
-    @staticmethod
-    def get_builder_cls():
-        return AscendQwenFlashAttentionMetadataBuilder
 
 
 class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):

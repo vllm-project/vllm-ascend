@@ -29,7 +29,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
-from vllm_ascend.attention.flash_attention_v3 import AscendDFlash2FlashAttentionBackend, AscendQwenFlashAttentionBackend
+from vllm_ascend.attention.flash_attention_v3 import AscendFlashAttentionBackend as AscendFA3Backend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
 from vllm_ascend.utils import vllm_version_is
@@ -2172,15 +2172,14 @@ def _qwen_dflash2_device_length_runner():
     )
     runner.speculative_config.parallel_drafting = True
     runner.speculative_config.enable_adaptive_verification = False
-    runner.speculator = SimpleNamespace(attn_backends={"draft.0": AscendDFlash2FlashAttentionBackend})
+    runner.speculator = SimpleNamespace(attn_backends={"draft.0": AscendFA3Backend})
     runner.attn_groups = [
-        [SimpleNamespace(backend=backend)]
-        for backend in (AscendQwenFlashAttentionBackend, AscendGDNFusedAttentionBackend)
+        [SimpleNamespace(backend=backend)] for backend in (AscendFA3Backend, AscendGDNFusedAttentionBackend)
     ]
     return runner, output, batch
 
 
-@pytest.mark.parametrize("target_backend", [AscendAttentionBackend, AscendQwenFlashAttentionBackend])
+@pytest.mark.parametrize("target_backend", [AscendAttentionBackend, AscendFA3Backend])
 @pytest.mark.parametrize("blocked", [None, "draft_backend", "target_backend", "model_state", "pp", "kv_transfer"])
 def test_qwen_dflash2_length_snapshot_and_wait_share_backend_guard(target_backend, blocked):
     runner, output, batch = _qwen_dflash2_device_length_runner()

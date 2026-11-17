@@ -307,7 +307,10 @@ def qwen_dflash2_fa3(monkeypatch, dflash2_config):
 
     def select(tag="dflash_head"):
         monkeypatch.setattr("vllm.compilation.backends.model_tag", tag)
-        return platform.NPUPlatform._select_attn_backend_cls(runtime.selector).rsplit(".", 1)[-1]
+        backend = platform.NPUPlatform._select_attn_backend_cls(runtime.selector)
+        if backend.endswith(".AscendFlashAttentionBackend"):
+            assert backend == "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
+        return backend.rsplit(".", 1)[-1]
 
     runtime.select = select
     return runtime
@@ -316,10 +319,10 @@ def qwen_dflash2_fa3(monkeypatch, dflash2_config):
 @pytest.mark.parametrize(
     "hardware,tag,eager,draft_scope,expected",
     [
-        ("A2", "dflash_head", False, False, "AscendDFlash2FlashAttentionBackend"),
-        ("A3", "dflash_head", True, True, "AscendDFlash2FlashAttentionBackend"),
-        ("A2", "backbone", False, False, "AscendQwenFlashAttentionBackend"),
-        ("A3", "backbone", True, True, "AscendQwenFlashAttentionBackend"),
+        ("A2", "dflash_head", False, False, "AscendFlashAttentionBackend"),
+        ("A3", "dflash_head", True, True, "AscendFlashAttentionBackend"),
+        ("A2", "backbone", False, False, "AscendFlashAttentionBackend"),
+        ("A3", "backbone", True, True, "AscendFlashAttentionBackend"),
         ("A5", "backbone", False, False, "AscendAttentionBackend"),
         ("A2", "dflash2_candidate_selector", False, False, "AscendAttentionBackend"),
     ],
@@ -337,10 +340,10 @@ def test_qwen_target_allowlist_leaves_draft_selection_independent(monkeypatch, q
     from vllm_ascend import platform
 
     r = qwen_dflash2_fa3
-    assert r.select("backbone") == "AscendQwenFlashAttentionBackend"
+    assert r.select("backbone") == "AscendFlashAttentionBackend"
     monkeypatch.setattr(platform, "_FA3_TARGET_MODEL_ALLOWLIST", frozenset(allowlist))
     assert r.select("backbone") == "AscendAttentionBackend"
-    assert r.select() == "AscendDFlash2FlashAttentionBackend"
+    assert r.select() == "AscendFlashAttentionBackend"
     assert r.select("dflash2_candidate_selector") == "AscendAttentionBackend"
     # An allowlist entry cannot bypass the backend's supported architecture.
     r.target.architecture = "Qwen3_5MoeForConditionalGeneration"

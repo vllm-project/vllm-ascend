@@ -10,9 +10,8 @@ import torch
 from vllm.config import CUDAGraphMode
 
 from vllm_ascend.attention.flash_attention_v3 import (
-    AscendDFlash2FlashAttentionBackend,
+    AscendFlashAttentionBackend,
     AscendFlashAttentionImpl,
-    AscendQwenFlashAttentionBackend,
 )
 
 
@@ -26,7 +25,7 @@ def ops(monkeypatch):
     return operators
 
 
-def make_builder(backend, mode, eager=False):
+def make_builder(mode, eager=False, draft_roles=(True, True)):
     impl = AscendFlashAttentionImpl(8, 192, 192**-0.5, num_kv_heads=2)
     config = NS(
         speculative_config=NS(method="dflash", enforce_eager=eager, num_speculative_tokens=7),
@@ -34,10 +33,12 @@ def make_builder(backend, mode, eager=False):
         compilation_config=NS(
             cudagraph_mode=mode,
             cudagraph_capture_sizes=[15],
-            static_forward_context={"attn.0": NS(impl=impl), "attn.1": NS(impl=impl)},
+            static_forward_context={
+                f"attn.{i}": NS(impl=impl, is_draft_layer=is_draft) for i, is_draft in enumerate(draft_roles)
+            },
         ),
     )
-    return backend.get_builder_cls()(
+    return AscendFlashAttentionBackend.get_builder_cls()(
         NS(dtype=torch.bfloat16, block_size=128), ["attn.0", "attn.1"], config, torch.device("cpu")
     ), impl
 
@@ -60,7 +61,7 @@ def make_common():
 
 @pytest.mark.parametrize("eager", [False, True])
 def test_dflash_rounded_bucket_preserves_exact_device_lengths_and_tiling_storage(ops, eager):
-    builder, _ = make_builder(AscendDFlash2FlashAttentionBackend, CUDAGraphMode.FULL_DECODE_ONLY, eager)
+    builder, _ = make_builder(CUDAGraphMode.FULL_DECODE_ONLY, eager)
     common = make_common()
     captured = builder.build_for_graph_capture(common)
     spec = next(iter(captured.scheduler_metadata))
@@ -85,7 +86,7 @@ def test_dflash_rounded_bucket_preserves_exact_device_lengths_and_tiling_storage
 @pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY])
 def test_qwen_full_attention_updates_ragged_tnd_and_padded_tables_without_changing_graph_addresses(ops, mode):
     # Draft eager must not disable the target's graph buffers.
-    builder, impl = make_builder(AscendQwenFlashAttentionBackend, mode, eager=True)
+    builder, impl = make_builder(mode, eager=True, draft_roles=(False, False))
     common = make_common()
     common.causal = True
     captured = builder.build(0, common)
@@ -123,3 +124,20 @@ def test_qwen_full_attention_updates_ragged_tnd_and_padded_tables_without_changi
         assert arguments["window_size"] == tiling["window_size"] == (1023, 0)
         assert arguments["scheduler_metadata"] is next(iter(metadata.scheduler_metadata.values()))
         torch.testing.assert_close(output, query + 1)
+
+
+def test_shared_builder_keeps_mixed_target_groups_separate_from_draft_metadata(ops):
+    # Main groups can contain both roles; the speculator filters to draft layers.
+    target_builder, _ = make_builder(CUDAGraphMode.FULL_DECODE_ONLY, draft_roles=(False, True))
+    draft_builder, _ = make_builder(CUDAGraphMode.FULL_DECODE_ONLY)
+    common = make_common()
+    target = target_builder.build(0, common)
+    draft = draft_builder.build(0, common)
+    assert type(target_builder) is type(draft_builder)
+    assert target.full_attention_window == 1024
+    assert draft.full_attention_window is None
+    assert target.max_query_len == 8 and draft.max_query_len == 4
+    assert target.block_tables.shape[1] == 9 and draft.block_tables.shape[1] == 8
+    target_tiling = next(iter(target.scheduler_metadata.values()))
+    draft_tiling = next(iter(draft.scheduler_metadata.values()))
+    assert target_tiling.data_ptr() != draft_tiling.data_ptr()
