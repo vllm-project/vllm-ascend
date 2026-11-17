@@ -6,6 +6,7 @@ import torch.multiprocessing as mp
 import torch_npu
 from torch.distributed.distributed_c10d import _get_default_group
 
+from vllm_ascend.ops.fused_moe.eplb import record_expert_tokens
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -197,28 +198,44 @@ class TestDispatchFFNCombine:
 
         baseline_out = out.clone()
         baseline_counts = expert_token_nums.clone()
+        # Every rank routes the same seeded batch, so each destination receives a copy from every rank.
+        expected_counts = torch.bincount(
+            expert_idx.flatten().long(), minlength=self.world_size * e
+        )[self.rank * e : (self.rank + 1) * e] * self.world_size
+        assert torch.equal(baseline_counts.cpu(), expected_counts.to(torch.int32))
         local_start = 3 + self.rank * e
         load = torch.full((3 + self.world_size * e + 2,), 11, dtype=torch.int32, device="npu")
+        standalone_load = load.clone()
         enabled = torch.tensor(False, dtype=torch.bool, device="npu")
+        record_expert_tokens(baseline_counts, standalone_load, enabled, 1, local_start)
         torch.ops._C_ascend.dispatch_ffn_combine(
             **op_kwargs, expert_load_view=load, record_enabled=enabled, local_expert_start=local_start
         )
         torch.npu.synchronize()
-        assert torch.equal(load, torch.full_like(load, 11))
+        assert torch.equal(load, standalone_load)
         enabled.fill_(True)
+        record_expert_tokens(baseline_counts, standalone_load, enabled, 1, local_start)
         torch.ops._C_ascend.dispatch_ffn_combine(
             **op_kwargs, expert_load_view=load, record_enabled=enabled, local_expert_start=local_start
         )
         torch.npu.synchronize()
+        assert torch.equal(load, standalone_load), "fused Record differs from standalone Record"
         expected_load = torch.full_like(load, 11)
         expected_load[local_start : local_start + e].add_(baseline_counts)
-        assert torch.equal(load, expected_load), "fused Record must add exactly the local per-expert counts"
-        enabled.fill_(False)
+        assert torch.equal(load, expected_load)
+        record_expert_tokens(baseline_counts, standalone_load, enabled, 1, local_start)
         torch.ops._C_ascend.dispatch_ffn_combine(
             **op_kwargs, expert_load_view=load, record_enabled=enabled, local_expert_start=local_start
         )
         torch.npu.synchronize()
-        assert torch.equal(load, expected_load), "disabled Record must leave the load unchanged"
+        assert torch.equal(load, standalone_load), "fused Record accumulation differs from standalone Record"
+        enabled.fill_(False)
+        record_expert_tokens(baseline_counts, standalone_load, enabled, 1, local_start)
+        torch.ops._C_ascend.dispatch_ffn_combine(
+            **op_kwargs, expert_load_view=load, record_enabled=enabled, local_expert_start=local_start
+        )
+        torch.npu.synchronize()
+        assert torch.equal(load, standalone_load), "disabled fused Record differs from standalone Record"
         assert torch.equal(out, baseline_out)
         assert torch.equal(expert_token_nums, baseline_counts)
 

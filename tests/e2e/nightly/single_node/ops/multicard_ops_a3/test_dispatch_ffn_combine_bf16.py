@@ -6,6 +6,7 @@ import torch.multiprocessing as mp
 import torch_npu
 from torch.distributed.distributed_c10d import _get_default_group
 
+from vllm_ascend.ops.fused_moe.eplb import record_expert_tokens
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -139,11 +140,14 @@ class TestDispatchFFNCombine:
         baseline_counts = expert_token_nums.clone().view(-1)
         baseline_out = out.clone()
         load = torch.full((e + 4,), 7, dtype=torch.int32, device="npu")
+        standalone_load = load.clone()
         enabled = torch.tensor(True, dtype=torch.bool, device="npu")
+        record_expert_tokens(baseline_counts, standalone_load, enabled, 1, 2)
         torch.ops._C_ascend.dispatch_ffn_combine(
             **op_kwargs, expert_load_view=load, record_enabled=enabled, local_expert_start=2
         )
         torch.npu.synchronize()
+        assert torch.equal(load, standalone_load), "fused Record differs from standalone Record"
         expected_load = torch.full_like(load, 7)
         expected_load[2 : 2 + e].add_(baseline_counts)
         assert torch.equal(load, expected_load)
