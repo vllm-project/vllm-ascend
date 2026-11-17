@@ -1,0 +1,8 @@
+pr: 22149
+entries:
+  - category: bugfix
+    text: >-
+      Fixed layer index errors and transfer completion waits when KVPP uses
+      Memcache layerwise KV pooling with uneven layer ownership. Each owner now
+      reserves only its own layer payload when PP=1. Existing cache keys and PP
+      byte origins are preserved, with no cache namespace migration required.

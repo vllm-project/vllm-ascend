@@ -565,6 +565,13 @@ class BaseKVPoolWorker(ABC):
         gbl = self.group_block_len.get(group_id) or []
         if not gbl:
             return self.page_size_bytes
+        if (
+            getattr(self, "use_kvpp", False)
+            and getattr(self, "use_layerwise_transfer", False)
+            and getattr(self, "pp_size", 1) == 1
+        ):
+            # A single-stage KVPP object contains only its owner's layers.
+            return sum(gbl)
         # Backward compatibility: when total_layers is not set (unit tests,
         # partial init), fall back to the LOCAL sum (pre-PP behavior).
         total_layers = getattr(self, "total_layers", None)

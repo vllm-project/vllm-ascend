@@ -62,6 +62,14 @@ For non-layerwise complete-block transfers, adjacent MLA components sharing one 
 
 This bulk fast path uses physical-page-major object contents instead of the previous component-major segmented contents. A fresh namespace is required even when upgrading from the earlier segmented version of this fix. Writers and readers must agree on transfer mode and cache layout; do not share these objects with layerwise readers or workers using a different component layout.
 
+### KVPP Memcache Layerwise Pools
+
+With KVPP and Memcache `use_layerwise=true`, each rank transfers only the layers
+it owns and completes transfers at its last owned layer. With one pipeline stage
+(`PP=1`), each object's allocation covers only that owner's registered payload.
+Existing cache keys and PP byte origins are preserved; this fix does not require
+changing `cache_salt` or rebuilding the cache namespace.
+
 ### Prefix Cache Retention
 
 Configure retention with the upstream vLLM argument `--prefix-cache-retention-interval`.
