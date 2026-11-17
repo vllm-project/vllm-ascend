@@ -33,6 +33,7 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 from vllm_ascend.device.hardware_profile import get_current_hardware_profile
+from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
@@ -291,9 +292,6 @@ def _build_non_spec_chunked_prefill_metadata(
     device: torch.device,
     build_device_metadata: bool = True,
 ) -> GDNChunkedPrefillMetadata:
-    # Import lazily because the PCP builder extends this module's GDN builder.
-    from vllm_ascend.ops.recurrent_pcp import AscendGDNPCPMetadataBuilder
-
     chunk_indices_chunk64 = prepare_chunk_indices(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
     head_sharded_pcp = isinstance(builder, AscendGDNPCPMetadataBuilder)
     if build_device_metadata:
@@ -1124,6 +1122,20 @@ class AscendGDNAttentionBackend(GDNAttentionBackend):
     @staticmethod
     def get_builder_cls() -> type[AscendGDNAttentionMetadataBuilder]:
         return AscendGDNAttentionMetadataBuilder
+
+
+class AscendGDNPCPMetadataBuilder(PCPRecurrentMetadataBuilderMixin, AscendGDNAttentionMetadataBuilder):
+    pass
+
+
+class AscendGDNPCPBackend(AscendGDNAttentionBackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
+    @staticmethod
+    def get_builder_cls() -> type[AscendGDNPCPMetadataBuilder]:
+        return AscendGDNPCPMetadataBuilder
 
 
 class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):

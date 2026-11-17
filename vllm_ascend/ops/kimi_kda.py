@@ -36,6 +36,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     record_attention_compute_start,
 )
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend, AscendGDNHostMetadataBuilder
 from vllm_ascend.ops.head_parallel import (
     HeadParallelColumnLinear,
     HeadParallelMergedColumnLinear,
@@ -44,7 +45,7 @@ from vllm_ascend.ops.head_parallel import (
     get_head_parallel_size,
 )
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
-from vllm_ascend.ops.recurrent_pcp import KimiKDAHostMetadataBackend, KimiKDARecoverSSMMetadataBackend
+from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
@@ -207,6 +208,28 @@ def _prepare_beta(
     """Slice beta and apply sigmoid unless the auxiliary stream already did."""
     beta = beta[:, :num_actual_tokens]
     return beta if is_preprocessed else beta.float().sigmoid()
+
+
+class KimiKDAHostMetadataBuilder(PCPRecurrentMetadataBuilderMixin, AscendGDNHostMetadataBuilder):
+    pass
+
+
+class KimiKDAHostMetadataBackend(AscendGDNHostMetadataBackend):
+    @staticmethod
+    def get_builder_cls():
+        return KimiKDAHostMetadataBuilder
+
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
+
+class KimiKDARecoverSSMMetadataBackend(KimiKDAHostMetadataBackend):
+    @staticmethod
+    def get_builder_cls():
+        from vllm_ascend.models.kimi_k3.recoverssm_metadata import AscendKimiKDARecoverSSMMetadataBuilder
+
+        return AscendKimiKDARecoverSSMMetadataBuilder
 
 
 class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):

@@ -14,6 +14,7 @@ from tests.ut.ops.test_gdn_attn_builder import (
     create_common_attn_metadata,
 )
 from vllm_ascend.ops import gdn_attn_builder, recurrent_pcp
+from vllm_ascend.ops.kimi_kda import KimiKDAHostMetadataBuilder
 
 
 @pytest.mark.parametrize("rank", range(8))
@@ -24,7 +25,7 @@ def test_real_builder_pcp8_context_restores_and_scatters(rank, for_capture, monk
 
     def make_kimi(spec, layers, config, device):
         config.parallel_config.prefill_context_parallel_size = 8
-        return recurrent_pcp.KimiKDAHostMetadataBuilder(spec, layers, config, device)
+        return KimiKDAHostMetadataBuilder(spec, layers, config, device)
 
     with (
         patch.object(recurrent_pcp, "get_pcp_group", return_value=group),

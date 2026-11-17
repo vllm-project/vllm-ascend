@@ -10,7 +10,12 @@ import torch
 
 from vllm_ascend.models.kimi_k3 import kimi_k3
 from vllm_ascend.ops import head_parallel, recurrent_pcp
-from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention, KimiKDAInputParallelLinear
+from vllm_ascend.ops.gdn_attn_builder import (
+    AscendGDNAttentionMetadataBuilder,
+    AscendGDNHostMetadataBuilder,
+    AscendGDNPCPMetadataBuilder,
+)
+from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention, KimiKDAHostMetadataBuilder, KimiKDAInputParallelLinear
 
 
 @contextmanager
@@ -137,7 +142,7 @@ def test_pcp_kda_output_projection_does_not_enter_tp_only_fusion(monkeypatch):
     assert not layer._enable_o_proj_mm_reduce_scatter(SimpleNamespace(lora_config=None))
 
 
-def make_builder(pcp_rank, capacity=16, builder_cls=recurrent_pcp.KimiKDAHostMetadataBuilder):
+def make_builder(pcp_rank, capacity=16, builder_cls=KimiKDAHostMetadataBuilder):
     builder = object.__new__(builder_cls)
     builder.pcp_size = 2
     builder.pcp_rank = pcp_rank
@@ -214,8 +219,8 @@ def test_pcp_metadata_refresh_preserves_captured_addresses():
 @pytest.mark.parametrize(
     ("builder_cls", "base_cls"),
     [
-        (recurrent_pcp.KimiKDAHostMetadataBuilder, recurrent_pcp.AscendGDNHostMetadataBuilder),
-        (recurrent_pcp.AscendGDNPCPMetadataBuilder, recurrent_pcp.AscendGDNAttentionMetadataBuilder),
+        (KimiKDAHostMetadataBuilder, AscendGDNHostMetadataBuilder),
+        (AscendGDNPCPMetadataBuilder, AscendGDNAttentionMetadataBuilder),
     ],
 )
 def test_pcp_builder_consumes_common_metadata_context(for_capture, builder_cls, base_cls):
@@ -268,10 +273,10 @@ def test_capture_capacity_counts_global_kda_tokens_without_changing_runner():
         self.decode_cudagraph_max_bs = vllm_config.compilation_config.max_cudagraph_capture_size
 
     with (
-        patch.object(recurrent_pcp.AscendGDNHostMetadataBuilder, "__init__", init_metadata),
+        patch.object(AscendGDNHostMetadataBuilder, "__init__", init_metadata),
         patch.object(recurrent_pcp, "get_pcp_group", return_value=SimpleNamespace(rank_in_group=0)),
     ):
-        builder = recurrent_pcp.KimiKDAHostMetadataBuilder(None, [], config, torch.device("cpu"))
+        builder = KimiKDAHostMetadataBuilder(None, [], config, torch.device("cpu"))
     assert builder.decode_cudagraph_max_bs == 8
     assert config.compilation_config.max_cudagraph_capture_size == 4
 
