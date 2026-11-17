@@ -61,6 +61,7 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
@@ -984,6 +985,9 @@ class NPUWorker(WorkerBase):
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
 
+    # Lockstep wave sync for idle DP ranks (never burns manual_dump);
+    # lives in the runtime_guard hook, see runtime_guard_idle_step.
+    @runtime_guard_idle_step
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
         self.model_runner._dummy_run(num_tokens=self.model_runner.decode_token_per_req, uniform_decode=True)
