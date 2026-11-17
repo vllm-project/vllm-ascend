@@ -249,16 +249,22 @@ def get_pr_reviews(pr_number: int) -> dict[str, str]:
 
 def check_approvals(
     pr_number: int, pr_author: str, rules: list[Rule], files: list[str], reviews: dict[str, str]
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str]]:
     """Gate on owner approvals.
 
-    Returns ``(failures, unclaimed)``. Unclaimed files (no CODEOWNERS owner
-    at all) are NOT gate failures by policy: nobody can approve them, and
-    maintainers handle claiming at their own pace. The caller surfaces them
-    as a notice (PR comment / warnings) instead.
+    Returns ``(failures, unclaimed, self_owned)``. Two categories are NOT
+    gate failures by policy, and are surfaced as notices instead:
+
+    - ``unclaimed``: files with no CODEOWNERS owner at all - nobody can
+      approve them, maintainers handle claiming at their own pace;
+    - ``self_owned``: files whose only owner is the PR author - a sole
+      owner cannot self-approve, and requiring a second owner before any
+      progress would block the module indefinitely. Consider adding a
+      co-owner to CODEOWNERS.
     """
     failures = []
     unclaimed = []
+    self_owned = []
     for path in files:
         owners, skipped = resolve_owners(rules, path)
         if skipped:
@@ -267,29 +273,27 @@ def check_approvals(
         if not owners:
             unclaimed.append(path)
             continue
+        eligible = [o for o in owners if o.lstrip("@") != pr_author]
+        if not eligible:
+            # The sole owner is the PR author: self-approval is impossible,
+            # and blocking the module on a second owner that does not exist
+            # yet would stall it indefinitely. Notice instead.
+            self_owned.append(path)
+            continue
         # A pending "changes requested" from any owner of the file (excluding
         # the PR author) blocks it even when another owner approved; the
         # author must address the feedback and get the owner to re-review.
-        blocking = [
-            o.lstrip("@")
-            for o in owners
-            if o.lstrip("@") != pr_author and reviews.get(o.lstrip("@")) == "CHANGES_REQUESTED"
-        ]
+        blocking = [o.lstrip("@") for o in eligible if reviews.get(o.lstrip("@")) == "CHANGES_REQUESTED"]
         if blocking:
             failures.append(
                 f"{path}: changes requested by {', '.join('@' + b for b in blocking)}; "
                 "address the feedback, then ask them to re-review (approve or dismiss)"
             )
             continue
-        eligible = [o for o in owners if o.lstrip("@") != pr_author]
         approved = [o.lstrip("@") for o in eligible if reviews.get(o.lstrip("@")) == "APPROVED"]
-        if not eligible:
-            failures.append(
-                f"{path}: only owner is the PR author ({pr_author}); another owner must be added to CODEOWNERS"
-            )
-        elif not approved:
+        if not approved:
             failures.append(f"{path}: waiting for approval from one of: {', '.join(eligible)}")
-    return failures, unclaimed
+    return failures, unclaimed, self_owned
 
 
 def list_tracked_files(repo_root: str) -> list[str]:
@@ -389,17 +393,23 @@ def main() -> int:
             if not args.author:
                 pr_data = gh_api("repos/{owner}/{repo}/pulls/{pr}", pr=args.pr)
                 args.author = pr_data["user"]["login"]
-        failures, unclaimed = check_approvals(args.pr or 0, args.author, rules, files, reviews)
+        failures, unclaimed, self_owned = check_approvals(args.pr or 0, args.author, rules, files, reviews)
         out = os.environ.get("UNCLAIMED_OUT")
         if out is not None:
             with open(out, "w") as f:
                 f.write("\n".join(unclaimed))
+        self_out = os.environ.get("SELF_OWNED_OUT")
+        if self_out is not None:
+            with open(self_out, "w") as f:
+                f.write("\n".join(self_owned))
         detail_out = os.environ.get("APPROVAL_FAILURES_OUT")
         if detail_out is not None:
             with open(detail_out, "w") as f:
                 f.write("\n".join(failures))
         for path in unclaimed:
             print(f"  ::warning::{path}: no CODEOWNERS owner yet; no approval required")
+        for path in self_owned:
+            print(f"  ::warning::{path}: sole owner is the PR author; no additional approval required")
         if failures:
             print("codeowner approval check FAILED:")
             for failure in failures:
