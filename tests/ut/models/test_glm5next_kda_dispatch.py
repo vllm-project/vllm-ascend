@@ -453,6 +453,38 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
     assert events == [("load", "layer"), "compute", *expected_execution_events, "save"]
 
 
+@pytest.mark.parametrize(
+    ("recover", "num_spec", "error"),
+    [
+        (False, 7, None),
+        (False, 8, "GLM AscendC KDA supports at most seven speculative tokens"),
+        (True, 8, None),
+        (True, 9, "GLM KDA RecoverSSM supports at most 8 speculative tokens"),
+    ],
+)
+def test_kda_speculative_token_limit_by_backend(monkeypatch, recover, num_spec, error):
+    class ValidationPassed(Exception):
+        pass
+
+    def get_pcp_group():
+        raise ValidationPassed
+
+    monkeypatch.setattr(
+        model_kda.GatedDeltaNetAttention, "__init__", lambda self, *a, **kw: torch.nn.Module.__init__(self)
+    )
+    monkeypatch.setattr(model_kda, "get_pcp_group", get_pcp_group)
+    config = SimpleNamespace(linear_head_dim=128, linear_conv_kernel_dim=4, linear_lower_bound=-5)
+    vllm_config = SimpleNamespace(
+        quant_config=None,
+        model_config=SimpleNamespace(dtype=torch.bfloat16, hf_text_config=SimpleNamespace(model_type="glm5_next_text")),
+        cache_config=SimpleNamespace(use_replayssm=recover),
+        speculative_config=SimpleNamespace(num_speculative_tokens=num_spec),
+    )
+    expectation = pytest.raises(ValidationPassed) if error is None else pytest.raises(ValueError, match=error)
+    with expectation:
+        model_kda.Glm5NextLinearAttention(config, vllm_config)
+
+
 @pytest.mark.parametrize(("width", "num_spec"), [(1, 0), (5, 0), (3, 3)])
 def test_unsupported_conv_width_is_rejected_before_execution(monkeypatch, width, num_spec):
     monkeypatch.setattr(

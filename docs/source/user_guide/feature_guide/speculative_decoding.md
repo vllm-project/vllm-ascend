@@ -880,7 +880,8 @@ Use a model with MTP support for this example, or retain your existing supported
 GLM-5.3-Flash supports experimental KDA RecoverSSM on A3 and A5. It reconstructs
 the accepted recurrent state after speculative decoding instead of keeping a
 recurrent checkpoint for every draft token.
-The default remains the native AscendC KDA path.
+RecoverSSM supports up to eight speculative tokens. The default native AscendC
+KDA path supports up to seven.
 
 Enable this path with upstream vLLM's `--use-replayssm` option, which defaults
 to disabled. See the [vLLM serving CLI reference](https://docs.vllm.ai/en/latest/cli/serve/)
