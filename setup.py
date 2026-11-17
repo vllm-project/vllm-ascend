@@ -535,7 +535,6 @@ setup(
         "vllm_ascend.observability.ms_metrics": ["config/*.yaml"],
         "vllm_ascend.observability.runtime_guard.detector.rare": [
             "rare.json",
-            "NOTICE",
             "tables/*.npz",
         ],
     },

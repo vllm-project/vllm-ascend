@@ -86,8 +86,7 @@ def compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> tor
     return logprobs
 
 
-# Partitioned narrow collect: top1 = -log S, chosen = (x_c - M) - log S.
-# No full logprob table / ranks. Used by Guard rare_chars.
+# rare_chars narrow collect: top1 = -log S, chosen = (x_c - M) - log S.
 _NARROW_COLLECT_BLOCK = 4096
 _narrow_collect_workspace: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
@@ -130,11 +129,7 @@ def compute_top1_and_chosen_logprobs(
     *,
     packed: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
-    """Narrow collect: top-1 and chosen logprobs from raw logits (Ascend Triton).
-
-    Two-kernel partitioned max/sum-exp then LSE + gather — no full logprob
-    table, no ranks. Intended for Guard ``rare_chars`` (``lp1``, ``lpc``).
-    """
+    """Return per-row (top1, chosen) logprobs; ``packed=True`` → ``[rows, 2]``."""
     if logits.dim() != 2:
         raise ValueError(f"logits must be 2-D [rows, vocab], got shape={tuple(logits.shape)}")
     batch_size, vocab_size = logits.shape
