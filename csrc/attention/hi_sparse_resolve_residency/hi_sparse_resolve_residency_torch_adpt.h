@@ -3,43 +3,46 @@
 #define HI_SPARSE_RESOLVE_RESIDENCY_TORCH_ADPT_H
 
 #include <ATen/ATen.h>
+#include <string>
+
+#include <ascendcl.h>
+#include <tiling/platform/platform_ascendc.h>
 
 #include "op_kernel/resolver_scratch.h"
-#ifdef VLLM_ASCEND_HISPARSE_ARCH22
-#include <tiling/platform/platform_ascendc.h>
-#include <ascendcl.h>
-#endif
 
 namespace vllm_ascend::hisparse {
 
+inline bool is_arch22_soc()
+{
+    // Runtime SoC dispatch, the same pattern as the tiling stage; the only
+    // registered non-arch22 target is the Ascend950 SIMT family.
+    const char* socName = aclrtGetSocName();
+    return (socName == nullptr) || (std::string(socName).find("Ascend950") == std::string::npos);
+}
+
 inline void validate_resolver_scratch(int64_t hot, int64_t union_rows)
 {
-#ifdef VLLM_ASCEND_HISPARSE_ARCH22
     // Fail fast at workspace construction; the tiling stage enforces the same
-    // arch22 UB budget again at launch time.
+    // platform-specific UB budget again at launch time. One body serves both
+    // targets: the scratch formulas are constexpr and selected by the runtime
+    // SoC name, exactly like the tiling dispatch.
+    TORCH_CHECK(union_rows > 0 && union_rows <= hot && hot <= 32768,
+                "HiSparse union must fit the hot cache and int16 LRU slots");
     uint64_t platform_ub_bytes = 0;
     auto* platform = platform_ascendc::PlatformAscendCManager::GetInstance(aclrtGetSocName());
     TORCH_CHECK(platform != nullptr, "HiSparse failed to query the target UB capacity");
     platform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, platform_ub_bytes);
-    const uint64_t budget = resolver_arch22_ub_budget(platform_ub_bytes);
-    TORCH_CHECK(union_rows > 0 && union_rows <= hot && hot <= 32768,
-                "HiSparse union must fit the hot cache and int16 LRU slots");
-    const uint64_t minimum_bytes = resolver_arch22_scratch_bytes(hot, union_rows + 1);
+    const bool arch22 = is_arch22_soc();
+    const uint64_t budget = arch22 ? resolver_arch22_ub_budget(platform_ub_bytes)
+                                   : resolver_simt_ub_budget(platform_ub_bytes);
+    TORCH_CHECK(budget != 0, "HiSparse platform UB does not cover the resolver reserve.");
+    const uint64_t minimum_bytes = arch22 ? resolver_arch22_scratch_bytes(hot, union_rows + 1)
+                                          : resolver_scratch_bytes(hot, union_rows + 1);
     TORCH_CHECK(minimum_bytes <= budget,
                 "HiSparse hot_size=", hot, ", max_union_rows=", union_rows,
                 " needs at least ", minimum_bytes,
                 " UB bytes; the target allows ", budget,
                 ". Lower device_buffer_size or speculative tokens.");
-#else
-    TORCH_CHECK(union_rows > 0 && union_rows <= hot && hot <= 32768,
-                "HiSparse union must fit the hot cache and int16 LRU slots");
-    const uint64_t minimum_bytes = resolver_scratch_bytes(hot, union_rows + 1);
-    TORCH_CHECK(minimum_bytes <= kResolverMaxSimtUbBytes,
-                "HiSparse hot_size=", hot, ", max_union_rows=", union_rows,
-                " needs at least ", minimum_bytes,
-                " UB bytes; the target SIMT UB budget allows ", kResolverMaxSimtUbBytes,
-                ". Lower device_buffer_size or speculative tokens.");
-#endif
 }
 
 /**
@@ -113,11 +116,11 @@ inline void resolve_residency(
         swap_host_t, swap_device_t,
         swap_counts_t, miss_mask_t,
         stats_t);
-#ifdef VLLM_ASCEND_HISPARSE_ARCH22
-    // The arch22 resolve kernel cannot issue the ordered int64 stats
-    // accumulation as a secondary launch, so it runs through the same aclnn
-    // op with mode=2.
-    if (stats_t.numel()) {
+    // The arch22 resolve kernel cannot fold the ordered int64 stats
+    // accumulation into its launch, so it runs through the same aclnn op with
+    // mode=2. The A5 SIMT kernel already accumulates stats inline; a second
+    // launch would double-count, so only arch22 issues it.
+    if (is_arch22_soc() && stats_t.numel()) {
         EXEC_NPU_CMD(aclnnHiSparseResolveResidency,
                      empty, empty, empty, empty, empty, empty, empty,
                      errors,
@@ -127,7 +130,6 @@ inline void resolve_residency(
                      empty, empty, empty, empty, empty, empty, empty,
                      empty, empty, empty, empty, stats_t);
     }
-#endif
 }
 
 }  // namespace vllm_ascend::hisparse
