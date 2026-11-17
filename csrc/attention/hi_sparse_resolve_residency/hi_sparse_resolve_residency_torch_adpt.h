@@ -48,14 +48,11 @@ inline void validate_resolver_scratch(int64_t hot, int64_t union_rows)
 /**
  * HiSparse residency resolution. All outputs are caller-owned and mutated in
  * place; the adapter maps the torch op arguments onto the single ACLNN
- * wrapper signature (inputs, attributes, outputs). The `mode` attribute
- * selects the launch flavor inside the one aclnn op:
- *   0 = resolve residency, 2 = accumulate stats.
- * Invalidation runs as the shared Triton kernel on every SoC, so it never
- * reaches this aclnn wrapper. The aclnn wrapper selects the arch22 scalar-UB
- * kernel or the A5 SIMT kernel through the registered SoC configs; arch22
- * additionally accumulates its per-row error counters through a second
- * ordered mode=2 launch.
+ * wrapper signature (inputs, attributes, outputs). Invalidation runs as the
+ * shared Triton kernel on every SoC, so it never reaches this aclnn wrapper.
+ * The aclnn wrapper selects the arch22 scalar-UB kernel or the A5 SIMT kernel
+ * through the registered SoC configs; both accumulate stats inline, so one
+ * resolve launch serves every SoC.
  */
 inline void resolve_residency(
     const at::Tensor &logical, const at::Tensor &hot_table,
@@ -93,10 +90,8 @@ inline void resolve_residency(
     const int64_t attention_stride = attention ? attention->stride(0) : topk;
     const int64_t counts_stride = counts ? counts->stride(0) : 1;
     const int64_t miss_mask_bytes = static_cast<int64_t>(miss_mask.has_value() && miss_mask->element_size() == 1);
-    // Resolve mode (0) leaves the accumulate-only inputs, attrs and outputs
-    // unbound; empty tensors convert to nullptr inside EXEC_NPU_CMD.
+    // Unbound optional inputs convert to nullptr inside EXEC_NPU_CMD.
     const at::Tensor empty;
-    const int64_t zero = 0;
     EXEC_NPU_CMD(
         aclnnHiSparseResolveResidency,
         logical, hot_table,
@@ -110,26 +105,13 @@ inline void resolve_residency(
         resident_stride, hot_table_stride,
         attention_stride, counts_stride,
         miss_mask_bytes,
-        zero,
         dgi, lru, output, resolved, errors,
         attention_t, counts_t,
         swap_host_t, swap_device_t,
         swap_counts_t, miss_mask_t,
         stats_t);
-    // The arch22 resolve kernel cannot fold the ordered int64 stats
-    // accumulation into its launch, so it runs through the same aclnn op with
-    // mode=2. The A5 SIMT kernel already accumulates stats inline; a second
-    // launch would double-count, so only arch22 issues it.
-    if (is_arch22_soc() && stats_t.numel()) {
-        EXEC_NPU_CMD(aclnnHiSparseResolveResidency,
-                     empty, empty, empty, empty, empty, empty, empty,
-                     errors,
-                     zero, zero, zero, zero, zero, zero, zero, zero,
-                     zero, zero, zero, zero, zero, zero, zero,
-                     zero,
-                     empty, empty, empty, empty, empty, empty, empty,
-                     empty, empty, empty, empty, stats_t);
-    }
+    // Stats accumulate inline in both the arch22 and the A5 kernel, so a
+    // single resolve launch serves every SoC and no second launch is needed.
 }
 
 }  // namespace vllm_ascend::hisparse

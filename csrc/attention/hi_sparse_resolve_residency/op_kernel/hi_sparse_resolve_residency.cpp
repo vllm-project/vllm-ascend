@@ -5,14 +5,10 @@
 
 // arch22 (A2/A3) entry: the Resolver consumes the legacy pointer/geometry ABI
 // directly, keeping the classic AscendC UB path used on these SoCs. One block
-// per logical row, exactly like the former csrc/hisparse launcher. The `mode`
-// tiling field dispatches the two native launch flavors sharing this single
-// entry (invalidation runs as the shared Triton kernel on every SoC).
+// per logical row, exactly like the former csrc/hisparse launcher. Stats
+// accumulate inline, so this entry only serves the resolve launch
+// (invalidation runs as the shared Triton kernel on every SoC).
 #include "arch22/hisparse_resolver_kernel.h"
-
-namespace {
-constexpr uint32_t kModeAccumulate = 2;
-}  // namespace
 
 extern "C" __global__ __aicore__ void hi_sparse_resolve_residency(
     GM_ADDR logical,
@@ -39,12 +35,7 @@ extern "C" __global__ __aicore__ void hi_sparse_resolve_residency(
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
     GET_TILING_DATA(tilingData, tiling);
     (void)workspace;
-
-    if (tilingData.mode == kModeAccumulate) {
-        AccumulateStats(reinterpret_cast<uintptr_t>(error_rows), reinterpret_cast<uintptr_t>(stats),
-            static_cast<int32_t>(tilingData.rows));
-        return;
-    }
+    (void)error_rows;
 
     HiSparseArch22Descriptor descriptor{};
     descriptor.pointers[0] = reinterpret_cast<uintptr_t>(logical);

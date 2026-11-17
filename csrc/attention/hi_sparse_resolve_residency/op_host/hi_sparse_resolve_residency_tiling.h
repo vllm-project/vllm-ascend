@@ -8,13 +8,10 @@
 
 namespace optiling {
 
-// Launch modes carried in the `mode` attribute: one def/kernel/aclnn wrapper
-// serves both HiSparse native launches (invalidation runs as a Triton kernel).
-constexpr uint32_t kHiSparseModeResolve = 0;
-constexpr uint32_t kHiSparseModeAccumulate = 2;
+// One resolve-only launch serves the HiSparse native kernel on every SoC
+// (invalidation runs as a shared Triton kernel); stats accumulate inline.
 
 BEGIN_TILING_DATA_DEF(HiSparseResolveResidencyTilingData)
-TILING_DATA_FIELD_DEF(uint32_t, mode);
 TILING_DATA_FIELD_DEF(uint64_t, rows);
 TILING_DATA_FIELD_DEF(uint64_t, topk);
 TILING_DATA_FIELD_DEF(uint64_t, hotSlots);

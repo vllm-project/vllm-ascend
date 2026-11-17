@@ -16,7 +16,6 @@ constexpr size_t kStatesInput = 3;
 constexpr size_t kSourceInput = 4;
 constexpr size_t kResidentInput = 5;
 constexpr size_t kValidRowsInput = 6;
-constexpr size_t kErrorRowsInput = 7;
 constexpr size_t kTagsOutput = 0;
 constexpr size_t kLruOutput = 1;
 constexpr size_t kAttentionOutput = 5;
@@ -39,7 +38,6 @@ constexpr size_t kHotTableStrideAttr = 11;
 constexpr size_t kAttentionStrideAttr = 12;
 constexpr size_t kCountsStrideAttr = 13;
 constexpr size_t kByteMissMaskAttr = 14;
-constexpr size_t kModeAttr = 15;
 
 ge::graphStatus TileResolve(gert::TilingContext* context,
                             HiSparseResolveResidencyTilingData& tiling) {
@@ -240,58 +238,12 @@ ge::graphStatus TileResolve(gert::TilingContext* context,
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus TileAccumulate(gert::TilingContext* context,
-                               HiSparseResolveResidencyTilingData& tiling) {
-    const auto* errors = context->GetInputShape(kErrorRowsInput);
-    OP_CHECK_IF(errors == nullptr,
-                OP_LOGE(context->GetNodeName(), "stats accumulation requires the error_rows input."),
-                return ge::GRAPH_FAILED);
-    const auto& errorsShape = errors->GetOriginShape();
-    OP_CHECK_IF(errorsShape.GetDimNum() != 2 || errorsShape.GetDim(1) != 8,
-                OP_LOGE(context->GetNodeName(), "the error scratch must be [rows, 8]."),
-                return ge::GRAPH_FAILED);
-    const int64_t rows = errorsShape.GetDim(0);
-    OP_CHECK_IF(rows <= 0 || rows > INT32_MAX,
-                OP_LOGE(context->GetNodeName(), "the error row count must fit int32."),
-                return ge::GRAPH_FAILED);
-
-    auto* rawTiling = context->GetRawTilingData();
-    auto* workspace = context->GetWorkspaceSizes(1);
-    OP_CHECK_IF(rawTiling == nullptr || workspace == nullptr || rawTiling->GetCapacity() < tiling.GetDataSize(),
-                OP_LOGE(context->GetNodeName(), "failed to query tiling or workspace."),
-                return ge::GRAPH_FAILED);
-    tiling.set_rows(static_cast<uint64_t>(rows));
-    tiling.SaveToBuffer(rawTiling->GetData(), rawTiling->GetCapacity());
-    rawTiling->SetDataSize(tiling.GetDataSize());
-
-    // A single leader block walks the rows in order, matching the former
-    // arch22 launcher's in-launcher stats accumulation.
-    context->SetBlockDim(1);
-    workspace[0] = 0;
-    return ge::GRAPH_SUCCESS;
-}
-
 ge::graphStatus TileHiSparseResolveResidency(gert::TilingContext* context) {
     OP_CHECK_IF(context == nullptr,
                 OP_LOGE("HiSparseResolveResidency", "TilingContext is null."),
                 return ge::GRAPH_FAILED);
-    const auto* attrs = context->GetAttrs();
-    const auto* mode = attrs != nullptr ? attrs->GetInt(kModeAttr) : nullptr;
-    OP_CHECK_IF(mode == nullptr,
-                OP_LOGE(context->GetNodeName(), "the mode attribute is missing."),
-                return ge::GRAPH_FAILED);
-
     HiSparseResolveResidencyTilingData tiling;
-    tiling.set_mode(static_cast<uint32_t>(*mode));
-    switch (tiling.get_mode()) {
-        case kHiSparseModeAccumulate:
-            return TileAccumulate(context, tiling);
-        case kHiSparseModeResolve:
-            return TileResolve(context, tiling);
-        default:
-            OP_LOGE(context->GetNodeName(), "unknown HiSparse launch mode %u.", tiling.get_mode());
-            return ge::GRAPH_FAILED;
-    }
+    return TileResolve(context, tiling);
 }
 
 ge::graphStatus PrepareHiSparseResolveResidency(gert::TilingParseContext*) {

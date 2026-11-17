@@ -2,14 +2,11 @@
 #include "register/op_def_registry.h"
 
 namespace ops {
-// Single HiSparse residency op. The `mode` attribute selects the launch:
-//   0 = resolve residency (logical/hot_table inputs, tags/lru/... outputs)
-//   2 = accumulate stats (error_rows input, stats output)
-// Invalidation is implemented by the shared Triton kernel in
-// vllm_ascend/ops/triton/hisparse.py on every SoC, so only the two native
-// modes remain. All tensors are optional at the def level so one aclnn
-// wrapper serves the two modes; each tiling/kernel path validates its own
-// mode's geometry.
+// Single HiSparse residency op. The resolve launch carries every input and
+// output; stats accumulate inline through atomic adds. Invalidation is
+// implemented by the shared Triton kernel in vllm_ascend/ops/triton/hisparse.py
+// on every SoC, so there is no native mode for it. All tensors are optional at
+// the def level; each tiling/kernel path validates the bound geometry.
 class HiSparseResolveResidency : public OpDef {
 public:
     explicit HiSparseResolveResidency(const char* name) : OpDef(name) {
@@ -45,7 +42,6 @@ public:
         Attr("attentionStride").AttrType(REQUIRED).Int();
         Attr("countsStride").AttrType(REQUIRED).Int();
         Attr("byteMissMask").AttrType(REQUIRED).Int();
-        Attr("mode").AttrType(REQUIRED).Int();
         Output("tags").ParamType(OPTIONAL)
             .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32}).Format(formats).UnknownShapeFormat(formats);
         Output("lru").ParamType(OPTIONAL)
@@ -77,8 +73,8 @@ public:
             .NeedCheckSupportFlag(false)
             .ExtendCfgInfo("aclnnSupport.value", "support_aclnn")
             .ExtendCfgInfo("prebuildPattern.value", "Opaque");
-        // arch22 (ascend910b / ascend910_93) reuses the same config; the kernel
-        // entry selects its implementation through __CCE_AICORE__ and mode.
+        // arch22 (ascend910b / ascend910_93) reuses the same config; the
+        // kernel entry selects its implementation through __CCE_AICORE__.
         AICore().AddConfig("ascend950", config);
         AICore().AddConfig("ascend910_93", config);
         AICore().AddConfig("ascend910b", config);
