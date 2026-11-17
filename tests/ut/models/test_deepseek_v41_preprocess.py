@@ -11,7 +11,6 @@ import torch_npu
 
 from vllm_ascend.attention import dsa_v41
 from vllm_ascend.attention import utils as attention_utils
-from vllm_ascend.models.deepseek_v41.model import DeepseekV41Attention
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
@@ -21,7 +20,9 @@ def test_dsa_v41_custom_op_forwards_its_output_buffer(monkeypatch):
     hidden = torch.zeros(1, 8)
     output = torch.empty_like(hidden)
     impl = Mock()
-    attn = SimpleNamespace(v41_impl=impl)
+    cache = SimpleNamespace(prefix="layer.swa_cache", kv_cache=[])
+    attn = SimpleNamespace(v41_impl=impl, dsa_attn=SimpleNamespace(swa_cache_layer=cache))
+    monkeypatch.setattr(attention_utils, "has_kv_transfer_group", lambda: False)
     monkeypatch.setattr(
         dsa_v41,
         "get_forward_context",
@@ -32,25 +33,27 @@ def test_dsa_v41_custom_op_forwards_its_output_buffer(monkeypatch):
 
 
 @pytest.mark.parametrize("has_metadata", [False, True])
-def test_v41_attention_notifies_connector_after_cache_write(monkeypatch, has_metadata):
+def test_dsa_v41_custom_op_notifies_connector_after_cache_write(monkeypatch, has_metadata):
     """Layerwise sends must use the registered cache name after KV is written."""
     hidden = torch.ones(2, 8)
+    output = torch.empty_like(hidden)
     cache = SimpleNamespace(prefix="model.layers.2.self_attn.swa_cache", kv_cache=[torch.zeros_like(hidden)])
-    attn = SimpleNamespace(
-        v41_layer_name="model.layers.2.self_attn.v41_attn", dsa_attn=SimpleNamespace(swa_cache_layer=cache)
-    )
+    impl = Mock()
+    attn = SimpleNamespace(dsa_attn=SimpleNamespace(swa_cache_layer=cache), v41_impl=impl)
+    op_layer_name = "model.layers.2.self_attn.v41_attn"
     metadata = object() if has_metadata else None
+    context = SimpleNamespace(no_compile_layers={op_layer_name: attn}, attn_metadata=metadata)
     connector = Mock()
     connector.has_connector_metadata.return_value = True
+    monkeypatch.setattr(dsa_v41, "get_forward_context", lambda: context)
     monkeypatch.setattr(attention_utils, "has_kv_transfer_group", lambda: True)
     monkeypatch.setattr(attention_utils, "is_v1_kv_transfer_group", lambda: True)
     monkeypatch.setattr(attention_utils, "get_kv_transfer_group", lambda: connector)
-    monkeypatch.setattr(attention_utils, "get_forward_context", lambda: SimpleNamespace(attn_metadata=metadata))
+    monkeypatch.setattr(attention_utils, "get_forward_context", lambda: context)
 
-    def forward(hidden_states, output, layer_name):
-        assert layer_name == attn.v41_layer_name
+    def forward(_attn, _positions, hidden_states, result):
         cache.kv_cache[0].copy_(hidden_states)
-        output.copy_(hidden_states)
+        result.copy_(hidden_states)
 
     def save(layer_name, kv_cache, attn_metadata):
         assert layer_name == cache.prefix
@@ -58,9 +61,9 @@ def test_v41_attention_notifies_connector_after_cache_write(monkeypatch, has_met
         assert attn_metadata is metadata
         torch.testing.assert_close(kv_cache[0], hidden)
 
-    monkeypatch.setattr(torch.ops.vllm, "dsa_v41_forward", forward)
+    impl.forward.side_effect = forward
     connector.save_kv_layer.side_effect = save
-    output = DeepseekV41Attention.forward(attn, None, hidden)
+    dsa_v41.dsa_v41_forward(hidden, output, op_layer_name)
     torch.testing.assert_close(output, hidden)
     assert connector.save_kv_layer.call_count == int(has_metadata)
 

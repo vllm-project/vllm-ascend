@@ -30,6 +30,7 @@ from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices, dsv4_dsa_overlap_stream
+from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
@@ -66,6 +67,8 @@ def dsa_v41_forward(
     forward_context = get_forward_context()
     attn = forward_context.no_compile_layers[layer_name]
     attn.v41_impl.forward(attn, None, hidden_states, output)
+    cache = attn.dsa_attn.swa_cache_layer
+    maybe_save_kv_layer_to_connector(cache.prefix, cache.kv_cache)
 
 
 def dsa_v41_forward_fake(
