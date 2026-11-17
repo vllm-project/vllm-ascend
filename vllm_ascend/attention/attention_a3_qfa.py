@@ -22,12 +22,10 @@ Two paths share this file:
    per-token-head and V per-head to INT8, fed to the TND-packed operator.
    Only PrefillNoCache steps qualify; the KV cache stays BF16.
 
-2. Decode (``VLLM_ASCEND_QFA_A3_DECODE=1``, paged KV cache): the decode
-   operator contract (PA_BNBD paged K/V, TND Q with NT q_descale,
-   per-token K descale stored per page, per-head static V descale). The
-   INT8 KV cache infrastructure is inherited from
-   AscendC8AttentionBackendImpl (C8/QuaRot channel); Step 1 covers
-   DecodeOnly, other states keep the inherited FIA fallbacks.
+2. Decode (``--kv-cache-dtype int8_qfa``, paged KV cache): the decode
+   operator contract (PA_NZ paged K/V, TND Q with NT q_descale,
+   per-token K descale stored per page, per-head static V descale).
+   One QFA call per step covers decode and prefill alike.
 """
 
 import torch
@@ -296,9 +294,9 @@ class AscendQFA3PrefillBackendImpl(AscendAttentionBackendImpl):
 class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
     """INT8 KV cache backend computed by the A3 QFA paged operator.
 
-    Activated by ``--kv-cache-dtype int8_qfa`` (plus the
-    VLLM_ASCEND_QFA_A3_DECODE A/B lever). Structure mirrors the C8-MXFP
-    backend with INT8 semantics:
+    Activated by ``--kv-cache-dtype int8_qfa`` alone (no recipe gate, the
+    mxfp8 precedent). Structure mirrors the C8-MXFP backend with INT8
+    semantics:
 
     - Cache: one raw INT8 allocation per layer, packet-packed
       ``[K(PA_NZ) | K_descale(FP32, (Bn,N,Bs)) | V(PA_NZ)]`` built by
@@ -554,7 +552,12 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
             win_left=-1,
             win_right=-1,
             max_seqlen_q=max_seqlen_q,
-            max_seqlen_kv=-1,
+            # The decode-operator probes always passed the real max KV
+            # length (never -1); the wrapper's tiling consumes it, so keep
+            # the probe-verified contract. Eager bring-up tolerates the
+            # one .item() sync; a device-side derivation replaces it before
+            # graph capture.
+            max_seqlen_kv=int(seqused_kv[:batch_size].max().item()),
             layout_q="TND",
             layout_q_descale="NT",
             layout_kv="PA_NZ",
@@ -565,19 +568,17 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
         return output
 
     def _qfa_block_table(self, attn_metadata, batch_size: int) -> torch.Tensor:
-        """block_table at kernel-block granularity (scheduler 896 -> x7)."""
-        bt = attn_metadata.block_tables[:batch_size].to(torch.int32)
-        cache_bs = self._kernel_block_size()
-        sched_bs = self.vllm_config.cache_config.block_size
-        if sched_bs == cache_bs:
-            return bt
-        if sched_bs % cache_bs:
-            raise RuntimeError(
-                f"Scheduler block size {sched_bs} is not a multiple of the "
-                f"QFA kernel block size {cache_bs}."
-            )
-        ratio = sched_bs // cache_bs
-        expanded = bt.view(batch_size, -1, 1) * ratio + torch.arange(
-            ratio, device=bt.device, dtype=torch.int32
-        ).view(1, 1, ratio)
-        return expanded.view(batch_size, -1)
+        """block_table at kernel-block granularity.
+
+        vLLM encodes block_tables/slot_mapping at the KV-cache storage
+        granularity ("Setting kv cache block size to 128 for CUSTOM
+        backends"), which already equals the QFA kernel block: the write
+        path's slot//kernel_block and the block_tables values share the
+        same 128 grain (verified on-device 2026-11-17: pages[0] ==
+        block_tables[0][0] == 13). Do NOT re-expand by cache_config
+        .block_size // kernel_block_size (1664/128 = 13) -- that re-scales
+        already-correct block ids (13 -> 169) and points the operator at
+        untouched zero pages, making every attention output exactly zero.
+        Re-verify this encoding whenever the vLLM base is upgraded.
+        """
+        return attn_metadata.block_tables[:batch_size].to(torch.int32)
