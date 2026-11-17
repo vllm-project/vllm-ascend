@@ -1037,6 +1037,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 self,
                 is_a3=get_ascend_device_type() == AscendDeviceType.A3,
                 is_draft=backends.model_tag == "dspark_head",
+                pd_supported=supports_component_major_mla_pd(self.vllm_config),
             )
             and get_a3_mla_ops() is not None
         )

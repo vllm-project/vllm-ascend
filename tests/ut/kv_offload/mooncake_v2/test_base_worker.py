@@ -253,19 +253,22 @@ def test_shared_page_handles_mixed_dtype_views() -> None:
     assert worker._get_shared_page_metadata((k_cache, scale_cache)) == (raw_cache.data_ptr(), 64, (48,), 1)
 
 
-def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(monkeypatch) -> None:
-    spec = MLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.float16)
-    raw_cache = torch.empty(4 * 128 * 576, dtype=torch.float16)
-    slot_elems = 128 * 576
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("block_scale", [1, 12])
+@pytest.mark.parametrize("padding", [0, 32])
+def test_register_kv_caches_publishes_component_major_mla_views(monkeypatch, dtype, block_scale, padding) -> None:
+    spec = MLAAttentionSpec(block_size=128 * block_scale, num_kv_heads=1, head_size=576, dtype=dtype)
+    slot_elems = 128 * 576 + padding
+    raw_cache = torch.empty(4 * block_scale * slot_elems, dtype=dtype)
     nope_cache = torch.as_strided(
         raw_cache,
-        size=(4, 128, 1, 512),
+        size=(4 * block_scale, 128, 1, 512),
         stride=(slot_elems, 512, 512, 1),
         storage_offset=0,
     )
     rope_cache = torch.as_strided(
         raw_cache,
-        size=(4, 128, 1, 64),
+        size=(4 * block_scale, 128, 1, 64),
         stride=(slot_elems, 64, 64, 1),
         storage_offset=128 * 512,
     )
@@ -288,7 +291,7 @@ def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(mon
     worker.kv_cache_config = config
     worker.engine_id = "engine-d"
     worker.te_rpc_port = 9000
-    worker.block_size = 128
+    worker.block_size = 128 * block_scale
     worker.side_channel_host = "10.0.0.1"
     worker.handshake_port = 5000
     transfer_engine = MagicMock()
@@ -299,13 +302,23 @@ def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(mon
 
     metadata = worker.xfer_handshake_metadata
     assert metadata is not None
-    assert metadata.kv_caches_base_addr == [[raw_cache.data_ptr()]]
-    assert metadata.block_strides == [[slot_elems * raw_cache.element_size()]]
-    assert metadata.block_lens == [[slot_elems * raw_cache.element_size()]]
-    assert metadata.block_shapes == [[(slot_elems,)]]
+    element_size = raw_cache.element_size()
+    if padding:
+        # Hybrid page padding is not part of either tensor. Publish separate
+        # component ranges with the physical stride, never a truncated page.
+        assert metadata.kv_caches_base_addr == [[nope_cache.data_ptr(), rope_cache.data_ptr()]]
+        assert metadata.block_strides == [[slot_elems * element_size] * 2]
+        assert metadata.block_lens == [[128 * 512 * element_size, 128 * 64 * element_size]]
+        assert metadata.block_shapes == [[(128, 1, 512), (128, 1, 64)]]
+        assert metadata.block_size_scales == [[block_scale, block_scale]]
+    else:
+        assert metadata.kv_caches_base_addr == [[raw_cache.data_ptr()]]
+        assert metadata.block_strides == [[slot_elems * element_size]]
+        assert metadata.block_lens == [[slot_elems * element_size]]
+        assert metadata.block_shapes == [[(slot_elems,)]]
+        assert metadata.block_size_scales == [[block_scale]]
     assert metadata.indexer_replication_sizes == [0]
     assert metadata.cp_kv_cache_interleave_size == 16
-    assert metadata.block_size_scales == [[1]]
 
 
 def test_component_major_mla_binding_rejects_token_interleaved_parent() -> None:

@@ -60,6 +60,13 @@ def ast_method(path, owner, name, scope):
     return scope[name]
 
 
+supports_component_major_mla_pd = ast_symbols(
+    "vllm_ascend/core/kv_cache_interface.py",
+    {"supports_component_major_mla_pd"},
+    {"VllmConfig": object},
+)["supports_component_major_mla_pd"]
+
+
 def common(lengths=(15, 7), prefixes=(0, 2, 3), capacity=8):
     return SimpleNamespace(
         num_actual_tokens=prefixes[-1],
@@ -265,6 +272,7 @@ def runner(ready=True):
         is_deepseek_v41=lambda cfg: False,
         AscendFlashAttentionBackend=backend,
         a3_target_device_lengths_ready=sink.a3_target_device_lengths_ready,
+        supports_component_major_mla_pd=supports_component_major_mla_pd,
     )
     path = "vllm_ascend/worker/v2/model_runner.py"
     fn = ast_method(path, "NPUModelRunner", "_can_skip_spec_cpu_length_sync", scope)
@@ -272,9 +280,12 @@ def runner(ready=True):
     return instance, scope
 
 
+@pytest.mark.parametrize("connector", [None, "MooncakeConnectorV2", "MooncakePullConnector"])
 @pytest.mark.parametrize("ready", [False, True])
-def test_real_runner_copy_and_wait_share_the_same_predicate(monkeypatch, ready):
+def test_real_runner_copy_and_wait_share_the_same_predicate(monkeypatch, ready, connector):
     instance, scope = runner(ready)
+    if connector is not None:
+        instance.vllm_config.kv_transfer_config = SimpleNamespace(kv_connector=connector)
     assert instance._can_skip_spec_cpu_length_sync() is ready
     instance.req_states = SimpleNamespace(
         num_computed_tokens=SimpleNamespace(gpu=torch.tensor([98, 195])),
@@ -302,6 +313,34 @@ def test_real_runner_copy_and_wait_share_the_same_predicate(monkeypatch, ready):
     assert events.count("record") == int(not ready)
     assert instance.num_computed_tokens_cpu.tolist() == ([-99, -99] if ready else [98, 195])
     assert instance.input_buffers.seq_lens_cpu.tolist() == ([204, 104] if ready else [199, 102])
+
+
+@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
+@pytest.mark.parametrize(
+    "connector,module,expected",
+    [
+        ("MooncakeConnectorV2", None, True),
+        ("MooncakePullConnector", None, True),
+        ("MooncakeConnectorV1", None, False),
+        ("MooncakePushConnector", None, False),
+        ("AscendStoreConnector", None, False),
+        ("MultiConnector", None, False),
+        ("MooncakeConnectorV2", "custom.connector", False),
+    ],
+)
+def test_pd_selection_and_length_sync_share_a5_transfer_gate(role, connector, module, expected):
+    transfer = SimpleNamespace(kv_connector=connector, kv_connector_module_path=module, kv_role=role)
+    impl = selection_impl()
+    impl.vllm_config.kv_transfer_config = transfer
+    assert (
+        sink.supports_a3_mla(
+            impl, is_a3=True, is_draft=True, pd_supported=supports_component_major_mla_pd(impl.vllm_config)
+        )
+        is expected
+    )
+    instance, _ = runner()
+    instance.vllm_config.kv_transfer_config = transfer
+    assert instance._can_skip_spec_cpu_length_sync() is expected
 
 
 @pytest.mark.parametrize(

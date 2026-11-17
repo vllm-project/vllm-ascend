@@ -58,7 +58,7 @@ class A3MLAConfig:
             raise ValueError("query capacity must be nonnegative")
 
 
-def supports_a3_mla(impl, *, is_a3: bool, is_draft: bool) -> bool:
+def supports_a3_mla(impl, *, is_a3: bool, is_draft: bool, pd_supported: bool = False) -> bool:
     """Static selection before cache allocation; no tensor-content reads."""
     if not is_a3 or not is_draft:
         return False
@@ -74,7 +74,9 @@ def supports_a3_mla(impl, *, is_a3: bool, is_draft: bool) -> bool:
         return False
     if impl.use_pcp or cfg.parallel_config.pipeline_parallel_size != 1:
         return False
-    if cfg.kv_transfer_config is not None:
+    # The caller shares A5's component-major cache transfer gate. Keep this
+    # provider boundary independent of vLLM's cache/connector imports.
+    if cfg.kv_transfer_config is not None and not pd_supported:
         return False
     # AscendMLABackend exposes 128-token kernel pages. Manager blocks (e.g.
     # K3.1's 1536) are expanded by the existing block-table/cache-view layer;

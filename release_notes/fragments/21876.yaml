@@ -4,5 +4,6 @@ entries:
     text: >-
       Added the flash-attention-npu 910 MLA interface for supported A3 K3.1
       DSpark configurations, reusing the FlashMLA metadata, graph-buffer,
-      and DCP execution paths. Keep FIA for unavailable or unsupported paths
+      and DCP execution paths, including Mooncake V2 pull PD disaggregation.
+      Keep FIA for unavailable or unsupported paths
       and retain host-length synchronization for unsupported consumers.
