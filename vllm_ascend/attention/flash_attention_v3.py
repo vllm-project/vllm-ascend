@@ -9,7 +9,7 @@ from enum import Enum
 import torch
 import vllm.envs as envs_vllm
 from flash_attn_npu_3 import flash_attn_with_kvcache, get_scheduler_metadata  # type: ignore[import-not-found]
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config_or_none
 from vllm.logger import logger
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -85,6 +85,53 @@ class AscendFlashAttentionMetadata(AttentionMetadata):
     # aliases the builder's cache dictionary for the current graph_key; eager
     # execution owns a fresh dictionary. This field only references tiling storage.
     scheduler_metadata: dict[tuple, torch.Tensor] = field(default_factory=dict)
+
+
+_FA3_WARMUP_KEYS: set[tuple] = set()
+
+
+def _warmup_eager_dflash_scheduler(
+    vllm_config: VllmConfig, device: torch.device, scheduler_specs: set[tuple], block_size: int
+) -> None:
+    speculative = vllm_config.speculative_config
+    if device.type != "npu" or speculative is None or speculative.method != "dflash" or not speculative.enforce_eager:
+        return
+    key = (device.index, frozenset(scheduler_specs), block_size)
+    if key in _FA3_WARMUP_KEYS:
+        return
+    # Register the native AICPU scheduler while no target EP/graph work is
+    # in flight. Its first asynchronous launch must not be deferred until
+    # a draft forward reads query offsets back through PackedCuLast/item.
+    # This is a one-time initialization barrier, outside capture/build.
+    torch.npu.synchronize(device)
+    offsets = torch.arange(2, dtype=torch.int32, device=device)
+    lengths = torch.ones(1, dtype=torch.int32, device=device)
+    warmup_metadata = []
+    for num_heads, num_kv_heads, head_size, dtype, _scale, softcap, sliding_window in scheduler_specs:
+        warmup_metadata.append(
+            get_scheduler_metadata(
+                batch_size=1,
+                max_seqlen_q=1,
+                max_seqlen_k=block_size,
+                num_heads_q=num_heads,
+                num_heads_kv=num_kv_heads,
+                headdim=head_size,
+                cache_seqlens=lengths,
+                qkv_dtype=dtype,
+                cu_seqlens_q=offsets,
+                page_size=block_size,
+                causal=False,
+                window_size=_get_window_size(sliding_window, False),
+                has_softcap=softcap != 0.0,
+                num_splits=0,
+            )
+        )
+    # Retain all inputs/results until the asynchronous scheduler is done.
+    torch.npu.synchronize(device)
+    _FA3_WARMUP_KEYS.add(key)
+    logger.info(
+        "FA3 eager DFlash scheduler initialization completed during draft construction, before target profiling."
+    )
 
 
 class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAttentionMetadata]):
@@ -270,6 +317,21 @@ class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):
         # FA3 uses softcap=0.0 to disable logit capping. Explicit None from
         # vLLM must be normalized for both scheduler tiling and execution.
         self.logits_soft_cap = 0.0 if logits_soft_cap is None else logits_soft_cap
+        config = get_current_vllm_config_or_none()
+        speculative = config.speculative_config if config is not None else None
+        if speculative is not None and speculative.method == "dflash" and speculative.enforce_eager:
+            spec = (
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_size,
+                config.model_config.dtype,
+                self.scale,
+                self.logits_soft_cap,
+                self.sliding_window,
+            )
+            _warmup_eager_dflash_scheduler(
+                config, torch.device("npu", torch.npu.current_device()), {spec}, config.cache_config.block_size or 128
+            )
 
     @staticmethod
     def update_graph_params(

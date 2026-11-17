@@ -77,6 +77,20 @@ def initialize_kv_cache(
     draft_attn_layer_names = None
     if isinstance(self.speculator, upstream.DraftModelSpeculator):
         draft_attn_layer_names = self.speculator.draft_attn_layer_names
+    active_layer_names = None
+    speculative_config = self.vllm_config.speculative_config
+    if (
+        target_attn_layer_names is not None
+        and speculative_config is not None
+        and speculative_config.method == "dflash"
+        and speculative_config.enforce_eager
+    ):
+        # DFlash builds its draft metadata through its own attention groups.
+        # Including those layers here also prepares the eager draft's native
+        # scheduler metadata during target graph capture and replay warmup.
+        # Keep the full KV-cache config: set_attn still initializes the draft
+        # groups and init_kv_cache still allocates/binds both models' caches.
+        active_layer_names = target_attn_layer_names
     # Metadata builders select attention kernels that need JIT warmup.
     with self.jit_warmup_registry.activate():
         (
@@ -87,6 +101,7 @@ def initialize_kv_cache(
             self.kv_cache_config,
             self.vllm_config,
             self.device,
+            active_layer_names=active_layer_names,
             draft_layer_names=draft_attn_layer_names,
         )
     additional_attn_cg_support = self.model_state.get_additional_cg_support()

@@ -20,6 +20,62 @@ import torch
 ROOT = Path(__file__).resolve().parents[3]
 
 
+@pytest.mark.parametrize(
+    "method,eager,device_type,expected_calls",
+    [
+        ("dflash", True, "npu", 1),
+        ("dflash", False, "npu", 0),
+        ("dspark", True, "npu", 0),
+        ("dflash", True, "cpu", 0),
+    ],
+)
+def test_eager_dflash_scheduler_registration_completes_before_runtime(
+    fa3, monkeypatch, method, eager, device_type, expected_calls
+):
+    builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
+    builder.device = NS(type=device_type, index=0)
+    builder.block_size = 128
+    builder.scheduler_specs = {(32, 4, 128, torch.bfloat16, 0.1, 0.0, 2048)}
+    events = []
+    scheduler = Mock(side_effect=lambda **kwargs: events.append("scheduler") or torch.zeros(8, dtype=torch.uint8))
+    sync = Mock(side_effect=lambda *_: events.append("synchronize"))
+    fake_torch = NS(
+        int32=torch.int32,
+        arange=Mock(return_value=torch.tensor([0, 1], dtype=torch.int32)),
+        ones=Mock(return_value=torch.ones(1, dtype=torch.int32)),
+        npu=NS(synchronize=sync),
+    )
+    namespace = fa3._warmup_eager_dflash_scheduler.__globals__
+    monkeypatch.setitem(namespace, "torch", fake_torch)
+    monkeypatch.setitem(namespace, "get_scheduler_metadata", scheduler)
+    monkeypatch.setitem(namespace, "logger", NS(info=Mock()))
+    fa3._warmup_eager_dflash_scheduler(
+        NS(speculative_config=NS(method=method, enforce_eager=eager)),
+        builder.device,
+        builder.scheduler_specs,
+        builder.block_size,
+    )
+    assert scheduler.call_count == expected_calls
+    if expected_calls:
+        assert events == ["synchronize", "scheduler", "synchronize"]
+        args = scheduler.call_args.kwargs
+        assert args["batch_size"] == 1 and args["page_size"] == 128
+        assert args["num_heads_q"] == 32 and args["num_heads_kv"] == 4
+        torch.testing.assert_close(args["cu_seqlens_q"], torch.tensor([0, 1], dtype=torch.int32))
+        assert builder.scheduler_specs == {(32, 4, 128, torch.bfloat16, 0.1, 0.0, 2048)}
+        # Layers with the same operator contract share one initialization.
+        fa3._warmup_eager_dflash_scheduler(
+            NS(speculative_config=NS(method=method, enforce_eager=eager)),
+            builder.device,
+            builder.scheduler_specs,
+            builder.block_size,
+        )
+        assert scheduler.call_count == 1
+        assert sync.call_count == 2
+    else:
+        sync.assert_not_called()
+
+
 def execute_nodes(path, names, namespace):
     tree = ast.parse(path.read_text())
     nodes = [node for node in tree.body if getattr(node, "name", None) in names]
@@ -194,6 +250,8 @@ def fa3():
         "AttentionType": NS(DECODER="decoder"),
         "logger": NS(info_once=lambda *args, **kwargs: None),
         "get_scheduler_metadata": Mock(),
+        "get_current_vllm_config_or_none": lambda: None,
+        "_FA3_WARMUP_KEYS": set(),
         "flash_attn_with_kvcache": Mock(),
         "envs_vllm": NS(VLLM_KV_CACHE_LAYOUT="NHD"),
         "DeviceOperator": NS(reshape_and_cache=Mock()),
@@ -207,6 +265,7 @@ def fa3():
     namespace["attention_transfer_window"] = transfer
     names = {
         "_get_window_size",
+        "_warmup_eager_dflash_scheduler",
         "AscendFlashAttentionBackend",
         "AscendFlashAttentionMetadata",
         "AscendFlashAttentionMetadataBuilder",

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
 from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,6 +13,66 @@ from vllm.v1.worker.gpu import model_runner as upstream
 
 from vllm_ascend.patch.worker import patch_model_runner  # noqa: F401
 from vllm_ascend.utils import vllm_version_is
+
+
+@pytest.mark.parametrize(
+    ("method", "draft_eager", "has_draft", "target_only"),
+    [
+        ("dflash", True, True, True),
+        ("dflash", False, True, False),
+        ("eagle3", True, True, False),
+        (None, False, False, False),
+    ],
+)
+def test_eager_dflash_target_metadata_excludes_draft_but_keeps_draft_kv(method, draft_eager, has_draft, target_only):
+    runner = MagicMock()
+    runner.device = torch.device("cpu")
+    runner.is_encoder_decoder = False
+    runner.vocab_size = 16
+    runner.max_model_len = 128
+    runner.cache_config.kv_sharing_fast_prefill = False
+    runner.vllm_config.aux_output_config.enabled = False
+    runner.vllm_config.speculative_config = (
+        SimpleNamespace(method=method, enforce_eager=draft_eager) if method else None
+    )
+    runner.jit_warmup_registry.activate.side_effect = nullcontext
+    runner.speculator = MagicMock(spec=upstream.DraftModelSpeculator) if has_draft else None
+    if has_draft:
+        runner.speculator.draft_attn_layer_names = {"draft"}
+        runner.speculator.enable_adaptive_verification = False
+    group = MagicMock()
+    group.layer_names = ["target", "draft"] if has_draft else ["target"]
+    config = KVCacheConfig(num_blocks=3, kv_cache_tensors=[], kv_cache_groups=[group])
+    groups = [[MagicMock()]]
+    caches = {name: torch.empty(3, 4) for name in group.layer_names}
+
+    with (
+        patch.object(upstream, "init_attn_backend", return_value=(groups, MagicMock(), [128])) as init_attn,
+        patch.object(upstream, "maybe_create_adaptive_verification_manager", return_value=None),
+        patch.object(upstream, "BlockTables"),
+        patch.object(upstream, "get_block_table_width", return_value=1),
+        patch.object(upstream.pcp, "maybe_build_pcp_manager", return_value=None),
+        patch.object(upstream, "maybe_build_ubatch_runner", return_value=None),
+        patch.object(upstream, "initialize_mamba_ssu_backend"),
+        patch.object(upstream, "has_compiled_submodule", return_value=False),
+        patch.object(upstream, "ModelCudaGraphManager"),
+        patch.object(upstream, "check_attention_cp_compatibility"),
+        patch.object(upstream, "init_kv_cache", return_value=caches) as init_cache,
+        patch.object(upstream, "get_kv_connector") as connector,
+    ):
+        upstream.GPUModelRunner.initialize_kv_cache(runner, config)
+
+    assert init_attn.call_args.kwargs.get("active_layer_names") == ({"target"} if target_only else None)
+    # Filtering metadata must not remove draft storage or disconnect the draft
+    # speculator, which initializes its own attention groups in set_attn.
+    assert init_cache.call_args.args[1] is runner.kv_cache_config
+    assert runner.kv_cache_config.kv_cache_groups[0].layer_names == group.layer_names
+    assert connector.call_args.args[1] is caches
+    if has_draft:
+        runner.speculator.set_attn.assert_called_once_with(
+            runner.model_state, runner.kv_cache_config, runner.block_tables, runner.input_buffers, groups
+        )
+        runner.speculator.init_cudagraph_manager.assert_called_once()
 
 
 @pytest.mark.parametrize("is_profiling", [False, True])
