@@ -97,7 +97,7 @@ def test_reject_noncontiguous_ids():
         count_allgather_tokens_triton(ids, mask, 0, 128)
 
 
-@pytest.mark.parametrize("tokens,experts,calls", [(65, 17, 1), (10240, 128, 20)])
+@pytest.mark.parametrize("tokens,experts,calls", [(65, 17, 1), (10240, 128, 20), (1088, 512, 20), (10240, 512, 20)])
 def test_mutable_graph_replay(tokens, experts, calls):
     ids = torch.full((tokens, 8), 3, dtype=torch.int64, device="npu")
     mask = torch.ones(tokens, dtype=torch.bool, device="npu")

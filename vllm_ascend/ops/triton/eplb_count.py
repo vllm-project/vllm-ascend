@@ -16,6 +16,7 @@ def _count_allgather_kernel(
     ids_ptr,
     mask_ptr,
     partial_counts_ptr,
+    counts_ptr,
     num_assignments,
     local_start,
     local_count,
@@ -44,6 +45,10 @@ def _count_allgather_kernel(
         local_counts += tl.histogram(safe_ids, NUM_BINS, mask=eligible).to(tl.int64)
     bins = tl.arange(0, NUM_BINS)
     tl.store(partial_counts_ptr + pid * NUM_BINS + bins, local_counts)
+    # The next kernel merges row tiles atomically. Initialize once in this
+    # launch so the existing stream dependency orders zeroing before all merges.
+    if pid == 0:
+        tl.store(counts_ptr + bins, tl.full((NUM_BINS,), 0, tl.int64), mask=bins < local_count)
 
 
 @triton.jit
@@ -56,19 +61,16 @@ def _reduce_allgather_counts_kernel(
     ROWS_PER_TILE: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
 ):
-    rows = tl.arange(0, BLOCK_ROWS)
+    tile_rows = tl.arange(0, BLOCK_ROWS)
+    rows = tl.program_id(0) * ROWS_PER_TILE + tile_rows
     bins = tl.arange(0, NUM_BINS)
-    counts = tl.full((NUM_BINS,), 0, tl.int64)
-    # Read complete contiguous rows and bound the live reduction tile.
-    for first_row in range(0, NUM_PROGRAMS, ROWS_PER_TILE):
-        programs = first_row + rows
-        partial_counts = tl.load(
-            partial_counts_ptr + programs[:, None] * NUM_BINS + bins[None, :],
-            mask=(rows[:, None] < ROWS_PER_TILE) & (programs[:, None] < NUM_PROGRAMS),
-            other=0,
-        )
-        counts += tl.sum(partial_counts, axis=0)
-    tl.store(counts_ptr + bins, counts, mask=bins < LOCAL_COUNT)
+    partial_counts = tl.load(
+        partial_counts_ptr + rows[:, None] * NUM_BINS + bins[None, :],
+        mask=(tile_rows[:, None] < ROWS_PER_TILE) & (rows[:, None] < NUM_PROGRAMS),
+        other=0,
+    )
+    counts = tl.sum(partial_counts, axis=0)
+    tl.atomic_add(counts_ptr + bins, counts, mask=bins < LOCAL_COUNT, sem="relaxed")
 
 
 def count_allgather_tokens_triton(
@@ -106,6 +108,7 @@ def count_allgather_tokens_triton(
         topk_ids,
         token_mask,
         partial_counts,
+        counts,
         num_assignments,
         local_expert_start,
         local_expert_count,
@@ -116,7 +119,7 @@ def count_allgather_tokens_triton(
         compile_mode="simd",
     )
     reduce_rows = min(programs, max(1, MAX_REDUCE_ELEMENTS // num_bins))
-    _reduce_allgather_counts_kernel[(1,)](
+    _reduce_allgather_counts_kernel[(triton.cdiv(programs, reduce_rows),)](
         partial_counts,
         counts,
         NUM_PROGRAMS=programs,
