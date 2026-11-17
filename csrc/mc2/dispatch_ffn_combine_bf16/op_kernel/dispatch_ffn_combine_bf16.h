@@ -19,6 +19,7 @@
 using namespace AscendC;
 
 #include "kernel_operator.h"
+#include "../../common/record_expert_load.h"
 
 #include "utils/moe_distribute_base.h"
 
@@ -57,7 +58,8 @@ class DispatchFFNCombineBF16 {
 public:
     __aicore__ inline DispatchFFNCombineBF16() {};
     __aicore__ inline void Init(GM_ADDR xGM, GM_ADDR weight1GM, GM_ADDR weight2GM, GM_ADDR expertIdGM, GM_ADDR scale1GM, GM_ADDR scale2GM,
-                                GM_ADDR probs, GM_ADDR outGM, GM_ADDR expertTokenNums, GM_ADDR workspaceGM, GM_ADDR tilingGM);
+                                GM_ADDR probs, GM_ADDR expertLoad, GM_ADDR recordEnabled,
+                                GM_ADDR outGM, GM_ADDR expertTokenNums, GM_ADDR workspaceGM, GM_ADDR tilingGM);
     __aicore__ inline void Process();
 
 
@@ -71,6 +73,9 @@ private:
     GM_ADDR probs_;
     GM_ADDR outGM_;
     GM_ADDR gmExpertTokenNums_;
+    GM_ADDR expertLoad_;
+    GM_ADDR recordEnabled_;
+    uint32_t localExpertStart_;
     GM_ADDR workspaceGM_;
 
     GM_ADDR moeInitRoutingQuantV2Scale = nullptr;
@@ -115,7 +120,8 @@ private:
 
 template <TemplateMMA2AClass>
 __aicore__ inline void DispatchFFNCombineBF16<TemplateMMA2ACFunc>::Init(GM_ADDR xGM, GM_ADDR weight1GM, GM_ADDR weight2GM, GM_ADDR expertIdGM, GM_ADDR scale1GM, GM_ADDR scale2GM,
-                                                                    GM_ADDR probs, GM_ADDR outGM, GM_ADDR expertTokenNums, GM_ADDR workspaceGM, GM_ADDR tilingGM)
+                                                                    GM_ADDR probs, GM_ADDR expertLoad, GM_ADDR recordEnabled,
+                                                                    GM_ADDR outGM, GM_ADDR expertTokenNums, GM_ADDR workspaceGM, GM_ADDR tilingGM)
 {
     REGISTER_TILING_DEFAULT(DispatchFFNCombineBF16TilingData);
     auto tiling = (__gm__ DispatchFFNCombineBF16TilingData*)tilingGM;
@@ -131,6 +137,9 @@ __aicore__ inline void DispatchFFNCombineBF16<TemplateMMA2ACFunc>::Init(GM_ADDR 
 
     outGM_ = outGM;
     gmExpertTokenNums_ = expertTokenNums;
+    expertLoad_ = expertLoad;
+    recordEnabled_ = recordEnabled;
+    localExpertStart_ = tilingData.dispatchFFNCombineBF16Info.localExpertStart;
 
     workspaceGM_ = workspaceGM;
 
@@ -284,6 +293,11 @@ __aicore__ inline void DispatchFFNCombineBF16<TemplateMMA2ACFunc>::Process()
     //Call kernel
     MatmulKernel kernel(params);
     kernel(params);
+    if ASCEND_IS_AIV {
+        if (get_block_idx() == 0 && get_subblockid() == 0) {
+            RecordExpertLoad(gmExpertTokenNums_, expertLoad_, recordEnabled_, localExpertStart_, expertPerRank);
+        }
+    }
 }
 
 } // DispatchFFNCombineBF16Impl

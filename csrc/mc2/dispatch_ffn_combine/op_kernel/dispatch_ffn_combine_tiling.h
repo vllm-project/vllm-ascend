@@ -32,6 +32,7 @@ struct DispatchFFNCombineInfo {
     uint32_t worldSize;
     uint32_t listLen;
     float swigluLimit;
+    uint32_t localExpertStart;
 };
 
 struct CoCTiling {

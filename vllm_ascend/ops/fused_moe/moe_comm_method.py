@@ -25,7 +25,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import HardwareCapability, MoECommPolicy, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe import moe_utils
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInput
@@ -88,6 +88,7 @@ class FusedExpertsResult:
     # For dynamic_eplb
     group_list_type: int = 1
     expert_tokens: torch.Tensor | None = None
+    load_recording_handled: bool = False
 
 
 class MoECommMethod(ABC):
@@ -652,6 +653,7 @@ class FusedMC2CommImpl(MoECommMethod):
         )
 
         expert_tokens = None
+        load_recording_handled = False
         if self.enable_fused_mc2 == 1:
             if _EXTRA_CTX.use_mega_moe:
                 out, expert_tokens = self._apply_cann_mega_moe(
@@ -668,6 +670,38 @@ class FusedMC2CommImpl(MoECommMethod):
                 # mega_moe_max_tokens, whose 0 now means "operator
                 # auto-compute" for the MegaMoe symm buffer only.
                 max_output_size = 65536
+                # Keep the recording switch on device so graph replay sees its value.
+                layer_state = getattr(getattr(fused_experts_input.layer, "router", None), "eplb_state", None)
+                expert_load_view = None
+                record_enabled = None
+                local_expert_start = 0
+                if (
+                    layer_state is not None
+                    and getattr(fused_experts_input.layer, "_use_v2_model_runner", False)
+                    and get_current_hardware_profile().moe_comm_policy is MoECommPolicy.FUSED_OR_CAPACITY
+                    and weights.w1[0].dtype in (torch.int8, torch.int32, torch.bfloat16, torch.float16)
+                ):
+                    expert_load_view = layer_state.expert_load_view
+                    record_enabled = layer_state.should_record_tensor
+                    local_expert_start = layer_state.local_expert_start
+                    if expert_load_view is None or record_enabled is None:
+                        raise RuntimeError("Fused MC2 EPLB recording state is not initialized")
+                    if layer_state.local_expert_count != self.moe_config.num_local_experts:
+                        raise RuntimeError("Fused MC2 EPLB local expert count does not match the MoE output")
+                    load_recording_handled = (
+                        expert_load_view.ndim == 1
+                        and expert_load_view.dtype == torch.int32
+                        and expert_load_view.device.type == "npu"
+                        and expert_load_view.is_contiguous()
+                        and expert_load_view.numel() >= local_expert_start + self.moe_config.num_local_experts
+                        and record_enabled.ndim == 0
+                        and record_enabled.dtype == torch.bool
+                        and record_enabled.device == expert_load_view.device
+                    )
+                    if not load_recording_handled:
+                        expert_load_view = None
+                        record_enabled = None
+                        local_expert_start = 0
                 torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
                     x=fused_experts_input.hidden_states,
                     weight1=weights.w1,
@@ -685,6 +719,9 @@ class FusedMC2CommImpl(MoECommMethod):
                     x_active_mask=fused_experts_input.routing.mc2_mask,
                     out=out,
                     expert_token_nums=self.expert_token_nums,
+                    expert_load_view=expert_load_view,
+                    record_enabled=record_enabled,
+                    local_expert_start=local_expert_start,
                 )
                 expert_tokens = self.expert_token_nums
         else:
@@ -692,4 +729,5 @@ class FusedMC2CommImpl(MoECommMethod):
         return FusedExpertsResult(
             routed_out=out,
             expert_tokens=expert_tokens,
+            load_recording_handled=load_recording_handled,
         )

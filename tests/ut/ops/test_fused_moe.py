@@ -909,10 +909,13 @@ def test_hash_router_chunks_unaligned_input_ids_for_sequence_parallel(monkeypatc
 
 
 @pytest.mark.parametrize("return_with_event", [False, True])
-@pytest.mark.parametrize("use_v2,v2_eplb", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize(
+    "use_v2,v2_eplb,fused_record_handled",
+    [(False, False, False), (True, False, False), (True, True, False), (True, True, True)],
+)
 @pytest.mark.parametrize("is_sequence_parallel", [False, True])
 def test_routed_experts_forward_impl_runs_current_flow(
-    monkeypatch, return_with_event, use_v2, v2_eplb, is_sequence_parallel
+    monkeypatch, return_with_event, use_v2, v2_eplb, fused_record_handled, is_sequence_parallel
 ):
     """Verify routed-expert forward preserves the current dispatch flow."""
     _disable_force_eplb(monkeypatch)
@@ -930,6 +933,7 @@ def test_routed_experts_forward_impl_runs_current_flow(
         return_value=SimpleNamespace(
             routed_out=routed_out,
             expert_tokens=torch.tensor([3, 5]) if v2_eplb else None,
+            load_recording_handled=fused_record_handled,
             group_list_type=1,
             before_dispatch_evt=None,
             before_gmm2_evt=None,
@@ -1044,7 +1048,7 @@ def test_routed_experts_forward_impl_runs_current_flow(
     )
     expected_load = torch.zeros_like(expert_load)
     torch.testing.assert_close(expert_load, expected_load)
-    assert record_expert_tokens.call_count == int(v2_eplb)
+    assert record_expert_tokens.call_count == int(v2_eplb and not fused_record_handled)
     moe_comm_method.finalize.assert_called_once_with(
         hidden_states=routed_out,
         reduce_results=False,

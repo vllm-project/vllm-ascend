@@ -195,7 +195,7 @@ class TestDispatchFFNCombine:
 
         out = self.generate_random_tensor((m, k), dtype=torch.bfloat16).npu()
         expert_token_nums = self.generate_random_tensor((1, e), dtype=torch.int32).npu()
-        torch.ops._C_ascend.dispatch_ffn_combine(
+        op_kwargs = dict(
             x=x,
             weight1=weight1_nz_npu,
             weight2=weight2_nz_npu,
@@ -212,6 +212,20 @@ class TestDispatchFFNCombine:
             expert_token_nums=expert_token_nums,
             x_active_mask=x_active_mask,
         )
+        torch.ops._C_ascend.dispatch_ffn_combine(**op_kwargs)
+        baseline_counts = expert_token_nums.clone().view(-1)
+        baseline_out = out.clone()
+        load = torch.full((e + 4,), 7, dtype=torch.int32, device="npu")
+        enabled = torch.tensor(True, dtype=torch.bool, device="npu")
+        torch.ops._C_ascend.dispatch_ffn_combine(
+            **op_kwargs, expert_load_view=load, record_enabled=enabled, local_expert_start=2
+        )
+        torch.npu.synchronize()
+        expected_load = torch.full_like(load, 7)
+        expected_load[2 : 2 + e].add_(baseline_counts)
+        assert torch.equal(load, expected_load)
+        assert torch.equal(out, baseline_out)
+        assert torch.equal(expert_token_nums.view(-1), baseline_counts)
         return True
 
     def run_normal(self) -> bool:

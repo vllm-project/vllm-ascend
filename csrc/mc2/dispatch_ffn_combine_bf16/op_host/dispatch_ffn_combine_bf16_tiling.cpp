@@ -32,6 +32,7 @@ namespace {
     constexpr uint32_t ATTR_IS_TRANS_B = 2;
     constexpr uint32_t ATTR_WEIGHT_NZ = 3;
     constexpr uint32_t ATTR_WORLD_SIZE_INDEX = 4;
+    constexpr uint32_t ATTR_LOCAL_EXPERT_START_INDEX = 5;
     constexpr int64_t MAX_WORLD_SIZE = 768;
     constexpr uint64_t INIT_TILINGKEY = 1000000;
     constexpr uint64_t TILINGKEY_TRANS_B = 1U;
@@ -40,6 +41,8 @@ namespace {
     constexpr uint32_t WEIGHT_INDEX = 1;
     constexpr uint32_t WEIGHT2_INDEX = 2;
     constexpr uint32_t EXPERTID_INDEX = 3;
+    constexpr uint32_t EXPERT_LOAD_INDEX = 7;
+    constexpr uint32_t RECORD_ENABLED_INDEX = 8;
     constexpr uint32_t BLOCK_NUM = 20;
     constexpr uint32_t SYSTEM_NEED_WORKSPACE = 16 * 1024 * 1024;
     constexpr uint64_t MB_SIZE = 1024 * 1024UL;
@@ -82,6 +85,10 @@ static ge::graphStatus DispatchFFNCombineBF16CheckAttrAndSetTiling(gert::TilingC
             static_cast<long long>(MAX_WORLD_SIZE),
             worldSizePtr == nullptr ? 0L : static_cast<long long>(*worldSizePtr)), return ge::GRAPH_FAILED);
     info.worldSize = static_cast<uint32_t>(*worldSizePtr);
+    auto localExpertStart = attrs->GetAttrPointer<int64_t>(ATTR_LOCAL_EXPERT_START_INDEX);
+    OP_TILING_CHECK(localExpertStart == nullptr || *localExpertStart < 0,
+        OP_LOGE(K_INNER_DEBUG, "localExpertStart is invalid"), return ge::GRAPH_FAILED);
+    info.localExpertStart = static_cast<uint32_t>(*localExpertStart);
 
     OP_LOGD(K_INNER_DEBUG, "maxOutputSize=%d ", info.maxOutputSize);
     OP_LOGD(K_INNER_DEBUG, "rankSize=%d ", info.worldSize);
@@ -120,6 +127,14 @@ static ge::graphStatus DispatchFFNCombineBF16CheckShapeAndSetTiling(gert::Tiling
     info.N = N;
     info.K = K;
     info.expertPerRank = expertPerRank;
+    const auto* expertLoadShape = context->GetOptionalInputShape(EXPERT_LOAD_INDEX);
+    const auto* recordEnabledShape = context->GetOptionalInputShape(RECORD_ENABLED_INDEX);
+    OP_TILING_CHECK((expertLoadShape == nullptr) != (recordEnabledShape == nullptr),
+        OP_LOGE(K_INNER_DEBUG, "expertLoad and recordEnabled must be provided together"), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(expertLoadShape != nullptr &&
+        (expertLoadShape->GetStorageShape().GetDimNum() != 1 ||
+         expertLoadShape->GetStorageShape().GetDim(0) < static_cast<int64_t>(info.localExpertStart) + expertPerRank),
+        OP_LOGE(K_INNER_DEBUG, "expertLoad does not cover local experts"), return ge::GRAPH_FAILED);
     info.topK = topK;
     info.listLen = listLen;
     OP_LOGD(K_INNER_DEBUG, "M=%d ", info.M);

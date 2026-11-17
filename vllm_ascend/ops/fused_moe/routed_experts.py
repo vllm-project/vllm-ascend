@@ -749,7 +749,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         if self._use_v2_model_runner:
             eplb_state = self.router.eplb_state
-            if eplb_state is not None:
+            if eplb_state is not None and not fused_experts_results.load_recording_handled:
                 # eplb_state imports vllm_ascend.ops.fused_moe at module scope, so a
                 # top-level import here would close an import cycle.
                 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState

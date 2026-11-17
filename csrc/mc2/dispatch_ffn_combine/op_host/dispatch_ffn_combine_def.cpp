@@ -60,6 +60,16 @@ class DispatchFFNCombine : public OpDef {
         .DataType({ge::DT_BOOL, ge::DT_BOOL, ge::DT_BOOL})
         .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+    this->Input("expertLoad")
+        .ParamType(OPTIONAL)
+        .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32})
+        .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+        .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+    this->Input("recordEnabled")
+        .ParamType(OPTIONAL)
+        .DataType({ge::DT_BOOL, ge::DT_BOOL, ge::DT_BOOL})
+        .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+        .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
 
     // Output
     this->Output("out")
@@ -72,6 +82,12 @@ class DispatchFFNCombine : public OpDef {
         .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32})
         .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+    // Matching input/output names make this a writable ACLNN Ref tensor.
+    this->Output("expertLoad")
+        .ParamType(OPTIONAL)
+        .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32})
+        .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+        .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
 
     this->Attr("group").AttrType(REQUIRED).String();
     this->Attr("M").AttrType(OPTIONAL).Int();
@@ -79,6 +95,7 @@ class DispatchFFNCombine : public OpDef {
     this->Attr("weightNz").AttrType(OPTIONAL).Bool(false);
     this->Attr("swigluLimit").AttrType(OPTIONAL).Float(0.0f);
     this->Attr("worldSize").AttrType(REQUIRED).Int();
+    this->Attr("localExpertStart").AttrType(OPTIONAL).Int(0);
 
     OpAICoreConfig aicore_config;
     aicore_config.DynamicCompileStaticFlag(true)
