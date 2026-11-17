@@ -1,4 +1,0 @@
-pr: 22010
-entries:
-  - category: performance
-    text: Reduced GDN prefill latency for inputs with contiguous head-first storage by avoiding redundant QKV copies.
