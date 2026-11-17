@@ -62,47 +62,6 @@ For non-layerwise complete-block transfers, adjacent MLA components sharing one 
 
 This bulk fast path uses physical-page-major object contents instead of the previous component-major segmented contents. A fresh namespace is required even when upgrading from the earlier segmented version of this fix. Writers and readers must agree on transfer mode and cache layout; do not share these objects with layerwise readers or workers using a different component layout.
 
-### DeepSeek V4.1 Layerwise Pooling
-
-DeepSeek V4.1 uses the existing Memcache GVA layerwise path with
-`backend: "memcache"` and `use_layerwise: true`. It requires Model Runner V2
-and eager execution (`--enforce-eager`). TP and PCP are supported; PP, DCP,
-KVPP, and graph replay are not supported for this shared-source layout.
-No additional transfer-mode option is needed. The model's `kv_source_layer_ids`
-select the shared-source layout automatically. Layerwise scratch-buffer reuse
-is not supported because later layers still consume the source layers' KV.
-Do not configure `layerwise_num_shared_buffers` for this model; the existing
-GVA layout uses independent buffers by default.
-
-Load submission follows the model's source layers instead of the numeric
-`layerwise_prefetch_layers` window. For zero-based source layers `[2, 8, 14, 20]`,
-layer 0 submits layers 0-2, layer 2 submits 3-8, layer 8 submits 9-14, and layer 14
-submits 15-20. Tasks within each segment enter the existing receive queue in
-layer order. With bounded replay disabled, they include the intervening SWA
-loads; with it enabled, empty tasks are skipped. From the final source onward,
-submission covers the current and next layer, including registered draft caches.
-Each layer waits only for its own load completion. This schedule is derived from
-`kv_source_layer_ids` and needs no additional setting. Other models retain their
-existing prefetch-window behavior.
-
-The transfer sequence keeps every model layer. Layers without registered KV
-have empty tasks; source KV, index caches, SWA, and registered draft caches
-retain their existing cache-group addressing. For bounded replay, the cut
-layer loads before its cache-only write and saves after its normal forward's
-last write, while later layers can continue computing. Registered draft caches
-follow the existing per-layer GVA load/save hooks. By default, the existing
-final-layer save fence waits for all copies before source memory can be reused.
-The existing `VLLM_ASCEND_LW_DEFER_LAST_SAVE` option remains off by default;
-enabling it has not been validated for this model.
-
-With `AscendMultiConnector`, Mooncake V2 push uses the composite attention
-boundary to mark all caches owned by a layer ready. Draft caches remain deferred
-until the post-forward save fence. Unsupported sibling connectors do not receive
-these composite layer callbacks. Transfer failures use existing GVA error
-reporting; failed saves do not publish incomplete KV. Use the same cache layout
-on all pool readers and writers; existing entries from a different layout must
-use a separate namespace.
-
 ### Prefix Cache Retention
 
 Configure retention with the upstream vLLM argument `--prefix-cache-retention-interval`.
