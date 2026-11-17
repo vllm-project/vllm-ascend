@@ -810,9 +810,6 @@ class RequestTracker:
     # NOTE: allocated blocks could be more than the number of tokens.
     allocated_block_ids_by_group: list[list[int]]
 
-    # Namespace for request-scoped snapshots; renewed after preemption/reuse.
-    snapshot_run_id: str | None = None
-
     # The number of tokens that has been savd
     num_saved_tokens: int = 0
 
@@ -937,7 +934,6 @@ class ReqMeta:
     block_ids_by_group: list[list[int]]
 
     block_hashes: list[BlockHash]
-    snapshot_run_id: str | None = None
     save_private_snapshot: bool = True
 
     # First token that has not been saved before this metadata was built.
@@ -1006,13 +1002,11 @@ class ReqMeta:
         load_key_block_offset: int = 0,
         load_last_block_key: str | None = None,
         load_keys: list[str] | None = None,
-        snapshot_run_id: str | None = None,
         save_private_snapshot: bool = True,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
         self.req_id = req_id
-        self.snapshot_run_id = snapshot_run_id
         self.save_private_snapshot = save_private_snapshot
         self.token_len_chunk = token_len_chunk
         self.save_end_token = token_len_chunk if save_end_token is None else save_end_token
@@ -1198,7 +1192,6 @@ class ReqMeta:
         logger.debug("request:%s, meta save spec:%s, meta load spec:%s", tracker.req_id, not skip_save, load_spec)
         return ReqMeta(
             req_id=tracker.req_id,
-            snapshot_run_id=tracker.snapshot_run_id,
             token_len_chunk=num_tokens_to_save,
             save_end_token=num_tokens_to_save,
             target_token_len=target_token_len,

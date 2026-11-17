@@ -1,6 +1,5 @@
 from collections.abc import Sequence
 from typing import Any
-from uuid import uuid4
 
 from vllm.config import VllmConfig
 from vllm.logger import logger
@@ -32,8 +31,6 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         if self.layerwise_offload and request_tuple is not None:
             # Verifier rows have no corresponding input KV/state to snapshot.
             request_tracker.token_len = min(request_tracker.token_len, len(request_tuple[0].all_token_ids))
-        if self.layerwise_offload and request_tracker.snapshot_run_id is None:
-            request_tracker.snapshot_run_id = uuid4().hex
         meta = super()._build_req_meta(request_tracker, *args, **kwargs)
         if meta is not None and self.layerwise_offload and request_tuple is not None:
             request = request_tuple[0]

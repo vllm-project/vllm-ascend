@@ -778,7 +778,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         assert self.layerwise_backend is not None
         return self.layerwise_backend.make_partial_key(
             self.model_name,
-            request.snapshot_run_id or request.req_id,
+            request.req_id,
             group_id,
             block_index,
             end_token,
