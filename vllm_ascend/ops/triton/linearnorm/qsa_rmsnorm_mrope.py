@@ -84,6 +84,92 @@ def _qsa_rmsnorm_mrope_kernel(
     tl.store(output_row + rotary_offsets + half_rope_dim, rotated_second)
 
 
+@triton.jit
+def _qsa_rmsnorm_mrope_fused_heads_kernel(
+    input_ptr,
+    weight_ptr,
+    cos_sin_ptr,
+    output_ptr,
+    input_stride_token,
+    input_stride_head,
+    cos_sin_stride_token,
+    output_stride_token,
+    output_stride_head,
+    num_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    eps: tl.constexpr,
+    mrope_section_h: tl.constexpr,
+    mrope_section_w: tl.constexpr,
+    rope_dim: tl.constexpr,
+    block_dim: tl.constexpr,
+    positions_ptr,
+    position_stride_axis: tl.constexpr,
+    position_stride_token: tl.constexpr,
+    cache_rows: tl.constexpr,
+):
+    token_id = tl.program_id(0)
+    head_offsets = tl.arange(0, num_heads)[:, None]
+    dim_offsets = tl.arange(0, block_dim)[None, :]
+    dim_mask = dim_offsets < head_dim
+    input_offsets = (
+        token_id * input_stride_token
+        + head_offsets * input_stride_head
+        + dim_offsets
+    )
+    values = tl.load(input_ptr + input_offsets, mask=dim_mask, other=0.0).to(tl.float32)
+    weight = tl.load(weight_ptr + dim_offsets, mask=dim_mask, other=0.0).to(tl.float32) + 1.0
+    variance = tl.sum(values * values, axis=1)[:, None] / head_dim
+    reciprocal_std = tl.rsqrt(variance + eps)
+    normalized = (values * reciprocal_std * weight).to(tl.bfloat16)
+
+    half_rope_dim: tl.constexpr = rope_dim // 2
+    rotary_offsets = tl.arange(0, half_rope_dim)
+    h_mask = (rotary_offsets % 3 == 1) & (rotary_offsets < mrope_section_h * 3)
+    w_mask = (rotary_offsets % 3 == 2) & (rotary_offsets < mrope_section_w * 3)
+    axis = tl.where(h_mask, 1, tl.where(w_mask, 2, 0))
+    position = tl.load(
+        positions_ptr
+        + axis * position_stride_axis
+        + token_id * position_stride_token
+    )
+    position = tl.minimum(tl.maximum(position, 0), cache_rows - 1)
+    cache_row = cos_sin_ptr + position.to(tl.int64) * cos_sin_stride_token
+    cos = tl.load(cache_row + rotary_offsets).to(tl.float32)[None, :]
+    sin = tl.load(cache_row + rotary_offsets + half_rope_dim).to(tl.float32)[None, :]
+
+    rotary_head_offsets = head_offsets * input_stride_head
+    first_offsets = (
+        token_id * input_stride_token
+        + rotary_head_offsets
+        + rotary_offsets[None, :]
+    )
+    second_offsets = first_offsets + half_rope_dim
+    first = tl.load(input_ptr + first_offsets).to(tl.float32)
+    second = tl.load(input_ptr + second_offsets).to(tl.float32)
+    first_weight = tl.load(weight_ptr + rotary_offsets).to(tl.float32)[None, :] + 1.0
+    second_weight = (
+        tl.load(weight_ptr + rotary_offsets + half_rope_dim).to(tl.float32)[None, :] + 1.0
+    )
+    first = (first * reciprocal_std * first_weight).to(tl.bfloat16)
+    second = (second * reciprocal_std * second_weight).to(tl.bfloat16)
+    rotated_first = ((first * cos).to(tl.bfloat16) - (second * sin).to(tl.bfloat16)).to(tl.bfloat16)
+    rotated_second = ((second * cos).to(tl.bfloat16) + (first * sin).to(tl.bfloat16)).to(tl.bfloat16)
+
+    output_offsets = (
+        token_id * output_stride_token
+        + head_offsets * output_stride_head
+        + dim_offsets
+    )
+    tl.store(output_ptr + output_offsets, normalized, mask=dim_mask)
+    rotary_output_offsets = (
+        token_id * output_stride_token
+        + head_offsets * output_stride_head
+        + rotary_offsets[None, :]
+    )
+    tl.store(output_ptr + rotary_output_offsets, rotated_first)
+    tl.store(output_ptr + rotary_output_offsets + half_rope_dim, rotated_second)
+
+
 def triton_qsa_rmsnorm_mrope(
     tensor: torch.Tensor,
     weight: torch.Tensor,
@@ -121,33 +207,70 @@ def triton_qsa_rmsnorm_mrope(
     num_tokens, num_heads, head_dim = tensor.shape
     if not num_tokens:
         return output
-    _qsa_rmsnorm_mrope_kernel[(num_tokens, num_heads)](
-        tensor,
-        weight,
-        cos_sin,
-        output,
-        tensor.stride(0),
-        tensor.stride(1),
-        cos_sin_stride_axis,
-        cos_sin.stride(-2),
-        output.stride(0),
-        output.stride(1),
-        num_heads=num_heads,
-        head_dim=head_dim,
-        eps=eps,
-        mrope_section_h=mrope_section[1] if has_mrope else 0,
-        mrope_section_w=mrope_section[2] if has_mrope else 0,
-        rope_dim=rope_dim,
-        has_mrope=has_mrope,
-        block_dim=triton.next_power_of_2(head_dim),
-        positions_ptr=positions,
-        position_stride_axis=positions.stride(0) if positions is not None and positions.ndim == 2 else 0,
-        position_stride_token=positions.stride(-1) if positions is not None else 0,
-        cache_rows=cos_sin.shape[0],
-        GATHER_CACHE=positions is not None,
-        num_warps=1,
-        num_stages=1,
+    use_fused_heads = (
+        positions is not None
+        and has_mrope
+        and num_heads == 4
+        and head_dim == 128
+        and rope_dim == 64
+        # This specialization targets decode-sized batches.  Keeping large
+        # prefill chunks on the established per-head kernel avoids increasing
+        # per-program work and preserves the prefill execution path.
+        and num_tokens <= 64
     )
+    if use_fused_heads:
+        _qsa_rmsnorm_mrope_fused_heads_kernel[(num_tokens,)](
+            tensor,
+            weight,
+            cos_sin,
+            output,
+            tensor.stride(0),
+            tensor.stride(1),
+            cos_sin.stride(-2),
+            output.stride(0),
+            output.stride(1),
+            num_heads=num_heads,
+            head_dim=head_dim,
+            eps=eps,
+            mrope_section_h=mrope_section[1],
+            mrope_section_w=mrope_section[2],
+            rope_dim=rope_dim,
+            block_dim=triton.next_power_of_2(head_dim),
+            positions_ptr=positions,
+            position_stride_axis=positions.stride(0),
+            position_stride_token=positions.stride(-1),
+            cache_rows=cos_sin.shape[0],
+            num_warps=1,
+            num_stages=1,
+        )
+    else:
+        _qsa_rmsnorm_mrope_kernel[(num_tokens, num_heads)](
+            tensor,
+            weight,
+            cos_sin,
+            output,
+            tensor.stride(0),
+            tensor.stride(1),
+            cos_sin_stride_axis,
+            cos_sin.stride(-2),
+            output.stride(0),
+            output.stride(1),
+            num_heads=num_heads,
+            head_dim=head_dim,
+            eps=eps,
+            mrope_section_h=mrope_section[1] if has_mrope else 0,
+            mrope_section_w=mrope_section[2] if has_mrope else 0,
+            rope_dim=rope_dim,
+            has_mrope=has_mrope,
+            block_dim=triton.next_power_of_2(head_dim),
+            positions_ptr=positions,
+            position_stride_axis=positions.stride(0) if positions is not None and positions.ndim == 2 else 0,
+            position_stride_token=positions.stride(-1) if positions is not None else 0,
+            cache_rows=cos_sin.shape[0],
+            GATHER_CACHE=positions is not None,
+            num_warps=1,
+            num_stages=1,
+        )
     return output
 
 

@@ -15,7 +15,7 @@ pytestmark = [
 ]
 
 
-@pytest.mark.parametrize("rows", [0, 1, 32, 129])
+@pytest.mark.parametrize("rows", [0, 1, 32, 64, 129])
 @pytest.mark.parametrize("axes", [1, 3])
 @pytest.mark.parametrize("weight_dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("num_q_heads", [2, 12])
