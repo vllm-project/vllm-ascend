@@ -1,0 +1,4 @@
+pr: 15826
+entries:
+  - category: feature
+    text: Added an explicit physical sliding window for Qwen3 DSpark draft KV with native MLA/indexer and draft cache groups.

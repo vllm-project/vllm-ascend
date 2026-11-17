@@ -19,10 +19,12 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -72,6 +74,135 @@ def _page_sizes(spec: UniformTypeKVCacheSpecs) -> set[int]:
     lanes, so compute it inline.
     """
     return {s.page_size_bytes for s in spec.kv_cache_specs.values()}
+
+
+def _partition_mla_regular_swa_specs(
+    kv_cache_specs: dict[str, KVCacheSpec],
+) -> tuple[dict[str, KVCacheSpec], dict[str, KVCacheSpec]] | None:
+    """Recognize GLM MLA/indexer target caches plus regular DSpark SWA."""
+    target_specs: dict[str, KVCacheSpec] = {}
+    draft_specs: dict[str, KVCacheSpec] = {}
+    has_main_mla = False
+    has_indexer = False
+    for layer_name, spec in kv_cache_specs.items():
+        if isinstance(spec, AscendMLAAttentionSpec):
+            # A compressed target cache needs CompressAttentionManager. Do
+            # not alter its grouping/representative in this DSpark SWA fix.
+            if spec.tokens_per_state != 1:
+                return None
+            target_specs[layer_name] = spec
+            has_main_mla = True
+        elif isinstance(spec, AscendSFAIndexerCacheSpec):
+            target_specs[layer_name] = spec
+            has_indexer = True
+        elif isinstance(spec, SlidingWindowSpec) and not isinstance(spec, SlidingWindowMLASpec):
+            draft_specs[layer_name] = spec
+        else:
+            return None
+    if not (has_main_mla and has_indexer and draft_specs):
+        return None
+    # Keep target-spec order so the scheduler's representative retains the
+    # already validated target-cache manager semantics.
+    return target_specs, draft_specs
+
+
+def _is_mla_regular_swa_groups(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> bool:
+    if len(kv_cache_groups) != 2:
+        return False
+    if not all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups):
+        return False
+    combined_specs: dict[str, KVCacheSpec] = {}
+    for group in kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        assert isinstance(group_spec, UniformTypeKVCacheSpecs)
+        if set(group.layer_names) != set(group_spec.kv_cache_specs):
+            return False
+        combined_specs.update(group_spec.kv_cache_specs)
+    return _partition_mla_regular_swa_specs(combined_specs) is not None
+
+
+def _dspark_native_layout_enabled(vllm_config: VllmConfig) -> bool:
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    scheduler_config = getattr(vllm_config, "scheduler_config", None)
+    use_dspark = getattr(speculative_config, "use_dspark", None)
+    parallel = vllm_config.parallel_config
+    return (
+        getattr(parallel, "decode_context_parallel_size", 1) == 1
+        and getattr(parallel, "prefill_context_parallel_size", 1) == 1
+        and callable(use_dspark)
+        and use_dspark()
+        and scheduler_config is not None
+        and not scheduler_config.disable_hybrid_kv_cache_manager
+    )
+
+
+def _use_dspark_native_layout(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> bool:
+    return _dspark_native_layout_enabled(vllm_config) and _is_mla_regular_swa_groups(kv_cache_groups)
+
+
+def _native_layout_bytes_per_block(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
+    total = 0
+    for group in kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        assert isinstance(group_spec, UniformTypeKVCacheSpecs)
+        total += sum(group_spec.kv_cache_specs[layer_name].page_size_bytes for layer_name in group.layer_names)
+    assert total > 0
+    return total
+
+
+def _get_dspark_native_cache_groups(
+    vllm_config: VllmConfig,
+    kv_cache_specs: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec] | None:
+    partition = _partition_mla_regular_swa_specs(kv_cache_specs)
+    if partition is None or not _dspark_native_layout_enabled(vllm_config):
+        return None
+
+    target_specs, draft_specs = partition
+    target_uniform = UniformTypeKVCacheSpecs.from_specs(target_specs)
+    draft_uniform = UniformTypeKVCacheSpecs.from_specs(draft_specs)
+    if target_uniform is None or draft_uniform is None:
+        return None
+    return [
+        KVCacheGroupSpec(list(target_specs), target_uniform),
+        KVCacheGroupSpec(list(draft_specs), draft_uniform),
+    ]
+
+
+def _make_dspark_native_cache_config(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> KVCacheConfig:
+    bytes_per_block = _native_layout_bytes_per_block(kv_cache_groups)
+    num_blocks = may_override_num_blocks(vllm_config, max(available_memory // bytes_per_block, 0))
+    tensors: list[KVCacheTensor] = []
+    for group in kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        assert isinstance(group_spec, UniformTypeKVCacheSpecs)
+        for layer_name in group.layer_names:
+            spec = group_spec.kv_cache_specs[layer_name]
+            tensors.append(
+                KVCacheTensor(
+                    size=spec.page_size_bytes * num_blocks,
+                    layers=[layer_name],
+                    layer_stride=spec.page_size_bytes * num_blocks,
+                    block_stride=spec.page_size_bytes,
+                )
+            )
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=tensors,
+        kv_cache_groups=kv_cache_groups,
+        prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
+    )
 
 
 def _get_kv_cache_groups_uniform_page_size(
@@ -476,6 +607,8 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
     layout, so using the upstream value changes ``num_blocks`` during the
     re-plan and leaves ranks inconsistent.
     """
+    if _use_dspark_native_layout(vllm_config, kv_cache_groups):
+        return _native_layout_bytes_per_block(kv_cache_groups)
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         return paired_sfa_pool_bytes(kv_cache_groups)
     pools = _get_replicated_draft_pools(kv_cache_groups)
@@ -503,6 +636,9 @@ def _ascend_max_memory_usage_bytes_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int:
     """Keep Ascend admission accounting with the upstream builder API."""
+    if _use_dspark_native_layout(vllm_config, kv_cache_groups):
+        pages = sum(group.kv_cache_spec.max_memory_usage_pages(vllm_config) for group in kv_cache_groups)
+        return _native_layout_bytes_per_block(kv_cache_groups) * pages
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         return paired_sfa_max_memory(vllm_config, kv_cache_groups)
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
@@ -535,6 +671,9 @@ def _get_ascend_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
+    native_groups = _get_dspark_native_cache_groups(vllm_config, kv_cache_spec)
+    if native_groups is not None:
+        return native_groups
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
     if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
@@ -566,7 +705,9 @@ def _ascend_get_kv_cache_config_from_groups(
         else get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     )
     pools = _get_replicated_draft_pools(kv_cache_groups)
-    if vllm_config.model_config.hf_config.model_type == "kimi_k31":
+    if _use_dspark_native_layout(vllm_config, kv_cache_groups):
+        kv_cache_config = _make_dspark_native_cache_config(vllm_config, kv_cache_groups, available_memory)
+    elif vllm_config.model_config.hf_config.model_type == "kimi_k31":
         kv_cache_config = paired_sfa_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif pools is not None:
         # Every physical pool shares the scheduler's block count, but owns a
