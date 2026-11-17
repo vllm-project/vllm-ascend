@@ -71,7 +71,7 @@ class AscendFlashAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
             )
             self.plan_buffer = torch.empty_like(plan_meta, device=device)
 
-    def update_draft_decode_metadata(self, metadata: AscendFlashAttentionMetadata) -> None:
+    def _get_flash_attn_plan(self, metadata: AscendFlashAttentionMetadata) -> tuple[torch.Tensor, dict]:
         from cann_ops_transformer.ops import flash_attn_metadata
 
         num_reqs = metadata.block_tables.shape[0]
@@ -96,11 +96,18 @@ class AscendFlashAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
             layout_out="TND",
         )
         plan = flash_attn_metadata(self.num_heads, self.num_kv_heads, self.head_size, **attrs)
-        if self.plan_buffer is not None:
-            stored_plan = self.plan_buffer[: plan.numel()]
-            stored_plan.copy_(plan)
-            plan = stored_plan
-        metadata.flash_attn_plan = plan, attrs
+        return plan, attrs
+
+    def _store_flash_attn_plan(self, plan: torch.Tensor) -> torch.Tensor:
+        if self.plan_buffer is None:
+            return plan
+        stored_plan = self.plan_buffer[: plan.numel()]
+        stored_plan.copy_(plan)
+        return stored_plan
+
+    def update_draft_decode_metadata(self, metadata: AscendFlashAttentionMetadata) -> None:
+        plan, attrs = self._get_flash_attn_plan(metadata)
+        metadata.flash_attn_plan = self._store_flash_attn_plan(plan), attrs
 
     def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
         metadata = self._build_metadata(common_attn_metadata)
