@@ -9,10 +9,13 @@ Repeated routes count separately; masked, negative and nonlocal routes count zer
 NPU physical IDs must be contiguous; noncontiguous IDs raise ValueError rather
 than being copied implicitly. Strided token masks and empty T/K are supported.
 
-The output is zero-initialized. Fixed 512-route tiles are balanced across a grid
+Fixed 512-route tiles are balanced across a grid
 bounded by the Vector Core count from the shared capability helper. Each program
-accumulates a private INT64 histogram across all its tiles, then atomically merges
-its nonzero bins into the output once. Histogram length is the next power of two
+accumulates a private INT64 histogram across all its tiles, then writes one row
+of a fresh `[programs, num_bins]` INT64 scratch tensor. A second kernel reduces
+the program dimension and writes the fresh output without global atomics.
+Every scratch and output element used is overwritten per call, including Graph
+replay; empty inputs return zeros. Histogram length is the next power of two
 of C, with a minimum of two: the A5 backend failed to lower a one-element
 loop-carried tensor, including an attempted sum reduction. Padding resolves that
 case without changing the 128-bin main case. The caller selects the current NPU,
@@ -22,9 +25,9 @@ IDs use `ids_ptr + offsets` directly. This preserves contiguous access in the
 compiler IR instead of reconstructing offsets with division and remainder.
 
 No host reads of tensor values or global intermediate index/mask tensors are
-introduced. The 128-bin logical accumulator is 1 KiB. Saved compiler IR confirms
-the loop-carried histogram and atomic store outside the loop; final physical UB
-placement and compiler-internal workspace have not been established.
+introduced. The 128-bin logical accumulator is 1 KiB; partial-count scratch is
+40 KiB for 40 programs or 64 KiB for 64 programs. Final physical UB placement
+and compiler-internal workspace have not been established.
 
 The caller still owns gathering/padding, record-enable state and persistent
 load accumulation. This is the existing 0/1 route-count contract, not a general
@@ -32,7 +35,60 @@ weighted scatter API.
 
 ## Validation
 
-### Current contiguous-ID implementation (2026-11-17)
+### Two-stage candidate (2026-11-17)
+
+A3 and A5 each passed 83/83 exact tests. Mutable Graph coverage includes
+20 calls/capture at [10240,8], with repeated changes to IDs and masks.
+Same-device full-wrapper Graph medians against atomic commit `a75a38f92`:
+
+| Device | Distribution | Atomic us | Two-stage us |
+| --- | --- | ---: | ---: |
+| A3 | uniform | 625.29 | 545.24 |
+| A3 | hot | 592.72 | 523.85 |
+| A3 | mixed | 595.62 | 521.33 |
+| A5 | uniform | 1034.54 | 308.09 |
+| A5 | hot | 1024.91 | 196.38 |
+| A5 | mixed | 1028.70 | 201.18 |
+
+Protocol: 20 complete calls/capture, 5 warmup replays, 10 alternating Event
+samples, replay time divided by 20. A5 two-stage timings are unstable: this
+paired run ranges from 148.86 to 400.95 us, while a separate four-way diagnostic
+also observed roughly 18-us samples. Do not report the lowest sample as stable
+performance. The first four-way run failed its final correctness assertion;
+that failure is retained and its cause remains unresolved. Subsequent paired
+and per-replay-checked four-way runs passed. This remains a draft candidate.
+
+A separate, repeated A5 control keeps the old atomic code and changes only the
+program limit to match A3's 40 programs:
+
+| Distribution | 64 programs us | 40 programs us |
+| --- | ---: | ---: |
+| uniform | 1033.99 | 459.28 |
+| hot | 1025.68 | 457.91 |
+| mixed | 1027.43 | 457.79 |
+
+This reduction in latency was reproduced in the four-way control. Two-stage
+40/64 comparisons remain unstable, so the current candidate keeps the existing
+device-based program policy; the 40-program controls are experiments. Removing
+atomic also enables A5 AutoBlockify in compiler metadata, so the two-stage gain
+cannot be attributed exclusively to atomic contention. No new msprof or model
+integration was performed for this candidate. Ruff check/format and diff checks
+pass; full format.sh ci is blocked by unavailable pre-commit in the Bash environment.
+
+The final four-way repeat used the original timing synchronization protocol
+(no CPU correctness copy between timed replays) and passed pre/post checks:
+
+| Distribution | Atomic64 us | Atomic40 us | Two-stage64 us | Two-stage40 us |
+| --- | ---: | ---: | ---: | ---: |
+| uniform | 1033.80 | 456.68 | 194.67 | 194.53 |
+| hot | 1034.37 | 455.87 | 196.42 | 196.45 |
+| mixed | 1033.27 | 456.55 | 193.90 | 194.24 |
+
+These medians do not remove the earlier failure or the within-run timing
+outliers; they show no material median advantage for 40 producers once the
+global atomic merge is removed in this workload.
+
+### Historical contiguous-ID atomic implementation (2026-11-17)
 
 A3 and A5 each passed 82/82 tests, including noncontiguous-ID rejection and
 mutable Graph replay. IDs lower to contiguous `memref.copy` in adapter IR;

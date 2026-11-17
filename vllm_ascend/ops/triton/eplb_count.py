@@ -13,7 +13,7 @@ ASSIGNMENTS_PER_TILE = 512
 def _count_allgather_kernel(
     ids_ptr,
     mask_ptr,
-    counts_ptr,
+    partial_counts_ptr,
     num_assignments,
     local_start,
     local_count,
@@ -41,7 +41,27 @@ def _count_allgather_kernel(
         safe_ids = tl.where(eligible, local_ids, 0).to(tl.int32)
         local_counts += tl.histogram(safe_ids, NUM_BINS, mask=eligible).to(tl.int64)
     bins = tl.arange(0, NUM_BINS)
-    tl.atomic_add(counts_ptr + bins, local_counts, mask=(bins < local_count) & (local_counts != 0), sem="relaxed")
+    tl.store(partial_counts_ptr + pid * NUM_BINS + bins, local_counts)
+
+
+@triton.jit
+def _reduce_allgather_counts_kernel(
+    partial_counts_ptr,
+    counts_ptr,
+    NUM_PROGRAMS: tl.constexpr,
+    NUM_BINS: tl.constexpr,
+    LOCAL_COUNT: tl.constexpr,
+    REDUCE_SIZE: tl.constexpr,
+):
+    programs = tl.arange(0, REDUCE_SIZE)
+    bins = tl.arange(0, NUM_BINS)
+    partial_counts = tl.load(
+        partial_counts_ptr + programs[:, None] * NUM_BINS + bins[None, :],
+        mask=programs[:, None] < NUM_PROGRAMS,
+        other=0,
+    )
+    counts = tl.sum(partial_counts, axis=0)
+    tl.store(counts_ptr + bins, counts, mask=bins < LOCAL_COUNT)
 
 
 def count_allgather_tokens_triton(
@@ -65,25 +85,36 @@ def count_allgather_tokens_triton(
         raise ValueError("Expected contiguous physical IDs [T,K]")
     if local_expert_start < 0 or local_expert_count <= 0:
         raise ValueError("Expected nonnegative local start and positive local expert count")
-    counts = torch.zeros(local_expert_count, dtype=torch.int64, device=topk_ids.device)
     num_assignments = topk_ids.numel()
     if num_assignments == 0:
-        return counts
+        return torch.zeros(local_expert_count, dtype=torch.int64, device=topk_ids.device)
     init_device_properties_triton()
     vector_cores = get_vectorcore_num()
     programs = min(vector_cores, triton.cdiv(num_assignments, ASSIGNMENTS_PER_TILE))
+    # Keep a vector accumulator: the backend cannot lower a one-element loop-carried tensor.
+    num_bins = max(2, triton.next_power_of_2(local_expert_count))
+    partial_counts = torch.empty((programs, num_bins), dtype=torch.int64, device=topk_ids.device)
+    counts = torch.empty(local_expert_count, dtype=torch.int64, device=topk_ids.device)
     _count_allgather_kernel[(programs,)](
         topk_ids,
         token_mask,
-        counts,
+        partial_counts,
         num_assignments,
         local_expert_start,
         local_expert_count,
         MASK_STRIDE=token_mask.stride(0),
         TOPK=topk_ids.shape[1],
         BLOCK_SIZE=ASSIGNMENTS_PER_TILE,
-        # Keep a vector accumulator: the backend cannot lower a one-element loop-carried tensor.
-        NUM_BINS=max(2, triton.next_power_of_2(local_expert_count)),
+        NUM_BINS=num_bins,
+        compile_mode="simd",
+    )
+    _reduce_allgather_counts_kernel[(1,)](
+        partial_counts,
+        counts,
+        NUM_PROGRAMS=programs,
+        NUM_BINS=num_bins,
+        LOCAL_COUNT=local_expert_count,
+        REDUCE_SIZE=triton.next_power_of_2(programs),
         compile_mode="simd",
     )
     return counts

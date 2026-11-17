@@ -51,18 +51,20 @@ def test_reject_noncontiguous_ids():
         count_allgather_tokens_triton(ids, mask, 0, 128)
 
 
-def test_mutable_graph_replay():
-    ids = torch.full((65, 8), 3, dtype=torch.int64, device="npu")
-    mask = torch.ones(65, dtype=torch.bool, device="npu")
+@pytest.mark.parametrize("tokens,experts,calls", [(65, 17, 1), (10240, 128, 20)])
+def test_mutable_graph_replay(tokens, experts, calls):
+    ids = torch.full((tokens, 8), 3, dtype=torch.int64, device="npu")
+    mask = torch.ones(tokens, dtype=torch.bool, device="npu")
     for _ in range(3):
-        count_allgather_tokens_triton(ids, mask, 3, 17)
+        count_allgather_tokens_triton(ids, mask, 3, experts)
     torch.npu.synchronize()
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph):
-        out = count_allgather_tokens_triton(ids, mask, 3, 17)
-    for expert, enabled in [(4, True), (4, False), (19, True)]:
+        for _ in range(calls):
+            out = count_allgather_tokens_triton(ids, mask, 3, experts)
+    for expert, enabled in [(4, True), (4, False), (19, True)] * 3:
         ids.fill_(expert)
         mask.fill_(enabled)
         graph.replay()
-        expected = reference(ids.cpu(), mask.cpu(), 3, 17)
+        expected = reference(ids.cpu(), mask.cpu(), 3, experts)
         torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
