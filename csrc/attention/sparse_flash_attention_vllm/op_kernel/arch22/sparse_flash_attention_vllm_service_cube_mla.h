@@ -9,18 +9,18 @@
  */
 
 /*!
- * \file sparse_flash_attention_service_cube_mla.h
+ * \file sparse_flash_attention_vllm_service_cube_mla.h
  * \brief use 7 buffer for matmul l1, better pipeline
  */
-#ifndef SPARSE_FLASH_ATTENTION_SERVICE_CUBE_MLA_H
-#define SPARSE_FLASH_ATTENTION_SERVICE_CUBE_MLA_H
+#ifndef SPARSE_FLASH_ATTENTION_VLLM_SERVICE_CUBE_MLA_H
+#define SPARSE_FLASH_ATTENTION_VLLM_SERVICE_CUBE_MLA_H
 
 #include "kernel_operator.h"
 #include "kernel_operator_list_tensor_intf.h"
 #include "kernel_tiling/kernel_tiling.h"
 #include "lib/matmul_intf.h"
 #include "lib/matrix/matmul/tiling.h"
-#include "../sparse_flash_attention_common.h"
+#include "../sparse_flash_attention_vllm_common.h"
 
 struct PAShape {
     uint32_t blockSize;
@@ -1308,4 +1308,4 @@ __aicore__ inline void SFAMatmulService<SFAT>::ComputeMm2(const RunInfo &info, c
     qpL1BufIter += mL1Loops;
 }
 
-#endif // SPARSE_FLASH_ATTENTION_SERVICE_CUBE_MLA_H
+#endif // SPARSE_FLASH_ATTENTION_VLLM_SERVICE_CUBE_MLA_H

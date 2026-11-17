@@ -9,16 +9,16 @@
  */
 
  /*!
- * \file sparse_flash_attention.cpp
+ * \file sparse_flash_attention_vllm.cpp
  * \brief
  */
 
 #include "kernel_operator.h"
-#include "sparse_flash_attention_template_tiling_key.h"
+#include "sparse_flash_attention_vllm_template_tiling_key.h"
 #if (__CCE_AICORE__ == 310)
-#include "arch35/sparse_flash_attention_kernel_mla.h"
+#include "arch35/sparse_flash_attention_vllm_kernel_mla.h"
 #else
-#include "arch22/sparse_flash_attention_kernel_mla.h"
+#include "arch22/sparse_flash_attention_vllm_kernel_mla.h"
 #endif
 
 using namespace AscendC;
@@ -66,7 +66,7 @@ using namespace AscendC;
 
 template<int FLASH_DECODE, int PAGE_ATTENTION, int LAYOUT_T, int KV_LAYOUT_T, int TEMPLATE_MODE, int IS_SPLIT_G>
  __global__ __aicore__ void
-sparse_flash_attention(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *value,
+sparse_flash_attention_vllm(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *value,
                        __gm__ uint8_t *sparseIndices, __gm__ uint8_t *blocktable,
                        __gm__ uint8_t *actualSeqLengthsQuery, __gm__ uint8_t *actualSeqLengthsKV,
                        __gm__ uint8_t* queryRope, __gm__ uint8_t* keyRope,
@@ -81,21 +81,21 @@ sparse_flash_attention(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_
 #if (__CCE_AICORE__ == 310)
     if constexpr (ORIG_DTYPE_QUERY == DT_BF16 && ORIG_DTYPE_KEY == DT_BF16 &&
                   ORIG_DTYPE_ATTENTION_OUT == DT_BF16) {
-        SFA_OP_IMPL(BaseApi::SparseFlashAttentionKernelMla, SparseFlashAttentionTilingDataMla, bfloat16_t, bfloat16_t,
+        SFA_OP_IMPL(BaseApi::SparseFlashAttentionVllmKernelMla, SparseFlashAttentionVllmTilingDataMla, bfloat16_t, bfloat16_t,
             float, bfloat16_t, FLASH_DECODE, PAGE_ATTENTION, static_cast<SFA_LAYOUT>(LAYOUT_T),
             static_cast<SFA_LAYOUT>(KV_LAYOUT_T), static_cast<SFATemplateMode>(TEMPLATE_MODE), IS_SPLIT_G);
     } else {
-        SFA_OP_IMPL(BaseApi::SparseFlashAttentionKernelMla, SparseFlashAttentionTilingDataMla, half, half,
+        SFA_OP_IMPL(BaseApi::SparseFlashAttentionVllmKernelMla, SparseFlashAttentionVllmTilingDataMla, half, half,
             float, half, FLASH_DECODE, PAGE_ATTENTION, static_cast<SFA_LAYOUT>(LAYOUT_T),
             static_cast<SFA_LAYOUT>(KV_LAYOUT_T), static_cast<SFATemplateMode>(TEMPLATE_MODE), IS_SPLIT_G);
     }
 #else
     if constexpr (ORIG_DTYPE_QUERY == DT_FLOAT16 && ORIG_DTYPE_KEY == DT_FLOAT16 &&
                   ORIG_DTYPE_ATTENTION_OUT == DT_FLOAT16) {
-        SFA_OP_IMPL(SparseFlashAttentionMla, SparseFlashAttentionTilingDataMla, half, half, half,
+        SFA_OP_IMPL(SparseFlashAttentionVllmMla, SparseFlashAttentionVllmTilingDataMla, half, half, half,
             FLASH_DECODE, static_cast<SFA_LAYOUT>(LAYOUT_T), static_cast<SFA_LAYOUT>(KV_LAYOUT_T), TEMPLATE_MODE);
     } else { // bf16
-        SFA_OP_IMPL(SparseFlashAttentionMla, SparseFlashAttentionTilingDataMla, bfloat16_t, bfloat16_t, bfloat16_t,
+        SFA_OP_IMPL(SparseFlashAttentionVllmMla, SparseFlashAttentionVllmTilingDataMla, bfloat16_t, bfloat16_t, bfloat16_t,
             FLASH_DECODE, static_cast<SFA_LAYOUT>(LAYOUT_T), static_cast<SFA_LAYOUT>(KV_LAYOUT_T), TEMPLATE_MODE);
     }
 #endif

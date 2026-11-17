@@ -10,14 +10,14 @@
 add_op_to_compiled_list()
 
 if (BUILD_OPEN_PROJECT)
-    set(sparse_flash_attention_depends attention/common CACHE INTERNAL "Dependencies for sparse_flash_attention")
+    set(sparse_flash_attention_vllm_depends attention/common CACHE INTERNAL "Dependencies for sparse_flash_attention_vllm")
     target_sources(op_host_aclnnInner PRIVATE
-        sparse_flash_attention_def.cpp
+        sparse_flash_attention_vllm_def.cpp
     )
 endif()
 
 add_ops_compile_options(
-    OP_NAME SparseFlashAttention
+    OP_NAME SparseFlashAttentionVllm
     OPTIONS --cce-auto-sync=off
             -Wno-deprecated-declarations
             -mllvm -cce-vf-remove-membar=false
@@ -25,5 +25,5 @@ add_ops_compile_options(
 )
 
 if (NOT BUILD_OPS_RTY_KERNEL)
-    add_modules_sources(OPTYPE sparse_flash_attention ACLNNTYPE aclnn_inner)
+    add_modules_sources(OPTYPE sparse_flash_attention_vllm ACLNNTYPE aclnn_inner)
 endif()

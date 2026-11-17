@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file sparse_flash_attention_proto.cpp
+ * \file sparse_flash_attention_vllm_proto.cpp
  * \brief
  */
 
@@ -37,9 +37,9 @@ constexpr uint32_t OUTPUT_INDEX_0 = 0;
 constexpr uint32_t OUTPUT_INDEX_1 = 1;
 constexpr uint32_t OUTPUT_INDEX_2 = 2;
 
-ge::graphStatus InferShapeSparseFlashAttention(gert::InferShapeContext *context)
+ge::graphStatus InferShapeSparseFlashAttentionVllm(gert::InferShapeContext *context)
 {  
-    OP_CHECK_IF(context == nullptr, OP_LOGE("SparseFlashAttention", "InferShapeContext is nullptr"),
+    OP_CHECK_IF(context == nullptr, OP_LOGE("SparseFlashAttentionVllm", "InferShapeContext is nullptr"),
                return ge::GRAPH_FAILED);
     const gert::Shape *queryShape = context->GetInputShape(QUERY_INPUT_INDEX);
     OP_CHECK_NULL_WITH_CONTEXT(context, queryShape);
@@ -112,9 +112,9 @@ ge::graphStatus InferShapeSparseFlashAttention(gert::InferShapeContext *context)
     return GRAPH_SUCCESS;
 }
 
-ge::graphStatus InferDataTypeSparseFlashAttention(gert::InferDataTypeContext *context)
+ge::graphStatus InferDataTypeSparseFlashAttentionVllm(gert::InferDataTypeContext *context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE("SparseFlashAttention", "InferShapeContext is nullptr"),
+    OP_CHECK_IF(context == nullptr, OP_LOGE("SparseFlashAttentionVllm", "InferShapeContext is nullptr"),
                return ge::GRAPH_FAILED);
     const auto inputDataType = context->GetInputDataType(QUERY_INPUT_INDEX);
     context->SetOutputDataType(OUTPUT_INDEX_0, inputDataType);
@@ -123,8 +123,8 @@ ge::graphStatus InferDataTypeSparseFlashAttention(gert::InferDataTypeContext *co
     return ge::GRAPH_SUCCESS;
 }
 
-IMPL_OP_INFERSHAPE(SparseFlashAttention)
-    .InferShape(InferShapeSparseFlashAttention)
-    .InferDataType(InferDataTypeSparseFlashAttention);
+IMPL_OP_INFERSHAPE(SparseFlashAttentionVllm)
+    .InferShape(InferShapeSparseFlashAttentionVllm)
+    .InferDataType(InferDataTypeSparseFlashAttentionVllm);
 } // namespace ops
   
