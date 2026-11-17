@@ -32,9 +32,6 @@ from vllm_ascend.hisparse.pcp import hisparse_write_target, prepare_pcp_query_me
 
 # Bound the temporary D2D packing workspace independently of prefill length.
 _ATTENTION_CHUNK_ROWS = 32
-# Temporary cache pages match AscendSFABackend's supported kernel block size.
-# Host-pool blocks can have a different size.
-_SFA_CACHE_BLOCK_SIZE = 128
 
 
 def finish_hisparse_kv_update(cache, metadata) -> None:
@@ -236,9 +233,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             self.vllm_config.scheduler_config.max_num_batched_tokens,
             self.vllm_config.compilation_config.max_cudagraph_capture_size or 0,
         )
-        self._kv_staging_capacity = (
-            (max_rows + _SFA_CACHE_BLOCK_SIZE - 1) // _SFA_CACHE_BLOCK_SIZE * _SFA_CACHE_BLOCK_SIZE
-        )
+        self._kv_staging_capacity = (max_rows + 127) // 128 * 128
 
     def _fused_preprocess_type(self):
         # Reuse SFA's supported quantization/weight preparation. The HiSparse
@@ -286,7 +281,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
 
         def allocate():
             device = self.index_group.logical_topk_indices.device
-            shape = (self._kv_staging_capacity // _SFA_CACHE_BLOCK_SIZE, _SFA_CACHE_BLOCK_SIZE, 1)
+            shape = (self._kv_staging_capacity // 128, 128, 1)
             return (
                 torch.empty((*shape, self.kv_lora_rank), dtype=dtype, device=device),
                 torch.empty((*shape, self.qk_rope_head_dim), dtype=dtype, device=device),
@@ -307,7 +302,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             device = self.index_group.logical_topk_indices.device
             return (
                 torch.empty(
-                    (self._kv_staging_capacity // _SFA_CACHE_BLOCK_SIZE, _SFA_CACHE_BLOCK_SIZE, 1, C8_ROW_BYTES),
+                    (self._kv_staging_capacity // 128, 128, 1, C8_ROW_BYTES),
                     dtype=torch.float8_e4m3fn,
                     device=device,
                 ),

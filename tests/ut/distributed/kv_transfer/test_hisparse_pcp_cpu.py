@@ -53,7 +53,7 @@ def test_pcp_workspace_uses_supported_sfa_kernel_pages(monkeypatch):
     from vllm_ascend.attention import sfa_hisparse
     from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 
-    block_size = sfa_hisparse._SFA_CACHE_BLOCK_SIZE
+    block_size = 128
     assert AscendSFABackend.get_supported_kernel_block_sizes() == [block_size]
     impl = sfa_hisparse.AscendHiSparseImpl.__new__(sfa_hisparse.AscendHiSparseImpl)
     impl._kv_staging_capacity = 2 * block_size
