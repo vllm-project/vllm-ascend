@@ -629,7 +629,8 @@ def test_eagle_flag_propagates_to_all_merged_swa_groups():
         KVCacheGroupSpec(["L2"], swa, is_eagle_group=True),
     ]
     coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
-    assert coord.eagle_group_ids == {1, 2}
+    assert coord.eagle_group_ids == {2}
+    assert coord.eagle_reachable_group_ids == {1, 2}
 
     # Save side: both SWA groups must produce identical (eagle-shifted) masks.
     masks = coord.store_mask(128, num_prompt_tokens=130)

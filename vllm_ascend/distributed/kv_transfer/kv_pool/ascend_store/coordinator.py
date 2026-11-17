@@ -158,6 +158,10 @@ class AscendStoreCoordinator:
                 "scheduler_block_size must be a multiple of each group's effective block_size"
             )
 
+        self.eagle_group_ids = {i for i, group in enumerate(kv_cache_groups) if group.is_eagle_group}
+        if use_eagle and not self.eagle_group_ids:
+            self.eagle_group_ids = set(range(len(kv_cache_groups)))
+
         self._verify_and_split_kv_cache_groups()
         # Do not keep the coordinator alive through its cache while GC is frozen.
         self._cached_reachable_masks = lru_cache(maxsize=_REACHABLE_MASK_CACHE_SIZE)(
@@ -169,10 +173,6 @@ class AscendStoreCoordinator:
         return length // alignment * alignment
 
     def _verify_and_split_kv_cache_groups(self) -> None:
-        eagle_group_ids = {i for i, group in enumerate(self.kv_cache_groups) if group.is_eagle_group}
-        if self.use_eagle and not eagle_group_ids:
-            eagle_group_ids = set(range(len(self.kv_cache_groups)))
-
         attention_groups: list[tuple[KVCacheSpec, list[int], type[SingleTypeKVCacheManager]]] = []
         self.group_effective_specs: list[KVCacheSpec] = []
 
@@ -199,11 +199,11 @@ class AscendStoreCoordinator:
         self.eagle_attn_group_indices: set[int] = {
             index
             for index, (_, group_ids, _) in enumerate(self.attention_groups)
-            if any(group_id in eagle_group_ids for group_id in group_ids)
+            if any(group_id in self.eagle_group_ids for group_id in group_ids)
         }
         if self.use_eagle and not self.eagle_attn_group_indices:
             self.eagle_attn_group_indices = set(range(len(self.attention_groups)))
-        self.eagle_group_ids: set[int] = {
+        self.eagle_reachable_group_ids: set[int] = {
             group_id for index in self.eagle_attn_group_indices for group_id in self.attention_groups[index][1]
         }
         self.eagle_proof_margin_by_group = {
@@ -261,7 +261,7 @@ class AscendStoreCoordinator:
         # every possible checkpoint: a shorter request may have published a
         # boundary that is not the current request's replay/segment boundary.
         reachable_boundaries = (
-            replay_boundaries(num_prompt_tokens, self.lcm_block_size, use_eagle=bool(self.eagle_group_ids))
+            replay_boundaries(num_prompt_tokens, self.lcm_block_size, use_eagle=bool(self.eagle_reachable_group_ids))
             if num_prompt_tokens is not None
             else ()
         )
@@ -281,7 +281,7 @@ class AscendStoreCoordinator:
                 end_block=num_chunks,
                 alignment_tokens=self.lcm_block_size,
                 kv_cache_spec=spec,
-                use_eagle=group_id in self.eagle_group_ids,
+                use_eagle=group_id in self.eagle_reachable_group_ids,
                 retention_interval=retention_interval,
                 num_prompt_tokens=num_prompt_tokens,
                 reachable_boundaries=reachable_boundaries,
