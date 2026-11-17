@@ -860,6 +860,8 @@ def prefix_connector():
     result = MooncakePullConnector.__new__(MooncakePullConnector)
     result.connector_scheduler = MooncakePullConnectorScheduler.__new__(MooncakePullConnectorScheduler)
     result.connector_scheduler.need_truncate = True
+    result.connector_scheduler.kv_cache_config = SimpleNamespace(hash_block_size=128)
+    result.connector_scheduler.vllm_config = SimpleNamespace(num_hash_lookahead_tokens=0)
     result.connector_scheduler._heartbeat_thread = None
     return result
 

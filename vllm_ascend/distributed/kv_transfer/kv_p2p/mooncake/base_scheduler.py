@@ -528,23 +528,14 @@ class MooncakeBaseConnectorScheduler:
         request._all_token_ids.pop()
         request.num_prompt_tokens -= 1
         request.max_tokens = 1
-        # Preserve hashes whose complete dependency window still fits, using
-        # the resolved request-hash geometry rather than the physical KV page.
-        kv_cache_config = getattr(self, "kv_cache_config", None)
-        hash_block_size = getattr(kv_cache_config, "hash_block_size", None)
-        vllm_config = getattr(self, "vllm_config", None)
-        lookahead = getattr(vllm_config, "num_hash_lookahead_tokens", None)
         truncate_hashes = getattr(request, "truncate_block_hashes", None)
-        if (
-            callable(truncate_hashes)
-            and isinstance(hash_block_size, int)
-            and hash_block_size > 0
-            and isinstance(lookahead, int)
-            and lookahead >= 0
-        ):
-            truncate_hashes(hash_block_size, lookahead)
+        if callable(truncate_hashes):
+            # The engine resolves hash geometry before creating the connector.
+            hash_block_size = self.kv_cache_config.hash_block_size
+            assert hash_block_size is not None
+            truncate_hashes(hash_block_size, self.vllm_config.num_hash_lookahead_tokens)
         else:
-            # Older cores or unresolved geometry retain the safe full rebuild.
+            # Older vLLM versions do not provide incremental hash truncation.
             request.block_hashes.clear()
         request.update_block_hashes()
         params["_p_side_truncated"] = True

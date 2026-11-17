@@ -107,18 +107,6 @@ def test_incomplete_hash_list_only_fills_missing_suffix(lookahead):
     assert request.block_hashes == reference.block_hashes
 
 
-@pytest.mark.parametrize("geometry", [None, 0])
-def test_unresolved_geometry_uses_safe_full_rebuild(geometry):
-    counted = Mock(side_effect=sha256)
-    request = make_hashed_request(129, 2, 0, counted)
-    counted.reset_mock()
-    make_hash_scheduler(geometry, 0).on_new_request(request)
-    assert counted.call_count > 0
-    reference = make_hashed_request(129, 2, 0)
-    truncate_with_full_rebuild(reference)
-    assert request.block_hashes == reference.block_hashes
-
-
 def test_repeated_hook_is_idempotent():
     scheduler = make_hash_scheduler(2, 0)
     request = make_hashed_request(33, 2, 0)
@@ -195,15 +183,3 @@ def test_short_requests_are_unchanged(num_tokens):
     make_hash_scheduler(2, 0).on_new_request(request)
     assert before == (request._all_token_ids, request.block_hashes, request.max_tokens)
     assert "_p_side_truncated" not in request.kv_transfer_params
-
-
-@pytest.mark.parametrize("lookahead", [None, -1])
-def test_unresolved_lookahead_uses_safe_full_rebuild(lookahead):
-    counted = Mock(side_effect=sha256)
-    request = make_hashed_request(129, 2, 0, counted)
-    reference = make_hashed_request(129, 2, 0)
-    counted.reset_mock()
-    make_hash_scheduler(2, lookahead).on_new_request(request)
-    truncate_with_full_rebuild(reference)
-    assert counted.call_count > 0
-    assert request.block_hashes == reference.block_hashes
