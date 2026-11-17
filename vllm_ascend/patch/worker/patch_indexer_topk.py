@@ -29,10 +29,10 @@ falls back to vLLM's implementation -- the pre-patch behaviour -- while it is no
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import torch
-
 import vllm._custom_ops as vllm_custom_ops
 
 PREFILL_ENTRY = "top_k_per_row_prefill"
