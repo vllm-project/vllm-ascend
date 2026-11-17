@@ -169,6 +169,7 @@ def test_draft_loading_preserves_target_megamoe(monkeypatch, megamoe_target, met
     spec.vllm_config = draft_config
     if method == "dspark":
         spec.use_draft_logits = False
+        spec.draft_logits = None
         spec.enable_adaptive_verification = False
     if method == "mtp":
         spec.method = method
