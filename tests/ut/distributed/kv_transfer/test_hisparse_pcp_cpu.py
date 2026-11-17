@@ -155,7 +155,7 @@ def test_host_mirror_mapping_shared_across_groups_and_scheduling_steps(monkeypat
         assert draft.runtime.hot_block_table is manager._local_block_tables[2]
         for member in worker.cache_handles:
             assert member.mirror_slot_mapping.data_ptr() == cache.mirror_slot_mapping.data_ptr()
-            assert member.req_id_per_token is meta.hisparse_write_req_id_per_token
+            assert member.req_id_per_token is cache.req_id_per_token
             assert member.req_id_per_token.tolist() == expected
             assert member.num_actual_tokens == 6 and member.host_mirror_required
         HiSparseConnectorWorker._clear_forward_mirror_state(worker)
@@ -187,10 +187,47 @@ def test_capture_and_real_forward_keep_query_and_scatter_input_addresses():
     assert captured_states is meta.hisparse_request_state_indices
     assert captured_states.tolist() == [7, 9, -1, -1, -1, -1, -1, -1]
     assert meta.hisparse_num_valid_write_rows is None
-    assert meta.hisparse_write_req_id_per_token is meta.req_id_per_token
+    connector.prepare_host_mirror()
+    assert cache.req_id_per_token is meta.req_id_per_token
     assert cache.slot_mapping[:8].tolist() == [100, 101, 102, -1, -1, -1, -1, -1]
     assert connector._pending_load_kwargs["num_tokens"] == 8
     assert captured_slots.data_ptr() == cache.slot_mapping.data_ptr()
+
+
+def test_host_mapping_changes_from_gathered_to_replicated_then_no_forward():
+    connector, cache, meta, local, batch, manager = make_connector()
+    local.num_tokens_after_padding = 3
+    batch.query_start_loc = torch.tensor([0, 4, 7], dtype=torch.int32)
+    batch.is_prefilling_np[:] = True
+    manager._padded_gather_idx = torch.tensor([0, 3, 0, 1, 4, 0])
+    manager._gathered_kv_write_mask = torch.tensor([True, True, False, True, True, False])
+    meta.hisparse_num_write_tokens = 6
+    meta.hisparse_write_has_prefill = True
+    query_request_ids = meta.req_id_per_token
+    scheduler = NS(kv_connector_metadata=object(), has_sync_kv_loads=False)
+    worker = connector.kv_connector.connector_worker
+    missing_group = handle()
+    worker._group_leaders.append(("not_in_this_batch", missing_group))
+    missing_group.req_id_per_token = torch.tensor([42], dtype=torch.int32)
+
+    connector.pre_forward(scheduler, local, {"layer0": meta, "indexer": NS()})
+    connector.prepare_host_mirror()
+    assert cache.req_id_per_token.tolist() == [0, 0, -1, 0, 1, -1]
+    assert meta.req_id_per_token is query_request_ids
+    assert missing_group.req_id_per_token.tolist() == [42]
+
+    batch.is_prefilling_np[:] = False
+    meta.hisparse_num_write_tokens = 3
+    meta.hisparse_write_has_prefill = False
+    connector.pre_forward(scheduler, local, {"layer0": meta})
+    connector.prepare_host_mirror()
+    assert cache.req_id_per_token is query_request_ids
+    assert cache.num_actual_tokens == 3 and not cache.host_mirror_required
+
+    assert connector._build_load_kwargs(scheduler, None, None) == {}
+    cache.req_id_per_token = None
+    connector.prepare_host_mirror()
+    assert cache.req_id_per_token is None
 
 
 def test_pcp_builder_reuses_state_input_without_per_draft_buffers(monkeypatch):
@@ -241,9 +278,10 @@ def test_empty_query_rank_still_prepares_host_mirror(monkeypatch):
     connector, cache, meta, _, _, _ = make_connector()
     cache.num_actual_tokens = 0  # Other PCP ranks still produce gathered KV.
     meta.hisparse_num_write_tokens = 6
-    meta.hisparse_write_req_id_per_token = torch.tensor([0, -1, -1, 1, -1, -1], dtype=torch.int32)
+    write_request_ids = torch.tensor([0, -1, -1, 1, -1, -1], dtype=torch.int32)
     meta.hisparse_write_has_prefill = False
-    connector._pcp_attn_metadata = {"layer0": meta}
+    connector._pcp_group_metadata = [(cache, meta)]
+    connector._pcp_write_request_ids = write_request_ids
     cache.runtime.eager_host_mirror = True
     finish = Mock()
     monkeypatch.setattr(ActiveKVConnector, "finish_forward", finish)
@@ -251,7 +289,7 @@ def test_empty_query_rank_still_prepares_host_mirror(monkeypatch):
     wrapper.finish_forward()
     finish.assert_called_once()
     assert cache.num_actual_tokens == 6
-    assert cache.req_id_per_token is meta.hisparse_write_req_id_per_token
+    assert cache.req_id_per_token is write_request_ids
     assert cache.host_mirror_required
 
 
@@ -302,7 +340,6 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     meta.hisparse_for_capture = capture
     num_write_rows = meta.num_input_tokens * pcp_world_size
     meta.hisparse_num_write_tokens = num_write_rows
-    meta.hisparse_write_req_id_per_token = torch.zeros(num_write_rows, dtype=torch.int32)
     impl.hisparse_cache._prepare_for_batch(meta)
     impl.hisparse_cache.submit_layer_mirror = Mock()
     from vllm.config.compilation import CUDAGraphMode
