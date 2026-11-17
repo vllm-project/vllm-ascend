@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 from vllm.logger import logger
 
+from vllm_ascend import envs
 from vllm_ascend.dynamic_spec import (
     PHYSICAL_K_MAX_TP_SIZE,
     PHYSICAL_K_MIN_TUNED_BATCH_SIZE,
@@ -22,6 +23,7 @@ from vllm_ascend.dynamic_spec import (
     physical_k_runtime_enabled,
     resolve_physical_k,
 )
+from vllm_ascend.worker.v2.spec_decode.av_budget import configure_av_budget, select_av_budget
 
 _PROFILE_K: ContextVar[int | None] = ContextVar("ascend_profile_physical_k", default=None)
 _MIN_PREDICTED_DOWNSHIFT_GAIN = 0.03
@@ -122,6 +124,7 @@ def _extend_profile_batches(
 def configure_physical_k_profiling(manager: Any, vllm_config: Any):
     """Add physical-K samples and recommendations to an upstream AV manager."""
 
+    configure_av_budget(manager, envs.VLLM_ASCEND_AV_SCORE_TOLERANCE)
     dynamic = (getattr(vllm_config, "additional_config", None) or {}).get("dynamic_spec_config", {})
     params = resolve_physical_k(dynamic)
     if params is not None and not physical_k_runtime_enabled(vllm_config):
@@ -348,7 +351,11 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
         # curve. Price the budget it will actually execute, rather than an
         # independently optimized budget based on this candidate's draft cost.
         av_draft_cost = self.cost_tables[0][num_reqs]
-        budget = int(np.argmax(expected / (av_draft_cost + verify_costs)))
+        budget = select_av_budget(
+            expected,
+            expected / (av_draft_cost + verify_costs),
+            getattr(self, "_ascend_av_score_tolerance", 0.0),
+        )
         return float(expected[budget] / (draft_cost + verify_costs[budget]))
 
     def recommend(self, num_tokens_per_req, draft_tokens):

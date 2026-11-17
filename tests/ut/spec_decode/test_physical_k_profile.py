@@ -401,3 +401,21 @@ def test_full_k_native_budget_is_preserved_when_scoring_full_k():
     manager.get_num_tokens({"0": 8}, {"0": list(range(7))})
     assert manager._physical_k_recommendation == (1, 7)
     assert manager._batch_budget[2] == 7
+
+
+@pytest.mark.parametrize(("tolerance", "budget", "recommended_k"), [(0, 3, 4), (0.01, 4, 3)])
+def test_physical_recommendation_prices_toleranced_budget(monkeypatch, tolerance, budget, recommended_k):
+    monkeypatch.setenv("VLLM_ASCEND_AV_SCORE_TOLERANCE", str(tolerance))
+    manager = FakeManager(1)
+    manager.get_num_tokens = MethodType(AdaptiveVerificationManager.get_num_tokens, manager)
+    configure_physical_k_profiling(manager, config())
+    manager._stale_confidences = [SimpleNamespace(np=np.array([[0.8, 0.5, 0.5, 0.5]])) for _ in range(2)]
+    manager.cost_tables = (np.ones(2), np.array([0.0, 0.5, 0.7, 0.9, 1.0, 1.096]))
+    manager._physical_k_draft_costs = {3: {1: 0.945}, 4: {1: 1.0}}
+    seed_full_confidences(manager)
+
+    assert manager.get_num_tokens({"0": 5}, {"0": list(range(4))}) == budget + 1
+    assert manager._batch_budget[2] == budget
+    # The larger K4 budget crosses a cost boundary while K3 still sends three,
+    # taking its predicted gain just above the 3% downshift threshold.
+    assert manager._physical_k_recommendation == (1, recommended_k)

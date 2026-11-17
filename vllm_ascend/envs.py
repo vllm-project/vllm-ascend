@@ -86,6 +86,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Emit physical K scheduler decisions for diagnosis. Default: 0 (disabled).
     # Valid values: 0 or 1. This configuration is not sensitive.
     "VLLM_ASCEND_PHYSICAL_K_TRACE": lambda: _strict_binary_env("VLLM_ASCEND_PHYSICAL_K_TRACE"),
+    # Allow a larger AV budget within this relative loss in predicted throughput.
+    # Valid range: [0, 1). Default: 0 (native selection). This is not sensitive.
+    "VLLM_ASCEND_AV_SCORE_TOLERANCE": lambda: float(os.getenv("VLLM_ASCEND_AV_SCORE_TOLERANCE", "0")),
     # Override the Unified Buffer (UB) size in KB for Triton kernel tile sizing.
     # 0 (default): auto-detect from device properties, falling back to 192 KB
     # (safe for Ascend 910B/A3). Set to a positive value to override when
