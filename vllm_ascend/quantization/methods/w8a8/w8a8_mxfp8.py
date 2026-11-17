@@ -349,16 +349,19 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         orig_scale_shape = orig_shapes["weight_scale"]
 
         if getattr(layer, "dsa_wo_a_3d_layout", False) and layer.weight.data.ndim == 3:
-            groups, _, rank = layer.weight.data.shape
+            groups, hidden, rank = layer.weight.data.shape
+            weight_by_group = layer.weight.data.permute(1, 0, 2)
             layer.weight.data = (
-                layer.weight.data.transpose(1, 2).reshape(groups * rank, -1).transpose(0, 1).contiguous()
+                torch.empty_like(weight_by_group, memory_format=torch.contiguous_format)
+                .copy_(weight_by_group)
+                .view(hidden, groups * rank)
             )
-            scale = layer.weight_scale.data
+            scale_by_group = layer.weight_scale.data.permute(1, 0, 2, 3)
+            scale_k_dim = scale_by_group.shape[0]
             layer.weight_scale.data = (
-                scale.transpose(1, 2)
-                .reshape(scale.shape[0] * scale.shape[2], scale.shape[1], 2)
-                .transpose(0, 1)
-                .contiguous()
+                torch.empty_like(scale_by_group, memory_format=torch.contiguous_format)
+                .copy_(scale_by_group)
+                .view(scale_k_dim, groups * rank, 2)
             )
 
         if getattr(layer, "_mxfp8_gmm_nz_layout", False):

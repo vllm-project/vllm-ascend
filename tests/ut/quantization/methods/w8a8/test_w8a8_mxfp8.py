@@ -143,25 +143,39 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         mock_cast.assert_not_called()
 
     def test_dsa_wo_a_3d_layout_round_trip(self):
-        n_local_groups, o_lora_rank, hidden = 2, 4, 8
+        group_size = 32
+        for n_local_groups, o_lora_rank, hidden in [(1, 4, 64), (1, 128, 1024), (2, 4, 64), (4, 4, 64)]:
+            with self.subTest(n_local_groups=n_local_groups, o_lora_rank=o_lora_rank, hidden=hidden):
+                self._check_dsa_wo_a_3d_layout_round_trip(n_local_groups, o_lora_rank, hidden, group_size)
+
+    def _check_dsa_wo_a_3d_layout_round_trip(self, n_local_groups, o_lora_rank, hidden, group_size):
         output_size = n_local_groups * o_lora_rank
-        weight = torch.arange(output_size * hidden, dtype=torch.uint8).reshape(output_size, hidden)
-        weight = weight.to(torch.float8_e4m3fn)
-        scale = torch.arange(output_size * 4, dtype=torch.uint8).reshape(output_size, 4)
+        scale_k_dim = hidden // group_size
+
+        def make_checkpoint(offset):
+            weight = (torch.arange(output_size * hidden) + offset) % 256
+            weight = weight.to(torch.uint8).reshape(output_size, hidden).to(torch.float8_e4m3fn)
+            scale = (torch.arange(output_size * scale_k_dim) + offset) % 256
+            scale = scale.to(torch.uint8).reshape(output_size, scale_k_dim)
+            expected_weight = weight.reshape(n_local_groups, o_lora_rank, hidden).transpose(1, 2).contiguous()
+            expected_scale = (
+                scale.reshape(n_local_groups, o_lora_rank, scale_k_dim // 2, 2).transpose(1, 2).contiguous()
+            )
+            return weight, scale, expected_weight, expected_scale
+
+        weight, scale, expected_weight, expected_scale = make_checkpoint(0)
         layer = nn.Module()
         layer.weight = nn.Parameter(weight.clone(), requires_grad=False)
         layer.weight_scale = nn.Parameter(scale.clone(), requires_grad=False)
         layer.dsa_wo_a_3d_layout = True
         layer.skip_weight_nz_conversion = True
         layer.o_lora_rank = o_lora_rank
-        expected_weight = weight.reshape(n_local_groups, o_lora_rank, hidden).transpose(1, 2).contiguous()
-        expected_scale = scale.reshape(n_local_groups, o_lora_rank, 2, 2).transpose(1, 2).contiguous()
 
         with patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.maybe_trans_nz") as mock_nz:
             self.scheme.process_weights_after_loading(layer)
         mock_nz.assert_not_called()
         self.assertEqual(layer.weight.shape, (n_local_groups, hidden, o_lora_rank))
-        self.assertEqual(layer.weight_scale.shape, (n_local_groups, 2, o_lora_rank, 2))
+        self.assertEqual(layer.weight_scale.shape, (n_local_groups, scale_k_dim // 2, o_lora_rank, 2))
         self.assertTrue(layer.weight.data.is_contiguous())
         self.assertTrue(layer.weight_scale.data.is_contiguous())
         torch.testing.assert_close(layer.weight.float(), expected_weight.float(), rtol=0, atol=0)
@@ -169,17 +183,33 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
 
         weight_ptr = layer._mxfp8_weight_buf.data_ptr()
         scale_ptr = layer._mxfp8_scale_buf.data_ptr()
-        self.scheme.restore_weights_for_rl_loading(layer)
-        self.assertEqual(tuple(layer.weight.shape), tuple(weight.shape))
-        self.assertEqual(tuple(layer.weight_scale.shape), tuple(scale.shape))
-        torch.testing.assert_close(layer.weight.float(), weight.float(), rtol=0, atol=0)
-        torch.testing.assert_close(layer.weight_scale, scale)
+        for reload_step in range(1, 3):
+            self.scheme.restore_weights_for_rl_loading(layer)
+            self.assertEqual(tuple(layer.weight.shape), tuple(weight.shape))
+            self.assertEqual(tuple(layer.weight_scale.shape), tuple(scale.shape))
+            torch.testing.assert_close(layer.weight.float(), weight.float(), rtol=0, atol=0)
+            torch.testing.assert_close(layer.weight_scale, scale)
+            self.assertNotEqual(
+                layer.weight.data.untyped_storage().data_ptr(),
+                layer._mxfp8_weight_buf.untyped_storage().data_ptr(),
+            )
+            self.assertNotEqual(
+                layer.weight_scale.data.untyped_storage().data_ptr(),
+                layer._mxfp8_scale_buf.untyped_storage().data_ptr(),
+            )
 
-        self.scheme.process_weights_after_loading(layer)
-        self.assertEqual(layer._mxfp8_weight_buf.data_ptr(), weight_ptr)
-        self.assertEqual(layer._mxfp8_scale_buf.data_ptr(), scale_ptr)
-        torch.testing.assert_close(layer.weight.float(), expected_weight.float(), rtol=0, atol=0)
-        torch.testing.assert_close(layer.weight_scale, expected_scale)
+            # Simulate model.load_weights() writing a new checkpoint in place.
+            weight, scale, expected_weight, expected_scale = make_checkpoint(reload_step)
+            layer.weight.data.copy_(weight)
+            layer.weight_scale.data.copy_(scale)
+
+            self.scheme.process_weights_after_loading(layer)
+            self.assertEqual(layer._mxfp8_weight_buf.data_ptr(), weight_ptr)
+            self.assertEqual(layer._mxfp8_scale_buf.data_ptr(), scale_ptr)
+            self.assertEqual(layer.weight.data.data_ptr(), weight_ptr)
+            self.assertEqual(layer.weight_scale.data.data_ptr(), scale_ptr)
+            torch.testing.assert_close(layer.weight.float(), expected_weight.float(), rtol=0, atol=0)
+            torch.testing.assert_close(layer.weight_scale, expected_scale)
 
     @patch("vllm_ascend.utils._should_trans_nz", return_value=True)
     @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
