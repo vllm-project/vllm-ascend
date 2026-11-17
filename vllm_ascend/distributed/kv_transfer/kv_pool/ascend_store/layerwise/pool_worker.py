@@ -1802,10 +1802,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             else spec.layerwise_snapshot_block_index
         )
 
-    def _prepare_load_gvas(self, requests: list[ReqMeta]) -> None:
-        self._prepare_load_gvas_for_request(requests)
-
-    def _prepare_load_gvas_for_request(self, requests: list[ReqMeta]) -> bool | None:
+    def _prepare_load_gvas(self, requests: list[ReqMeta]) -> bool | None:
         if not self.use_layerwise_transfer:
             return None
 
@@ -1821,10 +1818,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 continue
             plans.append((request, *plan))
 
-        # Planning selects the keys, including private snapshots. The lease
-        # policy can batch public keys without changing those selections.
-        lease_loads = getattr(self, "_lease_step_load_gvas", self._lease_group_load_gvas)
-        for (request, groups, _), addresses in zip(plans, lease_loads(plans), strict=True):
+        for (request, groups, _), addresses in zip(plans, self._lease_step_load_gvas(plans), strict=True):
             if addresses is None:
                 self._fail_load_preparation(request)
                 failed = True
@@ -1848,18 +1842,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 request.partial_load_gva_per_group = partial_gvas
                 request.load_gva_block_offset = 0
         return False if failed else None
-
-    def _lease_group_load_gvas(self, plans: list[_LoadPlan]) -> Iterable[list[list[int]] | None]:
-        for _, groups, _ in plans:
-            addresses = []
-            for _, _, keys, has_partial in groups:
-                leases = self._lease_load_gvas(keys, {len(keys) - 1} if has_partial else None)
-                if leases is None or not all(leases):
-                    yield None
-                    break
-                addresses.append(leases)
-            else:
-                yield addresses
 
     def _fail_load_preparation(self, request: ReqMeta) -> None:
         logger.error("Memcache load preparation failed for %s", request.req_id)
