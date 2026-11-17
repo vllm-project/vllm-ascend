@@ -17,7 +17,6 @@
 import torch
 from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
-from vllm.logger import logger
 from vllm.model_executor.models.utils import get_draft_quant_config
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
