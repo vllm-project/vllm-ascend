@@ -55,6 +55,7 @@
 #include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
+#include "attention/hi_sparse_resolve_residency/hi_sparse_resolve_residency_torch_adpt.h"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
 #include "moe/grouped_matmul_situ_quant/grouped_matmul_situ_quant_torch_adpt.h"
@@ -210,7 +211,8 @@ void enqueue_device_print(std::unique_ptr<DevicePrintPayload> payload,
 void swap_blocks_batch(const torch::Tensor& src_ptrs,
                        const torch::Tensor& dst_ptrs,
                        const torch::Tensor& sizes,
-                       int64_t direction) {
+                       int64_t direction,
+                       bool prefer_small_async) {
 
     TORCH_CHECK(src_ptrs.device().is_cpu(), "src_ptrs must be on CPU");
     TORCH_CHECK(dst_ptrs.device().is_cpu(), "dst_ptrs must be on CPU");
@@ -229,8 +231,6 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
     const int64_t* dst_data = dst_ptrs.data_ptr<int64_t>();
     const int64_t* size_data = sizes.data_ptr<int64_t>();
 
-    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
-
     aclrtMemcpyKind memcpy_kind;
     switch (direction) {
         case 0:
@@ -248,10 +248,50 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
                         " (expected 0=H2D, 1=D2H, 2=D2D)");
     }
 
+    constexpr int64_t kSmallAsyncCopyLimit = 16;
+    if (prefer_small_async && n <= kSmallAsyncCopyLimit &&
+        memcpy_kind != ACL_MEMCPY_DEVICE_TO_DEVICE) {
+        // Copy scalar descriptors into PTA's queued command, before the
+        // caller's completion event. Core retains payload owners until that
+        // event completes; no tensor/Python owners move to the queue thread.
+        struct Copy {
+            void* dst;
+            const void* src;
+            size_t size;
+        };
+        std::vector<Copy> copies;
+        copies.reserve(n);
+        for (int64_t i = 0; i < n; ++i) {
+            copies.push_back({reinterpret_cast<void*>(dst_data[i]),
+                              reinterpret_cast<const void*>(src_data[i]),
+                              static_cast<size_t>(size_data[i])});
+        }
+        const auto task_stream = c10_npu::getCurrentNPUStream();
+        auto submit = [copies = std::move(copies), task_stream, memcpy_kind]() -> int {
+            // Only the ordered PTA consumer may bypass Host queue draining.
+            const aclrtStream stream = task_stream.stream(false);
+            for (size_t i = 0; i < copies.size(); ++i) {
+                const auto& copy = copies[i];
+                const aclError ret = aclrtMemcpyAsync(
+                    copy.dst, copy.size, copy.src, copy.size, memcpy_kind, stream);
+                // Throw on a partial submission; never retry these copies.
+                TORCH_CHECK(ret == ACL_SUCCESS,
+                            "Queued async memcpy failed at index ", i,
+                            " with error code ", ret);
+            }
+            return 0;
+        };
+        at_npu::native::OpCommand::RunOpApiV2("HiSparseSmallHostMirror", submit);
+        return;
+    }
+
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+
     // =========================================================================
     // path 1: aclrtMemcpyBatchAsync (CANN 8.5+)
     // =========================================================================
 #if defined(CANN_MEMCPY_BATCH_ASYNC)
+    // Full-layer mirrors and callers that did not opt in keep the batch API.
     if (memcpy_kind != ACL_MEMCPY_DEVICE_TO_DEVICE) {
         static_assert(sizeof(void*) == sizeof(int64_t),
                       "void* and int64_t must be the same size");
@@ -2811,6 +2851,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 // Pybind on other platform
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
+    ops.def("hisparse_resolve_residency(Tensor logical, Tensor hot_table, Tensor? requests, Tensor? states, Tensor? source, "
+            "Tensor? resident, Tensor? valid_rows, Tensor(a!) dgi, Tensor(a!) lru, Tensor(a!) output, "
+            "Tensor(a!) resolved, Tensor(a!) errors, Tensor(a!)? attention, Tensor(a!)? counts, "
+            "Tensor(a!)? swap_host, Tensor(a!)? swap_device, Tensor(a!)? swap_counts, Tensor(a!)? miss_mask, "
+            "Tensor(a!)? stats, int host_rows, int hot_block_size, int source_block_size, int resident_block_size, "
+            "int resident_null_block, int attention_block_stride, int union_rows, int attention_capacity=0) -> ()");
+    ops.impl("hisparse_resolve_residency", torch::kPrivateUse1, &vllm_ascend::hisparse::resolve_residency);
+    ops.def("hisparse_resolver_validate_scratch(int hot, int union_rows) -> ()",
+            [](int64_t hot, int64_t union_rows) {
+                vllm_ascend::hisparse::validate_resolver_scratch(hot, union_rows);
+            });
     ops.def("get_npu_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor?");
     ops.impl("get_npu_view_from_cpu_tensor", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::get_npu_view_from_cpu_tensor);
@@ -2924,7 +2975,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     // swap_blocks_batch takes CPU tensors (int64 pointer/size arrays), not NPU
     // tensors, so dispatch must be registered on the CPU backend. The function
     // internally submits async memcpy on the current NPU stream.
-    ops.def("swap_blocks_batch(Tensor x, Tensor y, Tensor z, int direction) -> ()");
+    ops.def("swap_blocks_batch(Tensor x, Tensor y, Tensor z, int direction, bool prefer_small_async=False) -> ()");
     ops.impl("swap_blocks_batch", torch::kCPU, &vllm_ascend::swap_blocks_batch);
 
 #ifdef VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD

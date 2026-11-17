@@ -429,9 +429,8 @@ def test_v2_draft_metadata_does_not_alias_history_between_steps():
 
 
 @pytest.mark.parametrize("rank", [0, 1])
-def test_v1_draft_builder_owns_history_and_padding_without_manager_override(rank):
+def test_draft_builder_owns_history_and_padding(rank):
     from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPMetadataBuilder
-    from vllm_ascend.worker.dcp_utils import DCPManager
 
     builder = object.__new__(AscendAttentionDCPMetadataBuilder)
     builder.use_pcp = False
@@ -464,35 +463,16 @@ def test_v1_draft_builder_owns_history_and_padding_without_manager_override(rank
         slot_mapping=torch.arange(16, dtype=torch.int32),
         attn_state=None,
         causal=True,
-        is_prefilling=torch.ones(16, dtype=torch.bool),
-        context_parallel_metadata=object(),
+        is_prefilling=torch.zeros(16, dtype=torch.bool),
     )
-    manager = object.__new__(DCPManager)
-    manager.dcp_world_size, manager.dcp_world_rank = 2, rank
-    manager.vllm_config = builder.vllm_config
-    manager._get_dcp_local_seq_lens = MagicMock(side_effect=AssertionError("builder owns GQA lengths"))
-    with (
-        patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=False),
-        patch.object(DCPManager, "_is_sfa_dcp_metadata_builder", return_value=False),
-        patch.object(torch.Tensor, "pin_memory", lambda tensor: tensor),
-    ):
-        manager.prepare_spec_decode_drafting_cp_metadata(common, object())
-        assert common.context_parallel_metadata is None
+    with patch.object(torch.Tensor, "pin_memory", lambda tensor: tensor):
         metadata = builder.build(0, common)
-        decode = metadata.decode
-        original_history = decode.cp_history_seq_len
-        original_total = decode.num_computed_tokens_of_dcp
-        manager.update_spec_decode_drafting_cp_metadata(
-            metadata, object(), torch.tensor([10, 11, 12, 13]), draft_index=99
-        )
+    decode = metadata.decode
     expected = [sum(position % 2 == rank for position in range(length)) for length in [11, 12, 13, 14]]
     assert metadata.num_decodes == 16
     assert decode.cp_history_seq_len == expected + [0] * 12
     assert decode.block_tables.shape == (16, 1)
     assert decode.num_computed_tokens_of_dcp.shape == (16, 2)
-    assert decode.cp_history_seq_len is original_history
-    assert decode.num_computed_tokens_of_dcp is original_total
-    manager._get_dcp_local_seq_lens.assert_not_called()
 
 
 def test_dcp_forward_preserves_graph_padding_query_span():

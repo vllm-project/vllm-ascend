@@ -4,7 +4,7 @@ import math
 
 import torch
 
-from vllm_ascend.attention.context_parallel.common_cp import _update_out_and_lse
+from tests.ut.attention.utils import _update_out_and_lse
 
 
 def _attention_partial(

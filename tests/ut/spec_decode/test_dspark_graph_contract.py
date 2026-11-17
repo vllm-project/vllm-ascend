@@ -220,8 +220,14 @@ def test_dispatcher_pads_uniform_draft_descriptors(query_count):
     manager.compilation_config = SimpleNamespace(
         cudagraph_capture_sizes=[16, 32, 48, 64, 80, 96, 112, 128],
         max_cudagraph_capture_size=128,
+        prefill_cudagraph_capture_token_sizes=[16, 32, 48, 64, 80, 96, 112, 128],
+        decode_cudagraph_capture_request_sizes=list(range(1, 17)),
+        max_decode_cudagraph_capture_tokens=None,
     )
-    manager.vllm_config = SimpleNamespace(speculative_config=None)
+    manager.vllm_config = SimpleNamespace(speculative_config=None, uniform_decode_query_len=query_count)
+    manager.decode_request_sizes = None
+    manager.decode_max_reqs = {query_count: 16}
+    manager._decode_descs = {}
     manager.max_num_reqs = 16
     manager.decode_query_len = query_count
     manager.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY

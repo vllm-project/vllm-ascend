@@ -24,7 +24,10 @@ from vllm.models.deepseek_v41.common.mm_preprocess import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
+from vllm_ascend.utils import vllm_version_is
+
 from .engram.shared_pool import rollback_shared_engram
+from .engram_lifecycle import close_engram_on_init_failure
 from .model import AscendDeepseekV41LLMForCausalLM
 from .vision import DeepseekV41Aligner, DeepseekV41ViT
 
@@ -56,6 +59,16 @@ class AscendDeepseekV41ForCausalLM(
     packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     language_model_cls = AscendDeepseekV41LLMForCausalLM
 
+    @property
+    def filter_unused_checkpoint_weights(self) -> bool:
+        return self.language_model.filter_unused_checkpoint_weights
+
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        return self.language_model.is_unused_checkpoint_weight(name)
+
+    def close_shared_engram(self) -> None:
+        self.language_model.close_shared_engram()
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         del i
@@ -63,6 +76,7 @@ class AscendDeepseekV41ForCausalLM(
             return IMAGE_PLACEHOLDER
         return None
 
+    @close_engram_on_init_failure(("language_model", "model", "_engram_remote_reader"))
     def __init__(self, *, vllm_config, prefix: str = "") -> None:
         super().__init__()
         model_config = vllm_config.model_config
@@ -333,6 +347,9 @@ class AscendDeepseekV41ForCausalLM(
         return loaded_vision | {f"language_model.{name}" for name in loaded_language}
 
     def process_weights_after_loading(self) -> None:
+        # #57678 already finalizes language_model in the children-first walk.
+        if not vllm_version_is("0.33.0"):
+            return
         hook = getattr(
             self.language_model,
             "process_weights_after_loading",
