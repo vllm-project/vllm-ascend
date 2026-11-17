@@ -11,10 +11,11 @@ from torch import nn
 from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
     AscendKimiK3DeltaAttention,
+    KimiKDAHostMetadataBackend,
+    KimiKDARecoverSSMMetadataBackend,
     _KDAFusedBFGLinear,
     _prepare_beta,
 )
-from vllm_ascend.ops.recurrent_pcp import KimiKDAHostMetadataBackend, KimiKDARecoverSSMMetadataBackend
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
 )

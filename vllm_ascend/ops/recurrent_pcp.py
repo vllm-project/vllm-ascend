@@ -9,13 +9,6 @@ from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ops.gdn_attn_builder import (
-    AscendGDNAttentionBackend,
-    AscendGDNAttentionMetadataBuilder,
-    AscendGDNHostMetadataBackend,
-    AscendGDNHostMetadataBuilder,
-)
-
 
 class PCPRecurrentMetadataBuilderMixin:
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
@@ -74,42 +67,6 @@ class PCPRecurrentMetadataBuilderMixin:
     def build(self, common_prefix_len, common_attn_metadata, *args, **kwargs):
         metadata = super().build(common_prefix_len, common_attn_metadata, *args, **kwargs)
         return self._attach_pcp(metadata, getattr(common_attn_metadata, "pcp_context", None))
-
-
-class KimiKDAHostMetadataBuilder(PCPRecurrentMetadataBuilderMixin, AscendGDNHostMetadataBuilder):
-    pass
-
-
-class AscendGDNPCPMetadataBuilder(PCPRecurrentMetadataBuilderMixin, AscendGDNAttentionMetadataBuilder):
-    pass
-
-
-class AscendGDNPCPBackend(AscendGDNAttentionBackend):
-    @classmethod
-    def supports_pcp(cls) -> bool:
-        return True
-
-    @staticmethod
-    def get_builder_cls() -> type[AscendGDNPCPMetadataBuilder]:
-        return AscendGDNPCPMetadataBuilder
-
-
-class KimiKDAHostMetadataBackend(AscendGDNHostMetadataBackend):
-    @staticmethod
-    def get_builder_cls():
-        return KimiKDAHostMetadataBuilder
-
-    @classmethod
-    def supports_pcp(cls) -> bool:
-        return True
-
-
-class KimiKDARecoverSSMMetadataBackend(KimiKDAHostMetadataBackend):
-    @staticmethod
-    def get_builder_cls():
-        from vllm_ascend.models.kimi_k3.recoverssm_metadata import AscendKimiKDARecoverSSMMetadataBuilder
-
-        return AscendKimiKDARecoverSSMMetadataBuilder
 
 
 def pcp_gather_tokens(hidden_states: torch.Tensor, pcp_size: int, layer_name: str) -> torch.Tensor:
