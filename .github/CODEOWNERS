@@ -226,6 +226,8 @@
 
 # tests
 /tests/ @wenjun91
+# RLHF e2e tests
+/tests/e2e/common/rlhf/ @wenjun91 @Ronald1995
 /tests/e2e/nightly @wenjun91
 /tests/e2e/nightly/single_node/ops @Foriv
 /tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_recoverssm_npu.py @drslark @chenxi-hh
@@ -267,9 +269,3 @@
 # SKIP(owner): /tests/deepseek_v41_utils.py
 # SKIP(owner): /tests/ut/
 # SKIP(owner): /tests/e2e/pull_request/
-
-# RLHF e2e tests
-/tests/e2e/common/rlhf/ @wenjun91 @Ronald1995
-/tests/e2e/pull_request/one_card/rlhf/ @wenjun91 @Ronald1995
-/tests/e2e/pull_request/two_card/rlhf/ @wenjun91 @Ronald1995
-/tests/e2e/pull_request/four_card/rlhf/ @wenjun91 @Ronald1995
