@@ -374,9 +374,7 @@ class AisbenchRunner:
         ]
         values = pd.to_numeric(checked_rows.iloc[:, -1], errors="coerce")
         failures = checked_rows.loc[~values.eq(0)]
-        assert failures.empty, (
-            f"Response anomaly verification failed in {acc_file}\n{failures.to_string(index=False)}"
-        )
+        assert failures.empty, f"Response anomaly verification failed in {acc_file}\n{failures.to_string(index=False)}"
 
         df = df.loc[~anomaly_rows]
         if "longbenchv2" in str(self.dataset_conf):
