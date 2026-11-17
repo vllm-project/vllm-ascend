@@ -633,6 +633,7 @@ def test_indexer_owner_reports_data_scale_and_replication(monkeypatch, c4, c8, r
         is_draft=True,
     )
     spec = backend._build_cache_spec(source, config)
+    assert backend.customize_spec(spec) is spec
     assert isinstance(spec, AscendSFAIndexerCacheSpec)
     assert spec.cache_role is source.cache_role and spec.is_draft
     assert spec.sfa_dcp_replicated_indexer_size == replicas

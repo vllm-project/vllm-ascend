@@ -85,7 +85,6 @@ from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
-    _is_glm_model,
     enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
@@ -169,9 +168,8 @@ class AscendMLAAttention(MLAAttention):
         values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
         model_type = getattr(vllm_config.model_config.hf_text_config, "model_type", None)
         storage_heads = self.num_heads
-        if _is_glm_model(vllm_config.model_config) or model_type == "kimi_linear":
-            # The planner counts physical latent slots. Query heads remain on
-            # the attention layer and its execution backend.
+        if model_type == "kimi_linear":
+            # Preserve the existing Kimi Linear cache head-count contract.
             storage_heads = spec.num_heads
         head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8 = self._get_kv_cache_format(spec)
 

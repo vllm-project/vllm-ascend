@@ -283,6 +283,9 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
         vllm_config = get_current_vllm_config()
         spec = self._build_cache_spec(self.k_cache.get_kv_cache_spec(vllm_config), vllm_config)
+        # TODO: Make upstream DeepseekV32IndexerCache a PluggableLayer so the
+        # Ascend cache layer can be selected directly and create its backend,
+        # instead of the backend replacing an already-created cache layer.
         self.k_cache = AscendSFAIndexerCache(self.k_cache, spec, backend_cls=type(self))
         vllm_indexer.k_cache = self.k_cache
 
@@ -370,10 +373,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         if enable_sfa_dcp_replicated_indexer(vllm_config) and not enable_sfa_dcp_sharded_indexer(vllm_config):
             indexer_replicas = vllm_config.parallel_config.decode_context_parallel_size
 
-        # Preserve upstream ownership/grouping metadata; override only the
-        # storage layout supplied by this backend.
-        spec_fields = {field.name: getattr(source, field.name) for field in fields(source) if field.init}
-        spec_fields.update(
+        return self.customize_spec(
+            source,
             head_size=head_size,
             dtype=dtype,
             cache_dtype_str=cache_dtype_str,
@@ -383,6 +384,15 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             cache_sparse_li_c8=self.enable_sparse_li_c8,
             sfa_dcp_replicated_indexer_size=indexer_replicas,
         )
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec, **overrides: Any) -> AscendSFAIndexerCacheSpec:
+        """Preserve source metadata and apply the owner's resolved storage format."""
+        # The collector calls this hook again without per-layer overrides.
+        if isinstance(spec, AscendSFAIndexerCacheSpec) and not overrides:
+            return spec
+        spec_fields = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
+        spec_fields.update(overrides)
         return AscendSFAIndexerCacheSpec(**spec_fields)
 
     def process_weights_after_loading(self) -> None:

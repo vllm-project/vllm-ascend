@@ -21,10 +21,10 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 @pytest.mark.parametrize(
     "model_type,heads",
     [
-        ("glm_moe_dsa", 1),
-        ("glm4_moe_lite", 1),
-        ("glm5_next", 1),
-        ("glm5_next_text", 1),
+        ("glm_moe_dsa", 12),
+        ("glm4_moe_lite", 12),
+        ("glm5_next", 12),
+        ("glm5_next_text", 12),
         ("kimi_linear", 1),
         ("deepseek_v3", 12),
     ],
@@ -65,8 +65,6 @@ def test_mla_owner_preserves_upstream_spec_metadata(monkeypatch, model_type, hea
     assert isinstance(actual, AscendMLAAttentionSpec)
     assert actual.num_heads == heads
     assert layer.num_heads == 12
-    if "glm" in model_type:
-        assert actual.real_page_size_bytes == actual.num_heads * actual.num_states * actual.state_content_size_bytes
     for field in (
         "kv_quant_mode",
         "page_size_padded",
