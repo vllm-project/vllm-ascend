@@ -135,19 +135,24 @@ def test_draft_config_remaps_modelslim_description(monkeypatch) -> None:
             }
         )
     )
-    target_config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            hf_text_config=SimpleNamespace(mtp_num_hidden_layers=1),
-        ),
-        speculative_config=None,
-    )
+    target_config = SimpleNamespace(speculative_config=None)
+
+    def make_draft_config(_config, start_layer_idx, num_mtp_layers):
+        assert start_layer_idx == 48
+        assert num_mtp_layers == 2
+        return draft_config
+
     monkeypatch.setattr(
         mtp,
         "_upstream_make_draft_vllm_config",
-        lambda _config, _start: draft_config,
+        make_draft_config,
     )
 
-    actual = mtp._make_draft_vllm_config(target_config, mtp_start_layer_idx=48)
+    actual = mtp._make_draft_vllm_config(
+        target_config,
+        mtp_start_layer_idx=48,
+        num_mtp_layers=2,
+    )
 
     assert actual is draft_config
     assert draft_config.quant_config.quant_description == {
@@ -157,10 +162,10 @@ def test_draft_config_remaps_modelslim_description(monkeypatch) -> None:
 
 def test_position_cache_is_aligned_before_upstream_draft_config(monkeypatch) -> None:
     vllm_config, draft_model_config, _ = _make_long_context_config()
-    draft_model_config.hf_text_config.mtp_num_hidden_layers = 1
     draft_config = SimpleNamespace(quant_config=None)
 
-    def make_draft_config(_config, _start):
+    def make_draft_config(_config, _start, num_mtp_layers):
+        assert num_mtp_layers == 1
         assert draft_model_config.hf_text_config.max_position_embeddings == 1010000
         assert draft_model_config.max_model_len == 1010000
         return draft_config
@@ -171,6 +176,10 @@ def test_position_cache_is_aligned_before_upstream_draft_config(monkeypatch) -> 
         make_draft_config,
     )
 
-    actual = mtp._make_draft_vllm_config(vllm_config, mtp_start_layer_idx=48)
+    actual = mtp._make_draft_vllm_config(
+        vllm_config,
+        mtp_start_layer_idx=48,
+        num_mtp_layers=1,
+    )
 
     assert actual is draft_config
