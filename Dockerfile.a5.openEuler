@@ -65,21 +65,21 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[a
 
 # Install vllm-ascend
 # Limit cargo parallelism to avoid OOM in constrained build environments.
-# Overridable via --build-arg CARGO_BUILD_JOBS=N (e.g. 32-CPU/128Gi buildkitd
-# runs up to 2 builds in parallel, so 16 jobs keep memory within ~64Gi per build).
+# CI passes --build-arg CARGO_BUILD_JOBS=32 / MAX_JOBS=32 (e.g. 32-CPU/128Gi
+# buildkitd runs up to 2 builds in parallel; gy006 run observed ~45GiB node peak
+# with 2 concurrent MAX_JOBS=32 builds, so 32 jobs is safe). Leaving the ARGs
+# unset keeps the default nproc parallelism for local builds.
 # Limit opc/c++ build parallelism to avoid OOM. Mirrors
 # .github/workflows/_build_csrc_cache.yaml.
 # TODO: auto-detect buildkitd CPU cores and set MAX_JOBS accordingly
 
 # Dependency versions used by the vllm-ascend build.
 ARG SOC_VERSION="ascend950dt_9582"
-ARG CARGO_BUILD_JOBS=16
-ARG MAX_JOBS=16
+ARG MAX_JOBS
+ARG CARGO_BUILD_JOBS
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
-    OMP_NUM_THREADS=1 \
-    CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS \
-    MAX_JOBS=$MAX_JOBS
+    OMP_NUM_THREADS=1
 COPY . /vllm-workspace/vllm-ascend/
 
 ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
