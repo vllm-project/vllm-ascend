@@ -1356,14 +1356,15 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     for block_idx in range(save_start_block, end_limit)
                     if group_store_mask is None or block_idx >= len(group_store_mask) or group_store_mask[block_idx]
                 ]
-                candidate_keys: list[str] = []
-                for block_idx in candidate_blocks:
-                    if block_idx >= len(group_block_hashes):
-                        key = self._make_layerwise_partial_key(request, group_id, block_idx, request.target_token_len)
-                    else:
-                        block_hash = block_hash_to_str(group_block_hashes[block_idx])
-                        key = self._make_layerwise_full_key(group_id, block_hash)
-                    candidate_keys.append(key)
+                candidate_keys = [
+                    self._make_layerwise_full_key(
+                        group_id,
+                        block_hash_to_str(group_block_hashes[block_idx]),
+                    )
+                    if block_idx < len(group_block_hashes)
+                    else self._make_layerwise_partial_key(request, group_id, block_idx, request.target_token_len)
+                    for block_idx in candidate_blocks
+                ]
                 partial_key = None
                 if (
                     self.layerwise_offload
@@ -1376,7 +1377,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 if self.layerwise_offload:
                     pages = self._snapshot_keys.setdefault(request.req_id, {}).setdefault(group_id, {})
                     pages.update(
-                        (index, (min((index + 1) * effective_block_size, request.target_token_len), key))
+                        (index, ((index + 1) * effective_block_size, key))
                         for index, key in zip(candidate_blocks, candidate_keys)
                     )
                     if partial_key is not None:
@@ -1790,12 +1791,13 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             block_hashes = request.block_hashes
             request.load_masks = self._compute_reachable_load_masks(request, cached_tokens)
 
-            # One entry per group: allocated block IDs, load indices, keys and trailing slot.
-            groups: list[tuple[np.ndarray | None, list[int], list[str], int | None]] = []
+            all_group_load_gvas: list[np.ndarray] = []
+            all_group_load_keys: list[str] = []
+            partial_load_gvas = [0] * self.num_kv_cache_groups
             restore_previous_step = self.layerwise_offload and request.load_spec.layerwise_previous_step
             for group_id in range(self.num_kv_cache_groups):
                 if group_id not in self.cacheable_group_ids:
-                    groups.append((None, [], [], None))
+                    all_group_load_gvas.append(np.zeros(0, dtype=np.int64))
                     continue
                 group_block_size = self.grouped_block_size[group_id]
                 effective_block_size = group_block_size
@@ -1810,7 +1812,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 if restore_previous_step:
                     snapshot = self._get_layerwise_load_snapshot(request, group_id, cached_tokens, group_block_hashes)
                     if snapshot is None:
-                        groups.append((None, [], [], None))
+                        all_group_load_gvas.append(np.zeros(0, dtype=np.int64))
                         continue
                     full_blocks, get_saved_key = snapshot
 
@@ -1822,7 +1824,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 if block_ids_by_group is None:
                     if get_saved_key is not None:
                         return False
-                    groups.append((None, [], [], None))
+                    all_group_load_gvas.append(np.zeros(0, dtype=np.int64))
                     continue
                 full_len = len(block_ids_by_group)
 
@@ -1841,7 +1843,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     partial_block_index = None
 
                 if load_start_block >= full_blocks and partial_block_index is None:
-                    groups.append((block_ids_by_group, [], [], None))
+                    all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
                     continue
 
                 group_load_mask = (
@@ -1881,16 +1883,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         block_hash = block_hash_to_str(group_block_hashes[block_idx])
                         key = self._make_layerwise_full_key(group_id, block_hash)
                     keys.append(key)
-                groups.append((block_ids_by_group, block_indices, keys, partial_block_index))
-
-            all_group_load_gvas: list[np.ndarray] = []
-            all_group_load_keys: list[str] = []
-            partial_load_gvas = [0] * self.num_kv_cache_groups
-            for group_id, (block_ids_by_group, block_indices, keys, partial_block_index) in enumerate(groups):
-                if block_ids_by_group is None:
-                    all_group_load_gvas.append(np.zeros(0, dtype=np.int64))
-                    continue
-                full_len = len(block_ids_by_group)
                 if not keys:
                     all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
                     continue
