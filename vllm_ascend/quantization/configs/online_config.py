@@ -50,13 +50,16 @@ from vllm.config.quantization import (
     QuantizationConfigArgs,
     resolve_quantization_config,
 )
-from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+    UnquantizedFusedMoEMethod,
+)
+from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 
-from vllm_ascend.quantization.methods.online.int8 import (
-    AscendOnlineInt8W8A8FusedMoEMethod,
-    AscendOnlineInt8W8A8LinearMethod,
+from vllm_ascend.quantization.methods.online.adapters import (
+    AscendOnlineInt8LinearMethod,
+    AscendOnlineInt8MoEMethod,
 )
 from vllm_ascend.quantization.online_methods import ASCEND_ONLINE_QUANT_METHODS
 
@@ -66,30 +69,30 @@ __all__ = [
     "build_ascend_online_quant_config",
 ]
 
-# Weight QuantKey -> Ascend scheme class. Only keys that have an Ascend
+# Weight QuantKey -> Ascend online method class. Only keys that have an Ascend
 # execution path are listed; everything else is rejected with a message that
 # explains which hardware would be needed.
-_ASCEND_ONLINE_LINEAR_SCHEMES: dict[Any, type] = {}
-_ASCEND_ONLINE_MOE_SCHEMES: dict[Any, type] = {}
+_ASCEND_ONLINE_LINEAR_METHODS: dict[Any, type] = {}
+_ASCEND_ONLINE_MOE_METHODS: dict[Any, type] = {}
 
 
-def _scheme_tables() -> tuple[dict[Any, type], dict[Any, type]]:
-    """Build the QuantKey -> scheme tables.
+def _method_tables() -> tuple[dict[Any, type], dict[Any, type]]:
+    """Build the QuantKey -> Ascend online method tables.
 
     Deferred because they need the QuantKey singletons from
     ``vllm.model_executor.layers.quantization.utils.quant_utils``, which drags
     in the kernel registry. The tables are built once and cached.
     """
-    if _ASCEND_ONLINE_LINEAR_SCHEMES and _ASCEND_ONLINE_MOE_SCHEMES:
-        return _ASCEND_ONLINE_LINEAR_SCHEMES, _ASCEND_ONLINE_MOE_SCHEMES
+    if _ASCEND_ONLINE_LINEAR_METHODS and _ASCEND_ONLINE_MOE_METHODS:
+        return _ASCEND_ONLINE_LINEAR_METHODS, _ASCEND_ONLINE_MOE_METHODS
 
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
         kInt8StaticChannelSym,
     )
 
-    _ASCEND_ONLINE_LINEAR_SCHEMES[kInt8StaticChannelSym] = AscendOnlineInt8W8A8LinearMethod
-    _ASCEND_ONLINE_MOE_SCHEMES[kInt8StaticChannelSym] = AscendOnlineInt8W8A8FusedMoEMethod
-    return _ASCEND_ONLINE_LINEAR_SCHEMES, _ASCEND_ONLINE_MOE_SCHEMES
+    _ASCEND_ONLINE_LINEAR_METHODS[kInt8StaticChannelSym] = AscendOnlineInt8LinearMethod
+    _ASCEND_ONLINE_MOE_METHODS[kInt8StaticChannelSym] = AscendOnlineInt8MoEMethod
+    return _ASCEND_ONLINE_LINEAR_METHODS, _ASCEND_ONLINE_MOE_METHODS
 
 
 def _is_moe_layer(layer: torch.nn.Module) -> bool:
@@ -159,10 +162,11 @@ class AscendOnlineQuantizationConfig(OnlineQuantizationConfig):
         return 0
 
     def _get_method_cls(self, spec, table, layer_cls: type) -> type | None:
-        """Resolve the Ascend scheme class for a layer's quantization spec.
+        """Resolve the Ascend online method class for a layer's quantization spec.
 
-        Overrides the upstream table lookup so that a spec resolves to an
-        Ascend scheme instead of a CUDA-only vLLM method class.
+        Overrides the upstream table lookup so that a spec resolves to an Ascend
+        method (a subclass of ``OnlineLinearBase`` / ``OnlineMoEMethodBase``,
+        which vLLM instantiates and drives) instead of a CUDA-only vLLM method.
 
         This is vLLM's only dispatch hook for online methods, so it is pinned by
         ``test_override_still_matches_the_upstream_signature``. The third
@@ -183,42 +187,35 @@ class AscendOnlineQuantizationConfig(OnlineQuantizationConfig):
                 "dynamically per token."
             )
 
-        linear_schemes, moe_schemes = _scheme_tables()
+        linear_methods, moe_methods = _method_tables()
         if _is_moe_layer_cls(layer_cls):
-            schemes = moe_schemes
+            methods = moe_methods
         elif issubclass(layer_cls, LinearBase):
-            schemes = linear_schemes
+            methods = linear_methods
         else:
             return None
 
-        scheme_cls = schemes.get(spec.weight)
-        if scheme_cls is None:
-            supported = sorted({str(key) for key in schemes})
+        method_cls = methods.get(spec.weight)
+        if method_cls is None:
+            supported = sorted({str(key) for key in methods})
             raise NotImplementedError(
                 f"Ascend online quantization does not support weight={spec.weight} for "
                 f"{layer_cls.__name__}. Supported on this build: {supported}. INT8 is the only "
                 "online recipe Ascend A2/A3 can execute; FP8 recipes need an FP8-capable device."
             )
-        return scheme_cls
+        return method_cls
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str):
-        """Return the Ascend quant method for ``layer``."""
-        from vllm_ascend.quantization.method_adapters import (
-            AscendOnlineFusedMoEMethod,
-            AscendOnlineLinearMethod,
-        )
+        """Return the Ascend online method for ``layer``, if one applies.
 
-        resolved = self.resolve_quant_method_cls(type(layer), prefix)
-        if resolved is None:
+        vLLM instantiates the class resolved above and records it in
+        `quantized_layers`, so only the unquantized fallback has to be Ascend's
+        own (it runs the NPU-specific post-load weight processing).
+        """
+        method = super().get_quant_method(layer, prefix)
+        if method is None or isinstance(method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)):
             return _unquantized_method(layer)
-
-        source, quant_key_str, target_pattern, _, scheme_cls = resolved
-        self.quantized_layers[prefix] = (source.value, quant_key_str, target_pattern)
-
-        scheme = scheme_cls()
-        if _is_moe_layer(layer):
-            return AscendOnlineFusedMoEMethod(scheme, layer.moe_config)
-        return AscendOnlineLinearMethod(scheme)
+        return method
 
 
 def build_ascend_online_quant_config(model_config) -> AscendOnlineQuantizationConfig:

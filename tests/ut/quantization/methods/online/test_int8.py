@@ -33,6 +33,7 @@ from vllm_ascend.quantization.configs.online_config import (
     AscendOnlineQuantizationConfig,
     build_ascend_online_quant_config,
 )
+from vllm_ascend.quantization.methods.online.adapters import AscendOnlineInt8LinearMethod
 from vllm_ascend.quantization.methods.online.int8 import (
     AscendOnlineInt8W8A8FusedMoEMethod,
     AscendOnlineInt8W8A8LinearMethod,
@@ -378,9 +379,9 @@ class TestReduceGroupSelection(TestBase):
 
 class TestAscendOnlineQuantizationConfig(TestBase):
     def test_supports_the_int8_weight_key(self):
-        scheme_cls = _int8_moe_config()._get_method_cls(QuantSpec(weight=kInt8StaticChannelSym), {}, LinearBase)
+        method_cls = _int8_moe_config()._get_method_cls(QuantSpec(weight=kInt8StaticChannelSym), {}, LinearBase)
 
-        self.assertIs(scheme_cls, AscendOnlineInt8W8A8LinearMethod)
+        self.assertIs(method_cls, AscendOnlineInt8LinearMethod)
 
     def test_rejects_unsupported_weight_keys_with_a_hardware_hint(self):
         with self.assertRaises(NotImplementedError) as raised:
@@ -402,7 +403,7 @@ class TestAscendOnlineQuantizationConfig(TestBase):
         for layer_arg in (LinearBase, _LinearLayer()):
             self.assertIs(
                 config._get_method_cls(QuantSpec(weight=kInt8StaticChannelSym), {}, layer_arg),
-                AscendOnlineInt8W8A8LinearMethod,
+                AscendOnlineInt8LinearMethod,
             )
 
     def test_override_still_matches_the_upstream_signature(self):
@@ -460,8 +461,14 @@ class TestAscendOnlineQuantizationConfig(TestBase):
 
         config = AscendOnlineQuantizationConfig(QuantizationConfigArgs(linear=QuantSpec(weight=kInt8StaticChannelSym)))
         layer = _LinearLayer("model.layers.0.mlp.down_proj")
+        vllm_config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16))
 
-        method = config.get_quant_method(layer, "model.layers.0.mlp.down_proj")
+        # OnlineLinearBase.__init__ records the model dtype.
+        with patch(
+            "vllm.model_executor.layers.quantization.online.fp8.get_current_vllm_config",
+            return_value=vllm_config,
+        ):
+            method = config.get_quant_method(layer, "model.layers.0.mlp.down_proj")
 
         self.assertIsInstance(method, AscendOnlineLinearMethod)
         self.assertIn("model.layers.0.mlp.down_proj", config.quantized_layers)
