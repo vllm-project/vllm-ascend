@@ -110,8 +110,8 @@ class LocalSharedVmmBuffer:
         self.lib = None
         library_error = None
         try:
-            path = Path(__file__).resolve().parents[3] / "libengram_host_vmm.so"
-            self.lib = _library(path)
+            library_path = Path(__file__).resolve().parents[3] / "libengram_host_vmm.so"
+            self.lib = _library(library_path)
         except Exception as exc:  # noqa: BLE001 - synchronize library failures
             library_error = f"{type(exc).__name__}: {exc}"
         allocation_shape = shape
