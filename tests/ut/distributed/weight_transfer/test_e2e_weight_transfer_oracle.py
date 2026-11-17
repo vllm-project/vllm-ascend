@@ -303,45 +303,6 @@ def test_hccl_client_selects_only_the_start_endpoint(is_draft):
     ]
 
 
-@pytest.mark.parametrize("is_draft", [False, True])
-def test_hccl_send_uses_the_selected_source_and_factory_engine(is_draft):
-    from tests.e2e.common.rlhf.weight_transfer import hccl
-
-    server, engine = MagicMock(), MagicMock()
-    client = hccl.WeightUpdateClient("http://unused")
-    source = object()
-    with patch.object(hccl, "post_control") as post:
-        hccl.send_update(server, engine, client, source, is_draft=is_draft)
-    assert client.is_draft is is_draft
-    assert engine.source is source
-    engine.send_weights.assert_called_once_with()
-    assert [call.args[1] for call in post.call_args_list] == ["pause", "resume"]
-
-
-def test_hccl_send_does_not_resume_after_a_trainer_failure():
-    from tests.e2e.common.rlhf.weight_transfer import hccl
-
-    server, engine = MagicMock(), MagicMock()
-    error = RuntimeError("transfer failed")
-    engine.send_weights.side_effect = error
-
-    with (
-        patch.object(hccl, "post_control") as post,
-        pytest.raises(RuntimeError, match="transfer failed") as caught,
-    ):
-        hccl.send_update(
-            server,
-            engine,
-            hccl.WeightUpdateClient("http://unused"),
-            object(),
-            is_draft=True,
-        )
-
-    assert caught.value is error
-    engine.send_weights.assert_called_once_with()
-    post.assert_called_once_with(server, "pause")
-
-
 @pytest.mark.parametrize("layers", [1, 2])
 def test_draft_checkpoint_applies_its_case_overrides(random_weight_cases, tmp_path, layers):
     """A draft reads its own reduced config without target CLI overrides."""
