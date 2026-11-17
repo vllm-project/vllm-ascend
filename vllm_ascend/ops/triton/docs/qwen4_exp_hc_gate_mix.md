@@ -110,6 +110,13 @@ Source: `vllm_ascend/ops/triton/qwen4_exp/hc.py` (public wrapper:
     - NPU adaptation for performance: processes eight rows per Triton program
       for large prefill batches, reducing the program count by up to 8x and
       amortizing scheduling overhead without changing FP32 accumulation order.
+    - Tile tuning: at 1024 rows, the shared `8 x 512` tile measured `80.00 us`
+      on A2, within 1.45% of the best measured `4 x 512` variant (`78.86 us`),
+      and `14.63 us` on A5, within 0.41% of the best measured `32 x 128`
+      variant (`14.57 us`). A shared tile avoids per-device tuning. `512`
+      divides the production `group_dim=2560` exactly, while the `8 x 512`
+      FP32 accumulator occupies 16 KiB before stream loads and keeps the
+      production column mask disabled.
     - Modified for specific vLLM-Ascend logic: hardware capability gating
       enables the row-block path on A2, A3, and A5, while preserving the
       one-row kernel elsewhere.
@@ -125,6 +132,11 @@ Source: `vllm_ascend/ops/triton/qwen4_exp/hc.py` (public wrapper:
   `qwen4_exp_ascend_hc_gate_mix`.
 
 ## Test Cases
+
+The reference implementation is `_reference_gate_mix` in the nightly test:
+it evaluates the same grouping, sigmoid, multiply, and mean operations in
+PyTorch FP32 before casting to BF16. The legacy Triton kernel is a separate
+bitwise-parity oracle.
 
 The single-operator NPU suite is located under the nightly single-card Triton
 directory:
