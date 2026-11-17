@@ -1,4 +1,0 @@
-pr: 21634
-entries:
-  - category: performance
-    text: Reduced Qwen4Exp decode overhead by preparing GBSA, LightningIndexerV2, and QSA rotary metadata once in MRV2.
