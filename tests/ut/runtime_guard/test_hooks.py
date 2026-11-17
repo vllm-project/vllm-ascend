@@ -291,6 +291,9 @@ def test_resolve_sampling_input_batch_prefers_pcp_sampling_global():
     )
     assert _resolve_sampling_input_batch(runner, local) is global_batch
     assert _resolve_sampling_input_batch(SimpleNamespace(pcp_manager=None), local) is local
+    from unittest.mock import MagicMock
+
+    assert _resolve_sampling_input_batch(SimpleNamespace(pcp_manager=MagicMock()), local) is local
 
 
 def test_sample_tokens_guardless_keeps_bare_path():

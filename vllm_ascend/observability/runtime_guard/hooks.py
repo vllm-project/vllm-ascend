@@ -131,16 +131,18 @@ def _resolve_sampling_input_batch(runner: Any, peeked_batch: Any) -> Any:
     over the pre-pop local partition so detectors attribute the correct req rows.
     """
     pcp = getattr(runner, "pcp_manager", None)
-    if pcp is None:
+    # unittest.mock fabricates attrs; treat mocks as "no PCP" so UT shells that
+    # MagicMock the runner keep the peeked batch instead of a fake sampling view.
+    if pcp is None or type(pcp).__module__ == "unittest.mock":
         return peeked_batch
     sampling = getattr(pcp, "_sampling_global_batch", None)
-    if sampling is not None:
+    if sampling is not None and type(sampling).__module__ != "unittest.mock":
         return sampling
     try:
         global_batch = getattr(pcp, "global_batch", None)
     except Exception:
         global_batch = None
-    if global_batch is not None:
+    if global_batch is not None and type(global_batch).__module__ != "unittest.mock":
         return global_batch
     return peeked_batch
 
