@@ -95,6 +95,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,
             HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
             HardwareCapability.DEVICE_LENGTH_FLASH_ATTN,
+            HardwareCapability.FLASH_ATTN_NPU_3,
             HardwareCapability.CLUSTER_CPU_TOPOLOGY,
             HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
             HardwareCapability.DSV4_COMPRESSED_CACHE,
