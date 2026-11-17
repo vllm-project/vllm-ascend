@@ -10,5 +10,9 @@ entries:
     model: deepseek-v4.1
   - category: bugfix
     text: >-
+      Preserved immediate PD push readiness for local HBM prefix hits while
+      waiting for per-layer readiness for prefixes loaded from external KV storage.
+  - category: bugfix
+    text: >-
       Restored MooncakeConnectorV2 layerwise push selection and full source
       block allocation tracking when combined with KV pooling.

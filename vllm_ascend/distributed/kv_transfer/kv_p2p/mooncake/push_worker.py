@@ -260,7 +260,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
 
     def _register_composite_layer_aliases(self) -> None:
         """Map model-ready boundaries to this worker's registered cache owners."""
-        self._uses_composite_kv_ready_events = False
         self._composite_kv_aliases: set[str] = set()
         self._declared_layer_indices: set[tuple[str, int]] = set()
         context = self.vllm_config.compilation_config.static_forward_context
@@ -272,7 +271,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             self._layer_index_by_name[alias] = layer_index
             self._composite_kv_aliases.add(alias)
             self._declared_layer_indices.add(layer_index)
-            self._uses_composite_kv_ready_events = True
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
         if self.kv_transfer_config.is_kv_producer:
@@ -282,14 +280,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 state.metadata = request
                 if not state.destinations:
                     self._prepare_destinations(state, request)
-                # Composite models may be restoring an adopted external hit.
-                # Only a model-ready event (after the existing load gate), or
-                # the post-finish_forward fallback, can publish those bytes.
-                if (
-                    not self._uses_composite_kv_ready_events
-                    and not state.available_layers
-                    and request.num_computed_tokens
-                ):
+                # External hits still need loading on P; HBM hits are ready now.
+                if not request.num_external_tokens and not state.available_layers and request.num_computed_tokens:
                     event = torch.npu.Event()
                     event.record()
                     state.available_layers = {
