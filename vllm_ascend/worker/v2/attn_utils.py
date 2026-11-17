@@ -154,8 +154,6 @@ def ring_state_update_skipped() -> bool:
     return _SKIP_RING_STATE_UPDATE.get()
 
 
-
-
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
     from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
@@ -1592,7 +1590,7 @@ def allocate_kv_cache_main(
         raise NotImplementedError("Extensible KV cache allocation is not supported on Ascend.")
     vllm_config = get_current_vllm_config()
     model_type = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None)
-    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text", "kimi_linear"):
+    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text", "kimi_linear", "qwen3_5_text"):
         return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     shared_layers = {

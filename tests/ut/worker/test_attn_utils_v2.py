@@ -1869,6 +1869,141 @@ def test_v2_fused_offload_prepares_request_ownership_and_restores_tails(monkeypa
     manager.restore_copy_sfa_tails.assert_called_once_with(metadata)
 
 
+@pytest.mark.parametrize("layout", ["NHD", "HND", "LBHNC"])
+@pytest.mark.parametrize("splits", [1, 7, 16])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("padding", [0, 64])
+def test_gqa_runtime_views_match_legacy_storage(monkeypatch, layout, splits, dtype, padding):
+    monkeypatch.setattr("vllm_ascend.attention.attention_v1.envs_vllm.VLLM_KV_CACHE_LAYOUT", layout)
+    num_blocks, tokens, heads, dim = 2, 128, 2, 4
+    slot_bytes = 2 * tokens * heads * dim * dtype.itemsize + padding
+    spec = FullAttentionSpec(
+        block_size=tokens * splits,
+        num_kv_heads=heads,
+        head_size=dim,
+        dtype=dtype,
+        page_size_padded=slot_bytes * splits,
+    )
+    # A nonzero storage offset catches accidental loss of the pool placement.
+    backing = torch.full((num_blocks * spec.page_size_bytes + 128,), -7, dtype=torch.int8)
+    raw = backing[64:-64]
+    groups = [AttentionGroup(AscendAttentionBackend, ["gqa"], spec, 0)]
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[_make_kv_cache_tensor(raw.numel(), ["gqa"], spec.page_size_bytes)],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=["gqa"], kv_cache_spec=spec)],
+    )
+    key, value = attn_utils.create_kv_cache_runtime_views(config, {"gqa": raw}, groups, [tokens], {}, layout)["gqa"]
+    legacy = attn_utils._reshape_combined_attention_kv_cache(
+        raw,
+        AscendAttentionBackend.get_kv_cache_shape(num_blocks * splits, tokens, heads, dim),
+        dtype,
+        spec.page_size_bytes,
+        splits,
+    )
+    for view, old_view in zip((key, value), legacy):
+        assert view.shape == old_view.shape
+        assert view.stride() == old_view.stride()
+        assert view.storage_offset() == old_view.storage_offset()
+        assert view.untyped_storage().data_ptr() == backing.untyped_storage().data_ptr()
+    # Distinct coordinates exercise the page-internal HND/NHD ordering.
+    expected = torch.arange(key.numel(), dtype=torch.float32).reshape(key.shape).to(dtype)
+    key.copy_(expected)
+    value.copy_(-expected)
+    torch.testing.assert_close(legacy[0], expected)
+    torch.testing.assert_close(legacy[1], -expected)
+    slots = raw.view(num_blocks * splits, slot_bytes)
+    if padding:
+        assert torch.all(slots[:, slot_bytes - padding :] == -7)
+    assert torch.all(backing[:64] == -7)
+    assert torch.all(backing[-64:] == -7)
+
+
+@pytest.mark.parametrize("kernel_block_size", [0, -1, 127, 1024])
+def test_gqa_runtime_views_reject_invalid_kernel_block_size(kernel_block_size):
+    spec = FullAttentionSpec(block_size=896, num_kv_heads=2, head_size=256, dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="must divide"):
+        AscendAttentionBackend.get_runtime_shapes(spec, 2, None, kernel_block_size)
+
+
+def test_gqa_runtime_views_reject_unaligned_slots():
+    spec = FullAttentionSpec(
+        block_size=896,
+        num_kv_heads=2,
+        head_size=256,
+        dtype=torch.bfloat16,
+        page_size_padded=1835008 + 2,
+    )
+    with pytest.raises(ValueError, match="dtype-aligned"):
+        AscendAttentionBackend.get_runtime_shapes(spec, 2, None, 128)
+
+
+@pytest.mark.parametrize("layout", ["NHD", "HND", "LBHNC"])
+def test_qwen35_unified_gqa_mamba_cache(monkeypatch, layout):
+    monkeypatch.setattr("vllm_ascend.attention.attention_v1.envs_vllm.VLLM_KV_CACHE_LAYOUT", layout)
+    spec = FullAttentionSpec(block_size=896, num_kv_heads=2, head_size=256, dtype=torch.bfloat16)
+    mamba = MambaSpec(
+        block_size=896,
+        shapes=((3, 5120), (24, 128, 128)),
+        dtypes=(torch.bfloat16, torch.float32),
+        page_size_padded=spec.page_size_bytes,
+    )
+    num_blocks = 2
+    region_bytes = num_blocks * spec.page_size_bytes
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=2 * region_bytes,
+                layers=[name],
+                layer_stride=region_bytes,
+                block_stride=spec.page_size_bytes,
+                offset=index * region_bytes,
+            )
+            for index, name in enumerate(("gqa", "gdn"))
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=[name], kv_cache_spec=cache_spec)
+            for name, cache_spec in (("gqa", spec), ("gdn", mamba))
+        ],
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3_5_text")),
+        kv_transfer_config=None,
+    )
+    # MambaSpec bypasses the backend runtime-shape interface; its state ranks
+    # and mixed dtypes come directly from the spec.
+    layers = {name: SimpleNamespace(get_attn_backend=lambda: AscendAttentionBackend) for name in ("gqa", "gdn")}
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: layers)
+    monkeypatch.setattr(attn_utils, "_allocate_kv_cache", MagicMock(side_effect=AssertionError("legacy allocation")))
+    caches = attn_utils.allocate_kv_cache_main(config, torch.device("cpu"), layout, [128, 896])
+    key, value = caches["gqa"]
+    conv, state = caches["gdn"]
+    expected_shape = AscendAttentionBackend.get_kv_cache_shape(14, 128, 2, 256)[1:]
+    assert key.shape == value.shape == expected_shape
+    assert key.stride(0) * key.element_size() == 262144
+    assert (value.storage_offset() - key.storage_offset()) * key.element_size() == 131072
+    assert conv.shape == (2, 3, 5120) and conv.dtype == torch.bfloat16
+    assert state.shape == (2, 24, 128, 128) and state.dtype == torch.float32
+    assert conv.stride(0) * conv.element_size() == spec.page_size_bytes
+    assert state.stride(0) * state.element_size() == spec.page_size_bytes
+    assert conv.storage_offset() * conv.element_size() == region_bytes
+    assert state.storage_offset() * state.element_size() == region_bytes + 30720
+    assert len({view.untyped_storage().data_ptr() for view in (key, value, conv, state)}) == 1
+    key.fill_(1)
+    value.fill_(2)
+    conv.fill_(3)
+    state.fill_(4)
+    for view, expected in ((key, 1), (value, 2), (conv, 3), (state, 4)):
+        assert torch.all(view == expected)
+    raw = torch.empty(0, dtype=torch.int8).set_(key.untyped_storage())
+    state_payload_bytes = 30720 + 24 * 128 * 128 * 4
+    for block in range(num_blocks):
+        start = region_bytes + block * spec.page_size_bytes
+        assert torch.all(raw[start + state_payload_bytes : start + spec.page_size_bytes] == 0)
+
+
 @pytest.mark.parametrize("splits", [1, 9, 16])
 def test_combined_attention_kernel_blocks_match_physical_rows(splits):
     shape = (2, 3 * splits, 128, 2, 256)
@@ -2403,9 +2538,9 @@ def test_build_attn_metadata_propagates_prefill_and_pcp_context(for_cudagraph_ca
 
 @pytest.mark.parametrize("packed", [False, True], ids=["mla", "sfa-c8"])
 def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
+    from tests.ut.kvpp_utils import assert_attention_cache_views, make_attention_cache_case, make_cache_config
     from vllm.v1.worker.gpu import model_runner as upstream_model_runner
 
-    from tests.ut.kvpp_utils import assert_attention_cache_views, make_attention_cache_case, make_cache_config
     from vllm_ascend.core import kv_cache_placement
     from vllm_ascend.patch.worker import patch_attn_utils
     from vllm_ascend.worker import kvpp_cache

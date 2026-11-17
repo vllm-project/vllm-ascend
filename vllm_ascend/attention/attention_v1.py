@@ -39,7 +39,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     register_backend,
 )
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec, KVQuantMode
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -49,6 +49,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    KVCacheRuntimeShapes,
     _select_seq_lens,
     is_dcp_enabled,
     needs_layer_aware_fia_graph_replay,
@@ -121,6 +122,55 @@ class AscendAttentionBackend(AttentionBackend):
         if envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND"):
             return (2, num_blocks, num_kv_heads, block_size, head_size)
         return (2, num_blocks, block_size, num_kv_heads, head_size)
+
+    @classmethod
+    def get_runtime_shapes(
+        cls,
+        spec: AttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapes:
+        """Describe separate dense K/V components in byte shapes [B,H,N,C]."""
+        itemsize = spec.dtype.itemsize
+        widths = (spec.head_size, spec.head_size_v)
+        if (
+            spec.kv_quant_mode != KVQuantMode.NONE
+            or spec.tokens_per_state != 1
+            or spec.num_heads != spec.num_kv_heads
+            or spec.state_content_size_bytes != sum(widths) * itemsize
+        ):
+            raise NotImplementedError("GQA runtime views require an unpacked, unquantized K/V cache spec.")
+        block_size = spec.block_size if kernel_block_size is None else kernel_block_size
+        if block_size <= 0 or spec.block_size <= 0 or spec.block_size % block_size:
+            raise ValueError("GQA kernel block size must divide the manager block size.")
+        kernel_blocks_per_manager = spec.block_size // block_size
+        if spec.page_size_bytes % (kernel_blocks_per_manager * itemsize):
+            raise ValueError("GQA physical pages must split into dtype-aligned kernel slots.")
+        slot_bytes = spec.page_size_bytes // kernel_blocks_per_manager
+        if block_size * spec.num_kv_heads * sum(widths) * itemsize > slot_bytes:
+            raise ValueError("GQA kernel slot is smaller than its K/V components.")
+        prefix = (num_blocks * kernel_blocks_per_manager, spec.num_kv_heads, block_size)
+        return tuple((*prefix, width * itemsize) for width in widths)
+
+    @staticmethod
+    def get_runtime_dtypes(spec: AttentionSpec) -> tuple[torch.dtype, torch.dtype]:
+        return spec.dtype, spec.dtype
+
+    @staticmethod
+    def format_runtime_views(spec: AttentionSpec, components: list[torch.Tensor]) -> tuple[torch.Tensor, ...]:
+        if envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND"):
+            # Reinterpret the page bytes as dense HND, preserving K/V offsets
+            # and the physical kernel-slot stride. A permute would retain NHD
+            # storage order and would not match the existing Ascend cache ABI.
+            return tuple(
+                component.as_strided(
+                    size=(component.shape[0], component.shape[2], component.shape[1], component.shape[3]),
+                    stride=(component.stride(0), component.shape[1] * component.shape[3], component.shape[3], 1),
+                )
+                for component in components
+            )
+        return tuple(components)
 
     @staticmethod
     def swap_blocks(
