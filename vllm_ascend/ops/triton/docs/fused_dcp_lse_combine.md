@@ -28,9 +28,9 @@
 ## Constraints
 
 - `recv` must be contiguous on NPU. Its packed dimension must equal `D + 1` for FP32 or `D + 4` for BF16/FP16. `local_output` and `local_lse` must be supplied together and match the post-scatter output shape.
-- `return_lse=True` requires an FP32 receive buffer. The batched path requires `return_lse=False`; all other valid combinations use the scalar kernel.
-- Batching requires BF16, `scatter_dim=1`, `D <= 512`, at least `4 * get_vectorcore_num()` output rows, and unit feature stride when `local_output` is present. Rank count has no hardware-specific upper bound.
-- `BLOCK_D = next_power_of_2(D)` and `BLOCK_ROWS = 8`. Both local and received-only modes stream ranks. Unrolling is bounded by the live-element budget; multibuffering is disabled. This is an inference operator without a backward pass.
+- `return_lse=True` requires an FP32 receive buffer. Both vector paths require `return_lse=False`; other valid combinations use the scalar kernel.
+- The original eight-row batching requires BF16, `scatter_dim=1`, `D <= 512`, at least `4 * get_vectorcore_num()` output rows, and unit feature stride when `local_output` is present. The A3 row-weighted implementation below removes the row-count threshold. Rank count has no hardware-specific upper bound.
+- `BLOCK_D = next_power_of_2(D)`. The original batched kernel also uses `BLOCK_ROWS = 8`. Both local and received-only modes stream ranks. Unrolling is bounded by the live-element budget; multibuffering is disabled. This is an inference operator without a backward pass.
 
 ## Origin and Differences
 
@@ -46,4 +46,56 @@ The single-card nightly test compares the result against an independent FP32 sof
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py
 pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dcp_a2a.py
+```
+
+## Row-weighted implementation
+
+With the A3 hardware policy `prefer_row_weighted_dcp_combine`, the public
+`fused_dcp_lse_combine` wrapper selects the same row-weighted kernel for BF16
+head-scatter inputs with `D <= 512`, unit local feature stride and no returned
+LSE. There is no lower rank-count, head-dimension or row-count threshold, and
+head-major local tensors use their actual token/head strides. The existing
+batched/scalar implementations cover other hardware policies and the broader
+dtype, scatter-axis, feature-width and returned-LSE modes.
+
+Each program receives a balanced contiguous row interval. For one row, the kernel
+decodes the received LSE fields once and places the optional local LSE in the same
+small rank vector. It computes one maximum, exponent vector and denominator,
+then streams each rank's output into one FP32 feature accumulator. The optional
+local output uses its already-computed vector weight. Invalid contributions are
+masked before multiplication; all-invalid rows produce zeros. The caller's
+inputs are unchanged and the allocated output is fully written.
+
+### Specialization and warmup
+
+`DCP_SIZE`, `BLOCK_D` and `HAS_LOCAL` determine rank-vector shape, feature lanes
+and the optional contribution, so they remain compile-time parameters. The
+rank vector is `next_power_of_2(DCP_SIZE + HAS_LOCAL)`. `BLOCK_ROWS` and
+`RANK_UNROLL` are absent from this row-wise kernel because it does not use them.
+The launcher supplies them only to the original batched kernel.
+
+Sizes and strides remain runtime scalars, subject to ordinary Triton integer
+specialization classes; pointer dtype/alignment and compiler options can also
+create variants. Tensor contents and the grid alone do not create variants.
+The existing DCP warmup uses the same production launcher and now includes
+`_fused_dcp_lse_combine_row_weights` in its wrapper inventory. Unit tests check
+both hardware-policy states and small-row/narrow-D/head-major launches. Serving
+compilation counts remain unmeasured.
+
+### Row-weighted validation
+
+`test_dcp_combine_row_weights.py` compares public output with independently
+encoded inputs and CPU FP64 weighted reduction. It includes trace-derived logical
+shapes `(144,12,512,8)`, `(152,12,512,8)` and `(114,8,512,8)` as well as smaller
+worlds, D384, non-power-of-two worlds, invalid/extreme LSE and strided local data.
+The test requires at least 99% of BF16 elements to satisfy
+`abs_error <= 2e-5 + 0.004 * abs(reference)`, with maximum absolute error at most
+0.02 and every output finite. Invalid-LSE cases are handled explicitly. These are
+reconstructed inputs, not model payload replay. A5, distributed HCCL and
+model-level validation remain outstanding.
+
+```bash
+pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_combine_row_weights.py
+pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py
+pytest -q tests/ut/model_executor/warmup/test_kernel_warmup.py
 ```

@@ -16,7 +16,7 @@ from tests.ut.model_executor.warmup.helpers import (
     make_registry,
 )
 from vllm_ascend.ops.triton import rms_norm
-from vllm_ascend.ops.triton.dcp import dcp_warmup
+from vllm_ascend.ops.triton.dcp import dcp_a2a, dcp_a2a_batched, dcp_warmup
 from vllm_ascend.ops.triton.dcp.dcp_jit import DcpJitKernel
 
 # The package __init__ re-exports the function of the same name, so resolve
@@ -211,6 +211,29 @@ def _dcp_warmup_keys(registry):
     }
 
 
+@pytest.mark.parametrize("prefer_row_weights", [False, True])
+def test_row_weighted_combine_is_registered_by_production_warmup(prefer_row_weights):
+    with patch.object(
+        dcp_a2a,
+        "get_current_hardware_profile",
+        return_value=SimpleNamespace(prefer_row_weighted_dcp_combine=prefer_row_weights),
+    ):
+        registry = _register_dcp_warmup(
+            dtype=torch.bfloat16,
+            local_heads=12,
+            head_dim=512,
+            scatter_size=8,
+            pcp_size=1,
+            max_tokens=33,
+            from_stats=False,
+            mla=True,
+        )
+    kernels = {owner.kernel for owner in registry._registrations}
+    assert (dcp_a2a_batched._fused_dcp_lse_combine_row_weights in kernels) == prefer_row_weights
+    assert (dcp_a2a_batched._fused_dcp_lse_combine_batched_kernel in kernels) == (not prefer_row_weights)
+    assert (dcp_a2a._fused_dcp_lse_combine_kernel in kernels) == (not prefer_row_weights)
+
+
 @pytest.mark.parametrize(
     "dtype,local_heads,head_dim,scatter_size,pcp_size,from_stats,mla,max_tokens",
     [
@@ -259,7 +282,8 @@ def test_finite_warmup_covers_every_token_count(
     assert dict(exhaustive) == registered
 
 
-def test_registration_is_scoped_deduplicated_and_allocates_nothing():
+@pytest.mark.parametrize("prefer_row_weights", [False, True])
+def test_registration_is_scoped_deduplicated_and_allocates_nothing(prefer_row_weights):
     kwargs = dict(
         dtype=torch.bfloat16,
         local_heads=8,
@@ -272,6 +296,11 @@ def test_registration_is_scoped_deduplicated_and_allocates_nothing():
     )
     registry = make_registry()
     with (
+        patch.object(
+            dcp_a2a,
+            "get_current_hardware_profile",
+            return_value=SimpleNamespace(prefer_row_weighted_dcp_combine=prefer_row_weights),
+        ),
         patch.object(dcp_warmup, "init_device_properties_triton"),
         patch.object(dcp_warmup, "get_vectorcore_num", return_value=24),
         patch.object(torch, "empty", side_effect=AssertionError("warmup must not allocate payloads")),
@@ -282,7 +311,16 @@ def test_registration_is_scoped_deduplicated_and_allocates_nothing():
         with registry.activate():
             dcp_warmup.register_dcp_warmup(**kwargs)
             dcp_warmup.register_dcp_warmup(**kwargs)
-    assert len(registry) == 8
+    # General row weighting replaces both scalar and batched combine variants.
+    expected = {owner.kernel for owner in dcp_warmup._DCP_KERNELS}
+    if prefer_row_weights:
+        expected -= {
+            dcp_a2a._fused_dcp_lse_combine_kernel,
+            dcp_a2a._fused_dcp_lse_combine_batched_kernel,
+        }
+    else:
+        expected.remove(dcp_a2a._fused_dcp_lse_combine_row_weights)
+    assert {owner.kernel for owner in registry._registrations} == expected
     assert all(len(registrations) == 1 for registrations in registry._registrations.values())
     for original, keys in _dcp_warmup_keys(registry).items():
         kernel = MagicMock()

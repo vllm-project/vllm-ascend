@@ -17,6 +17,7 @@ from vllm_ascend.ops.triton.dcp.dcp_a2a import (
 )
 from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
     _fused_dcp_lse_combine_batched_kernel,
+    _fused_dcp_lse_combine_row_weights,
     _pack_dcp_output_lse_batched_kernel,
 )
 from vllm_ascend.ops.triton.dcp.dcp_jit import DcpJitKernel
@@ -38,6 +39,7 @@ _DCP_KERNELS = (
     DcpJitKernel(_pack_dcp_output_lse_batched_kernel),
     DcpJitKernel(_fused_dcp_lse_combine_kernel),
     DcpJitKernel(_fused_dcp_lse_combine_batched_kernel),
+    DcpJitKernel(_fused_dcp_lse_combine_row_weights),
     DcpJitKernel(_pack_t1_peer),
     DcpJitKernel(_pack_token_peer, ("tokens",)),
     DcpJitKernel(_pack_token_peer_tiled, ("tokens",)),
