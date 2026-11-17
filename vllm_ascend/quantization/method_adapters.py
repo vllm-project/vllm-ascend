@@ -26,6 +26,7 @@ from vllm.model_executor.parameter import BlockQuantScaleParameter, PerTensorSca
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.distributed.parallel_state import get_mlp_tp_group, get_otp_group
+from vllm_ascend.quantization.reload import process_quant_weights
 from vllm_ascend.utils import mlp_tp_enable, oproj_tp_enable
 
 from .methods import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, is_mx_quant_type
@@ -196,7 +197,7 @@ class AscendLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
-            self.quant_method.process_weights_after_loading(layer)
+            process_quant_weights(self.quant_method, layer)
 
     def get_computed_params(self) -> set[str]:
         """Return parameter name patterns that are computed, not loaded.
@@ -345,7 +346,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
-            self.quant_method.process_weights_after_loading(layer)
+            process_quant_weights(self.quant_method, layer)
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module):
         pass

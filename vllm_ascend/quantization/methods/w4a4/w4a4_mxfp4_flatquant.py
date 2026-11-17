@@ -22,6 +22,9 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import RowParallelLinear
+from vllm.model_executor.utils import replace_parameter
+
+from vllm_ascend.quantization.reload import get_flatquant_clip_ratio
 
 from vllm_ascend.device.hardware_profile import WeightFormat
 
@@ -177,6 +180,7 @@ class AscendW4A4MXFP4FlatQuantDynamicLinearMethod(AscendLinearScheme):
         return output
 
     def process_weights_after_loading(self, layer):
+        clip_ratio = get_flatquant_clip_ratio(layer)
         if isinstance(layer, RowParallelLinear):
             """
             Process weights after loading with TP diagonal block extraction. 
@@ -195,7 +199,7 @@ class AscendW4A4MXFP4FlatQuantDynamicLinearMethod(AscendLinearScheme):
         layer.weight.data = layer.weight.data.transpose(0, 1)
         layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
 
-        layer.left_trans = torch.nn.Parameter(layer.left_trans.data.t().contiguous())
-        layer.right_trans = torch.nn.Parameter(layer.right_trans.data)
-        layer.clip_ratio = torch.nn.Parameter(layer.clip_ratio.data.to(torch.float32))
-        layer.aclnn_clip_ratio = layer.clip_ratio.item()
+        replace_parameter(layer, "left_trans", layer.left_trans.data.t().contiguous())
+        replace_parameter(layer, "right_trans", layer.right_trans.data)
+        replace_parameter(layer, "clip_ratio", layer.clip_ratio.data.to(torch.float32))
+        layer.aclnn_clip_ratio = clip_ratio

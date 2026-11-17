@@ -22,6 +22,7 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.utils import retire_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
@@ -35,6 +36,7 @@ from vllm_ascend.ops.fused_moe.routed_experts import (
     EplbExpertTensorList,
 )
 from vllm_ascend.quantization.nz import NzCastSpec, fp4_packed_nz, fp4_semantic_nz
+from vllm_ascend.quantization.reload import refill_expert_list
 from vllm_ascend.utils import FP8_METHOD, dispose_tensor
 
 from ..base import (
@@ -334,7 +336,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             # reports, so the two cannot drift apart.
             w13_cast_spec = self._w13_cast_spec(layer)
 
-            layer.w13_weight_list = []
+            w13_weight_list = []
             for weight in layer.w13_weight.data.unbind(dim=0):
                 # aclnnInplaceCopy does not support DT_FLOAT4_E2M1. Clone the
                 # packed bytes while the tensor is still uint8, then attach
@@ -343,18 +345,25 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 if is_situ:
                     expert_weight = expert_weight.view(torch.float4_e2m1fn_x2)
 
-                layer.w13_weight_list.append(w13_cast_spec.cast(expert_weight))
-            layer.w2_weight_list = [
-                fp4_packed_nz().cast(weight.clone()) for weight in layer.w2_weight.data.unbind(dim=0)
-            ]
+                w13_weight_list.append(w13_cast_spec.cast(expert_weight))
+            refill_expert_list(layer, "w13_weight_list", w13_weight_list)
+            refill_expert_list(
+                layer,
+                "w2_weight_list",
+                [fp4_packed_nz().cast(weight.clone()) for weight in layer.w2_weight.data.unbind(dim=0)],
+            )
             # GMM-SiTU consumes contiguous N-major expert lists. Ordinary GMM
             # gets zero-copy transposed views from _get_mlp_weights.
-            layer.w13_weight_scale_list = [scale.clone() for scale in layer.w13_weight_scale.data.unbind(dim=0)]
-            layer.w2_weight_scale_list = [scale.clone() for scale in layer.w2_weight_scale.data.unbind(dim=0)]
-            del layer.w13_weight
-            del layer.w2_weight
-            del layer.w13_weight_scale
-            del layer.w2_weight_scale
+            refill_expert_list(
+                layer, "w13_weight_scale_list", [scale.clone() for scale in layer.w13_weight_scale.data.unbind(dim=0)]
+            )
+            refill_expert_list(
+                layer, "w2_weight_scale_list", [scale.clone() for scale in layer.w2_weight_scale.data.unbind(dim=0)]
+            )
+            retire_parameter(layer, "w13_weight")
+            retire_parameter(layer, "w2_weight")
+            retire_parameter(layer, "w13_weight_scale")
+            retire_parameter(layer, "w2_weight_scale")
             torch.npu.empty_cache()
 
         else:

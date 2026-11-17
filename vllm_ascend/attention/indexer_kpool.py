@@ -40,6 +40,7 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.quantization.reload import refill_derived_buffer
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
 
@@ -856,11 +857,27 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         return 2 if self.enable_sparse_li_c8 else 1
 
     def process_weights_after_loading(self) -> None:
-        self._key_weight = self.wk_weights_proj.weight[: self.head_dim].detach().contiguous()
-        self._gate_weight = self.index_kpool_compress_gate.detach().to(self._key_weight.dtype).contiguous()
-        self._head_weight_f32 = self.wk_weights_proj.weight[self.head_dim :].detach().float().contiguous()
-        self._norm_weight_f32 = self.k_norm.weight.detach().float() if self.k_norm.weight is not None else None
-        self._norm_bias_f32 = self.k_norm.bias.detach().float() if self.k_norm.bias is not None else None
+        # These non-persistent derived buffers must own their storage: slices
+        # and float()/contiguous() can otherwise alias checkpoint parameters.
+        refill_derived_buffer(
+            self, "_key_weight", self.wk_weights_proj.weight[: self.head_dim].detach().clone().contiguous()
+        )
+        refill_derived_buffer(
+            self,
+            "_gate_weight",
+            self.index_kpool_compress_gate.detach().to(self._key_weight.dtype).clone().contiguous(),
+        )
+        refill_derived_buffer(
+            self, "_head_weight_f32", self.wk_weights_proj.weight[self.head_dim :].detach().float().clone().contiguous()
+        )
+        refill_derived_buffer(
+            self,
+            "_norm_weight_f32",
+            self.k_norm.weight.detach().float().clone() if self.k_norm.weight is not None else None,
+        )
+        refill_derived_buffer(
+            self, "_norm_bias_f32", self.k_norm.bias.detach().float().clone() if self.k_norm.bias is not None else None
+        )
 
     @staticmethod
     def _bound_caches(layer: Any) -> tuple[torch.Tensor, ...]:

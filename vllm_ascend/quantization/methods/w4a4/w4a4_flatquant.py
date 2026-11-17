@@ -21,6 +21,9 @@ from typing import Any
 import torch
 import torch_npu
 from vllm.logger import logger
+from vllm.model_executor.utils import replace_parameter, retire_parameter
+
+from vllm_ascend.quantization.reload import get_flatquant_clip_ratio
 
 from ..base import AscendLinearScheme, PreparedLinearInput
 from ..registry import register_scheme
@@ -198,13 +201,14 @@ class AscendW4A4FlatQuantDynamicLinearMethod(AscendLinearScheme):
         return output
 
     def process_weights_after_loading(self, layer):
+        clip_ratio = get_flatquant_clip_ratio(layer)
         # NOTE: Currently, w4a4 can't support weight nz
         weight_packed = pack_int4_weights(layer.weight.data)
-        layer.register_parameter("weight_packed", torch.nn.Parameter(weight_packed, requires_grad=False))
-        del layer.weight
-        layer.weight_scale.data = layer.weight_scale.data.to(torch.float32)
-        layer.weight_offset.data = layer.weight_offset.data.to(torch.float32)
-        layer.left_trans = torch.nn.Parameter(layer.left_trans.data.t().contiguous())
-        layer.right_trans = torch.nn.Parameter(layer.right_trans.data)
-        layer.clip_ratio = torch.nn.Parameter(layer.clip_ratio.data.to(torch.float32))
-        layer.aclnn_clip_ratio = layer.clip_ratio.item()
+        replace_parameter(layer, "weight_packed", weight_packed)
+        retire_parameter(layer, "weight")
+        replace_parameter(layer, "weight_scale", layer.weight_scale.data.to(torch.float32))
+        replace_parameter(layer, "weight_offset", layer.weight_offset.data.to(torch.float32))
+        replace_parameter(layer, "left_trans", layer.left_trans.data.t().contiguous())
+        replace_parameter(layer, "right_trans", layer.right_trans.data)
+        replace_parameter(layer, "clip_ratio", layer.clip_ratio.data.to(torch.float32))
+        layer.aclnn_clip_ratio = clip_ratio

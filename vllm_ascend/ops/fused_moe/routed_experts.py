@@ -27,7 +27,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoERouter, RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import replace_parameter, retire_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
@@ -50,7 +50,8 @@ from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
 from vllm_ascend.quantization.nz import NzCastSpec
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
+from vllm_ascend.quantization.reload import refill_expert_list, refill_nz_weight
+from vllm_ascend.utils import maybe_trans_nz
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -123,8 +124,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if enable_fused_mc2:
             use_megamoe = use_cann_megamoe(get_current_vllm_config())
             if not use_megamoe:
-                layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-                layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
+                refill_nz_weight(layer, "w13_weight")
+                refill_nz_weight(layer, "w2_weight")
             if use_megamoe or self.dynamic_eplb:
                 if use_megamoe and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
                     logger.warning_once(
@@ -135,10 +136,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                     layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
                     layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
                 else:
-                    layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
-                    layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-                    del layer.w13_weight
-                    del layer.w2_weight
+                    for name in ("w13_weight", "w2_weight"):
+                        weights = list(getattr(layer, name).data.unbind(dim=0))
+                        refill_expert_list(layer, f"{name}_list", [weight.clone() for weight in weights])
+                    retire_parameter(layer, "w13_weight")
+                    retire_parameter(layer, "w2_weight")
                     torch.npu.empty_cache()
         else:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)

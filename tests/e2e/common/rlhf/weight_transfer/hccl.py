@@ -40,7 +40,7 @@ TRAINER_DEVICE_INDEX = INFERENCE_DEVICE_INDEX + 1
 GPU_MEMORY_UTILIZATION = 0.75
 
 
-def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
+def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool, *, reload_mode: str):
     if INFERENCE_DEVICE_INDEX < 0 or torch.npu.device_count() <= TRAINER_DEVICE_INDEX:
         pytest.skip("HCCL weight transfer e2e test requires at least 2 NPUs.")
 
@@ -48,6 +48,8 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
     source = make_weight_source(case, torch.device("npu", TRAINER_DEVICE_INDEX))
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
+        "VLLM_RELOAD_MODE": reload_mode,
+        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "ASCEND_RT_VISIBLE_DEVICES": server_visible_devices(INFERENCE_DEVICE_INDEX, INFERENCE_WORLD_SIZE),
     }
 

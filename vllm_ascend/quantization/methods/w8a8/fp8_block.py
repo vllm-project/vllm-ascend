@@ -44,7 +44,7 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import logger
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import replace_parameter, retire_parameter
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.device.hardware_profile import WeightFormat, get_current_hardware_profile
@@ -271,7 +271,7 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
             self.block_k,
             self.model_dtype,
         )
-        del layer.weight_scale_inv
+        retire_parameter(layer, "weight_scale_inv")
 
         if _is_absorbed_by_attention(layer):
             # The attention backend splits this layer and disposes of it, so
@@ -279,7 +279,7 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
             # the matmul nor the weight switch may describe this layer as MXFP8;
             # and since each layer owns its own scheme instance, this stays local.
             self.use_mxfp8 = False
-            layer.weight = torch.nn.Parameter(maybe_trans_nz(resolved), requires_grad=False)
+            replace_parameter(layer, "weight", maybe_trans_nz(resolved))
             return
 
         self.use_mxfp8 = _supports_mx_regroup(resolved.shape[1], self.mxfp8_method.group_size)
@@ -292,7 +292,7 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
                 self.mxfp8_method.group_size,
                 self.model_dtype,
             )
-            layer.weight = torch.nn.Parameter(maybe_trans_nz(resolved), requires_grad=False)
+            replace_parameter(layer, "weight", maybe_trans_nz(resolved))
             return
 
         quantized, mx_scale = _mx_quantize(resolved, self.mxfp8_method.dynamic_mx_quant_scale_alg)
@@ -301,8 +301,8 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
         # while the MXFP8 method unpacks [out, in // 32]. view() keeps the
         # bytes; reshape() restores the layout the method expects.
         mx_scale = mx_scale.view(torch.uint8).reshape(resolved.shape[0], -1)
-        layer.weight = torch.nn.Parameter(quantized, requires_grad=False)
-        layer.weight_scale = torch.nn.Parameter(mx_scale, requires_grad=False)
+        replace_parameter(layer, "weight", quantized)
+        replace_parameter(layer, "weight_scale", mx_scale)
         self.mxfp8_method.process_weights_after_loading(layer)
 
     def prepare_input_for_overlap(
@@ -422,10 +422,10 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
             scale_name = f"{weight_name}_scale_inv"
             if self.use_mxfp8:
                 mx_scale = self._requantize_experts_inplace(layer, weight_name, scale_name)
-                layer.register_parameter(f"{weight_name}_scale", torch.nn.Parameter(mx_scale, requires_grad=False))
+                replace_parameter(layer, f"{weight_name}_scale", mx_scale)
             else:
                 replace_parameter(layer, weight_name, self._resolve_experts(layer, weight_name, scale_name))
-            delattr(layer, scale_name)
+            retire_parameter(layer, scale_name)
 
         if self.use_mxfp8:
             self.quant_type = self.mxfp8_method.quant_type

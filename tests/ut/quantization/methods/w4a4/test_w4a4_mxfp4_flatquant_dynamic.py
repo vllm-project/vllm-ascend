@@ -169,17 +169,18 @@ class TestAscendW4A4MXFP4FlatQuantDynamicLinearMethod(TestBase):
             self.method.apply(layer, x)
 
     def test_process_weights_after_loading(self):
-        layer = MagicMock()
-        layer.weight.data = torch.randint(0, 255, (self.output_size, self.input_size // 2), dtype=torch.uint8)
+        layer = torch.nn.Module()
+        layer.weight = torch.nn.Parameter(
+            torch.randint(0, 255, (self.output_size, self.input_size // 2), dtype=torch.uint8), requires_grad=False
+        )
 
         weight_scale_data = torch.randint(
             0, 255, (self.output_size, self.input_size // self.group_size), dtype=torch.uint8
         )
-        layer.weight_scale.data = weight_scale_data
-        layer.weight_scale.shape = weight_scale_data.shape
-        layer.left_trans.data = torch.randn(32, 32, dtype=torch.bfloat16)
-        layer.right_trans.data = torch.randn(32, 32, dtype=torch.bfloat16)
-        layer.clip_ratio.data = torch.tensor([0.95])
+        layer.weight_scale = torch.nn.Parameter(weight_scale_data, requires_grad=False)
+        layer.left_trans = torch.nn.Parameter(torch.randn(32, 32, dtype=torch.bfloat16), requires_grad=False)
+        layer.right_trans = torch.nn.Parameter(torch.randn(32, 32, dtype=torch.bfloat16), requires_grad=False)
+        layer.clip_ratio = torch.nn.Parameter(torch.tensor([0.95]), requires_grad=False)
 
         self.method.process_weights_after_loading(layer)
 

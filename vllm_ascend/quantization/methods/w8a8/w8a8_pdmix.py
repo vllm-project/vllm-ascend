@@ -26,6 +26,7 @@ from typing import Any
 
 import torch
 from vllm.config import get_current_vllm_config
+from vllm.model_executor.utils import refill_derived
 
 from ..base import AscendLinearScheme, PreparedLinearInput
 from ..registry import register_scheme
@@ -89,5 +90,5 @@ class AscendW8A8PDMixLinearMethod(AscendLinearScheme):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         self._static_method.process_weights_after_loading(layer)
-        layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
+        refill_derived(layer, "weight_scale_fp32", layer.weight_scale.data.to(torch.float32))
         layer.is_kv_consumer = self._is_kv_consumer

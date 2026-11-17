@@ -215,7 +215,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.quant_method.use_expert_weight_list = True
         list_layer = self.build_layer()
         self.quant_method.process_weights_after_loading(list_layer)
-        self.assertFalse(hasattr(list_layer, "w13_weight"))
+        self.assertTrue(list_layer.w13_weight.retired)
         self.assertEqual(len(list_layer.w13_weight_list), self.experts)
         self.assertTrue(all(weight.storage_offset() == 0 for weight in list_layer.w13_weight_list))
         weight_views = self.quant_method.get_eplb_weight_views(list_layer)
@@ -242,7 +242,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.quant_method.use_expert_weight_list = True
         list_layer = self.build_layer_compressed_tensors()
         self.quant_method.process_weights_after_loading(list_layer)
-        self.assertFalse(hasattr(list_layer, "w13_weight"))
+        self.assertTrue(list_layer.w13_weight.retired)
         self.assertEqual(len(list_layer.w13_weight_list), self.experts)
         self.assertEqual(list_layer.w13_weight_list[0].dtype, torch.int8)
         self.assertTrue(all(weight.storage_offset() == 0 for weight in list_layer.w13_weight_list))

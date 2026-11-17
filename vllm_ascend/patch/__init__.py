@@ -1757,3 +1757,12 @@
 #    Future Plan:
 #      Remove when upstream adds dirty tracking to UvaBackedTensor flushes.
 #
+
+
+# ** File: worker/patch_direct_reload.py **
+# Target: vllm.model_executor.model_loader.reload.direct._checkpoint_views.
+# Why: NPU NZ storage cannot serve as an ND checkpoint-loader allocation.
+# How: Select Ascend-owned staging views and retain upstream ND behavior.
+# Related PR: #64336/#65281 provide direct reload, but no backend view hook.
+# Future Plan: Remove this patch when upstream exposes such a provider hook.
+# Scope: Every Ascend worker with VLLM_RELOAD_MODE=direct, before model load.

@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+from vllm import envs as vllm_envs
 from vllm.triton_utils import HAS_TRITON
 
 import vllm_ascend.patch.worker.patch_worker_profiler  # noqa
@@ -90,3 +91,9 @@ if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKE
 
 # only patch routed experts capture in main2main.
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+
+
+# The verified vLLM main supplies the direct-reload API.
+# Release builds without it keep their original worker setup unchanged.
+if getattr(vllm_envs, "VLLM_RELOAD_MODE", None) == "direct":
+    import vllm_ascend.patch.worker.patch_direct_reload  # noqa: F401

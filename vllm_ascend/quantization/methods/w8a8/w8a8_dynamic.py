@@ -22,6 +22,7 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.utils import refill_derived, replace_parameter, retire_parameter
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -35,7 +36,8 @@ from vllm_ascend.ops.fused_moe.moe_utils import (
     cumsum_group_list,
 )
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, dispose_tensor, maybe_trans_nz
+from vllm_ascend.quantization.reload import refill_expert_list, refill_nz_weight
+from vllm_ascend.utils import dispose_tensor, maybe_trans_nz
 
 from ..base import (
     AscendLinearScheme,
@@ -134,12 +136,12 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         return output
 
     def process_weights_after_loading(self, layer):
-        layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
+        replace_parameter(layer, "weight", layer.weight.data.transpose(0, 1).contiguous())
         # cast quantized weight tensors in NZ format for higher inference speed
         if self.act_quant_type == torch.int8:
             layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = layer.weight_scale.data.flatten()
-        layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
+        refill_derived(layer, "weight_scale_fp32", layer.weight_scale.data.to(torch.float32))
         layer.weight_offset.data = layer.weight_offset.data.flatten()
 
 
@@ -277,59 +279,83 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         return weights
 
     def process_weights_after_loading(self, layer):
-        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
-        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
+        replace_parameter(layer, "w13_weight", layer.w13_weight.data.transpose(1, 2).contiguous())
+        replace_parameter(layer, "w2_weight", layer.w2_weight.data.transpose(1, 2).contiguous())
         # TODO(zzzzwwjj): Currently, `torch_npu.npu_grouped_matmul_swiglu_quant`
         # can only support weight nz.
         if self.quant_type == QuantType.W8A8:
-            layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
+            refill_nz_weight(layer, "w13_weight")
+            refill_nz_weight(layer, "w2_weight")
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(layer.w13_weight_scale.data.shape[0], -1)
-        layer.w13_weight_scale_fp32 = layer.w13_weight_scale.data.to(torch.float32)
+        refill_derived(layer, "w13_weight_scale_fp32", layer.w13_weight_scale.data.to(torch.float32))
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(layer.w13_weight_offset.data.shape[0], -1)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(layer.w2_weight_scale.data.shape[0], -1)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(layer.w2_weight_offset.data.shape[0], -1)
 
         if get_ascend_config().enable_fused_mc2 == 1:
-            layer.fused_w1_scale = scale_from_float_to_int64(layer.w13_weight_scale.data)
-            layer.fused_w2_scale = scale_from_float_to_int64(layer.w2_weight_scale.data)
-            layer.fused_w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
-            layer.fused_w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
+            refill_derived(layer, "fused_w1_scale", scale_from_float_to_int64(layer.w13_weight_scale.data))
+            refill_derived(layer, "fused_w2_scale", scale_from_float_to_int64(layer.w2_weight_scale.data))
+            refill_expert_list(layer, "fused_w1_scale_bias", [torch.tensor([], dtype=torch.float32)])
+            refill_expert_list(layer, "fused_w2_scale_bias", [torch.tensor([], dtype=torch.float32)])
 
         if self.use_expert_weight_list:
-            layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
-            layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-            layer.w13_weight_scale_fp32_list = [
-                weight.clone() for weight in layer.w13_weight_scale_fp32.data.unbind(dim=0)
-            ]
-            layer.w2_weight_scale_list = [weight.clone() for weight in layer.w2_weight_scale.data.unbind(dim=0)]
+            refill_expert_list(
+                layer, "w13_weight_list", [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+            )
+            refill_expert_list(
+                layer, "w2_weight_list", [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+            )
+            refill_expert_list(
+                layer,
+                "w13_weight_scale_fp32_list",
+                [weight.clone() for weight in layer.w13_weight_scale_fp32.data.unbind(dim=0)],
+            )
+            refill_expert_list(
+                layer, "w2_weight_scale_list", [weight.clone() for weight in layer.w2_weight_scale.data.unbind(dim=0)]
+            )
             if get_ascend_config().enable_fused_mc2 == 1:
-                layer.fused_w1_scale_list = [
-                    weight.clone()
-                    for weight in layer.fused_w1_scale.view(len(layer.w13_weight_list), -1).data.unbind(dim=0)
-                ]
-                layer.fused_w2_scale_list = [
-                    weight.clone()
-                    for weight in layer.fused_w2_scale.view(len(layer.w2_weight_list), -1).data.unbind(dim=0)
-                ]
-            del layer.w13_weight
-            del layer.w2_weight
-            del layer.w13_weight_scale
+                refill_expert_list(
+                    layer,
+                    "fused_w1_scale_list",
+                    [
+                        weight.clone()
+                        for weight in layer.fused_w1_scale.view(len(layer.w13_weight_list), -1).data.unbind(dim=0)
+                    ],
+                )
+                refill_expert_list(
+                    layer,
+                    "fused_w2_scale_list",
+                    [
+                        weight.clone()
+                        for weight in layer.fused_w2_scale.view(len(layer.w2_weight_list), -1).data.unbind(dim=0)
+                    ],
+                )
+            retire_parameter(layer, "w13_weight")
+            retire_parameter(layer, "w2_weight")
+            retire_parameter(layer, "w13_weight_scale")
             del layer.w13_weight_scale_fp32
-            del layer.w2_weight_scale
+            retire_parameter(layer, "w2_weight_scale")
             if get_ascend_config().enable_fused_mc2 == 1:
                 del layer.fused_w1_scale
                 del layer.fused_w2_scale
             torch.npu.empty_cache()
 
         elif use_cann_megamoe(get_current_vllm_config()):
-            layer.cann_mega_moe_w13_weight_list = list(layer.w13_weight.data.unbind(dim=0))
-            layer.cann_mega_moe_w2_weight_list = list(layer.w2_weight.data.unbind(dim=0))
-            layer.cann_mega_moe_fused_w1_scale_list = list(
-                layer.fused_w1_scale.view(layer.w13_weight.shape[0], -1).data.unbind(dim=0)
+            refill_expert_list(
+                layer, "cann_mega_moe_w13_weight_list", [w.clone() for w in layer.w13_weight.data.unbind(dim=0)]
             )
-            layer.cann_mega_moe_fused_w2_scale_list = list(
-                layer.fused_w2_scale.view(layer.w2_weight.shape[0], -1).data.unbind(dim=0)
+            refill_expert_list(
+                layer, "cann_mega_moe_w2_weight_list", [w.clone() for w in layer.w2_weight.data.unbind(dim=0)]
+            )
+            refill_expert_list(
+                layer,
+                "cann_mega_moe_fused_w1_scale_list",
+                [s.clone() for s in layer.fused_w1_scale.view(layer.w13_weight.shape[0], -1).data.unbind(dim=0)],
+            )
+            refill_expert_list(
+                layer,
+                "cann_mega_moe_fused_w2_scale_list",
+                [s.clone() for s in layer.fused_w2_scale.view(layer.w2_weight.shape[0], -1).data.unbind(dim=0)],
             )
             # MegaMoe reads the fused int64 scale lists above exclusively for
             # activations whose fused MC2 path supports the scale layout.

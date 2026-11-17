@@ -19,6 +19,7 @@ from typing import Any
 
 import torch
 import torch_npu
+from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.utils import maybe_trans_nz
 
@@ -72,7 +73,7 @@ class AscendW8A16LinearMethod(AscendLinearScheme):
         return output
 
     def process_weights_after_loading(self, layer):
-        layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
+        replace_parameter(layer, "weight", layer.weight.data.transpose(0, 1).contiguous())
         layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)

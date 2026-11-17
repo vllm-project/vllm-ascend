@@ -1,0 +1,5 @@
+# Draft: replace 0 in the filename and pr field with the actual PR number.
+pr: 0
+entries:
+  - category: bugfix
+    text: Fixed Ascend direct weight reload session recovery and preserved runtime allocations for quantized weights, scales, MoE expert lists, forced NZ storage, and KPool derived buffers so existing graphs read refreshed data. FlatQuant direct reload rejects changes to clip_ratio, which is captured as a host scalar and requires rebuilding the model and recapturing graphs.

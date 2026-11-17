@@ -20,6 +20,7 @@ from typing import Any
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.model_executor.utils import refill_derived, replace_parameter
 
 from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
@@ -135,23 +136,21 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
 
     def process_weights_after_loading(self, layer):
         expanding_factor = layer.weight.data.shape[1]
-        layer.aclnn_input_scale = torch.nn.Parameter(
-            layer.input_scale.data.repeat(expanding_factor), requires_grad=False
+        replace_parameter(layer, "aclnn_input_scale", layer.input_scale.data.repeat(expanding_factor))
+        refill_derived(layer, "aclnn_input_scale_reciprocal", layer.aclnn_input_scale.data.reciprocal())
+        replace_parameter(
+            layer,
+            "aclnn_input_offset",
+            layer.input_offset.data.repeat(expanding_factor).to(layer.aclnn_input_scale.dtype),
         )
-        layer.aclnn_input_scale_reciprocal = 1 / torch.nn.Parameter(
-            layer.input_scale.data.repeat(expanding_factor), requires_grad=False
-        )
-        layer.aclnn_input_offset = torch.nn.Parameter(
-            layer.input_offset.data.repeat(expanding_factor), requires_grad=False
-        ).to(layer.aclnn_input_scale.dtype)
 
-        layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
+        replace_parameter(layer, "weight", layer.weight.data.transpose(0, 1).contiguous())
         layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
         if self.quant_method == COMPRESSED_TENSORS_METHOD:
             deq_scale = layer.input_scale.data * layer.weight_scale.data
-            layer.deq_scale = torch.nn.Parameter(deq_scale, requires_grad=False)
+            replace_parameter(layer, "deq_scale", deq_scale)
         else:
             # Static ModelSlim checkpoints need not store weight_scale. The
             # regular quantized matmul uses deq_scale, but MLAPO consumes the
@@ -161,4 +160,4 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
             if deq_scale.dtype == torch.int64:
                 # FP16 quant_matmul scales encode FP32 bits in the low 32 bits.
                 deq_scale = deq_scale.to(torch.int32).view(torch.float32)
-            layer.weight_scale.data = deq_scale.float() / layer.input_scale.data.float()
+            replace_parameter(layer, "weight_scale", deq_scale.float() / layer.input_scale.data.float())

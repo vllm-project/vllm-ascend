@@ -19,6 +19,7 @@ from typing import Any
 
 import torch
 import torch_npu
+from vllm.model_executor.utils import replace_parameter
 
 from ..base import AscendLinearScheme, PreparedLinearInput
 from ..registry import register_scheme
@@ -86,6 +87,6 @@ class AscendW4A4LaosDynamicLinearMethod(AscendLinearScheme):
         return output
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight_scale.data = layer.weight_scale.data.to(torch.float32)
-        layer.weight.data = torch_npu.npu_convert_weight_to_int4pack(layer.weight.data.to(torch.int32))
-        layer.weight.data = layer.weight.data.transpose(-1, -2)
+        replace_parameter(layer, "weight_scale", layer.weight_scale.data.to(torch.float32))
+        packed = torch_npu.npu_convert_weight_to_int4pack(layer.weight.data.to(torch.int32))
+        replace_parameter(layer, "weight", packed.transpose(-1, -2))

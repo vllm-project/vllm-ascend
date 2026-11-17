@@ -205,7 +205,7 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         mock_pack_weights.return_value = mock_packed
         self.method.process_weights_after_loading(layer)
         mock_pack_weights.assert_called_once()
-        self.assertFalse(hasattr(layer, "weight"))
+        self.assertTrue(layer.weight.retired)
         self.assertTrue(hasattr(layer, "weight_packed"))
         self.assertTrue(torch.equal(layer.weight_packed.data, mock_packed))
         self.assertEqual(layer.weight_scale.dtype, torch.float32)

@@ -23,6 +23,7 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.utils import refill_derived, replace_parameter, retire_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
@@ -30,8 +31,8 @@ from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
+from vllm_ascend.quantization.reload import refill_expert_list, refill_nz_weight
 from vllm_ascend.utils import (
-    ACL_FORMAT_FRACTAL_NZ,
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
     dispose_tensor,
@@ -313,8 +314,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             self.process_weights_after_loading_modelslim(layer)
         # The W4A8 MoE kernels require NZ, including in batch-invariant mode.
         # Keep this operator requirement local; other weights retain their policy.
-        layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-        layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
+        refill_nz_weight(layer, "w13_weight")
+        refill_nz_weight(layer, "w2_weight")
         tensor_names = (
             "w13_weight",
             "w2_weight",
@@ -330,31 +331,47 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 expert_list = [expert.clone() for expert in tensor.data.unbind(dim=0)]
                 if tensor_name in ("w13_scale_bias", "w2_scale_bias") and use_mega_moe:
                     expert_list = [expert.to(torch.float32) for expert in expert_list]
-                setattr(layer, f"{tensor_name}_list", expert_list)
-                delattr(layer, tensor_name)
+                refill_expert_list(layer, f"{tensor_name}_list", expert_list)
+                retire_parameter(layer, tensor_name)
         elif use_mega_moe:
-            layer.cann_mega_moe_w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
-            layer.cann_mega_moe_w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+            refill_expert_list(
+                layer,
+                "cann_mega_moe_w13_weight_list",
+                [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)],
+            )
+            refill_expert_list(
+                layer, "cann_mega_moe_w2_weight_list", [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+            )
 
-            layer.cann_mega_moe_w13_weight_scale_list = [
-                t.reshape(-1) for t in layer.w13_weight_scale.data.unbind(dim=0)
-            ]
-            layer.cann_mega_moe_w2_weight_scale_list = [t.reshape(-1) for t in layer.w2_weight_scale.data.unbind(dim=0)]
-            layer.cann_mega_moe_w13_scale_bias_list = [
-                t.reshape(-1).to(torch.float32) for t in layer.w13_scale_bias.data.unbind(dim=0)
-            ]
-            layer.cann_mega_moe_w2_scale_bias_list = [
-                t.reshape(-1).to(torch.float32) for t in layer.w2_scale_bias.data.unbind(dim=0)
-            ]
+            refill_expert_list(
+                layer,
+                "cann_mega_moe_w13_weight_scale_list",
+                [t.reshape(-1) for t in layer.w13_weight_scale.data.unbind(dim=0)],
+            )
+            refill_expert_list(
+                layer,
+                "cann_mega_moe_w2_weight_scale_list",
+                [t.reshape(-1) for t in layer.w2_weight_scale.data.unbind(dim=0)],
+            )
+            refill_expert_list(
+                layer,
+                "cann_mega_moe_w13_scale_bias_list",
+                [t.reshape(-1).to(torch.float32) for t in layer.w13_scale_bias.data.unbind(dim=0)],
+            )
+            refill_expert_list(
+                layer,
+                "cann_mega_moe_w2_scale_bias_list",
+                [t.reshape(-1).to(torch.float32) for t in layer.w2_scale_bias.data.unbind(dim=0)],
+            )
             for tensor_name in tensor_names:
-                delattr(layer, tensor_name)
+                retire_parameter(layer, tensor_name)
         else:
             layer.w13_weight.data = self._pack_to_int32(layer.w13_weight.data)
             layer.w2_weight.data = self._pack_to_int32(layer.w2_weight.data)
 
     def process_weights_after_loading_compressed_tensors(self, layer):
-        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
-        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
+        replace_parameter(layer, "w13_weight", layer.w13_weight.data.transpose(1, 2).contiguous())
+        replace_parameter(layer, "w2_weight", layer.w2_weight.data.transpose(1, 2).contiguous())
 
         def update_bias_compressed_tensors(weight: torch.Tensor, scale: torch.Tensor):
             group_num, k, n = weight.shape
@@ -365,19 +382,17 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         w13_bias = update_bias_compressed_tensors(layer.w13_weight.data, layer.w13_weight_scale.data)
         w2_bias = update_bias_compressed_tensors(layer.w2_weight.data, layer.w2_weight_scale.data)
-        w13_scale_bias = torch.nn.Parameter(w13_bias, requires_grad=False)
-        layer.register_parameter("w13_scale_bias", w13_scale_bias)
-        w2_scale_bias = torch.nn.Parameter(w2_bias, requires_grad=False)
-        layer.register_parameter("w2_scale_bias", w2_scale_bias)
+        replace_parameter(layer, "w13_scale_bias", w13_bias)
+        replace_parameter(layer, "w2_scale_bias", w2_bias)
 
-        layer.w13_weight_scale.data = self._process_scale(layer.w13_weight_scale.data.to(torch.float32))
-        layer.w2_weight_scale.data = self._process_scale(layer.w2_weight_scale.data.to(torch.float32))
+        replace_parameter(layer, "w13_weight_scale", self._process_scale(layer.w13_weight_scale.data.to(torch.float32)))
+        replace_parameter(layer, "w2_weight_scale", self._process_scale(layer.w2_weight_scale.data.to(torch.float32)))
         # To use torch_npu.npu_grouped_matmul, keep w2_weigh_scale unsqueezed
         layer.w13_weight_scale.data = self.maybe_squeeze_per_channel_weight_scale(layer.w13_weight_scale.data)
 
         # Packs 2 int4 into 1 int8 on-the-fly to mirror the modelslim path
-        layer.w13_weight.data = self._pack_int4_to_int8(layer.w13_weight.data)
-        layer.w2_weight.data = self._pack_int4_to_int8(layer.w2_weight.data)
+        replace_parameter(layer, "w13_weight", self._pack_int4_to_int8(layer.w13_weight.data))
+        replace_parameter(layer, "w2_weight", self._pack_int4_to_int8(layer.w2_weight.data))
 
     def _get_mlp_weights(self, layer):
         """Return (w1, w1_scale, w2, w2_scale) in the standard MLP layout."""
@@ -569,14 +584,14 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         )[0]
 
     def process_weights_after_loading_modelslim(self, layer):
-        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
-        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
+        replace_parameter(layer, "w13_weight", layer.w13_weight.data.transpose(1, 2).contiguous())
+        replace_parameter(layer, "w2_weight", layer.w2_weight.data.transpose(1, 2).contiguous())
 
-        layer.w13_weight_scale.data = self._process_scale(layer.w13_weight_scale.data)
-        layer.w2_weight_scale.data = self._process_scale(layer.w2_weight_scale.data)
+        replace_parameter(layer, "w13_weight_scale", self._process_scale(layer.w13_weight_scale.data))
+        replace_parameter(layer, "w2_weight_scale", self._process_scale(layer.w2_weight_scale.data))
 
-        layer.w13_scale_bias.data = layer.w13_scale_bias.data.transpose(1, 2).contiguous().sum(axis=1)
-        layer.w2_scale_bias.data = layer.w2_scale_bias.data.transpose(1, 2).contiguous().sum(axis=1)
+        replace_parameter(layer, "w13_scale_bias", layer.w13_scale_bias.data.transpose(1, 2).contiguous().sum(axis=1))
+        replace_parameter(layer, "w2_scale_bias", layer.w2_scale_bias.data.transpose(1, 2).contiguous().sum(axis=1))
         layer.w13_weight_scale.data = self.maybe_squeeze_per_channel_weight_scale(layer.w13_weight_scale.data)
 
 
@@ -692,6 +707,10 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         # Materialize the 3D single-group tensor before NZ conversion. A view
         # retains the 2D storage descriptor and triggers an unsupported TransData.
         packed_weight = layer.weight.data.transpose(0, 1).unsqueeze(0).contiguous()
+        # Preserve ND storage before the optional format cast. Applying the
+        # upstream storage view to NZ would discard its physical format.
+        replace_parameter(layer, "weight", packed_weight)
+        packed_weight = layer.weight.data
         # INT4 NZ requires K divisible by 16 and N divisible by 64. Keep ND
         # for smaller TP partitions, such as the QSA indexer (N=80 at TP8).
         if (
@@ -700,8 +719,8 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         ):
             packed_weight = maybe_trans_nz(packed_weight)
         layer.weight.data = packed_weight.view(torch.int32)
-        layer.weight_scale_fp32 = layer.weight_scale.data.flatten().to(torch.float32).contiguous()
+        refill_derived(layer, "weight_scale_fp32", layer.weight_scale.data.flatten().to(torch.float32).contiguous())
         # CANN A8W4 consumes the FP32 scale bits in the low half of INT64.
-        layer.weight_scale.data = layer.weight_scale_fp32.view(torch.int32).to(torch.int64)
+        replace_parameter(layer, "weight_scale", layer.weight_scale_fp32.view(torch.int32).to(torch.int64))
         layer.weight_offset.data = layer.weight_offset.data.flatten()
-        layer.scale_bias.data = layer.scale_bias.data.sum(dim=1).contiguous()
+        replace_parameter(layer, "scale_bias", layer.scale_bias.data.sum(dim=1).contiguous())

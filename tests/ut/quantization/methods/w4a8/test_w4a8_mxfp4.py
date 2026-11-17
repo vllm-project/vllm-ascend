@@ -256,8 +256,8 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         self.assertEqual(layer.w13_weight_list[0].dtype, torch.float4_e2m1fn_x2)
         self.assertEqual(layer.w13_weight_scale_list[0].shape, (256, 2, 2))
         self.assertTrue(all(expert.storage_offset() == 0 for experts in weight_views for expert in experts))
-        self.assertFalse(hasattr(layer, "w13_weight"))
-        self.assertFalse(hasattr(layer, "w13_weight_scale"))
+        self.assertTrue(getattr(layer.w13_weight, "retired", False))
+        self.assertTrue(getattr(layer.w13_weight_scale, "retired", False))
         self.assertEqual(self.mock_nz_npu.npu_format_cast.call_count, 2 * self.num_experts)
         self.assertTrue(
             all(
@@ -330,7 +330,7 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         self.scheme.process_weights_after_loading(layer)
 
         self.assertTrue(self.scheme.use_expert_weight_list)
-        self.assertFalse(hasattr(layer, "w13_weight"))
+        self.assertTrue(layer.w13_weight.retired)
         self.assertFalse(hasattr(layer, "cann_mega_moe_w13_weight_list"))
         with patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4._EXTRA_CTX") as context:
             context.use_mega_moe = True

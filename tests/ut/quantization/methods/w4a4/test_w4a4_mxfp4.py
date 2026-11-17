@@ -44,7 +44,7 @@ class TestAscendW4A4MXFP4LinearMethod(TestBase):
         layer.weight_packed = nn.Parameter(torch.empty(2, 2), requires_grad=False)
         _rename_packed_weight_parameter(layer, "weight")
         self.assertTrue(hasattr(layer, "weight"))
-        self.assertFalse(hasattr(layer, "weight_packed"))
+        self.assertIs(layer.weight, layer.weight_packed)
 
     def test_get_pergroup_param_based_on_group_size(self):
         group_sizes = [16, 32, 64]
@@ -323,7 +323,8 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         mlp_compute_input.group_list = torch.tensor([4], dtype=torch.int64)
         mlp_compute_input.group_list_type = 0
 
-        self.scheme.apply_gmm1(mlp_compute_input)
+        with patch("vllm_ascend.quantization.methods.base.torch_npu", mock_npu):
+            self.scheme.apply_gmm1(mlp_compute_input)
 
         kwargs = mock_npu.npu_grouped_matmul.call_args.kwargs
         self.assertEqual(kwargs["x_dtype"], mock_npu.float4_e2m1fn_x2)

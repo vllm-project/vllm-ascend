@@ -21,6 +21,7 @@ from typing import Any
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -30,6 +31,7 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.quantization.nz import bf16_nz
+from vllm_ascend.quantization.reload import refill_runtime_parameter
 from vllm_ascend.utils import dispose_tensor
 
 from ..base import AscendMoEScheme, QuantType, require_mx_weight_format
@@ -142,18 +144,16 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
         )
 
     def process_weights_after_loading(self, layer):
-        layer.w13_weight.data = unpack_uint8_to_fp4_return_float32(layer.w13_weight.data)
-        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
-        layer.w13_weight.data = bf16_nz().cast(layer.w13_weight.data)
-        layer.w13_weight.data = torch_npu.npu_convert_weight_to_int4pack(layer.w13_weight.data).contiguous()
+        weight = unpack_uint8_to_fp4_return_float32(layer.w13_weight.data).transpose(1, 2)
+        weight = torch_npu.npu_convert_weight_to_int4pack(bf16_nz().cast(weight)).contiguous()
+        refill_runtime_parameter(layer, "w13_weight", weight)
 
-        layer.w2_weight.data = unpack_uint8_to_fp4_return_float32(layer.w2_weight.data)
-        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
-        layer.w2_weight.data = bf16_nz().cast(layer.w2_weight.data)
-        layer.w2_weight.data = torch_npu.npu_convert_weight_to_int4pack(layer.w2_weight.data).contiguous()
+        weight = unpack_uint8_to_fp4_return_float32(layer.w2_weight.data).transpose(1, 2)
+        weight = torch_npu.npu_convert_weight_to_int4pack(bf16_nz().cast(weight)).contiguous()
+        refill_runtime_parameter(layer, "w2_weight", weight)
 
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2).contiguous()
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2).contiguous()
+        replace_parameter(layer, "w13_weight_scale", layer.w13_weight_scale.data.transpose(1, 2).contiguous())
+        replace_parameter(layer, "w2_weight_scale", layer.w2_weight_scale.data.transpose(1, 2).contiguous())
 
     def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
         layer = mlp_compute_input.layer

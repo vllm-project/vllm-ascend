@@ -207,7 +207,7 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         self.assertEqual(layer.weight_scale.dtype, torch.uint8)
         # The schemes consume one entry per group, not the split the operator emits.
         self.assertEqual(layer.weight_scale.shape, (8, num_groups))
-        self.assertFalse(hasattr(layer, "weight_scale_inv"))
+        self.assertTrue(layer.weight_scale_inv.retired)
         scheme.mxfp8_method.process_weights_after_loading.assert_called_once_with(layer)
 
     def test_kv_b_proj_is_left_dense_for_the_attention_backend(self):
@@ -361,8 +361,8 @@ class TestAscendFp8BlockFusedMoEMethod(TestBase):
         self.assertFalse(scheme.use_mxfp8)
         self.assertEqual(layer.w13_weight.dtype, torch.bfloat16)
         self.assertEqual(layer.w2_weight.dtype, torch.bfloat16)
-        self.assertFalse(hasattr(layer, "w13_weight_scale_inv"))
-        self.assertFalse(hasattr(layer, "w2_weight_scale_inv"))
+        self.assertTrue(getattr(layer.w13_weight_scale_inv, "retired", False))
+        self.assertTrue(getattr(layer.w2_weight_scale_inv, "retired", False))
         scheme._bf16_method.process_weights_after_loading.assert_called_once_with(layer)
 
         expected = reference_resolve(original_w13[0], original_scale[0], 4, 32, torch.bfloat16)
@@ -391,7 +391,7 @@ class TestAscendFp8BlockFusedMoEMethod(TestBase):
         self.assertEqual(layer.w13_weight.dtype, torch.float8_e4m3fn)
         self.assertEqual(layer.w13_weight_scale.shape, (num_experts, 128, 64 // MX_GROUP_SIZE))
         self.assertEqual(layer.w13_weight_scale.dtype, torch.uint8)
-        self.assertFalse(hasattr(layer, "w13_weight_scale_inv"))
+        self.assertTrue(layer.w13_weight_scale_inv.retired)
         scheme.mxfp8_method.process_weights_after_loading.assert_called_once_with(layer)
 
     def test_apply_delegates_to_the_active_method(self):

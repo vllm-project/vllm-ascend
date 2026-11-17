@@ -21,6 +21,7 @@ from typing import Any
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -307,14 +308,14 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
             .contiguous()
             .int()
         )
-        layer.w13_weight_packed.data = pack_to_int32(unpacked_w13_weight)
-        layer.w2_weight_packed.data = pack_to_int32(unpacked_w2_weight)
+        replace_parameter(layer, "w13_weight_packed", pack_to_int32(unpacked_w13_weight))
+        replace_parameter(layer, "w2_weight_packed", pack_to_int32(unpacked_w2_weight))
 
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2).contiguous()
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2).contiguous()
+        replace_parameter(layer, "w13_weight_scale", layer.w13_weight_scale.data.transpose(1, 2).contiguous())
+        replace_parameter(layer, "w2_weight_scale", layer.w2_weight_scale.data.transpose(1, 2).contiguous())
 
-        layer.w13_weight_offset.data = layer.w13_weight_offset.data.transpose(1, 2).contiguous()
-        layer.w2_weight_offset.data = layer.w2_weight_offset.data.transpose(1, 2).contiguous()
+        replace_parameter(layer, "w13_weight_offset", layer.w13_weight_offset.data.transpose(1, 2).contiguous())
+        replace_parameter(layer, "w2_weight_offset", layer.w2_weight_offset.data.transpose(1, 2).contiguous())
 
     def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
         hidden_states = mlp_compute_input.hidden_states

@@ -2,6 +2,7 @@ import torch
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.logger import logger
+from vllm.model_executor.utils import refill_derived
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
@@ -58,18 +59,19 @@ class AscendFAQuantAttentionMethod:
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         fa_k_scale = torch.squeeze(layer.fa_k.scale).unsqueeze(0)
-        layer.fak_descale_float = torch.nn.Parameter(fa_k_scale.to(torch.float), requires_grad=False)
-        layer.fak_descale = torch.nn.Parameter(fa_k_scale, requires_grad=False)
-        if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
-            layer.fak_descale_reciprocal = 1.0 / torch.nn.Parameter(fa_k_scale.to(torch.float), requires_grad=False)
-        else:
-            layer.fak_descale_reciprocal = 1.0 / torch.nn.Parameter(fa_k_scale, requires_grad=False)
+        # Own the derived storage: refill must not overwrite a checkpoint alias.
+        refill_derived(layer, "fak_descale_float", fa_k_scale.float().clone())
+        refill_derived(layer, "fak_descale", fa_k_scale.clone())
+        reciprocal_scale = (
+            fa_k_scale.float()
+            if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+            else fa_k_scale
+        )
+        refill_derived(layer, "fak_descale_reciprocal", 1.0 / reciprocal_scale)
         fa_k_offset = torch.squeeze(layer.fa_k.offset).unsqueeze(0)
-        layer.fak_offset = torch.nn.Parameter(fa_k_offset.to(layer.fak_descale.dtype), requires_grad=False)
-
-        repeated_quant_kscale = fa_k_scale.repeat(self.kv_lora_rank)
-        layer.quant_kscale = repeated_quant_kscale.view(1, self.kv_lora_rank)
-        layer.quant_kscale = 1.0 / torch.nn.Parameter(layer.quant_kscale.to(torch.float), requires_grad=False)
+        refill_derived(layer, "fak_offset", fa_k_offset.to(layer.fak_descale.dtype).clone())
+        quant_kscale = fa_k_scale.repeat(self.kv_lora_rank).view(1, self.kv_lora_rank)
+        refill_derived(layer, "quant_kscale", 1.0 / quant_kscale.float())
 
 
 @register_scheme("INT8_DYNAMIC", "attention")
