@@ -2851,7 +2851,10 @@ On A3, `enable_fused_mc2=3` opts into fusing the main model's shared expert
 into MegaMoe. The adapter supports DeepSeek V4.1 with W4A8 routed experts
 and exactly one dynamic W8A8 INT8 shared expert. It requires a matching
 operator package with independent shared INT8 descriptors; a package that
-supports routed-only MegaMoe is insufficient. The operator's Python
+supports routed-only MegaMoe is insufficient. The matching package is
+planned for CANN 9.3.0 and must currently be installed manually in the
+runtime environment before enabling this option. Do not assume that a
+stock CANN image includes it. The operator's Python
 signature must expose `shared_l1_weights`, `shared_l2_weights`,
 `shared_l1_weights_sf`, `shared_l2_weights_sf`,
 `shared_expert_quant_out_dtype`, `shared_weight1_type`, and
