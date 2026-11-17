@@ -101,7 +101,8 @@ def test_flash_attn_graph_forward_prepares_plan_for_attention(monkeypatch):
     impl.num_heads, impl.num_kv_heads, impl.head_size = 8, 1, 128
     impl.sliding_window, impl.use_bnsd_kv_cache, impl.sinks = None, False, None
     impl.scale, impl.key_cache, impl.value_cache = 128**-0.5, None, None
-    builder.plan_keys = (impl.plan_key,)
+    builder.num_heads, builder.num_kv_heads, builder.head_size = 8, 1, 128
+    builder.sliding_window, builder.layout_kv = None, "PA_BBND"
     plan = torch.empty(16, dtype=torch.int32)
     query = torch.zeros(16, 8, 128)
     ops = SimpleNamespace(

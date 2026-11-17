@@ -198,7 +198,8 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
     impl = AscendFlashAttentionImpl.__new__(AscendFlashAttentionImpl)
     impl.num_heads, impl.num_kv_heads, impl.head_size, impl.sliding_window = 8, 1, 128, None
     impl.use_bnsd_kv_cache, impl.sinks, impl.scale = True, None, 128**-0.5
-    builder.plan_keys = (impl.plan_key,)
+    builder.num_heads, builder.num_kv_heads, builder.head_size = 8, 1, 128
+    builder.sliding_window, builder.layout_kv = None, "PA_BNBD"
     impl.key_cache = impl.value_cache = torch.empty(0)
     upper_bounds = torch.tensor([110, 210, 0, 0], dtype=torch.int32)
     previous = None

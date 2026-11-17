@@ -25,10 +25,14 @@ from vllm_ascend.worker.v2 import attn_utils
 
 def make_builder(monkeypatch, *impls):
     layers = {f"draft.{i}": SimpleNamespace(impl=impl) for i, impl in enumerate(impls)}
+    first = impls[0]
+    kv_spec = FullAttentionSpec(
+        block_size=128, num_kv_heads=first.num_kv_heads, head_size=first.head_size, dtype=torch.bfloat16
+    )
     with monkeypatch.context() as patches:
         patches.setattr(fa_v1.AscendAttentionMetadataBuilder, "__init__", lambda *_args: None)
         patches.setattr(fa_v1, "get_layers_from_vllm_config", Mock(return_value=layers))
-        return AscendFlashAttentionMetadataBuilder(None, list(layers), None, torch.device("cpu"))
+        return AscendFlashAttentionMetadataBuilder(kv_spec, list(layers), None, torch.device("cpu"))
 
 
 @pytest.mark.parametrize("head_size", [64, 72, 128, 192, 256])
@@ -469,7 +473,7 @@ def test_capture_records_fresh_lengths_and_tiling_after_warmup(monkeypatch):
     builder = make_builder(monkeypatch, impl)
     builder.update_draft_decode_metadata(metadata)
     impl.forward_impl(query, None, None, None, metadata, output)
-    eager_plans = dict(metadata.flash_attn_plans)
+    eager_plan, _ = metadata.flash_attn_plan
     ops.flash_attn_metadata.reset_mock()
     ops.flash_attn.reset_mock()
 
@@ -479,7 +483,7 @@ def test_capture_records_fresh_lengths_and_tiling_after_warmup(monkeypatch):
     # Reuse the same metadata for independent captures, including a padded
     # request disappearing after rejection. No producer may come from warmup
     # or from the preceding capture.
-    previous_plans = {id(plan) for plan, _attrs in eager_plans.values()}
+    previous_plans = {id(eager_plan)}
     for boundaries, lengths in (([0, 4, 8, -1], [253, 251, 0]), ([0, 4, 4, -1], [250, 0, 0])):
         tiling_start = ops.flash_attn_metadata.call_count
         metadata.query_start_loc_gpu.copy_(torch.tensor(boundaries, dtype=torch.int32))
@@ -504,44 +508,10 @@ def test_capture_records_fresh_lengths_and_tiling_after_warmup(monkeypatch):
     assert ops.flash_attn.call_count == 12
 
 
-def test_distinct_attention_geometries_do_not_share_plans(monkeypatch):
-    from vllm_ascend.attention.fa_v1 import AscendFlashAttentionMetadata
-
-    ops = SimpleNamespace(
-        flash_attn_metadata=Mock(return_value=torch.empty(16)),
-        flash_attn=Mock(side_effect=lambda query, *args, **kwargs: (query, None)),
-    )
-    monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
-    metadata = AscendFlashAttentionMetadata(
-        query_start_loc_gpu=torch.tensor([0, 6], dtype=torch.int32),
-        seq_lens_gpu=torch.tensor([256], dtype=torch.int32),
-        block_tables=torch.zeros(1, 2, dtype=torch.int32),
-        max_query_len=6,
-        causal=False,
-        flash_attn_mask=torch.ones(2, 2),
-    )
-    geometries = [
-        (8, 1, 128, None, "PA_BBND"),
-        (16, 1, 128, None, "PA_BBND"),
-        (8, 2, 128, None, "PA_BBND"),
-        (8, 1, 64, None, "PA_BBND"),
-        (8, 1, 128, 2048, "PA_BBND"),
-        (8, 1, 128, None, "PA_BNBD"),
-    ]
-    queries = [torch.empty(6, heads, dim) for heads, _, dim, _, _ in geometries]
-    impls = [
-        make_impl(query, num_kv_heads=kv_heads, window=window, layout=layout)
-        for query, (_, kv_heads, _, window, layout) in zip(queries, geometries)
-    ]
-    metadata.num_actual_tokens = 6
-    builder = make_builder(monkeypatch, *impls, impls[0])
-    assert builder.plan_keys == tuple(impl.plan_key for impl in impls)
-    builder.update_draft_decode_metadata(metadata)
-    for _ in range(2):
-        for impl, query in zip(impls, queries):
-            impl.forward_impl(query, None, None, None, metadata, torch.empty_like(query))
-    assert ops.flash_attn_metadata.call_count == len(geometries)
-    assert ops.flash_attn.call_count == 2 * len(geometries)
+def test_flash_attn_rejects_mixed_windows_in_one_attention_group(monkeypatch):
+    query = torch.empty(6, 8, 128)
+    with pytest.raises(ValueError, match="same sliding window"):
+        make_builder(monkeypatch, make_impl(query), make_impl(query, window=2048))
 
 
 def test_prepared_plans_isolate_attention_groups(monkeypatch):

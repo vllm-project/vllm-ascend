@@ -3,7 +3,7 @@
 
 """Device-length CANN FlashAttn for A5 V2 drafts."""
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import cast
 
 import torch
@@ -24,7 +24,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 @dataclass
 class AscendFlashAttentionMetadata(AscendMetadata):
     flash_attn_mask: torch.Tensor | None = None
-    flash_attn_plans: dict = field(default_factory=dict)
+    flash_attn_plan: tuple[torch.Tensor, dict] | None = None
 
 
 class AscendFlashAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
@@ -40,16 +40,45 @@ class AscendFlashAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
-        self.plan_keys = tuple(
-            dict.fromkeys(cast(AscendFlashAttentionImpl, layer.impl).plan_key for layer in layers.values())
-        )
+        impl = cast(AscendFlashAttentionImpl, layers[layer_names[0]].impl)
+        self.num_heads = impl.num_heads
+        self.num_kv_heads = kv_cache_spec.num_kv_heads
+        self.head_size = AscendFlashAttentionBackend.get_padded_head_size(kv_cache_spec.head_size)
+        self.sliding_window = impl.sliding_window
+        self.layout_kv = "PA_BNBD" if impl.use_bnsd_kv_cache else "PA_BBND"
+        # A merged full KV cache spec may include both full and windowed layers.
+        if any(
+            cast(AscendFlashAttentionImpl, layer.impl).sliding_window != self.sliding_window
+            for layer in layers.values()
+        ):
+            raise ValueError("CANN FlashAttn requires the same sliding window within each attention group.")
 
     def update_draft_decode_metadata(self, metadata: AscendFlashAttentionMetadata) -> None:
-        lengths = AscendFlashAttentionImpl._build_lengths(metadata, metadata.num_actual_tokens)
-        metadata.flash_attn_plans = {
-            key: AscendFlashAttentionImpl._build_plan(key, lengths, metadata.max_query_len, metadata.causal)
-            for key in self.plan_keys
-        }
+        from cann_ops_transformer.ops import flash_attn_metadata
+
+        num_reqs = metadata.block_tables.shape[0]
+        boundaries = metadata.query_start_loc_gpu[: num_reqs + 1].int()
+        # Dummy requests may have repeated or negative query boundaries.
+        boundaries = boundaries.clamp(min=0, max=metadata.num_actual_tokens).cummax(dim=0).values
+        lengths = metadata.seq_lens_gpu[:num_reqs].int().clamp(min=1)
+        sliding_window = self.sliding_window
+        window = sliding_window - 1 if sliding_window is not None else -1
+        # Both CANN operators require the same lengths, mask and layout.
+        # Mask modes: 0 = unmasked, 3 = causal, 4 = sliding window.
+        attrs = dict(
+            cu_seqlens_q=boundaries,
+            seqused_kv=lengths,
+            max_seqlen_q=metadata.max_query_len,
+            max_seqlen_kv=-1,
+            mask_mode=4 if sliding_window is not None else 3 if metadata.causal else 0,
+            win_left=window,
+            win_right=0 if metadata.causal and sliding_window is not None else window,
+            layout_q="TND",
+            layout_kv=self.layout_kv,
+            layout_out="TND",
+        )
+        plan = flash_attn_metadata(self.num_heads, self.num_kv_heads, self.head_size, **attrs)
+        metadata.flash_attn_plan = plan, attrs
 
     def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
         metadata = self._build_metadata(common_attn_metadata)
@@ -131,47 +160,6 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
     def do_kv_cache_update(self, layer, key, value, kv_cache, slot_mapping):
         return super().do_kv_cache_update(layer, self._pad_head(key), self._pad_head(value), kv_cache, slot_mapping)
 
-    @staticmethod
-    def _build_lengths(metadata, num_tokens):
-        num_reqs = metadata.block_tables.shape[0]
-        boundaries = metadata.query_start_loc_gpu[: num_reqs + 1].int()
-        # Dummy requests may have repeated or negative query boundaries.
-        boundaries = boundaries.clamp(min=0, max=num_tokens).cummax(dim=0).values
-        lengths = metadata.seq_lens_gpu[:num_reqs].int().clamp(min=1)
-        return boundaries, lengths
-
-    @property
-    def plan_key(self):
-        return (
-            self.num_heads,
-            self.num_kv_heads,
-            AscendFlashAttentionBackend.get_padded_head_size(self.head_size),
-            self.sliding_window,
-            "PA_BNBD" if self.use_bnsd_kv_cache else "PA_BBND",
-        )
-
-    @staticmethod
-    def _build_plan(plan_key, lengths, max_query_len, causal):
-        from cann_ops_transformer.ops import flash_attn_metadata
-
-        num_heads, num_kv_heads, head_size, sliding_window, layout_kv = plan_key
-        window = sliding_window - 1 if sliding_window is not None else -1
-        # Both CANN operators require the same lengths, mask and layout.
-        # Mask modes: 0 = unmasked, 3 = causal, 4 = sliding window.
-        attrs = dict(
-            cu_seqlens_q=lengths[0],
-            seqused_kv=lengths[1],
-            max_seqlen_q=max_query_len,
-            max_seqlen_kv=-1,
-            mask_mode=4 if sliding_window is not None else 3 if causal else 0,
-            win_left=window,
-            win_right=0 if causal and sliding_window is not None else window,
-            layout_q="TND",
-            layout_kv=layout_kv,
-            layout_out="TND",
-        )
-        return flash_attn_metadata(num_heads, num_kv_heads, head_size, **attrs), attrs
-
     def forward_impl(self, query, key, value, kv_cache, attn_metadata, output):
         from cann_ops_transformer.ops import flash_attn
 
@@ -179,7 +167,8 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
         output_head_size = query.shape[-1]
         query = self._pad_head(query)
         metadata = attn_metadata
-        plan, attrs = metadata.flash_attn_plans[self.plan_key]
+        assert metadata.flash_attn_plan is not None
+        plan, attrs = metadata.flash_attn_plan
 
         with attention_transfer_window():
             result, _ = flash_attn(

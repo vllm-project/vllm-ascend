@@ -91,7 +91,8 @@ def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, 
     impl.num_heads, impl.num_kv_heads, impl.head_size = 8, 1, head_dim
     impl.scale, impl.sliding_window = head_dim**-0.5, window
     impl.use_bnsd_kv_cache, impl.sinks = layout == "PA_BNBD", None
-    builder.plan_keys = (impl.plan_key,)
+    builder.num_heads, builder.num_kv_heads, builder.head_size = 8, 1, physical_dim
+    builder.sliding_window, builder.layout_kv = window, layout
     output = torch.empty_like(query)
     # Capture must retain views of the persistent buffers, not a particular
     # iteration's subtraction result or a host mirror of accepted lengths.
@@ -119,7 +120,7 @@ def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, 
         graph = UpdatableGraph()
         with torch.npu.graph(graph, stream=stream):
             run()
-        assert len(captured_metadata.flash_attn_plans) == 1
+        assert captured_metadata.flash_attn_plan is not None
 
         def execute():
             graph.replay()
