@@ -10,7 +10,7 @@ import torch_npu  # noqa: F401
 from vllm_ascend.device import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.ops.triton.glm5_next_cann_keypool import write_keypool_caches
+from vllm_ascend.ops.triton.glm5_next_cann_keypool import build_tail_slot_mapping, write_keypool_caches
 
 pytestmark = pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
@@ -24,6 +24,41 @@ GUARD_BYTES = 256
 GUARD_VALUE = 0x55
 TAIL_PAGE_ROWS = 80
 TAIL_CAPACITY = 7
+
+
+@pytest.mark.parametrize("capacity", [4, 8, 32])
+@pytest.mark.parametrize("use_graph", [False, True])
+def test_tail_slot_mapping_long_positions_padding_and_graph(capacity, use_graph):
+    positions = torch.tensor([5999, 6000, 6001, 129, 130, 7, 8, 0, 1], device="npu")
+    common = SimpleNamespace(
+        positions=positions,
+        query_start_loc=torch.tensor([0, 3, 5, 7], dtype=torch.int32, device="npu"),
+        block_table_tensor=torch.tensor([[5, 99], [2, 99], [0, 99]], dtype=torch.int32, device="npu"),
+        slot_mapping=torch.full_like(positions, -1),
+        num_actual_tokens=7,
+        num_input_tokens=9,
+        num_reqs=3,
+    )
+    output = torch.full((16,), 42, dtype=torch.int64, device="npu")
+    run = lambda: build_tail_slot_mapping(common, capacity, output)
+    graph = None
+    if use_graph:
+        run()
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            run()
+    for offset in (0, 8192):
+        positions[:7].add_(offset)
+        output.fill_(42)
+        run() if graph is None else graph.replay()
+        host_positions = positions.cpu().tolist()
+        expected = [5 * capacity + pos % capacity for pos in host_positions[:3]]
+        expected += [2 * capacity + pos % capacity for pos in host_positions[3:5]]
+        expected += [-1] * 4
+        assert output[:9].cpu().tolist() == expected
+        assert torch.all(output[9:] == 42)
+        assert torch.all(common.slot_mapping == -1)
 
 
 def _cache_views(storage, dtype, page_bytes):

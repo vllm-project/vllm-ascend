@@ -15,11 +15,13 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
     FullAttentionManager,
     SlidingWindowManager,
     register_all_kvcache_specs,
 )
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -36,7 +38,6 @@ import vllm_ascend.patch.platform.patch_kv_cache_utils as kv_cache_utils_patch
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.core.kv_cache_interface import (
     AscendCircularBufferSpec,
-    AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
     register_ascend_kv_cache_specs,
@@ -151,15 +152,7 @@ def test_disabled_prefix_cache_preserves_private_tail_allocation(with_private_ta
     full = FullAttentionSpec(block_size=4480, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
     groups = [KVCacheGroupSpec(["full"], full)]
     if with_private_tail:
-        tail = AscendIndexerKPoolTailSpec(
-            block_size=4,
-            ring_capacity=9,
-            sliding_window=4,
-            compress_ratio=4,
-            num_kv_heads=1,
-            head_size=8,
-            dtype=torch.float32,
-        )
+        tail = CircularBufferSpec(block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float32, head_size_v=0)
         groups.append(KVCacheGroupSpec(["tail"], UniformTypeKVCacheSpecs.from_specs({"tail": tail})))
     cfg = KVCacheConfig(num_blocks=32, kv_cache_tensors=[], kv_cache_groups=groups)
     scheduler_size, hash_size = resolve_kv_cache_block_sizes(
@@ -173,7 +166,7 @@ def test_disabled_prefix_cache_preserves_private_tail_allocation(with_private_ta
             parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         ),
     )
-    # The physical nine-row ring must not enlarge logical scheduling units.
+    # The speculative ring must not enlarge logical scheduling units.
     assert scheduler_size == hash_size == full.block_size
     coordinator = get_kv_cache_coordinator(
         cfg,
@@ -210,21 +203,13 @@ def test_disabled_prefix_cache_preserves_private_tail_allocation(with_private_ta
 
 @pytest.mark.parametrize("wrapped", [False, True])
 @pytest.mark.parametrize("scheduler_size", [16, 32])
-@pytest.mark.parametrize("ring_capacity", [4, 9])
+@pytest.mark.parametrize("ring_capacity", [4, 8])
 def test_real_tail_coordinator_preserves_prefix_hit_and_private_lifecycle(wrapped, scheduler_size, ring_capacity):
-    from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
-
     register_all_kvcache_specs(None)
     register_ascend_kv_cache_specs()
     full = FullAttentionSpec(block_size=scheduler_size, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
-    tail = AscendIndexerKPoolTailSpec(
-        block_size=4,
-        ring_capacity=ring_capacity,
-        sliding_window=4,
-        compress_ratio=4,
-        num_kv_heads=1,
-        head_size=8,
-        dtype=torch.float32,
+    tail = CircularBufferSpec(
+        block_size=ring_capacity, num_kv_heads=1, head_size=16, dtype=torch.float32, head_size_v=0
     )
     group_tail = UniformTypeKVCacheSpecs.from_specs({"tail": tail}) if wrapped else tail
     cfg = KVCacheConfig(
@@ -249,7 +234,7 @@ def test_real_tail_coordinator_preserves_prefix_hit_and_private_lifecycle(wrappe
         max_in_flight_tokens=64,
     )
     full_mgr, tail_mgr = coordinator.single_type_managers
-    assert isinstance(tail_mgr, KpoolTailManager)
+    assert isinstance(tail_mgr, CircularBufferManager)
     assert len(coordinator.attention_groups) == 1
     full_mgr.allocate_new_blocks("old", 64, 64)
     tail_mgr.allocate_new_blocks("old", 64, 64)
@@ -282,15 +267,7 @@ def test_glm_speculative_tail_preserves_main_and_mamba_scheduler_boundaries(dcp)
     register_all_kvcache_specs(None)
     register_ascend_kv_cache_specs()
     full = FullAttentionSpec(block_size=4480, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
-    tail = AscendIndexerKPoolTailSpec(
-        block_size=4,
-        ring_capacity=9,
-        sliding_window=4,
-        compress_ratio=4,
-        num_kv_heads=1,
-        head_size=8,
-        dtype=torch.float32,
-    )
+    tail = CircularBufferSpec(block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float32, head_size_v=0)
     mamba = MambaSpec(block_size=4480, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
     cfg = KVCacheConfig(
         num_blocks=32,
@@ -325,15 +302,7 @@ def test_partial_hash_alignment_reaches_real_managers_and_cached_blocks():
         FullAttentionSpec(block_size=32, num_kv_heads=1, head_size=8, dtype=torch.bfloat16),
         MambaSpec(block_size=64, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align"),
         SlidingWindowMLASpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.bfloat16, sliding_window=16),
-        AscendIndexerKPoolTailSpec(
-            block_size=4,
-            ring_capacity=4,
-            sliding_window=4,
-            compress_ratio=4,
-            num_kv_heads=1,
-            head_size=8,
-            dtype=torch.float32,
-        ),
+        CircularBufferSpec(block_size=4, num_kv_heads=1, head_size=16, dtype=torch.float32, head_size_v=0),
     ]
     cfg = KVCacheConfig(
         num_blocks=64,
@@ -684,16 +653,12 @@ def test_glm5_next_hashes_exclude_private_tail_after_engine_min_block_update(
         model_version="glm5_next",
         **_ratio_kwargs(16),
     )
-    state_spec = AscendIndexerKPoolTailSpec(
+    state_spec = CircularBufferSpec(
         block_size=16,
-        ring_capacity=16,
-        sliding_window=16,
-        compress_ratio=16,
         num_kv_heads=1,
-        head_size=256,
+        head_size=512,
         dtype=torch.float32,
-        model_version="glm5_next",
-        cache_role="indexer_tail",
+        head_size_v=0,
     )
     full_group_spec = UniformTypeKVCacheSpecs.from_specs({"layer.main": main_spec, "layer.indexer": indexer_spec})
     state_group_spec = UniformTypeKVCacheSpecs.from_specs({"layer.state": state_spec})
@@ -745,7 +710,7 @@ def test_glm5_next_hashes_exclude_private_tail_after_engine_min_block_update(
         group.kv_cache_spec.block_size for group in scheduler_config.kv_cache_groups
     )
     assert vllm_config.cache_config.block_size == 16
-    assert state_spec.block_size == state_spec.compress_ratio == 16
+    assert state_spec.block_size == 16
     assert not state_spec.prefix_cacheable
     scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
         scheduler_config,
@@ -778,16 +743,12 @@ def test_glm5_next_single_cacheable_group_ignores_private_tail_block_size() -> N
         dtype=torch.bfloat16,
         model_version="glm5_next",
     )
-    tail_spec = AscendIndexerKPoolTailSpec(
+    tail_spec = CircularBufferSpec(
         block_size=16,
-        ring_capacity=16,
-        sliding_window=16,
-        compress_ratio=16,
         num_kv_heads=1,
-        head_size=256,
+        head_size=512,
         dtype=torch.float32,
-        model_version="glm5_next",
-        cache_role="indexer_tail",
+        head_size_v=0,
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=10,

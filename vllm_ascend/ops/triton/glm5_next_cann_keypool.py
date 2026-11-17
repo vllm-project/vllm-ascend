@@ -10,6 +10,68 @@ from vllm.triton_utils import tl, triton
 FP8_E4M3_MAX = tl.constexpr(448.0)
 
 
+@triton.jit
+def _tail_slot_mapping_kernel(
+    positions,
+    query,
+    pages,
+    output,
+    PAGE_STRIDE: tl.constexpr,
+    capacity: tl.constexpr,
+    actual,
+    tokens,
+    requests,
+    BLOCK: tl.constexpr,
+):
+    req = tl.program_id(0)
+    if req == requests:
+        for begin in range(actual, tokens, BLOCK):
+            rows = begin + tl.arange(0, BLOCK)
+            tl.store(output + rows, -1, rows < tokens)
+    else:
+        start = tl.load(query + req)
+        end = tl.load(query + req + 1)
+        start = tl.minimum(tl.where(start < 0, actual, start), actual)
+        end = tl.minimum(tl.where(end < 0, actual, end), actual)
+        page = tl.load(pages + req * PAGE_STRIDE).to(tl.int64)
+        for begin in range(start, end, BLOCK):
+            rows = begin + tl.arange(0, BLOCK)
+            pos = tl.load(positions + rows, rows < end, other=-1).to(tl.int64)
+            slot = tl.where((page > 0) & (pos >= 0), page * capacity + pos % capacity, -1)
+            tl.store(output + rows, slot, rows < end)
+
+
+def build_tail_slot_mapping(common, capacity, output):
+    """Map positions through column zero of each request's circular block table."""
+    tokens = min(common.positions.numel(), getattr(common, "num_input_tokens", common.positions.numel()))
+    slots = output[:tokens]
+    actual = min(common.num_actual_tokens, slots.numel())
+    if common.positions.device.type == "cpu":
+        slots.fill_(-1)
+        if actual and common.num_reqs:
+            rows = torch.arange(actual)
+            query = common.query_start_loc[1:]
+            query = torch.where(query < 0, actual, query).clamp(max=actual)
+            req = torch.searchsorted(query, rows, right=True)
+            pages = common.block_table_tensor[req, 0].long()
+            pos = common.positions[:actual].long()
+            slots[:actual] = torch.where((pages > 0) & (pos >= 0), pages * capacity + pos % capacity, -1)
+    else:
+        _tail_slot_mapping_kernel[(common.num_reqs + 1,)](
+            common.positions,
+            common.query_start_loc,
+            common.block_table_tensor,
+            slots,
+            common.block_table_tensor.stride(0),
+            capacity,
+            actual,
+            slots.numel(),
+            common.num_reqs,
+            256,
+        )
+    return slots
+
+
 @triton.jit(do_not_specialize=["tail_rows", "tail_blocks", "cache_blocks", "INPUT_STRIDE", "INPUT_WIDTH"])
 def _write_keypool_caches_kernel(
     tail,
