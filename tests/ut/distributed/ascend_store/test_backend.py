@@ -688,6 +688,103 @@ class TestMooncakeBackendSetup(unittest.TestCase):
 
         self.assertIs(context.exception, setup_error)
 
+    def test_prefetch_requester_setup_without_local_ssd(self):
+        # Cover a segment-zero worker and schedulers with either SSD setting.
+        for contribute_memory, enable_ssd_offload in ((True, False), (False, False), (False, True)):
+            for use_fabric_mem, use_store_independent_te in ((False, False), (True, False), (False, True)):
+                with (
+                    self.subTest(
+                        contribute_memory=contribute_memory,
+                        enable_ssd_offload=enable_ssd_offload,
+                        use_fabric_mem=use_fabric_mem,
+                        use_store_independent_te=use_store_independent_te,
+                    ),
+                    patch(f"{self._MODULE_PATH}._mooncake_supports_exist_prefetch", return_value=True),
+                    patch(f"{self._MODULE_PATH}._mooncake_setup_has_config_dict", return_value=True),
+                    patch(f"{self._MODULE_PATH}._mooncake_exist_options_class", return_value=_FakeExistOptions),
+                    patch(f"{self._MODULE_PATH}.os.makedirs") as makedirs,
+                ):
+                    config = _make_mooncake_store_config(
+                        global_segment_size=0,
+                        local_buffer_size=0,
+                        tenant_id="tenant-a",
+                        enable_ssd_offload=enable_ssd_offload,
+                        ssd_offload_path="/tmp/standalone-holder",
+                        enable_ssd_prefetch=True,
+                        ssd_prefetch_cooldown_sec=5,
+                        ssd_prefetch_dedup_ttl_sec=30,
+                    )
+                    backend = self._make_backend(
+                        config=config,
+                        use_fabric_mem=use_fabric_mem,
+                        contribute_memory=contribute_memory,
+                    )
+                    backend._use_store_independent_te = use_store_independent_te
+                    store = MagicMock()
+                    store.setup.return_value = 0
+                    backend.store = self._setup_store(backend, store)
+
+                    store.setup.assert_called_once()
+                    args, kwargs = store.setup.call_args
+                    self.assertEqual(kwargs, {})
+                    payload = args[0]
+                    self.assertEqual(payload["enable_ssd_prefetch"], "true")
+                    self.assertEqual(payload["global_segment_size"], "0")
+                    self.assertEqual(payload["local_buffer_size"], "0")
+                    self.assertEqual(payload["tenant_id"], "tenant-a")
+                    self.assertNotIn("enable_ssd_offload", payload)
+                    self.assertNotIn("ssd_offload_path", payload)
+                    self.assertNotIn("ssd_prefetch_cooldown_sec", payload)
+                    self.assertNotIn("ssd_prefetch_dedup_ttl_sec", payload)
+                    makedirs.assert_not_called()
+                    self.assertTrue(backend._prefetch_conf.use_dict_setup)
+
+                    backend._lazy_init = False
+                    store.batch_is_exist.return_value = [1, 0, 1]
+                    self.assertEqual(backend.exists(["k1", "missing", "k2"]), [1, 0, 1])
+                    store.batch_is_exist.assert_called_once_with(
+                        ["k1", "missing", "k2"], backend._prefetch_conf.options
+                    )
+                    self.assertTrue(backend._prefetch_conf.options.prefetch_to_memory)
+                    with patch(f"{self._MODULE_PATH}.global_te") as global_te:
+                        backend.register_buffer([1234], [4096])
+                    store.register_buffer.assert_called_once_with(1234, 4096)
+                    global_te.register_buffer.assert_not_called()
+
+    def test_prefetch_requester_setup_requires_sdk_capabilities(self):
+        for contribute_memory in (False, True):
+            for supports_options, supports_config_dict in ((False, True), (True, False)):
+                with (
+                    self.subTest(
+                        contribute_memory=contribute_memory,
+                        supports_options=supports_options,
+                        supports_config_dict=supports_config_dict,
+                    ),
+                    patch(f"{self._MODULE_PATH}._mooncake_supports_exist_prefetch", return_value=supports_options),
+                    patch(f"{self._MODULE_PATH}._mooncake_setup_has_config_dict", return_value=supports_config_dict),
+                    patch(f"{self._MODULE_PATH}.logger") as logger,
+                ):
+                    backend = self._make_backend(
+                        config=_make_mooncake_store_config(global_segment_size=0, enable_ssd_prefetch=True),
+                        use_fabric_mem=False,
+                        contribute_memory=contribute_memory,
+                    )
+                    store = MagicMock()
+                    store.setup.return_value = 0
+                    backend.store = self._setup_store(backend, store)
+                    self.assertFalse(backend._prefetch_conf.enabled)
+                    self.assertIsNone(backend._prefetch_conf.options)
+                    self.assertFalse(backend._prefetch_conf.use_dict_setup)
+                    self.assertEqual(store.setup.call_args.args, ())
+                    self.assertNotIn("enable_ssd_prefetch", store.setup.call_args.kwargs)
+                    logger.warning.assert_called_once()
+                    self.assertIn("Prefetch will be disabled", logger.warning.call_args.args[0])
+
+                    backend._lazy_init = False
+                    store.batch_is_exist.return_value = [1, 0]
+                    self.assertEqual(backend.exists(["k1", "missing"]), [1, 0])
+                    store.batch_is_exist.assert_called_once_with(["k1", "missing"])
+
     def test_config_dict_forwards_prefetch_knobs_when_set(self):
         with tempfile.TemporaryDirectory(prefix="mooncake_ssd_ut_") as ssd_path:
             config = _make_mooncake_store_config(
@@ -785,6 +882,8 @@ class TestMooncakeSupportsExistPrefetch(unittest.TestCase):
 
 
 class TestMooncakeBackendMethods(unittest.TestCase):
+    _MODULE_PATH = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend"
+
     def _make_backend(self):
         with (
             patch.dict(os.environ, {"MOONCAKE_CONFIG_PATH": "/dev/null"}),
@@ -833,9 +932,20 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         )
         self.assertFalse(_resolve_ssd_prefetch(cfg, contribute_memory=True).enabled)
 
-    def test_resolve_no_offload(self):
+    def test_resolve_no_offload_still_initializes_prefetch(self):
         cfg = _make_mooncake_store_config(enable_ssd_offload=False, enable_ssd_prefetch=True)
-        self.assertFalse(_resolve_ssd_prefetch(cfg, contribute_memory=True).enabled)
+        for contribute_memory in (False, True):
+            with (
+                self.subTest(contribute_memory=contribute_memory),
+                patch(f"{self._MODULE_PATH}._mooncake_supports_exist_prefetch", return_value=True),
+                patch(f"{self._MODULE_PATH}._mooncake_setup_has_config_dict", return_value=True),
+                patch(f"{self._MODULE_PATH}._mooncake_exist_options_class", return_value=_FakeExistOptions),
+            ):
+                conf = _resolve_ssd_prefetch(cfg, contribute_memory=contribute_memory)
+            self.assertTrue(conf.enabled)
+            self.assertTrue(conf.use_dict_setup)
+            self.assertTrue(conf.options.prefetch_to_memory)
+            self.assertEqual(conf.knobs, {})
 
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend."
