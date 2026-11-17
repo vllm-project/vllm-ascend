@@ -19,7 +19,10 @@
 
 from typing import Any, cast
 
+import logging
+
 import torch
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import _TL_RAND_MIN
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
@@ -42,7 +45,90 @@ from vllm_ascend.ops.triton.spec_decode.entropy_verify import (
 from vllm_ascend.ops.triton.spec_decode.resample import resample
 from vllm_ascend.utils import vllm_version_is
 
+logger = init_logger(__name__)
+
 _ENTROPY_EPSILON = 1e-10
+_NAN_ROW_FMT_LIMIT = 8
+
+
+def _fmt_nan_rows(bad_rows, nan_per_row, rows_per_req: int, unit: str) -> str:
+    """Render (row_id, nan_count) pairs as req/step coordinates."""
+    parts = []
+    for i in bad_rows[:_NAN_ROW_FMT_LIMIT].tolist():
+        parts.append(f"{unit}={i // rows_per_req} step={i % rows_per_req} nan={int(nan_per_row[i])}")
+    return "[" + ", ".join(parts) + "]"
+
+
+def _log_nan_census(
+    logger: logging.Logger,
+    target_logits: torch.Tensor,
+    draft_logits: torch.Tensor | None,
+    num_speculative_steps: int,
+) -> None:
+    """[dfx/nan] Per-row NaN census of the verification inputs.
+
+    Row-level reductions (logsumexp, probability mass) turn a single NaN
+    element into a whole-row verdict failure -- the acceptance test
+    ``target_log_prob > tl.log(u) + draft_log_prob`` is False whenever
+    either side is NaN -- and the resample zero-mass fallback then emits a
+    degenerate but legal token (id 0). A single census record therefore
+    identifies exactly which request/step was poisoned.
+
+    DEBUG-gated: INFO pays one integer compare per step; DEBUG pays one
+    device reduction + D2H sync per input tensor (diagnostic mode only).
+    """
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    try:
+        rows_per_req = num_speculative_steps + 1
+        nan_per_row = torch.isnan(target_logits).sum(dim=-1)
+        bad_rows = nan_per_row.nonzero(as_tuple=True)[0]
+        if bad_rows.numel() > 0:
+            logger.debug(
+                "[dfx/nan] target_logits: rows_with_nan=%d/%d total_nan=%d %s",
+                bad_rows.numel(),
+                target_logits.shape[0],
+                int(nan_per_row.sum()),
+                _fmt_nan_rows(bad_rows, nan_per_row, rows_per_req, "req"),
+            )
+        if draft_logits is not None and draft_logits.numel() > 1:
+            d_nan = torch.isnan(draft_logits).sum(dim=-1).view(-1)
+            d_bad = d_nan.nonzero(as_tuple=True)[0]
+            if d_bad.numel() > 0:
+                logger.debug(
+                    "[dfx/nan] draft_logits: rows_with_nan=%d total_nan=%d %s",
+                    d_bad.numel(),
+                    int(d_nan.sum()),
+                    _fmt_nan_rows(d_bad, d_nan, num_speculative_steps, "slot"),
+                )
+    except Exception as e:  # diagnostics must never take down the sampler
+        logger.debug("[dfx/nan] target/draft census failed: %s", e)
+
+
+def _log_accept0_census(logger: logging.Logger, num_sampled: torch.Tensor, num_reqs: int) -> None:
+    """[dfx/nan] Post-resample accepted-count census.
+
+    ``num_sampled`` stores ``resample_idx + 1`` unconditionally for every
+    request (finalize kernel), so ``num_sampled == 1`` marks a request whose
+    drafts were ALL rejected this step. Correlate with the input NaN census
+    of the same step: ``rows_with_nan`` rising together with ``accept0``
+    confirms the NaN -> forced-reject -> garbage-token causality in
+    production; NaN present but accept0 normal means the row-level NaN did
+    NOT reach the verdict (reduction NaN semantics evidence).
+    """
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    try:
+        zero_accept = (num_sampled == 1).nonzero(as_tuple=True)[0]
+        if zero_accept.numel() > 0:
+            logger.debug(
+                "[dfx/nan] post-resample: accept0_reqs=%d/%d req_ids_first8=%s",
+                zero_accept.numel(),
+                num_reqs,
+                zero_accept[:_NAN_ROW_FMT_LIMIT].tolist(),
+            )
+    except Exception as e:  # diagnostics must never take down the sampler
+        logger.debug("[dfx/nan] accept0 census failed: %s", e)
 
 
 @triton.jit
@@ -406,6 +492,10 @@ def rejection_sample(
     num_logits, vocab_size = target_logits.shape
     has_draft_logits = draft_logits is not None
 
+    # [dfx/nan] Input-side NaN census -- BEFORE the dummy replacement below
+    # so the real draft_logits (or None) is what gets inspected.
+    _log_nan_census(logger, target_logits, draft_logits, num_speculative_steps)
+
     # Both upstream kernels detect bonus rows using the total logit count.
     stats_num_logits = num_logits
 
@@ -696,4 +786,8 @@ def rejection_sample(
         cumulative_log_p=cumulative_log_p,
         use_block_verification=use_block_verification,
     )
+
+    # [dfx/nan] Output-side census: correlate accept0 requests with the
+    # input NaN census logged above for the same step.
+    _log_accept0_census(logger, num_sampled, num_reqs)
     return sampled, num_sampled
