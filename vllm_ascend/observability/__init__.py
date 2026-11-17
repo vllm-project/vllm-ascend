@@ -5,4 +5,5 @@
 - MS Service Metric integration: :mod:`vllm_ascend.observability.ms_metrics`
 - Runtime guard control plane: :mod:`vllm_ascend.observability.runtime_config`
   and :mod:`vllm_ascend.observability.runtime_guard`
+- Spec-decode DFX probes: :mod:`vllm_ascend.observability.spec_decode_dfx`
 """
