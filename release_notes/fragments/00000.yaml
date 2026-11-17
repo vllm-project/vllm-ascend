@@ -1,0 +1,5 @@
+# Replace the placeholder with the assigned PR number before publication.
+pr: 0
+entries:
+  - category: bugfix
+    text: Limit shared Engram HIXL communication resource file reads to the documented 1 MiB maximum.
