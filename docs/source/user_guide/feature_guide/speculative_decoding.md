@@ -70,26 +70,29 @@ Use `method="dflash"`; the draft checkpoint metadata selects DSpine automaticall
 Both Tencent and Speculators checkpoint layouts use the upstream DSpine loader.
 
 ```shell
-VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3.8-27B \
+vllm serve Qwen/Qwen3.8-27B \
   --language-model-only \
-  --speculative-config '{"method":"dflash","model":"tencent/Qwen3.8-27B-DSpine-b16","num_speculative_tokens":15,"enable_adaptive_verification":false}'
+  --speculative-config '{
+    "method": "dflash",
+    "model": "tencent/Qwen3.8-27B-DSpine-b16",
+    "revision": "260a6c23070ca873ff1a5f33b7119ac3f6a245ee",
+    "num_speculative_tokens": 15,
+    "enable_adaptive_verification": false
+  }'
 ```
 
 Set `num_speculative_tokens` to the checkpoint block size minus one. Omit
-`draft_tensor_parallel_size` to inherit the target TP size. Draft sampling defaults
+`draft_tensor_parallel_size` to inherit the target TP size; the two sizes must
+match for DSpine. Draft sampling defaults
 to `greedy`; use `draft_sample_method="probabilistic"` for probabilistic proposals.
-The adapter reuses DFlash's eager and ACL graph execution paths, with Ascend
-candidate-walk and proposal-cache kernels. NPU correctness, acceptance and graph
-replay validation remain pending.
+The adapter uses the existing Ascend DFlash2 candidate walk. Probabilistic
+sampling uses the Ascend RNG, so a fixed seed need not reproduce CUDA drafts.
 
 Adaptive verification, fine-grained LM head TP, PCP vocabulary weight sharding,
-QuaRot targets, quantized causal-injection projections, FP64 Gumbel sampling and
-quantized target LM heads are not supported by this adapter. Standard tensor
-parallelism uses candidate gathering and transition-score reduction over TP.
-Existing MRV2 DFlash restrictions on pipeline and context parallelism continue
-to apply. Scoring uses cached FP32 bridge weights; an NZ target LM head also
-requires an ND copy of each rank's vocabulary shard, increasing device memory use.
-The scoring caches assume weights remain fixed during serving.
+QuaRot targets, FP64 Gumbel sampling and batch-sharded draft logits are not
+supported. Exact transition scoring requires an unquantized LM head and
+unquantized refinement projections in ND format. Existing MRV2 DFlash
+restrictions on pipeline and context parallelism continue to apply.
 
 ## Speculating by matching n-grams in the prompt
 
