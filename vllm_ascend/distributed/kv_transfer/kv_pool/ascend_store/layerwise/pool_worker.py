@@ -739,11 +739,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 raise RuntimeError(f"Mooncake layerwise: no KV cache group for local layer {local_layer}")
             return [(group_id, layer_idx) for group_id, layer_idx in groups if group_id in self.cacheable_group_ids]
         # GVA groups use stage-local indices too; PP offsets apply to pool keys and remote addresses.
-        return [
-            (group_id, layer_idx)
-            for group_id, layer_idx in self.physical_layer_to_group_layers.get(local_layer, [(0, local_layer)])
-            if group_id in self.cacheable_group_ids
-        ]
+        return self.physical_layer_to_group_layers.get(local_layer, [(0, local_layer)])
 
     def _masked_block_runs_cached(
         self,
