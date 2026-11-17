@@ -125,6 +125,8 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
         seq_lens_cpu_upper_bound=torch.ones(batch_reqs, dtype=torch.int32),
     )
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.context_kv_only = False
+    spec.attn_groups = [[SimpleNamespace(kernel_block_stride=0, kernel_block_size=32)]]
     spec.pcp_manager = None
     spec.use_dcp = False
     spec.enable_adaptive_verification = True
