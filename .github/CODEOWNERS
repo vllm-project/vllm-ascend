@@ -227,7 +227,7 @@
 # tests
 /tests/ @wenjun91
 # RLHF e2e tests
-/tests/e2e/common/rlhf/ @wenjun91 @Ronald1995
+/tests/e2e/common/rlhf/ @Ronald1995
 /tests/e2e/nightly @wenjun91
 /tests/e2e/nightly/single_node/ops @Foriv
 /tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_recoverssm_npu.py @drslark @chenxi-hh
