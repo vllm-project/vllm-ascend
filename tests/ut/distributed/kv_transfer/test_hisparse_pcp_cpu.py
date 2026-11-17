@@ -49,6 +49,27 @@ def handle():
     return cache
 
 
+def test_pcp_workspace_uses_supported_sfa_kernel_pages(monkeypatch):
+    from vllm_ascend.attention import sfa_hisparse
+    from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+
+    block_size = sfa_hisparse._SFA_CACHE_BLOCK_SIZE
+    assert AscendSFABackend.get_supported_kernel_block_sizes() == [block_size]
+    impl = sfa_hisparse.AscendHiSparseImpl.__new__(sfa_hisparse.AscendHiSparseImpl)
+    impl._kv_staging_capacity = 2 * block_size
+    impl.index_group = NS(logical_topk_indices=torch.empty(1))
+    monkeypatch.setattr(
+        sfa_hisparse,
+        "current_workspace_manager",
+        lambda: NS(get_persistent_resource=lambda key, allocate: allocate()),
+    )
+    scratch, slots = impl._pcp_prolog_workspace()
+    assert scratch.shape == (2, block_size, 1, sfa_hisparse.C8_ROW_BYTES)
+    assert scratch.dtype == torch.float8_e4m3fn
+    assert scratch.is_contiguous()
+    torch.testing.assert_close(slots, torch.arange(2 * block_size, dtype=torch.int64))
+
+
 def make_connector(padded_tokens=3):
     meta = metadata()
     local = NS(num_tokens=3, idx_mapping=torch.tensor([7, 7, 9], dtype=torch.int64))
