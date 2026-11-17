@@ -27,7 +27,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -173,8 +173,30 @@ class AscendMLAAttention(MLAAttention):
             # The planner counts physical latent slots. Query heads remain on
             # the attention layer and its execution backend.
             storage_heads = spec.num_heads
-        # Resolve execution format before constructing the final spec. Keep
-        # TurboQuant's existing precedence when both SFA switches are set.
+        head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8 = self._get_kv_cache_format(spec)
+
+        # Preserve upstream metadata and apply all owner fields together.
+        # Reuse the physical packing selected by the execution implementation.
+        values.update(
+            num_heads=storage_heads,
+            model_version=spec.model_version or getattr(self, "model_version", None),
+            indexes_kv_by_block_stride=bool(
+                getattr(spec, "indexes_kv_by_block_stride", False) or getattr(self, "indexes_kv_by_block_stride", False)
+            ),
+            cache_sparse_sfa_turboquant=use_sfa_turboquant,
+            cache_sparse_sfa_c8=use_sfa_c8,
+            store_on_host=(
+                not (spec.is_draft or self.is_draft_layer) and getattr(self.impl, "store_kv_cache_on_host", False)
+            ),
+            head_size=head_size,
+            dtype=dtype,
+            cache_dtype_str=cache_dtype_str,
+        )
+        return AscendMLAAttentionSpec(**values)
+
+    def _get_kv_cache_format(self, spec: MLAAttentionSpec) -> tuple[int, torch.dtype, str | None, bool, bool]:
+        """Resolve cache dimensions, dtype and SFA flags from the execution format."""
+        # Keep TurboQuant's existing precedence when both SFA switches are set.
         use_sfa_turboquant = getattr(self.impl, "enable_sparse_sfa_turboquant", False)
         use_sfa_c8 = not use_sfa_turboquant and getattr(self.impl, "enable_sparse_sfa_c8", False)
         use_packed_sfa = use_sfa_turboquant or use_sfa_c8
@@ -196,24 +218,7 @@ class AscendMLAAttention(MLAAttention):
             dtype = self.impl.dtype
             cache_dtype_str = None
 
-        # Preserve upstream metadata and apply all owner fields together.
-        # Reuse the physical packing selected by the execution implementation.
-        values.update(
-            num_heads=storage_heads,
-            model_version=spec.model_version or getattr(self, "model_version", None),
-            indexes_kv_by_block_stride=bool(
-                getattr(spec, "indexes_kv_by_block_stride", False) or getattr(self, "indexes_kv_by_block_stride", False)
-            ),
-            cache_sparse_sfa_turboquant=use_sfa_turboquant,
-            cache_sparse_sfa_c8=use_sfa_c8,
-            store_on_host=(
-                not (spec.is_draft or self.is_draft_layer) and getattr(self.impl, "store_kv_cache_on_host", False)
-            ),
-            head_size=head_size,
-            dtype=dtype,
-            cache_dtype_str=cache_dtype_str,
-        )
-        return AscendMLAAttentionSpec(**values)
+        return head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8
 
 
 @dataclass

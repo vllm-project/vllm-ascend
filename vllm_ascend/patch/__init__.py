@@ -1497,10 +1497,8 @@
 #       logic expects `AscendMLAAttentionSpec`.
 #    How：
 #       Monkey-patch `get_kv_cache_spec` so regular attention layers keep the
-#       upstream behavior. MLA and indexer owners publish complete Ascend
-#       specs from their execution layouts. The collector applies the upstream
-#       customize_attention_spec helper without reconstructing their formats or
-#       resolving indexer ownership through layer names.
+#       upstream behavior while MLA layers are rewritten to
+#       `AscendMLAAttentionSpec`, including the FA-quant head-size adjustment.
 #    Related PR (if no, explain why):
 #       No. This is a plugin-side compatibility patch for the current upstream
 #       helper path.
