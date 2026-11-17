@@ -477,8 +477,19 @@ class RareDetector:
             with open(config, encoding="utf-8") as f:
                 self.cfg = json.load(f)
         else:
-            self.cfg = config
-        self.rules = self.cfg['rules']
+            self.cfg = dict(config)
+        if not isinstance(self.cfg, dict):
+            raise ValueError("rare config must be a dict or path to json")
+        rules = self.cfg.get("rules")
+        if not isinstance(rules, list) or not rules:
+            raise ValueError('rare config missing non-empty "rules"')
+        for i, r in enumerate(rules):
+            if not isinstance(r, dict) or not isinstance(r.get("and"), list) or not r["and"]:
+                raise ValueError(f'rare config rules[{i}] needs non-empty "and"')
+            for j, a in enumerate(r["and"]):
+                if not isinstance(a, dict) or "f" not in a:
+                    raise ValueError(f'rare config rules[{i}].and[{j}] needs "f"')
+        self.rules = rules
         self.need = needs(self.rules)
         self.compiled = [compile_rule(r) for r in self.rules]
         self.strict = [r.get('tier', 'intercept') != 'monitor' for r in self.rules]

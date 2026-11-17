@@ -329,8 +329,24 @@ def load(corpus: str) -> dict[str, Any]:
     if key.endswith(".npz"):
         if not os.path.isfile(key):
             raise FileNotFoundError(f"rare_chars table not found: {key}")
-        z = np.load(key)
+        try:
+            z = np.load(key)
+        except Exception as exc:
+            raise ValueError(f"rare_chars table npz unreadable: {key}: {exc}") from exc
+        need = ("rcls", "lead", "first", "last", "u8", "boff", "bflat")
+        missing = [k for k in need if k not in z.files]
+        if missing:
+            raise ValueError(f"rare_chars table missing keys {missing}: {key}")
         table = {k: z[k] for k in z.files}
+        rcls = np.asarray(table["rcls"])
+        boff = np.asarray(table["boff"])
+        bflat = np.asarray(table["bflat"])
+        if rcls.ndim != 1 or boff.shape != (rcls.shape[0] + 1,):
+            raise ValueError(f"rare_chars table bad rcls/boff shapes: {key}")
+        if int(boff[0]) != 0 or np.any(boff[1:] < boff[:-1]):
+            raise ValueError(f"rare_chars table boff not monotonic: {key}")
+        if int(boff[-1]) > int(np.asarray(bflat).size):
+            raise ValueError(f"rare_chars table boff exceeds bflat: {key}")
         return register(key, table)
     raise FileNotFoundError(
         f"rare_chars table {key!r} is not registered. "
