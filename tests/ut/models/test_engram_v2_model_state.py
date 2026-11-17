@@ -264,6 +264,7 @@ def test_forward_only_waits_external_events_on_full_runs(runtime, monkeypatch, m
             return hidden[:, 0]
 
     model.layers = [Layer(1), Layer(2)]
+    model._native_mhc_steps = (model_mod._native_mhc_step,) * len(model.layers)
     model.forward(
         torch.arange(4),
         torch.arange(4),
@@ -613,6 +614,7 @@ def test_mask_wait_is_delayed_past_early_layer_compute(runtime):
             return hidden[:, 0]
 
     model.layers = [Layer(0), Layer(1), Layer(2)]
+    model._native_mhc_steps = (model_mod._native_mhc_step,) * len(model.layers)
     model.forward(
         torch.arange(4),
         torch.arange(4),

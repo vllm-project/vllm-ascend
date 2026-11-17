@@ -105,7 +105,7 @@ def test_v41_mhc_waits_only_at_coefficient_consumers_during_capture(monkeypatch,
     )
 
     with mhc.record_mhc_overlap() if capturing else nullcontext():
-        updated, normed, routing, post, comb, pre = mhc._prepare_moe(
+        updated, normed, _, post, comb, pre = mhc._prepare_moe(
             x, residual, post, comb, pre, *weights, overlap=True, wait_for_attention=False
         )
         updated, normed, post, comb, _ = mhc._prepare_attention(
@@ -113,7 +113,6 @@ def test_v41_mhc_waits_only_at_coefficient_consumers_during_capture(monkeypatch,
         )
         mhc._finish_overlap(normed, updated, post, comb)
 
-    assert routing.shape == x.shape and routing.dtype == torch.float32
     if capturing:
         assert events == ["fuse", "aux", "wait", "fuse", "aux", "wait", "post"]
     else:

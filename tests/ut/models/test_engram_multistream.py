@@ -294,6 +294,7 @@ def test_sp_row_copy_waits_for_its_table(runtime, monkeypatch):
             return hidden[:, 0]
 
     model.layers = [Layer(1), Layer(2)]
+    model._native_mhc_steps = (model_mod._native_mhc_step,) * len(model.layers)
     monkeypatch.setattr(model_mod, "sp_shard", shard)
     monkeypatch.setattr(model_mod, "sp_all_gather", lambda values: torch.cat((values, values)))
     monkeypatch.setattr(model_mod.envs, "VLLM_MOE_SKIP_PADDING", False)

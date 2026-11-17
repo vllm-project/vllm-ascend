@@ -33,6 +33,7 @@ def test_triton_warmup_follows_dummy_runs_before_capture(enforce_eager, use_v2):
         vllm_config=SimpleNamespace(compilation_config=compilation_config),
         model_config=SimpleNamespace(enforce_eager=enforce_eager, seed=0),
         cache_config=SimpleNamespace(kv_cache_memory_bytes=1),
+        get_model=lambda: SimpleNamespace(warmup_mhc=lambda: events.append(("mhc",))),
         model_runner=SimpleNamespace(
             _dummy_run=lambda size: events.append(("dummy", size)),
             capture_model=lambda: events.append(("capture",)),
@@ -49,7 +50,7 @@ def test_triton_warmup_follows_dummy_runs_before_capture(enforce_eager, use_v2):
     ):
         profile.return_value.supports.return_value = False
         NPUWorker.compile_or_warm_up_model(worker)
-    expected = [("dummy", 4), ("dummy", 2), ("kernels",)]
+    expected = [("dummy", 4), ("dummy", 2), ("kernels",), ("mhc",)]
     if not enforce_eager:
         expected.append(("capture",))
     assert events == expected
