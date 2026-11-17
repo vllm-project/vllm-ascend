@@ -86,17 +86,14 @@ def compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> tor
     return logprobs
 
 
-# v35 partitioned collect (RinshannKaihou collect.py `_v35_partials` / `_v35_finish`):
-# https://github.com/RinshannKaihou/self_evolving_inference_detector/blob/main/src/v35_detector/serving/collect.py
-# Gate: Ascend Triton (not CUDA-only). Same math as full log_softmax max/gather:
-# top1 = -log S, chosen = (x_c - M) - log S.
-_V35_BLOCK = 4096
-# device -> (partial max, partial sum) workspace reused across steps.
-_v35_workspace: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+# Partitioned narrow collect: top1 = -log S, chosen = (x_c - M) - log S.
+# No full logprob table / ranks. Used by Guard rare_chars.
+_NARROW_COLLECT_BLOCK = 4096
+_narrow_collect_workspace: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
 
 @triton.jit
-def _v35_partials(X, stride, PMax, PSum, N: tl.constexpr, PARTS: tl.constexpr, BLOCK: tl.constexpr):
+def _narrow_collect_partials(X, stride, PMax, PSum, N: tl.constexpr, PARTS: tl.constexpr, BLOCK: tl.constexpr):
     row = tl.program_id(0)
     part = tl.program_id(1)
     offs = part * BLOCK + tl.arange(0, BLOCK)
@@ -109,7 +106,9 @@ def _v35_partials(X, stride, PMax, PSum, N: tl.constexpr, PARTS: tl.constexpr, B
 
 
 @triton.jit
-def _v35_finish(PMax, PSum, X, stride, Sampled, Out, N: tl.constexpr, PARTS: tl.constexpr, BLOCK_P: tl.constexpr):
+def _narrow_collect_finish(
+    PMax, PSum, X, stride, Sampled, Out, N: tl.constexpr, PARTS: tl.constexpr, BLOCK_P: tl.constexpr
+):
     row = tl.program_id(0)
     offs = tl.arange(0, BLOCK_P)
     pm = tl.load(PMax + row * PARTS + offs, mask=offs < PARTS, other=-float("inf"))
@@ -131,12 +130,10 @@ def compute_top1_and_chosen_logprobs(
     *,
     packed: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
-    """Sampler-side narrow collect: top-1 and chosen logprobs from raw logits.
+    """Narrow collect: top-1 and chosen logprobs from raw logits (Ascend Triton).
 
-    Uses the v35 two-kernel Triton path (partitioned max+sum-exp, then LSE +
-    gather) — no full logprob table, no top-k list, no ranks. Always launches
-    Ascend Triton (does not gate on ``is_cuda``). Intended for Guard
-    ``rare_chars`` / rc3-style detectors that only need ``(lp1, lpc)``.
+    Two-kernel partitioned max/sum-exp then LSE + gather — no full logprob
+    table, no ranks. Intended for Guard ``rare_chars`` (``lp1``, ``lpc``).
     """
     if logits.dim() != 2:
         raise ValueError(f"logits must be 2-D [rows, vocab], got shape={tuple(logits.shape)}")
@@ -149,29 +146,29 @@ def compute_top1_and_chosen_logprobs(
     if ids.stride(0) != 1:
         ids = ids.contiguous()
 
-    parts = triton.cdiv(vocab_size, _V35_BLOCK)
+    parts = triton.cdiv(vocab_size, _NARROW_COLLECT_BLOCK)
     device_key = str(raw.device)
-    ws = _v35_workspace.get(device_key)
+    ws = _narrow_collect_workspace.get(device_key)
     if ws is None or ws[0].shape[0] < batch_size or ws[0].shape[1] != parts:
         cap = triton.cdiv(batch_size, 64) * 64
-        ws = _v35_workspace[device_key] = (
+        ws = _narrow_collect_workspace[device_key] = (
             torch.empty((cap, parts), dtype=torch.float32, device=raw.device),
             torch.empty((cap, parts), dtype=torch.float32, device=raw.device),
         )
 
     out = torch.empty((batch_size, 2), dtype=torch.float32, device=raw.device)
     block_p = max(16, triton.next_power_of_2(parts))
-    _v35_partials[(batch_size, parts)](
+    _narrow_collect_partials[(batch_size, parts)](
         raw,
         raw.stride(0),
         ws[0],
         ws[1],
         vocab_size,
         parts,
-        _V35_BLOCK,
+        _NARROW_COLLECT_BLOCK,
         num_warps=4,
     )
-    _v35_finish[(batch_size,)](
+    _narrow_collect_finish[(batch_size,)](
         ws[0],
         ws[1],
         raw,

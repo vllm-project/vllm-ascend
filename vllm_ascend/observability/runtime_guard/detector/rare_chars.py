@@ -16,10 +16,11 @@
 """Runtime Guard wrapper for rare_chars (visible garbled / foreign-script).
 
 Collects ``(top1_logprob, chosen_logprob)`` via sampler-side narrow collect on
-Guard-stashed pre-sample logits + sampled ids (v35 Triton). Does **not**
-require ``SamplingParams.logprobs``. Per-tokenizer tables are built at warmup
-from the served tokenizer. Algorithm knobs (``think_end``, ``alert_monitor``)
-live in ``rare.json``; runtime_config only exposes ``enabled``.
+Guard-stashed pre-sample logits + sampled ids (Ascend Triton
+``_narrow_collect_*``). Does **not** require ``SamplingParams.logprobs``.
+Per-tokenizer tables are built at warmup from the served tokenizer. Algorithm
+knobs (``think_end``, ``alert_monitor``) live in ``rare.json``; runtime_config
+only exposes ``enabled``.
 """
 
 from __future__ import annotations
@@ -159,8 +160,8 @@ class RareCharsDetector(ConfigBackedDetector):
         help=(
             "Visible garbled text (rare_chars): foreign-script fragments, "
             "illegal UTF-8, low-confidence rare tokens. Guard uses sampler-side "
-            "v35 Triton narrow collect on stashed pre-sample logits "
-            "for (top1, chosen) — API SamplingParams.logprobs not required. "
+            "narrow collect (Ascend Triton) on stashed pre-sample logits "
+            "for (top1, chosen) — SamplingParams.logprobs not required. "
             "Per-tokenizer table is built at warmup; think_end / alert_monitor "
             "come from detector/rare/rare.json."
         ),

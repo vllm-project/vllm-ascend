@@ -132,7 +132,7 @@ per-tokenizer rare table is always built at model warmup from the served
 tokenizer; the shared GB model (`rare_gb.npz`) ships with the package.
 
 Guard collects `(top1, chosen)` natural-log logprobs from a pre-sample logits
-stash via v35 Triton ``_v35_partials`` / ``_v35_finish`` (no API
+stash via Ascend Triton ``_narrow_collect_partials`` / ``_narrow_collect_finish`` (no API
 ``SamplingParams.logprobs``). Sampled ids stay on device and the kernels read
 logits by stride. Each step's device pair is attached to that step's
 ``AscendAsyncOutput`` (no shared runner slot). ``get_output`` only submits to a
