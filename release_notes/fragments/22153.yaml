@@ -1,0 +1,15 @@
+pr: 22153
+entries:
+  - category: feature
+    text: >-
+      Added experimental Qwen4Exp/Flash Next GDN state recovery for speculative
+      decoding on Model Runner V2, enabled with additional_config.qwen_gdn_recoverssm=true
+      and disabled by default. Initial validation covers reduced-model eager 1P1D
+      execution with prefix caching disabled and mamba-cache-mode=none; token parity,
+      full-model accuracy, and performance remain unverified.
+  - category: bugfix
+    text: >-
+      Fixed Qwen4Exp MTP startup compatibility with the upstream num_mtp_layers
+      argument and allowed W4A8 users to select separate GMM and SwiGLU operations
+      with ascend_fusion_config.fusion_ops_gmmswigluquant=false. This switch keeps
+      its existing enabled-by-default behavior.
