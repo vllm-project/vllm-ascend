@@ -23,42 +23,6 @@ hardware_overrides:
       HCCL_BUFFSIZE: '512'
       HCCL_OP_EXPANSION_MODE: AIV
       HCCL_CONNECT_TIMEOUT: '7200'
-  ascend_910b:
-    extra_args:
-      - '--enable-expert-parallel'
-      - '--safetensors-load-strategy'
-      - prefetch
-      - '--max-num-seqs'
-      - '32'
-      - '--max-model-len'
-      - '1048576'
-      - '--max-num-batched-tokens'
-      - '8192'
-      - '--trust-remote-code'
-      - '--quantization'
-      - ascend
-      - '--limit-mm-per-prompt'
-      - '{"image":7,"video":0}'
-      - '--gpu-memory-utilization'
-      - '0.9'
-      - '--kv-cache-dtype'
-      - int8
-      - '--attention-config.indexer_kv_dtype'
-      - int8
-      - '--enforce-eager'
-      - '--enable-prefix-caching'
-      - '--additional-config'
-      - '{"enable_flashcomm1":false,"enable_shared_expert_dp":true}'
-    extra_env:
-      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
-      HCCL_BUFFSIZE: '1024'
-      HCCL_OP_EXPANSION_MODE: AIV
-      HCCL_INTRA_ROCE_ENABLE: '1'
-      TASK_QUEUE_ENABLE: '1'
-      OMP_NUM_THREADS: '1'
-      HCCL_SOCKET_IFNAME: '$IFACE_NAME'
-      GLOO_SOCKET_IFNAME: '$IFACE_NAME'
-      TP_SOCKET_IFNAME: '$IFACE_NAME'
 hardware_notes:
   ascend_950pr_8x:
     title: vLLM Ascend A5 image required
@@ -70,6 +34,7 @@ hardware_notes:
       PD roles = prefill + decode; TP/DP per role: prefill dp=2/tp=1/pcp=8, decode dp=8/tp=2; total NPUs = 32.
       Before declaring PD ready: every backend process healthy, requests via the router/proxy succeed, KV transfer completes.
       stop/cleanup: stop prefill/decode processes and the proxy on every node before restart.
+      Weights come from ModelScope (set VLLM_USE_MODELSCOPE=true, or pre-download the checkpoint and serve a local path).
       Set HCCL_BUFFSIZE=1024 before launch.
 strategy_hardware:
   single_node_tep:
@@ -96,6 +61,7 @@ variants:
           pip: false
       ascend_910b:
         docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        docker_serve_command: vllm serve
         install:
           pip: false
   ascend_w8a8:
@@ -105,6 +71,7 @@ variants:
     vram_minimum_gb: 386
     description: 'ModelSlim INT8 W8A8 checkpoint measured on a 4-node Atlas 800I A2 (Ascend 910B) prefill/decode cluster: prefill DP2+TP1+PCP8 across 2 node(s), decode DP8+TP2 across 2 node(s). Requires --quantization ascend. Published at https://modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8.'
     supported_hardware: [ascend_910b]
+    supported_frontends: [python]
     tp:
       ascend_910b: 1
     min_vllm_version: 0.29.0
@@ -112,8 +79,46 @@ variants:
       - '--quantization'
       - ascend
     hardware_overrides:
+      npu:
+        extra_args:
+          - '--enable-expert-parallel'
+          - '--safetensors-load-strategy'
+          - prefetch
+          - '--max-num-seqs'
+          - '32'
+          - '--max-model-len'
+          - '1048576'
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--trust-remote-code'
+          - '--quantization'
+          - ascend
+          - '--limit-mm-per-prompt'
+          - '{"image":7,"video":0}'
+          - '--gpu-memory-utilization'
+          - '0.9'
+          - '--kv-cache-dtype'
+          - int8
+          - '--attention-config.indexer_kv_dtype'
+          - int8
+          - '--enforce-eager'
+          - '--enable-prefix-caching'
+          - '--additional-config'
+          - '{"enable_flashcomm1":false,"enable_shared_expert_dp":true}'
+        extra_env:
+          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+          HCCL_BUFFSIZE: '1024'
+          HCCL_OP_EXPANSION_MODE: AIV
+          HCCL_INTRA_ROCE_ENABLE: '1'
+          TASK_QUEUE_ENABLE: '1'
+          OMP_NUM_THREADS: '1'
+          HCCL_SOCKET_IFNAME: '$IFACE_NAME'
+          GLOO_SOCKET_IFNAME: '$IFACE_NAME'
+          TP_SOCKET_IFNAME: '$IFACE_NAME'
+          VLLM_USE_MODELSCOPE: 'true'
       ascend_910b:
         docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        docker_serve_command: vllm serve
         install:
           pip: false
 
@@ -153,6 +158,10 @@ guide_sections:
 
     Served W8A8 checkpoint: [Eco-Tech/GLM-5.3-Flash-w8a8](https://modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
 
+    Weights are published on ModelScope (not Hugging Face): either set `VLLM_USE_MODELSCOPE=true`
+    (as exported in the runbook below), or pre-download the checkpoint and pass a local
+    model path to `vllm serve`.
+
     #### Prefill role — run on every prefill node
 
     The prefill pool runs 2 engine(s) in total; every engine needs a distinct
@@ -171,6 +180,7 @@ guide_sections:
     export HCCL_SOCKET_IFNAME="$IFACE_NAME"
     export GLOO_SOCKET_IFNAME="$IFACE_NAME"
     export TP_SOCKET_IFNAME="$IFACE_NAME"
+    export VLLM_USE_MODELSCOPE=true
     vllm serve Eco-Tech/GLM-5.3-Flash-w8a8 \
       --data-parallel-size 2 \
       --tensor-parallel-size 1 \
@@ -216,6 +226,7 @@ guide_sections:
     export HCCL_SOCKET_IFNAME="$IFACE_NAME"
     export GLOO_SOCKET_IFNAME="$IFACE_NAME"
     export TP_SOCKET_IFNAME="$IFACE_NAME"
+    export VLLM_USE_MODELSCOPE=true
     vllm serve Eco-Tech/GLM-5.3-Flash-w8a8 \
       --data-parallel-size 8 \
       --tensor-parallel-size 2 \
