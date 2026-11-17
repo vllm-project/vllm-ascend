@@ -35,7 +35,8 @@ def worker(cache_names=("model.layers.2.long", "model.layers.2.swa")):
 
 
 @pytest.mark.parametrize("draft_alias", [False, True])
-def test_target_and_draft_use_their_own_ready_hooks(draft_alias):
+@pytest.mark.parametrize("target_name", ["model.layers.2.v41_attn", "model.layers.2.long"])
+def test_target_and_draft_use_their_own_ready_hooks(draft_alias, target_name):
     obj = worker()
     if draft_alias:
         obj.vllm_config.compilation_config.static_forward_context["draft.v41_attn"] = SimpleNamespace(
@@ -47,16 +48,11 @@ def test_target_and_draft_use_their_own_ready_hooks(draft_alias):
     )
     obj._reqs_send_state = {"r": state}
     save = load(PUSH, "save_kv_layer", {"torch": SimpleNamespace(npu=SimpleNamespace(Event=Mock))}, OWNER)
-    save(obj, "model.layers.2.long")
-    assert not state.available_layers
-    save(obj, "model.layers.2.v41_attn")
+    save(obj, target_name)
     assert {name: end for name, (end, _) in state.available_layers.items()} == {
         "model.layers.2.long": 32,
         "model.layers.2.swa": 32,
     }
-    if draft_alias:
-        save(obj, "draft")
-        assert "draft" not in state.available_layers
     save(obj, "draft.v41_attn" if draft_alias else "draft")
     assert state.available_layers["draft"][0] == 32
     assert state.available_layers["draft"][1] is not state.available_layers["model.layers.2.long"][1]

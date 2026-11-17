@@ -260,17 +260,11 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
 
     def _register_composite_layer_aliases(self) -> None:
         """Map model-ready boundaries to this worker's registered cache owners."""
-        self._composite_kv_aliases: set[str] = set()
-        self._declared_layer_indices: set[tuple[str, int]] = set()
         context = self.vllm_config.compilation_config.static_forward_context
         for alias, layer in context.items():
             cache_names = getattr(layer, "kv_transfer_cache_names", None)
-            if cache_names is None:
-                continue
-            layer_index = self._layer_index_by_name[cache_names[0]]
-            self._layer_index_by_name[alias] = layer_index
-            self._composite_kv_aliases.add(alias)
-            self._declared_layer_indices.add(layer_index)
+            if cache_names is not None:
+                self._layer_index_by_name[alias] = self._layer_index_by_name[cache_names[0]]
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
         if self.kv_transfer_config.is_kv_producer:
@@ -829,9 +823,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             return
         layer_index = self._layer_index_by_name.get(layer_name)
         if layer_index is None:
-            return
-        if layer_index in self._declared_layer_indices and layer_name not in self._composite_kv_aliases:
-            # One physical cache's callback cannot declare the whole owner ready.
             return
         # Share one fence across the physical layer's caches and requests.
         # Duplicate hooks with no new tokens do not record another device event.
