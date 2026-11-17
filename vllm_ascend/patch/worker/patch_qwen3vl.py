@@ -35,7 +35,13 @@ def tensor_parallel_wrap(func):
 def forward_with_split_qkv_rmsnorm_mrope(self, positions: torch.Tensor, hidden_states: torch.Tensor):
     qkv, _ = self.qkv_proj(hidden_states)
     if isinstance(self.rotary_emb, AscendMRotaryEmbedding):
-        cos_sin = self.rotary_emb.cos_sin_cache[positions]
+        # A single index_select on the flattened positions runs as one gather
+        # kernel. Advanced indexing with the [3, num_tokens] positions tensor
+        # launches Index + IndexCheck kernels instead, once per decoder layer.
+        cos_sin_cache = self.rotary_emb.cos_sin_cache
+        cos_sin = torch.index_select(cos_sin_cache, 0, positions.reshape(-1)).view(
+            *positions.shape, cos_sin_cache.shape[-1]
+        )
         if cos_sin.device != qkv.device:
             cos_sin = cos_sin.to(qkv.device)
         if cos_sin.dtype != qkv.dtype:
