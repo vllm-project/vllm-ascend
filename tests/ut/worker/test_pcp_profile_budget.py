@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.ascend_forward_context import MoECommType
@@ -17,7 +18,11 @@ def make_runner(tokens=16384, pcp=16, requests=64, query=4, replicated=False):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.max_num_tokens = tokens
     runner.max_num_reqs = requests
-    runner.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp))
+    runner.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp),
+        model_config=SimpleNamespace(enforce_eager=True),
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE, cudagraph_capture_sizes=[]),
+    )
     runner.speculative_config = SimpleNamespace(
         method="dspark" if replicated else "mtp",
         num_speculative_tokens=query - 1,
@@ -142,3 +147,40 @@ def test_mc2_reservation_compares_the_selected_profile_budget(capacity, reserve)
             capacity, skip_attn=True, skip_eplb=True, is_profile=True, randomize_inputs=False
         )
     assert runner.max_num_tokens == 16384
+
+
+@pytest.mark.parametrize("mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE])
+@pytest.mark.parametrize("split_grid", [False, True])
+@pytest.mark.parametrize("graph_tokens,expected", [(512, 3048), (4096, 4096)])
+def test_profile_budget_covers_prefill_graphs(mode, split_grid, graph_tokens, expected):
+    runner = make_runner(pcp=8, requests=500, query=1)
+    config = runner.vllm_config
+    config.model_config.enforce_eager = False
+    config.compilation_config.cudagraph_mode = mode
+    config.compilation_config.cudagraph_capture_sizes = [512, 8192] if split_grid else [512, graph_tokens]
+    if split_grid:
+        config.compilation_config.prefill_cudagraph_capture_token_sizes = [512, graph_tokens]
+    assert get_pcp_profile_num_tokens(config, runner.max_num_tokens, runner.max_num_reqs) == expected
+
+
+@pytest.mark.parametrize(
+    "eager,mode",
+    [(True, CUDAGraphMode.PIECEWISE), (False, CUDAGraphMode.NONE), (False, CUDAGraphMode.FULL_DECODE_ONLY)],
+)
+def test_profile_budget_ignores_inactive_prefill_graphs(eager, mode):
+    runner = make_runner(pcp=8, requests=500, query=1)
+    config = runner.vllm_config
+    config.model_config.enforce_eager = eager
+    config.compilation_config.cudagraph_mode = mode
+    config.compilation_config.prefill_cudagraph_capture_token_sizes = [4096]
+    assert get_pcp_profile_num_tokens(config, runner.max_num_tokens, runner.max_num_reqs) == 3048
+
+
+def test_empty_prefill_grid_does_not_use_draft_graph_sizes():
+    runner = make_runner(pcp=8, requests=500, query=1)
+    config = runner.vllm_config
+    config.model_config.enforce_eager = False
+    config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+    config.compilation_config.prefill_cudagraph_capture_token_sizes = []
+    config.compilation_config.cudagraph_capture_sizes = [8192]
+    assert get_pcp_profile_num_tokens(config, runner.max_num_tokens, runner.max_num_reqs) == 3048

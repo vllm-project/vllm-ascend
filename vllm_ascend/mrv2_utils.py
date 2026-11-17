@@ -47,7 +47,22 @@ def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max
     local_tokens = (max_num_tokens + pcp_size - 1) // pcp_size
     # DualChunkSwap rounds two chunks per request on each PCP rank.
     padding_tokens = 2 * max_num_reqs
-    return min(max_num_tokens, max(local_tokens, max_num_reqs * query_per_req) + padding_tokens)
+    profile_tokens = min(max_num_tokens, max(local_tokens, max_num_reqs * query_per_req) + padding_tokens)
+
+    from vllm.config import CUDAGraphMode
+
+    compilation_config = vllm_config.compilation_config
+    if not vllm_config.model_config.enforce_eager and compilation_config.cudagraph_mode in (
+        CUDAGraphMode.PIECEWISE,
+        CUDAGraphMode.FULL_AND_PIECEWISE,
+    ):
+        # Capture sizes are already PCP-local, including graph padding.
+        # Older vLLM versions use the shared token grid instead of a prefill grid.
+        prefill_sizes = getattr(compilation_config, "prefill_cudagraph_capture_token_sizes", None)
+        if prefill_sizes is None:
+            prefill_sizes = compilation_config.cudagraph_capture_sizes
+        profile_tokens = max(profile_tokens, max(prefill_sizes or [], default=0))
+    return profile_tokens
 
 
 def use_v2_model_runner(vllm_config: VllmConfig) -> bool:

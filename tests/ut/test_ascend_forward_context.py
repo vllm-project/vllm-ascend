@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 
 from vllm_ascend import ascend_forward_context as afc
 from vllm_ascend.ascend_forward_context import MoECommType
@@ -51,6 +52,7 @@ def _make_vllm_config(
     hf_text_config_attrs["hidden_size"] = hidden_size
 
     model_config = SimpleNamespace(
+        enforce_eager=True,
         hf_text_config=SimpleNamespace(**hf_text_config_attrs),
         get_num_experts=lambda: num_experts,
     )
@@ -62,6 +64,7 @@ def _make_vllm_config(
         prefill_context_parallel_size=1,
     )
     compilation_config = SimpleNamespace(
+        cudagraph_mode=CUDAGraphMode.NONE,
         cudagraph_capture_sizes=cudagraph_capture_sizes or [],
         max_cudagraph_capture_size=max_cudagraph_capture_size,
     )
