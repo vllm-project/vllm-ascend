@@ -126,7 +126,7 @@ class PCPHiSparseConnector(ActiveKVConnector):
         manager = self._pcp_manager
         global_batch = manager.global_batch
         write_request_ids = None
-        if global_batch.is_prefilling_np.any():
+        if manager.is_decode_sharded or global_batch.is_prefilling_np.any():
             write_request_ids = get_pcp_write_request_ids(
                 global_batch, manager._padded_gather_idx, manager._gathered_kv_write_mask
             )

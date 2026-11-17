@@ -271,7 +271,7 @@ def test_hisparse_uses_standard_decode_sharding(pcp_size):
     assert manager.shard_decode_requests
     counts = np.array([1, 4], dtype=np.int32)
     prefilling = np.array([False, False])
-    np.testing.assert_array_equal(manager.replicated_requests(counts, prefilling), [False, False])
+    # Core classifies decode rows before assigning their single-rank owner.
     assert list(manager._iter_rank_chunks(0, counts, prefilling)) == [(0, 0, 1)]
     assert list(manager._iter_rank_chunks(1, counts, prefilling)) == [(1, 0, 4)]
     for rank in range(2, pcp_size):

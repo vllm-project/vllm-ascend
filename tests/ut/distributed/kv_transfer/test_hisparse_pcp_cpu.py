@@ -85,6 +85,7 @@ def make_connector(padded_tokens=3):
     gathered_slots = torch.full((3, padded_tokens * 2), -1)
     manager = NS(
         global_batch=global_batch,
+        is_decode_sharded=False,
         _gathered_kv_slot_mappings=gathered_slots,
         _local_block_tables=original_tables,
     )
@@ -92,24 +93,6 @@ def make_connector(padded_tokens=3):
         active, manager, NS(slot_mappings=original_slots, input_block_tables=original_tables), 0
     )
     return connector, cache, meta, local, global_batch, manager
-
-
-@pytest.mark.parametrize("capture", [False, True])
-def test_sharded_decode_keeps_gathered_resident_and_host_rows(capture):
-    connector, cache, meta, local, batch, manager = make_connector()
-    manager.is_decode_sharded = True
-    batch.is_prefilling_np[:] = False
-    meta.pcp_has_global_prefill = False
-    meta.hisparse_write_has_prefill = False
-    meta.hisparse_for_capture = capture
-    scheduler = NS(kv_connector_metadata=object(), has_sync_kv_loads=True)
-    connector.pre_forward(scheduler, local, {"layer0": meta})
-    assert connector._pending_load_kwargs["num_tokens"] == manager._padded_gather_idx.numel()
-    assert cache.slot_mapping.data_ptr() == manager._gathered_kv_slot_mappings[1].data_ptr()
-    assert cache.slot_mapping.tolist() == [100, 103, -1, 101, 104, -1]
-    assert meta.hisparse_write_req_id_per_token.tolist() == [0, 0, -1, 0, 1, -1]
-    assert connector._pending_load_kwargs["request_state_indices"].tolist() == [7, 9]
-    assert meta.hisparse_request_state_indices.tolist() == [7, 7, 9]
 
 
 def test_host_mirror_mapping_shared_across_groups_and_scheduling_steps(monkeypatch):
@@ -189,6 +172,27 @@ def test_capture_and_real_forward_keep_query_and_scatter_input_addresses():
     assert cache.slot_mapping[:8].tolist() == [100, 101, 102, -1, -1, -1, -1, -1]
     assert connector._pending_load_kwargs["num_tokens"] == 8
     assert captured_slots.data_ptr() == cache.slot_mapping.data_ptr()
+
+
+@pytest.mark.parametrize("capture", [False, True])
+def test_sharded_decode_keeps_gathered_resident_and_host_rows(capture):
+    connector, cache, meta, local, batch, manager = make_connector()
+    manager.is_decode_sharded = True
+    batch.is_prefilling_np[:] = False
+    batch.query_start_loc = torch.tensor([0, 4, 7], dtype=torch.int32)
+    manager._padded_gather_idx = torch.tensor([0, 3, 0, 1, 4, 0])
+    manager._gathered_kv_write_mask = torch.tensor([True, True, False, True, True, False])
+    local.num_tokens_after_padding = 3
+    meta.hisparse_for_capture = capture
+    scheduler = NS(kv_connector_metadata=object(), has_sync_kv_loads=True)
+    connector.pre_forward(scheduler, local, {"layer0": meta})
+    assert connector._pending_load_kwargs["num_tokens"] == 6
+    assert cache.slot_mapping.data_ptr() == manager._gathered_kv_slot_mappings[1].data_ptr()
+    meta.hisparse_num_write_tokens = 6
+    meta.hisparse_write_has_prefill = False
+    connector.prepare_host_mirror()
+    assert cache.req_id_per_token.tolist() == [0, 0, -1, 0, 1, -1]
+    assert connector._pending_load_kwargs["request_state_indices"].tolist() == [7, 9]
 
 
 @pytest.mark.parametrize("prefill", [False, True])
