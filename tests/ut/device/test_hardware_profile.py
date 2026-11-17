@@ -73,6 +73,7 @@ _EXPECTED_CAPABILITIES = {
         HardwareCapability.FLASH_ATTN_NPU_3,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
         HardwareCapability.NPU_TOP_K_TOP_P,
+        HardwareCapability.POOL_KEY_INDEXER_INT8,
     },
     AscendDeviceType._310P: frozenset(
         {
