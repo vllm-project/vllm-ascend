@@ -24,7 +24,7 @@ class DeviceTensor:
         return self.tensor[index]
 
 
-def load_reader(copy, fmt=2, function="try_load_strided_mla_cache"):
+def load_reader(copy, fmt=2, function="try_load_strided_mla_cache", slot_builder=None):
     # Execute the production function, isolating only device factories and the
     # final copy kernel without duplicating the slot computation.
     source = Path(__file__).resolve().parents[3] / "vllm_ascend/device/paged_mla_cache_read.py"
@@ -43,6 +43,7 @@ def load_reader(copy, fmt=2, function="try_load_strided_mla_cache"):
         "torch": cpu_torch,
         "torch_npu": SimpleNamespace(get_npu_format=lambda cache: fmt),
         "copy_pcp_kv_cache": copy,
+        "build_mla_read_slots": slot_builder or (lambda *args: None),
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(source), "exec"), namespace)
     return namespace[function]
@@ -211,3 +212,45 @@ def test_unaffected_layouts_keep_native_reader(unsupported):
 
     fmt = 29 if unsupported == "nz" else 2
     assert not load_reader(forbidden_copy, fmt)(DeviceTensor(cache), DeviceTensor(cache), None, None, None, None, None)
+
+
+def test_strided_reader_uses_optimized_slots_when_available():
+    block_size, key_dim, rope_dim = 4, 3, 2
+    backing = torch.arange(3 * block_size * (key_dim + rope_dim), dtype=torch.float16).reshape(
+        3, block_size, 1, key_dim + rope_dim
+    )
+    key, value = backing[..., :key_dim], backing[..., key_dim:]
+    table = torch.tensor([[2, 0]], dtype=torch.int32)
+    lengths = torch.tensor([3], dtype=torch.int32)
+    offsets = torch.tensor([1], dtype=torch.int32)
+    expected_slots = [9, 10, 11]
+    calls = []
+
+    def slot_builder(actual_table, actual_lengths, actual_offsets, num_tokens, actual_block_size):
+        calls.append((actual_table, actual_lengths, actual_offsets, num_tokens, actual_block_size))
+        return torch.tensor(expected_slots, dtype=torch.int64)
+
+    def copy(cache, slots):
+        return torch.stack(
+            [
+                torch.cat([part.tensor[slot // block_size, slot % block_size, 0] for part in cache])
+                for slot in slots.tolist()
+            ]
+        )
+
+    out_key = torch.empty(3, 1, key_dim, dtype=torch.float16)
+    out_value = torch.empty(3, 1, rope_dim, dtype=torch.float16)
+    table_arg, lengths_arg, offsets_arg = map(DeviceTensor, (table, lengths, offsets))
+    assert load_reader(copy, slot_builder=slot_builder)(
+        DeviceTensor(key),
+        DeviceTensor(value),
+        table_arg,
+        lengths_arg,
+        offsets_arg,
+        DeviceTensor(out_key),
+        DeviceTensor(out_value),
+    )
+    assert calls == [(table_arg, lengths_arg, offsets_arg, 3, block_size)]
+    for row, slot in enumerate(expected_slots):
+        assert torch.equal(out_key[row, 0], key[slot // block_size, slot % block_size, 0])
+        assert torch.equal(out_value[row, 0], value[slot // block_size, slot % block_size, 0])

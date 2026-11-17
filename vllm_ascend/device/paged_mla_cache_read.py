@@ -6,6 +6,7 @@
 import torch
 import torch_npu
 
+from vllm_ascend.ops.triton.mla_read_slots import build_mla_read_slots
 from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
 
 PCP_COPY_MAX_TILE_ROWS = 8
@@ -60,22 +61,24 @@ def try_load_strided_mla_cache(cache_k, cache_v, block_table, seq_lens, seq_offs
         raise ValueError("Strided MLA cache reader received incompatible metadata or output buffers.")
     if num_tokens == 0:
         return True
-    # Device lengths describe local rows for both base and DCP paths.
-    # Do not use global cumulative lengths from the CPU.
-    lengths = seq_lens.to(torch.int64)
-    requests = torch.repeat_interleave(
-        torch.arange(num_sequences, device=seq_lens.device, dtype=torch.int64),
-        lengths,
-        output_size=num_tokens,
-    )
-    prefix_starts = torch.cumsum(lengths, dim=0) - lengths
-    positions = torch.arange(num_tokens, device=seq_lens.device, dtype=torch.int64)
-    positions = positions - prefix_starts.index_select(0, requests)
-    if seq_offset is not None:
-        positions = positions + seq_offset.to(torch.int64).index_select(0, requests)
     block_size = cache_k.shape[1]
-    physical_blocks = block_table[requests, positions // block_size].to(torch.int64)
-    slots = physical_blocks * block_size + positions % block_size
+    slots = build_mla_read_slots(block_table, seq_lens, seq_offset, num_tokens, block_size)
+    if slots is None:
+        # Device lengths describe local rows for both base and DCP paths.
+        # Do not use global cumulative lengths from the CPU.
+        lengths = seq_lens.to(torch.int64)
+        requests = torch.repeat_interleave(
+            torch.arange(num_sequences, device=seq_lens.device, dtype=torch.int64),
+            lengths,
+            output_size=num_tokens,
+        )
+        prefix_starts = torch.cumsum(lengths, dim=0) - lengths
+        positions = torch.arange(num_tokens, device=seq_lens.device, dtype=torch.int64)
+        positions = positions - prefix_starts.index_select(0, requests)
+        if seq_offset is not None:
+            positions = positions + seq_offset.to(torch.int64).index_select(0, requests)
+        physical_blocks = block_table[requests, positions // block_size].to(torch.int64)
+        slots = physical_blocks * block_size + positions % block_size
 
     packed = load_mla_cache_rows_by_slots(cache_k, cache_v, slots)
     # Split views retain a row stride spanning both components. Copy into the
