@@ -3,8 +3,10 @@
 import pytest
 import torch
 import torch_npu  # noqa: F401
+from vllm.triton_utils import triton
 
 from vllm_ascend.distributed.eplb.tensor_ops import count_allgather_tokens as count_allgather_tokens_triton
+from vllm_ascend.ops.triton.eplb_count import MAX_REDUCE_ELEMENTS, _reduce_allgather_counts_kernel
 
 
 def reference(ids, mask, start, count):
@@ -37,6 +39,7 @@ def reference(ids, mask, start, count):
         (10240, 8, 32),
         (10240, 8, 64),
         (10240, 8, 128),
+        (81920, 1, 128),
         (10240, 8, 256),
         (10240, 16, 128),
         (32768, 8, 128),
@@ -95,6 +98,28 @@ def test_reject_noncontiguous_ids():
     mask = torch.ones(4, dtype=torch.bool, device="npu")
     with pytest.raises(ValueError, match="contiguous physical IDs"):
         count_allgather_tokens_triton(ids, mask, 0, 128)
+
+
+@pytest.mark.parametrize("rows,bins", [(4, 128), (17, 512)])
+def test_reduce_large_int64_counts(rows, bins):
+    partials = torch.full((rows, bins), 2**31 + 17, dtype=torch.int64, device="npu")
+    rows_per_tile = min(rows, max(1, MAX_REDUCE_ELEMENTS // bins))
+    tiles = triton.cdiv(rows, rows_per_tile)
+    # A direct writer must overwrite the previous contents, including on replay.
+    output = torch.full((bins,), -7 if tiles == 1 else 0, dtype=torch.int64, device="npu")
+    _reduce_allgather_counts_kernel[(tiles,)](
+        partials,
+        output,
+        NUM_PARTIAL_ROWS=rows,
+        NUM_BINS=bins,
+        LOCAL_COUNT=bins,
+        ROWS_PER_TILE=rows_per_tile,
+        BLOCK_ROWS=triton.next_power_of_2(rows_per_tile),
+        SINGLE_REDUCER=tiles == 1,
+        compile_mode="simd",
+    )
+    expected = torch.full((bins,), rows * (2**31 + 17), dtype=torch.int64)
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("tokens,experts,calls", [(65, 17, 1), (10240, 128, 20), (1088, 512, 20), (10240, 512, 20)])

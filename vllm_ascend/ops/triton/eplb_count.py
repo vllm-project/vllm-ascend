@@ -24,6 +24,7 @@ def _count_allgather_kernel(
     TOPK: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     NUM_BINS: tl.constexpr,
+    SINGLE_REDUCER: tl.constexpr,
 ):
     pid = tl.program_id(0)
     programs = tl.num_programs(0)
@@ -45,10 +46,11 @@ def _count_allgather_kernel(
         local_counts += tl.histogram(safe_ids, NUM_BINS, mask=eligible).to(tl.int64)
     bins = tl.arange(0, NUM_BINS)
     tl.store(partial_counts_ptr + pid * NUM_BINS + bins, local_counts)
-    # The next kernel merges row tiles atomically. Initialize once in this
-    # launch so the existing stream dependency orders zeroing before all merges.
-    if pid == 0:
-        tl.store(counts_ptr + bins, tl.full((NUM_BINS,), 0, tl.int64), mask=bins < local_count)
+    # Multiple row tiles merge atomically; stream order places initialization
+    # before every merge. A single reducer overwrites the complete output.
+    if not SINGLE_REDUCER:
+        if pid == 0:
+            tl.store(counts_ptr + bins, tl.full((NUM_BINS,), 0, tl.int64), mask=bins < local_count)
 
 
 @triton.jit
@@ -60,6 +62,7 @@ def _reduce_allgather_counts_kernel(
     LOCAL_COUNT: tl.constexpr,
     ROWS_PER_TILE: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
+    SINGLE_REDUCER: tl.constexpr,
 ):
     tile_rows = tl.arange(0, BLOCK_ROWS)
     rows = tl.program_id(0) * ROWS_PER_TILE + tile_rows
@@ -70,7 +73,10 @@ def _reduce_allgather_counts_kernel(
         other=0,
     )
     counts = tl.sum(partial_counts, axis=0)
-    tl.atomic_add(counts_ptr + bins, counts, mask=bins < LOCAL_COUNT, sem="relaxed")
+    if SINGLE_REDUCER:
+        tl.store(counts_ptr + bins, counts, mask=bins < LOCAL_COUNT)
+    else:
+        tl.atomic_add(counts_ptr + bins, counts, mask=bins < LOCAL_COUNT, sem="relaxed")
 
 
 def count_allgather_tokens_triton(
@@ -104,6 +110,8 @@ def count_allgather_tokens_triton(
     num_bins = max(2, triton.next_power_of_2(local_expert_count))
     partial_counts = torch.empty((programs, num_bins), dtype=torch.int64, device=topk_ids.device)
     counts = torch.empty(local_expert_count, dtype=torch.int64, device=topk_ids.device)
+    reduce_rows = min(programs, max(1, MAX_REDUCE_ELEMENTS // num_bins))
+    reduce_tiles = triton.cdiv(programs, reduce_rows)
     _count_allgather_kernel[(programs,)](
         topk_ids,
         token_mask,
@@ -116,10 +124,10 @@ def count_allgather_tokens_triton(
         TOPK=topk_ids.shape[1],
         BLOCK_SIZE=ASSIGNMENTS_PER_TILE,
         NUM_BINS=num_bins,
+        SINGLE_REDUCER=reduce_tiles == 1,
         compile_mode="simd",
     )
-    reduce_rows = min(programs, max(1, MAX_REDUCE_ELEMENTS // num_bins))
-    _reduce_allgather_counts_kernel[(triton.cdiv(programs, reduce_rows),)](
+    _reduce_allgather_counts_kernel[(reduce_tiles,)](
         partial_counts,
         counts,
         NUM_PARTIAL_ROWS=programs,
@@ -127,6 +135,7 @@ def count_allgather_tokens_triton(
         LOCAL_COUNT=local_expert_count,
         ROWS_PER_TILE=reduce_rows,
         BLOCK_ROWS=triton.next_power_of_2(reduce_rows),
+        SINGLE_REDUCER=reduce_tiles == 1,
         compile_mode="simd",
     )
     return counts
