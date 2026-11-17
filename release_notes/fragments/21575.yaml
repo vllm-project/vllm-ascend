@@ -2,6 +2,7 @@ pr: 21575
 entries:
   - category: bugfix
     text: >-
-      Fixed KV-consumer chunked prefills skipping reusable Mamba/KDA state
-      checkpoints after an existing computed prefix, while preserving
-      speculative verifier and asynchronous scheduling windows.
+      Fixed missed prefix-cache reuse during chunked prefill for Mamba/KDA
+      models on KV consumers using mamba_cache_mode="align".
+      Preserving reusable cache boundaries may require additional prefill
+      scheduling iterations.
