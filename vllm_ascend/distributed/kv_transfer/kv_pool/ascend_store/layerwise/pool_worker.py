@@ -348,12 +348,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             {k: v for k, v in list(self.physical_layer_to_group_layers.items())[:3]},
         )
 
-    def _extract_physical_layer_index(self, layer_name: str) -> int:
-        layout = getattr(self, "_layerwise_reuse_layout", None)
-        if layout is not None and layer_name in layout.cache_layer_indices:
-            return layout.cache_layer_indices[layer_name]
-        return super()._extract_physical_layer_index(layer_name)
-
     @staticmethod
     def _remap_layout_to_stage_local(
         prefetch_layer_map: dict[int, tuple[int, ...]],
