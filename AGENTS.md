@@ -9,12 +9,13 @@ Read linked documentation when it applies to the current task, using the relevan
 ## Table of Contents
 
 - [Setup and Environment](#setup-and-environment)
-    - [Environment Variables](#environment-variables)
-    - [Environment Variable Review Requirement](#environment-variable-review-requirement)
+    - [No New Environment Variables](#no-new-environment-variables)
+    - [Configuration Review Requirement](#configuration-review-requirement)
 - [Testing](#testing)
 - [Code Style](#code-style)
     - [Python Conventions](#python-conventions)
     - [Naming Conventions](#naming-conventions)
+- [Triton Operators](#triton-operators)
 - [NPU-Specific Considerations](#npu-specific-considerations)
     - [Tensor item() Operations](#tensor-item-operations)
     - [Memory and Performance](#memory-and-performance)
@@ -32,9 +33,13 @@ Read linked documentation when it applies to the current task, using the relevan
 
 ## Setup and Environment
 
-### Environment Variables
+### No New Environment Variables
 
-Define environment variables in the centralized `env_variables` dictionary in [vllm_ascend/envs.py](vllm_ascend/envs.py).
+Do not add new environment variables. User-facing configuration belongs in vLLM's additional config mechanism: a typed key under `--additional-config` (offline: `LLM(additional_config={...})`), following the existing sub-config patterns in [vllm_ascend/ascend_config.py](vllm_ascend/ascend_config.py) and documented in [Additional Configuration](docs/source/user_guide/configuration/additional_config.md). The project has already migrated most configuration from environment variables to additional config (see the [migration guide](docs/source/user_guide/configuration/additional_config.md#migration-guide)); do not reverse it.
+
+An environment variable is a last resort, only when additional config cannot cover the case — for example, a value needed before vLLM config exists (process bootstrap, subprocess launch). A strong reason is required; "it is simpler" is not one.
+
+When an environment variable is truly unavoidable, define it in the centralized `env_variables` dictionary in [vllm_ascend/envs.py](vllm_ascend/envs.py).
 
 **Requirements:**
 
@@ -44,16 +49,23 @@ Define environment variables in the centralized `env_variables` dictionary in [v
 
 **Never**: Hardcode environment variable names throughout the codebase. Reference them from the central module using `from vllm_ascend import envs`.
 
-### Environment Variable Review Requirement
+### Configuration Review Requirement
 
-Explain new environment variables in the PR for code review.
+Both configuration channels are strictly managed. The PR must justify the channel it chooses.
 
-Reviewers must verify:
+For a **new additional config key** (the recommended channel), the PR must show:
 
+- Why existing configuration cannot cover the use case
+- Typed parsing and validation in `vllm_ascend/ascend_config.py`, following the existing sub-config pattern (e.g. `EplbConfig`, `RlConfig`), not raw dict access scattered across the code
+- A table entry in [Additional Configuration](docs/source/user_guide/configuration/additional_config.md) with type, default, and behavior
+- A name that generalizes beyond the model or workload that motivated it
+
+For a **new environment variable** (exceptional), the PR must show a strong reason on top:
+
+- Why additional config cannot cover the use case
 - The variable name follows the `VLLM_ASCEND_*` naming convention
-- Default value is appropriate for all supported hardware
-- Documentation is added to the `env_variables` dict
-- The variable is needed and existing configuration cannot cover the use case
+- The default value works for all supported hardware
+- Documentation is added to the `env_variables` dict and reflected in the user-facing [environment variables](docs/source/user_guide/configuration/env_vars.md) page
 
 ---
 
@@ -62,6 +74,14 @@ Reviewers must verify:
 Run tests appropriate to the change and complete required checks. Broaden or repeat testing when new changes, failures, or unresolved risks justify it.
 
 When preparing or reviewing a PR, read the [PR testing requirements](docs/source/developer_guide/contribution/testing.md#pr-testing-requirements) for coverage, hardware evidence, and validation reporting. Use the other sections of the same guide for environment setup and test commands as needed.
+
+**What you can verify without NPU hardware:**
+
+- Unit tests run on CPU: `TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest -sv tests/ut` (commands and mocking conventions in the [Unit tests](docs/source/developer_guide/contribution/testing.md#unit-tests) section)
+- Format and lint checks: `bash format.sh ci`
+- Documentation build and link checks, when docs changed
+
+E2E, multi-card, and performance tests require real NPU hardware. Do not attempt them in a CPU-only environment; delegate that coverage to CI and say so in the PR.
 
 ---
 
@@ -95,6 +115,21 @@ When preparing or reviewing a PR, read the [PR testing requirements](docs/source
 
 ---
 
+## Triton Operators
+
+When adding, modifying, or reviewing Triton operators, follow the [Triton operator contribution guidelines](docs/source/developer_guide/contribution/triton_operators.md) for deliverables, functionality, accuracy, performance, and code quality.
+
+Contributors and reviewers must check:
+
+- The documented interface, production integration, and compatibility across applicable devices.
+- Operator and model accuracy and performance evidence, with test coverage appropriate to framework-wide or model-specific use.
+- Public wrapper usage, documented side effects, and JIT specialization and recompilation risks.
+- When warmup is used, required variants, registration in the selected component's active registry window, and reuse of the same wrapper for runtime calls.
+
+For warmup integration or changes, read [Triton JIT warmup on Ascend](docs/source/developer_guide/Design_Documents/triton_jit_warmup.md) for the startup flow, registration locations, and validation steps.
+
+---
+
 ## NPU-Specific Considerations
 
 ### Tensor item() Operations
@@ -119,7 +154,7 @@ Additional NPU-specific best practices:
 - Avoid CPU-NPU memory transfers in hot paths
 - Prefer in-place operations where safe (e.g., `x.add_()`, `x.mul_()`)
 - Monitor memory fragmentation, especially for long-running processes
-- Test with realistic workloads on actual NPU hardware (Ascend 910B/C)
+- Test with realistic workloads on actual NPU hardware (e.g. Ascend 910B, 910C, 310P)
 
 ---
 
@@ -143,27 +178,29 @@ Choose the integration approach that fits the change:
 
 3. **External upstream contributions** where appropriate
 
+When adding or adapting a model, follow the step-by-step walkthrough in the [vllm-ascend-model-adapter skill](.agents/skills/vllm-ascend-model-adapter/SKILL.md).
+
 ### Patching Requirement
 
 Explain new patches in the PR for architectural review.
 
 When adding or changing a patch, read the [patch strategy](docs/source/developer_guide/Design_Documents/patch.md) for lifecycle, registration, and removal-plan requirements.
 
-Reviewers must verify:
+Your PR must explain:
 
-- The patch targets the correct upstream component
-- The patch is minimal and focused
-- Performance implications are understood
-- A long-term plan exists for upstream contribution
+- Which upstream component the patch targets and why
+- How the patch stays minimal and focused
+- The performance implications
+- The long-term plan for upstream contribution
 
 ### Model Runner Changes
 
 Explain new `model_runner` behavior in the PR for architectural review.
 
-Reviewers must verify:
+Your PR must explain:
 
 - Why existing extension points cannot cover the new behavior
-- Performance implications on NPU hardware
+- The performance implications on NPU hardware
 - Compatibility with existing model implementations
 - Long-term maintainability and test coverage
 
@@ -175,20 +212,42 @@ Reviewers must verify:
 
 ## Release Notes
 
-Every PR with a user-facing change must ship a release note fragment in the same PR.
+Every PR with a user-facing change must ship a release note fragment in the same PR. The
+fragment is written for users of the released wheel or Docker image, not for reviewers:
+a reader who never sees the diff should be able to tell what changed for them and whether
+they need to do anything.
 
-**Required for**: new models, hardware, or operators; new features; changes to user-facing
-APIs, parameters, environment variables, or configuration; breaking changes, deprecations,
-and default behavior changes; dependency and toolchain updates (CANN, torch_npu,
-triton-ascend, vLLM alignment); measurable performance improvements; and important bug fixes.
+**Write a fragment for**: new models, hardware, or operators; new features; changes to
+user-facing APIs, parameters, environment variables, or configuration; breaking changes,
+deprecations, and default behavior changes; dependency and toolchain updates (CANN,
+torch_npu, triton-ascend, vLLM alignment); performance improvements; and bug fixes users
+could have hit (hangs, OOM, wrong outputs, broken metrics).
 
-**Not required for**: internal refactors, tests, CI, build scripts, tooling, and
-documentation edits.
+**Do not write a fragment for**: internal refactors, code moves, logging and typing
+cleanups; tests, CI, build scripts, development tooling; documentation typo fixes and
+small edits (guides for brand-new scenarios are the exception, category `documentation`);
+and plumbing for future features that is still invisible to users. If the only honest
+sentence is "refactored X" or "prepared Y for Z", users cannot observe the change — no
+fragment.
 
-Add `release_notes/fragments/<PR number>.yaml` following `release_notes/TEMPLATE.yaml`. See
-`release_notes/README.md` for the principles and the field rules. When in doubt, add a
-fragment: the release manager drops extra entries at release time. Reviewers confirm the
-fragment together with the code; there is no CI gate.
+**How to write the text** (full rules and examples in
+[release_notes/README.md](release_notes/README.md#writing-the-text)):
+
+- Say what the user gets, not what the code does. Name user-facing switches exactly (env
+  vars, config keys, CLI flags); skip file, class, and kernel-level narration.
+- Performance entries: state the scenario (model, workload, hardware) and the effect
+  (measured metric and magnitude, or the concrete user-visible mechanism). Never invent
+  numbers.
+- Breaking and config entries: old behavior → new behavior, the exact switch, the
+  migration step, and what happens if the user does nothing.
+- Bug fixes: the user-visible symptom and when it occurs, not the internal root cause.
+
+Add `release_notes/fragments/<PR number>.yaml` following `release_notes/TEMPLATE.yaml` — open the PR first to get its number, then push the fragment to the same PR. When in
+doubt about whether users can observe the change, add a fragment — the release manager drops
+extra entries, but a missing one is lost. Reviewers confirm the inclusion decision and the
+wording together with the code; there is no CI gate.
+
+For release management workflows (release checklist issues, critical bug triage, fragment aggregation), use the [vllm-ascend-release skill](.agents/skills/vllm-ascend-release/SKILL.md).
 
 ---
 
@@ -206,7 +265,7 @@ git commit -s -m "<type>: <summary>" -m "<body - explaining what changed and why
 
 ### Pull Request Title Format
 
-Use a PR title accepted by the CI check linked in the [PR submission checklist](docs/source/developer_guide/contribution/testing.md#pr-submission-checklist).
+PR titles use bracketed change-type tags such as `[BugFix]`, `[Feature]`, or `[Doc]` (note: this differs from the `type:` prefix used in commit messages). The full accepted set is enforced by the CI check linked in the [PR submission checklist](docs/source/developer_guide/contribution/testing.md#pr-submission-checklist).
 
 ### Pull Request Template
 
@@ -221,6 +280,10 @@ When creating a PR, please follow the template in `.github/PULL_REQUEST_TEMPLATE
     - Manual testing: provide the test steps and commands
     - CI testing: indicate if only CI verification is needed
 
+    **Only report test runs you actually performed.** Without NPU hardware, write "CI testing only" and let CI produce the hardware evidence — never claim NPU or performance results that were not produced.
+
+If the change renames or deletes files, update `.github/CODEOWNERS` in the same PR; entries pointing at removed paths fail the CI gate for everyone (see the [CODEOWNERS approval gate](docs/source/developer_guide/contribution/testing.md#codeowners-approval-gate)).
+
 Document public APIs and reflect user-facing behavior changes in the project docs.
 
 ---
@@ -232,10 +295,15 @@ For environment setup, use the [contribution guide](docs/source/developer_guide/
 Before pushing, run the required checks for all file types, including Markdown:
 
 ```bash
+pip install -r requirements-lint.txt  # first-time setup
 bash format.sh ci
 ```
 
-Inspect any formatter changes and include them in the commit. Push to your fork and create the PR against the upstream repository, following the commit and PR requirements above.
+Inspect any formatter changes and include them in the commit.
+
+If `format.sh ci` fails, fix real lint and format errors. Exception: the `gitleaks-offline-scan` hook can fail locally for environment or git-history reasons even when no secret was added — if gitleaks is the only failure and the diff adds no secrets, proceed and let CI confirm.
+
+Push to your fork and create the PR against the upstream repository, following the commit and PR requirements above.
 
 ---
 

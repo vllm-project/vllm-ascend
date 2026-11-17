@@ -306,7 +306,8 @@ def compiled_replay_model(monkeypatch, request, replay_cpu_kernel):
     model.start_layer = 0
     model.decoder_replay_start = 1
     model.decoder_replay_layer_name = "decoder_replay"
-    model.aux_hidden_state_layers = (1, 3)
+    # Include the zero-based replay boundary itself in compiled coverage.
+    model.aux_hidden_state_layers = (0, 1, 2)
     replay = replay_mod.AscendDecoderReplayLayers(2, model._run_replay_layers, [])
     replay.sequence_parallel = model.use_sequence_parallel
     model.decoder_replay_layers = replay
@@ -371,7 +372,8 @@ def test_decode_keeps_encoder_in_graph_with_opaque_replay_tail(compiled_replay_m
     output, aux = case.forward()
     torch.testing.assert_close(output, case.embeddings * 24)
     torch.testing.assert_close(aux[0], case.embeddings)
-    torch.testing.assert_close(aux[1], case.embeddings * 6)
+    torch.testing.assert_close(aux[1], case.embeddings * 2)
+    torch.testing.assert_close(aux[2], case.embeddings * 6)
     assert len(case.graphs) == 1
     # The prefix stays visible to FX; only the decoder tail is opaque when
     # bounded replay is enabled, matching the existing non-SP implementation.
@@ -427,7 +429,8 @@ def test_compiled_entry_reads_each_replay_plan_and_peer_context(compiled_replay_
         expected[rows] = case.embeddings[rows] * 24
         torch.testing.assert_close(output, expected)
         torch.testing.assert_close(aux[0], case.embeddings)
-        torch.testing.assert_close(aux[1], expected / 4)
+        torch.testing.assert_close(aux[1], expected / 12)
+        torch.testing.assert_close(aux[2], expected / 4)
         assert len(case.calls) == call_count
         assert len(case.graphs) == 1
     assert contexts == ["enter", "exit", "enter", "exit"]
@@ -451,7 +454,13 @@ def test_compiled_entry_reads_each_replay_plan_and_peer_context(compiled_replay_
     assert len(case.graphs) == 1
 
 
-def test_model_replays_only_layers_after_kv_sources(monkeypatch, replay_cpu_kernel):
+@pytest.mark.parametrize(
+    "num_layers,replay_start,selected",
+    [(3, start, selected) for start in (0, 1, 2) for selected in ((), (0,), (1,), (2,), (0, 2), (1, 2), (0, 1, 2))]
+    + [(40, start, (37, 38, 39)) for start in (37, 38, 39)],
+)
+@pytest.mark.parametrize("compacted", [False, True])
+def test_model_replays_only_layers_after_kv_sources(monkeypatch, num_layers, replay_start, selected, compacted):
     seen = []
 
     class Layer:
@@ -477,25 +486,28 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch, replay_cpu_kern
     model.use_sequence_parallel = False
     model._mtp_hidden_buffer = None
     model.shared_attention_state = SimpleNamespace(reset=lambda: None)
-    model.layers = [Layer(i) for i in range(3)]
+    model.layers = [Layer(i) for i in range(num_layers)]
     model.norm = lambda hidden: hidden
-    model.end_layer = 3
+    model.end_layer = num_layers
     model.start_layer = 0
     model.needs_moe_input_ids = False
-    model.decoder_replay_start = 1
+    model.decoder_replay_start = replay_start
+    model.aux_hidden_state_layers = selected
     model.decoder_replay_layer_name = "decoder_replay"
-    model.aux_hidden_state_layers = (1, 3)
     replay = replay_mod.AscendDecoderReplayLayers(
-        2, model._run_replay_layers, [], write_batch_kv=model.layers[1].write_kv
+        2, model._run_replay_layers, [], write_batch_kv=model.layers[replay_start].write_kv
     )
-    replay.rows = torch.tensor([2, 3])
+    replay.rows = torch.tensor([2, 3]) if compacted else None
     replay.num_actual_rows = 2
     replay.context_factory = nullcontext
     model.decoder_replay_layers = replay
-    forward_context = SimpleNamespace(no_compile_layers={model.decoder_replay_layer_name: replay})
-    monkeypatch.setattr(replay_mod, "get_forward_context", lambda: forward_context)
 
-    output, aux = DeepseekV41Model.forward(
+    context = SimpleNamespace(no_compile_layers={model.decoder_replay_layer_name: replay})
+    monkeypatch.setattr(replay_mod, "get_forward_context", lambda: context)
+    monkeypatch.setattr(
+        torch.ops.vllm, "dsv41_decoder_replay_forward", replay_mod.dsv41_decoder_replay_forward, raising=False
+    )
+    result = DeepseekV41Model.forward(
         model,
         torch.arange(4),
         torch.arange(4),
@@ -504,7 +516,35 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch, replay_cpu_kern
         engram_lookups={},
         engram_mask=torch.empty(0, dtype=torch.bool),
     )
-    assert seen == [(0, [0, 1, 2, 3]), ("write_kv_1", [0, 1, 2, 3]), (1, [2, 3]), (2, [2, 3])]
-    assert output[:, 0].tolist() == [0, 0, 4, 4]
-    assert aux[0][:, 0].tolist() == [1, 1, 1, 1]
-    assert aux[1][:, 0].tolist() == [0, 0, 3, 3]
+    output, aux = result if selected else (result, [])
+    all_rows = [0, 1, 2, 3]
+    if compacted:
+        expected: list[tuple[int | str, list[int]]] = [(i, all_rows) for i in range(replay_start)]
+        expected += [(f"write_kv_{replay_start}", all_rows)]
+        expected += [(i, [2, 3]) for i in range(replay_start, num_layers)]
+    else:
+        expected = [(i, all_rows) for i in range(num_layers)]
+    assert seen == expected
+    assert output[:, 0].tolist() == ([0, 0, num_layers + 1, num_layers + 1] if compacted else [num_layers + 1] * 4)
+    assert len(aux) == len(selected)
+    for actual, index in zip(aux, selected):
+        values = [1 + index] * 4
+        if compacted and index >= replay_start:
+            values[:2] = [0, 0]
+        assert actual[:, 0].tolist() == values
+
+    # In particular, an ID equal to replay_start belongs to the replay suffix.
+    # Compare its active rows directly with regular forward on the same input.
+    model.decoder_replay_layers = None
+    regular = model.forward(
+        torch.arange(4),
+        torch.arange(4),
+        None,
+        inputs_embeds=torch.ones(4, 1),
+        engram_lookups={},
+        engram_mask=torch.empty(0, dtype=torch.bool),
+    )
+    regular_aux = regular[1] if selected else []
+    for actual, reference, index in zip(aux, regular_aux, selected):
+        rows = slice(2, None) if compacted and index >= replay_start else slice(None)
+        torch.testing.assert_close(actual[rows], reference[rows])
