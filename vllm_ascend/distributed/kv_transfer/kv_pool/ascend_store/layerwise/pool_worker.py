@@ -140,14 +140,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._snapshot_keys: dict[str, dict[int, dict[int, tuple[int, str]]]] = {}
         super()._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
-        self._layerwise_reuse_layout = (
-            get_layerwise_reuse_layout(kv_cache_config) if self.use_layerwise_transfer else None
-        )
         self._dspark_draft_layer_names = (
             set(getattr(kv_cache_config, "dspark_draft_layer_names", ())) if self.use_layerwise_transfer else set()
         )
-        if self._layerwise_reuse_layout is not None:
-            self._dspark_draft_layer_names.update(self._layerwise_reuse_layout.draft_entry_names)
         if (
             self.backend_name != "memcache"
             and not self.use_block_key_layerwise
@@ -195,13 +190,17 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             )
 
     def _init_layerwise_config(self) -> None:
+        layout = get_layerwise_reuse_layout(self.kv_cache_config) if self.use_layerwise_transfer else None
+        self._layerwise_reuse_layout = layout
+        if layout is not None:
+            self._dspark_draft_layer_names.update(layout.draft_entry_names)
+
         # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
         # layer_idx_in_group is the index of the physical layer within the
         # group (not the index in layer_names). Multiple cache names at the
         # same physical layer are treated as entries of one layer.
         self.physical_layer_to_group_layers: dict[int, list[tuple[int, int]]] = {}
         self._global_to_local_layer: dict[int, int] = {}
-        layout = getattr(self, "_layerwise_reuse_layout", None)
         self._reused_layers_by_group: dict[int, set[int]] = {}
         self._recurrent_layers: set[int] = set()
         stage_num_layers = self.num_layers
