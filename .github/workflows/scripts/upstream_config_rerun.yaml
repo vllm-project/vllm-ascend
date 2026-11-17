@@ -2,37 +2,15 @@ e2e-upstream_pr:
   - name: tests/v1/worker/test_mamba_utils.py
     estimated_time: 20
 e2e-upstream_singlecard:
-  - name: tests/config/test_speculative_draft_max_position_embeddings.py
-    estimated_time: 20
-  - name: tests/entrypoints/generate/structured_decisions/test_strategies.py
-    estimated_time: 20
-  - name: tests/entrypoints/multimodal/openai/chat_completion/test_video.py
-    estimated_time: 20
-  - name: tests/entrypoints/pooling/classify/test_online_vision.py
-    estimated_time: 20
   - name: tests/entrypoints/pooling/scoring/test_cross_encoder_online_vision.py
     estimated_time: 20
   - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_utils.py
-    estimated_time: 20
-  - name: tests/model_executor/model_loader/runai_streamer_loader/test_weight_utils.py
-    estimated_time: 20
-  - name: tests/model_executor/model_loader/test_ep_weight_filter.py
-    estimated_time: 20
-  - name: tests/models/multimodal/processing/test_gemma4.py
-    estimated_time: 20
-  - name: tests/models/multimodal/processing/test_glm5next.py
     estimated_time: 20
   - name: tests/models/multimodal/processing/test_minicpmv.py
     estimated_time: 20
   - name: tests/models/multimodal/processing/test_qwen2_vl.py
     estimated_time: 20
   - name: tests/models/multimodal/processing/test_transformers_video.py
-    estimated_time: 20
-  - name: tests/multimodal/test_cache.py
-    estimated_time: 20
-  - name: tests/renderers/test_prompt_embeds_payload_validation.py
-    estimated_time: 20
-  - name: tests/v1/core/test_priority_preemption_bug.py
     estimated_time: 20
   - name: tests/v1/core/test_scheduler.py
     estimated_time: 20
