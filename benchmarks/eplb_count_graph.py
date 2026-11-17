@@ -9,6 +9,7 @@ from pathlib import Path
 
 import baseline_tensor_ops as main_module
 import torch
+import torch_npu  # noqa: F401
 
 import vllm_ascend.distributed.eplb.tensor_ops as candidate_module
 import vllm_ascend.ops.triton.eplb_count as kernel_module
@@ -96,7 +97,7 @@ def measure(shape, dtype_name, stride, pattern):
             end.synchronize()
             samples[name].append(begin.elapsed_time(end) * 1000 / CALLS)
     for name, value in outputs.items():
-        torch.testing.assert_close(value.cpu(), expected, rtol=0, atol=0, msg=lambda m: name + ": " + m)
+        torch.testing.assert_close(value.cpu(), expected, rtol=0, atol=0, msg=lambda m, name=name: name + ": " + m)
     medians = {n: statistics.median(v) for n, v in samples.items()}
     return dict(
         status="pass",
