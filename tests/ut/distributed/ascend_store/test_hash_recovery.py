@@ -154,6 +154,73 @@ def test_partial_chunks_do_not_fold_hashes_into_page_keys():
     assert chunks == [(0, 16, hashes[3], None), (16, 20, hashes[4], None)]
 
 
+@pytest.mark.parametrize(
+    "completed, mamba_tails, publish, expected",
+    [
+        (40, [40], False, []),
+        (75, [68], True, [(0, 17, 68), (0, 18, 72)]),
+        (75, [40, 68], True, [(0, 17, 68), (0, 18, 72)]),
+        (75, [68, 68], False, [(0, 17, 68), (0, 18, 72)]),
+        (68, [68], False, []),
+        (75, [], True, [(0, 17, 68), (0, 18, 72)]),
+        (75, [], False, []),
+    ],
+)
+def test_partial_tail_non_mamba_puts_follow_upstream_prompt_checkpoint(completed, mamba_tails, publish, expected):
+    # Match upstream's shared-prefix junction cases: a 75-token prompt has an
+    # EAGLE checkpoint at 68, with attention proof through token 72.
+    scheduler = object.__new__(KVPoolScheduler)
+    scheduler.cache_coordinator = SimpleNamespace(
+        mamba_group_ids=[1],
+        hash_block_size=4,
+        lcm_block_size=16,
+        use_eagle=True,
+        eagle_proof_margin_by_group={0: 4},
+    )
+    scheduler.grouped_block_size = [4, 16]
+    scheduler.cacheable_group_ids = [0, 1]
+    req_meta = metadata.ReqMeta(
+        "tail",
+        token_len_chunk=0,
+        block_ids_by_group=[list(range(1, 20)), [50, 51, 52, 53, 54]],
+        block_hashes=[bytes([i]) for i in range(18)],
+        num_prompt_tokens=75,
+        # A resumed prefill can extend past the original prompt; this helper
+        # follows upstream and still keys the original prompt checkpoint.
+        prefill_end_tokens=91,
+        completed_token_len=completed,
+        boundary_puts=[metadata.BoundaryPut(1, 60 + i, n) for i, n in enumerate(mamba_tails)],
+        publish_partial_tail=publish,
+    )
+    assert scheduler._partial_tail_non_mamba_puts(req_meta) == expected
+
+
+@pytest.mark.parametrize("blocks, expected", [([1, 2, 0], []), ([1, 2], []), ([1, 2, 3], [(0, 3, 44)])])
+def test_partial_tail_non_mamba_puts_follow_upstream_eagle_drop(blocks, expected):
+    # Like upstream, EAGLE block drop determines the checkpoint even when the
+    # attention group itself has no EAGLE proof margin.
+    scheduler = object.__new__(KVPoolScheduler)
+    scheduler.cache_coordinator = SimpleNamespace(
+        mamba_group_ids=[1],
+        hash_block_size=4,
+        lcm_block_size=16,
+        use_eagle=True,
+        eagle_proof_margin_by_group={},
+    )
+    scheduler.grouped_block_size = [16, 16]
+    scheduler.cacheable_group_ids = [0, 1]
+    req_meta = metadata.ReqMeta(
+        "tail",
+        token_len_chunk=0,
+        block_ids_by_group=[blocks, [50]],
+        block_hashes=[bytes([i]) for i in range(12)],
+        num_prompt_tokens=49,
+        completed_token_len=49,
+        boundary_puts=[metadata.BoundaryPut(1, 50, 44)],
+    )
+    assert scheduler._partial_tail_non_mamba_puts(req_meta) == expected
+
+
 def test_core_boundary_offload_is_not_positional_recurrent_table():
     scheduler = object.__new__(KVPoolScheduler)
     scheduler.enable_partial_hash_hits = True
@@ -169,7 +236,7 @@ def test_core_boundary_offload_is_not_positional_recurrent_table():
     scheduler._request_trackers = {"r": SimpleNamespace(prefill_end_tokens=12, num_prompt_tokens=12, token_len=12)}
     scheduler._unfinished_requests = {"r": (SimpleNamespace(block_hashes=[b"a", b"b", b"c"]), None)}
     scheduler._finished_partial_tail_metas = {}
-    scheduler._partial_tail_puts = lambda req: []
+    scheduler._partial_tail_non_mamba_puts = lambda req: []
     tables = {"r": ([1], [2])}
     state = KVConnectorBlockState(
         req_ids={"r"}, resolve_block_ids=tables.__getitem__, boundary_state_offloads={"r": [(1, 9, 8)]}

@@ -5,6 +5,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
@@ -836,36 +837,72 @@ class KVPoolScheduler(BaseKVPoolScheduler):
             retain_all=self.enable_partial_hash_hits,
         )
 
-    def _partial_tail_puts(self, req_meta: ReqMeta) -> list[BoundaryPut]:
-        """Publish Attention proof under the same boundary as Core's state."""
+    def _partial_tail_non_mamba_puts(self, req_meta: ReqMeta) -> list[BoundaryPut]:
+        """Locate the non-Mamba blocks a partial-tail save publishes.
+
+        A later request resumes at the prompt's Mamba checkpoint (``boundary``)
+        only if both pieces of KV are stored:
+
+        - Mamba groups: the state at ``boundary``, handed off by Core as a
+          boundary put of its own, so Mamba groups are not listed here.
+        - Other groups: the KV from the last LCM-aligned normal save up to
+          ``boundary`` plus the group's EAGLE proof margin (``proof_end``).
+          Each block is keyed by the hash at its end, clipped to ``proof_end``.
+
+        Groups whose proof is not computed yet are omitted. For example, with
+        LCM 16, blocks of 4 tokens, and a checkpoint at 44, the full-attention
+        blocks are 8-10, keyed at 36, 40 and 44.
+
+        A Mamba state handed off at any other position, i.e. a shared-prefix
+        junction (``--enable-mamba-shared-prefix-checkpoint``), adds no puts here.
+        """
         coord = self.cache_coordinator
         assert coord is not None
-        prompt = req_meta.prefill_end_tokens or req_meta.num_prompt_tokens or 0
-        boundary = get_mamba_prefill_checkpoint_position(prompt, self.hash_block_size, self.use_eagle)
-        mamba_tails = {
+        mamba_tails = [
             put.num_tokens
             for put in req_meta.boundary_puts or []
             if put.group_id in coord.mamba_group_ids and put.num_tokens % self.grouped_block_size[put.group_id]
-        }
+        ]
+        # The tail is due on the save that first covers the prompt, or when Mamba
+        # hands off its checkpoint state.
+        if not mamba_tails and not req_meta.publish_partial_tail:
+            return []
+        prompt_tokens = req_meta.num_prompt_tokens
+        completed = req_meta.completed_token_len
+        assert prompt_tokens is not None and completed is not None
+        hash_block_size = coord.hash_block_size
+        # Core drops the Mamba checkpoint whenever EAGLE block drop is on,
+        # whichever groups carry the eagle flag.
+        boundary = get_mamba_prefill_checkpoint_position(prompt_tokens, hash_block_size, coord.use_eagle)
+        # Any other sub-block Mamba hand-off is a shared-prefix junction. Its
+        # attention KV, EAGLE proof included, ends on an attention block end no
+        # later than this checkpoint's proof, so normal and prompt-tail saves
+        # store it.
         if not req_meta.publish_partial_tail and boundary not in mamba_tails:
             return []
-        if not boundary or boundary // self.hash_block_size > len(req_meta.block_hashes):
+        num_hashes = len(req_meta.block_hashes)
+        if boundary == 0 or boundary // hash_block_size > num_hashes:
             return []
-        start = boundary // self.lcm_block_size * self.lcm_block_size
-        puts = []
+        start = boundary // coord.lcm_block_size * coord.lcm_block_size
+        puts: list[BoundaryPut] = []
+        # Ascend keeps original group IDs; exclude non-cacheable groups here
+        # rather than renumbering the block tables as Mooncake Store does.
         for group_id in self.cacheable_group_ids:
             if group_id in coord.mamba_group_ids:
                 continue
             proof_end = boundary + coord.eagle_proof_margin_by_group.get(group_id, 0)
-            if proof_end > (req_meta.completed_token_len or 0):
+            if proof_end > completed or proof_end // hash_block_size > num_hashes:
                 continue
-            if proof_end // self.hash_block_size > len(req_meta.block_hashes):
-                continue
-            page = self.grouped_block_size[group_id]
-            blocks = req_meta.block_ids_by_group[group_id]
-            for index in range(start // page, min(cdiv(proof_end, page), len(blocks))):
-                if blocks[index] > 0:
-                    puts.append(BoundaryPut(group_id, blocks[index], min((index + 1) * page, proof_end)))
+            block_size = self.grouped_block_size[group_id]
+            group_blocks = req_meta.block_ids_by_group[group_id]
+            for block_idx in range(start // block_size, cdiv(proof_end, block_size)):
+                if block_idx >= len(group_blocks):
+                    break
+                block_id = group_blocks[block_idx]
+                if block_id == NULL_BLOCK_ID:
+                    continue
+                num_tokens = min((block_idx + 1) * block_size, proof_end)
+                puts.append(BoundaryPut(group_id, block_id, num_tokens))
         return puts
 
     def _prepare_boundary_saves(self, meta: AscendConnectorMetadata, output: SchedulerOutput) -> None:
@@ -905,7 +942,7 @@ class KVPoolScheduler(BaseKVPoolScheduler):
             block_ids = state.get_block_ids(req_meta.req_id)
             assert block_ids is not None, f"Missing Core save block table: {req_meta.req_id}"
             req_meta.block_ids_by_group = [list(group) for group in block_ids]
-            req_meta.boundary_puts = [*self._partial_tail_puts(req_meta), *(req_meta.boundary_puts or [])]
+            req_meta.boundary_puts = [*self._partial_tail_non_mamba_puts(req_meta), *(req_meta.boundary_puts or [])]
         # These blocks were pinned in the finish callback before Core freed the
         # request. They are intentionally independent of this step's tables.
         for req_meta in self._finished_partial_tail_metas.values():
@@ -940,7 +977,7 @@ class KVPoolScheduler(BaseKVPoolScheduler):
             completed_token_len=request.num_computed_tokens,
             boundary_puts=[BoundaryPut(*put) for put in partial_tail_offloads],
         )
-        req_meta.boundary_puts = [*self._partial_tail_puts(req_meta), *req_meta.boundary_puts]
+        req_meta.boundary_puts = [*self._partial_tail_non_mamba_puts(req_meta), *req_meta.boundary_puts]
         assert request.request_id not in self._finished_partial_tail_metas
         self.retain_blocks_for_save(req_meta)
         self._finished_partial_tail_metas[request.request_id] = req_meta
