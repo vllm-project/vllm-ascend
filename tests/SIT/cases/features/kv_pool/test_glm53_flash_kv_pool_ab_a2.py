@@ -124,7 +124,7 @@ Environment knobs:
   convention as the Qwen3.8 A2 file) or ``record`` (log + artifact only; the
   shared ``run_pool_ab`` default is ``record``, but this file does not call
   ``run_pool_ab`` because its thresholds are module constants);
-- ``KV_POOL_AB_ARTIFACT``: JSONL artifact path, honored from ``ab_watch``.
+- ``KV_POOL_AB_ARTIFACT``: JSONL artifact path, honored from ``kv_pool_watch``.
 
 Host / runner prerequisites: an A2-class machine with 8 NPUs visible, the
 ``memcache_hybrid`` package importable, a complete checkpoint dir, and (for
@@ -153,7 +153,7 @@ from vllm import SamplingParams
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.common.kv_pool.ab_watch import (
+from tests.e2e.pull_request.kv_pool_watch import (
     AB_ARTIFACT,
     AB_LEG_GAP_SECONDS,
     AB_SAMPLES,
@@ -181,7 +181,7 @@ TP_SIZE = 8
 # 16K-class shared prefix with a non-zero tail: the pool only transfers whole
 # lcm groups, and an lcm-aligned prompt would trim its final block into a
 # guaranteed miss (the tail-trim half of the rationale lives in
-# ``ab_watch.expected_hit_token_count``; this engine additionally drops
+# ``kv_pool_watch.expected_hit_token_count``; this engine additionally drops
 # the final *engine block* before lcm grouping — see
 # ``_expected_hit_tokens``). The GLM-5.3 dummy four-card case measured
 # lcm=1152 -> 16,128 hit tokens at prompt 16,388 (PR case #11); the real TP8

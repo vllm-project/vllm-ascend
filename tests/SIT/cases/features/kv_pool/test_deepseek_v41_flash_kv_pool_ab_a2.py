@@ -105,8 +105,8 @@ Environment knobs (all optional, defaults shown in the code):
   ~276 GB load, from the documented A2 script (:1656-1660).
 - ``KV_POOL_AB_MODE``: ``gate`` (default here, as in the Qwen3.8 A2 case) or
   ``record``.  Note the shared watch module defaults the same variable to
-  ``record`` (`ab_watch.py:563`), so CI must set it explicitly.
-- ``KV_POOL_AB_ARTIFACT``: JSON-Lines report path (from ``ab_watch``).
+  ``record`` (`kv_pool_watch.py:563`), so CI must set it explicitly.
+- ``KV_POOL_AB_ARTIFACT``: JSON-Lines report path (from ``kv_pool_watch``).
 
 Host prerequisites (official KV pool guide): mooncake on A2 runs the HIXL RoCE
 direct mode (``HCCL_INTRA_ROCE_ENABLE=1``, set here) over reserved 2 MB
@@ -137,7 +137,7 @@ from vllm import SamplingParams
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.common.kv_pool.ab_watch import (
+from tests.e2e.pull_request.kv_pool_watch import (
     AB_ARTIFACT,
     AB_LEG_GAP_SECONDS,
     AB_SAMPLES,
@@ -238,7 +238,7 @@ EXPERT_PARALLEL = _env_bool("DSV41_POOL_ENABLE_EP", True)
 
 # lcm + 4 rule: the pool only transfers whole block groups, and a prompt whose
 # length is an exact multiple of the KV-group lcm has its final group trimmed by
-# the scheduler, so the hit count is always 0 (ab_watch.py:122-151,
+# the scheduler, so the hit count is always 0 (kv_pool_watch.py:122-151,
 # measured in .claude/scratch/pr20757/notes.md section 2.6: 16384/128/16384 ->
 # 0 hits, 16388/128/16384 -> 16384 hits).  16388 = 16384 + 4 keeps a non-zero
 # tail for every plausible V4.1 lcm.  The lcm itself is read from the engine at
@@ -341,7 +341,7 @@ MASTER_EXTRA_ARGS = tuple(
 AB_MODE = os.environ.get("KV_POOL_AB_MODE", "gate")
 # Per-tier A/B gates.  run_pool_ab cannot express these: its TTFT/throughput
 # limits are module constants with no injection point
-# (ab_watch.py:398-399, notes.md section 8.2 I-3), which is also why the
+# (kv_pool_watch.py:398-399, notes.md section 8.2 I-3), which is also why the
 # Qwen3.8 A2 case drives the low-level assertions directly.  The numbers are
 # inherited from that A2 calibration (1.35x TTFT / 0.75x throughput for a pure
 # DRAM tier, 3.0x / 0.30x for the slow per-layer + mixed-medium tier) and stay
@@ -1048,7 +1048,7 @@ def _emit_ab_record(
     """Log and persist the A/B verdict in the shared watch format.
 
     Same ``[kv_pool_ab]`` line shape and JSON-Lines record as
-    ``ab_watch.PoolABReport.emit`` so one grep works across cases, but with
+    ``kv_pool_watch.PoolABReport.emit`` so one grep works across cases, but with
     the per-tier limits attached (``run_pool_ab`` is not used here; see the
     comment on ``TIER_TTFT_LIMITS``).  ``outputs`` carries only the 16-token
     completions, not the 16K prompt, which is what made the stock report huge.
