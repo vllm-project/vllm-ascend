@@ -1,8 +1,8 @@
 pr: 21294
 entries:
   - category: feature
-    text: Added shared-layer KV offload for full/shared sparse attention models with batched Decode graph replay and an experimental precomputed-TopK LIM path using shared pinned Host staging and SDMA.
+    text: Added shared-layer KV offload for full/shared sparse attention models with native CPU-worker Decode graph replay, independent TopK and hot-cache capacity, and shared pinned Host staging for dynamic SDMA transfers.
     hardware: [A3, A5]
   - category: performance
-    text: Reduced Decode overhead for selective KV offload when all selected historical KV is already cached on the device.
+    text: Reduced selective KV Decode overhead with persistent free slots and timestamp LRU, lazy selected-page validation, stable request metadata, and CPU-precomputed tail slots.
     hardware: [A3]

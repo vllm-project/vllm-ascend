@@ -2658,10 +2658,95 @@ void selective_check_disjoint(const std::vector<at::Tensor>& tensors) {
   }
 }
 
-std::vector<at::Tensor> selective_group_lru_plan_cpu(
+// Shared by graph sizes through the existing group owner; one pool per physical request row.
+struct SelectivePersistentLRU {
+  std::unordered_map<int32_t, int32_t> slot_of_token;
+  std::vector<int32_t> free_slots;
+  std::vector<int64_t> last_used;
+  std::vector<std::pair<int64_t, int32_t>> cold;
+  int64_t step = 0;
+  int32_t stable_prefix = -1;
+
+  void reset(int32_t capacity, int32_t* resident) {
+    slot_of_token.clear();
+    slot_of_token.reserve(capacity);
+    last_used.assign(capacity, 0);
+    free_slots.resize(capacity);
+    for (int32_t i = 0; i < capacity; ++i) free_slots[i] = capacity - 1 - i;
+    std::fill_n(resident, capacity, -1);
+    step = 0;
+    stable_prefix = -1;
+  }
+
+  void invalidate(int32_t token, int32_t* resident) {
+    const auto found = slot_of_token.find(token);
+    if (found == slot_of_token.end()) return;
+    const auto slot = found->second;
+    resident[slot] = -1;
+    free_slots.push_back(slot);
+    slot_of_token.erase(found);
+  }
+
+  int32_t plan(const int32_t* selected, int32_t count, int32_t capacity, int32_t* resident,
+               int32_t* /*lru*/, int32_t prefix, int32_t* current, int32_t* miss_tokens,
+               int32_t* miss_slots) {
+    if (last_used.size() != static_cast<size_t>(capacity) || prefix < stable_prefix) reset(capacity, resident);
+    TORCH_CHECK(step < INT64_MAX, "selective LRU timestamp overflow");
+    ++step;
+    stable_prefix = prefix;
+    int32_t misses = 0;
+    for (int32_t i = 0; i < count; ++i) {
+      auto found = slot_of_token.find(selected[i]);
+      if (found != slot_of_token.end() && (selected[i] >= prefix || resident[found->second] != selected[i])) {
+        invalidate(selected[i], resident);
+        found = slot_of_token.end();
+      }
+      if (found == slot_of_token.end()) { current[i] = -1; miss_tokens[misses++] = selected[i]; }
+      else { current[i] = found->second; last_used[found->second] = step; }
+    }
+    const int32_t need = std::max<int32_t>(0, misses - static_cast<int32_t>(free_slots.size()));
+    if (need) {
+      cold.clear();
+      cold.reserve(slot_of_token.size());
+      for (const auto& entry : slot_of_token) {
+        const auto slot = entry.second;
+        if (last_used[slot] < step) cold.emplace_back(last_used[slot], slot);
+      }
+      TORCH_CHECK(need <= static_cast<int32_t>(cold.size()), "selective LRU has insufficient evictable slots");
+      if (need < static_cast<int32_t>(cold.size()) / 4)
+        std::nth_element(cold.begin(), cold.begin() + need, cold.end());
+      else std::sort(cold.begin(), cold.end());
+      for (int32_t i = 0; i < need; ++i) invalidate(resident[cold[i].second], resident);
+    }
+    for (int32_t i = 0; i < misses; ++i) {
+      const int32_t slot = free_slots.back(); free_slots.pop_back();
+      resident[slot] = miss_tokens[i];
+      slot_of_token.emplace(miss_tokens[i], slot);
+      last_used[slot] = step;
+      miss_slots[i] = slot;
+    }
+    for (int32_t i = 0; i < count; ++i) current[i] = slot_of_token.at(selected[i]);
+    return misses;
+  }
+};
+
+template <typename Function>
+void selective_parallel_requests(int64_t rows, Function&& function) {
+  std::vector<std::exception_ptr> errors(static_cast<size_t>(rows));
+#pragma omp parallel for if(rows > 4) schedule(static) num_threads(std::min<int64_t>(rows, 8))
+  for (int64_t row = 0; row < rows; ++row) {
+    try {
+      c10::InferenceMode inference_guard(true);
+      function(row);
+    } catch (...) { errors[static_cast<size_t>(row)] = std::current_exception(); }
+  }
+  for (const auto& error : errors) if (error) std::rethrow_exception(error);
+}
+
+std::vector<at::Tensor> selective_group_lru_plan_impl(
     const at::Tensor& topk, const at::Tensor& page_tables, at::Tensor slot_to_token,
     at::Tensor lru_slots, at::Tensor resident_pages, at::Tensor last_identity, at::Tensor token_mark,
-    at::Tensor token_pos, at::Tensor epoch, at::Tensor control, const std::vector<int64_t>& meta) {
+    at::Tensor token_pos, at::Tensor epoch, at::Tensor control, const std::vector<int64_t>& meta, SelectivePersistentLRU* pool) {
   auto check = [](const at::Tensor& t, at::ScalarType dtype, const char* name) {
     TORCH_CHECK(t.device().is_cpu() && t.is_contiguous() && t.scalar_type() == dtype,
                 name, " must be contiguous CPU memory with the requested dtype");
@@ -2750,13 +2835,14 @@ std::vector<at::Tensor> selective_group_lru_plan_cpu(
   for (int64_t b = 0; b < block_count; ++b) table[b] = static_cast<int32_t>(meta[10] * blocks_per_row + b);
   table[block_count] = static_cast<int32_t>(tail_row * blocks_per_row + block_count);
   auto ticket_tensor = at::full({1}, ticket, last_identity.options());
-  std::vector<int32_t> current(width, -1), workspace(static_cast<size_t>(cap) * 3), positions(width);
+  std::vector<int32_t> current(width, -1), workspace(pool ? 0 : static_cast<size_t>(cap) * 3),
+                       positions(pool ? 0 : width);
   int64_t last_req = std::equal(identity, identity + 4, meta.begin()) && identity[4] == meta[10] &&
                      identity[5] == meta[7] && identity[6] == meta[11] && identity[7] == cap64 &&
                      identity[8] == page_tables.size(0) ? meta[0] : -1;
   auto* epoch_value = epoch.data_ptr<int32_t>();
   TORCH_CHECK(*epoch_value >= 0 && *epoch_value < EPOCH_RESET_THRESHOLD, "invalid selective epoch");
-  if (last_req == meta[0]) {
+  if (last_req == meta[0] && !pool) {
     std::vector<bool> seen_slots(cap, false);
     std::unordered_map<int32_t, bool> seen_tokens;
     const auto* lru = lru_slots.data_ptr<int32_t>();
@@ -2796,17 +2882,52 @@ std::vector<at::Tensor> selective_group_lru_plan_cpu(
     }
   }
   int32_t miss_count = 0;
+  if (pool) {
+    auto* resident = slot_to_token.data_ptr<int32_t>();
+    auto* tags = resident_pages.data_ptr<int32_t>();
+    if (last_req != meta[0] || pool->last_used.size() != static_cast<size_t>(cap) || prefix < pool->stable_prefix) {
+      pool->reset(cap, resident);
+      resident_pages.fill_(-1);
+    }
+    // Unselected rows are checked lazily before use; only lifecycle changes reset the pool.
+    for (int32_t i = 0; i < count; ++i) {
+      const auto token = unique[i];
+      const auto found = pool->slot_of_token.find(token);
+      if (found == pool->slot_of_token.end()) continue;
+      const auto slot = found->second;
+      TORCH_CHECK(slot >= 0 && slot < cap && resident[slot] == token, "invalid selective resident lookup");
+      bool reload = token >= prefix;
+      for (int64_t layer = 0; layer < page_tables.size(0); ++layer)
+        reload |= tags[layer * cap + slot] != pages[layer * cols + token / block_size];
+      if (reload) {
+        pool->invalidate(token, resident);
+        for (int64_t layer = 0; layer < page_tables.size(0); ++layer) tags[layer * cap + slot] = -1;
+      }
+    }
+    miss_count = pool->plan(unique.data(), count, cap, resident, lru_slots.data_ptr<int32_t>(),
+        prefix, current.data(), miss_tokens.data_ptr<int32_t>(), miss_slots.data_ptr<int32_t>());
+  } else {
   process_one_lru_resident_row(0, 0, width, cap, max_token, meta.data(), &last_req, unique.data(), &prefix,
       slot_to_token.data_ptr<int32_t>(), lru_slots.data_ptr<int32_t>(), current.data(), &miss_count,
       miss_tokens.data_ptr<int32_t>(), miss_slots.data_ptr<int32_t>(), token_mark.data_ptr<int32_t>(),
       token_pos.data_ptr<int32_t>(), workspace.data(), positions.data(), epoch.data_ptr<int32_t>(),
       nullptr, nullptr, 0, false, &seq);
+  }
   auto* resident_page_data = resident_pages.data_ptr<int32_t>();
   const auto* resident = slot_to_token.data_ptr<int32_t>();
-  for (int32_t slot = 0; slot < cap; ++slot) {
-    const int32_t token = resident[slot];
-    for (int64_t layer = 0; layer < page_tables.size(0); ++layer) {
-      resident_page_data[layer * cap + slot] = token < 0 ? -1 : pages[layer * cols + token / block_size];
+  if (pool) {
+    for (int32_t i = 0; i < miss_count; ++i) {
+      const auto token = miss_tokens.data_ptr<int32_t>()[i];
+      const auto slot = miss_slots.data_ptr<int32_t>()[i];
+      for (int64_t layer = 0; layer < page_tables.size(0); ++layer)
+        resident_page_data[layer * cap + slot] = pages[layer * cols + token / block_size];
+    }
+  } else {
+    for (int32_t slot = 0; slot < cap; ++slot) {
+      const int32_t token = resident[slot];
+      for (int64_t layer = 0; layer < page_tables.size(0); ++layer) {
+        resident_page_data[layer * cap + slot] = token < 0 ? -1 : pages[layer * cols + token / block_size];
+      }
     }
   }
   for (int32_t i = 0; i < width; ++i) {
@@ -2833,6 +2954,14 @@ std::vector<at::Tensor> selective_group_lru_plan_cpu(
   __atomic_store_n(busy, ticket, __ATOMIC_RELEASE);
   reservation.handed_off = true;
   return result;
+}
+
+std::vector<at::Tensor> selective_group_lru_plan_cpu(
+    const at::Tensor& topk, const at::Tensor& page_tables, at::Tensor slot_to_token,
+    at::Tensor lru_slots, at::Tensor resident_pages, at::Tensor last_identity, at::Tensor token_mark,
+    at::Tensor token_pos, at::Tensor epoch, at::Tensor control, const std::vector<int64_t>& meta) {
+  return selective_group_lru_plan_impl(topk, page_tables, slot_to_token, lru_slots, resident_pages,
+      last_identity, token_mark, token_pos, epoch, control, meta, nullptr);
 }
 
 // Each rank publishes a bounded serialized value and retains its slot until
@@ -3023,14 +3152,14 @@ void selective_check_read_write_disjoint(const std::vector<at::Tensor>& inputs,
 void selective_gather_group_rows(
     std::vector<SelectiveGroupLayerTransfer>& layers, const at::Tensor& miss_tokens,
     const at::Tensor& miss_slots, int64_t physical_row, int64_t row_stride,
-    int64_t block_size, int64_t capacity, size_t k_bytes, size_t v_bytes, bool gather_host,
+    int64_t block_size, int64_t capacity, int64_t hot_capacity, size_t k_bytes, size_t v_bytes, bool gather_host,
     size_t logical_row = 0, size_t batch_rows = 1) {
   TORCH_CHECK(!layers.empty() && miss_tokens.device().is_cpu() && miss_slots.device().is_cpu() &&
               miss_tokens.scalar_type() == at::kInt && miss_slots.scalar_type() == at::kInt &&
               miss_tokens.is_contiguous() && miss_slots.is_contiguous() &&
               miss_tokens.numel() == miss_slots.numel() && miss_tokens.numel() <= capacity &&
               physical_row >= 0 && row_stride > 0 && block_size > 0 && capacity > 0 &&
-              capacity <= row_stride && capacity <= INT64_MAX / 2 && batch_rows > 0 &&
+              capacity <= hot_capacity && hot_capacity <= row_stride - block_size && capacity <= INT64_MAX / 2 && batch_rows > 0 &&
               logical_row < batch_rows && batch_rows <= static_cast<size_t>(INT64_MAX) /
                                                              (2 * static_cast<size_t>(capacity)) &&
               k_bytes > 0 && v_bytes > 0 &&
@@ -3042,12 +3171,12 @@ void selective_gather_group_rows(
   TORCH_CHECK(cap <= SIZE_MAX / 2 && cap <= SIZE_MAX / k_bytes && cap <= SIZE_MAX / v_bytes,
               "selective group staging size overflow");
   const size_t row_base = static_cast<size_t>(physical_row) * static_cast<size_t>(row_stride);
-  TORCH_CHECK(row_base <= SIZE_MAX - cap, "selective group hot row overflow");
+  TORCH_CHECK(row_base <= SIZE_MAX - static_cast<size_t>(hot_capacity), "selective group hot row overflow");
   const auto* tokens = miss_tokens.data_ptr<int32_t>();
   const auto* slots = miss_slots.data_ptr<int32_t>();
   std::unordered_map<int32_t, bool> unique_tokens, unique_slots;
   for (size_t i = 0; i < count; ++i) {
-    TORCH_CHECK(tokens[i] >= 0 && slots[i] >= 0 && slots[i] < capacity &&
+    TORCH_CHECK(tokens[i] >= 0 && slots[i] >= 0 && slots[i] < hot_capacity &&
                 unique_tokens.emplace(tokens[i], true).second && unique_slots.emplace(slots[i], true).second,
                 "invalid or duplicate selective miss");
   }
@@ -3086,7 +3215,7 @@ void selective_gather_group_rows(
       const size_t host_size = gather_host ? selective_tensor_bytes(host[part]) : 0;
       const size_t hot_size = selective_tensor_bytes(hot[part]);
       TORCH_CHECK(selective_tensor_bytes(staging[part]) >= cap * bytes[part] &&
-                  row_base + cap <= hot_size / bytes[part], "selective staging or hot buffer too small");
+                  row_base + static_cast<size_t>(hot_capacity) <= hot_size / bytes[part], "selective staging or hot buffer too small");
       const auto* pages = gather_host ? item.pages.data_ptr<int32_t>() : nullptr;
       for (size_t i = 0; i < count; ++i) {
         size_t source_row = 0;
@@ -3143,6 +3272,7 @@ struct SelectiveNativeOwner {
   std::vector<std::pair<uintptr_t, size_t>> state, hot;
   int device = -1;
   int64_t tp_rank = 0, tp_world = 1;
+  std::shared_ptr<std::vector<SelectivePersistentLRU>> pools;
   size_t references = 0;
   bool in_flight = false;
 };
@@ -3167,12 +3297,37 @@ std::unordered_map<const void*, SelectiveNativeSpans>& selective_owner_spans() {
 // selective path does not call this entry until its version, graph-completion
 // and TP lifecycle contracts are validated. All tensor owners are retained by
 // the handle through graph destruction and worker shutdown.
+template <typename Token>
+void selective_normalize_topk_cpu(
+    const Token* input, int32_t* output, int64_t count, int64_t max_token) {
+  TORCH_CHECK(max_token > 0 && max_token <= INT32_MAX, "invalid selective token domain");
+  for (int64_t i = 0; i < count; ++i)
+    output[i] = input[i] >= 0 && input[i] < max_token ? static_cast<int32_t>(input[i]) : -1;
+}
+
+template <typename Sequence, typename Tail>
+void selective_pack_native_metadata_cpu(
+    const int64_t* requests, const Sequence* sequences, const Tail* tails,
+    int64_t rows, int64_t* output) {
+  for (int64_t row = 0; row < rows; ++row) {
+    auto* values = output + row * 12;
+    values[0] = requests[row];
+    values[1] = values[2] = values[3] = 0;
+    values[4] = sequences[row];
+    values[5] = tails[row * 2];
+    values[6] = tails[row * 2 + 1];
+    values[9] = sequences[row] > 0 ? static_cast<int64_t>(sequences[row]) - 1 : 0;
+    values[10] = row;
+  }
+}
+
 class SelectiveNativeGraph {
  public:
   explicit SelectiveNativeGraph(std::vector<at::Tensor> buffers, std::vector<at::Tensor> tp = {},
-                                int64_t rank = 0, int64_t world = 1)
-      : b_(std::move(buffers)), tp_(std::move(tp)), tp_rank_(rank), tp_world_(world) {
-    TORCH_CHECK(tp_world_ > 0 && tp_world_ <= (INT64_MAX - SELECTIVE_TP_ACK_BASE) / 2 &&
+                                int64_t rank = 0, int64_t world = 1,
+                                std::vector<at::Tensor> inputs = {})
+      : b_(std::move(buffers)), tp_(std::move(tp)), inputs_(std::move(inputs)), tp_rank_(rank), tp_world_(world) {
+    TORCH_CHECK(tp_world_ > 0 && tp_world_ <= (INT64_MAX - SELECTIVE_TP_ACK_BASE - 4) / 2 &&
                 tp_rank_ >= 0 && tp_rank_ < tp_world_ &&
                 (tp_world_ == 1 ? tp_.empty() : tp_.size() == 8), "invalid selective TP configuration");
     TORCH_CHECK(b_.size() >= 30 && (b_.size() - 30) % 14 == 0, "invalid selective native tensor list");
@@ -3189,7 +3344,8 @@ class SelectiveNativeGraph {
     const int pinned_indices[] = {1, 3, 5, 10, 11, 14, 16, 18, 20};
     for (int i : pinned_indices)
       TORCH_CHECK(selective_is_pinned_or_registered(b_[i]), "selective native buffer is not pinned at ", i);
-    TORCH_CHECK(b_[0].scalar_type() == at::kInt && b_[1].scalar_type() == at::kInt &&
+    TORCH_CHECK((b_[0].scalar_type() == at::kInt || b_[0].scalar_type() == at::kLong) &&
+                b_[1].scalar_type() == b_[0].scalar_type() &&
                 b_[0].numel() == b_[1].numel() && b_[0].numel() > 0 &&
                 b_[2].scalar_type() == at::kInt && b_[3].scalar_type() == at::kInt &&
                 b_[2].numel() == b_[3].numel() && b_[4].scalar_type() == at::kLong &&
@@ -3201,23 +3357,39 @@ class SelectiveNativeGraph {
                 "invalid selective native request rows");
     width_ = b_[0].numel() / rows_;
     page_columns_ = b_[2].numel() / rows_;
+    TORCH_CHECK(b_[22].dim() == 2, "selective resident state must be [requests, capacity]");
+    capacity_ = b_[22].size(1);
+    normalized_topk_ = at::empty(b_[1].sizes(), b_[1].options().dtype(at::kInt).pinned_memory(false));
+    TORCH_CHECK(inputs_.empty() || inputs_.size() == 6, "invalid selective raw metadata inputs");
+    for (size_t i = 0; i < inputs_.size(); i += 2) {
+      const auto& device = inputs_[i];
+      const auto& host = inputs_[i + 1];
+      TORCH_CHECK(device.defined() && host.defined() && device.device() == b_[0].device() &&
+                  host.device().is_cpu() && device.is_contiguous() && host.is_contiguous() &&
+                  (device.scalar_type() == at::kInt || device.scalar_type() == at::kLong) &&
+                  host.scalar_type() == device.scalar_type() &&
+                  device.numel() == rows_ * (i == 4 ? 2 : 1) && host.numel() == device.numel() &&
+                  selective_is_pinned_or_registered(host), "invalid selective raw metadata pair");
+    }
+    TORCH_CHECK(inputs_.empty() || inputs_[0].scalar_type() == at::kLong,
+                "selective request identities require int64");
     TORCH_CHECK(width_ > 0 && width_ <= 2048 && b_[0].numel() <= INT64_MAX / 2 &&
-                b_[22].numel() > 0 && b_[22].numel() % width_ == 0 &&
+                capacity_ >= width_ && capacity_ <= INT32_MAX && b_[22].numel() > 0 && b_[22].numel() % capacity_ == 0 &&
                 static_cast<uint64_t>(layer_count_) <= static_cast<uint64_t>(INT64_MAX) /
                                                          static_cast<uint64_t>(b_[22].numel()) &&
-                b_[22].numel() / width_ <= INT64_MAX / 9,
+                b_[22].numel() / capacity_ <= INT64_MAX / 9,
                 "selective native tensor geometry overflows");
-    TORCH_CHECK(width_ > 0 && width_ <= 2048 && page_columns_ > 0 && b_[22].numel() % width_ == 0 &&
-                b_[22].numel() >= rows_ * width_ && b_[23].numel() == b_[22].numel() &&
-                b_[24].numel() == (b_[22].numel() / width_) * static_cast<int64_t>(layer_count_) * width_ &&
-                b_[25].numel() == (b_[22].numel() / width_) * 9 &&
+    TORCH_CHECK(width_ > 0 && width_ <= 2048 && page_columns_ > 0 && b_[22].numel() % capacity_ == 0 &&
+                b_[22].numel() >= rows_ * capacity_ && b_[23].numel() == b_[22].numel() &&
+                b_[24].numel() == (b_[22].numel() / capacity_) * static_cast<int64_t>(layer_count_) * capacity_ &&
+                b_[25].numel() == (b_[22].numel() / capacity_) * 9 &&
                 b_[14].numel() == 2 * rows_ * width_ && b_[15].numel() == b_[14].numel() &&
                 b_[16].numel() == b_[14].numel() && b_[17].numel() == b_[14].numel() &&
                 b_[18].numel() == rows_ * width_ && b_[19].numel() == b_[18].numel() &&
                 b_[20].numel() >= rows_ && b_[20].numel() == b_[21].numel() && b_[20].numel() % rows_ == 0 &&
                 b_[26].numel() > 0 && b_[26].numel() == b_[27].numel() &&
-                b_[26].numel() % (b_[22].numel() / width_) == 0 &&
-                b_[28].numel() == b_[22].numel() / width_ && b_[29].numel() == 2 * b_[28].numel(),
+                b_[26].numel() % (b_[22].numel() / capacity_) == 0 &&
+                b_[28].numel() == b_[22].numel() / capacity_ && b_[29].numel() == 2 * b_[28].numel(),
                 "invalid selective native buffer geometry");
     const int int32_indices[] = {16, 17, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28};
     for (int i : int32_indices) TORCH_CHECK(b_[i].scalar_type() == at::kInt, "invalid int32 buffer ", i);
@@ -3263,7 +3435,7 @@ class SelectiveNativeGraph {
                   static_cast<uint64_t>(layer_count_) <= static_cast<uint64_t>(INT64_MAX) /
                       (static_cast<uint64_t>(tp_capacity_rows_) * static_cast<uint64_t>(width_)),
                   "selective TP plan geometry overflows");
-      TORCH_CHECK(tp_[0].scalar_type() == at::kLong && tp_[0].numel() == SELECTIVE_TP_ACK_BASE + 2 * tp_world_ &&
+      TORCH_CHECK(tp_[0].scalar_type() == at::kLong && tp_[0].numel() == SELECTIVE_TP_ACK_BASE + 2 * tp_world_ + 4 &&
                   tp_[1].scalar_type() == at::kInt && tp_[1].numel() == tp_capacity_rows_ * (3 * width_ + q + 1) &&
                   tp_[2].scalar_type() == at::kLong &&
                   tp_[3].scalar_type() == at::kInt && tp_[3].numel() == tp_capacity_rows_ * width_ &&
@@ -3290,9 +3462,13 @@ class SelectiveNativeGraph {
       }
       for (size_t layer = 1; layer < layer_count_; ++layer) {
         const size_t n = 30 + (layer - 1) * 14;
-        TORCH_CHECK(b_[n + 6].data_ptr() == b_[10].data_ptr() && b_[n + 6].numel() == b_[10].numel() &&
-                    b_[n + 7].data_ptr() == b_[11].data_ptr() && b_[n + 7].numel() == b_[11].numel(),
-                    "selective TP layers must share exactly one K/V Host staging pair");
+        const size_t bank = layer % 2;
+        const auto k_offset = bank * tp_capacity_rows_ * (selective_tensor_bytes(b_[10]) / rows_);
+        const auto v_offset = bank * tp_capacity_rows_ * (selective_tensor_bytes(b_[11]) / rows_);
+        TORCH_CHECK(b_[n + 6].data_ptr() == b_[10].data_ptr<uint8_t>() + k_offset &&
+                    b_[n + 7].data_ptr() == b_[11].data_ptr<uint8_t>() + v_offset &&
+                    b_[n + 6].numel() == b_[10].numel() && b_[n + 7].numel() == b_[11].numel(),
+                    "selective TP layers must alternate two K/V Host staging pairs");
       }
     }
     std::vector<at::Tensor> host_reads{b_[6], b_[7]};
@@ -3300,11 +3476,15 @@ class SelectiveNativeGraph {
                                         b_[22], b_[23], b_[24], b_[25], b_[26], b_[27], b_[28], b_[29]};
     std::vector<at::Tensor> device_reads{b_[0], b_[2], b_[4]};
     std::vector<at::Tensor> device_writes{b_[8], b_[9], b_[12], b_[13], b_[15], b_[17], b_[19], b_[21]};
+    for (size_t i = 0; i < inputs_.size(); i += 2) {
+      device_reads.push_back(inputs_[i]);
+      host_writes.push_back(inputs_[i + 1]);
+    }
     for (size_t layer = 1; layer < layer_count_; ++layer) {
       const size_t n = 30 + (layer - 1) * 14;
       host_reads.insert(host_reads.end(), {b_[n + 2], b_[n + 3]});
       host_writes.insert(host_writes.end(), {b_[n + 1], b_[n + 10], b_[n + 12]});
-      if (tp_world_ == 1) host_writes.insert(host_writes.end(), {b_[n + 6], b_[n + 7]});
+      if (tp_world_ == 1 || layer == 1) host_writes.insert(host_writes.end(), {b_[n + 6], b_[n + 7]});
       device_reads.push_back(b_[n]);
       device_writes.insert(device_writes.end(), {b_[n + 4], b_[n + 5], b_[n + 8], b_[n + 9], b_[n + 11], b_[n + 13]});
     }
@@ -3330,7 +3510,7 @@ class SelectiveNativeGraph {
       if (!destroy_acl_resources()) fatal_cleanup("selective native destructor cleanup failed");
     }
   }
-  void capture(const at::Tensor& anchor) {
+  void capture(const at::Tensor& anchor, bool layered) {
     std::lock_guard<std::mutex> lock(mu_);
     TORCH_CHECK(!released_ && !closing_ && anchor.device() == b_[0].device() && !captured_,
                 "invalid selective native capture");
@@ -3344,20 +3524,37 @@ class SelectiveNativeGraph {
     captured_ = true;
     model_ri_ = model;
     capture_stream_ = stream;
+    layered_ = layered;
     copy_capture(b_[1], b_[0], stream);
     copy_capture(b_[3], b_[2], stream);
-    copy_capture(b_[5], b_[4], stream);
+    if (inputs_.empty()) copy_capture(b_[5], b_[4], stream);
+    for (size_t i = 0; i < inputs_.size(); i += 2) copy_capture(inputs_[i + 1], inputs_[i], stream);
     for (size_t layer = 1; layer < layer_count_; ++layer) {
       const size_t n = 30 + (layer - 1) * 14;
       copy_capture(b_[n + 1], b_[n], stream);
     }
     check_acl(aclrtRecordNotify(ready_, stream), "capture ready");
-    check_acl(aclrtWaitAndResetNotify(done_, stream, 0), "capture done wait");
+    if (!layered_) check_acl(aclrtWaitAndResetNotify(done_, stream, 0), "capture done wait");
+  }
+  void wait_layer(size_t layer, const at::Tensor& anchor) {
+    std::lock_guard<std::mutex> lock(mu_);
+    TORCH_CHECK(captured_ && layered_ && !released_ && !closing_ && !scatter_captured_ &&
+                layer == captured_layers_ && layer < layer_count_ && anchor.device() == b_[0].device(),
+                "invalid selective layer capture order");
+    const auto stream = c10_npu::getCurrentNPUStream().stream();
+    aclmdlRICaptureStatus status = ACL_MODEL_RI_CAPTURE_STATUS_NONE;
+    aclmdlRI model = nullptr;
+    check_acl(aclmdlRICaptureGetInfo(stream, &status, &model), "query selective layer capture");
+    TORCH_CHECK(stream == capture_stream_ && status == ACL_MODEL_RI_CAPTURE_STATUS_ACTIVE && model == model_ri_,
+                "selective layer wait belongs to a different graph");
+    check_acl(aclrtWaitAndResetNotify(layer_ready_[layer], stream, 0), "capture layer ready wait");
+    ++captured_layers_;
   }
   void record_scatter(const at::Tensor& anchor) {
     std::lock_guard<std::mutex> lock(mu_);
     TORCH_CHECK(!released_ && !closing_ && captured_ && !scatter_captured_ && anchor.device() == b_[0].device(),
                 "invalid selective scatter capture");
+    TORCH_CHECK(!layered_ || captured_layers_ == layer_count_, "selective layers are missing readiness waits");
     c10_npu::NPUGuard guard(anchor.device());
     const auto stream = c10_npu::getCurrentNPUStream().stream();
     TORCH_CHECK(stream == capture_stream_, "selective scatter marker must follow scatter on the capture stream");
@@ -3453,7 +3650,7 @@ class SelectiveNativeGraph {
         tp_store(SELECTIVE_TP_ACK_BASE + tp_world_ + tp_rank_, epoch);
         if (tp_rank_ == 0) {
           for (int64_t rank = 0; rank < tp_world_; ++rank) tp_wait(SELECTIVE_TP_ACK_BASE + tp_world_ + rank, epoch);
-          const auto max_rows = b_[22].numel() / width_;
+          const auto max_rows = b_[22].numel() / capacity_;
           auto identity = b_[25].view({max_rows, 9});
           auto controls = b_[29].view({max_rows, 2});
           for (const auto& ticket : pending_tickets_)
@@ -3552,6 +3749,10 @@ class SelectiveNativeGraph {
       spans.host_writes.push_back(tensor_span(b_[i]));
     for (int i : {0, 2, 4}) spans.device_reads.push_back(tensor_span(b_[i]));
     for (int i : {8, 9, 12, 13, 15, 17, 19, 21}) spans.device_writes.push_back(tensor_span(b_[i]));
+    for (size_t i = 0; i < inputs_.size(); i += 2) {
+      spans.device_reads.push_back(tensor_span(inputs_[i]));
+      spans.host_writes.push_back(tensor_span(inputs_[i + 1]));
+    }
     for (size_t layer = 1; layer < layer_count_; ++layer) {
       const size_t n = 30 + (layer - 1) * 14;
       for (size_t i : {size_t{2}, size_t{3}}) if (b_[n + i].numel()) spans.host_reads.push_back(tensor_span(b_[n + i]));
@@ -3610,11 +3811,15 @@ class SelectiveNativeGraph {
                         "overlapping selective hot buffers use different group state");
       }
     }
+    if (existing == owners.end())
+      candidate.pools = std::make_shared<std::vector<SelectivePersistentLRU>>(b_[22].numel() / capacity_);
     registered_spans.emplace(this, std::move(spans));
     try {
       if (existing != owners.end()) ++existing->second.references;
       else { candidate.references = 1; owners.emplace(owner_key_, std::move(candidate)); }
     } catch (...) { registered_spans.erase(this); throw; }
+    auto& owner = owners.at(owner_key_);
+    pools_ = owner.pools;
     owner_registered_ = true;
   }
   void unregister_owner() noexcept {
@@ -3637,6 +3842,12 @@ class SelectiveNativeGraph {
       check_acl(aclrtCreateNotify(&done_, ACL_NOTIFY_DEFAULT), "selective done");
       check_acl(aclrtCreateNotify(&scatter_, ACL_NOTIFY_DEFAULT), "selective scatter");
       check_acl(aclrtCreateNotify(&graph_done_, ACL_NOTIFY_DEFAULT), "selective graph completion");
+      layer_ready_.resize(layer_count_, nullptr);
+      for (auto& notify : layer_ready_)
+        check_acl(aclrtCreateNotify(&notify, ACL_NOTIFY_DEFAULT), "selective layer ready");
+      if (tp_world_ > 1)
+        for (size_t bank = 0; bank < std::min(layer_count_, size_t{2}); ++bank)
+          check_acl(aclrtCreateEventWithFlag(&stage_events_[bank], ACL_EVENT_SYNC), "selective stage event");
     } catch (...) {
       if (!destroy_acl_resources()) fatal_cleanup("selective native ACL creation cleanup failed");
       throw;
@@ -3644,6 +3855,10 @@ class SelectiveNativeGraph {
   }
   bool destroy_acl_resources() noexcept {
     bool ok = true;
+    for (auto& notify : layer_ready_)
+      if (notify) { if (aclrtDestroyNotify(notify) == ACL_SUCCESS) notify = nullptr; else ok = false; }
+    for (auto& event : stage_events_)
+      if (event) { if (aclrtDestroyEvent(event) == ACL_SUCCESS) event = nullptr; else ok = false; }
     if (ready_) { if (aclrtDestroyNotify(ready_) == ACL_SUCCESS) ready_ = nullptr; else ok = false; }
     if (done_) { if (aclrtDestroyNotify(done_) == ACL_SUCCESS) done_ = nullptr; else ok = false; }
     if (scatter_) { if (aclrtDestroyNotify(scatter_) == ACL_SUCCESS) scatter_ = nullptr; else ok = false; }
@@ -3674,20 +3889,21 @@ class SelectiveNativeGraph {
   void tp_mark_error() noexcept {
     if (tp_world_ > 1) __atomic_store_n(tp_[0].data_ptr<int64_t>(), int64_t{1}, __ATOMIC_RELEASE);
   }
-  void tp_wait(int64_t index, int64_t expected) {
+  void tp_wait(int64_t index, int64_t expected, bool at_least = false) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
     for (;;) {
       TORCH_CHECK(tp_load(0) == 0, "selective TP peer failed");
       const auto value = tp_load(index);
-      TORCH_CHECK(value <= expected, "selective TP observed a later epoch");
-      if (value == expected) return;
+      TORCH_CHECK(at_least ? value >= 0 && value <= tp_load(3) : value <= expected,
+                  "selective TP observed a later epoch");
+      if (at_least ? value >= expected : value == expected) return;
       TORCH_CHECK(std::chrono::steady_clock::now() < deadline, "selective TP synchronization timed out");
       std::this_thread::yield();
     }
   }
   int32_t tp_selected_page(const int32_t* pages, int64_t row, int64_t position) {
     const auto* meta = b_[5].data_ptr<int64_t>() + row * 12;
-    const int32_t token = b_[1].data_ptr<int32_t>()[row * width_ + position];
+    const int32_t token = normalized_topk_.data_ptr<int32_t>()[row * width_ + position];
     if (meta[0] == 0 || token < 0 || token >= meta[4] || meta[7] <= 0) return -1;
     const int64_t block = token / meta[7];
     if (block >= page_columns_) return -1;
@@ -3695,7 +3911,7 @@ class SelectiveNativeGraph {
   }
   void tp_check_or_publish_inputs(int64_t epoch) {
     const auto* meta = b_[5].data_ptr<int64_t>();
-    const auto* topk = b_[1].data_ptr<int32_t>();
+    const auto* topk = normalized_topk_.data_ptr<int32_t>();
     auto* shared_meta = tp_[2].data_ptr<int64_t>();
     auto* shared_topk = tp_[3].data_ptr<int32_t>();
     auto* shared_pages = tp_[4].data_ptr<int32_t>();
@@ -3756,8 +3972,14 @@ class SelectiveNativeGraph {
                   "selective TP group identity or batch geometry differs");
       for (size_t i = 0; i < view_layout.size(); ++i)
         TORCH_CHECK(tp_load(11 + i) == view_layout[i], "selective TP mapping view layout differs");
-      TORCH_CHECK(std::equal(meta, meta + rows_ * 12, shared_meta) &&
-                  std::equal(topk, topk + rows_ * width_, shared_topk), "selective TP request metadata differs");
+      const auto meta_mismatch = std::mismatch(meta, meta + rows_ * 12, shared_meta);
+      TORCH_CHECK(meta_mismatch.first == meta + rows_ * 12,
+                  "selective TP request metadata differs rank=", tp_rank_, " index=", meta_mismatch.first - meta,
+                  " local=", *meta_mismatch.first, " owner=", *meta_mismatch.second);
+      const auto topk_mismatch = std::mismatch(topk, topk + rows_ * width_, shared_topk);
+      TORCH_CHECK(topk_mismatch.first == topk + rows_ * width_,
+                  "selective TP TopK differs rank=", tp_rank_, " index=", topk_mismatch.first - topk,
+                  " local=", *topk_mismatch.first, " owner=", *topk_mismatch.second);
       for (size_t layer = 0; layer < layer_count_; ++layer)
         for (int64_t row = 0; row < rows_; ++row) for (int64_t i = 0; i < width_; ++i)
           TORCH_CHECK(shared_pages[(layer * tp_capacity_rows_ + row) * width_ + i] == tp_selected_page(layer_pages[layer], row, i),
@@ -3796,13 +4018,13 @@ class SelectiveNativeGraph {
       return {};
     }
     const auto* meta = b_[5].data_ptr<int64_t>() + row * 12;
-    TORCH_CHECK(meta[7] > 0 && meta[7] <= INT32_MAX - width_, "invalid selective TP block size");
-    const auto* topk = b_[1].data_ptr<int32_t>() + row * width_;
+    TORCH_CHECK(meta[7] > 0 && meta[7] <= INT32_MAX - capacity_, "invalid selective TP block size");
+    const auto* topk = normalized_topk_.data_ptr<int32_t>() + row * width_;
     std::unordered_map<int32_t, int32_t> selected, slot_owners;
     selected.reserve(static_cast<size_t>(width_));
     slot_owners.reserve(static_cast<size_t>(width_));
     for (int64_t i = 0; i < width_; ++i) {
-      TORCH_CHECK(values[i] >= -1 && values[i] < width_ + meta[7],
+      TORCH_CHECK(values[i] >= -1 && values[i] < capacity_ + meta[7],
                   "invalid shared selective physical slot");
       if (topk[i] < 0 || topk[i] >= meta[4]) {
         TORCH_CHECK(values[i] == -1, "invalid shared selective padding slot");
@@ -3816,7 +4038,7 @@ class SelectiveNativeGraph {
     }
     for (int32_t i = 0; i < count; ++i) {
       const auto token = values[width_ + q + 1 + i], slot = values[2 * width_ + q + 1 + i];
-      TORCH_CHECK(token >= 0 && token < meta[4] && slot >= 0 && slot < width_, "invalid shared selective miss");
+      TORCH_CHECK(token >= 0 && token < meta[4] && slot >= 0 && slot < capacity_, "invalid shared selective miss");
       const auto found = selected.find(token);
       TORCH_CHECK(found != selected.end() && found->second == slot, "shared selective miss is absent from physical plan");
     }
@@ -3838,19 +4060,19 @@ class SelectiveNativeGraph {
     return {shared.narrow(0, 0, width_), shared.narrow(0, width_ + q + 1, count),
             shared.narrow(0, 2 * width_ + q + 1, count), shared.narrow(0, width_, q)};
   }
-  int64_t tp_begin_stage(size_t layer, int64_t epoch) {
+  int64_t tp_begin_stage(size_t layer, int64_t epoch, int64_t next) {
     TORCH_CHECK(tp_load(1) == epoch, "selective TP stage has wrong plan epoch");
+    const auto bank_index = SELECTIVE_TP_ACK_BASE + 2 * tp_world_ + 2 * (layer % 2);
     if (tp_rank_ == 0) {
       const auto previous = tp_load(3);
-      TORCH_CHECK(previous >= 0 && previous < INT64_MAX, "selective TP stage epoch overflow");
-      for (int64_t rank = 0; rank < tp_world_; ++rank) tp_wait(SELECTIVE_TP_ACK_BASE + rank, previous);
+      TORCH_CHECK(previous >= 0 && previous < INT64_MAX && next == previous + 1,
+                  "selective TP stage epoch overflow or mismatch");
+      const auto reused = tp_load(bank_index);
+      for (int64_t rank = 0; rank < tp_world_; ++rank) tp_wait(SELECTIVE_TP_ACK_BASE + rank, reused, true);
       return previous + 1;
     }
-    const auto previous = tp_load(SELECTIVE_TP_ACK_BASE + tp_rank_);
-    TORCH_CHECK(previous >= 0 && previous < INT64_MAX, "selective TP acknowledgement overflow");
-    const auto next = previous + 1;
-    tp_wait(3, next);
-    TORCH_CHECK(tp_load(1) == epoch && tp_load(4) == static_cast<int64_t>(layer),
+    tp_wait(bank_index, next);
+    TORCH_CHECK(tp_load(1) == epoch && tp_load(bank_index + 1) == static_cast<int64_t>(layer),
                 "selective TP layer or epoch mismatch");
     return next;
   }
@@ -3858,6 +4080,9 @@ class SelectiveNativeGraph {
     if (tp_rank_ != 0) return;
     tp_store(4, static_cast<int64_t>(layer));
     tp_store(3, stage);
+    const auto bank_index = SELECTIVE_TP_ACK_BASE + 2 * tp_world_ + 2 * (layer % 2);
+    tp_store(bank_index + 1, static_cast<int64_t>(layer));
+    tp_store(bank_index, stage);
   }
   SelectiveGroupLayerTransfer layer_binding(size_t layer) {
     if (layer == 0) return {b_[6], b_[7], b_[8], b_[9], b_[10], b_[11], b_[12], b_[13],
@@ -3865,6 +4090,24 @@ class SelectiveNativeGraph {
     const size_t n = 30 + (layer - 1) * 14;
     return {b_[n + 2], b_[n + 3], b_[n + 4], b_[n + 5], b_[n + 6], b_[n + 7], b_[n + 8], b_[n + 9],
             b_[n + 10], b_[n + 11], b_[n + 12], b_[n + 13], b_[n + 1]};
+  }
+  void prepare_inputs() {
+    const auto max_rows = b_[22].numel() / capacity_;
+    const auto max_seq = b_[26].numel() / max_rows;
+    auto* topk = normalized_topk_.data_ptr<int32_t>();
+    if (b_[1].scalar_type() == at::kLong)
+      selective_normalize_topk_cpu(b_[1].data_ptr<int64_t>(), topk, b_[1].numel(), max_seq);
+    else selective_normalize_topk_cpu(b_[1].data_ptr<int32_t>(), topk, b_[1].numel(), max_seq);
+    if (inputs_.empty()) return;
+    const auto* requests = inputs_[1].data_ptr<int64_t>();
+    auto* metadata = b_[5].data_ptr<int64_t>();
+    const auto pack = [&](const auto* sequences) {
+      if (inputs_[5].scalar_type() == at::kLong)
+        selective_pack_native_metadata_cpu(requests, sequences, inputs_[5].data_ptr<int64_t>(), rows_, metadata);
+      else selective_pack_native_metadata_cpu(requests, sequences, inputs_[5].data_ptr<int32_t>(), rows_, metadata);
+    };
+    if (inputs_[3].scalar_type() == at::kLong) pack(inputs_[3].data_ptr<int64_t>());
+    else pack(inputs_[3].data_ptr<int32_t>());
   }
   void run() noexcept {
     try {
@@ -3880,17 +4123,18 @@ class SelectiveNativeGraph {
           TORCH_CHECK(inflight_, "selective native ready without replay");
           replay_epoch = last_epoch_;
         }
+        prepare_inputs();
         if (tp_world_ > 1) tp_check_or_publish_inputs(replay_epoch);
         const auto* metadata = b_[5].data_ptr<int64_t>();
-        const auto max_rows = b_[22].numel() / width_;
+        const auto max_rows = b_[22].numel() / capacity_;
         const auto max_seq = b_[26].numel() / max_rows;
         const auto table_width = b_[20].numel() / rows_;
-        auto topk = b_[1].view({rows_, width_});
+        auto topk = normalized_topk_.view({rows_, width_});
         auto physical = b_[18].view({rows_, width_});
         auto block_table = b_[20].view({rows_, table_width});
-        auto keys = b_[22].view({max_rows, width_});
-        auto lru = b_[23].view({max_rows, width_});
-        auto resident = b_[24].view({max_rows, static_cast<int64_t>(layer_count_), width_});
+        auto keys = b_[22].view({max_rows, capacity_});
+        auto lru = b_[23].view({max_rows, capacity_});
+        auto resident = b_[24].view({max_rows, static_cast<int64_t>(layer_count_), capacity_});
         auto identity = b_[25].view({max_rows, 9});
         auto marks = b_[26].view({max_rows, max_seq});
         auto positions = b_[27].view({max_rows, max_seq});
@@ -3908,12 +4152,17 @@ class SelectiveNativeGraph {
           TORCH_CHECK(slot_row >= 0 && slot_row < max_rows && used_rows.emplace(slot_row, true).second,
                       "invalid or duplicate selective physical row");
           physical_rows[static_cast<size_t>(row)] = slot_row;
+        }
+        selective_parallel_requests(rows_, [&](int64_t row) {
+          const auto& meta = metas[static_cast<size_t>(row)];
+          if (meta[0] == 0) return;
+          const auto slot_row = physical_rows[static_cast<size_t>(row)];
           if (tp_world_ > 1 && tp_rank_ != 0) {
             auto result = tp_read_plan(row, false);
             physical[row].copy_(result[0]);
             block_table[row].copy_(result[3]);
             plans[static_cast<size_t>(row)] = std::move(result);
-            continue;
+            return;
           }
           auto pages = at::empty({static_cast<int64_t>(layer_count_), page_columns_}, b_[3].options());
           for (size_t layer = 0; layer < layer_count_; ++layer) {
@@ -3921,23 +4170,39 @@ class SelectiveNativeGraph {
             pages[static_cast<int64_t>(layer)].copy_(entry.pages.view({rows_, page_columns_})[row]);
           }
           auto epoch = b_[28].view({max_rows}).narrow(0, slot_row, 1);
-          auto result = selective_group_lru_plan_cpu(topk[row], pages, keys[slot_row], lru[slot_row],
+          auto result = selective_group_lru_plan_impl(topk[row], pages, keys[slot_row], lru[slot_row],
               resident[slot_row], identity[slot_row], marks[slot_row], positions[slot_row], epoch,
-              controls[slot_row], meta);
+              controls[slot_row], meta, &(*pools_)[slot_row]);
           physical[row].copy_(result[0]);
           block_table[row].copy_(result[3]);
           plans[static_cast<size_t>(row)] = std::move(result);
-        }
+        });
         if (tp_world_ > 1 && tp_rank_ == 0) tp_publish_plans(plans, replay_epoch);
+        const auto stage_base = tp_world_ > 1 ? tp_load(SELECTIVE_TP_ACK_BASE + tp_rank_) : 0;
+        TORCH_CHECK(stage_base >= 0 && stage_base <= INT64_MAX - static_cast<int64_t>(layer_count_),
+                    "selective TP stage counter overflow");
+        std::array<int64_t, 2> pending_stages{};
+        copy_h2d(b_[19], b_[18]);
+        copy_h2d(b_[21], b_[20]);
         for (size_t layer_index = 0; layer_index < layer_count_; ++layer_index) {
           auto layer = layer_binding(layer_index);
-          const int64_t stage = tp_world_ > 1 ? tp_begin_stage(layer_index, replay_epoch) : 0;
-          size_t packed_rows = 0;
+          const auto bank = layer_index % 2;
+          if (tp_world_ > 1 && pending_stages[bank]) {
+            // A bank can be overwritten only after every rank has finished reading it.
+            check_acl(aclrtSynchronizeEventWithTimeout(stage_events_[bank], 3000), "selective bank completion");
+            tp_store(SELECTIVE_TP_ACK_BASE + tp_rank_, pending_stages[bank]);
+          }
+          const int64_t stage = tp_world_ > 1
+              ? tp_begin_stage(layer_index, replay_epoch, stage_base + layer_index + 1) : 0;
+          std::vector<size_t> offsets(static_cast<size_t>(rows_) + 1, 0);
+          for (int64_t row = 0; row < rows_; ++row)
+            offsets[row + 1] = offsets[row] + (plans[row].empty() ? 0 : plans[row][1].numel());
+          const size_t packed_rows = offsets.back();
           layer.destinations_host.zero_();
           layer.lengths_host.zero_();
-          for (int64_t row = 0; row < rows_; ++row) {
+          selective_parallel_requests(rows_, [&](int64_t row) {
             const auto& result = plans[static_cast<size_t>(row)];
-            if (result.empty()) continue;
+            if (result.empty()) return;
             const auto& meta = metas[static_cast<size_t>(row)];
             const auto host_rows = static_cast<uint64_t>(meta[8]) * static_cast<uint64_t>(meta[7]);
             const auto stage_rows = static_cast<uint64_t>(rows_) * static_cast<uint64_t>(width_);
@@ -3959,12 +4224,17 @@ class SelectiveNativeGraph {
                         "selective native staging must be bytes");
             auto one = layer;
             one.pages = layer.pages.view({rows_, page_columns_})[row];
-            one.stage_host_k = layer.stage_host_k.view({-1}).narrow(0, packed_rows * k_bytes, width_ * k_bytes);
-            one.stage_host_v = layer.stage_host_v.view({-1}).narrow(0, packed_rows * v_bytes, width_ * v_bytes);
+            one.stage_host_k = layer.stage_host_k.view({-1}).narrow(0, offsets[row] * k_bytes, width_ * k_bytes);
+            one.stage_host_v = layer.stage_host_v.view({-1}).narrow(0, offsets[row] * v_bytes, width_ * v_bytes);
             std::vector<SelectiveGroupLayerTransfer> one_layer{one};
             selective_gather_group_rows(one_layer, result[1], result[2], meta[10], meta[11], meta[7],
-                                        width_, k_bytes, v_bytes, tp_rank_ == 0, row, rows_);
-            const auto count = static_cast<size_t>(result[1].numel());
+                                        width_, capacity_, k_bytes, v_bytes, tp_rank_ == 0, row, rows_);
+          });
+          // Compact metadata after parallel gather so row-local descriptors cannot race.
+          const auto k_bytes = selective_tensor_bytes(layer.stage_host_k) / (rows_ * width_);
+          const auto v_bytes = selective_tensor_bytes(layer.stage_host_v) / (rows_ * width_);
+          for (int64_t row = 0; row < rows_; ++row) {
+            const auto count = offsets[row + 1] - offsets[row];
             if (count) {
               auto* destinations = layer.destinations_host.data_ptr<int64_t>();
               const auto* lengths = layer.lengths_host.data_ptr<int32_t>();
@@ -3985,11 +4255,10 @@ class SelectiveNativeGraph {
                             (k_destination - k_base) % k_bytes == 0 &&
                             (v_destination - v_base) % v_bytes == 0,
                             "invalid selective scatter row alignment");
-                destinations[packed_rows + i] = (k_destination - k_base) / k_bytes;
-                destinations[rows_ * width_ + packed_rows + i] = (v_destination - v_base) / v_bytes;
+                destinations[offsets[row] + i] = (k_destination - k_base) / k_bytes;
+                destinations[rows_ * width_ + offsets[row] + i] = (v_destination - v_base) / v_bytes;
               }
             }
-            packed_rows += count;
           }
           const size_t capacity = static_cast<size_t>(rows_) * width_;
           for (size_t part = 0; part < 2; ++part)
@@ -4005,16 +4274,18 @@ class SelectiveNativeGraph {
                 ACL_MEMCPY_HOST_TO_DEVICE, worker_), "group packed V H2D");
           }
           copy_h2d(layer.destinations_device, layer.destinations_host);
-          if (tp_world_ > 1) tp_publish_stage(stage, layer_index);
+          if (layered_)
+            check_acl(aclrtRecordNotify(layer_ready_[layer_index], worker_), "selective layer ready");
           if (tp_world_ > 1) {
-            check_acl(aclrtSynchronizeStreamWithTimeout(worker_, 3000), "selective TP H2D completion");
-            tp_store(SELECTIVE_TP_ACK_BASE + tp_rank_, stage);
+            check_acl(aclrtRecordEvent(stage_events_[bank], worker_), "selective bank event");
+            pending_stages[bank] = stage;
+            tp_publish_stage(stage, layer_index);
           }
         }
-        copy_h2d(b_[19], b_[18]);
-        copy_h2d(b_[21], b_[20]);
         check_acl(aclrtSynchronizeStreamWithTimeout(worker_, 3000), "selective native H2D completion");
-        check_acl(aclrtRecordNotify(done_, worker_), "selective native done");
+        if (tp_world_ > 1)
+          tp_store(SELECTIVE_TP_ACK_BASE + tp_rank_, stage_base + layer_count_);
+        if (!layered_) check_acl(aclrtRecordNotify(done_, worker_), "selective native done");
         wait_notify(scatter_);
         std::vector<std::pair<int64_t, int64_t>> tickets;
         if (tp_rank_ == 0) for (int64_t row = 0; row < rows_; ++row) {
@@ -4043,15 +4314,22 @@ class SelectiveNativeGraph {
     check_acl(aclrtMemcpyAsync(device.data_ptr(), selective_tensor_bytes(device), host.data_ptr(), bytes,
                                ACL_MEMCPY_HOST_TO_DEVICE, worker_), "selective native output H2D");
   }
+  std::shared_ptr<std::vector<SelectivePersistentLRU>> pools_;
   std::vector<at::Tensor> b_;
   std::vector<at::Tensor> tp_;
+  std::vector<at::Tensor> inputs_;
+  at::Tensor normalized_topk_;
   int64_t tp_rank_ = 0, tp_world_ = 1, tp_capacity_rows_ = 0;
   std::vector<std::pair<int64_t, int64_t>> pending_tickets_;
   size_t layer_count_ = 0;
-  int64_t rows_ = 0, width_ = 0, page_columns_ = 0;
+  int64_t rows_ = 0, width_ = 0, capacity_ = 0, page_columns_ = 0;
   aclrtContext context_ = nullptr;
   aclrtStream worker_ = nullptr, control_ = nullptr, monitor_ = nullptr, launch_stream_ = nullptr, capture_stream_ = nullptr;
   aclrtNotify ready_ = nullptr, done_ = nullptr, scatter_ = nullptr, graph_done_ = nullptr;
+  std::vector<aclrtNotify> layer_ready_;
+  std::array<aclrtEvent, 2> stage_events_{};
+  size_t captured_layers_ = 0;
+  bool layered_ = false;
   aclmdlRI model_ri_ = nullptr;
   std::shared_ptr<std::atomic<bool>> destroyed_ = std::make_shared<std::atomic<bool>>(false);
   std::thread thread_;
@@ -4091,7 +4369,7 @@ int64_t selective_native_create(const std::vector<at::Tensor>& buffers) {
 }
 std::vector<at::Tensor> selective_group_native_buffers(const std::vector<at::Tensor>& shared,
                                                        const std::vector<at::Tensor>& layers, int64_t count) {
-  TORCH_CHECK(shared.size() == 16 && count > 0 && count <= INT64_MAX / 14 &&
+  TORCH_CHECK((shared.size() == 16 || shared.size() == 22) && count > 0 && count <= INT64_MAX / 14 &&
               layers.size() == static_cast<size_t>(count) * 14, "invalid selective group tensor list");
   std::vector<at::Tensor> buffers{
       shared[0], shared[1], layers[0], layers[1], shared[2], shared[3],
@@ -4103,20 +4381,27 @@ std::vector<at::Tensor> selective_group_native_buffers(const std::vector<at::Ten
 }
 int64_t selective_group_native_create(const std::vector<at::Tensor>& shared,
                                       const std::vector<at::Tensor>& layers, int64_t count) {
-  return selective_native_create(selective_group_native_buffers(shared, layers, count));
+  auto buffers = selective_group_native_buffers(shared, layers, count);
+  return selective_native_register(std::make_shared<SelectiveNativeGraph>(
+      std::move(buffers), std::vector<at::Tensor>{}, 0, 1,
+      std::vector<at::Tensor>(shared.begin() + 16, shared.end())));
 }
 int64_t selective_group_tp_native_create(const std::vector<at::Tensor>& shared,
                                          const std::vector<at::Tensor>& layers, int64_t count,
                                          const std::vector<at::Tensor>& tp, int64_t rank, int64_t world) {
+  auto buffers = selective_group_native_buffers(shared, layers, count);
   return selective_native_register(std::make_shared<SelectiveNativeGraph>(
-      selective_group_native_buffers(shared, layers, count), tp, rank, world));
+      std::move(buffers), tp, rank, world, std::vector<at::Tensor>(shared.begin() + 16, shared.end())));
 }
 template <typename Fn> void selective_native_call(int64_t handle, Fn fn) {
   auto graph = selective_native_get(handle);
   try { fn(*graph); } catch (...) { graph->notify_peer_error(); throw; }
 }
-void selective_native_capture(int64_t h, const at::Tensor& anchor) {
-  selective_native_call(h, [&](auto& graph) { graph.capture(anchor); });
+void selective_native_capture(int64_t h, const at::Tensor& anchor, bool layered) {
+  selective_native_call(h, [&](auto& graph) { graph.capture(anchor, layered); });
+}
+void selective_native_wait_layer(int64_t h, int64_t layer, const at::Tensor& anchor) {
+  selective_native_call(h, [&](auto& graph) { graph.wait_layer(static_cast<size_t>(layer), anchor); });
 }
 void selective_native_scatter_done(int64_t h, const at::Tensor& anchor) {
   selective_native_call(h, [&](auto& graph) { graph.record_scatter(anchor); });
@@ -4837,9 +5122,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "Tensor[] tp, int rank, int world) -> int");
     ops.impl("selective_group_tp_native_create", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::selective_group_tp_native_create);
-    ops.def("selective_native_capture(int handle, Tensor anchor) -> ()");
+    ops.def("selective_native_capture(int handle, Tensor anchor, bool layered=False) -> ()");
     ops.impl("selective_native_capture", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::selective_native_capture);
+    ops.def("selective_native_wait_layer(int handle, int layer, Tensor anchor) -> ()");
+    ops.impl("selective_native_wait_layer", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::selective_native_wait_layer);
     ops.def("selective_native_scatter_done(int handle, Tensor anchor) -> ()");
     ops.impl("selective_native_scatter_done", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::selective_native_scatter_done);

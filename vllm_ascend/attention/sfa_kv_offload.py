@@ -99,6 +99,7 @@ class AscendSFAOffloadMetadata(AscendSFAMetadata):
     # Fused Copy-SFA inputs are contiguous NPU tensors. No exact CPU length mirror is
     # required, including after speculative-token rejection.
     selective_tail_rows: torch.Tensor | None = None
+    selective_tail_slots: torch.Tensor | None = None
     fused_copy_sfa_enabled: bool = False
     copy_sfa_query_ends: torch.Tensor | None = None
     copy_sfa_seq_lens: torch.Tensor | None = None
@@ -305,6 +306,7 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         metadata.num_decode_tokens = num_decode_tokens
         metadata.req_ids_tensor = common_attn_metadata.req_ids_tensor
         metadata.selective_tail_rows = common_attn_metadata.selective_tail_rows
+        metadata.selective_tail_slots = common_attn_metadata.selective_tail_slots
         metadata.token_to_req = common_attn_metadata.token_to_req
         metadata.fused_copy_sfa_enabled = (
             self.use_fused_copy_sfa
@@ -882,7 +884,14 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                     rows = cache_tensor.view(-1, cache_tensor.shape[-1])
                     rows.index_copy_(0, device_slots[: value.shape[0]], value.reshape(value.shape[0], -1))
             if attn_metadata.selective_tail_rows is not None:
-                manager.write_selective_tail(layer_name, slots, attn_metadata.selective_tail_rows, k_nope, k_pe)
+                manager.write_selective_tail(
+                    layer_name,
+                    slots,
+                    attn_metadata.selective_tail_rows,
+                    k_nope,
+                    k_pe,
+                    device_slots=attn_metadata.selective_tail_slots,
+                )
                 return k_pe, k_nope
             k_cache_cpu, v_cache_cpu = self._cpu_cache_pair(manager, layer_name)
             manager.offload_new_kv(

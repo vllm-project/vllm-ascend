@@ -675,7 +675,7 @@ class NPUModelRunner(GPUModelRunner):
         # Native and eager planners cannot share hot-slot state after graph replay starts.
         if (
             sparse_config.selective_offload
-            and sparse_config.topk == sparse_config.topk_buffer_size
+            and sparse_config.topk <= sparse_config.topk_buffer_size
             and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
             and self.compilation_config.max_cudagraph_capture_size >= self.max_num_reqs
             and self.speculative_config is None
@@ -1025,7 +1025,9 @@ class NPUModelRunner(GPUModelRunner):
                     ids, scan_error = None, None
                     if native.tp_size == 1 or native.tp_rank == 0:
                         try:
-                            ids = native.selective_native_cache_ids_for_modified_pages(modified_pages, set(active.values()))
+                            ids = native.selective_native_cache_ids_for_modified_pages(
+                                modified_pages, set(active.values())
+                            )
                         except Exception as error:
                             scan_error = str(error)
                     if native.tp_size > 1:
@@ -1041,9 +1043,15 @@ class NPUModelRunner(GPUModelRunner):
                 self.model_state.invalidate_selective_requests(rolled_back)
             except Exception as error:
                 invalidation_error = error
-            if (getattr(native, "_selective_native_started", False) and native.tp_size > 1
-                    and (modified_pages or rolled_back)):
-                status = (str(invalidation_error) if invalidation_error is not None else None, tuple(sorted(rolled_back)))
+            if (
+                getattr(native, "_selective_native_started", False)
+                and native.tp_size > 1
+                and (modified_pages or rolled_back)
+            ):
+                status = (
+                    str(invalidation_error) if invalidation_error is not None else None,
+                    tuple(sorted(rolled_back)),
+                )
                 gathered = self._selective_tp_all_gather(native, status, "page invalidation")
                 if any(value[0] is not None or value[1] != status[1] for value in gathered):
                     raise RuntimeError(f"Native selective TP invalidation failed or differs: {gathered}")

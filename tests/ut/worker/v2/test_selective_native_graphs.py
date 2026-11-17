@@ -15,15 +15,24 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 
-@pytest.mark.parametrize("selective,capacity,native,fallback", [
-    (True, 2048, True, None), (True, 4096, False, None), (False, 2048, False, None),
-    (True, 2048, False, "eager"), (True, 2048, False, "partial_coverage"),
-    (True, 2048, False, "speculative"), (True, 2048, False, "ubatching"),
-])
+@pytest.mark.parametrize(
+    "selective,capacity,native,fallback",
+    [
+        (True, 2048, True, None),
+        (True, 4096, True, None),
+        (True, 20480, True, None),
+        (False, 2048, False, None),
+        (True, 2048, False, "eager"),
+        (True, 2048, False, "partial_coverage"),
+        (True, 2048, False, "speculative"),
+        (True, 2048, False, "ubatching"),
+    ],
+)
 def test_runner_registers_native_path_before_requests(selective, capacity, native, fallback):
     manager = MagicMock()
-    config = SimpleNamespace(selective_offload=selective, topk=2048, topk_buffer_size=capacity,
-                             use_fused_copy_sfa=False)
+    config = SimpleNamespace(
+        selective_offload=selective, topk=2048, topk_buffer_size=capacity, use_fused_copy_sfa=False
+    )
     runner = SimpleNamespace(
         sparse_kv_offload_manager=manager,
         ascend_config=SimpleNamespace(sparse_kv_offload_config=config),
@@ -43,7 +52,8 @@ def test_runner_registers_native_path_before_requests(selective, capacity, nativ
     if native:
         assert manager._selective_native_shared_exchange_requested is True
         assert [call[0] for call in manager.method_calls] == [
-            "register_kv_caches", "enable_selective_native_experiment",
+            "register_kv_caches",
+            "enable_selective_native_experiment",
         ]
 
 
@@ -69,8 +79,9 @@ def test_activation_precedes_requests_and_sets_model_state():
     manager.use_fused_copy_sfa = False
     manager.max_model_len = 16
     manager.topk_buffers_k = [torch.empty((2, 8))]
-    state = SimpleNamespace(_selective_request_ids={"active": 1}, _offload_live_req_ids={},
-                            _selective_native_experiment=False)
+    state = SimpleNamespace(
+        _selective_request_ids={"active": 1}, _offload_live_req_ids={}, _selective_native_experiment=False
+    )
     manager._selective_model_state = state
     with pytest.raises(RuntimeError, match="before admitting"):
         manager.enable_selective_native_experiment()
@@ -84,7 +95,8 @@ def test_activation_precedes_requests_and_sets_model_state():
     assert state._selective_native_experiment
 
 
-def test_tp_coordinator_shares_plan_and_stage_within_one_group():
+@pytest.mark.parametrize("capacity", [4, 12])
+def test_tp_coordinator_shares_plan_and_stage_within_one_group(capacity):
     barrier = threading.Barrier(2)
     published = threading.Event()
     names = []
@@ -95,6 +107,7 @@ def test_tp_coordinator_shares_plan_and_stage_within_one_group():
 
     class Group:
         cpu_group = object()
+
         def broadcast_object(self, value, src):
             if value is not None:
                 names.append(value)
@@ -109,7 +122,7 @@ def test_tp_coordinator_shares_plan_and_stage_within_one_group():
         thread_state.rank = rank
         try:
             coordinators[rank] = SelectiveNativeTPCoordinator(
-                Group(), rank, 2, 2, 4, 2, 4, 128, 128, [0, 1, 2]
+                Group(), rank, 2, 2, 4, 2, 4, 128, 128, [0, 1, 2], capacity=capacity
             )
         except BaseException as error:
             errors.append(error)
@@ -134,9 +147,13 @@ def test_tp_coordinator_shares_plan_and_stage_within_one_group():
         assert all(not thread.is_alive() for thread in threads)
         assert all(item is not None for item in coordinators)
         coordinators[0].buffers[0][0] = 17
-        coordinators[0].stage_k[0, 0, 0] = 31
+        assert coordinators[0].stage_k.shape == (2, 2, 4, 128)
+        assert coordinators[0].buffers[1].shape == (2, 3 * 4 + capacity // 4 + 2)
+        coordinators[0].stage_k[0, 0, 0, 0] = 31
+        coordinators[0].stage_k[1, 0, 0, 0] = 47
         assert int(coordinators[1].buffers[0][0]) == 17
-        assert int(coordinators[1].stage_k[0, 0, 0]) == 31
+        assert int(coordinators[1].stage_k[0, 0, 0, 0]) == 31
+        assert int(coordinators[1].stage_k[1, 0, 0, 0]) == 47
         for item in coordinators:
             item.close()
 
@@ -207,9 +224,11 @@ def test_missing_graph_binding_fails_before_start():
     graph = object()
     manager._selective_native_graphs[graph] = [11]
     manager._selective_native_graph_keys[graph] = [(1,)]
-    with patch.object(torch.ops._C_ascend, "selective_native_start", create=True) as start:
-        with pytest.raises(RuntimeError, match="binding"):
-            manager.start_selective_native_graphs({"a": graph, "b": object()})
+    with (
+        patch.object(torch.ops._C_ascend, "selective_native_start", create=True) as start,
+        pytest.raises(RuntimeError, match="binding"),
+    ):
+        manager.start_selective_native_graphs({"a": graph, "b": object()})
     start.assert_not_called()
 
 
@@ -234,8 +253,18 @@ def test_handle_lifecycle_uses_graph_object_and_orders_completion():
         manager.stop_selective_native_graphs()
         manager.release_selective_native_graphs()
     assert [call[0] for call in trace.mock_calls] == [
-        "start", "start", "begin", "begin", "record", "record", "retire", "retire", "stop", "stop",
-        "release", "release",
+        "start",
+        "start",
+        "begin",
+        "begin",
+        "record",
+        "record",
+        "retire",
+        "retire",
+        "stop",
+        "stop",
+        "release",
+        "release",
     ]
     assert [call.args[0] for call in trace.retire.call_args_list] == [12, 11]
     graph.reset.assert_called_once()
@@ -256,9 +285,9 @@ def test_tp_missing_group_fails_before_worker_start():
     with (
         patch.object(torch.distributed, "all_gather_object", side_effect=gather),
         patch.object(torch.ops._C_ascend, "selective_native_start", create=True) as start,
+        pytest.raises(RuntimeError, match="bindings differ"),
     ):
-        with pytest.raises(RuntimeError, match="bindings differ"):
-            manager.start_selective_native_graphs({"descriptor": graph})
+        manager.start_selective_native_graphs({"descriptor": graph})
     start.assert_not_called()
 
 
@@ -270,9 +299,11 @@ def test_tp_replay_descriptor_mismatch_is_rejected():
     def gather(output, local, group):
         output[:] = [local, ("different",)]
 
-    with patch.object(torch.distributed, "all_gather_object", side_effect=gather):
-        with pytest.raises(RuntimeError, match="descriptors differ"):
-            manager.check_selective_native_graph_step(SimpleNamespace(num_tokens=1))
+    with (
+        patch.object(torch.distributed, "all_gather_object", side_effect=gather),
+        pytest.raises(RuntimeError, match="descriptors differ"),
+    ):
+        manager.check_selective_native_graph_step(SimpleNamespace(num_tokens=1))
 
 
 def test_tp_capture_failure_is_reported_to_successful_peer():
@@ -283,9 +314,11 @@ def test_tp_capture_failure_is_reported_to_successful_peer():
     def gather(output, local, group):
         output[:] = [local, "other rank capture failed"]
 
-    with patch.object(torch.distributed, "all_gather_object", side_effect=gather):
-        with pytest.raises(RuntimeError, match="other rank capture failed"):
-            manager.check_selective_native_capture_status(None)
+    with (
+        patch.object(torch.distributed, "all_gather_object", side_effect=gather),
+        pytest.raises(RuntimeError, match="other rank capture failed"),
+    ):
+        manager.check_selective_native_capture_status(None)
 
 
 def test_tp_recapture_keeps_shared_mapping_until_shutdown():
@@ -328,10 +361,12 @@ def test_tp_stop_failure_is_shared_and_resources_remain_owned():
         calls.append(value)
         output[:] = [value, "peer stop failed"] if len(calls) == 2 else [value, value]
 
-    with (patch.object(torch.distributed, "all_gather_object", side_effect=gather),
-          patch.object(torch.ops._C_ascend, "selective_native_stop", create=True)):
-        with pytest.raises(RuntimeError, match="worker stop failed"):
-            manager.stop_selective_native_graphs()
+    with (
+        patch.object(torch.distributed, "all_gather_object", side_effect=gather),
+        patch.object(torch.ops._C_ascend, "selective_native_stop", create=True),
+        pytest.raises(RuntimeError, match="worker stop failed"),
+    ):
+        manager.stop_selective_native_graphs()
     assert manager._selective_native_failed
     assert graph in manager._selective_native_graphs
     graph.reset.assert_not_called()
@@ -343,12 +378,13 @@ def test_completion_failure_does_not_retire_or_release_graph():
     manager._selective_native_graphs[graph] = [11]
     manager._selective_native_graph_keys[graph] = [(1,)]
     with (
-        patch.object(torch.ops._C_ascend, "selective_native_record_complete", side_effect=RuntimeError("event"),
-                     create=True),
+        patch.object(
+            torch.ops._C_ascend, "selective_native_record_complete", side_effect=RuntimeError("event"), create=True
+        ),
         patch.object(torch.ops._C_ascend, "selective_native_retire", create=True) as retire,
+        pytest.raises(RuntimeError, match="event"),
     ):
-        with pytest.raises(RuntimeError, match="event"):
-            manager.finish_selective_native_graph(graph, 1, object())
+        manager.finish_selective_native_graph(graph, 1, object())
     retire.assert_not_called()
     graph.reset.assert_not_called()
     assert graph in manager._selective_native_graphs
@@ -367,33 +403,35 @@ def test_modified_pages_select_only_live_resident_identities():
         manager.selective_native_cache_ids_for_modified_pages({11}, {101, 102})
 
 
+@pytest.mark.parametrize("capacity", [4, 12])
 @pytest.mark.parametrize("num_layers", [1, 2])
-def test_two_graphs_share_group_state_but_not_staging(num_layers):
+def test_two_graphs_share_group_state_but_not_staging(num_layers, capacity):
     manager = make_manager()
     manager._selective_native_experiment = True
     manager.tp_size = 1
     manager.tp_rank = 0
     manager.kv_cache_config = SimpleNamespace(num_blocks=8)
-    manager.topk = manager.topk_buffer_size = 4
+    manager.topk, manager.topk_buffer_size = 4, capacity
     manager.block_size = 4
     manager.max_model_len = 16
-    manager.selective_row_stride = 8
+    manager.selective_row_stride = capacity + 4
     manager.token_size_bytes_k = manager.token_size_bytes_v = 2
     manager.k_caches_cpu = [torch.empty((8, 4, 1, 1), dtype=torch.bfloat16)]
     manager.v_caches_cpu = [torch.empty((8, 4, 1, 1), dtype=torch.bfloat16)]
-    manager.topk_buffers_k = [torch.empty((2, 8, 1, 1), dtype=torch.bfloat16)]
-    manager.topk_buffers_v = [torch.empty((2, 8, 1, 1), dtype=torch.bfloat16)]
+    manager.topk_buffers_k = [torch.empty((2, capacity + 4, 1, 1), dtype=torch.bfloat16)]
+    manager.topk_buffers_v = [torch.empty((2, capacity + 4, 1, 1), dtype=torch.bfloat16)]
     if num_layers == 2:
         manager.k_caches_cpu.append(torch.empty_like(manager.k_caches_cpu[0]))
         manager.v_caches_cpu.append(torch.empty_like(manager.v_caches_cpu[0]))
         manager.topk_buffers_k.append(torch.empty_like(manager.topk_buffers_k[0]))
         manager.topk_buffers_v.append(torch.empty_like(manager.topk_buffers_v[0]))
     manager.selective_physical = torch.empty((num_layers, 2, 1, 4), dtype=torch.int32)
-    manager._selective_native_rows = torch.arange(2, dtype=torch.int64)
     manager.selective_copy_counts = torch.tensor([8, 16], dtype=torch.int32)
     trace = []
-    manager.selective_prefetch_ready = [SimpleNamespace(record=lambda: trace.append("ready0")),
-                                        SimpleNamespace(record=lambda: trace.append("ready1"))][:num_layers]
+    manager.selective_prefetch_ready = [
+        SimpleNamespace(record=lambda: trace.append("ready0")),
+        SimpleNamespace(record=lambda: trace.append("ready1")),
+    ][:num_layers]
     manager.offload_layer_names = ["model.layers.1.attn", "model.layers.2.attn"][:num_layers]
     manager.copy_sfa_kv = MagicMock()
     metadata = SimpleNamespace(
@@ -411,7 +449,7 @@ def test_two_graphs_share_group_state_but_not_staging(num_layers):
 
     def cache_store(destination, indices, source):
         assert destination.dtype == source.dtype == torch.int8
-        assert destination.shape == (16, 2) and source.shape == (8, 2)
+        assert destination.shape == (2 * (capacity + 4), 2) and source.shape == (8, 2)
         assert indices.shape == (8, 1) and indices.dtype == torch.int64
         assert destination.data_ptr() in {
             tensor.data_ptr() for tensor in manager.topk_buffers_k + manager.topk_buffers_v
@@ -422,10 +460,20 @@ def test_two_graphs_share_group_state_but_not_staging(num_layers):
         patch.object(torch, "empty", side_effect=cpu_empty),
         patch.object(torch.ops._C_ascend, "selective_group_native_create", side_effect=[11, 12], create=True) as create,
         patch.object(torch.ops._C_ascend, "selective_native_capture", create=True),
+        patch.object(
+            torch.ops._C_ascend,
+            "selective_native_wait_layer",
+            create=True,
+            side_effect=lambda handle, index, anchor: trace.append(f"wait{index}"),
+        ),
         patch.object(torch.ops._C_ascend, "selective_native_graph_identity", return_value=17, create=True),
         patch.object(torch.ops._C_ascend, "npu_scatter_nd_update_sk", side_effect=cache_store, create=True),
-        patch.object(torch.ops._C_ascend, "selective_native_scatter_done", create=True,
-                     side_effect=lambda *args: trace.append("scatter_done")),
+        patch.object(
+            torch.ops._C_ascend,
+            "selective_native_scatter_done",
+            create=True,
+            side_effect=lambda *args: trace.append("scatter_done"),
+        ),
     ):
         for graph in (object(), object()):
             token = _ACTIVE_GRAPH.set(graph)
@@ -436,10 +484,26 @@ def test_two_graphs_share_group_state_but_not_staging(num_layers):
     first, second = [call.args for call in create.call_args_list]
     assert all(first[0][i] is second[0][i] for i in range(8, 16))
     assert first[1][6] is not second[1][6]  # Host staging belongs to each graph.
-    assert first[0][2][:, 0].tolist() == [1 << 32, 0]
-    assert first[0][2][:, 4].tolist() == [8, 0]
-    expected = (["store", "store", "scatter_done", "ready0"] if num_layers == 1 else
-                ["store", "store", "ready0", "store", "store", "scatter_done", "ready1"])
+    assert len(first[0]) == 22
+    assert first[0][0].data_ptr() == topk.data_ptr()
+    assert first[0][1].dtype == torch.int64
+    assert first[0][3][:, 7].tolist() == [4, 4]
+    assert first[0][3][:, 8].tolist() == [8, 8]
+    assert first[0][3][:, 11].tolist() == [capacity + 4, capacity + 4]
+    assert first[0][8].shape == (2, capacity)
+    assert first[0][10].shape == (2, num_layers, capacity)
+    assert first[0][6].shape == (2, capacity // 4 + 1)
+    assert first[0][4].shape == (2, 4)
+    assert first[1][8].shape == (2, 4, 2)
+    assert first[0][16].data_ptr() == metadata.req_ids_tensor.data_ptr()
+    assert first[0][18].data_ptr() == seq.data_ptr()
+    assert first[0][20].data_ptr() == metadata.selective_tail_rows.data_ptr()
+    assert all(first[0][i] is not second[0][i] for i in (17, 19, 21))
+    expected = (
+        ["wait0", "store", "store", "scatter_done", "ready0"]
+        if num_layers == 1
+        else ["wait0", "store", "store", "ready0", "wait1", "store", "store", "scatter_done", "ready1"]
+    )
     assert trace == expected * 2
     manager.copy_sfa_kv.assert_not_called()
 
@@ -450,9 +514,11 @@ def test_tp_stop_collective_failure_keeps_graph_and_quarantines():
     manager.tp_group = SimpleNamespace(cpu_group=object())
     graph = MagicMock()
     manager._selective_native_graphs[graph] = [11]
-    with patch.object(torch.distributed, "all_gather_object", side_effect=RuntimeError("collective failed")):
-        with pytest.raises(RuntimeError, match="collective failed"):
-            manager.stop_selective_native_graphs()
+    with (
+        patch.object(torch.distributed, "all_gather_object", side_effect=RuntimeError("collective failed")),
+        pytest.raises(RuntimeError, match="collective failed"),
+    ):
+        manager.stop_selective_native_graphs()
     assert manager._selective_native_failed
     assert graph in manager._selective_native_graphs
     graph.reset.assert_not_called()
@@ -464,9 +530,11 @@ def test_tp_graph_drop_collective_failure_keeps_graph_and_quarantines():
     manager.tp_group = SimpleNamespace(cpu_group=object())
     graph = MagicMock()
     manager._selective_native_graphs[graph] = [11]
-    with patch.object(torch.distributed, "all_gather_object", side_effect=RuntimeError("collective failed")):
-        with pytest.raises(RuntimeError, match="collective failed"):
-            manager.check_selective_native_phase_status("graph drop", None)
+    with (
+        patch.object(torch.distributed, "all_gather_object", side_effect=RuntimeError("collective failed")),
+        pytest.raises(RuntimeError, match="collective failed"),
+    ):
+        manager.check_selective_native_phase_status("graph drop", None)
     assert manager._selective_native_failed
     assert graph in manager._selective_native_graphs
     graph.reset.assert_not_called()
@@ -479,12 +547,16 @@ def test_tp_coordinator_close_failure_is_shared_and_quarantined():
     coordinator = SimpleNamespace(close=MagicMock())
     manager._selective_native_tp_groups[(0,)] = coordinator
     calls = []
+
     def gather(output, value, group):
         calls.append(value)
         output[:] = [value, "peer close failed"] if len(calls) == 2 else [value, value]
-    with patch.object(torch.distributed, "all_gather_object", side_effect=gather):
-        with pytest.raises(RuntimeError, match="coordinator close failed"):
-            manager.release_selective_native_graphs(close_tp=True)
+
+    with (
+        patch.object(torch.distributed, "all_gather_object", side_effect=gather),
+        pytest.raises(RuntimeError, match="coordinator close failed"),
+    ):
+        manager.release_selective_native_graphs(close_tp=True)
     assert manager._selective_native_failed
     assert manager._selective_native_tp_groups[(0,)] is coordinator
 
@@ -496,14 +568,19 @@ def test_shared_exchange_uses_exact_payload_and_confirms():
     manager._selective_tp_exchange_epoch = 0
     storage = MagicMock()
     manager._selective_native_tp_groups[(0,)] = SimpleNamespace(exchange=storage)
+
     def exchange(buf, rank, world, epoch, payload):
         assert buf is storage and (rank, world, epoch) == (0, 2, 1)
         return [payload, payload]
-    with (patch.object(torch.ops._C_ascend, "selective_tp_exchange_cpu", side_effect=exchange, create=True),
-          patch.object(torch.ops._C_ascend, "selective_tp_exchange_confirm_cpu", create=True) as confirm,
-          patch.object(torch.distributed, "all_gather_object") as old):
+
+    with (
+        patch.object(torch.ops._C_ascend, "selective_tp_exchange_cpu", side_effect=exchange, create=True),
+        patch.object(torch.ops._C_ascend, "selective_tp_exchange_confirm_cpu", create=True) as confirm,
+        patch.object(torch.distributed, "all_gather_object") as old,
+    ):
         assert manager.selective_native_all_gather(((7, 9), ("request",)), "pages") == [
-            ((7, 9), ("request",)), ((7, 9), ("request",))
+            ((7, 9), ("request",)),
+            ((7, 9), ("request",)),
         ]
     confirm.assert_called_once_with(storage, 0, 2, 1)
     old.assert_not_called()
@@ -517,11 +594,15 @@ def test_shared_exchange_oversize_uses_existing_collective():
     manager._selective_tp_exchange_epoch = 0
     storage = MagicMock()
     manager._selective_native_tp_groups[(0,)] = SimpleNamespace(exchange=storage)
+
     def gather(output, value, group):
         output[:] = [value, value]
-    with (patch.object(torch.ops._C_ascend, "selective_tp_exchange_cpu", return_value=[], create=True),
-          patch.object(torch.ops._C_ascend, "selective_tp_exchange_confirm_cpu", create=True) as confirm,
-          patch.object(torch.distributed, "all_gather_object", side_effect=gather)):
+
+    with (
+        patch.object(torch.ops._C_ascend, "selective_tp_exchange_cpu", return_value=[], create=True),
+        patch.object(torch.ops._C_ascend, "selective_tp_exchange_confirm_cpu", create=True) as confirm,
+        patch.object(torch.distributed, "all_gather_object", side_effect=gather),
+    ):
         assert manager.selective_native_all_gather([1, 2], "pages") == [[1, 2], [1, 2]]
     confirm.assert_called_once_with(storage, 0, 2, 1)
 
@@ -542,3 +623,19 @@ def test_shared_failure_marks_exchange_and_every_group_control():
     assert mark.call_count == 3
     pointers = [call.args[0].data_ptr() for call in mark.call_args_list]
     assert pointers == [exchange.data_ptr(), control1.data_ptr(), control2.data_ptr()]
+
+
+def test_native_warmup_masks_slots_without_running_legacy_lim():
+    manager = make_manager()
+    manager._selective_native_experiment = True
+    manager._selective_native_started = False
+    manager.topk = 4
+    manager.topk_buffer_size = 20480
+    manager.selective_physical = torch.zeros((1, 3, 1, 4), dtype=torch.int32)
+    with patch("torch_npu.npu.is_current_stream_capturing", return_value=False):
+        manager.prepare_selective_kv([(0, None, None)], torch.zeros((2, 4), dtype=torch.int32))
+        assert manager.selective_physical[0, :2].eq(-1).all()
+        assert manager.selective_physical[0, 2:].eq(0).all()
+        manager._selective_native_started = True
+        with pytest.raises(RuntimeError, match="cannot mix eager"):
+            manager.prepare_selective_kv([(0, None, None)], torch.zeros((2, 4), dtype=torch.int32))

@@ -35,8 +35,15 @@ class Row:
         result = torch.ops._C_ascend.selective_group_lru_plan_cpu(
             torch.tensor(tokens, dtype=torch.int32),
             torch.tensor(pages, dtype=torch.int32),
-            self.slots, self.lru, self.resident_pages, self.identity, self.mark, self.pos, self.epoch,
-            self.control, self.meta,
+            self.slots,
+            self.lru,
+            self.resident_pages,
+            self.identity,
+            self.mark,
+            self.pos,
+            self.epoch,
+            self.control,
+            self.meta,
         )
         if finish:
             self.finish(result[4].item(), True)
@@ -225,3 +232,23 @@ def test_corrupt_epoch_lru_and_aliased_state_are_rejected():
     row.lru = row.slots  # Must not pass aliases to the RESTRICT helper.
     with pytest.raises(RuntimeError, match="overlap"):
         row.plan([0, 1, -1, -1])
+
+
+@pytest.mark.parametrize("capacity", [2048, 20480])
+def test_topk_2048_reuses_larger_resident_window(capacity):
+    row = Row()
+    row.slots = torch.full((capacity,), -1, dtype=torch.int32)
+    row.lru = torch.arange(capacity, dtype=torch.int32)
+    row.resident_pages = torch.full((2, capacity), -1, dtype=torch.int32)
+    row.mark = torch.zeros(32768, dtype=torch.int32)
+    row.pos = torch.full((32768,), -1, dtype=torch.int32)
+    row.meta = [7, 0, 0, 0, 32768, 0, 0, 128, 512, 32767, 0, capacity + 128]
+    pages = [list(range(1, 257))] * 2
+    for start in range(0, 20480, 2048):
+        physical, misses, _, table, _ = row.plan(list(range(start, start + 2048)), pages)
+        assert physical.shape == (2048,) and misses.numel() == 2048
+        assert table.numel() == capacity // 128 + 1
+        assert physical.min() >= 0 and physical.max() < capacity
+    assert row.plan(list(range(2048)), pages)[1].numel() == (2048 if capacity == 2048 else 0)
+    physical, misses, _, _, _ = row.plan([32767], pages)
+    assert physical.tolist() == [capacity + 127] and misses.numel() == 0

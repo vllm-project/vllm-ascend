@@ -111,7 +111,7 @@ class AscendModelState(DefaultModelState):
                 min(capacity, vllm_config.scheduler_config.max_num_batched_tokens)
             )
             self._selective_tail_rows = CpuGpuBuffer(
-                capacity, 2, dtype=torch.int64, device=device, pin_memory=is_pin_memory_available()
+                capacity * 3, dtype=torch.int64, device=device, pin_memory=is_pin_memory_available()
             )
         if sparse_cfg.enabled:
             pin_memory = is_pin_memory_available()
@@ -354,8 +354,11 @@ class AscendModelState(DefaultModelState):
             yield
 
     def add_request(self, req_index: int, new_req_data) -> None:
-        if (self._selective_native_experiment and self._selective_request_ids is not None
-                and self._selective_next_request_id >= 1 << 63):
+        if (
+            self._selective_native_experiment
+            and self._selective_request_ids is not None
+            and self._selective_next_request_id >= 1 << 63
+        ):
             raise OverflowError("Selective KV request instance IDs exhausted")
         super().add_request(req_index, new_req_data)
         if self._selective_native_experiment and self._selective_request_ids is not None:
@@ -519,8 +522,11 @@ class AscendModelState(DefaultModelState):
         if offload_req_ids is not None:
             assert offload_token_to_req is not None
             request_instance_ids = None
-            if (self._selective_native_experiment and self._selective_cache_ids is not None
-                    and not (input_batch.is_dummy or for_capture)):
+            if (
+                self._selective_native_experiment
+                and self._selective_cache_ids is not None
+                and not (input_batch.is_dummy or for_capture)
+            ):
                 request_instance_ids = [
                     self._selective_cache_ids[req_id] for req_id in input_batch.req_ids[:num_actual_reqs]
                 ]
@@ -534,19 +540,26 @@ class AscendModelState(DefaultModelState):
                 offload_req_ids,
                 offload_token_to_req,
                 request_instance_ids=request_instance_ids,
+                reuse=self._selective_native_experiment and not (input_batch.is_dummy or for_capture),
             )
         tail_rows = None
+        tail_slots = None
         tail_buffer = getattr(self, "_selective_tail_rows", None)
         if tail_buffer is not None and num_actual_tokens == num_actual_reqs:
             assert self._selective_tails is not None
-            tail_buffer.np[:num_reqs].fill(-1)
-            if not (input_batch.is_dummy or for_capture):
-                for row, req_id in enumerate(input_batch.req_ids[:num_actual_reqs]):
-                    tail_buffer.np[row] = self._selective_tails.tail_row(
-                        req_id, int(input_batch.num_computed_tokens_np[row]), self.vllm_config.cache_config.block_size
-                    )
-            tail_buffer.copy_to_gpu(num_reqs)
-            tail_rows = tail_buffer.gpu[:num_reqs]
+            manager = get_sparse_kv_offload_manager()
+            self._selective_tails.prepare_tail_inputs(
+                input_batch.req_ids[:num_actual_reqs],
+                input_batch.num_computed_tokens_np,
+                self.vllm_config.cache_config.block_size,
+                manager.topk_buffers_k[0].shape[1],
+                manager.topk_buffer_size,
+                tail_buffer.np[: 3 * num_reqs],
+                dummy=input_batch.is_dummy or for_capture,
+            )
+            tail_buffer.copy_to_gpu(3 * num_reqs)
+            tail_rows = tail_buffer.gpu[: 2 * num_reqs].view(num_reqs, 2)
+            tail_slots = tail_buffer.gpu[2 * num_reqs : 3 * num_reqs]
         pool_slots = getattr(self, "_offload_pool_slots", None)
         pool_active = getattr(self, "_offload_pool_active", None)
         request_states = getattr(self, "_offload_request_states", None)
@@ -626,6 +639,7 @@ class AscendModelState(DefaultModelState):
             model_specific_attn_metadata=model_specific_attn_metadata,
             req_ids_tensor=offload_req_ids.gpu[:num_reqs] if offload_req_ids is not None else None,
             selective_tail_rows=tail_rows,
+            selective_tail_slots=tail_slots,
             token_to_req=offload_token_to_req.gpu[:num_input_tokens] if offload_token_to_req is not None else None,
             offload_dummy=getattr(input_batch, "is_dummy", False),
             req_topk_buffer_slots=pool_slots.cpu[:num_reqs] if pool_slots is not None else None,

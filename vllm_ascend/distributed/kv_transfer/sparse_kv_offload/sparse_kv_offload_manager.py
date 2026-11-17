@@ -139,14 +139,34 @@ _SELECTIVE_NATIVE_TP_QUARANTINE = []
 
 
 class SelectiveNativeTPCoordinator:
-    """Pinned shared plan and single per-group K/V stage for the TP experiment."""
+    """Pinned shared plan and two alternating K/V stages for the TP experiment."""
 
-    def __init__(self, group, rank, world, rows, width, layers, block, k_bytes, v_bytes, layer_ids, shared_exchange=False):
-        plan_width = 3 * width + width // block + 2
+    def __init__(
+        self,
+        group,
+        rank,
+        world,
+        rows,
+        width,
+        layers,
+        block,
+        k_bytes,
+        v_bytes,
+        layer_ids,
+        shared_exchange=False,
+        capacity=None,
+    ):
+        plan_width = 3 * width + (width if capacity is None else capacity) // block + 2
+        banks = min(layers, 2)
         sizes = [
-            (28 + 2 * world) * 8, rows * plan_width * 4, rows * 12 * 8,
-            rows * width * 4, layers * rows * width * 4, (layers + 1) * 8,
-            rows * width * k_bytes, rows * width * v_bytes,
+            (32 + 2 * world) * 8,
+            rows * plan_width * 4,
+            rows * 12 * 8,
+            rows * width * 4,
+            layers * rows * width * 4,
+            (layers + 1) * 8,
+            banks * rows * width * k_bytes,
+            banks * rows * width * v_bytes,
         ]
         if shared_exchange:
             sizes.append((1 + 3 * world) * 8 + world * ((1 << 20) + 8))
@@ -166,8 +186,10 @@ class SelectiveNativeTPCoordinator:
             except Exception as error:
                 create_error = str(error)
         try:
-            creation = group.broadcast_object((self.mapping.name, None) if self.mapping is not None else
-                                              (None, create_error) if rank == 0 else None, src=0)
+            creation = group.broadcast_object(
+                (self.mapping.name, None) if self.mapping is not None else (None, create_error) if rank == 0 else None,
+                src=0,
+            )
         except BaseException:
             if self.mapping is not None:
                 _SELECTIVE_NATIVE_TP_QUARANTINE.append(self)
@@ -190,15 +212,19 @@ class SelectiveNativeTPCoordinator:
             def view(index, dtype, shape):
                 return self.owner[offsets[index] : offsets[index] + sizes[index]].view(dtype).view(shape)
 
-            self.stage_k = view(6, torch.uint8, (rows, width, k_bytes))
-            self.stage_v = view(7, torch.uint8, (rows, width, v_bytes))
+            self.stage_k = view(6, torch.uint8, (banks, rows, width, k_bytes))
+            self.stage_v = view(7, torch.uint8, (banks, rows, width, v_bytes))
             self.exchange = view(8, torch.uint8, (sizes[8],)) if shared_exchange else None
-            self.buffers = [view(0, torch.int64, (28 + 2 * world,)),
-                            view(1, torch.int32, (rows, plan_width)),
-                            view(2, torch.int64, (rows, 12)),
-                            view(3, torch.int32, (rows, width)),
-                            view(4, torch.int32, (layers, rows, width)), self.owner,
-                            torch.tensor(layer_ids, dtype=torch.int64), view(5, torch.int64, (layers + 1,))]
+            self.buffers = [
+                view(0, torch.int64, (32 + 2 * world,)),
+                view(1, torch.int32, (rows, plan_width)),
+                view(2, torch.int64, (rows, 12)),
+                view(3, torch.int32, (rows, width)),
+                view(4, torch.int32, (layers, rows, width)),
+                self.owner,
+                torch.tensor(layer_ids, dtype=torch.int64),
+                view(5, torch.int64, (layers + 1,)),
+            ]
         except Exception as error:
             local_error = str(error)
         errors = [None] * world
@@ -758,28 +784,37 @@ def update_sparse_kv_offload_metadata(
     offload_req_ids_tensor: CpuGpuBuffer,
     offload_token_to_req: CpuGpuBuffer,
     request_instance_ids: list[int] | None = None,
+    reuse: bool = False,
 ) -> None:
     """Populate per-request identity tensors for the Sparse KV offload LRU.
 
     Callers may supply unique request instance IDs; otherwise use the legacy
     scheduler ID hash. Rows are reset when the occupying request changes.
     """
-    offload_req_ids_tensor.np[:num_reqs_padded].fill(0)
     effective_num_reqs = min(num_reqs, len(req_ids))
     if request_instance_ids is not None:
         if len(request_instance_ids) != effective_num_reqs or any(uid <= 0 for uid in request_instance_ids):
             raise ValueError("Request instance IDs must contain one positive ID per active request")
-        req_id_values = np.asarray(request_instance_ids, dtype=np.int64)
-    else:
-        req_id_values = np.asarray(
-            [
-                adler32(req_id.encode("utf-8")) if isinstance(req_id, str) else row + 1
-                for row, req_id in enumerate(req_ids[:effective_num_reqs])
-            ],
-            dtype=np.int64,
-        )
-    offload_req_ids_tensor.np[:effective_num_reqs] = req_id_values
-    offload_req_ids_tensor.copy_to_gpu(num_reqs_padded)
+    identity_key = (
+        tuple(request_instance_ids) if request_instance_ids is not None else tuple(req_ids[:effective_num_reqs]),
+        num_reqs,
+        num_reqs_padded,
+    )
+    if not reuse or getattr(offload_req_ids_tensor, "_sparse_identity_key", None) != identity_key:
+        if request_instance_ids is not None:
+            req_id_values = np.asarray(request_instance_ids, dtype=np.int64)
+        else:
+            req_id_values = np.asarray(
+                [
+                    adler32(req_id.encode("utf-8")) if isinstance(req_id, str) else row + 1
+                    for row, req_id in enumerate(req_ids[:effective_num_reqs])
+                ],
+                dtype=np.int64,
+            )
+        offload_req_ids_tensor.np[:num_reqs_padded].fill(0)
+        offload_req_ids_tensor.np[:effective_num_reqs] = req_id_values
+        offload_req_ids_tensor.copy_to_gpu(num_reqs_padded)
+    offload_req_ids_tensor._sparse_identity_key = identity_key if reuse else None
 
     if isinstance(query_start_loc, CpuGpuBuffer):
         query_start_loc_cpu = query_start_loc.cpu[: num_reqs + 1].numpy()
@@ -789,6 +824,9 @@ def update_sparse_kv_offload_metadata(
         query_start_loc_cpu = query_start_loc[: num_reqs + 1].numpy()
     else:
         query_start_loc_cpu = query_start_loc[: num_reqs + 1]
+    mapping_key = (tuple(query_start_loc_cpu), num_tokens, num_tokens_padded, num_reqs)
+    if reuse and getattr(offload_token_to_req, "_sparse_mapping_key", None) == mapping_key:
+        return
     query_lens = np.diff(query_start_loc_cpu).astype(np.int32, copy=False)
     token_to_req = np.repeat(np.arange(num_reqs, dtype=np.int32), query_lens)
     if token_to_req.shape[0] < num_tokens:
@@ -800,6 +838,7 @@ def update_sparse_kv_offload_metadata(
     if num_tokens_padded > num_tokens:
         offload_token_to_req.np[num_tokens:num_tokens_padded].fill(0)
     offload_token_to_req.copy_to_gpu(num_tokens_padded)
+    offload_token_to_req._sparse_mapping_key = mapping_key if reuse else None
 
 
 def prepare_sparse_kv_offload_mtp_dummy_metadata(
@@ -1146,8 +1185,8 @@ class SparseKVOffloadManager:
         self.token_size_bytes_k = kv_head_num * head_dim_k * dtype.itemsize
         self.token_size_bytes_v = kv_head_num * head_dim_v * dtype.itemsize
         if selective:
-            device = self.topk_buffers_k[0].device
             rows = self.topk_buffers_k[0].shape[0]
+            device = self.topk_buffers_k[0].device
             self.selective_lim_capture_buffers: list = []
             # MemFabric queues raw descriptor pointers, so keep their storage alive across replay.
             descriptor_shape = (self.num_layers, 2 * rows * self.topk)
@@ -1575,6 +1614,11 @@ class SparseKVOffloadManager:
                 return
             if getattr(self, "_selective_native_started", False):
                 raise RuntimeError("Native selective experiment cannot mix eager and captured hot-buffer paths")
+            # Before graph workers start, only capture warmup may execute eagerly.
+            rows = topk_indices.numel() // self.topk
+            for layer_id, _, _ in layers:
+                self.selective_physical[layer_id, :rows].fill_(-1)
+            return
         topk = topk_indices.reshape(-1, self.topk).to(torch.int64).contiguous()
         rows, width = topk.shape
         if not 0 < width <= self.topk_buffer_size <= 2048:
@@ -1641,15 +1685,13 @@ class SparseKVOffloadManager:
         model_state = getattr(self, "_selective_model_state", None)
         local_error = None
         try:
-            if self.topk != self.topk_buffer_size or self.use_fused_copy_sfa:
-                raise RuntimeError("Native selective KV requires TopK=hot capacity")
+            if not 0 < self.topk <= self.topk_buffer_size or self.use_fused_copy_sfa:
+                raise RuntimeError("Native selective KV requires 0 < TopK <= hot capacity")
             if self.max_model_len >= 1 << 31:
                 raise RuntimeError("Native selective KV requires int32 token indices")
             if model_state is not None and (model_state._selective_request_ids or model_state._offload_live_req_ids):
                 raise RuntimeError("Native selective experiment must be enabled before admitting requests")
             max_rows = self.topk_buffers_k[0].shape[0]
-            device = self.topk_buffers_k[0].device
-            self._selective_native_rows = torch.arange(max_rows, dtype=torch.int64, device=device)
         except Exception as error:
             local_error = str(error)
         if self.tp_size > 1:
@@ -1675,16 +1717,20 @@ class SparseKVOffloadManager:
                 signature_error = None
                 groups, signature = [], ()
                 try:
-                    groups = [(leader, tuple(names)) for leader, names in sorted(self.selective_followers.items())
-                              if names]
-                    signature = tuple((leader, tuple((extract_layer_index(name), name) for name in names))
-                                      for leader, names in groups)
+                    groups = [
+                        (leader, tuple(names)) for leader, names in sorted(self.selective_followers.items()) if names
+                    ]
+                    signature = tuple(
+                        (leader, tuple((extract_layer_index(name), name) for name in names)) for leader, names in groups
+                    )
                 except Exception as error:
                     signature_error = str(error)
                 use_shared_exchange = getattr(self, "_selective_native_shared_exchange_requested", False)
                 signature = (signature, use_shared_exchange)
                 gathered = [None] * self.tp_size
-                torch.distributed.all_gather_object(gathered, (signature_error, signature), group=self.tp_group.cpu_group)
+                torch.distributed.all_gather_object(
+                    gathered, (signature_error, signature), group=self.tp_group.cpu_group
+                )
                 if any(value[0] is not None or value[1] != signature for value in gathered):
                     raise RuntimeError("Native selective TP group definitions differ across ranks")
                 for leader, names in groups:
@@ -1693,13 +1739,25 @@ class SparseKVOffloadManager:
                         continue
                     stable_ids = [leader, *(extract_layer_index(name) for name in names)]
                     coordinator = SelectiveNativeTPCoordinator(
-                        self.tp_group, self.tp_rank, self.tp_size, max_rows, self.topk, len(layer_ids),
-                        self.block_size, self.token_size_bytes_k, self.token_size_bytes_v, stable_ids,
+                        self.tp_group,
+                        self.tp_rank,
+                        self.tp_size,
+                        max_rows,
+                        self.topk,
+                        len(layer_ids),
+                        self.block_size,
+                        self.token_size_bytes_k,
+                        self.token_size_bytes_v,
+                        stable_ids,
                         shared_exchange=use_shared_exchange and not self._selective_native_tp_groups,
+                        capacity=self.topk_buffer_size,
                     )
                     self._selective_native_tp_groups[layer_ids] = coordinator
-                    logger.info("Native selective TP group %s shared pinned region: %.2f MiB",
-                                layer_ids, coordinator.total_bytes / (1 << 20))
+                    logger.info(
+                        "Native selective TP group %s shared pinned region: %.2f MiB",
+                        layer_ids,
+                        coordinator.total_bytes / (1 << 20),
+                    )
                 if use_shared_exchange and not self._selective_native_tp_groups:
                     raise RuntimeError("Native selective TP shared exchange requires a nonempty group")
                 self._selective_tp_exchange_epoch = 0
@@ -1733,9 +1791,9 @@ class SparseKVOffloadManager:
         state = self._selective_native_groups.get(layer_ids)
         if state is None:
             state = [
-                torch.full((max_rows, width), -1, dtype=torch.int32),
-                torch.arange(width, dtype=torch.int32).repeat(max_rows, 1),
-                torch.full((max_rows, len(layer_ids), width), -1, dtype=torch.int32),
+                torch.full((max_rows, self.topk_buffer_size), -1, dtype=torch.int32),
+                torch.arange(self.topk_buffer_size, dtype=torch.int32).repeat(max_rows, 1),
+                torch.full((max_rows, len(layer_ids), self.topk_buffer_size), -1, dtype=torch.int32),
                 torch.full((max_rows, 9), -1, dtype=torch.int64),
                 torch.zeros((max_rows, self.max_model_len), dtype=torch.int32),
                 torch.full((max_rows, self.max_model_len), -1, dtype=torch.int32),
@@ -1744,31 +1802,33 @@ class SparseKVOffloadManager:
             ]
             self._selective_native_groups[layer_ids] = state
             state_bytes = sum(tensor.numel() * tensor.element_size() for tensor in state)
-            logger.info("Native selective experimental group %s CPU state: %.2f MiB", layer_ids, state_bytes / (1 << 20))
+            logger.info(
+                "Native selective experimental group %s CPU state: %.2f MiB", layer_ids, state_bytes / (1 << 20)
+            )
 
         def pair(shape, dtype):
             return torch.empty(shape, dtype=dtype, device=device), torch.empty(shape, dtype=dtype, pin_memory=True)
 
-        topk_d, topk_h = pair((rows, width), torch.int32)
-        topk_d.copy_(torch.where((topk >= 0) & (topk < self.max_model_len), topk, -1).to(torch.int32))
+        topk_d = topk.contiguous()
+        topk_h = torch.empty(topk_d.shape, dtype=topk_d.dtype, pin_memory=True)
         meta_d, meta_h = pair((rows, 12), torch.int64)
         metadata = layers[0][1]
         seq_lengths = layers[0][2][:rows]
         if metadata.req_ids_tensor is None or metadata.selective_tail_rows is None:
             raise RuntimeError("Native selective capture requires request and tail metadata")
-        meta_d.zero_()
-        meta_d[:, 0].copy_(metadata.req_ids_tensor[:rows])
-        meta_d[:, 4].copy_(seq_lengths)
-        meta_d[:, 5:7].copy_(metadata.selective_tail_rows[:rows])
-        meta_d[:, 7].fill_(self.block_size)
+        # Constants stay on Host; the worker packs replay inputs after their D2H completes.
+        meta_h.zero_()
+        meta_h[:, 7].fill_(self.block_size)
         host_blocks = self.kv_cache_config.num_blocks
-        meta_d[:, 8].fill_(host_blocks)
-        meta_d[:, 9].copy_((seq_lengths - 1).clamp_min(0))
-        meta_d[:, 10].copy_(self._selective_native_rows[:rows])
-        meta_d[:, 11].fill_(self.selective_row_stride)
+        meta_h[:, 8].fill_(host_blocks)
+        meta_h[:, 11].fill_(self.selective_row_stride)
+        inputs = []
+        for value in (metadata.req_ids_tensor[:rows], seq_lengths, metadata.selective_tail_rows[:rows]):
+            value = value.contiguous()
+            inputs.extend((value, torch.empty(value.shape, dtype=value.dtype, pin_memory=True)))
         physical_d, physical_h = pair((rows, width), torch.int32)
-        block_d, block_h = pair((rows, width // self.block_size + 1), torch.int32)
-        shared = [topk_d, topk_h, meta_d, meta_h, physical_d, physical_h, block_d, block_h, *state]
+        block_d, block_h = pair((rows, self.topk_buffer_size // self.block_size + 1), torch.int32)
+        shared = [topk_d, topk_h, meta_d, meta_h, physical_d, physical_h, block_d, block_h, *state, *inputs]
         layer_buffers = []
         scatter = []
         coordinator = self._selective_native_tp_groups.get(layer_ids) if self.tp_size > 1 else None
@@ -1791,27 +1851,54 @@ class SparseKVOffloadManager:
             else:
                 stage_k_d = torch.empty((rows, width, self.token_size_bytes_k), dtype=torch.uint8, device=device)
                 stage_v_d = torch.empty((rows, width, self.token_size_bytes_v), dtype=torch.uint8, device=device)
-                stage_k_h, stage_v_h = coordinator.stage_k[:rows], coordinator.stage_v[:rows]
+                bank = len(scatter) % 2
+                stage_k_h, stage_v_h = coordinator.stage_k[bank, :rows], coordinator.stage_v[bank, :rows]
             dest_d, dest_h = pair((2, rows, width), torch.int64)
             length_d, length_h = pair((2, rows, width), torch.int32)
-            layer_buffers.extend([
-                pages_d, pages_h, host_k, host_v, hot_k, hot_v, stage_k_h, stage_v_h,
-                stage_k_d, stage_v_d, dest_h, dest_d, length_h, length_d,
-            ])
+            layer_buffers.extend(
+                [
+                    pages_d,
+                    pages_h,
+                    host_k,
+                    host_v,
+                    hot_k,
+                    hot_v,
+                    stage_k_h,
+                    stage_v_h,
+                    stage_k_d,
+                    stage_v_d,
+                    dest_h,
+                    dest_d,
+                    length_h,
+                    length_d,
+                ]
+            )
             scatter.append(layer_id)
-        pinned = [topk_h, meta_h, physical_h, block_h]
+        if not hasattr(self, "_b7_probe_buffers"):
+            self._b7_probe_buffers = {}
+        self._b7_probe_buffers.setdefault(rows, {})[layer_ids] = (
+            physical_h,
+            [layer_buffers[i + 12] for i in range(0, len(layer_buffers), 14)],
+        )
+        pinned = [topk_h, meta_h, physical_h, block_h, *inputs[1::2]]
         for offset in range(0, len(layer_buffers), 14):
             indices = (1, 6, 7, 10, 12) if coordinator is None else (1, 10, 12)
             pinned.extend(layer_buffers[offset + index] for index in indices)
         pinned_bytes = sum(tensor.numel() * tensor.element_size() for tensor in pinned)
-        logger.info("Native selective experimental group %s per-graph pinned buffers: %.2f MiB",
-                    layer_ids, pinned_bytes / (1 << 20))
+        logger.info(
+            "Native selective experimental group %s per-graph pinned buffers: %.2f MiB",
+            layer_ids,
+            pinned_bytes / (1 << 20),
+        )
         device_buffers = [topk_d, meta_d, physical_d, block_d]
         for offset in range(0, len(layer_buffers), 14):
             device_buffers.extend(layer_buffers[offset + index] for index in (8, 9, 11, 13))
         device_bytes = sum(tensor.numel() * tensor.element_size() for tensor in device_buffers)
-        logger.info("Native selective experimental group %s per-graph named NPU buffers: %.2f MiB",
-                    layer_ids, device_bytes / (1 << 20))
+        logger.info(
+            "Native selective experimental group %s per-graph named NPU buffers: %.2f MiB",
+            layer_ids,
+            device_bytes / (1 << 20),
+        )
         if coordinator is None:
             handle = ops.selective_group_native_create(shared, layer_buffers, len(layer_ids))
         else:
@@ -1820,15 +1907,19 @@ class SparseKVOffloadManager:
             )
         record = self._selective_native_graphs.setdefault(graph, [])
         record.append(handle)
-        key = (tuple(int(value) for value in coordinator.buffers[6].tolist()) if coordinator is not None else
-               tuple(extract_layer_index(self.offload_layer_names[layer_id]) for layer_id in layer_ids))
+        key = (
+            tuple(int(value) for value in coordinator.buffers[6].tolist())
+            if coordinator is not None
+            else tuple(extract_layer_index(self.offload_layer_names[layer_id]) for layer_id in layer_ids)
+        )
         self._selective_native_graph_keys.setdefault(graph, []).append(key)
         anchor = self.topk_buffers_k[layer_ids[0]]
-        ops.selective_native_capture(handle, anchor)
+        ops.selective_native_capture(handle, anchor, True)
         graph_identity = ops.selective_native_graph_identity(handle)
         if len(record) > 1 and ops.selective_native_graph_identity(record[0]) != graph_identity:
             raise RuntimeError("Native selective handles do not belong to the same captured graph")
         for index, layer_id in enumerate(scatter):
+            ops.selective_native_wait_layer(handle, index, anchor)
             entry = layer_buffers[index * 14 : (index + 1) * 14]
             # Reinterpret bytes so the cache-store kernel preserves every KV dtype.
             for part, (hot, stage) in enumerate(zip(entry[4:6], entry[8:10])):
@@ -1853,8 +1944,15 @@ class SparseKVOffloadManager:
 
     @staticmethod
     def _selective_native_descriptor_key(desc):
-        fields = ("cg_mode", "num_tokens", "num_reqs", "uniform_token_count", "max_query_len",
-                  "num_active_loras", "num_ubatches")
+        fields = (
+            "cg_mode",
+            "num_tokens",
+            "num_reqs",
+            "uniform_token_count",
+            "max_query_len",
+            "num_active_loras",
+            "num_ubatches",
+        )
         return tuple(str(getattr(desc, field, None)) for field in fields)
 
     def _selective_native_exchange_storage(self):
@@ -1924,9 +2022,7 @@ class SparseKVOffloadManager:
         if self.tp_size > 1:
             try:
                 if phase == "connector preemption":
-                    gathered = self.selective_native_all_gather(
-                        str(error) if error is not None else None, phase
-                    )
+                    gathered = self.selective_native_all_gather(str(error) if error is not None else None, phase)
                 else:
                     gathered = [None] * self.tp_size
                     torch.distributed.all_gather_object(
@@ -2023,9 +2119,11 @@ class SparseKVOffloadManager:
 
     def stop_selective_native_graphs(self) -> None:
         self._selective_native_stopping = True
-        error = "Native selective graph failure requires rank quarantine" if (
-            self._selective_native_failed or self._selective_native_inflight
-        ) else None
+        error = (
+            "Native selective graph failure requires rank quarantine"
+            if (self._selective_native_failed or self._selective_native_inflight)
+            else None
+        )
         if self.tp_size > 1:
             gathered = [None] * self.tp_size
             try:
@@ -2123,7 +2221,7 @@ class SparseKVOffloadManager:
             keys.fill_(-1)
             request.fill_(-1)
 
-    def write_selective_tail(self, layer_name, slots, tail_rows, k, v):
+    def write_selective_tail(self, layer_name, slots, tail_rows, k, v, device_slots=None):
         layer_id = self._get_offload_layer_id(layer_name)
         k_cache, v_cache = self.topk_buffers_k[layer_id], self.topk_buffers_v[layer_id]
         rows = slots.numel()
@@ -2137,8 +2235,9 @@ class SparseKVOffloadManager:
             tail_base = tail_slot.clamp_min(0) * self.selective_row_stride + self.topk_buffer_size
             return valid, safe_slots, offset, tail_base, first
 
-        valid, _, offset, tail_base, _ = tail_positions()
-        device_slots = torch.where(valid, tail_base + offset, -1)
+        if device_slots is None:
+            valid, _, offset, tail_base, _ = tail_positions()
+            device_slots = torch.where(valid, tail_base + offset, -1)
         torch_npu.npu_scatter_pa_kv_cache(
             key=k.reshape(rows, 1, k_cache.shape[-1]).contiguous(),
             value=v.reshape(rows, 1, v_cache.shape[-1]).contiguous(),
