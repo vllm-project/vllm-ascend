@@ -1,5 +1,5 @@
 pr: 19430
 entries:
   - category: bugfix
-    text: Fixed Qwen3.8-Flash-Next startup with a DFlash2 draft so the engine no longer rejects this configuration before model loading.
+    text: Fixed Qwen3.8-Flash-Next initialization with DFlash2 by allowing this draft configuration and providing its required target auxiliary hidden states.
     model: qwen3-dflash
