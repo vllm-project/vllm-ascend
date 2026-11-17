@@ -16,7 +16,7 @@
 #
 """NPU Triton kernel overrides registered with the vLLM kernel dispatcher.
 
-This table replaces the retired ``patch/worker/patch_v2/patch_triton.py``
+This table replaces the retired ``patch/worker/patch_triton.py``
 monkey-patch file. Each entry maps one upstream Triton kernel to its Ascend
 implementation; ``register_triton_kernels()`` hands the whole table to
 ``vllm.triton_utils.dispatcher.register_kernels``, which swaps the defining
@@ -29,18 +29,20 @@ Three rules when editing the table:
   matches the original object; a key pointing at a copy silently defeats it.
 - Values only need their parameter *order* to match the original kernel;
   parameter names may differ (the dispatcher reorders launch kwargs).
-- Values must be plain callables. ``KernelOverride`` drops the caller's
-  grid and invokes the value as a plain function, so a raw ``@triton.jit``
-  kernel cannot be a value; kernel entries point at launch adapters that
-  derive the grid and launch it (see ``ops/triton/v2/``).
-  TODO: the dropped grid is an upstream dispatcher bug that will be
-  fixed; once the caller's grid reaches the impl, remove the launch
-  adapters and register the raw kernels directly.
+- Values are either plain callables or raw ``@triton.jit`` kernels. The
+  dispatcher swaps a raw kernel in directly -- never wrapping it -- so it
+  launches natively with the caller's grid and must mirror the original
+  kernel's parameter names or order; this is also the only shape that
+  works for Triton *device functions*, which are inlined into other
+  kernels at compile time. A plain callable is wrapped in
+  ``KernelOverride`` and invoked as a plain function: launch arguments
+  are forwarded, but the caller's grid reaches the impl only when it
+  reimplements ``__getitem__`` -- so impls that relaunch with a different
+  grid are written as launch adapters (see the ``ops/triton/`` modules).
 """
 
 from __future__ import annotations
 
-import importlib
 from collections.abc import Callable
 from typing import Any
 
@@ -113,6 +115,16 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
     "vllm.v1.worker.gpu.sample.thinking_budget._update_committed_marker_cache_kernel": (  # noqa: E501
         update_committed_marker_cache_npu
     ),
+    # A Triton *device function* (inlined into other kernels at compile
+    # time), so the value must itself be a Triton kernel: the dispatcher
+    # swaps such values in directly and never wraps them, and the impl
+    # mirrors the original's parameter names and order. The Ascend
+    # rewrite replaces the upstream branch-local return with a masked
+    # tl.load.
+    # TODO: Remove after the new Q4 Triton-Ascend release is available.
+    "vllm.v1.worker.gpu.sample.thinking_budget._load_effective_token": (  # noqa: E501
+        _load_effective_token_ascend
+    ),
     # Class mount. KernelOverride is not a descriptor, so no implicit `cls`
     # is passed at call time; sampling_mask_from_logits_npu therefore keeps
     # a cls-free signature (the retired patch wrapped it in classmethod()).
@@ -160,52 +172,13 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
 }
 
 
-# Triton *device functions* cannot go through the dispatcher: they are
-# inlined at kernel-compile time (the callee is resolved from the
-# defining module's globals), and the dispatcher's KernelOverride is not
-# a JITFunction -- compiling a kernel that calls the swapped symbol
-# would fail with "not a Triton function". These swaps keep the retired
-# patch file's plain-attribute semantics; only the defining module is
-# patched, which is exactly where the inliner looks.
-# TODO: this is an upstream dispatcher bug that will be fixed -- device
-# functions will become registerable; once they are, move these entries
-# into the override table and delete the manual swap.
-_DEVICE_FUNCTION_SWAPS: dict[str, Callable[..., Any]] = {
-    # TODO: Remove after the new Q4 Triton-Ascend release is available.
-    "vllm.v1.worker.gpu.sample.thinking_budget._load_effective_token": _load_effective_token_ascend,
-}
-
-
-# One-way latches: vLLM invokes the platform hook from every
+# One-way latch: vLLM invokes the platform hook from every
 # WorkerWrapperBase.init_worker, one process may create several workers
 # (in-process TP), and the e2e conftest registers directly before the
 # in-process engine starts -- so both entry points must stay idempotent.
 # Re-registering would double-wrap kernels, re-run the identity sweep on
 # a possibly polluted module set, and corrupt the serve smoke signals.
 _kernels_registered = False
-_device_functions_swapped = False
-
-
-def swap_device_functions() -> None:
-    """Swap Triton device functions the dispatcher cannot wrap.
-
-    Device functions are ``@triton.jit`` helpers called from inside other
-    kernels' bodies and inlined at kernel-compile time; there is no host
-    launch for the dispatcher to intercept, and a ``KernelOverride`` is
-    not a ``JITFunction``, so a wrapped name would break the outer
-    kernel's compilation. The raw attribute swap below keeps the retired
-    patch's semantics: only the defining module is patched, which is
-    where the inliner resolves the callee.
-    """
-    global _device_functions_swapped
-    if _device_functions_swapped:
-        return
-    for dotted, impl in _DEVICE_FUNCTION_SWAPS.items():
-        module_name, attr = dotted.rsplit(".", 1)
-        setattr(importlib.import_module(module_name), attr, impl)
-        logger.debug("Swapped device function %s", dotted)
-    _device_functions_swapped = True
-    logger.info("Swapped %d NPU Triton device functions", len(_DEVICE_FUNCTION_SWAPS))
 
 
 def register_triton_kernels() -> None:

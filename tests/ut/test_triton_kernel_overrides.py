@@ -26,26 +26,18 @@ from typing import Any
 import pytest
 
 from vllm_ascend.triton_kernel_overrides import (
-    _DEVICE_FUNCTION_SWAPS,
     TRITON_KERNEL_OVERRIDES,
     register_triton_kernels,
 )
 
-# The retired patch_v2/patch_triton.py carried 27 assignments; the
-# dispatcher's identity sweep collapses the fan-out into 17 registrations
-# plus one device-function swap (device functions are inlined by the
-# Triton compiler and cannot be wrapped -- see _DEVICE_FUNCTION_SWAPS).
-# The five flash_linear_attention entries absorb the FLA and KDA swaps
-# that the retired patch gained from upstream syncs.
-EXPECTED_OVERRIDE_COUNT = 22
-
-# Device functions (helpers called inside a @triton.jit kernel body) are
-# inlined by the Triton compiler, which resolves the callee from the
-# defining module's globals and rejects the dispatcher's KernelOverride
-# wrapper -- so they cannot go through register_kernels and stay manual.
-# Dropping or adding an entry must be a conscious, audited change -- hence
-# a named lock, same as EXPECTED_OVERRIDE_COUNT.
-EXPECTED_DEVICE_FUNCTION_SWAP_COUNT = 1
+# The retired patch/worker/patch_triton.py carried 34 assignments; two
+# were dead code, and the dispatcher's identity sweep collapsed the
+# rest into 23 registrations. The five flash_linear_attention entries
+# absorb the FLA and KDA swaps that the retired patch gained from
+# upstream syncs, and the thinking_budget entry absorbs the
+# device-function swap that used to be a manual lane (device functions
+# register as raw kernels -- swapped in directly, never wrapped).
+EXPECTED_OVERRIDE_COUNT = 23
 
 
 def _resolve(key: str):
@@ -90,26 +82,6 @@ def test_impl_is_callable(key):
 
 def test_table_covers_the_retired_patch():
     assert len(TRITON_KERNEL_OVERRIDES) == EXPECTED_OVERRIDE_COUNT
-
-
-def test_device_function_swaps_cover_the_retired_patch():
-    assert len(_DEVICE_FUNCTION_SWAPS) == EXPECTED_DEVICE_FUNCTION_SWAP_COUNT
-
-
-@pytest.mark.parametrize("key", sorted(_DEVICE_FUNCTION_SWAPS))
-def test_device_function_swap_targets_the_definition_module(key):
-    """Same rule as test_key_targets_the_definition_module, applied to the
-    manual swap table: the swap must land in the defining module, because
-    the Triton inliner resolves device-function callees from the defining
-    module's globals."""
-    host, attr, defining_module = _resolve(key)
-    original = getattr(host, attr)
-    # Unwrap classmethod/bound-method shells so __module__ is comparable.
-    func = getattr(original, "__func__", original)
-    assert func.__module__ == defining_module, (
-        f"{key!r} targets a copy site; the function is defined in "
-        f"{func.__module__!r}. Point the key at the defining module."
-    )
 
 
 def test_register_triton_kernels_hands_over_the_whole_table(monkeypatch):

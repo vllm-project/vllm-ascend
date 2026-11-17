@@ -3,7 +3,7 @@
 """DSpark sampling dispatch through the NPU gumbel_sample binding.
 
 The gumbel_sample fan-out used to be installed (and unit-tested) by the
-retired patch_v2/patch_triton.py; it is now registered through the
+retired patch/worker/patch_triton.py; it is now registered through the
 official kernel dispatcher, whose table is covered by
 tests/ut/test_triton_kernel_overrides.py.
 """
