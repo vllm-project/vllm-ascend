@@ -99,7 +99,7 @@ def _reset_local_cache(url):
 
 
 @pytest.mark.parametrize(("prompt_length", "concurrency"), [(257, 1), (8192, 2), (16384, 1)])
-def test_c8_external_replay_matches_local_prefix(serving_instance, tmp_path, prompt_length, concurrency):
+def test_c8_external_replay_matches_warm_prefix(serving_instance, tmp_path, prompt_length, concurrency):
     url, model, backend = serving_instance
     rng = random.Random(prompt_length)
     workloads = [
@@ -115,11 +115,15 @@ def test_c8_external_replay_matches_local_prefix(serving_instance, tmp_path, pro
             return choices, {key: after[key] - before[key] for key in before}
 
         # Populate the local prefix and external pool. Its output is not the
-        # reference: this test isolates external restore from local prefix reuse.
-        run_arm()
-        local, local_counts = run_arm()
-        assert local_counts[_COUNTERS[0]] > 0
-        assert local_counts[_COUNTERS[1]] == local_counts[_COUNTERS[2]] == 0
+        # reference: this test isolates external restore from warm prefix reuse.
+        _, seed_counts = run_arm()
+        assert seed_counts[_COUNTERS[0]] == seed_counts[_COUNTERS[1]] == seed_counts[_COUNTERS[2]] == 0
+        warm, warm_counts = run_arm()
+        assert warm_counts[_COUNTERS[0]] > 0
+        if prompt_length >= 8192:
+            assert warm_counts[_COUNTERS[1]] == warm_counts[_COUNTERS[2]] == 0
+        # A two-block prompt may keep only part of its prefix locally.
+        # Keep that mixed local/external reference visible in the evidence.
         _reset_local_cache(url)
         external, external_counts = run_arm()
 
@@ -127,16 +131,17 @@ def test_c8_external_replay_matches_local_prefix(serving_instance, tmp_path, pro
         "backend": backend,
         "prompt_length": prompt_length,
         "concurrency": concurrency,
-        "local_counts": local_counts,
+        "seed_counts": seed_counts,
+        "warm_counts": warm_counts,
         "external_counts": external_counts,
-        "local": local,
+        "warm": warm,
         "external": external,
     }
     (tmp_path / "replay.json").write_text(json.dumps(evidence), encoding="utf-8")
     assert external_counts[_COUNTERS[0]] == 0
     assert external_counts[_COUNTERS[1]] > 0 and external_counts[_COUNTERS[2]] > 0
-    assert local_counts[_COUNTERS[3]] > 1 and external_counts[_COUNTERS[3]] > 1
-    for expected, actual in zip(local, external, strict=True):
+    assert warm_counts[_COUNTERS[3]] > 1 and external_counts[_COUNTERS[3]] > 1
+    for expected, actual in zip(warm, external, strict=True):
         assert actual["token_ids"] == expected["token_ids"]
         for field in ("token_logprobs", "top_logprobs"):
             assert actual["logprobs"][field] == expected["logprobs"][field]
@@ -144,7 +149,7 @@ def test_c8_external_replay_matches_local_prefix(serving_instance, tmp_path, pro
         json.dumps(
             {
                 key: evidence[key]
-                for key in ("backend", "prompt_length", "concurrency", "local_counts", "external_counts")
+                for key in ("backend", "prompt_length", "concurrency", "warm_counts", "external_counts")
             }
         )
     )
