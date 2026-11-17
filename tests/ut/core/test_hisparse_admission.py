@@ -326,13 +326,20 @@ def test_failed_resident_import_releases_reservation_and_can_retry_with_another_
             )
             is not None
         )
-    assert coordinator.reserved_import_pages > 0
+    assert set(coordinator._pending_imports) == {request.request_id for request in requests}
+    # Older Core releases keep the import ledger without a reservation counter.
+    reserved_pages = getattr(coordinator, "reserved_import_pages", None)
+    if reserved_pages is not None:
+        assert reserved_pages > 0
     first, second = requests
     coordinator.finish_host_import(first.request_id, failed=True)
     manager.free(first)
     assert first.request_id not in host.req_to_blocks
     assert first.request_id not in resident.req_to_blocks
-    assert coordinator.reserved_import_pages > 0
+    assert set(coordinator._pending_imports) == {second.request_id}
+    reserved_pages = getattr(coordinator, "reserved_import_pages", None)
+    if reserved_pages is not None:
+        assert reserved_pages > 0
     assert second.request_id in host.req_to_blocks
 
     for computed in (0, block):
@@ -348,7 +355,10 @@ def test_failed_resident_import_releases_reservation_and_can_retry_with_another_
         assert request.request_id not in coordinator.request_states
         assert request.request_id not in host.req_to_blocks
         assert request.request_id not in resident.req_to_blocks
-    assert coordinator.reserved_import_pages == 0
+    assert not coordinator._pending_imports
+    reserved_pages = getattr(coordinator, "reserved_import_pages", None)
+    if reserved_pages is not None:
+        assert reserved_pages == 0
     assert host.block_pool.get_num_free_blocks() == host_free
     assert manager.block_pool.get_num_free_blocks() == device_free
 
