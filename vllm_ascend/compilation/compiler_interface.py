@@ -104,6 +104,7 @@ def _compute_decode_cudagraph_batch_sizes(vllm_config: VllmConfig) -> list[int]:
 
     return sorted(capture_sizes)
 
+
 def _initialize_static_kernel_runtime(vllm_config: VllmConfig) -> None:
     if "LOCAL_WORLD_SIZE" not in os.environ:
         # External DP config counts one replica; runtime topology includes all local ranks.
