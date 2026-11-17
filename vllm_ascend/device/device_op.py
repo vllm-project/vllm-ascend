@@ -1021,20 +1021,10 @@ class BaseDeviceAdaptor:
         from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
         # Conv1d produces head-first storage exposed to attention as BSND views.
-        # L2Norm reduces D only, so dense BNSD rows can be normalized directly.
-        head_first_qkv = tuple(x.transpose(1, 2) for x in (q, k, v))
-        if all(x.is_contiguous() for x in head_first_qkv):
-            q, k, v = head_first_qkv
-            q = l2norm_fwd(q)
-            k = l2norm_fwd(k)
-        else:
-            # A token slice across heads can leave gaps in the convolution storage.
-            q = l2norm_fwd(q.contiguous()).contiguous()
-            k = l2norm_fwd(k.contiguous()).contiguous()
-            v = v.contiguous()
-            q = q.transpose(1, 2).contiguous()
-            k = k.transpose(1, 2).contiguous()
-            v = v.transpose(1, 2).contiguous()
+        # Pack only views with gaps or a different storage order. L2Norm reduces D only.
+        q, k, v = (x.transpose(1, 2).contiguous() for x in (q, k, v))
+        q = l2norm_fwd(q)
+        k = l2norm_fwd(k)
 
         g = g.to(torch.float32).contiguous()
         beta = beta.to(v.dtype).contiguous()
