@@ -19,6 +19,7 @@
 
 import inspect
 import logging
+from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from typing import Any
@@ -93,7 +94,9 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     init_sparse_kv_offload_manager,
 )
 from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target_host_mirror
+from vllm_ascend.kv_trace.kv_trace_runner import install_trace
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
+from vllm_ascend.models.host_offload import track_host_offload_owners
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
     runtime_guard_step,
@@ -160,6 +163,8 @@ class NPUModelRunner(GPUModelRunner):
         # boundary and sequence length padding during FULL graph execution.
         self.use_fia = False
         self._target_uses_flashmla = False
+        # #56492: inherited dummy runs inspect this even on non-VMM platforms.
+        self.extensible_kv_cache = None
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
@@ -210,7 +215,11 @@ class NPUModelRunner(GPUModelRunner):
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and (
                 self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-                or breakable_cudagraph.is_breakable_cudagraph_enabled()
+                or (
+                    breakable_cudagraph.is_breakable_cudagraph_enabled()
+                    if vllm_version_is("0.33.0")
+                    else breakable_cudagraph.is_breakable_cudagraph_enabled(self.compilation_config)
+                )
             )
             and not self.model_config.enforce_eager
         )
@@ -304,6 +313,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 self.debugger = AclGraphDumper(dump_cfg)
         self.runtime_guard = RuntimeGuardProcessor.bind(self)
+        self._kv_trace = install_trace(self)
 
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
@@ -320,7 +330,21 @@ class NPUModelRunner(GPUModelRunner):
         start_nz_warm_thread("thread")
         try:
             aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
-            super().load_model(load_dummy_weights, *args, **kwargs)
+            with track_host_offload_owners() as owners:
+                try:
+                    super().load_model(load_dummy_weights, *args, **kwargs)
+                except BaseException:
+                    # self.model may not exist yet. Close every recorded owner
+                    # without collectives and retain failures for shutdown retry.
+                    pending = getattr(self, "_shared_engram_shutdown_pending", [])
+                    for owner in owners:
+                        try:
+                            owner.close_host_offload()
+                        except Exception:
+                            pending.append(owner)
+                            logger.exception("Failed to release host offload after model loading failed")
+                    self._shared_engram_shutdown_pending = pending
+                    raise
             self.pd_dspark_aux_layer_ids = aux_layers
         finally:
             # Join even when weight loading fails: these threads touch the NPU
@@ -558,6 +582,9 @@ class NPUModelRunner(GPUModelRunner):
         self._fill_c8_mxfp_v_scale_caches()
         if self.vllm_config.attention_config.hisparse_config is not None:
             self.kv_connector = overlap_target_host_mirror(self)
+        guard = getattr(self, "_kv_trace", None)
+        if guard is not None:
+            guard.configure(self)
 
     def _fill_c8_mxfp_v_scale_caches(self) -> None:
         """Initialize C8 V scales and retain views for page reassignment."""
@@ -575,11 +602,15 @@ class NPUModelRunner(GPUModelRunner):
 
     def shutdown(self) -> None:
         model = getattr(self, "model", None)
-        shared_embeddings = getattr(self, "_shared_engram_shutdown_pending", None) or (
-            [module for module in model.modules() if getattr(module, "_shared_pool_client", None) is not None]
-            if model is not None
-            else []
-        )
+        # Include private/shared UVA owners, which have no MemFabric client.
+        shared_embeddings = list(getattr(self, "_shared_engram_shutdown_pending", None) or [])
+        if model is not None:
+            owner_ids = {id(owner) for owner in shared_embeddings}
+            shared_embeddings.extend(
+                module
+                for module in model.modules()
+                if id(module) not in owner_ids and callable(getattr(module, "close_host_offload", None))
+            )
         # Drop C8 packet views before the parent collects tensors and
         # empties the allocator cache.
         entries = getattr(self, "_c8_mxfp_v_scale_caches", None)
@@ -1613,16 +1644,20 @@ def graph_manager_wrapper(model_runner):
         vllm_config: VllmConfig,
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int,
+        decode_query_len: int | None = None,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
-        ubatch_runner: Any = None,  # vLLM main (#51700)
+        ubatch_runner: Any = None,
+        *,
+        decode_query_lens: Mapping[int, int] | None = None,
     ):
+        query_shapes = decode_query_len if vllm_version_is("0.33.0") else decode_query_lens
+        assert query_shapes is not None
         return ModelAclGraphManager(
             vllm_config,
             device,
             cudagraph_mode,
-            decode_query_len,
+            query_shapes,
             model_runner,
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,

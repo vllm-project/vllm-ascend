@@ -19,6 +19,11 @@ name: PR Create
 
 on:
   pull_request_target:
+    # opened + synchronize cover everything meaningful: the welcome comment
+    # fires on opened, and label/description maintenance re-runs when the
+    # pushed file set changes. Other actions (labeled, edited, ...) only
+    # re-run idempotent no-ops.
+    types: [opened, synchronize]
 
 permissions:
   pull-requests: write
@@ -97,7 +102,7 @@ jobs:
           fi
 
       - name: Label the PR
-        uses: actions/labeler@v6
+        uses: actions/labeler@v7
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           configuration-path: .github/labeler.yml
