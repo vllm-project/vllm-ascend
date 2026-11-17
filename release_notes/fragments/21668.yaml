@@ -1,0 +1,11 @@
+pr: 21668
+entries:
+  - category: feature
+    text: >-
+      Added the Ascend formats for the drafter's online-quantized copy of a
+      shared target LM head (EAGLE/EAGLE3/MTP on Model Runner V2): select
+      "mxfp8" on A5-class devices or "int8" on A2/A3-class devices through
+      --speculative-config '{"draft_lm_head_quantization": "mxfp8"}'. The
+      upstream "fp8"/"nvfp4" formats are rejected with a pointer to the
+      Ascend formats; 310P is not supported.
+    hardware: [A2, A3, A5]
