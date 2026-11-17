@@ -42,6 +42,7 @@ extern aclnnStatus aclnnInnerDispatchFFNCombineW4A8GetWorkspaceSize(const aclTen
                                                          const char* group, int64_t maxOutputSize,
                                                          bool transB, bool weightNz, double swigluLimit, int64_t worldSize, int64_t localExpertStart,
                                                          const aclTensor* out, const aclTensor* expertTokenNums,
+                                                         const aclTensor* expertLoadOut,
                                                          uint64_t* workspaceSize, aclOpExecutor** executor);
 extern aclnnStatus aclnnInnerDispatchFFNCombineW4A8(void *workspace, uint64_t workspaceSize,
                                             aclOpExecutor *executor, aclrtStream stream);
@@ -66,7 +67,7 @@ aclnnStatus aclnnDispatchFFNCombineW4A8GetWorkspaceSize(const aclTensor* x, cons
                                                                     probs, xActiveMask, expertLoad, recordEnabled,
                                                                     group, maxOutputSize, 
                                                                     transB, weightNz, swigluLimit, worldSize, localExpertStart,
-                                                                    out, expertTokenNums, workspaceSize, executor);
+                                                                    out, expertTokenNums, expertLoad, workspaceSize, executor);
     return ret;
 }
 
