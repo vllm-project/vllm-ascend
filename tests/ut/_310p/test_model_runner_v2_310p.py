@@ -651,7 +651,7 @@ def test_finished_requests_synchronize_before_reusing_layout(finished_req_ids, s
 def test_config_rejects_non_tp_parallelism(setting: str) -> None:
     config = _make_vllm_config()
     setattr(config.parallel_config, setting, 2)
-    with pytest.raises(NotImplementedError, match="only supports tensor parallelism"):
+    with pytest.raises(NotImplementedError, match="does not support these parallel settings"):
         NPUModelRunner310V2._validate_config(config)
 
 

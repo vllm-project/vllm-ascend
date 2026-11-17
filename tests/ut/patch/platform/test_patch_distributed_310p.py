@@ -9,7 +9,7 @@ import torch
 
 
 @pytest.fixture
-def broadcast():
+def communication():
     path = Path(__file__).resolve().parents[4] / "vllm_ascend/patch/platform/patch_distributed.py"
     spec = spec_from_file_location("test_310p_communication", path)
     module = module_from_spec(spec)
@@ -20,12 +20,22 @@ def broadcast():
         ),
         patch.object(torch.distributed, "broadcast", autospec=True) as original,
         patch.object(torch.distributed.distributed_c10d, "broadcast"),
-        patch.object(torch.distributed, "all_reduce"),
+        patch.object(torch.distributed, "all_reduce", autospec=True) as original_reduce,
         patch.object(torch.distributed.distributed_c10d, "all_reduce"),
     ):
         spec.loader.exec_module(module)
         module.communication_adaptation_310p()
-        yield torch.distributed.broadcast, original
+        yield SimpleNamespace(
+            broadcast=torch.distributed.broadcast,
+            original_broadcast=original,
+            all_reduce=torch.distributed.all_reduce,
+            original_all_reduce=original_reduce,
+        )
+
+
+@pytest.fixture
+def broadcast(communication):
+    return communication.broadcast, communication.original_broadcast
 
 
 @pytest.mark.parametrize("sources", [{"src": 2}, {"group_src": 1}])
@@ -111,3 +121,21 @@ def test_world_group_is_used_when_group_is_omitted(broadcast):
     ):
         fn(tensor, src=1)
     group_rank.assert_called_once_with(c10d.group.WORLD, 1)
+
+
+@pytest.mark.parametrize("op", [torch.distributed.ReduceOp.SUM, torch.distributed.ReduceOp.MAX])
+@pytest.mark.parametrize("async_op", [False, True])
+def test_cpu_int64_all_reduce_preserves_inplace_result_and_handle(communication, op, async_op):
+    tensor = torch.tensor([1], dtype=torch.int64)
+    group = object()
+    handle = MagicMock() if async_op else None
+
+    def native_reduce(value, reduction, process_group, asynchronous):
+        value.fill_(3)
+        return handle
+
+    communication.original_all_reduce.side_effect = native_reduce
+    result = communication.all_reduce(tensor, op=op, group=group, async_op=async_op)
+    assert tensor.tolist() == [3]
+    assert result is handle
+    communication.original_all_reduce.assert_called_once_with(tensor, op, group, async_op)

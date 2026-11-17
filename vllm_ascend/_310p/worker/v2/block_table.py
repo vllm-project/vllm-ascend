@@ -35,7 +35,7 @@ class Ascend310PBlockTables(BlockTables):
         if kernel_block_sizes is None:
             kernel_block_sizes = block_sizes
         if cp_size != 1:
-            raise NotImplementedError("310P model runner v2 only supports tensor parallelism.")
+            raise NotImplementedError(f"310P model runner v2 does not support context parallelism (cp_size={cp_size}).")
         if len(max_num_blocks_per_group) != len(block_sizes):
             raise ValueError("max_num_blocks_per_group must match the number of KV cache groups.")
 

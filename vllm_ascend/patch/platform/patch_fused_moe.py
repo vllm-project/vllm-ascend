@@ -213,6 +213,9 @@ for module_name, module in list(sys.modules.items()):
 # ---------------------------------------------------------------------------
 # 310P data parallelism keeps every DP replica self-contained.
 #
+# Scope: this only changes the MoE shard view (the MoE parallel config). It
+# does not change engine-level DP, scheduling, or the number of replicas.
+#
 # Without expert parallelism, upstream flattens dp into the MoE tensor-parallel
 # group, so a replica owns only 1/(dp*tp) of each expert and runs two all-gathers
 # plus one reduce-scatter across the DP group on every MoE layer. In our tested
@@ -221,6 +224,9 @@ for module_name, module in list(sys.modules.items()):
 # capture events. Restricting the MoE parallel config to the TP group removes
 # them and makes each replica a complete model replica, so ACL graph decode
 # works; the cost is replicated expert weights (less KV cache).
+#
+# Upstream plan: remove this patch once upstream exposes a supported switch for
+# "do not shard MoE across DP" or 310P can build expert parallelism.
 _original_moe_parallel_config_make = FusedMoEParallelConfig.make
 
 

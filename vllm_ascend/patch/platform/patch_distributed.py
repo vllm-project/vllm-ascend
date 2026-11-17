@@ -73,7 +73,7 @@ def communication_adaptation_310p():
             group=None,
             async_op=False,
         ):
-            if tensor.dtype != torch.int64:
+            if tensor.device.type == "cpu" or tensor.dtype != torch.int64:
                 return fn(tensor, op, group, async_op)
             rank = torch.distributed.get_rank(group)
             world_size = torch.distributed.get_world_size(group)

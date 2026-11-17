@@ -243,6 +243,7 @@ def test_moe_parallel_config_resolves_310p_full_replicas(on_310p, expected):
     parallel_config = SimpleNamespace(
         enable_expert_parallel=False,
         enable_eplb=False,
+        mori_ep_v2=False,
         all2all_backend="standard",
         data_parallel_size=2,
     )
@@ -267,6 +268,7 @@ def test_moe_parallel_config_keeps_expert_parallel_dp():
     parallel_config = SimpleNamespace(
         enable_expert_parallel=True,
         enable_eplb=False,
+        mori_ep_v2=False,
         all2all_backend="standard",
         data_parallel_size=2,
     )

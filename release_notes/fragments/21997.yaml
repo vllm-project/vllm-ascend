@@ -1,0 +1,4 @@
+pr: 21997
+entries:
+  - category: hardware
+    text: 310P supports data parallelism deployment now.

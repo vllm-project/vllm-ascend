@@ -209,7 +209,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         enabled = [name for name, size in unsupported_parallel.items() if size != 1]
         if enabled:
             raise NotImplementedError(
-                f"310P model runner v2 only supports tensor parallelism; unsupported settings: {', '.join(enabled)}."
+                f"310P model runner v2 does not support these parallel settings: {', '.join(enabled)}."
             )
         if getattr(parallel_config, "enable_expert_parallel", False):
             raise NotImplementedError("Expert parallelism is not supported by model runner v2 on 310P.")

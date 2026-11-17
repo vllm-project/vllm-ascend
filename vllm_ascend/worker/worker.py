@@ -1434,18 +1434,24 @@ class NPUWorker(WorkerBase):
             # the original Engram settings for Ascend and model initialization.
             group_config = copy.copy(group_config)
             group_config.engram_config = None
+        # Only override upstream's backend when the world group cannot serve
+        # device collectives, so the default path keeps its original call.
+        mp_backend_kwargs = {} if mp_backend is None else {"backend": mp_backend}
         with set_current_vllm_config(group_config):
             ensure_model_parallel_initialized(
                 self.parallel_config.tensor_parallel_size,
                 self.parallel_config.pipeline_parallel_size,
                 self.parallel_config.prefill_context_parallel_size,
                 self.parallel_config.decode_context_parallel_size,
-                backend=mp_backend,
+                **mp_backend_kwargs,
             )
+        # Only override the Ascend device backend when the world group cannot
+        # serve device collectives, so the default path keeps its original call.
+        ascend_backend_kwargs = {} if mp_backend is None else {"device_backend": mp_backend}
         init_ascend_model_parallel(
             self.parallel_config,
             self.vllm_config.engram_config,
-            device_backend=mp_backend,
+            **ascend_backend_kwargs,
         )
         ensure_ec_transfer_initialized(self.vllm_config)
 

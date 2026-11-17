@@ -231,16 +231,27 @@ class NPUWorker310(NPUWorker):
 
         effective_base_port: int | None = None
         dp_local_rank: int | None = None
-        if parallel_config.data_parallel_size > 1:
+        dp_size = parallel_config.data_parallel_size
+        if dp_size > 1:
             dp_local_rank = parallel_config.data_parallel_rank_local
             if dp_local_rank is None:
                 dp_local_rank = parallel_config.data_parallel_index
+        else:
+            # Dense DP ranks are independent engine cores: vLLM resets
+            # data_parallel_size to 1 for them and keeps the original rank in
+            # data_parallel_index. They still share one host network namespace,
+            # so every replica after the first needs its own port block.
+            dp_rank = parallel_config.data_parallel_index or 0
+            if dp_rank:
+                dp_local_rank = dp_rank
+        if dp_local_rank is not None:
+            replicas = max(dp_size, dp_local_rank + 1)
             base_port = envs.HCCL_IF_BASE_PORT
-            last_port = base_port + parallel_config.data_parallel_size * _HCCL_PORTS_PER_DP_REPLICA - 1
+            last_port = base_port + replicas * _HCCL_PORTS_PER_DP_REPLICA - 1
             if base_port < _MIN_HCCL_PORT or last_port > _MAX_HCCL_PORT:
                 raise ValueError(
                     f"HCCL_IF_BASE_PORT={base_port} cannot reserve "
-                    f"{parallel_config.data_parallel_size} DP port ranges of "
+                    f"{replicas} DP port ranges of "
                     f"{_HCCL_PORTS_PER_DP_REPLICA} ports: the range "
                     f"[{base_port}, {last_port}] must stay within "
                     f"[{_MIN_HCCL_PORT}, {_MAX_HCCL_PORT}]."
@@ -267,7 +278,7 @@ class NPUWorker310(NPUWorker):
     def _init_device(self):
         self._configure_parallel_device()
         device_index = current_platform.logical_device_id_to_visible_device_id(self.local_rank)
-        if self.parallel_config.data_parallel_size > 1:
+        if self.parallel_config.data_parallel_size > 1 or self.parallel_config.data_parallel_index:
             logger.info(
                 "310P DP device: rank=%s local_rank=%s visible=%s assigned=%s",
                 self.rank,

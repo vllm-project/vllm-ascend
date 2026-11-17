@@ -134,6 +134,15 @@ def test_single_replica_leaves_hccl_base_port_untouched(monkeypatch):
     assert worker_module.os.environ["HCCL_IF_BASE_PORT"] == "60000"
 
 
+def test_independent_dp_rank_reserves_its_own_port_block(monkeypatch):
+    """Dense DP ranks keep the original rank while seeing data_parallel_size == 1."""
+    monkeypatch.setenv("HCCL_IF_BASE_PORT", "60000")
+    worker = make_worker(data_parallel_size=1, data_parallel_rank_local=None, data_parallel_index=2)
+    with patch.object(worker_module.torch.npu, "device_count", return_value=8):
+        worker._configure_parallel_device()
+    assert worker_module.os.environ["HCCL_IF_BASE_PORT"] == str(60000 + 2 * _PORTS_PER_REPLICA)
+
+
 def test_dp_shard_feeds_the_final_device_mapping(monkeypatch):
     """Slice -> logical id -> device the worker actually opens."""
     import vllm.platforms.interface as interface
@@ -221,7 +230,8 @@ def test_310p_dp_uses_gloo_world_with_hccl_device_backend():
     assert worker._select_distributed_backends() == ("gloo", "hccl")
 
 
-def test_selected_backends_reach_both_initializers():
+@pytest.mark.parametrize("dp_size", [1, 2])
+def test_selected_backends_reach_both_initializers(dp_size):
     """The 310P pair is used for the world group and every Ascend device group."""
     from vllm_ascend.worker import worker as worker_module
 
@@ -232,7 +242,7 @@ def test_selected_backends_reach_both_initializers():
         pipeline_parallel_size=1,
         prefill_context_parallel_size=1,
         decode_context_parallel_size=1,
-        data_parallel_size=2,
+        data_parallel_size=dp_size,
     )
     worker.rank = 0
     worker.local_rank = 0
@@ -249,9 +259,9 @@ def test_selected_backends_reach_both_initializers():
     ):
         worker._init_worker_distributed_environment()
 
-    assert init_dist.call_args.args[4] == "gloo"
-    assert ensure_mp.call_args.kwargs["backend"] == "hccl"
-    assert init_ascend.call_args.kwargs["device_backend"] == "hccl"
+    assert init_dist.call_args.args[4] == ("gloo" if dp_size > 1 else "hccl")
+    assert ensure_mp.call_args.kwargs == ({"backend": "hccl"} if dp_size > 1 else {})
+    assert init_ascend.call_args.kwargs == ({"device_backend": "hccl"} if dp_size > 1 else {})
 
 
 @pytest.mark.parametrize("assigned", [None, [2, 3]])
@@ -339,23 +349,27 @@ def test_single_replica_skips_subgroup_validation():
         ({"pd_head_ratio": 2}, "separated prefill"),
         ({"eplb_config": SimpleNamespace(dynamic_eplb=True)}, "dynamic_eplb"),
         (
-            {"finegrained_tp_config": SimpleNamespace(
-                oproj_tensor_parallel_size=2,
-                lmhead_tensor_parallel_size=0,
-                embedding_tensor_parallel_size=0,
-                mlp_tensor_parallel_size=0,
-                qkv_iproj_tensor_parallel_size=1,
-            )},
+            {
+                "finegrained_tp_config": SimpleNamespace(
+                    oproj_tensor_parallel_size=2,
+                    lmhead_tensor_parallel_size=0,
+                    embedding_tensor_parallel_size=0,
+                    mlp_tensor_parallel_size=0,
+                    qkv_iproj_tensor_parallel_size=1,
+                )
+            },
             "finegrained_tp: oproj",
         ),
         (
-            {"finegrained_tp_config": SimpleNamespace(
-                oproj_tensor_parallel_size=0,
-                lmhead_tensor_parallel_size=0,
-                embedding_tensor_parallel_size=0,
-                mlp_tensor_parallel_size=0,
-                qkv_iproj_tensor_parallel_size=2,
-            )},
+            {
+                "finegrained_tp_config": SimpleNamespace(
+                    oproj_tensor_parallel_size=0,
+                    lmhead_tensor_parallel_size=0,
+                    embedding_tensor_parallel_size=0,
+                    mlp_tensor_parallel_size=0,
+                    qkv_iproj_tensor_parallel_size=2,
+                )
+            },
             "finegrained_tp: qkv_iproj",
         ),
     ],
