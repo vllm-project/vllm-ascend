@@ -36,12 +36,12 @@ from vllm_ascend.worker.v2.aclgraph_utils import (
 )
 from vllm_ascend.worker.v2.utils import communicator_switch
 
-try:
-    from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
-except ModuleNotFoundError:
+if vllm_version_is("0.33.0"):
     from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (  # type: ignore[import-not-found]
         SpeculatorCudaGraphManager,
     )
+else:
+    from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
