@@ -75,9 +75,11 @@ def test_oob_token_id_no_crash():
     det = _det()
     batch = RareRowBatch(det)
     row = batch.add()
+    before = batch._native.oob_tokens
     batch.feed_rows(np.array([row]), np.array([10**9], np.int64), np.zeros(1), np.zeros(1))
     batch.feed_rows(np.array([row]), np.array([-5], np.int64), np.zeros(1), np.zeros(1))
     assert batch.strict_at(row) is None
+    assert batch._native.oob_tokens == before + 2
 
 
 def test_empty_feed_ok():
