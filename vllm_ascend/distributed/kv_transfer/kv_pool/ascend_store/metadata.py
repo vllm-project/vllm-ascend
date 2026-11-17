@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from copy import copy
 from dataclasses import dataclass, field, replace
 from itertools import compress
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
@@ -363,7 +362,7 @@ def get_engine_transfer_config(vllm_config, kv_cache_config):
 
 
 def resolve_pool_cache_geometry(vllm_config, kv_cache_config, *, use_layerwise: bool) -> PoolCacheGeometry:
-    """Consume the Core hash contract; do not use the requested PMU as a page size."""
+    """Consume Core's resolved hit alignment; never infer partial-hit support."""
     cache = vllm_config.cache_config
     parallel = vllm_config.parallel_config
     dcp = parallel.decode_context_parallel_size
@@ -375,31 +374,21 @@ def resolve_pool_cache_geometry(vllm_config, kv_cache_config, *, use_layerwise: 
         else (cache.block_size * dcp,)
     )
     page_alignment = math.lcm(*(block_sizes[i] for i in group_ids))
-    hash_size = getattr(kv_cache_config, "hash_block_size", None)
-    hit_alignment = getattr(kv_cache_config, "cache_hit_alignment_tokens", None)
-    has_hash = isinstance(hash_size, int) and hash_size > 0
-    has_alignment = isinstance(hit_alignment, int) and hit_alignment > 0
     if kv_cache_config is None:
         if isinstance(cache.prefix_match_unit, int):
             raise ValueError("AscendStore requires a resolved KVCacheConfig with prefix_match_unit")
         hash_size = hit_alignment = page_alignment
-    elif not (has_hash and has_alignment):
-        # Some Core versions resolve only leaf specs. Normalize uniform
-        # wrappers for the public resolver without mutating the planner's plan.
-        resolve_config = copy(kv_cache_config)
-        resolve_config.kv_cache_groups = [
-            replace(group, kv_cache_spec=next(iter(group.kv_cache_spec.kv_cache_specs.values())))
-            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-            else group
-            for group in groups
-        ]
-        scheduler_size, resolved_hash = kv_cache_utils.resolve_kv_cache_block_sizes(resolve_config, vllm_config)
-        if not has_hash:
-            hash_size = resolved_hash
-        if not has_alignment:
-            hit_alignment = kv_cache_utils.resolve_cache_hit_alignment_tokens(
-                resolve_config, vllm_config, scheduler_size, hash_size
-            )
+    else:
+        hash_size = getattr(kv_cache_config, "hash_block_size", None)
+        hit_alignment = getattr(kv_cache_config, "cache_hit_alignment_tokens", None)
+        # Match the upstream factory: an unresolved alignment keeps whole-page
+        # hits. Only legacy whole-page/layerwise callers may resolve the hash.
+        if hit_alignment is None:
+            hit_alignment = page_alignment
+        if hash_size is None:
+            if not use_layerwise and hit_alignment < page_alignment:
+                raise ValueError("AscendStore partial hits require Core-resolved hash_block_size")
+            _, hash_size = kv_cache_utils.resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
     if any(block_sizes[i] % hash_size for i in group_ids):
         raise ValueError(
             f"AscendStore cannot fold Core hash size {hash_size} into cacheable pages "

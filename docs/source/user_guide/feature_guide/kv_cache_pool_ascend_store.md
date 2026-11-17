@@ -1687,11 +1687,13 @@ granularity or mode option is needed:
 }
 ```
 
-Partial recovery requires compatible Core cache-geometry resolvers, registered
+Partial recovery requires Core-resolved cache geometry, registered
 cache managers, and the `SchedulerOutput.kv_connector_block_state` handoff,
 including `boundary_state_offloads`. AscendStore does not patch Core. If the
-cache plan has not already supplied the hash size and hit alignment, AscendStore
-uses Core's resolvers; it does not guess them from the command-line PMU. No
+cache plan has not supplied a hit alignment, AscendStore keeps whole-page hits
+and does not infer partial-hit support. Partial recovery requires Core to supply
+both the hash size and hit alignment. Legacy whole-page and layerwise callers
+may still resolve a missing hash size through Core's block-size resolver. No
 custom module path or legacy prefix-mode, direct-only, or setup-lock option is
 needed. Those old options have no implementation in this connector.
 
