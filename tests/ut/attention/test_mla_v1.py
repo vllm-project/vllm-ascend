@@ -6,7 +6,7 @@ import pytest
 import torch
 from vllm.compilation import backends
 from vllm.compilation.backends import set_model_tag
-from vllm.config import CacheConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, ParallelConfig, SchedulerConfig, VllmConfig
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 
@@ -187,7 +187,7 @@ def test_mxfp8_mla_fused_preprocess_owns_nz_conversion(
             dtype=torch.bfloat16,
             hf_config=SimpleNamespace(model_type="deepseek_v3"),
         ),
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
+        parallel_config=ParallelConfig(prefill_context_parallel_size=1, decode_context_parallel_size=1),
         cache_config=SimpleNamespace(cache_dtype="float16"),
         speculative_config=None,
     )
