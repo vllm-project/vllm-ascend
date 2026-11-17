@@ -18,12 +18,17 @@ import itertools
 import torch
 from vllm.forward_context import get_forward_context, is_forward_context_available
 
-try:
-    import triton  # type: ignore[import-untyped]
-    import triton.language as tl  # type: ignore[import-untyped]
+from vllm_ascend.utils import supports_triton
 
-    _HAS_TRITON = True
-except ImportError:
+if supports_triton():
+    try:
+        import triton  # type: ignore[import-untyped]
+        import triton.language as tl  # type: ignore[import-untyped]
+
+        _HAS_TRITON = True
+    except ImportError:
+        _HAS_TRITON = False
+else:
     _HAS_TRITON = False
 
 

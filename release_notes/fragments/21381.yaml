@@ -1,0 +1,5 @@
+pr: 21381
+entries:
+  - category: bugfix
+    text: 310P inference now disables Triton kernels before worker initialization, selects native fallbacks where available, and reports unsupported Triton-only configurations with actionable guidance.
+    hardware: [310P]

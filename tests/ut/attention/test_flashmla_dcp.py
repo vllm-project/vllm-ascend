@@ -208,6 +208,7 @@ def runtime(monkeypatch):
         "torch_npu": SimpleNamespace(npu_scatter_pa_kv_cache=scatter),
         "record_attention_compute_start": Mock(),
         "fused_dcp_lse_combine": combine_outputs,
+        "supports_triton": lambda: True,
         "AscendMLAMetadata": object,
         "AscendMLADCPDecodeMetadata": SimpleNamespace,
         "CPKVScope": AttentionKind,
@@ -215,6 +216,10 @@ def runtime(monkeypatch):
         "cp_decode_comm_stream": lambda: attn_stream,
         "get_graph_params": Mock(side_effect=AssertionError("FlashMLA must not prepare FIA graph tasks")),
     }
+    install(
+        "vllm_ascend.ops.triton.dcp.dcp_a2a",
+        fused_dcp_lse_combine=lambda *args, **kwargs: scope["fused_dcp_lse_combine"](*args, **kwargs),
+    )
     scope["torch_npu"]._npu_fused_infer_attention_score_get_max_workspace = Mock(
         side_effect=AssertionError("FlashMLA must not query FIA workspace")
     )

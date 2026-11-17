@@ -12,7 +12,6 @@ from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
-from vllm.triton_utils import HAS_TRITON
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
@@ -46,17 +45,16 @@ from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_sha
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
-from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
-from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale
 from vllm_ascend.utils import (
     _round_up,
     enable_sfa_dcp_replicated_indexer,
     enable_sfa_dcp_sharded_indexer,
     is_pd_decode_recompute_scheduler_enabled,
+    supports_triton,
 )
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask, wait_for_device_metadata
 
-if HAS_TRITON:
+if supports_triton():
     from vllm_ascend.ops.triton.indexer_quant_cache_int8 import (
         indexer_quant_cache_int8,
         register_indexer_quant_cache_int8_warmup,
@@ -259,7 +257,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self._is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(get_current_vllm_config())
         self._use_fused_cache_store = (
-            type(self) is AscendSFAIndexerBackend
+            supports_triton()
+            and type(self) is AscendSFAIndexerBackend
             and not self.use_pcp  # Keep PCP cache gathering and slot remapping on the existing path.
             and self.enable_sparse_li_c8
             and self.c8_k_cache_dtype == torch.int8  # INT8 config uses FP16 scales; C8 may also be FP8.
@@ -333,7 +332,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
                 self._fused_k_cache = getattr(ops, "indexer_quant_cache", None)
             elif (
-                HAS_TRITON
+                supports_triton()
                 and get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
                 and self.c8_k_cache_dtype == torch.int8
                 and self.c8_k_scale_cache_dtype == torch.float16
@@ -343,7 +342,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     def register_k_cache_warmup(self) -> None:
         """Register the INT8 epilogue after the worker binds the real cache."""
         if (
-            not HAS_TRITON
+            not supports_triton()
             or self._fused_k_cache is not indexer_quant_cache_int8
             or self._pcp_active
             or len(self.k_cache.kv_cache) != 2
@@ -362,7 +361,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             return False
         key, scale = self.k_cache.kv_cache
         if self.c8_k_cache_dtype == torch.int8:
-            return HAS_TRITON and supports_indexer_quant_cache_int8(key, scale, hidden_states.shape[0])
+            return supports_triton() and supports_indexer_quant_cache_int8(key, scale, hidden_states.shape[0])
         return (
             key.dtype == torch.float8_e4m3fn
             and scale.dtype == torch.float32
@@ -480,7 +479,9 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k_li = self.k_norm(k_li).unsqueeze(1)
         k_li = k_li.view(-1, 1, self.head_dim)
 
-        if self.qk_rope_head_dim and HAS_TRITON:
+        if self.qk_rope_head_dim and supports_triton():
+            from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
+
             cos = cos.view(-1, self.qk_rope_head_dim)
             sin = sin.view(-1, self.qk_rope_head_dim)
             k_li = rope_forward_triton_siso(
@@ -656,7 +657,9 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         else:
             q_li, _ = self.wq_b(q_c)
         q_li = q_li.view(-1, self.n_head, self.head_dim)
-        if self.qk_rope_head_dim and HAS_TRITON:
+        if self.qk_rope_head_dim and supports_triton():
+            from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
+
             q_li = rope_forward_triton_siso(
                 q_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
             )
@@ -802,6 +805,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             )
         elif fuse_store:
             assert k_li_scale is not None
+            from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale
+
             store_indexer_key_scale(
                 k_li,
                 k_li_scale,

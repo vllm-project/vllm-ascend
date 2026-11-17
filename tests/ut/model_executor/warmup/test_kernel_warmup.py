@@ -2,6 +2,7 @@
 """Unit tests for ``kernel_warmup`` orchestration."""
 
 import ast
+import builtins
 import importlib
 import inspect
 from collections import defaultdict
@@ -42,15 +43,24 @@ def _make_worker(*, enable_jit_warmup=True, speculative_config=None):
     return worker, registry
 
 
-@patch.object(kw, "HAS_TRITON", False)
+@patch.object(kw, "supports_triton", lambda: False)
 def test_skips_without_triton():
     worker, registry = _make_worker()
     registry.warmup = MagicMock()
-    kw.kernel_warmup(worker)
+
+    original_import = builtins.__import__
+
+    def reject_triton_import(name, *args, **kwargs):
+        if name.startswith("vllm_ascend.ops.triton"):
+            raise AssertionError(f"Triton module imported during disabled warmup: {name}")
+        return original_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=reject_triton_import):
+        kw.kernel_warmup(worker)
     registry.warmup.assert_not_called()
 
 
-@patch.object(kw, "HAS_TRITON", True)
+@patch.object(kw, "supports_triton", lambda: True)
 def test_skips_when_jit_warmup_disabled():
     worker, registry = _make_worker(enable_jit_warmup=False)
     registry.warmup = MagicMock()
@@ -58,7 +68,7 @@ def test_skips_when_jit_warmup_disabled():
     registry.warmup.assert_not_called()
 
 
-@patch.object(kw, "HAS_TRITON", True)
+@patch.object(kw, "supports_triton", lambda: True)
 @pytest.mark.parametrize("enabled", [False, True])
 def test_indexer_cache_registration_precedes_compilation(enabled):
     from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
@@ -85,7 +95,7 @@ def test_indexer_cache_registration_precedes_compilation(enabled):
     assert registry.warmup.call_count == int(enabled)
 
 
-@patch.object(kw, "HAS_TRITON", True)
+@patch.object(kw, "supports_triton", lambda: True)
 def test_prunes_non_ascend_registrations_and_warms():
     worker, registry = _make_worker()
     # One real Ascend registration...
@@ -125,7 +135,7 @@ def _make_dspark_builder(*, device_metadata=True):
     "vllm_ascend.ops.triton.dspark_swa_indices.register_dspark_swa_indices_warmup",
     return_value=True,
 )
-@patch.object(kw, "HAS_TRITON", True)
+@patch.object(kw, "supports_triton", lambda: True)
 def test_dspark_walker_v2_speculator_path_registers_nested_groups(mock_register):
     """The v2 runner keeps draft groups on the speculator (possibly nested);
     the walker must find them and register one key per DSA group."""
@@ -144,7 +154,7 @@ def test_dspark_walker_v2_speculator_path_registers_nested_groups(mock_register)
 
 
 @patch("vllm_ascend.ops.triton.dspark_swa_indices.register_dspark_swa_indices_warmup")
-@patch.object(kw, "HAS_TRITON", True)
+@patch.object(kw, "supports_triton", lambda: True)
 def test_dspark_walker_skips_eager_builders(mock_register):
     """Eager-path builders compile lazily at first call; no pre-capture key."""
     worker, _ = _make_worker()
@@ -351,7 +361,7 @@ def test_dcp_target_and_draft_owners_register_before_compilation():
 
     registry.warmup = MagicMock(side_effect=lambda: len(registered) == 2 or pytest.fail())
     with (
-        patch.object(kw, "HAS_TRITON", True),
+        patch.object(kw, "supports_triton", return_value=True),
         patch.object(kw, "_register_dspark_swa_indices_warmup", return_value=0),
         patch.object(dcp_warmup, "register_dcp_warmup", side_effect=register),
     ):

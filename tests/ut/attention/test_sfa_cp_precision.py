@@ -274,6 +274,11 @@ def test_dcp_query_gather_preserves_distinct_head_shards():
     gathered = torch.cat((send, send + 1000), dim=0)
     with (
         patch.object(sfa_cp, "get_pcp_group", return_value=SimpleNamespace(world_size=pcp_size)),
+        patch.object(sfa_cp, "supports_triton", return_value=True),
+        patch(
+            "vllm_ascend.ops.triton.query_gather_prep.prep_query_head_major",
+            side_effect=lambda q, rope: torch.cat((q, rope), dim=-1).transpose(0, 1).contiguous(),
+        ),
         patch.object(sfa_cp, "all_gather_async", return_value=(gathered, None)) as gather,
     ):
         context = impl._start_dcp_query_gather(q, rope)
