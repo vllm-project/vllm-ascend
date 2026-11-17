@@ -48,8 +48,13 @@ from vllm_ascend.ops.fused_moe.shared_experts import (
     SharedExpertParallelMode,
     SubmittedSharedExpertGateUp,
 )
+from vllm_ascend.quantization.method_adapters import AscendLinearMethod
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
+from vllm_ascend.quantization.methods.w4a8.w4a8 import AscendW4A8DynamicLinearMethod
+from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import AscendW4A8MXFPDynamicLinearMethod
+from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+from vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic import AscendW8A8FP8DynamicLinearMethod
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import vllm_version_is
 
@@ -1084,6 +1089,8 @@ def test_shared_experts_part2_applies_optional_gate(with_gate):
 
 
 def _make_quantized_situ_shared_experts(quant_type, gate_up_proj, down_proj):
+    gate_up_proj.quant_method = SimpleNamespace(quant_method=SimpleNamespace(quant_type=quant_type))
+    down_proj.quant_method = SimpleNamespace(quant_method=SimpleNamespace(quant_type=quant_type))
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
     shared_experts.layer = SimpleNamespace(
         gate_up_proj=gate_up_proj,
@@ -1115,7 +1122,7 @@ def _make_shared_expert_events():
     ("quant_type", "has_scales", "has_active_lora", "expected_path"),
     [
         (QuantType.W8A8, True, False, SharedExpertMLPPath.A8_INT_FUSED),
-        (QuantType.W4A8, True, False, SharedExpertMLPPath.A8_INT_FUSED),
+        (QuantType.W4A8, True, False, SharedExpertMLPPath.LINEAR_WRAPPER),
         (QuantType.W4A8MXFP, True, False, SharedExpertMLPPath.A8_MXFP_FUSED),
         # These schemes retain their registered linear implementation.
         (QuantType.W8A8MXFP, True, False, SharedExpertMLPPath.W8A8_MXFP_LINEAR),
@@ -1139,8 +1146,8 @@ def test_shared_expert_mlp_path_preserves_quant_and_lora_semantics(
     expected_path,
 ):
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
-    gate_up_proj = SimpleNamespace()
-    down_proj = SimpleNamespace()
+    gate_up_proj = SimpleNamespace(quant_method=SimpleNamespace(quant_method=SimpleNamespace(quant_type=quant_type)))
+    down_proj = SimpleNamespace(quant_method=SimpleNamespace(quant_method=SimpleNamespace(quant_type=quant_type)))
     if has_scales:
         gate_up_proj.weight_scale = torch.ones(1)
         down_proj.weight_scale = torch.ones(1)
@@ -1153,6 +1160,28 @@ def test_shared_expert_mlp_path_preserves_quant_and_lora_semantics(
     monkeypatch.setattr(shared_experts_module, "has_lora", lambda _: has_active_lora)
 
     assert shared_experts._select_mlp_path() is expected_path
+
+
+@pytest.mark.parametrize(
+    ("scheme_cls", "expected_path"),
+    [
+        (AscendW8A8DynamicLinearMethod, SharedExpertMLPPath.A8_INT_FUSED),
+        (AscendW4A8DynamicLinearMethod, SharedExpertMLPPath.LINEAR_WRAPPER),
+        (AscendW4A8MXFPDynamicLinearMethod, SharedExpertMLPPath.A8_MXFP_FUSED),
+        (AscendW8A8MXFP8DynamicLinearMethod, SharedExpertMLPPath.W8A8_MXFP_LINEAR),
+        (AscendW8A8FP8DynamicLinearMethod, SharedExpertMLPPath.LINEAR_WRAPPER),
+    ],
+)
+def test_shared_path_reads_actual_linear_scheme(scheme_cls, expected_path):
+    executor = AscendSharedExperts.__new__(AscendSharedExperts)
+    method = AscendLinearMethod(scheme_cls.__new__(scheme_cls))
+    executor.layer = SimpleNamespace(
+        gate_up_proj=SimpleNamespace(quant_method=method, weight_scale=torch.ones(1)),
+        down_proj=SimpleNamespace(quant_method=method, weight_scale=torch.ones(1)),
+    )
+    executor.quant_type = QuantType.NONE  # Deliberately different routed type.
+    executor.lora_context = None
+    assert executor._select_mlp_path() is expected_path
 
 
 @pytest.mark.parametrize("has_expert_gate", [False, True])
@@ -1212,8 +1241,16 @@ def test_int_shared_expert_preserves_output_gate(monkeypatch, quant_type, gate_m
     gate_weight = torch.tensor([[1.0, 2.0]], dtype=hidden_states.dtype)
     expert_gate = MagicMock(side_effect=lambda x: (F.linear(x, gate_weight), None))
     shared_experts.layer = SimpleNamespace(
-        gate_up_proj=SimpleNamespace(weight_scale=torch.ones(4), weight_scale_fp32=torch.ones(4)),
-        down_proj=SimpleNamespace(weight=torch.ones(2, 2, dtype=torch.int8), weight_scale=torch.ones(2)),
+        gate_up_proj=SimpleNamespace(
+            weight_scale=torch.ones(4),
+            weight_scale_fp32=torch.ones(4),
+            quant_method=SimpleNamespace(quant_method=SimpleNamespace(quant_type=QuantType.W8A8)),
+        ),
+        down_proj=SimpleNamespace(
+            weight=torch.ones(2, 2, dtype=torch.int8),
+            weight_scale=torch.ones(2),
+            quant_method=SimpleNamespace(quant_method=SimpleNamespace(quant_type=QuantType.W8A8)),
+        ),
     )
     if gate_mode != "absent":
         shared_experts.layer.expert_gate = expert_gate if gate_mode == "present" else None
@@ -1302,8 +1339,8 @@ def test_fused_routed_backend_without_stage_events_runs_shared_mlp(monkeypatch):
     """A monolithic routed op, such as FusedMC2, has no stage events."""
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
     shared_experts.layer = SimpleNamespace(
-        gate_up_proj=SimpleNamespace(),
-        down_proj=SimpleNamespace(),
+        gate_up_proj=SimpleNamespace(quant_method=None),
+        down_proj=SimpleNamespace(quant_method=None),
     )
     shared_experts.multistream_overlap = True
     shared_experts.quant_type = QuantType.NONE
@@ -1505,7 +1542,7 @@ def test_linear_wrapper_uses_cv_parallel_milestones(monkeypatch):
     down_proj.quant_method = None
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
     shared_experts.layer = SimpleNamespace(
-        gate_up_proj=SimpleNamespace(),
+        gate_up_proj=SimpleNamespace(quant_method=None),
         act_fn=activation,
         down_proj=down_proj,
         expert_gate=None,
@@ -1568,7 +1605,8 @@ def test_linear_wrapper_uses_cv_parallel_milestones(monkeypatch):
     down_proj.assert_called_once_with(shared_act)
 
 
-def test_linear_wrapper_prepares_gate_input_before_router_stage(monkeypatch):
+@pytest.mark.parametrize("routed_quant_type", [QuantType.W8A8MXFP, QuantType.W4A8MXFP])
+def test_linear_wrapper_prepares_gate_input_before_router_stage(monkeypatch, routed_quant_type):
     operation_order = []
     hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
     quantized_gate_input = torch.ones(2, 6, dtype=torch.float8_e4m3fn)
@@ -1586,7 +1624,7 @@ def test_linear_wrapper_prepares_gate_input_before_router_stage(monkeypatch):
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
     shared_experts.layer = SimpleNamespace(gate_up_proj=gate_up_proj, down_proj=down_proj, act_fn=MagicMock())
     shared_experts.multistream_overlap = True
-    shared_experts.quant_type = QuantType.W8A8MXFP
+    shared_experts.quant_type = routed_quant_type
     shared_experts.lora_context = None
     shared_experts.parallel_mode = MagicMock(return_value=SharedExpertParallelMode.TENSOR_PARALLEL)
 
@@ -2279,8 +2317,8 @@ def test_sp_multistream_down_projection_overlaps_combine_and_reduce_scatter_wait
 ):
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
     shared_experts.layer = SimpleNamespace(
-        gate_up_proj=SimpleNamespace(),
-        down_proj=SimpleNamespace(),
+        gate_up_proj=SimpleNamespace(quant_method=None),
+        down_proj=SimpleNamespace(quant_method=None),
     )
     shared_experts.multistream_overlap = True
     shared_experts.quant_type = QuantType.NONE
@@ -2385,8 +2423,8 @@ def test_sequence_parallel_sedp_forward_skips_token_comms(monkeypatch):
     any token gather/scatter."""
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
     shared_experts.layer = SimpleNamespace(
-        gate_up_proj=SimpleNamespace(),
-        down_proj=SimpleNamespace(),
+        gate_up_proj=SimpleNamespace(quant_method=None),
+        down_proj=SimpleNamespace(quant_method=None),
     )  # no weight_scale -> dense split path
     shared_experts.multistream_overlap = False
     shared_experts.quant_type = QuantType.NONE
@@ -2426,8 +2464,8 @@ def test_sequence_parallel_sedp_forward_skips_token_comms(monkeypatch):
 def test_active_shared_expert_lora_uses_dense_wrappers(monkeypatch):
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
     shared_experts.layer = SimpleNamespace(
-        gate_up_proj=SimpleNamespace(weight_scale=torch.ones(1)),
-        down_proj=SimpleNamespace(weight_scale=torch.ones(1)),
+        gate_up_proj=SimpleNamespace(weight_scale=torch.ones(1), quant_method=None),
+        down_proj=SimpleNamespace(weight_scale=torch.ones(1), quant_method=None),
     )
     shared_experts.multistream_overlap = False
     shared_experts.quant_type = QuantType.W8A8

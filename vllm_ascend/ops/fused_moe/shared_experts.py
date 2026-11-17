@@ -72,7 +72,7 @@ class SharedExpertParallelMode(Enum):
 class SharedExpertMLPPath(Enum):
     """Shared MLP implementation selected for a quantization scenario."""
 
-    A8_INT_FUSED = auto()  # W8A8/W4A8: explicit A8 quant + fused activation quant.
+    A8_INT_FUSED = auto()  # W8A8: explicit INT8 quant + fused activation quant.
     A8_MXFP_FUSED = auto()  # W4A8MXFP: explicit MXFP8 activation pipeline.
     W8A8_MXFP_LINEAR = auto()  # Preserve linears; fuse activation quant when supported.
     LINEAR_WRAPPER = auto()  # Dense, other quant schemes, or any active LoRA.
@@ -925,7 +925,7 @@ class AscendSharedExperts:
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
             self._wait_for_milestone(router_output_ready, "router_output_ready")
             if path is SharedExpertMLPPath.A8_INT_FUSED:
-                # W8A8/W4A8: INT8 activations with INT8 or INT4 weights.
+                # The actual shared scheme uses INT8 activations and weights.
                 assert isinstance(prepared_execution.gate_up_input, tuple)
                 quantized_x, gate_up_input_scale = prepared_execution.gate_up_input
                 gate_up = torch_npu.npu_quant_matmul(
@@ -958,12 +958,10 @@ class AscendSharedExperts:
         submitted_gate_up: SubmittedSharedExpertGateUp,
         milestones: RoutedMoEMilestones,
     ) -> torch.Tensor:
-        """Finish the fused W8A8/W4A8 INT-activation shared MLP.
+        """Finish the fused W8A8 INT8 shared MLP.
 
-        Both quantization modes use INT8 activations. W8A8 supplies INT8
-        weights, while W4A8 supplies INT4 weights. Gate-Up has already been
-        submitted before routed TopK/dispatch; this stage performs fused
-        activation/requantization and the Down projection.
+        Gate-Up has already been submitted before routed TopK/dispatch.
+        This stage performs fused activation/requantization and the Down projection.
         """
         pertoken_scale = submitted_gate_up.gate_up_input_scale
         assert pertoken_scale is not None
@@ -1062,7 +1060,7 @@ class AscendSharedExperts:
         return self.part2(submitted_gate_up.hidden_states, (quantized_x, swiglu_out_scale))
 
     def _can_fuse_w8a8_mxfp_activation(self, gate_up: torch.Tensor) -> bool:
-        if self.quant_type != QuantType.W8A8MXFP or has_lora(self.lora_context):
+        if has_lora(self.lora_context):
             return False
 
         # Lazy import: the quantization module imports routed/shared MoE code.
@@ -1147,22 +1145,28 @@ class AscendSharedExperts:
         W8A8FP, W4A4MXFP and other schemes use the generic wrapper path.
         Active LoRA always uses that generic path to preserve its adapters.
         """
+        # self.quant_type belongs to the routed experts. Mixed checkpoints
+        # must preserve each shared linear's own activation-quant contract.
+        gate_up_scheme = getattr(self.layer.gate_up_proj.quant_method, "quant_method", None)
+        down_scheme = getattr(self.layer.down_proj.quant_method, "quant_method", None)
+        quant_type = getattr(gate_up_scheme, "quant_type", QuantType.NONE)
+        if quant_type != getattr(down_scheme, "quant_type", QuantType.NONE):
+            return SharedExpertMLPPath.LINEAR_WRAPPER
         has_quantized_shared_without_lora = (
             not has_lora(self.lora_context)
             and hasattr(self.layer.gate_up_proj, "weight_scale")
             and hasattr(self.layer.down_proj, "weight_scale")
         )
-        # W8A8 and W4A8 share an INT8-activation implementation; A8 names
-        # the activation width and does not imply that weights are INT8.
-        if has_quantized_shared_without_lora and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
+        # INT4 linears retain their wrappers for GMM and scale-bias handling.
+        if has_quantized_shared_without_lora and quant_type == QuantType.W8A8:
             return SharedExpertMLPPath.A8_INT_FUSED
         # This MXFP path currently represents W4A8MXFP only (MXFP4 weights
         # with MXFP8 activations).
-        if has_quantized_shared_without_lora and self.quant_type == QuantType.W4A8MXFP:
+        if has_quantized_shared_without_lora and quant_type == QuantType.W4A8MXFP:
             return SharedExpertMLPPath.A8_MXFP_FUSED
         # Selecting this path does not guarantee fusion: tensor metadata and
         # the Down scheme are checked after the registered Gate-Up linear.
-        if not has_lora(self.lora_context) and self.quant_type == QuantType.W8A8MXFP:
+        if not has_lora(self.lora_context) and quant_type == QuantType.W8A8MXFP:
             return SharedExpertMLPPath.W8A8_MXFP_LINEAR
         return SharedExpertMLPPath.LINEAR_WRAPPER
 
