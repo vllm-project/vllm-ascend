@@ -78,8 +78,8 @@ This adds a small Gloo collective per eligible forward; include its cost when
 measuring P-side latency and throughput.
 
 Explicit eager memory profiling also initializes and measures MegaMoE resources.
-Allocation alone does not prove real requests used MegaMoE. With debug logging,
-look for `A2 MegaMoE selected for DeepSeek V4.1 P prefill` outside profiling.
+Allocation alone does not prove real requests used MegaMoE. The temporary
+validation diagnostics below show the selected backend outside profiling.
 Capture never selects this path. The P worker remains eager, including SWA
 bounded replay. Bounded replay's compact decoder rows retain their own active
 mask and are not treated as autoregressive decode.
@@ -98,6 +98,49 @@ identical resources. The A2 path uses this bound instead of the general
 communication memory and workspace; measure available KV capacity and peak HBM.
 Inputs larger than the allocated sender capacity fail rather than truncating.
 Ordinary fallback retains its original 512-token-per-rank MC2 selection limit.
+
+## Temporary validation diagnostics
+
+With `a2_mega_moe_prefill.enabled=true`, this validation build logs every forward
+at INFO level by default. No extra configuration or DEBUG logging is needed.
+Collect the output of **both P DP processes**, including all 16 EP workers:
+
+```shell
+rg 'A2_MEGA_MOE' p-dp0.log p-dp1.log
+```
+
+- `batch`: local and PCP-global request counts, token counts, appended padding
+  rows, `is_dummy`, `is_cpp_profile`, CPU prefill flags and scheduled lengths.
+  Appended padding excludes padding already present inside the local batch.
+- `eligibility`: draft identity, runner, package/hardware support, fused-MC2
+  setting, EP/LoRA state, DP/TP/PCP, token count, graph and profile flags.
+- `vote_enter`: local `(prefill, veto)` and attention metadata counts. Shared
+  metadata objects are grouped by identity; `aliases` counts their layer names.
+  Reasons distinguish empty rows, decode/mixed requests, missing/invalid counts
+  and inconsistent request counts.
+- `vote_exit`: EP-wide MAX of the two vote fields and the resulting selection.
+  A local veto of 1 identifies a rank rejecting fusion; a global veto of 1
+  rejects fusion for every rank. A global prefill of 0 also rejects fusion.
+- `gate_skip`: graph execution rejects fusion; `profile_forced` selects fusion
+  only for resource profiling, without a phase vote.
+- `decision`: selected communication method and fallback reason/capacity.
+- `op_enter`: actual entry into `cann_mega_moe` or ordinary
+  `npu_moe_distribute_dispatch_v2`, including the input shape and quantization
+  mode. Ordinary MC2 also logs its communication algorithm. This line precedes
+  the operator call and does not establish successful kernel completion.
+
+Start with `profile=False` eligibility records from a failing request, then
+compare the batch flags and local votes across ranks. For example, local
+`(1, 0)` with global `[1, 1]` means another rank vetoed the request; find its
+`vote_enter` with local `(0, 1)` and inspect its batch/metadata reason.
+`op_enter ... x_shape=(512, 5120)` confirms the actual MC2 input has 512 rows,
+even if only some rows are active.
+
+These diagnostics leave routing and existing collectives unchanged. They read
+CPU metadata and tensor shapes/dtypes without copying device tensor contents.
+They log neither prompts nor request IDs. Per-forward and per-layer output can
+be large and affect timing; this commit is intended for fault reproduction,
+not performance measurement.
 
 ## Validation and rollback
 

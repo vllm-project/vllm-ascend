@@ -546,6 +546,19 @@ class FusedMC2CommImpl(MoECommMethod):
         activation_kwargs = getattr(layer, "mega_moe_activation_kwargs", None)
         if activation_kwargs is None:
             activation_kwargs = getattr(self, "mega_moe_activation_kwargs", {}) or {}
+        if a2_prefill_enabled(get_ascend_config()):
+            logger.info(
+                "A2_MEGA_MOE op_enter op=cann_mega_moe ep_rank=%s x_shape=%s dtype=%s "
+                "sender_capacity=%s topk_shape=%s quant_mode=%s weight_type=%s mask_shape=%s",
+                self.token_dispatcher.ep_rank_id,
+                tuple(fused_experts_input.hidden_states.shape),
+                fused_experts_input.hidden_states.dtype,
+                num_max_tokens,
+                tuple(fused_experts_input.topk_ids.shape),
+                dispatch_quant_mode,
+                weight_type,
+                tuple(x_active_mask.shape) if x_active_mask is not None else None,
+            )
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
             fused_experts_input.topk_ids.to(torch.int32),

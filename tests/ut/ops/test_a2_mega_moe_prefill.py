@@ -9,12 +9,14 @@ import copy
 import dataclasses
 import importlib.util
 import json
+import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace as NS
 from typing import Any
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 from pydantic import TypeAdapter, ValidationError, model_validator
@@ -363,9 +365,39 @@ def test_empty_pcp_placeholder_does_not_veto_peer_prefill():
     assert policy.prefill_vote(placeholder) == (0, 0)
 
 
+@pytest.mark.parametrize(
+    "metadata,reason",
+    [
+        (phase(1), "prefill"),
+        (phase(0, 1), "decode_or_mixed"),
+        (NS(), "invalid_or_missing_counts"),
+        (NS(num_actual_tokens=0), "empty_tokens"),
+        (phase(0), "empty_requests"),
+        (NS(num_reqs=2, num_prefills=1, num_decodes=0), "request_count_mismatch"),
+    ],
+)
+def test_vote_diagnostics_explain_and_deduplicate_metadata(metadata, reason):
+    summary = policy.prefill_metadata_summary({"layer.0": metadata, "layer.1": metadata})
+    assert len(summary) == 1 and summary[0]["aliases"] == 2
+    assert summary[0]["reason"] == reason
+    assert summary[0]["vote"] == policy.prefill_vote(metadata)
+
+
+def test_vote_diagnostics_do_not_read_or_render_device_values():
+    class DeviceValue:
+        def __repr__(self):
+            raise AssertionError("logging read a device value")
+
+    summary = policy.prefill_metadata_summary(NS(num_reqs=DeviceValue()))
+    assert summary[0]["num_reqs"] == "DeviceValue"
+    assert summary[0]["reason"] == "invalid_or_missing_counts"
+    assert "DeviceValue" in str(summary)
+
+
 def selector_namespace(enabled=True):
     ns = dict(
         torch=torch,
+        logging=logging,
         prefill_vote=policy.prefill_vote,
         select_prefill_from_votes=policy.select_prefill_from_votes,
         a2_prefill_enabled=policy.a2_prefill_enabled,
@@ -377,16 +409,22 @@ def selector_namespace(enabled=True):
         _MC2_TOKENS_PER_RANK_LIMIT=512,
         is_moe_model=lambda cfg: True,
         use_cann_megamoe=lambda cfg: not policy.is_draft_model(cfg),
-        get_ep_group=lambda: NS(world_size=16),
+        get_ep_group=lambda: NS(world_size=16, rank_in_group=0),
+        is_mega_moe_supported=lambda: True,
+        HardwareCapability=NS(CANN_MEGAMOE="mega"),
         MoECommType=NS(FUSED_MC2="fused", MC2="mc2", ALLGATHER="gather"),
         QuantType=NS(NONE="none"),
         MoECommPolicy=NS(ALLGATHER="gather"),
-        get_current_hardware_profile=lambda: NS(moe_comm_policy="a2"),
-        logger=NS(debug=Mock()),
+        get_current_hardware_profile=lambda: NS(moe_comm_policy="a2", supports=lambda capability: True),
+        logger=Mock(),
     )
     functions(
         "vllm_ascend/ascend_forward_context.py",
-        ["select_moe_comm_method", "_select_capacity_and_expert_density_moe_comm_method"],
+        [
+            "select_moe_comm_method",
+            "_select_capacity_and_expert_density_moe_comm_method",
+            "_log_a2_mega_moe_eligibility",
+        ],
         ns,
     )
     ns["_MOE_COMM_SELECTORS"] = {"a2": ns["_select_capacity_and_expert_density_moe_comm_method"]}
@@ -410,12 +448,30 @@ def test_disabled_selector_does_not_vote():
     ns = selector_namespace(enabled=False)
     ns["select_a2_mega_moe_prefill"] = Mock(side_effect=AssertionError("disabled worker voted"))
     assert ns["select_moe_comm_method"](32, config()) == "mc2"
+    ns["logger"].info.assert_not_called()
 
 
-def test_actual_collective_gate(monkeypatch):
+@pytest.mark.parametrize("selected,method", [(True, "FUSED_MC2"), (False, "mc2")])
+def test_selection_diagnostics_are_visible_at_info(caplog, selected, method):
+    ns = selector_namespace()
+    ns["logger"] = logging.getLogger("a2_moe_diagnostics")
+    ns["select_a2_mega_moe_prefill"] = Mock(return_value=selected)
+    caplog.set_level(logging.INFO, logger="a2_moe_diagnostics")
+    ns["select_moe_comm_method"](512, config())
+    assert "A2_MEGA_MOE eligibility ep_rank=0" in caplog.text
+    assert "package_supported=True hardware_supported=True fused_mc2=1" in caplog.text
+    assert "dp=2 tp=1 pcp=8 tokens=512 graph=False profile=False" in caplog.text
+    assert f"A2_MEGA_MOE decision method={method}" in caplog.text
+    if not selected:
+        assert "reason=phase_rejected tokens=512 fallback_capacity=512" in caplog.text
+
+
+def test_actual_collective_gate(monkeypatch, caplog):
     group = object()
     monkeypatch.setitem(
-        sys.modules, "vllm_ascend.distributed.parallel_state", NS(get_mc2_group=lambda: NS(cpu_group=group))
+        sys.modules,
+        "vllm_ascend.distributed.parallel_state",
+        NS(get_mc2_group=lambda: NS(cpu_group=group, rank_in_group=3)),
     )
     calls = []
 
@@ -425,7 +481,15 @@ def test_actual_collective_gate(monkeypatch):
         votes[1] = 1
 
     monkeypatch.setattr(torch.distributed, "all_reduce", reduce)
-    ns = dict(torch=torch, prefill_vote=policy.prefill_vote, select_prefill_from_votes=policy.select_prefill_from_votes)
+    caplog.set_level(logging.INFO, logger="a2_moe_vote")
+    ns = dict(
+        torch=torch,
+        logging=logging,
+        logger=logging.getLogger("a2_moe_vote"),
+        prefill_vote=policy.prefill_vote,
+        prefill_metadata_summary=policy.prefill_metadata_summary,
+        select_prefill_from_votes=policy.select_prefill_from_votes,
+    )
     functions("vllm_ascend/ascend_forward_context.py", ["select_a2_mega_moe_prefill"], ns)
     select = ns["select_a2_mega_moe_prefill"]
     assert not select(phase(1), in_profile_run=False, graph_enabled=False)
@@ -433,6 +497,72 @@ def test_actual_collective_gate(monkeypatch):
     assert select(None, in_profile_run=True, graph_enabled=False)
     assert not select(phase(1), in_profile_run=True, graph_enabled=True)
     assert len(calls) == 1
+    assert "vote_enter ep_rank=3 local=(1, 0)" in caplog.text
+    assert "vote_exit ep_rank=3 local=(1, 0) global=[1, 1] selected=False" in caplog.text
+    assert "reason=profile_forced" in caplog.text and "reason=graph_enabled" in caplog.text
+
+
+@pytest.mark.parametrize("dummy", [False, True])
+def test_batch_diagnostics_show_local_and_global_cpu_phases(caplog, dummy):
+    ns = dict(
+        logger=logging.getLogger("a2_moe_batch"),
+        a2_prefill_enabled=policy.a2_prefill_enabled,
+        get_ascend_config=lambda: NS(a2_mega_moe_prefill=NS(enabled=True)),
+        get_ep_group=lambda: NS(rank_in_group=8),
+        get_dp_group=lambda: NS(rank_in_group=1),
+    )
+    functions("vllm_ascend/worker/v2/model_states/default.py", ["_log_a2_moe_batch"], ns)
+    local = NS(
+        num_reqs=1,
+        num_tokens=512,
+        num_tokens_after_padding=520,
+        is_dummy=dummy,
+        is_prefilling_np=np.array([False]),
+        num_scheduled_tokens=np.array([512]),
+    )
+    global_batch = NS(
+        num_reqs=1,
+        num_tokens=4096,
+        num_tokens_after_padding=4096,
+        is_dummy=dummy,
+        is_prefilling_np=np.array([True]),
+        num_scheduled_tokens=np.array([4096]),
+    )
+    caplog.set_level(logging.INFO, logger="a2_moe_batch")
+    ns["_log_a2_moe_batch"](local, NS(global_batch=global_batch))
+    assert "A2_MEGA_MOE batch ep_rank=8 dp_rank=1" in caplog.text
+    assert "'appended_padding_rows': 8" in caplog.text
+    assert f"'is_dummy': {dummy}" in caplog.text
+    assert "'is_prefilling': [False]" in caplog.text and "'is_prefilling': [True]" in caplog.text
+
+
+def test_mc2_logs_actual_shape_before_failing_operator(caplog):
+    tree = ast.parse((ROOT / "vllm_ascend/ops/fused_moe/token_dispatcher.py").read_text())
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "TokenDispatcherWithMC2")
+    dispatch = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "token_dispatch")
+    operator = Mock(side_effect=RuntimeError("simulated bs limit"))
+    ns = dict(
+        logger=logging.getLogger("a2_moe_operator"),
+        a2_prefill_enabled=policy.a2_prefill_enabled,
+        get_ascend_config=lambda: NS(a2_mega_moe_prefill=NS(enabled=True)),
+        torch_npu=NS(npu_moe_distribute_dispatch_v2=operator),
+    )
+    exec(
+        compile(
+            ast.Module(body=[dispatch], type_ignores=[]), "dispatch", "exec", flags=__future__.annotations.compiler_flag
+        ),
+        ns,
+    )
+    kwargs = dict(x=torch.empty(512, 5120), quant_mode=2)
+    dispatcher = NS(
+        get_dispatch_mc2_kwargs=lambda _: kwargs, ep_rank_id=8, ep_world_size=16, global_bs=0, mc2_comm_alg="fullmesh"
+    )
+    caplog.set_level(logging.INFO, logger="a2_moe_operator")
+    with pytest.raises(RuntimeError, match="simulated bs limit"):
+        ns["token_dispatch"](dispatcher, object())
+    operator.assert_called_once_with(**kwargs)
+    assert "op=npu_moe_distribute_dispatch_v2 ep_rank=8 x_shape=(512, 5120)" in caplog.text
+    assert "comm_alg=fullmesh quant_mode=2 ep_size=16" in caplog.text
 
 
 def test_policy_keeps_a2_disabled_without_opt_in():

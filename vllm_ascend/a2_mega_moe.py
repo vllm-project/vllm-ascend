@@ -132,3 +132,39 @@ def prefill_vote(metadata: Any) -> tuple[int, int]:
 
 def select_prefill_from_votes(prefill: int, veto: int) -> bool:
     return prefill > 0 and veto == 0
+
+
+def prefill_metadata_summary(metadata: Any) -> list[dict[str, Any]]:
+    """Describe vote inputs without reading device tensors or logging token IDs."""
+    entries = metadata.items() if isinstance(metadata, dict) else (("metadata", metadata),)
+    groups: dict[int, dict[str, Any]] = {}
+    fields = ("num_actual_tokens", "num_reqs", "num_prefills", "num_decodes")
+    for name, meta in entries:
+        key = id(meta)
+        if key in groups:
+            groups[key]["aliases"] += 1
+            continue
+        values = {field: getattr(meta, field, None) for field in fields}
+        vote = prefill_vote(meta)
+        actual_tokens = values["num_actual_tokens"]
+        if isinstance(actual_tokens, int) and actual_tokens == 0:
+            reason = "empty_tokens"
+        elif vote[1]:
+            counts = tuple(values[field] for field in fields[1:])
+            if not all(isinstance(value, int) and value >= 0 for value in counts):
+                reason = "invalid_or_missing_counts"
+            elif values["num_decodes"]:
+                reason = "decode_or_mixed"
+            else:
+                reason = "request_count_mismatch"
+        else:
+            reason = "prefill" if vote[0] else "empty_requests"
+        # Never stringify tensor values: repr(Tensor) can synchronize the NPU.
+        values = {
+            field: value if value is None or isinstance(value, int) else type(value).__name__
+            for field, value in values.items()
+        }
+        groups[key] = dict(
+            layer=str(name), aliases=1, metadata_type=type(meta).__name__, **values, vote=vote, reason=reason
+        )
+    return list(groups.values())
