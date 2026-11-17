@@ -519,9 +519,18 @@ class AscendNativeFp8BlockLinearMethod(AscendLinearScheme):
     common base.
     """
 
-    # A transposed weight no longer follows the [output, input] axis that
-    # weight switching rebuilds.
-    supports_weight_switch = False
+    # After processing, weight is [input, output] and weight_scale is
+    # [ceil(input / block_k), ceil(output / block_n)]. Both tensors must
+    # follow the same sharded axis when rebuilding a full projection.
+    weight_switch_gather_specs = (
+        WeightSwitchGatherSpec("weight", gather_dim=0),
+        WeightSwitchGatherSpec("weight_scale", gather_dim=0),
+    )
+    weight_switch_output_gather_specs = (
+        WeightSwitchGatherSpec("weight", gather_dim=1),
+        WeightSwitchGatherSpec("weight_scale", gather_dim=1),
+    )
+    supports_weight_switch = True
 
     def __init__(self, weight_block_size: tuple[int, int]):
         self.block_n, self.block_k = weight_block_size
