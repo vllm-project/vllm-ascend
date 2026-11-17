@@ -1,0 +1,5 @@
+pr: 21957
+entries:
+  - category: performance
+    text: Fused Qwen4Exp QSA rotary, compressed-key, and LightningIndexer preparation paths to reduce decode overhead.
+    model: Qwen3.8-Flash-Next
