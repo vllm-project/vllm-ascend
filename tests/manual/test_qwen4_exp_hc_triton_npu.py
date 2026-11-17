@@ -293,12 +293,7 @@ def main() -> None:
         "hc_count=",
         HC_COUNT,
     )
-    for rows, padded in (
-        (1, False),
-        (17, False),
-        (7, True),
-        (257, False),
-    ):
+    for rows, padded in ((1, False), (17, False), (7, True), (257, False)):
         run_correctness(rows, padded_input=padded)
     verify_fullgraph_capture()
     if args.benchmark:
