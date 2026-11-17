@@ -748,6 +748,21 @@ def setup_ascend_local_comm_res(user_device_id: int, kv_transfer_config: Any | N
     os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
+def get_config_hash(config: Any, *, cached: bool = False) -> str:
+    """Use the selected vLLM configuration hash contract.
+
+    Mutable copies, such as normalized KV cache configs, must stay uncached.
+    Remove the compute_hash branch when v0.33.0 support ends.
+    """
+    if vllm_version_is("0.33.0"):
+        return config.compute_hash()
+    # utils is imported while the out-of-tree platform is initializing.
+    # Importing vllm.config there re-enters current_platform resolution.
+    from vllm.config import utils as config_utils
+
+    return config_utils.hash_config_cached(config) if cached else config_utils.hash_config(config)
+
+
 @functools.cache
 @torch._dynamo.disable
 def vllm_version_is(target_vllm_version: str):
