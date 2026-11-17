@@ -89,6 +89,13 @@ class _NpuAll2AllManager:
         """Record the physical expert slots per EP rank."""
         self._num_local_experts = num_local_experts
 
+    def orig_to_dense_rank_table(self) -> torch.Tensor:
+        """Map each original EP rank to its densified rank (-1 for dead ranks)."""
+        table = torch.full((self._ep_world_size,), -1, dtype=torch.int32)
+        alive = sorted(set(range(self._ep_world_size)) - self._dead)
+        table[alive] = torch.arange(len(alive), dtype=torch.int32)
+        return table
+
     def _rebuild_elastic_info(self) -> None:
         """Rebuild elastic_info from the dead set into the existing device
         tensor (never reallocates, so captured graphs stay valid)."""
@@ -96,8 +103,7 @@ class _NpuAll2AllManager:
         world_size = self._ep_world_size
         alive = sorted(set(range(world_size)) - self._dead)
         num_physical_experts = len(alive) * self._num_local_experts
-        table1 = torch.full((world_size,), -1, dtype=torch.int32)
-        table1[alive] = torch.arange(len(alive), dtype=torch.int32)
+        table1 = self.orig_to_dense_rank_table()
         table2 = torch.full((world_size,), -1, dtype=torch.int32)
         table2[: len(alive)] = torch.tensor(alive, dtype=torch.int32)
         self._elastic_info_host.copy_(

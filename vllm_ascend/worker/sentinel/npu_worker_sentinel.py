@@ -19,7 +19,6 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_ma
 from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.model_executor.models.interfaces import get_mixture_of_experts_model
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.sentinel.eplb_redistribute import (
     mark_dead_expert_slots_inplace,
     redistribute_expert_placement,
@@ -37,7 +36,6 @@ from vllm_ascend.ascend_forward_context import (
 from vllm_ascend.distributed.eplb.eplb_state import refresh_model_routing_tables
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.worker.sentinel.eplb_redistribute import (
-    build_orig_to_dense_rank_table,
     densify_routing_table_physical_ids,
     reload_experts_from_disk,
 )
@@ -55,10 +53,9 @@ def fault_barrier_wrapper(func: Callable):
     On the first device-touching fault (e.g. an EP-group allreduce failing on a
     dead peer that poisons the model stream) it quarantines the worker and
     resets the device immediately, before any tensor teardown on the broken
-    stream can std::terminate the process. While quarantined, wrapped methods
-    short-circuit with an empty output so in-flight async steps drain safely
-    without re-hitting the device; retry lifts the quarantine only after the
-    groups are rebuilt.
+    stream can std::terminate the process. The fault is then raised through the
+    executor's failure channel instead of being reported as an empty success;
+    retry lifts the quarantine only after the groups are rebuilt.
     """
 
     def wrapped(self, *args, **kwargs):
@@ -66,13 +63,14 @@ def fault_barrier_wrapper(func: Callable):
         if sentinel is None:
             return func(self, *args, **kwargs)
         if sentinel.worker_faulted:
-            return EMPTY_MODEL_RUNNER_OUTPUT
+            raise RuntimeError(f"[FT] worker is quarantined after fault: {sentinel.fault_info}")
         try:
             return func(self, *args, **kwargs)
         except SystemExit:
             raise
         except Exception as exc:
             sentinel.worker_faulted = True
+            sentinel.fault_info = f"{type(exc).__name__}: {exc}"
             logger.warning(
                 "[FT] Quarantining %s after fault: %s",
                 getattr(self, "rank", "worker"),
@@ -85,7 +83,9 @@ def fault_barrier_wrapper(func: Callable):
                     "[FT] self device reset failed on %s.",
                     getattr(self, "rank", "worker"),
                 )
-            return EMPTY_MODEL_RUNNER_OUTPUT
+        # Raise outside the handler so the original traceback (which may pin
+        # device tensors of the broken stream) is released first.
+        raise RuntimeError(f"[FT] worker quarantined after fault: {sentinel.fault_info}")
 
     return wrapped
 
@@ -111,6 +111,7 @@ class WorkerSentinel(GPUWorkerSentinel):
         # Set once a device-touching method faults, to keep this worker off the
         # device until FT recovery rebuilds the groups.
         self.worker_faulted = False
+        self.fault_info: str | None = None
         _sentinel = self
 
     def query_mask(self, ft_request: FaultToleranceRequest) -> dict:
@@ -130,6 +131,7 @@ class WorkerSentinel(GPUWorkerSentinel):
         self.reset_device()
         super().retry(ft_request)
         self.worker_faulted = False
+        self.fault_info = None
 
     def init_num_local_experts(self) -> None:
         """Record the per-rank physical expert slot count after model load."""
@@ -313,15 +315,12 @@ class WorkerSentinel(GPUWorkerSentinel):
 
         The MC2 kernels consume the routing tables in the densified id space,
         so the kernel-facing values are renumbered in place after the refresh.
-        The dead set is cumulative (accumulated across recovery rounds), so it
-        is derived from the manager's mask rather than this round's ranks.
+        The mapping comes from the manager, which owns the cumulative dead set
+        used for elastic_info, so both stay on the same numbering.
         """
         p2l = eplb_model_state.physical_to_logical_map
-        ep_world_size = get_ep_group().world_size
-        num_local_experts = p2l.shape[1] // ep_world_size
-        active_mask = get_ep_all2all_manager().query_active_mask()
-        dead_ranks = {rank for rank, is_dead in enumerate(active_mask.tolist()) if is_dead}
-        orig_to_dense_rank = build_orig_to_dense_rank_table(ep_world_size, dead_ranks)
+        num_local_experts = p2l.shape[1] // get_ep_group().world_size
+        orig_to_dense_rank = get_ep_all2all_manager().orig_to_dense_rank_table()
         for layer in eplb_model_state.model.moe_layers:
             routing_table = getattr(getattr(layer, "eplb_state", None), "expert_replica_routing_table", None)
             if routing_table is not None:

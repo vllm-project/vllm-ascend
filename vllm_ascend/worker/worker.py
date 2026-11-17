@@ -509,7 +509,7 @@ class NPUWorker(WorkerBase):
                 # TP>1 relies on collective HCCL comms; disable HCCL's async
                 # error handling so it cannot abort the process out-of-band
                 # during fault-tolerance recovery.
-                os.environ["HCCL_ASYNC_ERROR_HANDLING"] = "0"
+                os.environ["TORCH_HCCL_ASYNC_ERROR_HANDLING"] = "0"
 
             abort_timeout = get_ascend_config().ft_communication_abort_timeout
             if abort_timeout > 0:
@@ -1023,8 +1023,7 @@ class NPUWorker(WorkerBase):
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         output = self.model_runner.sample_tokens(grammar_output)
         # Only the async (MRV2) path returns an AsyncOutput; re-class it so
-        # get_output is guarded by the fault barrier. A quarantined step drains
-        # as a plain ModelRunnerOutput and passes through untouched.
+        # get_output is guarded by the fault barrier.
         if self.parallel_config.enable_fault_tolerance and isinstance(output, AsyncOutput):
             output.__class__ = AscendAsyncOutput
         return output
