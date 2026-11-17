@@ -489,6 +489,15 @@ class RareDetector:
             for j, a in enumerate(r["and"]):
                 if not isinstance(a, dict) or "f" not in a:
                     raise ValueError(f'rare config rules[{i}].and[{j}] needs "f"')
+                for key in ("lt", "gt"):
+                    if key not in a:
+                        continue
+                    # bool is a subclass of int; reject it explicitly.
+                    thr = a[key]
+                    if isinstance(thr, bool) or not isinstance(thr, (int, float)):
+                        raise ValueError(
+                            f'rare config rules[{i}].and[{j}].{key} must be a number'
+                        )
         self.rules = rules
         self.need = needs(self.rules)
         self.compiled = [compile_rule(r) for r in self.rules]

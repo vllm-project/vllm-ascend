@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -115,3 +116,94 @@ def test_json_bad_atom():
     }
     with pytest.raises(ValueError, match='needs "f"'):
         RareDetector(key, cfg, think_end=None)
+
+
+def test_json_thr_must_be_number():
+    key = register_rare_table("ut_json_thr", build_from_token_bytes([b"a"]))
+    cfg = {
+        "gate": "fs",
+        "ref": "cats",
+        "gb": "rare_gb.npz",
+        "rules": [{"and": [{"f": "lpc", "lt": "nope"}]}],
+    }
+    with pytest.raises(ValueError, match="must be a number"):
+        RareDetector(key, cfg, think_end=None)
+
+
+def test_json_bool_thr_rejected():
+    key = register_rare_table("ut_json_bool_thr", build_from_token_bytes([b"a"]))
+    cfg = {
+        "gate": "fs",
+        "ref": "cats",
+        "gb": "rare_gb.npz",
+        "rules": [{"and": [{"f": "lpc", "lt": True}]}],
+    }
+    with pytest.raises(ValueError, match="must be a number"):
+        RareDetector(key, cfg, think_end=None)
+
+
+def test_gb_load_bad_shape(tmp_path: Path):
+    p = tmp_path / "shape.npz"
+    np.savez(
+        p,
+        depth=np.array(2),
+        feat=np.zeros((1, 2), np.int64),  # depth=2 needs 3 internal nodes
+        thr=np.zeros((1, 2), np.float64),
+        cat=np.zeros((1, 2), bool),
+        mask=np.zeros((1, 2), np.int64),
+        leaf=np.zeros((1, 4), np.float64),
+        base=np.array(0.0),
+        inputs=np.array(["lp1"]),
+    )
+    with pytest.raises(ValueError, match="feat shape"):
+        GB.load(str(p))
+
+
+def test_package_data_ships_rare_gb_npz():
+    """Wheel package_data must match tables/*.npz (not *.npy)."""
+    from pathlib import Path
+
+    setup = Path(__file__).resolve().parents[3] / "setup.py"
+    text = setup.read_text(encoding="utf-8")
+    assert '"tables/*.npz"' in text
+    assert '"tables/*.npy"' not in text
+    tables = Path(__file__).resolve().parents[3] / ("vllm_ascend/observability/runtime_guard/detector/rare/tables")
+    assert list(tables.glob("*.npz")), "rare_gb.npz missing from source tree"
+
+
+def test_repo_path_strips_parent_dirs(tmp_path: Path, monkeypatch):
+    """Relative gb paths are basename-only under package tables/ (no traversal)."""
+    from vllm_ascend.observability.runtime_guard.detector.rare import rare as rare_mod
+
+    # Traversal-looking relative path must resolve under tables/<basename>.
+    got = rare_mod._repo_path("../../etc/passwd")
+    assert got.endswith(os.path.join("tables", "passwd")) or got.endswith("tables/passwd")
+    assert "etc" not in Path(got).parts[-2:]
+
+
+def test_native_gb_score_aligns_numpy_gate():
+    """Native batch vs numpy RareDetector on a short stream (exact reason/fired_at)."""
+    _require_native()
+    det = _det()
+    # Mix: normal ascii, bad utf-8 lead, short word.
+    toks = np.array([0, 1, 2, 3, 0], np.int64)
+    top1 = np.array([-1.0, -3.0, -0.1, -5.0, -2.0], np.float64)
+    chosen = np.array([-1.2, -4.0, -0.2, -6.0, -2.5], np.float64)
+    st = det.start()
+    batch = RareRowBatch(det)
+    row = batch.add()
+    for i in range(len(toks)):
+        det.feed(st, toks[i : i + 1], top1[i : i + 1], chosen[i : i + 1])
+        batch.feed_rows(np.array([row]), toks[i : i + 1], top1[i : i + 1], chosen[i : i + 1])
+        br, sr = batch.strict_at(row), st.result
+        assert (br is None) == (sr is None)
+        if br is not None:
+            assert (br.is_ill, br.fired_at, br.reason) == (sr.is_ill, sr.fired_at, sr.reason)
+        bm, sm = batch.monitor_at(row), det.monitor(st)
+        assert (bm.is_ill, bm.fired_at, bm.reason) == (sm.is_ill, sm.fired_at, sm.reason)
+    det.finish(st)
+    batch.finish_row(row)
+    br, sr = batch.strict_at(row), st.result
+    assert (br is None) == (sr is None)
+    if br is not None:
+        assert (br.is_ill, br.fired_at, br.reason) == (sr.is_ill, sr.fired_at, sr.reason)
