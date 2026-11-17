@@ -379,7 +379,6 @@ def test_topk_2048_speculative_union_graph(query_rows, hot_size, cross_stream, d
             sc,
             resident,
             block,
-            None,
         )
         ops.hisparse_gather_compact(host, hot, sh, sd, sc)
 
