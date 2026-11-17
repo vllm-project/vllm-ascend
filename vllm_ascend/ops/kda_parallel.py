@@ -58,6 +58,9 @@ class KDAMergedColumnParallelLinear(MergedColumnParallelLinear, KDAColumnParalle
         self.output_sizes = output_sizes.copy()
         # Keep the merged checkpoint loaders, but allocate with explicit ranks.
         KDAColumnParallelLinear.__init__(self, input_size, sum(self.output_sizes), **kwargs)
+        # vLLM #63752: custom allocation bypasses the stacked initializer.
+        self.shard_ids = tuple(range(len(self.output_sizes)))
+        self.loaded_shard_ids: dict[str, set[str | int]] = {}
 
 
 class KDAInputParallelLinear(_KimiGDNMergedColumnParallelLinear, KDAMergedColumnParallelLinear):

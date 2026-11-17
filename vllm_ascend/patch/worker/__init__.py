@@ -66,6 +66,7 @@ import vllm_ascend.patch.worker.patch_uva  # noqa
 import vllm_ascend.patch.worker.patch_input_batch  # noqa
 import vllm_ascend.patch.worker.patch_model_state  # noqa
 import vllm_ascend.patch.worker.patch_block_table  # noqa
+import vllm_ascend.patch.worker.patch_staged_writes  # noqa
 import vllm_ascend.patch.worker.patch_attn_utils  # noqa
 import vllm_ascend.patch.worker.patch_model_runner  # noqa
 
@@ -87,6 +88,10 @@ if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKE
     )
 
     _ar_spec.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager310
+    if not vllm_version_is("0.33.0"):
+        from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as _shared_ar_spec
+
+        _shared_ar_spec.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager310
 
 # only patch routed experts capture in main2main.
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa

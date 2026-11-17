@@ -320,7 +320,7 @@ cd Mooncake
 sed -i 's|https://go.dev/dl/|https://golang.google.cn/dl/|g' dependencies.sh
 ```
 
-Install mpi
+Install MPI
 
 ```shell
 apt-get install mpich libmpich-dev -y
@@ -504,7 +504,7 @@ On Ascend NPU, Mooncake uses AscendDirectTransport for RDMA data transfer, which
 
 ### launch_online_dp.py
 
-Use `launch_online_dp.py` to launch external dp vllm servers.
+Use `launch_online_dp.py` to launch external dp vLLM servers.
 [launch_online_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
 
 ### run_dp_template.sh
@@ -1227,9 +1227,9 @@ Run a proxy server on the same node where your prefiller service instance is dep
 
 We provide two different proxy implementations with distinct request routing behaviors:
 
-- **`load_balance_proxy_layerwise_server_example.py`**: Requests are first routed to the D nodes, which then forward to the P nodes as needed.This proxy is designed for use with the MooncakeLayerwiseConnector.[load\_balance\_proxy\_layerwise\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py)
+- **`load_balance_proxy_layerwise_server_example.py`**: Requests are first routed to the D nodes, which then forward to the P nodes as needed. This proxy is designed for use with the MooncakeLayerwiseConnector.[load\_balance\_proxy\_layerwise\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py)
 
-- **`load_balance_proxy_server_example.py`**: Requests are first routed to the P nodes, which then forward to the D nodes for subsequent processing.This proxy is designed for use with the MooncakeConnector.[load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
+- **`load_balance_proxy_server_example.py`**: Requests are first routed to the P nodes, which then forward to the D nodes for subsequent processing. This proxy is designed for use with the MooncakeConnector.[load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
 === "Layerwise"
 
@@ -1348,11 +1348,11 @@ Both proxies share the following backend options.
 
     The proxy scripts validate that each host list has the same length as its corresponding port list.
 
-You can get the proxy program in the repository's examples, [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
+You can get the proxy program in the repository's examples, [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py).
 
 ## Benchmark
 
-We recommend use aisbench tool to assess performance. [aisbench](https://github.com/AISBench/benchmark) Execute the following commands to install aisbench
+We recommend use aisbench tool to assess performance. [aisbench](https://github.com/AISBench/benchmark) Execute the following commands to install aisbench.
 
 ```shell
 git clone https://github.com/AISBench/benchmark.git
@@ -1360,7 +1360,7 @@ cd benchmark/
 pip3 install -e ./
 ```
 
-You need to cancel the http proxy before assessing performance, as following
+You need to cancel the http proxy before assessing performance, as following:
 
 ```shell
 # unset proxy
@@ -1369,7 +1369,7 @@ unset https_proxy
 ```
 
 - You can place your datasets in the dir: `benchmark/ais_bench/datasets`
-- You can change the configuration in the dir :`benchmark/ais_bench/benchmark/configs/models/vllm_api` Take the `vllm_api_stream_chat.py` for example
+- You can change the configuration in the dir:`benchmark/ais_bench/benchmark/configs/models/vllm_api`. Take the `vllm_api_stream_chat.py` for example
 
 ```python
 models = [
@@ -1401,7 +1401,7 @@ models = [
 ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf  --debug  --mode perf
 ```
 
-- For more details for commands and parameters for aisbench, refer to  [aisbench](https://github.com/AISBench/benchmark)
+- For more details for commands and parameters for aisbench, refer to [aisbench](https://github.com/AISBench/benchmark).
 
 ## FAQ
 
