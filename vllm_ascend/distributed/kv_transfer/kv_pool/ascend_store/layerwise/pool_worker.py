@@ -805,8 +805,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         cached_tokens: int,
         block_hashes: Sequence[BlockHash],
     ) -> tuple[int, Callable[[int], str | None]] | None:
-        reused_groups = getattr(self, "_reused_layers_by_group", None)
-        if reused_groups is not None and group_id not in reused_groups:
+        if group_id not in self._reused_layers_by_group:
             # Resident pages remain available for the running request.
             return None
 
@@ -1264,23 +1263,24 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         missing: set[str] = set()
         for key_batch in self._layerwise_key_batches(unique_keys):
             try:
-                states = self.m_store.batch_is_exist(key_batch)
+                states = [int(state) for state in self.m_store.batch_is_exist(key_batch)]
                 if len(states) != len(key_batch):
                     raise RuntimeError(
                         "MemCache exists check returned unexpected number of states: "
                         f"expected={len(key_batch)}, actual={len(states)}"
                     )
-                missing.update(
-                    key for key, state in zip(key_batch, states) if int(state) == 0 or (fail_open and int(state) != 1)
-                )
+                if not fail_open and any(state not in (0, 1) for state in states):
+                    raise RuntimeError("Memcache exists check returned an invalid state")
+                missing.update(key for key, state in zip(key_batch, states, strict=True) if state != 1)
             except Exception as exc:
+                if not fail_open:
+                    raise
                 logger.error(
                     "Pool exists check failed keys=%d error=%s",
                     len(key_batch),
                     exc,
                 )
-                if fail_open:
-                    missing.update(key_batch)
+                missing.update(key_batch)
         return missing
 
     def _alloc_gvas_for_save(self, requests: list[ReqMeta]) -> None:
@@ -1288,7 +1288,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             return
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
             return
-        public_allocated: set[str] = set()
+        public_allocated: set[str] | None = set() if self.layerwise_offload else None
         for request in requests:
             if self._save_disabled.is_set():
                 break
@@ -1310,7 +1310,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 request.save_keys = []
 
     def _alloc_gvas_for_save_for_request(
-        self, requests: list[ReqMeta], public_allocated: set[str] | None = None
+        self, requests: list[ReqMeta], public_allocated: set[str] | None
     ) -> bool | None:
         """Allocate per-group GVA on the worker side right before batch_copy.
 
@@ -1328,8 +1328,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             return None
         if not self.can_put:
             return None
-        if public_allocated is None:
-            public_allocated = set()
         for request in requests:
             if request.can_save is None or not request.can_save:
                 continue
@@ -1401,7 +1399,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     else:
                         block_hash = block_hash_to_str(group_block_hashes[block_idx])
                         key = self._make_layerwise_full_key(group_id, block_hash)
-                        candidate_public_keys.add(key)
+                        if public_allocated is not None:
+                            candidate_public_keys.add(key)
                     candidate_keys.append(key)
                 partial_key = None
                 if keep_snapshot and partial_block_index is not None and partial_block_index < len(block_ids_by_group):
@@ -1426,13 +1425,22 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 # is medium-agnostic on purpose: a committed block (DRAM or
                 # SSD) does not need re-saving, and the load path rewarms
                 # SSD blocks on read.
-                if self.layerwise_offload:
+                if public_allocated is not None:
                     private_keys = [key for key in candidate_keys if key not in candidate_public_keys]
                     missing_keys = self._pool_keys_missing(private_keys)
-                    missing_keys.update(self._pool_keys_missing(list(candidate_public_keys), fail_open=False))
+                    try:
+                        missing_keys.update(self._pool_keys_missing(list(candidate_public_keys), fail_open=False))
+                    except Exception as exc:
+                        logger.error(
+                            "Public KV exists check failed: req=%s group=%d error=%s",
+                            request.req_id,
+                            group_id,
+                            exc,
+                        )
+                        return False
+                    missing_keys.difference_update(public_allocated)
                 else:
                     missing_keys = self._pool_keys_missing(candidate_keys)
-                missing_keys.difference_update(public_allocated)
                 transfer_blocks = [
                     block_idx for block_idx, key in zip(candidate_blocks, candidate_keys) if key in missing_keys
                 ]
@@ -1465,7 +1473,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     for key, gva in zip(transfer_keys, block_gvas):
                         if gva > 0:
                             all_group_save_keys.append(key)
-                            if key in candidate_public_keys:
+                            if public_allocated is not None and key in candidate_public_keys:
                                 public_allocated.add(key)
                     if self.layerwise_offload and any(gva <= 0 for gva in transfer_gvas):
                         return False
@@ -1813,10 +1821,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         )
         return partial_block_index, cached_tokens
 
-    def _prepare_load_gvas(self, requests: list[ReqMeta]) -> None:
-        self._prepare_load_gvas_for_request(requests)
-
-    def _prepare_load_gvas_for_request(self, requests: list[ReqMeta]) -> bool | None:
+    def _prepare_load_gvas(self, requests: list[ReqMeta]) -> bool | None:
         if not self.use_layerwise_transfer:
             return None
 

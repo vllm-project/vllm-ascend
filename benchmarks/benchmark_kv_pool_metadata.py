@@ -173,7 +173,7 @@ class LeaseCase:
         self.worker._step_load_keys.clear()
 
     def run(self) -> Any:
-        return self.worker._prepare_load_gvas_for_request([self.request])
+        return self.worker._prepare_load_gvas([self.request])
 
     def verify(self, result: Any) -> dict[str, Any]:
         import numpy as np
