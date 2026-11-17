@@ -121,11 +121,11 @@ def runner_pcp_rank(runner: Any) -> int:
             val = getattr(pcp_manager, "pcp_rank", None)
             if val is not None:
                 return int(val)
-    except (TypeError, ValueError, AttributeError):
+    except Exception:
         pass
     try:
         return int(getattr(runner, "pcp_rank", 0) or 0)
-    except (TypeError, ValueError):
+    except Exception:
         return 0
 
 
