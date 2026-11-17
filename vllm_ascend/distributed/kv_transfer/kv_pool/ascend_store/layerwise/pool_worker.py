@@ -487,6 +487,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self.kv_recv_thread.external_slot_release_waiter = waiter
         return True
 
+    def _final_layer_for_transfer(self, num_layers: int) -> int:
+        if getattr(self, "use_kvpp", False) and self.use_layerwise_transfer and self.physical_layer_to_group_layers:
+            return max(self.physical_layer_to_group_layers)
+        return num_layers - 1
+
     def _start_kv_transfer_threads(self) -> None:
         if self.use_layerwise_transfer:
             self.m_store.ensure_initialized()
@@ -497,6 +502,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self.layer_save_tasks = [[] for _ in range(self.num_layers)]
         if self._transfer_threads_started:
             return
+        final_layer_id = self._final_layer_for_transfer(self.num_layers)
         self.get_event = threading.Event()
         self.layer_load_finished_events = [threading.Event() for i in range(self.num_layers)]
         self.layer_save_finished_events = [threading.Event() for i in range(self.num_layers)]
@@ -526,6 +532,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 invalid_block_ids=self._invalid_block_ids,
                 invalid_block_ids_lock=self._invalid_block_ids_lock,
             )
+            self.kv_send_thread.final_layer_id = final_layer_id
             self.kv_send_thread.start()
             ready_event_sending.wait()
         elif self.can_put:
@@ -591,6 +598,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.kv_recv_thread.save_disabled = self._save_disabled
         if self.kv_send_thread is not None:
             self.kv_send_thread.save_disabled = self._save_disabled
+        self.kv_recv_thread.final_layer_id = final_layer_id
         self.kv_recv_thread.start()
         ready_event.wait()
         self._transfer_threads_started = True
@@ -748,8 +756,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     return []
                 raise RuntimeError(f"Mooncake layerwise: no KV cache group for local layer {local_layer}")
             return [(group_id, layer_idx) for group_id, layer_idx in groups if group_id in self.cacheable_group_ids]
-        # GVA groups use stage-local indices too; PP offsets apply to pool keys and remote addresses.
-        return self.physical_layer_to_group_layers.get(local_layer, [(0, local_layer)])
+        # GVA maps use stage-local layers; a KVPP owner has no rows for other layers.
+        return self.physical_layer_to_group_layers.get(
+            local_layer, [] if getattr(self, "use_kvpp", False) else [(0, local_layer)]
+        )
 
     def _masked_block_runs_cached(
         self,
@@ -2404,6 +2414,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         """Keep layerwise source buffers alive until the step's last PUT commits."""
         assert self.layer_save_finished_events is not None
         save_finished_events = self.layer_save_finished_events
+        final_layer_id = self._final_layer_for_transfer(num_local)
         # The final layer may have no save task while earlier layers still copy.
         # Drain pending saves before clearing or reusing completion events.
         queue = send_thread.request_queue
@@ -2415,9 +2426,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 waited_s += 1
                 if waited_s % 60 == 0:
                     logger.info("Layerwise save drain still waiting on %d queued PUT(s)", queue.unfinished_tasks)
-        while not save_finished_events[num_local - 1].wait(timeout=10):
+        while not save_finished_events[final_layer_id].wait(timeout=10):
             send_thread.raise_if_failed()
-            logger.info("Layerwise %d save not done, keep waiting", num_local - 1)
+            logger.info("Layerwise %d save not done, keep waiting", final_layer_id)
         send_thread.raise_if_failed()
         if self.block_key_hybrid:
             # An empty final layer signals completion without waiting for PUTs

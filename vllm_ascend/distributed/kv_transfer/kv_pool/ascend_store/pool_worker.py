@@ -382,6 +382,8 @@ class BaseKVPoolWorker(ABC):
 
     def _group_pp_byte_offset(self, group_id: int) -> int:
         """Keep GVA allocation and transfer origins on the same PP layout."""
+        if getattr(self, "use_kvpp", False) and getattr(self, "use_layerwise_transfer", False):
+            return 0
         if getattr(self, "pp_size", 1) == 1 or getattr(self, "use_block_key_layerwise", False):
             return 0
         block_lens = self.group_block_len.get(group_id) or []
@@ -565,6 +567,9 @@ class BaseKVPoolWorker(ABC):
         gbl = self.group_block_len.get(group_id) or []
         if not gbl:
             return self.page_size_bytes
+        if getattr(self, "use_kvpp", False) and getattr(self, "use_layerwise_transfer", False):
+            # KVPP owner and PP stage are already separated by the object key.
+            return sum(gbl)
         # Backward compatibility: when total_layers is not set (unit tests,
         # partial init), fall back to the LOCAL sum (pre-PP behavior).
         total_layers = getattr(self, "total_layers", None)

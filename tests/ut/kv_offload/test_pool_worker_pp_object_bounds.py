@@ -8,7 +8,7 @@ import pytest
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 
 
-def _worker(layer_entries, offset=42, total_layers=78, dcp_size=1, dcp_rank=0, block_key=False):
+def _worker(layer_entries, offset=42, total_layers=78, dcp_size=1, dcp_rank=0, block_key=False, kvpp=False):
     worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
     worker.pp_size = 2
     worker.pp_rank = int(offset > 0)
@@ -19,6 +19,7 @@ def _worker(layer_entries, offset=42, total_layers=78, dcp_size=1, dcp_rank=0, b
     worker.num_kv_cache_groups = 1
     worker.use_layerwise_transfer = not block_key
     worker.use_block_key_layerwise = block_key
+    worker.use_kvpp = kvpp
     worker.dcp_size = dcp_size
     worker.dcp_rank = dcp_rank
     worker.put_step = 8 if dcp_size > 1 else 1
@@ -34,6 +35,50 @@ def _worker(layer_entries, offset=42, total_layers=78, dcp_size=1, dcp_rank=0, b
     worker.token_database = worker
     worker.page_size_bytes = sum(flat)
     return worker
+
+
+@pytest.mark.parametrize("rank", range(16))
+@pytest.mark.parametrize("offset", [0, 42])
+@pytest.mark.parametrize("block_id", [0, 1])
+def test_kvpp_gva_uses_owner_indices_and_payload(rank, offset, block_id):
+    count = 4 + int(rank < 14)
+    first = rank * 4 + min(rank, 14)
+    entries = [[4096, 8192] for _ in range(count)]
+    worker = _worker(entries, offset=offset, total_layers=156, kvpp=True)
+    worker.num_layers = 78
+    worker.physical_layer_to_group_layers = {layer: [(0, i)] for i, layer in enumerate(range(first, first + count))}
+    builder = worker._build_group_layer_builders()[0]
+    allocated = worker._global_group_alloc_size(0)
+    assert allocated == count * 12288
+    assert builder.layer_byte_offset == 0
+    assert worker._final_layer_for_transfer(78) == first + count - 1
+
+    base = 1_000_000_000
+    copied_bytes = 0
+    for layer in range(78):
+        groups = worker._groups_for_layerwise_transfer(layer)
+        if not first <= layer < first + count:
+            assert groups == []
+            continue
+        assert groups == [(0, layer - first)]
+        _, dense = groups[0]
+        addrs, sizes, gvas = builder._build_transfer_arrays(np.array([block_id]), np.array([base]), dense)
+        start = dense * 2
+        assert addrs.tolist() == [
+            worker.group_kv_caches_base_addr[0][start + i] + block_id * worker.group_block_stride[0][start + i]
+            for i in range(2)
+        ]
+        assert gvas.tolist() == [base + dense * 12288, base + dense * 12288 + 4096]
+        assert np.all(gvas + sizes <= base + allocated)
+        copied_bytes += int(sizes.sum())
+    assert copied_bytes == allocated
+
+
+def test_non_kvpp_gva_keeps_layer_fallback_and_completion():
+    worker = _worker([[4096, 8192]], offset=0)
+    worker.physical_layer_to_group_layers = {}
+    assert worker._groups_for_layerwise_transfer(7) == [(0, 7)]
+    assert worker._final_layer_for_transfer(8) == 7
 
 
 @pytest.mark.parametrize(
