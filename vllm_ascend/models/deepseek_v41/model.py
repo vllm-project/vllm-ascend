@@ -1173,7 +1173,41 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 # ForwardContext, following the same pattern as Ascend DSA ops.
                 static_forward_context[self.decoder_replay_layer_name] = self.decoder_replay_layers
 
+            self._init_routing_input_ids_cache(vllm_config)
             rollback.pop_all()
+
+    def _init_routing_input_ids_cache(self, vllm_config: VllmConfig) -> None:
+        parallel = vllm_config.parallel_config
+        if parallel.use_ubatching:
+            # Concurrent microbatches cannot share one routing-ID buffer.
+            return
+        max_tokens = max(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            vllm_config.compilation_config.max_cudagraph_capture_size or 0,
+        )
+        tp_size = parallel.tensor_parallel_size
+        max_rows = (
+            ((max_tokens + tp_size - 1) // tp_size)
+            * tp_size
+            * parallel.data_parallel_size
+            * parallel.prefill_context_parallel_size
+        )
+        # The decoder replay tail may compact tokens and change cross-DP row
+        # counts. Each segment therefore needs its own producer and storage.
+        for start, end in (
+            (self.start_layer, self.decoder_replay_start),
+            (self.decoder_replay_start, self.end_layer),
+        ):
+            buffer = None
+            for layer in self.layers[start:end]:
+                router = layer.mlp.experts.router
+                if router.tid2eid is None and router.bias_vl is None:
+                    continue
+                if buffer is None:
+                    buffer = torch.empty(max_rows, dtype=torch.int64, device=self.device)
+                    self.register_buffer(f"routing_input_ids_{start}", buffer, persistent=False)
+                    router.is_routing_input_ids_producer = True
+                router.routing_input_ids_buffer = buffer
 
     def _make_empty_intermediate_tensors(self, batch_size, dtype, device):
         return IntermediateTensors(

@@ -69,6 +69,8 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_ec_cpu_offload.py: 1200
   tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 360
   tests/e2e/pull_request/one_card/test_decoder_replay.py: 60
+  # Initial estimate for graph capture/replay with two input-ID dtypes.
+  tests/e2e/pull_request/one_card/test_routing_ids_graph_refresh.py: 60
   tests/e2e/pull_request/one_card/test_fla_lazy_imports.py: 60
   tests/e2e/pull_request/one_card/test_gdn_block_packed_states.py: 60
   tests/e2e/pull_request/one_card/test_gdn_checkpoint_states.py: 600
