@@ -16,6 +16,17 @@ from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 
 
+def test_fused_swa_cache_store_rejects_pcp_global_metadata(monkeypatch):
+    profile = SimpleNamespace(supports=lambda _capability: True)
+    monkeypatch.setattr(dsa_v41, "HAS_TRITON", True)
+    monkeypatch.setattr(dsa_v41, "get_current_hardware_profile", lambda: profile)
+
+    attn = SimpleNamespace(packed_cache_ops=None)
+    metadata = SimpleNamespace(global_metadata=object())
+
+    assert not dsa_v41.AscendDSAV41Impl._can_fuse_swa_cache(attn, metadata, None, None, None)
+
+
 def test_fused_swa_cache_store_consumes_raw_projection(monkeypatch):
     projected = torch.randn(3, 512, dtype=torch.bfloat16)
     weight = torch.randn(512, dtype=torch.bfloat16)

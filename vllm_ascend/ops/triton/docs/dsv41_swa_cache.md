@@ -44,9 +44,10 @@ compatible, the RMSNorm has no loaded bias, and the batch contains at most
 8192 rows. The supported DeepSeek-V4.1 head width is 512 with an even,
 non-empty rotary suffix.
 
-A3, A5 packed caches, larger batches, other dtypes/layouts, and unsupported
-devices retain the original RMSNorm, partial RoPE, and cache-scatter chain.
-Long KV, C1/C2 compressor, and indexer cache writes do not call this operator.
+A3, replicated PCP cache writes that require a global row gather, A5 packed
+caches, larger batches, other dtypes/layouts, and unsupported devices retain
+the original RMSNorm, partial RoPE, and cache-scatter chain. Long KV, C1/C2
+compressor, and indexer cache writes do not call this operator.
 
 ## Validation
 

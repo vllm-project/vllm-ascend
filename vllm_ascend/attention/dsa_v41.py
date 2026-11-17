@@ -410,6 +410,8 @@ class AscendDSAV41Impl:
         """Whether the A2 (910B) Triton store exactly matches this SWA layout."""
         if not HAS_TRITON or not get_current_hardware_profile().supports(HardwareCapability.DSV41_SWA_CACHE_FUSION):
             return False
+        # Replicated PCP writes must pass through ``_write_swa_cache`` so the
+        # subclass can gather local rows before publishing the global cache.
         if (
             getattr(attn, "packed_cache_ops", None) is not None
             or getattr(metadata, "global_metadata", None) is not None
