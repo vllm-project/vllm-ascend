@@ -70,13 +70,14 @@ def test_unsynchronized_allocation_failure_does_not_fallback(failure_type):
     method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "_allocate_weights")
     method.returns = None
     wrapper = ast.parse("class Candidate:\n    pass\n").body[0]
+    assert isinstance(wrapper, ast.ClassDef)
     wrapper.body = [method]
     failure = failure_type("injected failure")
 
     def fail(*args, **kwargs):
         raise failure
 
-    scope = {
+    scope: dict[str, Any] = {
         "torch": SimpleNamespace(
             device=lambda *_: object(), npu=SimpleNamespace(current_device=lambda: 0), bfloat16=object()
         ),
@@ -103,6 +104,7 @@ def test_synchronized_allocation_failure_falls_back_to_registered_storage():
     method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "_allocate_weights")
     method.returns = None
     wrapper = ast.parse("class Candidate:\n    pass\n").body[0]
+    assert isinstance(wrapper, ast.ClassDef)
     wrapper.body = [method]
     allocations = []
 
@@ -114,7 +116,7 @@ def test_synchronized_allocation_failure_falls_back_to_registered_storage():
         allocations.append(buffer)
         return buffer
 
-    scope = {
+    scope: dict[str, Any] = {
         "torch": SimpleNamespace(
             device=lambda *_: object(), npu=SimpleNamespace(current_device=lambda: 0), bfloat16=object()
         ),
@@ -228,7 +230,7 @@ def test_failed_model_rollback_retains_all_remaining_vmm_buffers():
 
 
 def test_synchronized_release_failure_attempts_remaining_tables():
-    calls = []
+    calls: list[str] = []
     first, last = Table("first", calls), Table("last", calls)
 
     def fail():
