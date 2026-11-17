@@ -1,6 +1,5 @@
 pr: 22013
 entries:
   - category: performance
-    text: Reduced long-context single-query decode latency for GLM-5.3-Flash on A3 with wider BF16 KeyPoolIndexer pages.
+    text: Use wider BF16 KeyPoolIndexer pages for eligible GLM-5.3-Flash single-query decode.
     model: glm-5.3-flash
-    hardware: [A3]

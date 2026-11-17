@@ -56,8 +56,7 @@ def _prepare_nonempty_keypool_inputs_kernel(
         if TABLE_STRIDE == 1:
             value = tl.load(table + offsets, offsets < table_rows * TABLE_COLS, other=0)
         else:
-            # Load contiguous tiles so A3 can gather the first ID of each
-            # group from on-chip memory.
+            # Load contiguous tiles and gather the first page ID of each group on chip.
             source_offsets = block * TABLE_BLOCK * TABLE_STRIDE + tl.arange(0, TABLE_LOAD_BLOCK)
             source = tl.load(table + source_offsets, source_offsets < table_rows * TABLE_COLS * TABLE_STRIDE, other=0)
             indices = tl.arange(0, TABLE_BLOCK) * TABLE_STRIDE
@@ -71,9 +70,8 @@ def prepare_nonempty_keypool_inputs(query, weights, ends, lengths, tails, table,
 
     Allocate outputs per invocation so independently captured graphs and layers
     cannot alias a mutable workspace. Graph replay reuses captured allocations.
-    Contiguous inputs use a single vector-copy launch. Normalize strided views
-    first to avoid scalar gather lowering on A3; contiguous() is a no-op on the
-    ordinary backend inputs. All operator inputs returned here are contiguous.
+    Fuse table compaction with the sentinel writes. Normalize strided inputs
+    ahead of the launch to avoid scalar gathers. All returned inputs are contiguous.
     """
     tokens, heads, dim = query.shape
     requests = ends.numel()

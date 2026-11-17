@@ -667,12 +667,12 @@ def _config():
     )
 
 
-def _builder(config):
+def _builder(config, dtype=torch.bfloat16):
     spec = AscendMLAAttentionSpec(
         block_size=config.cache_config.block_size,
         num_kv_heads=1,
         head_size=128,
-        dtype=torch.bfloat16,
+        dtype=dtype,
         model_version="glm5_next",
         **_ratio_kwargs(4),
     )
@@ -701,18 +701,25 @@ def _common():
 
 
 @pytest.mark.parametrize(
-    ("block_size", "max_query_len", "expected_stride"), [(512, 1, 4), (1152, 1, 3), (640, 1, 1), (1152, 6, 1)]
+    ("block_size", "max_query_len", "dtype", "expected_stride"),
+    [
+        (512, 1, torch.bfloat16, 4),
+        (1152, 1, torch.bfloat16, 3),
+        (640, 1, torch.bfloat16, 1),
+        (1152, 6, torch.bfloat16, 1),
+        (1152, 1, torch.float8_e4m3fn, 1),
+    ],
 )
-def test_a3_indexer_wide_pages_respect_block_geometry_and_query_width(block_size, max_query_len, expected_stride):
+def test_indexer_wide_pages_require_aligned_bf16_single_query_scoring(
+    block_size, max_query_len, dtype, expected_stride
+):
     config = _config()
     config.cache_config.block_size = block_size
     config.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
     common = _common()
     common.max_query_len = max_query_len
     common.block_table_tensor = torch.arange(2 * (block_size // 128), dtype=torch.int32).view(2, -1)
-    with patch("vllm_ascend.attention.indexer_kpool.get_current_hardware_profile") as profile:
-        profile.return_value.supports.return_value = True
-        metadata = _builder(config).build(0, common)
+    metadata = _builder(config, dtype).build(0, common)
     assert metadata.scoring_block_table_stride == expected_stride
     assert metadata.block_table.data_ptr() == common.block_table_tensor.data_ptr()
 

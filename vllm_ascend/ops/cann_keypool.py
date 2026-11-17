@@ -50,8 +50,7 @@ def pool_key_indexer_nonempty(
 ):
     """Keep CANN's TND indexer out of its unsafe zero-work paths.
 
-    Short request histories can have queries but no completed pool. On A3 the
-    zero-work kernel initializes B*T output rows although TND only allocates T.
+    Short request histories can have queries before the first pool completes.
     A trailing dummy request guarantees work, including fully padded replay.
     Empty real histories use one physical pool; index packing discards these
     candidates using the original positions, so they cannot enter attention.

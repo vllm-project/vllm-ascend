@@ -309,7 +309,6 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             and kv_cache_spec.dtype == torch.bfloat16
             and compress_ratio == 4
             and vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL
-            and get_current_hardware_profile().supports(HardwareCapability.POOL_KEY_INDEXER_WIDE_PAGES)
         ):
             self.scoring_block_table_stride = scoring_block_size // GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE
         scheduler_config = vllm_config.scheduler_config
@@ -536,8 +535,6 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             self.compress_ratio,
         )
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
-        # A3's large pages help single-query scoring. Multi-query prefill and
-        # speculative verification keep the smaller pages.
         table_stride = (
             self.scoring_block_table_stride
             if self.scoring_block_table_stride > 1
