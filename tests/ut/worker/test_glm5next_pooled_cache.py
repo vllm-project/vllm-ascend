@@ -10,10 +10,9 @@ import torch
 from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_interface import (
-    AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     requires_padded_page_layout,
 )
@@ -50,6 +49,10 @@ class _AttentionBackend:
 
 class _StateBackend:
     @staticmethod
+    def get_name():
+        return "ASCEND_INDEXER_KPOOL_TAIL"
+
+    @staticmethod
     def get_kv_cache_shape(
         num_blocks,
         block_size,
@@ -57,7 +60,7 @@ class _StateBackend:
         head_size,
         **_kwargs,
     ):
-        return num_blocks, block_size, 2 * head_size
+        return num_blocks, block_size, head_size
 
 
 def _make_config():
@@ -103,16 +106,8 @@ def _make_specs(main_head_size=4):
             indexes_kv_by_block_stride=True,
             **_ratio_kwargs(2),
         ),
-        STATE: AscendIndexerKPoolTailSpec(
-            block_size=2,
-            ring_capacity=2,
-            sliding_window=2,
-            compress_ratio=2,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.float32,
-            model_version="glm5_next",
-            indexes_kv_by_block_stride=True,
+        STATE: CircularBufferSpec(
+            dcp_sharded=False, block_size=2, num_kv_heads=1, head_size=2, dtype=torch.float32, head_size_v=0
         ),
         MAMBA: MambaSpec(
             block_size=8,
@@ -148,6 +143,8 @@ def v2_glm_cache_plan(request, monkeypatch):
                     spec,
                     kv_cache_specs={
                         name: replace(layer_spec, model_version=None)
+                        if isinstance(layer_spec, AscendMLAAttentionSpec)
+                        else layer_spec
                         for name, layer_spec in spec.kv_cache_specs.items()
                     },
                 )
@@ -273,7 +270,7 @@ def test_cann_tail_views_keep_interleaved_rows_and_shared_page_stride(monkeypatc
     monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
     raw_caches = attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
-    spec = replace(_make_specs()[STATE], head_size=2)
+    spec = replace(_make_specs()[STATE], head_size=4)
     plan.kv_cache_groups = [KVCacheGroupSpec(layer_names=[STATE], kv_cache_spec=spec)]
     raw = raw_caches[STATE]
     expected = view_kpool_tail_cache(STATE, spec, raw, plan.num_blocks)
@@ -293,15 +290,14 @@ def test_cann_tail_views_keep_interleaved_rows_and_shared_page_stride(monkeypatc
 
 
 def test_speculative_tail_view_preserves_all_nine_physical_rows():
-    spec = AscendIndexerKPoolTailSpec(
-        block_size=4,
-        ring_capacity=9,
-        sliding_window=4,
-        compress_ratio=4,
+    spec = CircularBufferSpec(
+        dcp_sharded=False,
+        block_size=9,
         num_kv_heads=1,
-        head_size=2,
+        head_size=4,
         dtype=torch.float32,
         page_size_padded=256,
+        head_size_v=0,
     )
     raw = torch.zeros(3 * spec.page_size_bytes, dtype=torch.int8)
     view = view_kpool_tail_cache(STATE, spec, raw, 3)

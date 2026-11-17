@@ -428,83 +428,6 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
 
 
 @dataclass(frozen=True, kw_only=True)
-class AscendIndexerKPoolTailSpec(CircularBufferSpec):
-    """One fixed FP32 ``[ring_capacity, 2 * head_size]`` page per request.
-
-    ``block_size`` is the logical pool size (``compress_ratio``), while
-    ``ring_capacity`` also retains speculative rows. The dedicated manager
-    owns one complete ring per request and never slides or grows it.
-    """
-
-    sliding_window: int
-    compress_ratio: int
-    ring_capacity: int
-    dcp_sharded: bool = False
-    model_version: str = "glm5_next"
-    cache_role: str = "indexer_tail"
-    indexes_kv_by_block_stride: bool = True
-
-    @property
-    def is_circular(self) -> bool:
-        return True
-
-    @property
-    def uses_slot_mapping(self) -> bool:
-        # GLM's compressor consumes the per-token ring slot mapping.
-        return True
-
-    @property
-    def prefix_cacheable(self) -> bool:
-        return False
-
-    def get_num_kernel_states(self, kernel_block_size: int) -> int:
-        # One logical pool block owns the whole ring, including lookahead.
-        return self.ring_capacity
-
-    @property
-    def unpadded_page_size_bytes(self) -> int:
-        # The tail stores a fixed K/gate pair; the parent handles page padding.
-        return 2 * self.ring_capacity * self.head_size * get_dtype_size(self.dtype)
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        if self.dtype != torch.float32:
-            raise ValueError(f"Indexer K-pool tail must use FP32, got {self.dtype}.")
-        if self.num_kv_heads != 1 or self.head_size <= 0:
-            raise ValueError("Indexer K-pool tail requires one K/gate pair with positive head size.")
-        if self.compress_ratio <= 1 or self.ring_capacity < self.compress_ratio:
-            raise ValueError("Tail ring capacity must be at least the compression ratio, which must exceed one.")
-        if self.block_size != self.compress_ratio:
-            raise ValueError("Tail logical block size must equal the compression ratio.")
-        if self.sliding_window != self.compress_ratio:
-            raise ValueError("Tail sliding_window describes the logical pool size and must equal compress_ratio.")
-
-    @classmethod
-    def merge(cls, specs: list[Self]) -> Self:
-        assert all(isinstance(spec, cls) for spec in specs)
-        return super().merge(specs)
-
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        del vllm_config
-        return self.page_size_bytes
-
-    def max_admission_blocks_per_request(self, max_in_flight_tokens: int, max_model_len: int) -> int:
-        return 1
-
-    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        return 1
-
-    def is_uniform_with_collection(self, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
-        return all(
-            isinstance(spec, AscendIndexerKPoolTailSpec)
-            and spec.block_size == self.block_size
-            and spec.compress_ratio == self.compress_ratio
-            and spec.ring_capacity == self.ring_capacity
-            for spec in kv_cache_specs.values()
-        )
-
-
-@dataclass(frozen=True, kw_only=True)
 class AscendCircularBufferSpec(CircularBufferSpec):
     """Circular state whose physical pages participate in Ascend KV zeroing."""
 
@@ -514,7 +437,6 @@ class AscendCircularBufferSpec(CircularBufferSpec):
 
 def register_ascend_kv_cache_specs() -> None:
     from vllm_ascend.core.single_type_kv_cache_manager import AscendCircularBufferManager
-    from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
 
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendCircularBufferSpec,
@@ -536,10 +458,4 @@ def register_ascend_kv_cache_specs() -> None:
         kvcache_spec_cls=AscendSlidingWindowMLASpec,
         manager_class=SlidingWindowManager,
         uniform_type_base_spec=SlidingWindowMLASpec,
-    )
-
-    KVCacheSpecRegistry.register(
-        kvcache_spec_cls=AscendIndexerKPoolTailSpec,
-        manager_class=KpoolTailManager,
-        uniform_type_base_spec=AscendIndexerKPoolTailSpec,
     )

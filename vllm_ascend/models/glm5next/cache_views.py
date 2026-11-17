@@ -7,10 +7,9 @@ from collections.abc import Callable
 import torch
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec, KVCacheSpec
 
 from vllm_ascend.core.kv_cache_interface import (
-    AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     get_kv_cache_compression_ratio,
 )
@@ -25,7 +24,7 @@ def _row_major_strides(shape: tuple[int, ...]) -> list[int]:
 
 def view_kpool_tail_cache(
     layer_name: str,
-    kv_cache_spec: AscendIndexerKPoolTailSpec,
+    kv_cache_spec: CircularBufferSpec,
     raw_cache: torch.Tensor | tuple[torch.Tensor, ...],
     num_blocks: int,
 ) -> torch.Tensor:
@@ -42,8 +41,8 @@ def view_kpool_tail_cache(
         )
     return torch.as_strided(
         typed_slot,
-        size=(num_blocks, kv_cache_spec.ring_capacity, 2 * kv_cache_spec.head_size),
-        stride=(page_el, 2 * kv_cache_spec.head_size, 1),
+        size=(num_blocks, kv_cache_spec.block_size, kv_cache_spec.head_size),
+        stride=(page_el, kv_cache_spec.head_size, 1),
     )
 
 
@@ -152,7 +151,10 @@ def view_glm5_next_cache(
     when the spec is not owned by the GLM-Next pooled layout, so the caller
     falls through to its generic reshape paths.
     """
-    if isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec):
+    if (
+        isinstance(kv_cache_spec, CircularBufferSpec)
+        and getattr(attn_backend, "get_name", lambda: None)() == "ASCEND_INDEXER_KPOOL_TAIL"
+    ):
         return view_kpool_tail_cache(layer_name, kv_cache_spec, raw_cache, num_blocks)
     if isinstance(kv_cache_spec, AscendMLAAttentionSpec) and getattr(
         kv_cache_spec, "indexes_kv_by_block_stride", False

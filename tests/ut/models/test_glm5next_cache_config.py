@@ -10,9 +10,7 @@ import torch
 from vllm.config import AttentionConfig
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector import DecodeBenchConnector
-from vllm.v1.core.single_type_kv_cache_manager import (
-    register_all_kvcache_specs,
-)
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager, register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     KVCacheConfig,
@@ -26,7 +24,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.core.kv_cache_interface import (
-    AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     register_ascend_kv_cache_specs,
 )
@@ -37,7 +34,6 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
-from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
@@ -74,6 +70,14 @@ def test_platform_builder_preserves_default_non_glm_accounting():
     groups = [KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=make_specs()["model.layers.3.attn"])]
     groups[0].kv_cache_spec = replace(groups[0].kv_cache_spec, model_version=None)
     assert AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(make_config(), groups) is None
+
+
+@pytest.mark.parametrize("uniform", [False, True])
+def test_generic_circular_buffer_is_not_a_glm_layout(uniform):
+    spec = CircularBufferSpec(block_size=16, num_kv_heads=1, head_size=128, head_size_v=0, dtype=torch.float32)
+    group_spec = UniformTypeKVCacheSpecs.from_specs({"tail": spec}) if uniform else spec
+    groups = [KVCacheGroupSpec(layer_names=["tail"], kv_cache_spec=group_spec)]
+    assert _get_glm5_next_cache_layout(groups) is None
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
@@ -127,16 +131,8 @@ def make_specs(pool: int = 16):
             model_version="glm5_next",
             **_ratio_kwargs(pool),
         ),
-        "model.layers.3.indexer.tail_cache": AscendIndexerKPoolTailSpec(
-            block_size=pool,
-            ring_capacity=pool,
-            sliding_window=pool,
-            compress_ratio=pool,
-            num_kv_heads=1,
-            head_size=128,
-            dtype=torch.float32,
-            model_version="glm5_next",
-            indexes_kv_by_block_stride=True,
+        "model.layers.3.indexer.tail_cache": CircularBufferSpec(
+            dcp_sharded=False, block_size=pool, num_kv_heads=1, head_size=256, dtype=torch.float32, head_size_v=0
         ),
     }
     for layer_idx in range(3):
@@ -246,7 +242,7 @@ def test_fp8_shared_pages_preserve_tail_rows_and_kernel_scale_alignment():
     descriptor = next(tensor for tensor in plan.kv_cache_tensors if indexer_name in get_kv_cache_tensor_layers(tensor))
     raw = torch.zeros(descriptor.size, dtype=torch.uint8)
     tail = view_kpool_tail_cache(tail_name, specs[tail_name], raw, plan.num_blocks)
-    page_rows = specs[tail_name].page_size_bytes // (2 * specs[tail_name].head_size * tail.element_size())
+    page_rows = specs[tail_name].page_size_bytes // (specs[tail_name].head_size * tail.element_size())
     assert page_rows * tail.shape[-1] == tail.stride(0)
 
     backend = SimpleNamespace(get_kv_cache_shape=lambda n, b, h, d: (n, b, h, d))
@@ -261,21 +257,21 @@ def test_fp8_shared_pages_preserve_tail_rows_and_kernel_scale_alignment():
 
 def test_tail_tensor_registration_uses_upstream_request_local_zero_fill():
     """A 5999-token fake prefill initializes one ring, preserving other requests."""
-    spec = AscendIndexerKPoolTailSpec(
-        block_size=4,
-        ring_capacity=7,
-        sliding_window=4,
-        compress_ratio=4,
+    spec = CircularBufferSpec(
+        dcp_sharded=False,
+        block_size=7,
         num_kv_heads=1,
-        head_size=4,
+        head_size=8,
         dtype=torch.float32,
         page_size_padded=256,
+        head_size_v=0,
     )
+    register_all_kvcache_specs(None)
     register_ascend_kv_cache_specs()
     assert isinstance(spec, CircularBufferSpec)
-    assert spec.uses_slot_mapping
-    assert KVCacheSpecRegistry.get_manager_class(spec) is KpoolTailManager
-    group_spec = UniformTypeKVCacheSpecs(block_size=4, kv_cache_specs={"tail": spec})
+    assert not spec.uses_slot_mapping
+    assert KVCacheSpecRegistry.get_manager_class(spec) is CircularBufferManager
+    group_spec = UniformTypeKVCacheSpecs(block_size=spec.block_size, kv_cache_specs={"tail": spec})
     cache = KVCacheConfig(
         num_blocks=4,
         kv_cache_tensors=[],
@@ -331,7 +327,7 @@ def test_fp8_cache_budget_accounts_for_scales_tail_and_padding(block_size, looka
             tokens_per_state=4,
         )
         specs["model.layers.3.indexer.tail_cache"] = replace(
-            specs["model.layers.3.indexer.tail_cache"], ring_capacity=4 + lookahead
+            specs["model.layers.3.indexer.tail_cache"], block_size=4 + lookahead
         )
         groups = get_glm5_next_kv_cache_groups(config, specs)
         layout = _get_glm5_next_cache_layout(groups)

@@ -15,7 +15,6 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import (
-    AscendIndexerKPoolTailSpec,
     AscendSFAIndexerCacheSpec,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
@@ -88,16 +87,8 @@ def make_circular_spec(block_size: int = 16) -> CircularBufferSpec:
     )
 
 
-def make_kpool_tail_spec(block_size: int = 16) -> AscendIndexerKPoolTailSpec:
-    return AscendIndexerKPoolTailSpec(
-        block_size=8,
-        ring_capacity=block_size,
-        num_kv_heads=1,
-        head_size=8,
-        dtype=torch.float32,
-        sliding_window=8,
-        compress_ratio=8,
-    )
+def make_kpool_tail_spec(block_size: int = 16) -> CircularBufferSpec:
+    return CircularBufferSpec(block_size=block_size, num_kv_heads=1, head_size=16, dtype=torch.float32, head_size_v=0)
 
 
 def make_sfa_indexer_spec(

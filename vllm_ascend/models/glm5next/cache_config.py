@@ -21,6 +21,7 @@ from vllm.v1.core.kv_cache_planning import (
     may_override_num_blocks,
 )
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -31,7 +32,6 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import (
-    AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     get_kv_cache_compression_ratio,
 )
@@ -89,11 +89,7 @@ def _is_glm5_next_indexer_spec(spec: KVCacheSpec) -> bool:
 
 
 def _is_glm5_next_tail_spec(spec: KVCacheSpec) -> bool:
-    return (
-        isinstance(spec, AscendIndexerKPoolTailSpec)
-        and _is_glm5_next_spec(spec)
-        and getattr(spec, "cache_role", None) == "indexer_tail"
-    )
+    return type(spec) is CircularBufferSpec
 
 
 def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
@@ -128,7 +124,7 @@ def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
         # Quantized keys share pages with the FP32 tail; keep whole tail rows and aligned
         # scales when a scheduler page is split into indexer kernel blocks.
         small_page_alignment = lcm(
-            *(_unpadded_page_size(spec) // spec.ring_capacity for spec in tail_specs), *scale_alignments
+            *(_unpadded_page_size(spec) // spec.block_size for spec in tail_specs), *scale_alignments
         )
         small_page_size = (small_page_size + small_page_alignment - 1) // small_page_alignment * small_page_alignment
 
@@ -172,7 +168,7 @@ def _create_glm5_next_attention_groups(
         tail_spec = kv_cache_spec[tail_name]
         assert isinstance(main_spec, MLAAttentionSpec)
         assert isinstance(indexer_spec, MLAAttentionSpec)
-        assert isinstance(tail_spec, AscendIndexerKPoolTailSpec)
+        assert type(tail_spec) is CircularBufferSpec
 
         compress_ratio = get_kv_cache_compression_ratio(indexer_spec)
         if main_spec.block_size % compress_ratio:
@@ -181,7 +177,7 @@ def _create_glm5_next_attention_groups(
                 f"compression ratio: block_size={main_spec.block_size}, "
                 f"compress_ratio={compress_ratio}."
             )
-        if tail_spec.compress_ratio != compress_ratio or tail_spec.ring_capacity < compress_ratio:
+        if tail_spec.block_size < compress_ratio:
             raise ValueError(
                 f"GLM-Next tail must use compression ratio {compress_ratio} and have at least that ring capacity."
             )
@@ -217,7 +213,15 @@ def _get_glm5_next_cache_layout(
 ) -> _Glm5NextCacheLayout | None:
     """Recognize validated GLM-Next groups and derive physical slot counts."""
 
-    if not kv_cache_groups:
+    if not any(
+        _is_glm5_next_spec(spec)
+        for group in kv_cache_groups
+        for spec in (
+            group.kv_cache_spec.kv_cache_specs.values()
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+            else (group.kv_cache_spec,)
+        )
+    ):
         return None
 
     full_groups: list[KVCacheGroupSpec] = []
