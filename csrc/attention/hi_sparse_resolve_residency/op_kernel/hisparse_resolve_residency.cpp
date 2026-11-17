@@ -10,7 +10,7 @@
 // (invalidation runs as the shared Triton kernel on every SoC).
 #include "arch22/hisparse_resolver_kernel.h"
 
-extern "C" __global__ __aicore__ void hi_sparse_resolve_residency(
+extern "C" __global__ __aicore__ void hisparse_resolve_residency(
     GM_ADDR logical,
     GM_ADDR hot_table,
     GM_ADDR requests,
@@ -89,7 +89,7 @@ extern "C" __global__ __aicore__ void hi_sparse_resolve_residency(
 
 #include "hisparse_resolver_kernel.h"
 
-extern "C" __global__ __aicore__ void hi_sparse_resolve_residency(
+extern "C" __global__ __aicore__ void hisparse_resolve_residency(
     GM_ADDR logical,
     GM_ADDR hot_table,
     GM_ADDR requests,

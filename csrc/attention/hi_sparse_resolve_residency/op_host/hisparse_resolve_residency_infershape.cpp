@@ -16,7 +16,7 @@ void set_output_shape(gert::InferShapeContext* context, size_t idx, const gert::
 // The resolve launch binds every output from the framework, so infershape
 // only acknowledges the inputs and pins the stats output shape. Invalidation
 // runs as a Triton kernel without touching this aclnn op.
-static ge::graphStatus InferShape4HiSparseResolveResidency(gert::InferShapeContext* context) {
+static ge::graphStatus InferShape4HisparseResolveResidency(gert::InferShapeContext* context) {
     if (context == nullptr) return ge::GRAPH_FAILED;
     if (context->GetInputShape(0) == nullptr) return ge::GRAPH_FAILED;
     gert::Shape statsShape;
@@ -26,13 +26,13 @@ static ge::graphStatus InferShape4HiSparseResolveResidency(gert::InferShapeConte
     return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus InferDataType4HiSparseResolveResidency(gert::InferDataTypeContext* context) {
+static ge::graphStatus InferDataType4HisparseResolveResidency(gert::InferDataTypeContext* context) {
     if (context == nullptr) return ge::GRAPH_FAILED;
     context->SetOutputDataType(kStatsOutput, ge::DT_INT64);
     return ge::GRAPH_SUCCESS;
 }
 
-IMPL_OP_INFERSHAPE(HiSparseResolveResidency)
-    .InferShape(InferShape4HiSparseResolveResidency)
-    .InferDataType(InferDataType4HiSparseResolveResidency);
+IMPL_OP_INFERSHAPE(HisparseResolveResidency)
+    .InferShape(InferShape4HisparseResolveResidency)
+    .InferDataType(InferDataType4HisparseResolveResidency);
 }  // namespace ops

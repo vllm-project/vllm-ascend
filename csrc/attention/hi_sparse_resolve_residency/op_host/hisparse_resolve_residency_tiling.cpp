@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-#include "hi_sparse_resolve_residency_tiling.h"
+#include "hisparse_resolve_residency_tiling.h"
 #include "register/op_impl_registry.h"
 #include "log/log.h"
 #include "tiling/platform/platform_ascendc.h"
@@ -40,7 +40,7 @@ constexpr size_t kCountsStrideAttr = 13;
 constexpr size_t kByteMissMaskAttr = 14;
 
 ge::graphStatus TileResolve(gert::TilingContext* context,
-                            HiSparseResolveResidencyTilingData& tiling) {
+                            HisparseResolveResidencyTilingData& tiling) {
     using namespace vllm_ascend::hisparse;
     const auto* logical = context->GetInputShape(kLogicalInput);
     const auto* tags = context->GetOutputShape(kTagsOutput);
@@ -238,20 +238,20 @@ ge::graphStatus TileResolve(gert::TilingContext* context,
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus TileHiSparseResolveResidency(gert::TilingContext* context) {
+ge::graphStatus TileHisparseResolveResidency(gert::TilingContext* context) {
     OP_CHECK_IF(context == nullptr,
-                OP_LOGE("HiSparseResolveResidency", "TilingContext is null."),
+                OP_LOGE("HisparseResolveResidency", "TilingContext is null."),
                 return ge::GRAPH_FAILED);
-    HiSparseResolveResidencyTilingData tiling;
+    HisparseResolveResidencyTilingData tiling;
     return TileResolve(context, tiling);
 }
 
-ge::graphStatus PrepareHiSparseResolveResidency(gert::TilingParseContext*) {
+ge::graphStatus PrepareHisparseResolveResidency(gert::TilingParseContext*) {
     return ge::GRAPH_SUCCESS;
 }
 }  // namespace
 
-IMPL_OP_OPTILING(HiSparseResolveResidency)
-    .Tiling(TileHiSparseResolveResidency)
-    .TilingParse<HiSparseResolveResidencyCompileInfo>(PrepareHiSparseResolveResidency);
+IMPL_OP_OPTILING(HisparseResolveResidency)
+    .Tiling(TileHisparseResolveResidency)
+    .TilingParse<HisparseResolveResidencyCompileInfo>(PrepareHisparseResolveResidency);
 }  // namespace optiling

@@ -91,7 +91,7 @@ inline void resolve_residency(
     const int64_t counts_stride = counts ? counts->stride(0) : 1;
     const int64_t miss_mask_bytes = static_cast<int64_t>(miss_mask.has_value() && miss_mask->element_size() == 1);
     EXEC_NPU_CMD(
-        aclnnHiSparseResolveResidency,
+        aclnnHisparseResolveResidency,
         logical, hot_table,
         requests_t, states_t,
         source_t, resident_t,

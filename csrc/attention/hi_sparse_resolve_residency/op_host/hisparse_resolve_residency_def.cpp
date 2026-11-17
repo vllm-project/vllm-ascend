@@ -7,9 +7,9 @@ namespace ops {
 // implemented by the shared Triton kernel in vllm_ascend/ops/triton/hisparse.py
 // on every SoC, so there is no native mode for it. All tensors are optional at
 // the def level; each tiling/kernel path validates the bound geometry.
-class HiSparseResolveResidency : public OpDef {
+class HisparseResolveResidency : public OpDef {
 public:
-    explicit HiSparseResolveResidency(const char* name) : OpDef(name) {
+    explicit HisparseResolveResidency(const char* name) : OpDef(name) {
         const std::initializer_list<ge::Format> formats = {ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND};
         Input("logical").ParamType(OPTIONAL)
             .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32}).Format(formats).UnknownShapeFormat(formats).IgnoreContiguous();
@@ -78,5 +78,5 @@ public:
         AICore().AddConfig("ascend910b", config);
     }
 };
-OP_ADD(HiSparseResolveResidency);
+OP_ADD(HisparseResolveResidency);
 }  // namespace ops
