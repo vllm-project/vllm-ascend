@@ -1,5 +1,0 @@
-pr: 20629
-entries:
-  - category: feature
-    text: Enable A5 chunk32 GDN prefill with shared host metadata when the FLA entry point is available. A2/A3 retain chunk64.
-    hardware: [A5]
