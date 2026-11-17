@@ -27,7 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 _TRANSFER_SHUTDOWN_POLL_S = 0.1
 
 
-def get_bulk_by_residency(
+def get_by_residency(
     backend: Backend,
     keys: list[str],
     addrs: list[list[int]],
@@ -47,7 +47,7 @@ def get_bulk_by_residency(
         rotation = tp_rank % len(indices)
         indices = indices[rotation:] + indices[:rotation]
         batch_keys = [keys[i] for i in indices]
-        codes = backend.get_bulk(batch_keys, [addrs[i] for i in indices], [sizes[i] for i in indices], host=host)
+        codes = backend.get(batch_keys, [addrs[i] for i in indices], [sizes[i] for i in indices], host=host)
         if codes is None:
             return None
         for i, code in zip(indices, require_aligned_batch_results("Bulk GET", batch_keys, codes), strict=True):
@@ -1115,7 +1115,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 current_event.synchronize()
             put_result: bool | list[bool] | None
             if self.host_resident_groups:
-                put_result = self.m_store.put_bulk(keys, addrs, sizes, host=group_id in self.host_resident_groups)
+                put_result = self.m_store.put(keys, addrs, sizes, host=group_id in self.host_resident_groups)
                 if put_result is None:
                     logger.error("KV store returned no bulk PUT status for request %s", req_id)
                     return False
@@ -1292,7 +1292,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             if host_keys is None:
                 ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
             else:
-                ret = get_bulk_by_residency(
+                ret = get_by_residency(
                     self.m_store, key_list, addr_list, size_list, tp_rank=self.tp_rank, host_keys=host_keys
                 )
             if self._record_operation_cb is not None:
@@ -1301,7 +1301,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     time.perf_counter() - load_get_start,
                     len(key_list_c),
                 )
-            if (host_keys is not None or getattr(self.m_store, "strict_bulk_get", False) is True) and (
+            if (host_keys is not None or getattr(self.m_store, "strict_get_results", False) is True) and (
                 ret is None or len(ret) != len(key_list_c) or any(r != 0 for r in ret)
             ):
                 self._mark_failed_requests([req_meta], finish_receiving=True)

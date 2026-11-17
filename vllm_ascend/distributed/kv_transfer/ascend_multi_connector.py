@@ -1,4 +1,3 @@
-from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -9,6 +8,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import has_hisparse_layout
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -16,6 +16,8 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
+
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.save_coordinator import HiSparseStoreSaveCoordinator
 
 
 class AscendMultiConnector(MultiConnector, SupportsHMA):
@@ -65,12 +67,13 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             "HMA should not be enabled unless all sub-connectors support it"
         )
         self._configure_layerwise_reuse_completion()
+        self._store_save_coordinator: HiSparseStoreSaveCoordinator | None = None
         if (
             role == KVConnectorRole.WORKER
-            and getattr(kv_cache_config, "hisparse_host_num_blocks", None) is not None
+            and has_hisparse_layout(kv_cache_config)
             and vllm_config.speculative_config is not None
         ):
-            self._configure_bulk_save_fence()
+            self._configure_store_save_coordinator()
         # Handle to the (V2) mamba hybrid model state while its per-layer
         # align pre-copy is deferred behind a layerwise child connector.
         self._mamba_state: Any = None
@@ -87,22 +90,24 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             getattr(connector, "requires_mamba_state_copy_after_load", False) for connector in self._connectors
         )
 
-    def _configure_bulk_save_fence(self) -> None:
+    def _configure_store_save_coordinator(self) -> None:
         from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
 
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import finish_draft_host_mirror_for_save
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.save_coordinator import (
+            HiSparseStoreSaveCoordinator,
+        )
 
         source = next((child for child in self._connectors if isinstance(child, HiSparseConnector)), None)
-        if source is None:
-            return
-        owner = source.connector_worker
-        assert owner is not None
-        fence = partial(finish_draft_host_mirror_for_save, owner)
-        for store in self._connectors:
-            if isinstance(store, AscendStoreConnector) and isinstance(store.connector_worker, KVPoolWorker):
-                store.connector_worker.set_bulk_save_fence(fence)
+        stores = [child for child in self._connectors if isinstance(child, AscendStoreConnector)]
+        if source is not None and stores:
+            assert source.connector_worker is not None
+            self._store_save_coordinator = HiSparseStoreSaveCoordinator(source.connector_worker, stores)
+
+    def wait_for_save(self):
+        if self._store_save_coordinator is not None:
+            self._store_save_coordinator.prepare()
+        super().wait_for_save()
 
     def configure_dspark_prefix_cache(self, vllm_config: "VllmConfig") -> bool:
         """Select a store that restores both target and persistent draft KV."""

@@ -36,6 +36,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import has_hisparse_layout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     has_shared_kv_sources,
 )
@@ -181,11 +182,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.use_layerwise = extra_config.get("use_layerwise", False)
         self.supports_attention_prefetch_gate = bool(self.use_layerwise)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
-        has_hisparse = any(
-            getattr(group, "role", None) == "hisparse_source"
-            for group in getattr(kv_cache_config, "kv_cache_groups", ())
-        )
-        if has_hisparse:
+        if has_hisparse_layout(kv_cache_config):
             incompatibilities = []
             if self.use_layerwise or self.kv_role != "kv_both":
                 incompatibilities.append("requires whole-block transfers with kv_role=kv_both")
@@ -510,6 +507,14 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
         if layer_name not in getattr(worker, "dflash_draft_layer_names", ()):
             worker.save_kv_layer(self._get_connector_metadata())
+
+    def has_pending_bulk_save(self) -> bool:
+        """Let the parent order Host mirroring before this connector's save hook."""
+        return (
+            self.can_put
+            and not self.use_layerwise
+            and any(request.can_save for request in self._get_connector_metadata().requests)
+        )
 
     def wait_for_save(self):
         if not self.can_put:

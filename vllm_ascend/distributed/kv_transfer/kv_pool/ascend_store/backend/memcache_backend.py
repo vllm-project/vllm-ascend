@@ -19,6 +19,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     require_aligned_batch_results,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, buffer_arrays
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_sharded_mamba_group_ids
 
 _MEMCACHE_PROTOCOL_KEY = "ock.mmc.local_service.protocol"
@@ -257,16 +258,13 @@ class MemcacheBackend(Backend):
     def set_device(self):
         torch.npu.set_device(self.device_id)
 
-    strict_bulk_get = True
+    strict_get_results = True
 
     @classmethod
     def validate_mixed_bulk_config(cls) -> None:
         require_hisparse_host_tcp()
 
-    def register_bulk_buffers(self, ptrs: list[int], lengths: list[int], *, host_ranges: dict[int, int]) -> None:
-        self.register_buffer(ptrs, lengths, check_result=True)
-
-    def get_bulk(
+    def _get_registered(
         self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool
     ) -> list[int] | None:
         if not len(keys) == len(addrs) == len(sizes):
@@ -300,15 +298,9 @@ class MemcacheBackend(Backend):
             logger.exception("MemCache bulk GET failed for %d keys", len(keys))
             return None
 
-    def put_bulk(
-        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool
-    ) -> list[bool] | bool | None:
-        return self.put(keys, addrs, sizes, host=host)
-
-    def register_buffer(self, ptrs: list[int], sizes: list[int], *, check_result: bool = False):
-        if check_result and len(ptrs) != len(sizes):
-            raise ValueError("HiSparse MemCache buffer pointers and sizes must have the same length.")
-        self._pending_buffers = (list(ptrs), list(sizes), check_result)
+    def register_buffer(self, buffers: list[BufferDescriptor]) -> None:
+        ptrs, sizes = buffer_arrays(buffers)
+        self._pending_buffers = (ptrs, sizes, any(buffer.host for buffer in buffers))
         self._register_buffers_if_needed()
 
     def unregister_buffer(self, ptrs: list[int], sizes: list[int]):
@@ -514,7 +506,11 @@ class MemcacheBackend(Backend):
         key: list[str],
         addr: list[list[int]],
         size: list[list[int]],
+        *,
+        host: bool | None = None,
     ):
+        if host is not None:
+            return self._get_registered(key, addr, size, host=host)
         if self._lazy_init and not self._store_initialized:
             logger.error(
                 "Failed to get %d keys out of %d. Store is not initialized; "
@@ -556,7 +552,7 @@ class MemcacheBackend(Backend):
         addr: list[list[int]],
         size: list[list[int]],
         *,
-        host: bool = False,
+        host: bool | None = None,
     ) -> list[bool] | bool:
         if host and not (len(key) == len(addr) == len(size)):
             logger.error("Invalid HiSparse MemCache PUT metadata: expected one address and size per key")

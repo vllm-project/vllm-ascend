@@ -24,6 +24,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_b
     YuanrongBackend,
     YuanrongConfig,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor
 
 
 def test_yuanrong_put_does_not_require_exists_check():
@@ -242,7 +243,7 @@ def test_dev_mem_pregister_disabled_by_default(tmp_path, monkeypatch):
 def test_dev_mem_pregister_enabled_triggers_registration(tmp_path, monkeypatch):
     backend = _make_full_backend(tmp_path, monkeypatch, enable_dev_mem_pregister=True)
     assert backend._needs_dev_mem_pregister is True
-    backend.register_buffer([100], [200])
+    backend.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
     backend.store.pre_register_device_memory.assert_called_once_with([100], [200])
 
 
@@ -250,7 +251,7 @@ def test_dev_mem_pregister_skipped_when_fabric_mem(tmp_path, monkeypatch):
     # FabricMem mode still skips pre-registration even if the toggle is on.
     backend = _make_full_backend(tmp_path, monkeypatch, enable_dev_mem_pregister=True, enable_fabric_mem=True)
     assert backend._needs_dev_mem_pregister is False
-    backend.register_buffer([100], [200])
+    backend.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
     backend.store.pre_register_device_memory.assert_not_called()
 
 
@@ -260,5 +261,5 @@ def test_dev_mem_pregister_skipped_for_p2p_transfer(tmp_path, monkeypatch):
         tmp_path, monkeypatch, enable_dev_mem_pregister=True, remote_h2d_transport_backend="P2P_TRANSFER"
     )
     assert backend._needs_dev_mem_pregister is False
-    backend.register_buffer([100], [200])
+    backend.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
     backend.store.pre_register_device_memory.assert_not_called()

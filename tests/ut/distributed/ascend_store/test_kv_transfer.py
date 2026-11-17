@@ -51,7 +51,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
     KVTransferThread,
-    get_bulk_by_residency,
+    get_by_residency,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
     KVCacheStoreLayerRecvingThread,
@@ -1528,10 +1528,10 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
             db.set_group_buffers({0: [1000], 1: [2000]}, {0: [16], 1: [32]}, {0: [16], 1: [32]})
             store = MagicMock(spec=MemcacheBackend)
 
-            def get_bulk(keys, addrs, sizes, *, host):
+            def get(keys, addrs, sizes, *, host):
                 return [result[0] if host else result[1]] * len(keys)
 
-            store.get_bulk.side_effect = get_bulk
+            store.get.side_effect = get
             thread = KVCacheStoreRecvingThread(store, db, 16, rank, tp_size=2, host_resident_groups=frozenset({0}))
 
             worker = KVPoolWorker.__new__(KVPoolWorker)
@@ -1593,7 +1593,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
             assert not result.failed_recving
         assert poll(ranks).finished_recving is None
         assert poll(ranks).finished_recving is None
-        delayed_store.get_bulk.assert_not_called()
+        delayed_store.get.assert_not_called()
         assert coordinator._pending_imports == {"r1": 16}
         if abort:
             with patch.object(scheduler, "_connector_finished", return_value=(False, None)):
@@ -1622,8 +1622,8 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         assert result.finished_recving is None
         assert not result.failed_recving
         for store in (first_store, delayed_store):
-            assert [call.kwargs["host"] for call in store.get_bulk.call_args_list] == [False, True]
-        device_call, host_call = delayed_store.get_bulk.call_args_list
+            assert [call.kwargs["host"] for call in store.get.call_args_list] == [False, True]
+        device_call, host_call = delayed_store.get.call_args_list
         assert "@group:1" in device_call.args[0][0]
         assert device_call.args[1:] == ([[2096]], [[32]])
         assert host_call.args[1:] == ([[1032]], [[16]])
@@ -1937,9 +1937,9 @@ def test_bulk_get_rotates_within_memory_kinds_and_restores_original_order():
         seen.append((keys, host))
         return [int(key[-1]) for key in keys]
 
-    store.get_bulk.side_effect = get
+    store.get.side_effect = get
     keys = ["host0", "device1", "host2", "device3", "host4"]
-    assert get_bulk_by_residency(
+    assert get_by_residency(
         store, keys, [[i] for i in range(5)], [[8]] * 5, host_keys=[True, False, True, False, True], tp_rank=1
     ) == list(range(5))
     assert seen == [(["device3", "device1"], False), (["host2", "host4", "host0"], True)]
@@ -1950,9 +1950,9 @@ def test_bulk_get_rejects_missing_or_misaligned_statuses(result):
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import BatchResultShapeError
 
     store = MagicMock(spec=MemcacheBackend)
-    store.get_bulk.return_value = result
+    store.get.return_value = result
     if result is None:
-        assert get_bulk_by_residency(store, ["key"], [[100]], [[8]], host_keys=[True]) is None
+        assert get_by_residency(store, ["key"], [[100]], [[8]], host_keys=[True]) is None
     else:
         with pytest.raises(BatchResultShapeError, match="results for 1"):
-            get_bulk_by_residency(store, ["key"], [[100]], [[8]], host_keys=[True])
+            get_by_residency(store, ["key"], [[100]], [[8]], host_keys=[True])
