@@ -66,6 +66,7 @@
 /vllm_ascend/attention/dsa*.py @weijinqian0 @lcfenglinwan @GDzhu01 @linfeng-yuan
 /vllm_ascend/attention/fa_v1.py @jiajinzhu2 @CXY-Katrina
 /vllm_ascend/attention/fa3_v1.py @Ronald1995 @CXY-Katrina
+/vllm_ascend/attention/flash_attention_v3.py @earthmanylf @CXY-Katrina
 # /vllm_ascend/attention/flashmla.py
 /vllm_ascend/attention/indexer.py @weijinqian0 @lijiahang226
 /vllm_ascend/attention/indexer_kpool.py @weijinqian0 @lijiahang226
