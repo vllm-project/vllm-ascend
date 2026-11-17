@@ -186,10 +186,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             )
 
     def _init_layerwise_config(self) -> None:
-        layout = get_layerwise_reuse_layout(self.kv_cache_config) if self.use_layerwise_transfer else None
-        self._layerwise_reuse_layout = layout
-        if layout is not None:
-            self._dspark_draft_layer_names.update(layout.draft_entry_names)
+        layout = None
 
         # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
         # layer_idx_in_group is the index of the physical layer within the
@@ -228,15 +225,20 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self.layerwise_key_layer_offset = 0
 
         if self.kv_cache_config is not None:
+            if self.use_layerwise_transfer:
+                layout = get_layerwise_reuse_layout(self.kv_cache_config)
+                if layout is not None:
+                    self._dspark_draft_layer_names.update(layout.draft_entry_names)
+                elif (
+                    getattr(self, "_dspark_draft_layer_names", ())
+                    and getattr(self, "_dspark_prefix_keys", None) is None
+                ):
+                    # Without scratch reuse, retain the original target+draft
+                    # pool for prefix storage and load/save addressing.
+                    self._dspark_draft_layer_names = set()
             draft_names = getattr(self, "_dspark_draft_layer_names", ())
             layer_specs = get_layerwise_kv_cache_specs(self.kv_cache_config)
             target_specs = {name: spec for name, spec in layer_specs.items() if name not in draft_names}
-            if self.use_layerwise_transfer:
-                if draft_names and layout is None and getattr(self, "_dspark_prefix_keys", None) is None:
-                    # Without scratch reuse, retain the original target+draft
-                    # pool for prefix storage and load/save addressing.
-                    self._dspark_draft_layer_names = draft_names = set()
-                    target_specs = layer_specs
             physical_layers = {
                 self._extract_physical_layer_index(layer_name)
                 for group_spec in self.kv_cache_config.kv_cache_groups
@@ -290,6 +292,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         len(phys_to_layer_idx),
                     )
 
+        self._layerwise_reuse_layout = layout
         self.layer_load_finished_events: list[threading.Event] | None = None
         self.layer_save_finished_events: list[threading.Event] | None = None
 
