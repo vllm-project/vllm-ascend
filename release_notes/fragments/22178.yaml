@@ -1,0 +1,4 @@
+pr: 22178
+entries:
+  - category: bugfix
+    text: Fixed a crash in structured output generation with the outlines backend when speculative decoding rolled back tokens after the grammar had completed.
