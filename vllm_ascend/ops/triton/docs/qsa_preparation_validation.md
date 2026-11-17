@@ -123,3 +123,29 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsn
 Use the repository CPU CI environment for ABI tests and `bash format.sh ci` for
 all-file lint. Record commands, revisions, failures/skips and logs in the PR.
 Do not replace hardware evidence with mocks or source-string assertions.
+
+## Maintainer-requested device validation
+
+Run at the current PR head with vLLM `v0.33.0`, CANN `9.3.0`, and
+Triton Ascend `3.6.0.post2`. Record the exact tested commit and installed
+versions with the results. Use the repository's standard pytest configuration;
+do not use the isolated CPU checks' `--noconftest` option for these runs.
+
+| Test file under `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/` | A3 | A5 |
+| --- | --- | --- |
+| `test_qsa_compress_norm_store.py` | Pending | Not requested |
+| `test_qsa_direct_rope.py` | Pending | Not requested |
+| `test_qsa_lightning_prepare.py` | Pending | Not requested |
+| `test_qsa_rmsnorm_mrope.py` | Pending | Pending |
+| `test_split_qkv_rmsnorm_mrope.py` | Pending | Pending |
+
+From the repository root, execute each applicable file separately:
+
+```bash
+pytest -sv -ra tests/e2e/nightly/single_node/ops/singlecard_ops/triton/<test_file>.py
+```
+
+For every file and device, retain the log and report passed, skipped, failed,
+and error counts, plus any skip reasons. Pending means not executed, not zero
+failures. Historical operator results and combined-model GPQA scores do not
+replace these current-head runs.
