@@ -7,6 +7,65 @@ import pytest
 import torch
 
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl, AscendSFAPCPDCPImpl
+from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
+    _index_select_kv_blocks,
+    build_sfa_dcp_compact_kv_metadata,
+)
+
+
+@pytest.mark.parametrize("world", [2, 8])
+@pytest.mark.parametrize("interleave", [128, 768])
+def test_pcp_dcp_history_view_preserves_causal_topk_and_attention(world, interleave):
+    torch.manual_seed(41)
+    block_size, local_blocks, width = 128, 12, 8
+    length = local_blocks * block_size * world
+    order = [0, 1] if world == 2 else [0, 4, 1, 5, 2, 6, 3, 7]
+    # Two requests share a prefix page. Payloads differ across KV owners;
+    # the receiver's query rows are deliberately not in global request order.
+    global_table = torch.tensor([list(range(12)), list(range(6)) + list(range(12, 18))], dtype=torch.int32)
+    requests = [1, 0, 1]
+    ids, table = build_sfa_dcp_compact_kv_metadata(
+        global_table[requests],
+        torch.arange(local_blocks * world, dtype=torch.int32),
+        torch.tensor(order, dtype=torch.int32),
+        block_size,
+        interleave,
+        global_dcp_block_table=global_table,
+        global_dcp_num_blocks=torch.tensor([12, 12], dtype=torch.int32),
+    )
+    keys = torch.randn(world, 18, block_size, 1, width).to(torch.float8_e4m3fn)
+    scales = torch.rand(world, 18, block_size, 1, 1) + 0.25
+    # AllGather emits physical ProcessGroup order, not logical PCP-first order.
+    gathered_key = torch.cat(
+        [_index_select_kv_blocks(keys[order.index(rank)], ids).view(torch.uint8) for rank in range(world)]
+    ).view(keys.dtype)
+    gathered_scale = torch.cat([scales[order.index(rank)].index_select(0, ids) for rank in range(world)])
+    positions = [world * interleave + 17, 127, world * interleave + 20]
+    for row, request in enumerate(requests):
+        # Build the oracle by assigning each owner's contiguous local token
+        # stream to its global positions, independently of compact addresses.
+        dense = torch.empty(length, width)
+        all_positions = torch.arange(length)
+        for owner in range(world):
+            mask = all_positions // interleave % world == owner
+            local_key = _index_select_kv_blocks(keys[owner], global_table[request]).float().reshape(-1, width)
+            local_scale = scales[owner].index_select(0, global_table[request]).reshape(-1, 1)
+            dense[mask] = local_key * local_scale
+        restored_key = _index_select_kv_blocks(gathered_key, table[row]).float().reshape(-1, width)
+        restored_scale = gathered_scale.index_select(0, table[row]).reshape(-1, 1)
+        restored = restored_key * restored_scale
+        torch.testing.assert_close(restored, dense, rtol=0, atol=0)
+        query = torch.randn(width)
+        outputs = []
+        selections = []
+        for history in (dense, restored):
+            scores = history @ query
+            scores[positions[row] + 1 :] = -torch.inf
+            selected = scores.topk(16).indices
+            selections.append(selected)
+            outputs.append(scores[selected].softmax(-1) @ history[selected])
+        torch.testing.assert_close(selections[0], selections[1], rtol=0, atol=0)
+        torch.testing.assert_close(outputs[0], outputs[1], rtol=0, atol=0)
 
 
 def _make_impl(rank: int, interleave_size: int = 2) -> AscendSFADCPImpl:

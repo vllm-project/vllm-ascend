@@ -262,7 +262,6 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
         scale_dtype_set = set(spec.scale_dtype for spec in specs)
         cache_sparse_li_c8_set = set(spec.cache_sparse_li_c8 for spec in specs)
         cache_sparse_li_c4_set = set(spec.cache_sparse_li_c4 for spec in specs)
-        block_table_block_size_set = set(spec.block_table_block_size for spec in specs)
         sfa_dcp_replicated_indexer_size_set = set(spec.sfa_dcp_replicated_indexer_size for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
@@ -271,12 +270,11 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
             and len(scale_dtype_set) == 1
             and len(cache_sparse_li_c8_set) == 1
             and len(cache_sparse_li_c4_set) == 1
-            and len(block_table_block_size_set) == 1
             and len(sfa_dcp_replicated_indexer_size_set) == 1
         ), (
             "All SFA indexer cache layers in the same KV cache group must use "
-            "the same dtype, scale layout, quantization method, LI quant flags, "
-            "DCP replication size, and block-table block size."
+            "the same dtype, scale layout, quantization method, LI quant flags "
+            "and DCP replication size."
         )
         return cls(
             block_size=specs[0].block_size,
@@ -288,7 +286,6 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
             scale_dtype=scale_dtype_set.pop(),
             cache_sparse_li_c8=cache_sparse_li_c8_set.pop(),
             cache_sparse_li_c4=cache_sparse_li_c4_set.pop(),
-            block_table_block_size=block_table_block_size_set.pop(),
             sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size_set.pop(),
         )
 

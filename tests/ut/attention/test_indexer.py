@@ -27,9 +27,12 @@ def _make_builder(
     dcp_size: int = 1,
     dsa_cp: bool = False,
     num_speculative_tokens: int | None = None,
+    max_model_len: int = 1024,
+    interleave: int = 128,
+    block_size: int = 128,
 ) -> AscendSFAIndexerMetadataBuilder:
     kv_cache_spec = FullAttentionSpec(
-        block_size=128,
+        block_size=block_size,
         num_kv_heads=1,
         head_size=160,
         dtype=torch.uint8,
@@ -39,12 +42,13 @@ def _make_builder(
     vllm_config.model_config = SimpleNamespace(
         hf_text_config=SimpleNamespace(index_topk=2048),
         hf_config=SimpleNamespace(),
-        max_model_len=1024,
+        max_model_len=max_model_len,
     )
     vllm_config.parallel_config = SimpleNamespace(
         prefill_context_parallel_size=pcp_size,
         decode_context_parallel_size=dcp_size,
         tensor_parallel_size=4,
+        cp_kv_cache_interleave_size=interleave,
     )
     vllm_config.scheduler_config = SimpleNamespace(
         max_num_seqs=4,
@@ -59,6 +63,10 @@ def _make_builder(
             return_value=_KERNEL_BLOCK_SIZE,
         ),
         patch("vllm_ascend.attention.indexer.enable_dsa_cp", return_value=dsa_cp),
+        patch(
+            "vllm_ascend.attention.indexer.get_dcp_group",
+            return_value=SimpleNamespace(ranks=[0, 4, 1, 5, 2, 6, 3, 7] if dcp_size == 8 else list(range(dcp_size))),
+        ),
     ):
         return AscendSFAIndexerMetadataBuilder(
             kv_cache_spec,
@@ -417,6 +425,7 @@ def test_sfa_indexer_metadata_builder_builds_pcp_dcp_slots(
     pcp_context = SimpleNamespace(
         global_batch=global_batch,
         global_block_tables=(torch.tensor([[10, 11]], dtype=torch.int32),),
+        global_block_table_num_blocks=torch.tensor([[2]], dtype=torch.int32),
         padded_gather_idx=torch.tensor([2, 0, 1, 0], dtype=torch.int64),
         gathered_kv_write_mask=torch.tensor([True, True, True, False]),
     )
@@ -431,14 +440,74 @@ def test_sfa_indexer_metadata_builder_builds_pcp_dcp_slots(
     else:
         metadata = builder.build(0, common, **build_kwargs)
 
+    # Prefilling PCP+DCP replaces the replicated decode view with the compact
+    # full-history gather table: allocated global blocks [10, 11] are packed
+    # in rank-major order and local columns address the gathered tensor.
+    # The fixture's local ids all sort before the [10, 11] dictionary, so every
+    # compact index is 0 and columns differ only by the owner segment offset.
     torch.testing.assert_close(
         metadata.block_table,
-        torch.tensor([[0, 1, 2, 3], [4, 5, 6, 7]], dtype=torch.int32),
+        torch.tensor([[0, 2, 0, 2], [0, 2, 0, 2]], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        metadata.kv_gather_block_ids,
+        torch.tensor([10, 11], dtype=torch.int32),
     )
     torch.testing.assert_close(
         metadata.slot_mapping,
         torch.tensor([2816, 2560, 2688, -1], dtype=torch.int32),
     )
+
+
+@pytest.mark.parametrize("world", [2, 8])
+@pytest.mark.parametrize("local_tokens", [0, 8])
+@pytest.mark.parametrize("draft", [False, True])
+@patch("vllm_ascend.attention.indexer.get_ascend_config")
+@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
+def test_pcp_dcp_prefill_uses_global_history_and_local_query_rows(
+    mock_cos_sin, mock_get_ascend_config, world, local_tokens, draft
+):
+    mock_cos_sin.return_value = (torch.zeros(8, 1, 1, 8), torch.zeros(8, 1, 1, 8))
+    builder = _make_builder(pcp_size=2, dcp_size=world, block_size=768, max_model_len=14000, interleave=768)
+    # Two requests share a prefix page; stale tails differ per request. The
+    # global view decides which physical blocks are worth gathering.
+    global_table = torch.tensor(
+        [
+            list(range(6)) + [999] * 6,
+            list(range(6)) + list(range(6, 12)),
+            list(range(6)) + [998] * 6,
+            list(range(6)) + list(range(18, 24)),
+        ],
+        dtype=torch.int32,
+    )
+    context = SimpleNamespace(
+        global_batch=SimpleNamespace(num_reqs=4, is_prefilling_np=torch.ones(4, dtype=torch.bool)),
+        global_block_tables=(global_table,),
+        global_block_table_num_blocks=torch.tensor([[6, 12, 6, 12]], dtype=torch.int32),
+    )
+    common = _make_common_metadata()
+    common.num_reqs = 8  # Two PCP segments per request, exceeding decode capacity.
+    common.num_actual_tokens, common.num_input_tokens = local_tokens, 8
+    common.block_table_tensor = global_table[[3, 1, 0, 2, 2, 0, 1, 3]]
+    common.query_start_loc = common.query_start_loc_cpu = torch.arange(9, dtype=torch.int32)
+    common.seq_lens = torch.arange(101, 109, dtype=torch.int32)
+    common.positions = common.seq_lens - 1
+    common.slot_mapping = torch.full((16,), -1, dtype=torch.int64)
+    common.is_prefilling = torch.ones(8, dtype=torch.bool)
+    common.max_query_len = 1
+    # The PCP-ordered write mapping is covered above; keep this test focused
+    # on the compact full-history read metadata.
+    pcp_slots = torch.arange(16, dtype=torch.int32)
+    with patch.object(builder, "_build_pcp_ordered_slot_mapping", return_value=pcp_slots):
+        metadata = (
+            builder.build_for_drafting(common, draft_index=0, pcp_context=context, pcp_cache_group_idx=0)
+            if draft
+            else builder.build(0, common, pcp_context=context, pcp_cache_group_idx=0)
+        )
+    assert metadata.kv_gather_block_ids.tolist() == list(range(12)) + list(range(18, 24))
+    assert metadata.slot_mapping is pcp_slots
+    assert metadata.actual_seq_lengths_key is metadata.seq_lens
+    assert metadata.block_table.shape == (8, 12 * world)
 
 
 @pytest.mark.parametrize("with_dependency", [False, True])

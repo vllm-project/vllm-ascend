@@ -433,6 +433,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             attn_q_gather_handle.wait()
         k_li, k_li_scale, slot_mapping = self._gather_cache_inputs(k_li, k_li_scale, indexer_metadata)
         self.write_cache(k_li, k_li_scale, slot_mapping)
+        if not compute_topk:
+            return None
 
         kv_cache = self.k_cache.kv_cache
         if indexer_metadata.kv_gather_block_ids is not None:
@@ -449,8 +451,6 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         # Empty PCP receivers still supply their cache above. Shared-index
         # layers instead return before gathering because no rank selects Q.
         if indexer_metadata.num_actual_tokens == 0:
-            return None
-        if not compute_topk:
             return None
 
         assert self.wk_weights_proj is not None
@@ -631,6 +631,17 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         self._dcp_block_table_shape = (max_num_reqs, max_replicated_block_table_cols)
         self.replicated_col_idx_buf = torch.arange(
             max_replicated_block_table_cols,
+            dtype=torch.int32,
+            device=device,
+        )
+        dcp_group = get_dcp_group()
+        collective_ranks = sorted(dcp_group.ranks)
+        # AllGather writes payload segments in sorted ProcessGroup order while
+        # logical DCP ranks follow the PCP-first group order; store the
+        # permutation so compact KV block tables can address the gathered
+        # tensor in HCCL order (see AscendSFAPCPDCPMetadataBuilder).
+        self.dcp_collective_rank_order = torch.tensor(
+            [collective_ranks.index(rank) for rank in dcp_group.ranks],
             dtype=torch.int32,
             device=device,
         )
@@ -1093,10 +1104,16 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 pcp_context.global_batch.num_reqs,
                 self.max_local_block_table_cols,
             )
-            block_table = get_sfa_dcp_local_block_table(block_table, num_reqs, self.max_local_block_table_cols)
+            # The compact history gather addresses each sender's raw local
+            # blocks, not the replicated decode view built above.
+            local_table = get_sfa_dcp_local_block_table(
+                common_attn_metadata.block_table_tensor,
+                num_reqs,
+                self.max_local_block_table_cols,
+            )
             counts = pcp_context.global_block_table_num_blocks
             kv_gather_block_ids, block_table = build_sfa_dcp_compact_kv_metadata(
-                block_table,
+                local_table,
                 self.replicated_col_idx_buf,
                 self.dcp_collective_rank_order,
                 self.kernel_block_size,

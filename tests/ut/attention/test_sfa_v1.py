@@ -664,12 +664,15 @@ class TestAscendSFAKPathFusion(TestBase):
         indexer.k_cache = SimpleNamespace(kv_cache=torch.zeros(2, 16, 1, 128))
         indexer._pcp_active = False
         indexer._dsa_cp_active = False
+        indexer._sharded_dcp = False
         indexer.write_cache = MagicMock()
 
         hidden_states = torch.randn(num_tokens, head_dim + weights_dim)
         cos = torch.randn(num_tokens, 1, 1, 64)
         sin = torch.randn(num_tokens, 1, 1, 64)
         indexer_metadata = SimpleNamespace(
+            num_actual_tokens=num_tokens,
+            kv_gather_block_ids=None,
             cos=cos,
             sin=sin,
             slot_mapping=torch.arange(num_tokens, dtype=torch.int64).view(-1, 1),

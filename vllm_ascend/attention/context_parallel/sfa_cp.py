@@ -1286,28 +1286,17 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
         global_dcp_block_table: torch.Tensor | None = None,
         global_dcp_num_blocks: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if global_dcp_block_table is None:
-            return super()._build_compact_kv_gather_metadata(dcp_block_table)
-
         # PCP ranks can have different local request rows, even with zeroed
-        # block-table tails. Use the global request view so every DCP sender
-        # packs the same block IDs in the same order.
-        if global_dcp_num_blocks is None:
+        # block-table tails; the shared helper packs the global dictionary
+        # so every DCP sender selects the same block IDs in the same order
+        # and remaps addresses with the interleave-aware owner mapping.
+        if global_dcp_block_table is not None and global_dcp_num_blocks is None:
             raise ValueError("PCP+DCP compact KV metadata requires valid block counts for the global block table.")
-        valid_mask = self.arange_buffer[: global_dcp_block_table.shape[1]].unsqueeze(
-            0
-        ) < global_dcp_num_blocks.unsqueeze(1)
-        # Select allocated entries without modifying shared tables or
-        # introducing a block-0 placeholder for unused columns.
-        valid_block_ids = global_dcp_block_table[valid_mask].unique()
-        compact_block_table = torch.searchsorted(valid_block_ids, dcp_block_table.contiguous())
-        num_blocks = valid_block_ids.shape[0]
-        dcp_collective_rank_order = self.dcp_collective_rank_order[: self.dcp_size]
-        remapped_block_table = (
-            compact_block_table.unsqueeze(-1)
-            + (dcp_collective_rank_order * num_blocks).view(1, 1, -1).to(dcp_block_table)
-        ).reshape(dcp_block_table.shape[0], -1)
-        return valid_block_ids, remapped_block_table.to(torch.int32)
+        return super()._build_compact_kv_gather_metadata(
+            dcp_block_table,
+            global_dcp_block_table=global_dcp_block_table,
+            global_dcp_num_blocks=global_dcp_num_blocks,
+        )
 
     def _build_pcp_ordered_indexer_slot_mapping(
         self,
@@ -1990,6 +1979,15 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
 
 class AscendSFAPCPDCPImpl(AscendSFADCPImpl, AscendSFAPCPImpl):
     """Composes DCP attention with PCP gathered-token cache writes."""
+
+    def _get_indexer_attn_q_gather_handle(self, attn_metadata: M) -> torch.distributed.Work | None:
+        # Reuse the indexer's existing communication dependency: join the
+        # DCP history gather before its PCP cache-write gather uses AIV.
+        context = cast(AscendSFADCPMetadata, attn_metadata).dcp_context
+        assert context is not None
+        if context.kv_gather_block_ids is None or context.gather_context is None:
+            return None
+        return context.gather_context.handle
 
     def exec_kv(
         self,
