@@ -30,7 +30,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 
 @dataclass(frozen=True, slots=True)
 class MegamoeSharedWeights:
-    """Shared-expert weights rebuilt for the A5 MegaMoe operator.
+    """Shared-expert weights rebuilt for the MegaMoe operator.
 
     Produced by ``AscendSharedExperts`` after weight loading and carried by
     ``MegamoeSharedExpertFusion`` on the routed-expert layer; quant methods
@@ -38,7 +38,8 @@ class MegamoeSharedWeights:
     Field names mirror the ``MoEWeights.shared_*`` fields: one tensor per
     shared expert, w1 (2*intermediate, hidden) + scale
     (2*intermediate, k//2, 2), w2 (hidden, intermediate) + scale
-    (hidden, k//2, 2).
+    (hidden, k//2, 2) on A5. A3 uses INT8 [K, N] NZ weights and
+    one FP32 scale bit pattern per output channel in INT64/UINT64 carriers.
     """
 
     w1: list[torch.Tensor]
@@ -49,7 +50,7 @@ class MegamoeSharedWeights:
 
 @dataclass(slots=True)
 class MegamoeSharedExpertFusion:
-    """Live handle for the shared expert fused into the A5 MegaMoe operator.
+    """Live handle for the shared expert fused into the MegaMoe operator.
 
     ``AscendSharedExperts.megamoe_shared_fusion()`` returns one instance and
     ``AscendMoERunner`` installs it on the routed-expert layer at
@@ -77,10 +78,8 @@ class MoEWeights:
     w2_scale_bias: torch.Tensor | list[torch.Tensor] | None = None
     w1_offset: torch.Tensor | None = None
     w2_offset: torch.Tensor | None = None
-    # Shared-expert weights in the A5 MegaMoe layout, one tensor per shared
-    # expert: w1 (2*intermediate, hidden) + scale (2*intermediate, k//2, 2),
-    # w2 (hidden, intermediate) + scale (hidden, k//2, 2). Populated only when
-    # shared-expert fusion into the MegaMoe operator is active.
+    # Shared-expert descriptors (see MegamoeSharedWeights), populated only
+    # when shared-expert fusion into the MegaMoe operator is active.
     shared_w1: list[torch.Tensor] | None = None
     shared_w2: list[torch.Tensor] | None = None
     shared_w1_scale: list[torch.Tensor] | None = None

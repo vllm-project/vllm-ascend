@@ -117,19 +117,19 @@ class DeepseekV41MLP(nn.Module):
         reduce_results: bool = True,
         is_sequence_parallel=False,
         prefix: str = "",
+        replicate_weights: bool = False,
     ) -> None:
         super().__init__()
 
-        # If is_sequence_parallel, the input and output tensors are sharded
-        # across the ranks within the tp_group. In this case the weights are
-        # replicated and no collective ops are needed.
+        # SP and the opt-in SEDP shared MLP both need full weights per rank.
+        # Their caller handles the token layout, so the linears use no TP.
         # Otherwise we use standard TP with an allreduce at the end.
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
-            disable_tp=is_sequence_parallel,
+            disable_tp=is_sequence_parallel or replicate_weights,
             prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
@@ -138,7 +138,7 @@ class DeepseekV41MLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             reduce_results=reduce_results,
-            disable_tp=is_sequence_parallel,
+            disable_tp=is_sequence_parallel or replicate_weights,
             prefix=f"{prefix}.down_proj",
         )
         if swiglu_limit is not None:
@@ -210,6 +210,16 @@ class DeepseekV41MoE(nn.Module):
                 is_sequence_parallel=self.is_sequence_parallel,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
+                # Mode 3 consumes a full shared MLP on every EP rank. Restrict
+                # this new SEDP layout to the A3 main-model opt-in; MTP stays unchanged.
+                replicate_weights=(
+                    not is_draft_layer
+                    and get_ascend_config().megamoe_shared_expert_fusion
+                    and get_ascend_config().enable_shared_expert_dp
+                    and get_current_hardware_profile().supports(
+                        HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION_INT
+                    )
+                ),
             )
 
         self.hash = layer_idx < config.num_hash_layers and not is_draft_layer

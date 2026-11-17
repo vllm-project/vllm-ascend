@@ -69,9 +69,10 @@ class HardwareCapability(Enum):
     # Allow A5 MegaMoe's MXFP-only path and its A5-specific calling conventions.
     CANN_MEGAMOE_MXFP = auto()
     # Fuse the shared expert into the A5 MegaMoe operator (enable_fused_mc2=3).
-    # A5 only: the fused shared-expert calling convention assumes the shared and
-    # routed experts share a residual width, which A3 does not provide.
+    # MXFP calling convention; integer A3 shared weights use a separate capability.
     CANN_MEGAMOE_SHARED_EXPERT_FUSION = auto()
+    # A3 integer shared experts require an operator with independent INT8 descriptors.
+    CANN_MEGAMOE_SHARED_EXPERT_FUSION_INT = auto()
     # Split a mixed chunked-prefill batch into separate prefill and decode FIA calls.
     CHUNKED_PREFILL_PHASE_SPLIT = auto()
     # CANN device-side FlashAttn metadata with strided paged GQA K/V.
@@ -410,6 +411,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             | {
                 HardwareCapability.CANN_MEGAMOE,
                 HardwareCapability.FLASH_ATTN_NPU_3,
+                HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION_INT,
                 HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                 HardwareCapability.NPU_TOP_K_TOP_P,
             },

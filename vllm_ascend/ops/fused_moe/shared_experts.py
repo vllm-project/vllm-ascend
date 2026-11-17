@@ -143,7 +143,7 @@ class AscendSharedExperts:
         self.multistream_overlap = ascend_config.multistream_overlap_shared_expert
         self.weights_replicated = ascend_config.enable_shared_expert_dp
 
-        # Shared-expert fusion into the A5 MegaMoe operator: disabled until the
+        # Shared-expert fusion into the MegaMoe operator: disabled until the
         # setup below proves the configuration is supported, then armed once
         # both shared linears have been processed into the MegaMoe layout.
         self.megamoe_shared_weights_ready = False
@@ -172,7 +172,7 @@ class AscendSharedExperts:
         self._setup_megamoe_shared_fusion()
 
     def _setup_megamoe_shared_fusion(self) -> None:
-        """Fuse the shared expert into the A5 MegaMoe operator when supported.
+        """Fuse the shared expert into the MegaMoe operator when supported.
 
         When active, each shared linear's ``process_weights_after_loading`` is
         wrapped to rebuild the weight into the MegaMoe layout; the rebuilt
@@ -189,7 +189,9 @@ class AscendSharedExperts:
         # MegaMoe operator; =2 keeps the separate shared-expert forward.
         if not get_ascend_config().megamoe_shared_expert_fusion:
             return
-        if not get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
+        profile = get_current_hardware_profile()
+        integer_shared = profile.supports(HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION_INT)
+        if not (integer_shared or profile.supports(HardwareCapability.CANN_MEGAMOE_MXFP)):
             return
         # Checks the ROUTED experts' quant type: the shared fusion stacks on
         # top of the routed MegaMoe path, which must support the scenario
@@ -198,12 +200,12 @@ class AscendSharedExperts:
         # types pass. The shared expert's own quant type is resolved
         # per-linear in _collect_megamoe_shared_weight and may differ from
         # this one (mixed quantization).
-        if self.quant_type not in (QuantType.W8A8MXFP, QuantType.W4A4MXFP, QuantType.W4A8MXFP):
-            # Only MXFP8 and MXFP4 are implemented. Their shared weights
-            # rebuild cheaply from the post-processed linear buffers: MXFP8
-            # needs an (out, in) transpose, packed MXFP4 additionally needs the
-            # same FRACTAL_NZ (w1) / FRACTAL_NZ_C0_32 (w2) rebuild as the
-            # routed experts.
+        supported_quant_types = (
+            (QuantType.W4A8,) if integer_shared else (QuantType.W8A8MXFP, QuantType.W4A4MXFP, QuantType.W4A8MXFP)
+        )
+        if self.quant_type not in supported_quant_types:
+            # Integer A3 initially supports routed W4A8 only. In particular,
+            # floating-point MTP layers keep their separate shared MLP.
             logger.info_once(
                 "MegaMoe shared-expert fusion is not implemented for quant type %s; "
                 "keeping the separate shared-expert forward.",
@@ -365,9 +367,10 @@ class AscendSharedExperts:
         quant_method.process_weights_after_loading = wrapped_megamoe_collect  # type: ignore
 
     def _collect_megamoe_shared_weight(self, slot: str, linear: torch.nn.Module) -> None:
-        """Rebuild one shared linear into the A5 MegaMoe layout.
+        """Rebuild one shared linear into its hardware-specific MegaMoe layout.
 
-        MegaMoe expects (out, in) tensors while the processed linear buffer is
+        A3 INT8 uses its own collector below. A5 expects (out, in) tensors
+        while the processed linear buffer is
         (in, out) ND, so a transpose+contiguous materializes the correct ND
         layout; the per-group scale becomes (n, k//2, 2), matching the routed
         per-expert scale shape. Mixed-quantization models may quantize the
@@ -382,6 +385,9 @@ class AscendSharedExperts:
         are viewed with their semantic dtype.
         """
         if self._megamoe_shared_fusion_disabled:
+            return
+        if get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION_INT):
+            self._collect_integer_megamoe_shared_weight(slot, linear)
             return
         padding = getattr(linear, "mxfp8_tp_padding", getattr(linear, "mxfp4_tp_padding", (0, 0)))
         if any(padding):
@@ -487,6 +493,52 @@ class AscendSharedExperts:
         self._megamoe_shared_parts[slot + "_scale"] = scale
         self._publish_megamoe_shared_fusion()
 
+    def _collect_integer_megamoe_shared_weight(self, slot: str, linear: torch.nn.Module) -> None:
+        """Build A3 W8A8 shared descriptors without changing the standalone MLP.
+
+        The processed dynamic-INT8 linear already has logical [K, N] weights.
+        A3 consumes NZ INT8 weights and FP32 scale bits in UINT64 carriers,
+        unlike the transposed MXFP descriptors used on A5.
+        """
+        method = getattr(linear, "quant_method", None)
+        scheme = getattr(method, "quant_method", method)
+        if (
+            getattr(scheme, "quant_type", QuantType.NONE) != QuantType.W8A8
+            or getattr(scheme, "act_quant_type", None) != torch.int8
+        ):
+            self._disable_megamoe_shared_fusion("A3 shared fusion requires dynamic W8A8 INT8 shared linears")
+            return
+        hidden = self.moe_config.hidden_dim
+        intermediate = self.moe_config.intermediate_size_per_partition
+        expected_shape = (hidden, 2 * intermediate) if slot == "w1" else (intermediate, hidden)
+        weight = linear.weight.data
+        scale = getattr(linear, "weight_scale_fp32", None)
+        offset = getattr(linear, "weight_offset", None)
+        if weight.dtype != torch.int8 or tuple(weight.shape) != expected_shape:
+            self._disable_megamoe_shared_fusion(
+                f"A3 shared weight must be full INT8 [K, N] {expected_shape}, got {weight.dtype} {tuple(weight.shape)}"
+            )
+            return
+        if scale is None or scale.dtype != torch.float32 or scale.numel() != expected_shape[1]:
+            self._disable_megamoe_shared_fusion("A3 shared weight requires one FP32 scale per output channel")
+            return
+        # Loading-time CPU checks only. The operator has no shared offset
+        # compensation in this first adapter, so asymmetric weights must fall back.
+        if offset is None or offset.numel() != expected_shape[1] or torch.count_nonzero(offset.detach().cpu()).item():
+            self._disable_megamoe_shared_fusion("A3 shared fusion requires zero weight offsets")
+            return
+        scale_cpu = scale.detach().cpu().contiguous().reshape(-1)
+        if not torch.isfinite(scale_cpu).all().item() or not (scale_cpu > 0).all().item():
+            self._disable_megamoe_shared_fusion("A3 shared scales must be finite and positive")
+            return
+        # Bitcast, not a numeric FP32 -> INT64 conversion. CANN reinterprets
+        # the low 32 bits of each UINT64 element as the dequantization scale.
+        scale_bits = scale_cpu.view(torch.int32).to(torch.int64).bitwise_and(0xFFFFFFFF).to(weight.device)
+        self._megamoe_shared_quant_type = QuantType.W8A8
+        self._megamoe_shared_parts[slot] = torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+        self._megamoe_shared_parts[slot + "_scale"] = scale_bits
+        self._publish_megamoe_shared_fusion()
+
     def megamoe_shared_fusion(self) -> MegamoeSharedExpertFusion:
         """Payload the routed layer needs to run the shared expert in MegaMoe.
 
@@ -531,7 +583,7 @@ class AscendSharedExperts:
         fusion.weight_type = shared_weight_type
         if not self.megamoe_shared_weights_ready:
             self.megamoe_shared_weights_ready = True
-            logger.info_once("Fused the shared expert into the A5 MegaMoe operator.")
+            logger.info_once("Shared-expert weights are ready for MegaMoe fusion.")
 
     def _disable_megamoe_shared_fusion(self, reason: str) -> None:
         if not self._megamoe_shared_fusion_disabled:
@@ -542,6 +594,7 @@ class AscendSharedExperts:
         self._megamoe_shared_fusion_disabled = True
         self._megamoe_shared_parts.clear()
         self._megamoe_shared_fusion.weights = None
+        self.megamoe_shared_weights_ready = False
 
     def set_lora_context(self, lora_context) -> None:
         self.lora_context = lora_context

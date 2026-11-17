@@ -67,6 +67,7 @@ _EXPECTED_CAPABILITIES = {
         HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
         HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
         HardwareCapability.CANN_MEGAMOE,
+        HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION_INT,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.FLASH_ATTN_NPU_3,

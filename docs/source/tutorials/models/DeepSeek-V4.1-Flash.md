@@ -2845,6 +2845,49 @@ hardware limit.
 For the complete, step-by-step usage guide please refer to
 **[Optix-for-PD-disaggregation](https://gitcode.com/Ascend/msmodeling/blob/master/docs/en/quick_start/optix_agent_pd_disaggregation.md)**.
 
+### 9.2 Experimental A3 MegaMoe Shared-Expert Fusion
+
+On A3, `enable_fused_mc2=3` opts into fusing the main model's shared expert
+into MegaMoe. The adapter supports DeepSeek V4.1 with W4A8 routed experts
+and exactly one dynamic W8A8 INT8 shared expert. It requires a matching
+operator package with independent shared INT8 descriptors; a package that
+supports routed-only MegaMoe is insufficient. The operator's Python
+signature must expose `shared_l1_weights`, `shared_l2_weights`,
+`shared_l1_weights_sf`, `shared_l2_weights_sf`,
+`shared_expert_quant_out_dtype`, `shared_weight1_type`, and
+`shared_weight2_type`.
+
+To opt in on Decode, merge the following fields into its existing
+`--additional-config` JSON, retaining the other deployment settings:
+
+```json
+{
+  "enable_fused_mc2": 3,
+  "enable_shared_expert_dp": true
+}
+```
+
+The shared MLP must have full weights on every participating rank. For this
+opt-in A3 path, shared-expert data parallelism loads replicated shared
+weights even when the model uses tensor parallelism. The adapter preserves
+the MTP layer's existing weight layout and does not change speculative
+decoding settings. Prefill can retain `enable_fused_mc2=2`; shared fusion
+does not require both roles to use the same mode. Existing deployment
+examples and defaults remain unchanged.
+
+Shared weights must use symmetric INT8 quantization with finite, positive
+FP32 per-output-channel scales and zero weight offsets. The shared MLP's
+activation, including its clamp, must match the routed experts. Unsupported
+shared payloads keep the separate shared-expert forward. Missing required
+operator arguments instead fail during initialization with a message to use
+`enable_fused_mc2=2`, so that shared INT8 weights cannot be interpreted as
+routed INT4 weights. A5 MXFP shared fusion keeps its existing descriptor
+path.
+
+This A3 adapter is experimental. Full numerical, graph-mode, and model
+accuracy validation with the matching operator package remains pending;
+this option is not a performance recommendation.
+
 ## 10 FAQ
 
 ### 10.1 How do I enable tool calling and reasoning parsing?

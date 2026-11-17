@@ -65,6 +65,7 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
     and per-channel quantization for weights.
     """
 
+    quant_type: QuantType = QuantType.W8A8
     act_quant_type: torch.dtype = torch.int8
     weight_switch_gather_specs = (WeightSwitchGatherSpec("weight"),)
     weight_switch_output_gather_specs = (

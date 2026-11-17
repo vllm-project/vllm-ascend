@@ -1095,10 +1095,10 @@ class AscendConfig:
             )
 
     def _validate_megamoe_shared_expert_fusion(self, vllm_config: VllmConfig) -> None:
-        """Reject ``enable_fused_mc2=3`` on A3 and latent-MoE models.
+        """Validate the hardware and model contract for shared-expert fusion.
 
-        The shared expert is fused into the routed A5 MegaMoe operator, so this
-        contract is A5-only (``CANN_MEGAMOE_SHARED_EXPERT_FUSION``) and assumes
+        A5 uses MXFP descriptors; A3 initially supports DeepSeek V4.1's single
+        W8A8 shared expert under W4A8 routed experts. Both paths assume that
         the shared expert and routed experts share the residual width. Latent-MoE
         models (e.g. Kimi K3) project the residual stream before the routed FFN and
         expose ``routed_expert_hidden_size``; the shared expert cannot be fused in
@@ -1109,15 +1109,23 @@ class AscendConfig:
             return
 
         hardware_profile = get_current_hardware_profile()
-        if not hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION):
+        integer_shared = hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION_INT)
+        if not (integer_shared or hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION)):
             raise NotImplementedError(
-                "enable_fused_mc2=3 (MegaMoe shared-expert fusion) is only supported on A5; "
+                "enable_fused_mc2=3 (MegaMoe shared-expert fusion) requires A5 or supported A3 integer fusion; "
                 "the current hardware profile does not support it. "
                 "Set additional_config.enable_fused_mc2 to 0, 1, or 2."
             )
 
         model_config = getattr(vllm_config, "model_config", None)
         hf_text_config = getattr(model_config, "hf_text_config", None)
+        if integer_shared and (
+            getattr(hf_text_config, "model_type", None) != "deepseek_v41"
+            or getattr(hf_text_config, "n_shared_experts", None) != 1
+        ):
+            raise NotImplementedError(
+                "A3 MegaMoe shared-expert fusion currently requires DeepSeek V4.1 with exactly one shared expert."
+            )
         if getattr(hf_text_config, "routed_expert_hidden_size", None) is not None:
             raise NotImplementedError(
                 "enable_fused_mc2=3 (MegaMoe shared-expert fusion) does not support latent-MoE models "
