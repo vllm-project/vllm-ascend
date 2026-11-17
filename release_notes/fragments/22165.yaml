@@ -1,0 +1,6 @@
+pr: 22165
+entries:
+  - category: bugfix
+    text: >-
+      Fixed DeepSeek V4/V4.1 unquantized wo_a output projection weights
+      staying in ND when weight_nz_mode=2 is selected.
