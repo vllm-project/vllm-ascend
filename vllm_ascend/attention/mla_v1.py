@@ -982,9 +982,6 @@ class MLAParamProvider:
     def resolve(self, attn_metadata) -> dict[str, Any]:
         decode = attn_metadata[self.layer_name].decode
         assert decode is not None
-        role = "draft" if self.is_draft_model else "target"
-        logger.warning_once("DEBUG_MLA_PROVIDER_RESOLVE layer=%s role=%s", self.layer_name, role)
-
         if self.is_draft_model:
             actual_seq_qlen = decode.actual_seq_lengths_q
             block_table = decode.block_table

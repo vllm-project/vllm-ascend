@@ -223,7 +223,6 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
         for layer_name, metadata in draft_attn_metadata.items():
             decode_metadata = getattr(metadata, "decode", None)
             if decode_metadata is not None and getattr(metadata, "external_flashmla", None) is None:
-                logger.warning_once("DEBUG_SPEC_FIA path=multi_module_mtp backend=mla")
                 fia_params.append(
                     {
                         "layer_name": layer_name,
@@ -233,7 +232,6 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
                     }
                 )
             else:
-                logger.warning_once("DEBUG_SPEC_FIA path=multi_module_mtp backend=non_mla")
                 fia_params.append(
                     {
                         "layer_name": layer_name,
