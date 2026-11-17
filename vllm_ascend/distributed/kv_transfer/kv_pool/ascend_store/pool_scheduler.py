@@ -811,8 +811,6 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         super().update_connector_output(connector_output)
         meta = connector_output.kv_connector_worker_meta
         if isinstance(meta, AscendStoreKVConnectorWorkerMetadata) and self._block_pool is not None:
-            for event_id in meta.failed_events:
-                logger.error("AscendStore save event %s failed; releasing only after all ranks ACK", event_id)
             self._in_flight_save_blocks.complete(meta.completed_events, self._block_pool)
 
     def has_pending_push_work(self) -> bool:

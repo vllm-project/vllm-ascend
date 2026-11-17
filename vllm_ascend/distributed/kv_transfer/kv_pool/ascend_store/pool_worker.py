@@ -1413,11 +1413,6 @@ class BaseKVPoolWorker(ABC):
 
     def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
         if isinstance(self.kv_send_thread, KVCacheStoreSendingThread):
-            if self.enable_partial_hash_hits:
-                completed, failed = self.kv_send_thread.take_save_outcomes()
-                if completed:
-                    return AscendStoreKVConnectorWorkerMetadata(completed, failed)
-                return None
             if ce := self.kv_send_thread.get_completed_events():
                 return AscendStoreKVConnectorWorkerMetadata(ce)
         return None

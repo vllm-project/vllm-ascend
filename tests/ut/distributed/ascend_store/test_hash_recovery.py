@@ -121,8 +121,8 @@ def test_boundary_save_lookup_and_physical_page_replay(seed, store_job_id):
     assert req.store_job_id is not None and req.store_job_id != req.event_id
     send._handle_request(send.request_queue.get())
     req.current_event.synchronize.assert_called_once()
-    completed, failed = send.take_save_outcomes()
-    assert completed == {req.event_id: 1} and not failed
+    completed = send.get_completed_events()
+    assert completed == {req.event_id: 1}
     tracker.complete(completed, pool)
     pool.free_blocks.assert_called_once_with([3, 1])
     assert not tracker.has_pending_work()
@@ -191,5 +191,5 @@ def test_failed_save_acknowledges_without_advancing_saved_offset():
     send._handle_stored_request = Mock(return_value=False)
     send.add_save_batch([req])
     send._handle_request(send.request_queue.get())
-    assert send.take_save_outcomes() == ({3: 1}, {3})
+    assert send.get_completed_events() == {3: 1}
     assert send.get_saved_offset("failed") == 0

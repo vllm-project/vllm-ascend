@@ -484,7 +484,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.enable_kv_event = enable_kv_event
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
-        self.failed_events: set[int] = set()
         self.worker = worker
         # Request-local durable high-water marks. They are advanced only after
         # the backend store succeeds, so a failed range is retried on the next
@@ -563,7 +562,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     for request in requests:
                         if request.event_id is not None:
                             self.completed_events[request.event_id] = self.completed_events.get(request.event_id, 0) + 1
-                            self.failed_events.add(request.event_id)
                 save_batch.done.set()
                 return save_batch
             for request in requests:
@@ -667,13 +665,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self.completed_events.clear()
         return completed_events
 
-    def take_save_outcomes(self) -> tuple[dict[int, int], set[int]]:
-        with self.completed_events_lock:
-            completed, failed = self.completed_events.copy(), self.failed_events.copy()
-            self.completed_events.clear()
-            self.failed_events.clear()
-        return completed, failed
-
     def _handle_request_exception(self, request_data: Any):
         def finish_failed_request(failed_request: Any) -> None:
             if isinstance(failed_request, ReqMeta):
@@ -685,7 +676,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         self.completed_events[failed_request.event_id] = (
                             self.completed_events.get(failed_request.event_id, 0) + 1
                         )
-                        self.failed_events.add(failed_request.event_id)
             elif isinstance(failed_request, KVCacheStoreBatch):
                 # Complete the batch fence even after a fatal dispatch error.
                 # Request fences observe _fatal_error before allowing block reuse.
@@ -741,7 +731,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         req_id = req_meta.req_id
         tracked_request = False
-        succeeded = False
         try:
             tracked_request = self.is_live_store_job(req_meta)
             if not tracked_request:
@@ -763,8 +752,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if req_meta.event_id is not None:
                 with self.completed_events_lock:
                     self.completed_events[req_meta.event_id] = 1
-                    if succeeded is not True:
-                        self.failed_events.add(req_meta.event_id)
             self.request_queue.task_done()
 
     def _handle_stored_request(self, req_meta: ReqMeta) -> bool:

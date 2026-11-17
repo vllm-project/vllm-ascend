@@ -55,18 +55,17 @@ def test_out_of_order_completion_does_not_release_another_job():
     assert not tracker.has_tracked_blocks()
 
 
-def test_aggregated_worker_counts_release_source_and_preserve_failures():
+def test_aggregated_worker_counts_release_source():
     tracker = InFlightSaveBlockTracker(2)
     pool = _pool()
     meta = ReqMeta("r", can_save=True, boundary_puts=[BoundaryPut(0, 1, 16)])
     tracker.retain(meta, {}, pool)
-    first = AscendStoreKVConnectorWorkerMetadata({meta.event_id: 1}, {meta.event_id})
+    first = AscendStoreKVConnectorWorkerMetadata({meta.event_id: 1})
     second = AscendStoreKVConnectorWorkerMetadata({meta.event_id: 1})
 
     completed = first.aggregate(second)
 
     assert completed.completed_events == {meta.event_id: 2}
-    assert completed.failed_events == {meta.event_id}
     tracker.complete(completed.completed_events, pool)
     pool.free_blocks.assert_called_once_with([1])
     assert not tracker.has_pending_work()
