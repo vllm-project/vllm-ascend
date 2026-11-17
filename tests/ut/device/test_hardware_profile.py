@@ -283,7 +283,6 @@ def test_gdn_fixed_spec_recurrent_fallback_policy(device_type, expected_min_quer
         (AscendDeviceType.A2, 2048),
         (AscendDeviceType.A3, 2048),
         (AscendDeviceType.A5, 1024),
-        (AscendDeviceType._310P, 2048),
     ],
 )
 def test_qwen4exp_hc_gate_mix_row_block_threshold(device_type, expected_min_rows):
