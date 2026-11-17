@@ -222,10 +222,19 @@ class A3MLAAdapter:
             raise ValueError("A3 provider output must be TND and match Query dtype/device")
         if lse.shape != (cfg.num_heads, q.shape[0]) or lse.dtype != torch.float32 or lse.device != q.device:
             raise ValueError("A3 provider LSE must be FP32 [H,T] on the Query device")
-        if seqused_q is not None and q.shape[0]:
+        if q.shape[0]:
             token = torch.arange(q.shape[0], device=q.device, dtype=torch.int32)
             request = torch.searchsorted(cu_seqlens_q[1:].contiguous(), token, right=True).long()
-            live = (token - cu_seqlens_q[request] < seqused_q[request]) & (lengths[request] > 0)
+            offset = token - cu_seqlens_q[request]
+            live = lengths[request] > 0
+            if seqused_q is not None:
+                live &= offset < seqused_q[request]
+            if cfg.mask_mode == 3:
+                # Right-aligned causal attention can mask an entire query row
+                # when Q is longer than KV. Normalize the provider's +inf LSE
+                # sentinel so that DCP merging gives this row zero weight.
+                query_lengths = cu_seqlens_q[request + 1] - cu_seqlens_q[request]
+                live &= lengths[request] - query_lengths + offset >= 0
             output = output.masked_fill(~live[:, None, None], 0)
             lse = lse.masked_fill(~live[None, :], -torch.inf)
         # Existing MLA V-up and DCP adaptation consume NTD output and NT LSE.

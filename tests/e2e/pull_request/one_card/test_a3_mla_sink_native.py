@@ -147,7 +147,7 @@ def test_native_graph_refresh_lengths_and_reorder(sink, causal):
     with torch.npu.graph(graph):
         output = adapter.attention(**data, metadata=metadata)
     pointer = metadata.data_ptr()
-    for qlens, klens in [((2, 1), (257, 33)), ((1, 2), (9, 143)), ((2, 1), (129, 0))]:
+    for qlens, klens in [((2, 1), (257, 33)), ((1, 2), (9, 143)), ((2, 1), (129, 0)), ((2, 1), (1, 0))]:
         data["cache_seqlens"].copy_(torch.tensor(klens, dtype=torch.int32, device="npu"))
         data["cu_seqlens_q"].copy_(torch.tensor([0, qlens[0], 3], dtype=torch.int32, device="npu"))
         data["seqused_q"].copy_(torch.tensor(qlens, dtype=torch.int32, device="npu"))
