@@ -66,7 +66,8 @@ class PCPHiSparseConnector(ActiveKVConnector):
     def __init__(self, connector, manager, block_tables, host_group_id):
         self.__dict__.update(connector.__dict__)
         self._pcp_manager = manager
-        self._pcp_attn_metadata = {}
+        self._pcp_group_metadata = []
+        self._pcp_write_request_ids = None
         self._global_block_tables = block_tables
         worker = self.kv_connector.connector_worker
         groups = worker.kv_cache_config.kv_cache_groups
@@ -114,7 +115,8 @@ class PCPHiSparseConnector(ActiveKVConnector):
                 cache.runtime.request_state_indices = states
 
     def _build_load_kwargs(self, scheduler_output, input_batch, attn_metadata):
-        self._pcp_attn_metadata = {}
+        self._pcp_group_metadata = []
+        self._pcp_write_request_ids = None
         if input_batch is None:
             return super()._build_load_kwargs(scheduler_output, input_batch, attn_metadata)
         if attn_metadata is None and is_forward_context_available():
@@ -127,14 +129,13 @@ class PCPHiSparseConnector(ActiveKVConnector):
                 global_batch, manager._padded_gather_idx, manager._gathered_kv_write_mask
             )
         count = write_request_ids.numel() if write_request_ids is not None else input_batch.num_tokens_after_padding
-        for name, _ in self.kv_connector.connector_worker._group_leaders:
-            metadata = (attn_metadata or {}).get(name)
-            if metadata is None:
-                continue
-            metadata.hisparse_write_req_id_per_token = (
-                metadata.req_id_per_token if write_request_ids is None else write_request_ids
-            )
-        self._pcp_attn_metadata = attn_metadata or {}
+        self._pcp_write_request_ids = write_request_ids
+        metadata_by_layer = attn_metadata or {}
+        self._pcp_group_metadata = [
+            (cache, metadata)
+            for name, cache in self.kv_connector.connector_worker._group_leaders
+            if (metadata := metadata_by_layer.get(name)) is not None
+        ]
         # Keep Core's lifecycle canonical and snapshot all gathered slots.
         load_kwargs = super()._build_load_kwargs(scheduler_output, global_batch, attn_metadata)
         load_kwargs["num_tokens"] = count
@@ -144,19 +145,16 @@ class PCPHiSparseConnector(ActiveKVConnector):
         super()._start_load_kv()
         self.prepare_draft_prefill()
         # FULL replay also needs the resolver bound to local query states.
-        for name, cache in self.kv_connector.connector_worker._group_leaders:
-            metadata = self._pcp_attn_metadata.get(name)
-            if metadata is not None:
-                prepare_pcp_query_states(cache, metadata)
+        for cache, metadata in self._pcp_group_metadata:
+            prepare_pcp_query_states(cache, metadata)
 
     def prepare_host_mirror(self):
-        for name, leader in self.kv_connector.connector_worker._group_leaders:
-            metadata = self._pcp_attn_metadata.get(name)
-            if metadata is None:
-                continue
+        for leader, metadata in self._pcp_group_metadata:
             for cache in leader.index_group_caches:
                 cache.num_actual_tokens = metadata.hisparse_num_write_tokens
-                cache.req_id_per_token = metadata.hisparse_write_req_id_per_token
+                cache.req_id_per_token = (
+                    metadata.req_id_per_token if self._pcp_write_request_ids is None else self._pcp_write_request_ids
+                )
                 cache.host_mirror_required = metadata.hisparse_write_has_prefill or cache.runtime.eager_host_mirror
 
     def finish_forward(self):
