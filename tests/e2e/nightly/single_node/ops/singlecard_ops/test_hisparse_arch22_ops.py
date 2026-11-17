@@ -24,15 +24,6 @@ def _require_arch22():
     assert hasattr(torch.ops._C_ascend, "hisparse_resolve_residency"), "rebuild the arch22 extension"
 
 
-@pytest.mark.parametrize("graph_producer,shared_group", [(False, True), (True, False)])
-def test_direct_target_mirror_survives_draft_writes(graph_producer, shared_group, record_property):
-    from tests.e2e.pull_request.one_card.test_hisparse_integration import (
-        test_direct_target_mirror_survives_legal_draft_writes,
-    )
-
-    test_direct_target_mirror_survives_legal_draft_writes(graph_producer, shared_group, record_property)
-
-
 def reference(topk, requests, states, source, resident, hot_table, dgi, lru, block):
     dgi = dgi.clone()
     lru = lru.clone()
@@ -476,7 +467,7 @@ def _invalidation_graph(forward):
         graph.reset()
 
 
-@pytest.mark.parametrize("hot_capacity", [4, 10240])
+@pytest.mark.parametrize("hot_capacity", [4, 10240, 32768, 32769])
 def test_invalidate_hot_capacity_graph(hot_capacity):
     dgi = torch.arange(2 * hot_capacity, dtype=torch.int32, device="npu").view(2, hot_capacity)
     group_table = torch.tensor([dgi.data_ptr()], dtype=torch.int64, device=dgi.device)
