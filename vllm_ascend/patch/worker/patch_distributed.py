@@ -224,7 +224,11 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self._release_hccl_resources()
 
         device_group = getattr(self, "device_group", None)
-        if device_group is not None and self.backend != "hccl":
+        # ``backend`` is only set by __init__; a coordinator built without it
+        # (e.g. upstream unit tests that use ``GroupCoordinator.__new__``) must
+        # still be destroyable. Missing backend means "not hccl", so the device
+        # group is destroyed directly, same as upstream GroupCoordinator.
+        if device_group is not None and getattr(self, "backend", None) != "hccl":
             torch.distributed.destroy_process_group(device_group)
         if hasattr(self, "device_group"):
             del self.device_group
