@@ -28,10 +28,7 @@ from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.observability.runtime_config._defaults import SPEC_SHORT_LOG_INTERVAL_SECONDS
 from vllm_ascend.observability.runtime_config.schema import ConfigField, DetectorSchema
 from vllm_ascend.observability.runtime_guard.detector.base import ConfigBackedDetector, resolve_batch_req_ids
-from vllm_ascend.observability.runtime_guard.io import (
-    filter_valid_token_ids,
-    output_token_count_for_request,
-)
+from vllm_ascend.observability.runtime_guard.io import output_token_count_for_request
 from vllm_ascend.observability.runtime_guard.rank_gate import runner_tp_rank
 from vllm_ascend.observability.runtime_guard.state import ILL_TYPE_NONE, Incident
 
@@ -235,7 +232,8 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
         if draft_len <= 0:
             draft_len = int(getattr(req_state, "prev_num_draft_len", 0) or 0)
         if draft_len <= 0:
-            valid_sampled = filter_valid_token_ids(sampled_ids)
+            # sampled_norm is already normalized; drop async/pad placeholders only.
+            valid_sampled = [tid for tid in sampled_norm if tid != -1]
             draft_len = max(0, len(valid_sampled) - 1)
         if draft_len <= 0:
             if log_leader:
