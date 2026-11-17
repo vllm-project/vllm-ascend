@@ -18,6 +18,7 @@ from vllm.v1.hisparse.runtime import HiSparsePrefillStagingPlan
 from vllm.v1.hisparse.runtime import build_hisparse_prefill_staging_plan as build_core_prefill_plan
 from vllm.v1.worker.workspace import current_workspace_manager
 
+from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_max_num_reqs
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
@@ -125,7 +126,7 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device, metadata_cls=AscendHiSparseMetadata, **kwargs)
         self._request_row_buffers: dict[int | None, torch.Tensor] = {}
         self._pcp_query_buffers: dict[int | None, tuple[torch.Tensor, torch.Tensor]] = {}
-        self._pcp_request_capacity = 2 * vllm_config.scheduler_config.max_num_seqs
+        self._pcp_request_capacity = get_sfa_max_num_reqs(vllm_config)
         self._pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self._row_capacity = max(
             vllm_config.scheduler_config.max_num_batched_tokens,
