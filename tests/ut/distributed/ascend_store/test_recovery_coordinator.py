@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
 from math import lcm
 
 import pytest
@@ -12,6 +13,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
     SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
@@ -19,6 +21,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     ExternalCachedBlockPool,
+    _converge_spec,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
@@ -60,6 +63,51 @@ def _make_coord(
         retention_interval=retention_interval,
         enable_partial_hash_hits=enable_partial_hash_hits,
     )
+
+
+@pytest.mark.parametrize("extra_retained_tokens", [0, 3])
+@pytest.mark.parametrize("uniform", [False, True])
+def test_converge_spec_covers_retained_window_without_mutating_input(extra_retained_tokens, uniform):
+    spec = SlidingWindowSpec(
+        block_size=8,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=None,
+        sliding_window=16,
+        extra_retained_tokens=extra_retained_tokens,
+    )
+    wrapped = UniformTypeKVCacheSpecs.from_specs({"L0": spec}) if uniform else spec
+    converged = _converge_spec(wrapped)
+    assert converged == replace(spec, sliding_window=16 + extra_retained_tokens, extra_retained_tokens=0)
+    assert spec.sliding_window == 16
+    assert spec.extra_retained_tokens == extra_retained_tokens
+    assert _converge_spec(converged) is converged
+
+
+def test_converge_spec_preserves_full_attention():
+    spec = _full(16)
+    assert _converge_spec(spec) is spec
+
+
+def test_group_verification_uses_coordinator_state_and_converged_specs():
+    spec = SlidingWindowSpec(
+        block_size=8,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=None,
+        sliding_window=16,
+        extra_retained_tokens=3,
+    )
+    groups = [
+        KVCacheGroupSpec(["L0"], spec),
+        KVCacheGroupSpec(["mtp"], _converge_spec(spec), is_eagle_group=True),
+    ]
+    coord = _make_coord(groups, hash_block_size=8)
+    coord._verify_and_split_kv_cache_groups()
+    assert len(coord.attention_groups) == 1
+    assert coord.attention_groups[0][1] == [0, 1]
+    assert coord.eagle_group_ids == {0, 1}
+    assert coord.group_effective_specs == [_converge_spec(spec)] * 2
 
 
 # ----- ExternalCachedBlockPool -----

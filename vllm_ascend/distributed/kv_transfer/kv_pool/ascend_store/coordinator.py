@@ -159,11 +159,7 @@ class AscendStoreCoordinator:
                 "scheduler_block_size must be a multiple of each group's effective block_size"
             )
 
-        eagle_group_ids = {i for i, group in enumerate(kv_cache_groups) if group.is_eagle_group}
-        if use_eagle and not eagle_group_ids:
-            eagle_group_ids = set(range(len(kv_cache_groups)))
-
-        self._verify_and_split_kv_cache_groups(eagle_group_ids)
+        self._verify_and_split_kv_cache_groups()
         # Do not keep the coordinator alive through its cache while GC is frozen.
         self._cached_reachable_masks = lru_cache(maxsize=_REACHABLE_MASK_CACHE_SIZE)(
             partial(type(self)._reachable_masks, proxy(self))
@@ -173,19 +169,19 @@ class AscendStoreCoordinator:
         alignment = self.hash_block_size if self.enable_partial_hash_hits else self.lcm_block_size
         return length // alignment * alignment
 
-    def _verify_and_split_kv_cache_groups(self, eagle_group_ids: set[int]) -> None:
+    def _verify_and_split_kv_cache_groups(self) -> None:
+        eagle_group_ids = {i for i, group in enumerate(self.kv_cache_groups) if group.is_eagle_group}
+        if self.use_eagle and not eagle_group_ids:
+            eagle_group_ids = set(range(len(self.kv_cache_groups)))
+
         attention_groups: list[tuple[KVCacheSpec, list[int], type[SingleTypeKVCacheManager]]] = []
         self.group_effective_specs: list[KVCacheSpec] = []
 
         for group_id, group in enumerate(self.kv_cache_groups):
             spec = _unwrap_spec(group.kv_cache_spec)
-            effective_spec = _copy_spec_with_block_size(spec, self.group_effective_block_sizes[group_id])
-            if isinstance(effective_spec, SlidingWindowSpec) and effective_spec.extra_retained_tokens:
-                effective_spec = replace(
-                    effective_spec,
-                    sliding_window=effective_spec.sliding_window + effective_spec.extra_retained_tokens,
-                    extra_retained_tokens=0,
-                )
+            effective_spec = _converge_spec(
+                _copy_spec_with_block_size(spec, self.group_effective_block_sizes[group_id])
+            )
             self.group_effective_specs.append(effective_spec)
             if group_id not in self.cacheable_group_ids:
                 continue
@@ -471,6 +467,22 @@ class AscendStoreCoordinator:
 def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
+    return spec
+
+
+def _converge_spec(spec: KVCacheSpec) -> KVCacheSpec:
+    """Return the coverage spec used to converge external cache hits.
+
+    SWA recovery also needs the MTP re-prefill tail, so include the extra
+    retained tokens in the window used by lookup, load and store.
+    """
+    spec = _unwrap_spec(spec)
+    if isinstance(spec, SlidingWindowSpec) and spec.extra_retained_tokens:
+        return replace(
+            spec,
+            sliding_window=spec.sliding_window + spec.extra_retained_tokens,
+            extra_retained_tokens=0,
+        )
     return spec
 
 
