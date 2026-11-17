@@ -442,6 +442,11 @@ def test_dsv4_window_continuation_restores_live_pages_only(ns):
     )
     entries = ns["_load_entries"](worker, request, 0, [b"evicted", b"live"], [True, False])
     assert entries == [(b"live".hex(), 1)]
+    worker._offload_active_pages = {("request", "incarnation", 0): (256, {1: "committed-private-page"})}
+    assert ns["_load_entries"](worker, request, 0, [], None) == [("committed-private-page", 1)]
+    worker._offload_active_pages[("request", "incarnation", 0)] = (128, {1: "stale"})
+    with pytest.raises(ValueError, match="no committed version"):
+        ns["_load_entries"](worker, request, 0, [], None)
 
 
 def isolated_method(path, cls_name, method_name, ns):

@@ -77,6 +77,12 @@ def _load_entries(worker, request, group, hashes, mask):
             (request.req_id, request.layerwise_request_id, key), key
         )
         return [(key, index)]
+    checkpoint = None
+    active_pages = getattr(worker, "_offload_active_pages", {})
+    if spec.layerwise_previous_step and active_pages:
+        checkpoint = active_pages.get(
+            (request.req_id, request.layerwise_request_id, group)
+        )
     snapshot_start = worker._layerwise_load_snapshot_start(request, group, tokens)
     entries = []
     for index in range(end):
@@ -91,6 +97,12 @@ def _load_entries(worker, request, group, hashes, mask):
                 continue
             if worker._group_reuses_buffer(group) or (mask is not None and index < len(mask) and mask[index]):
                 raise ValueError("Mooncake offload restore selected a required null block")
+            continue
+        if checkpoint is not None:
+            endpoint, pages = checkpoint
+            if endpoint != tokens or index not in pages:
+                raise ValueError("Mooncake offload has no committed version for a live continuation page")
+            entries.append((pages[index], index))
             continue
         if snapshot_start is not None and index >= snapshot_start:
             key = snapshot_key(worker, request, group, index, spec.layerwise_snapshot_end_token)
@@ -253,6 +265,8 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
     groups: dict[int, list[ReqMeta]] = {group: [] for group in worker.cacheable_group_ids}
     get_slots = []
     put_slots: list[tuple[ReqMeta, str, int | None, int]] = []
+    pending = {}
+    dsv4 = getattr(getattr(worker, "kv_cache_config", None), "dsv4_component_identity", None) is not None
     for request in requests:
         cached = request.load_spec.kvpool_cached_tokens if request.load_spec is not None else 0
         masks = worker._compute_reachable_load_masks(request, cached)
@@ -281,15 +295,32 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
             for key, index in entries:
                 view.load_block_keys[index] = key
                 get_slots.append((view, key, request.block_ids_by_group[group][index], index))
-            put_slots.extend(
-                (view, key, slot, sum(worker.group_block_len[group]))
-                for key, slot in _save_entries(worker, request, view, group, hashes)
-            )
+            saves = _save_entries(worker, request, view, group, hashes)
+            put_slots.extend((view, key, slot, sum(worker.group_block_len[group])) for key, slot in saves)
+            if (
+                dsv4 and request.can_save and request.layerwise_request_id
+                and not request.is_last_chunk and worker._group_reuses_buffer(group)
+                and not worker.group_uses_align_state[group]
+            ):
+                pages = {index: key for key, index in entries}
+                for key, slot in saves:
+                    index = view.partial_block_index if slot is None else view.save_key_block_offset + slot
+                    pages[index] = key
+                live_ids = request.block_ids_by_group[group]
+                pages = {index: key for index, key in pages.items() if index < len(live_ids) and live_ids[index]}
+                pending[(request.req_id, request.layerwise_request_id, group)] = request.target_token_len, pages
             groups[group].append(view)
     try:
         worker._open_layerwise_get_sessions(get_slots)
         worker._check_layerwise_transfer_errors()
         _open_puts(worker, put_slots)
+        aliases = getattr(worker, "_offload_private_aliases", {})
+        worker._offload_pending_pages = {
+            identity: (endpoint, {
+                index: aliases.get((*identity[:2], key), key) for index, key in pages.items()
+            })
+            for identity, (endpoint, pages) in pending.items()
+        }
     except Exception:
         worker._layer_load_aborted.set()
         worker._finish_current_layerwise_load_sessions()

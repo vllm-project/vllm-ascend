@@ -1009,6 +1009,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if aliases:
             for identity in [identity for identity in aliases if identity[0] in req_ids]:
                 del aliases[identity]
+        for name in ("_offload_active_pages", "_offload_pending_pages"):
+            checkpoints = getattr(self, name, {})
+            for identity in [identity for identity in checkpoints if identity[0] in req_ids]:
+                del checkpoints[identity]
         if req_ids:
             offload_event("terminal_cleanup", requests=sorted(req_ids))
 
@@ -2729,6 +2733,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 while not save_finished_events[layer_id].wait(timeout=10):
                     send_thread.raise_if_failed()
             send_thread.raise_if_failed()
+        pending = getattr(self, "_offload_pending_pages", None)
+        if pending:
+            if not hasattr(self, "_offload_active_pages"):
+                self._offload_active_pages = {}
+            self._offload_active_pages.update(pending)
+            pending.clear()
         reuse_source_layers = {source for value in self.prefetch_layer_map.values() for source in reuse_sources(value)}
         for layer_id in range(num_local):
             if layer_id in reuse_source_layers:
