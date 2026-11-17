@@ -122,6 +122,7 @@ def test_sfa_k31_identity_in_registered_inner_model_context(tmp_path, monkeypatc
         enable_sparse_sfa_turboquant=False,
         enable_mlapo=False,
         sparse_kv_offload_config=SimpleNamespace(enabled=False),
+        sfa_preprocess_mode="auto",
     )
     monkeypatch.setattr("vllm_ascend.attention.sfa_v1.get_ascend_config", lambda: ascend_config)
     monkeypatch.setattr("vllm_ascend.attention.sfa_v1.get_tensor_model_parallel_world_size", lambda: 8)
