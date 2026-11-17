@@ -395,7 +395,7 @@ class AscendStoreCoordinator:
                 block_pool=cast(BlockPool, cached_block_pool),
                 kv_cache_spec=spec,
                 drop_eagle_block=0 in eagle_indices,
-                alignment_tokens=alignment_tokens if self.enable_partial_hash_hits else spec.block_size,
+                alignment_tokens=alignment_tokens,
             )
             blocks_by_group: list[list[KVCacheBlock]] = [[] for _ in range(len(self.kv_cache_groups))]
             for group_id, blocks in zip(group_ids, hit_blocks, strict=True):
