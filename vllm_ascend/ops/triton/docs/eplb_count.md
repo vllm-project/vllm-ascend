@@ -123,14 +123,11 @@ three distributions: 141 points/device. All failures and regressions are retaine
 | A3 | 455/455 | 141/141 | 117/141 | 24/141 | 0.574x–1.953x |
 | A5 | 455/455 | 141/141 | 118/141 | 23/141 | 0.237x–910.690x |
 
-A3 uses Ascend910_9362 / NpuArch2201, 40 vector cores and driver 26.2.rc1.b081.
-The target was healthy and no other process on that target was observed in
-ownership checks; other host devices had active workloads. This is a shared
-host measurement, not a reservation. CANN is 9.2.1, Torch 2.10.0+cpu, Torch-NPU
-2.10.0.post7, Triton 3.6.0 and Triton-Ascend 3.6.0.post2. The compiler SHA256 is
-`69b9402f711ccdcd21c6f951b5e211bb2abd397f1f5ff06dd4dc7a88c6f974bc`.
-
-A5 uses Ascend950DT_9582 / NpuArch3510, 64 vector cores and driver 26.2.rc1.b088. CANN, Torch, Torch-NPU, Triton, Triton-Ascend and the compiler binary hash match the A3 versions above. Periodic ownership checks found the target healthy and observed no other process on it. The shared host had Alarm on device 0 and Warning on devices 2/3/6/7; device 1 also had residual HBM allocations without another listed process. These conditions are retained with the raw run and do not establish an isolated hardware comparison between A3 and A5.
+A3 and A5 use CANN 9.2.1, Torch 2.10.0+cpu, Torch-NPU 2.10.0.post7,
+Triton 3.6.0 and Triton-Ascend 3.6.0.post2. The Triton compiler binary identity
+matches across both platforms. These are paired main-versus-candidate
+measurements in shared test environments, with periodic target-process checks.
+They do not establish an isolated comparison of A3 and A5 hardware.
 
 For INT64 IDs, contiguous masks and uniform local routes, shapes are
 `(T,K,local_expert_count)` and times are microseconds per call:
