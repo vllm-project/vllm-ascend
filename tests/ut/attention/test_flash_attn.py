@@ -13,10 +13,27 @@ from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import AttentionSelectorConfig
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
+from vllm_ascend.attention import fa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
-from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend, AscendFlashAttentionImpl
+from vllm_ascend.attention.fa_v1 import (
+    AscendFlashAttentionBackend,
+    AscendFlashAttentionImpl,
+    AscendFlashAttentionMetadataBuilder,
+)
 from vllm_ascend.models.minimax_m3 import msa_m3
 from vllm_ascend.worker.v2 import attn_utils
+
+
+def make_builder(monkeypatch, *impls):
+    layers = {f"draft.{i}": SimpleNamespace(impl=impl) for i, impl in enumerate(impls)}
+    first = impls[0]
+    kv_spec = FullAttentionSpec(
+        block_size=128, num_kv_heads=first.num_kv_heads, head_size=first.head_size, dtype=torch.bfloat16
+    )
+    with monkeypatch.context() as patches:
+        patches.setattr(fa_v1.AscendAttentionMetadataBuilder, "__init__", lambda *_args: None)
+        patches.setattr(fa_v1, "get_layers_from_vllm_config", Mock(return_value=layers))
+        return AscendFlashAttentionMetadataBuilder(kv_spec, list(layers), None, torch.device("cpu"))
 
 
 @pytest.mark.parametrize("head_size", [64, 72, 128, 192, 256])
@@ -103,6 +120,8 @@ def test_flash_attn_192_preserves_scale_and_output_buffer(monkeypatch, causal):
         max_query_len=7,
         causal=causal,
     )
+    metadata.num_actual_tokens = query.shape[0]
+    make_builder(monkeypatch, impl).update_draft_decode_metadata(metadata)
     assert impl.forward_impl(query, None, None, None, metadata, output) is output
     assert ops.flash_attn_metadata.call_args.args[2] == 256
     assert ops.flash_attn.call_args.kwargs["softmax_scale"] == 192**-0.5
@@ -173,7 +192,7 @@ def dflash2_config():
 
 def make_impl(query, *, num_kv_heads=1, window=None, layout="PA_BBND", sinks=None):
     impl = AscendFlashAttentionImpl.__new__(AscendFlashAttentionImpl)
-    impl.num_heads, impl.num_kv_heads = query.shape[1], num_kv_heads
+    impl.num_heads, impl.num_kv_heads, impl.head_size = query.shape[1], num_kv_heads, query.shape[-1]
     impl.scale, impl.sliding_window = query.shape[-1] ** -0.5, window
     impl.use_bnsd_kv_cache, impl.sinks = layout == "PA_BNBD", sinks
     impl.key_cache = impl.value_cache = None
@@ -227,9 +246,11 @@ def test_dspark_selects_flash_attn_for_eager_and_graph_drafts(
     assert not select(config, selector, "dspark_head")
 
 
-def test_flash_attn_is_selected_only_for_a5_dflash2_eager_drafts(select_flash_attn, dflash2_config):
+@pytest.mark.parametrize("enforce_eager", [True, False, None])
+def test_flash_attn_is_selected_for_a5_dflash2_eager_and_graph_drafts(select_flash_attn, dflash2_config, enforce_eager):
     select, profile = select_flash_attn
     config = dflash2_config
+    config.speculative_config.enforce_eager = enforce_eager
     selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
     assert select(config, selector)
     profile.supports = lambda _: False
@@ -266,13 +287,11 @@ def test_flash_attn_selection_is_independent_of_draft_sampling(select_flash_attn
     [
         ("method", "eagle3"),
         ("method", "mtp"),
-        ("enforce_eager", False),
-        ("enforce_eager", None),
         ("architectures", ["DFlashDraftModel"]),
         ("architectures", None),
     ],
 )
-def test_other_drafts_and_graph_mode_retain_legacy_backend(select_flash_attn, dflash2_config, field, value):
+def test_other_drafts_retain_legacy_backend(select_flash_attn, dflash2_config, field, value):
     select, _ = select_flash_attn
     spec = dflash2_config.speculative_config
     setattr(spec.draft_model_config if field == "architectures" else spec, field, value)
@@ -339,8 +358,12 @@ def test_flash_attn_reuses_plans_within_each_draft_step(monkeypatch, window, cau
         causal=causal,
         flash_attn_mask=torch.ones(2, 2, dtype=torch.int8),
     )
+    builder = make_builder(monkeypatch, impl)
     for step, lengths in enumerate(([256, 254, 0], [253, 251, 0]), start=1):
         metadata = AscendFlashAttentionMetadata(seq_lens_gpu=torch.tensor(lengths, dtype=torch.int32), **metadata_args)
+        metadata.num_actual_tokens = query.shape[0]
+        builder.update_draft_decode_metadata(metadata)
+        assert ops.flash_attn_metadata.call_count == step
         for _ in range(6):
             impl.forward_impl(query, None, None, None, metadata, output)
         assert ops.flash_attn_metadata.call_count == step
@@ -358,11 +381,13 @@ def test_flash_attn_reuses_plans_within_each_draft_step(monkeypatch, window, cau
 
 
 @pytest.mark.parametrize("cpu_mirrors", [False, True])
-def test_metadata_builder_does_not_materialize_exact_device_lengths(monkeypatch, cpu_mirrors):
-    from vllm_ascend.attention import fa_v1 as module
+@pytest.mark.parametrize("for_capture", [False, True])
+def test_metadata_builder_does_not_materialize_exact_device_lengths(monkeypatch, cpu_mirrors, for_capture):
     from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
-    builder = module.AscendFlashAttentionMetadataBuilder.__new__(module.AscendFlashAttentionMetadataBuilder)
+    builder = make_builder(monkeypatch, make_impl(torch.empty(12, 8, 128)))
+    ops = SimpleNamespace(flash_attn_metadata=Mock(return_value=torch.empty(16)))
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
     builder.model_config = SimpleNamespace(runner_type="draft")
     builder.attn_mask_builder = SimpleNamespace(
         get_splitfuse_attn_mask=Mock(return_value=torch.ones(2, 2)),
@@ -390,7 +415,11 @@ def test_metadata_builder_does_not_materialize_exact_device_lengths(monkeypatch,
     with monkeypatch.context() as patches:
         for operation in ("tolist", "item", "cpu"):
             patches.setattr(torch.Tensor, operation, forbidden_host_materialization)
-        result = builder.build_for_drafting(common, draft_index=0)
+        if for_capture:
+            result = builder.build_for_cudagraph_capture(common)
+        else:
+            result = builder.build_for_drafting(common, draft_index=0)
+    assert ops.flash_attn_metadata.call_count == (0 if for_capture else 1)
     assert result.seq_lens_gpu.data_ptr() == common.seq_lens.data_ptr()
     assert result.query_start_loc_gpu.data_ptr() == common.query_start_loc.data_ptr()
     assert not result.causal
@@ -414,7 +443,7 @@ def test_metadata_builder_slices_request_extent():
         causal=False,
         attn_state=None,
     )
-    metadata = builder.build(0, common)
+    metadata = builder.build_for_cudagraph_capture(common)
     assert metadata.block_tables.shape == (2, 8)
     assert metadata.slot_mapping.shape == (12,)
     torch.testing.assert_close(metadata.query_start_loc_gpu, torch.tensor([0, 6, 12], dtype=torch.int32))
@@ -423,37 +452,103 @@ def test_metadata_builder_slices_request_extent():
     assert metadata.query_start_loc_gpu.data_ptr() == common.query_start_loc.data_ptr()
 
 
-def test_distinct_attention_geometries_do_not_share_plans(monkeypatch):
+def test_capture_records_fresh_lengths_and_tiling_after_warmup(monkeypatch):
     from vllm_ascend.attention.fa_v1 import AscendFlashAttentionMetadata
 
+    query = torch.zeros(12, 8, 128, dtype=torch.bfloat16)
+    impl = make_impl(query)
+    output = torch.empty_like(query)
+    metadata = AscendFlashAttentionMetadata(
+        query_start_loc_gpu=torch.tensor([0, 4, 8, -1], dtype=torch.int32),
+        seq_lens_gpu=torch.tensor([256, 254, 0], dtype=torch.int32),
+        block_tables=torch.zeros(3, 4, dtype=torch.int32),
+        max_query_len=4,
+        causal=False,
+    )
     ops = SimpleNamespace(
-        flash_attn_metadata=Mock(return_value=torch.empty(16)),
-        flash_attn=Mock(side_effect=lambda query, *args, **kwargs: (query, None)),
+        flash_attn_metadata=Mock(side_effect=lambda *args, **kwargs: torch.empty(16, dtype=torch.int32)),
+        flash_attn=Mock(return_value=(query, None)),
     )
     monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
-    metadata = AscendFlashAttentionMetadata(
-        query_start_loc_gpu=torch.tensor([0, 6], dtype=torch.int32),
-        seq_lens_gpu=torch.tensor([256], dtype=torch.int32),
-        block_tables=torch.zeros(1, 2, dtype=torch.int32),
-        max_query_len=6,
-        causal=False,
-        flash_attn_mask=torch.ones(2, 2),
+    metadata.num_actual_tokens = query.shape[0]
+    builder = make_builder(monkeypatch, impl)
+    builder.update_draft_decode_metadata(metadata)
+    impl.forward_impl(query, None, None, None, metadata, output)
+    eager_plan, _ = metadata.flash_attn_plan
+    ops.flash_attn_metadata.reset_mock()
+    ops.flash_attn.reset_mock()
+
+    def forbid_host_read(*args, **kwargs):
+        raise AssertionError("captured draft lengths must stay on device")
+
+    # Reuse the same metadata for independent captures, including a padded
+    # request disappearing after rejection. No producer may come from warmup
+    # or from the preceding capture.
+    previous_plans = {id(eager_plan)}
+    for boundaries, lengths in (([0, 4, 8, -1], [253, 251, 0]), ([0, 4, 4, -1], [250, 0, 0])):
+        tiling_start = ops.flash_attn_metadata.call_count
+        metadata.query_start_loc_gpu.copy_(torch.tensor(boundaries, dtype=torch.int32))
+        metadata.seq_lens_gpu.copy_(torch.tensor(lengths, dtype=torch.int32))
+        with monkeypatch.context() as patches:
+            for operation in ("tolist", "item", "cpu"):
+                patches.setattr(torch.Tensor, operation, forbid_host_read)
+            builder.update_draft_decode_metadata(metadata)
+            for _ in range(6):
+                impl.forward_impl(query, None, None, None, metadata, output)
+        calls = ops.flash_attn_metadata.call_args_list[tiling_start:]
+        assert len(calls) == 1
+        expected_boundaries = torch.tensor(boundaries, dtype=torch.int32).clamp(min=0).cummax(dim=0).values
+        expected_lengths = torch.tensor(lengths, dtype=torch.int32).clamp(min=1)
+        for call in calls:
+            torch.testing.assert_close(call.kwargs["cu_seqlens_q"], expected_boundaries)
+            torch.testing.assert_close(call.kwargs["seqused_kv"], expected_lengths)
+        captured_plans = {id(call.kwargs["metadata"]) for call in ops.flash_attn.call_args_list[-6:]}
+        assert len(captured_plans) == 1
+        assert captured_plans.isdisjoint(previous_plans)
+        previous_plans.update(captured_plans)
+    assert ops.flash_attn.call_count == 12
+
+
+def test_flash_attn_rejects_mixed_windows_in_one_attention_group(monkeypatch):
+    query = torch.empty(6, 8, 128)
+    with pytest.raises(ValueError, match="same sliding window"):
+        make_builder(monkeypatch, make_impl(query), make_impl(query, window=2048))
+
+
+def test_prepared_plans_isolate_attention_groups(monkeypatch):
+    from vllm_ascend.attention.fa_v1 import AscendFlashAttentionMetadata
+
+    query = torch.zeros(6, 8, 128)
+    ops = SimpleNamespace(
+        flash_attn_metadata=Mock(side_effect=lambda *args, **kwargs: torch.empty(16)),
+        flash_attn=Mock(return_value=(query, None)),
     )
-    geometries = [
-        (8, 1, 128, None, "PA_BBND"),
-        (16, 1, 128, None, "PA_BBND"),
-        (8, 2, 128, None, "PA_BBND"),
-        (8, 1, 64, None, "PA_BBND"),
-        (8, 1, 128, 2048, "PA_BBND"),
-        (8, 1, 128, None, "PA_BNBD"),
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
+    groups = [
+        AscendFlashAttentionMetadata(
+            query_start_loc_gpu=torch.tensor([0, 6], dtype=torch.int32),
+            seq_lens_gpu=torch.tensor([length], dtype=torch.int32),
+            block_tables=torch.zeros(1, 2, dtype=torch.int32),
+            max_query_len=6,
+            causal=False,
+        )
+        for length in (128, 256)
     ]
+    impl = make_impl(query)
+    builder = make_builder(monkeypatch, impl)
+    for metadata in groups:
+        metadata.num_actual_tokens = query.shape[0]
+        builder.update_draft_decode_metadata(metadata)
     for _ in range(2):
-        for heads, kv_heads, dim, window, layout in geometries:
-            query = torch.empty(6, heads, dim)
-            impl = make_impl(query, num_kv_heads=kv_heads, window=window, layout=layout)
+        for metadata in groups:
             impl.forward_impl(query, None, None, None, metadata, torch.empty_like(query))
-    assert ops.flash_attn_metadata.call_count == len(geometries)
-    assert ops.flash_attn.call_count == 2 * len(geometries)
+    assert ops.flash_attn_metadata.call_count == 2
+    plans = [call.kwargs["metadata"] for call in ops.flash_attn.call_args_list]
+    assert plans[0] is plans[2]
+    assert plans[1] is plans[3]
+    assert plans[0] is not plans[1]
+    for call, length in zip(ops.flash_attn_metadata.call_args_list, (128, 256)):
+        torch.testing.assert_close(call.kwargs["seqused_kv"], torch.tensor([length], dtype=torch.int32))
 
 
 @pytest.mark.parametrize("backend", [AscendFlashAttentionBackend, AscendAttentionBackend], ids=["flash", "fia"])
