@@ -11,6 +11,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
+from tests.ut.distributed.ascend_store.cache_config_helpers import make_resolved_cache_config
 
 # isort: split
 from vllm.v1.kv_cache_interface import (
@@ -278,7 +279,9 @@ class TestMooncakeHybrid(unittest.TestCase):
         config.model_config.use_mla = True
         config.scheduler_config.disable_hybrid_kv_cache_manager = False
         with patch.object(mooncake_backend.MooncakeBackend, "create_scheduler_client"):
-            scheduler = create_kv_pool_scheduler(config, use_layerwise=True, kv_cache_config=worker.kv_cache_config)
+            scheduler = create_kv_pool_scheduler(
+                config, use_layerwise=True, kv_cache_config=make_resolved_cache_config(config, worker.kv_cache_config)
+            )
         self.assertEqual(scheduler.cacheable_group_ids, [0, 1, 2])
         self.assertEqual(scheduler.hash_block_size, 16)
         self.assertEqual(scheduler.cache_transfer_granularity, 32)
@@ -670,7 +673,9 @@ class TestMooncakeHybrid(unittest.TestCase):
                 ),
             ),
         ):
-            scheduler = create_kv_pool_scheduler(config, kv_cache_config=group_config, use_layerwise=True)
+            scheduler = create_kv_pool_scheduler(
+                config, kv_cache_config=make_resolved_cache_config(config, group_config), use_layerwise=True
+            )
             self.assertTrue(scheduler.block_key_hybrid)
             request = SimpleNamespace(request_id="r", block_hashes=[bytes([i]) * 32 for i in range(4)])
             for tail_blocks, expected in (({1, 3}, 64), ({1}, 32), (set(), 0)):

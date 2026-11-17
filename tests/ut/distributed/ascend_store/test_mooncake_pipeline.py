@@ -14,6 +14,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
+from tests.ut.distributed.ascend_store.cache_config_helpers import make_resolved_cache_config
 
 # isort: split
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, SlidingWindowSpec, UniformTypeKVCacheSpecs
@@ -172,7 +173,9 @@ class TestMooncakePipeline(unittest.TestCase):
             ),
         ):
             scheduler = create_kv_pool_scheduler(
-                worker.vllm_config, use_layerwise=True, kv_cache_config=worker.kv_cache_config
+                worker.vllm_config,
+                use_layerwise=True,
+                kv_cache_config=make_resolved_cache_config(worker.vllm_config, worker.kv_cache_config),
             )
         scheduler.store_scheduler = store
         return scheduler
@@ -273,7 +276,11 @@ class TestMooncakePipeline(unittest.TestCase):
                 "MooncakeBackend.create_scheduler_client"
             ),
         ):
-            scheduler = create_kv_pool_scheduler(config, use_layerwise=True, kv_cache_config=workers[0].kv_cache_config)
+            scheduler = create_kv_pool_scheduler(
+                config,
+                use_layerwise=True,
+                kv_cache_config=make_resolved_cache_config(config, workers[0].kv_cache_config),
+            )
         scheduler.store_scheduler = store
         for worker in workers:
             self.run_step(

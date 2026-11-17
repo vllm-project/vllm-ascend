@@ -26,6 +26,7 @@ import numpy as np
 import pytest
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from tests.ut.distributed.ascend_store.cache_config_helpers import make_resolved_cache_config
 
 # isort: split
 import torch
@@ -193,6 +194,7 @@ def make_worker(
     if enable_kv_events:
         config.kv_events_config = MagicMock(enable_kv_cache_events=True)
 
+    kv_cache_config = make_resolved_cache_config(config, kv_cache_config)
     return create_kv_pool_worker(config, use_layerwise=use_layerwise, kv_cache_config=kv_cache_config)
 
 
@@ -1171,7 +1173,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config = self._make_vllm_config()
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwise=False)
+        worker = KVPoolWorker(config, kv_cache_config=make_resolved_cache_config(config), use_layerwise=False)
 
         self.assertEqual(worker.block_size, 16)
         self.assertEqual(worker.num_layers, 32)
@@ -1203,7 +1205,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config.model_config.use_mla = True
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwise=False)
+        worker = KVPoolWorker(config, kv_cache_config=make_resolved_cache_config(config), use_layerwise=False)
         self.assertTrue(worker.use_mla)
         self.assertEqual(worker.num_kv_head, 1)
 
@@ -1233,7 +1235,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config.model_config.get_total_num_kv_heads.return_value = 4  # < tp_size=8
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwise=False)
+        worker = KVPoolWorker(config, kv_cache_config=make_resolved_cache_config(config), use_layerwise=False)
         self.assertEqual(worker.put_step, 2)  # 8 / 4
         self.assertEqual(worker.head_or_tp_rank, 1)  # 2 // 2
 
@@ -1262,7 +1264,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config = self._make_vllm_config()
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwise=False)
+        worker = KVPoolWorker(config, kv_cache_config=make_resolved_cache_config(config), use_layerwise=False)
         events = worker.get_kv_events()
         self.assertEqual(events, [])
 
@@ -1293,7 +1295,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config.kv_events_config.enable_kv_cache_events = True
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwise=False)
+        worker = KVPoolWorker(config, kv_cache_config=make_resolved_cache_config(config), use_layerwise=False)
         worker.kv_send_thread = MagicMock()
         worker.kv_send_thread.get_kv_events.return_value = [MagicMock()]
         events = worker.get_kv_events()
@@ -1333,7 +1335,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config.model_config.hf_text_config.num_hidden_layers = 32
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwise=False)
+        worker = KVPoolWorker(config, kv_cache_config=make_resolved_cache_config(config), use_layerwise=False)
         self.assertIsNotNone(worker.token_database.partitions)
         self.assertEqual(worker.token_database.partitions, [16, 16])
 
@@ -1401,7 +1403,9 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
     def _make_worker(self, kv_role="kv_producer", extra_config=None, use_layerwise=False):
         self._patch_all()
         config = self._make_config(kv_role=kv_role, extra_config=extra_config)
-        worker = create_kv_pool_worker(config, use_layerwise=use_layerwise)
+        worker = create_kv_pool_worker(
+            config, kv_cache_config=make_resolved_cache_config(config), use_layerwise=use_layerwise
+        )
         return worker
 
     def setUp(self):
@@ -1412,6 +1416,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 
     def test_register_kv_caches_non_mla(self):
         worker = self._make_worker()
+        worker.kv_cache_config.num_blocks = 100
         fake_cache = MagicMock()
         fake_cache.shape = [100, 16, 8, 64]
         fake_cache.element_size.return_value = 2
@@ -1440,6 +1445,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             with self.subTest(container=container):
                 worker = self._make_worker()
                 worker.use_hybrid = True
+                worker.kv_cache_config.kv_cache_groups[0].layer_names = ["layer.0"]
                 worker._transfer_threads_started = True
                 worker.register_kv_caches({"layer.0": container((cache, empty_rope))})
 
@@ -1735,7 +1741,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         config.model_config.get_total_num_kv_heads.return_value = 2
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwise=False)
+        worker = KVPoolWorker(config, kv_cache_config=make_resolved_cache_config(config), use_layerwise=False)
         # 2 blocks * 2 tp_ranks = 4 keys
         worker.m_store.exists.return_value = [1, 1, 1, 1]
         result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
@@ -3229,7 +3235,9 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
                 kv_role=kv_role, extra_config=extra_config, num_kv_heads=num_kv_heads, use_sparse=use_sparse
             )
             cfg.model_config.use_mla = use_mla
-            return create_kv_pool_worker(cfg, use_layerwise=use_layerwise)
+            return create_kv_pool_worker(
+                cfg, kv_cache_config=make_resolved_cache_config(cfg), use_layerwise=use_layerwise
+            )
         finally:
             for p in patches:
                 p.stop()
@@ -3345,6 +3353,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         worker = self._make_worker(
             tp_size=2, kv_role="kv_consumer", extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8
         )
+        worker.kv_cache_config.num_blocks = 100
         fake_cache = MagicMock()
         fake_cache.shape = [100, 16, 4, 64]
         fake_cache.__getitem__.return_value.numel.return_value = 16 * 4 * 64

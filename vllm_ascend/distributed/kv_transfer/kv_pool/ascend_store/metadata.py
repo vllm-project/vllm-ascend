@@ -361,12 +361,14 @@ def get_engine_transfer_config(vllm_config, kv_cache_config):
     return (current if current is not None else vllm_config).kv_transfer_config
 
 
-def resolve_pool_cache_geometry(vllm_config, kv_cache_config, *, use_layerwise: bool) -> PoolCacheGeometry:
+def resolve_pool_cache_geometry(
+    vllm_config, kv_cache_config: KVCacheConfig, *, use_layerwise: bool
+) -> PoolCacheGeometry:
     """Consume Core's resolved hit alignment; never infer partial-hit support."""
     cache = vllm_config.cache_config
     parallel = vllm_config.parallel_config
     dcp = parallel.decode_context_parallel_size
-    groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
+    groups = kv_cache_config.kv_cache_groups
     group_ids = tuple(infer_cacheable_group_ids(groups))
     block_sizes = (
         tuple(kv_cache_utils.resolve_dcp_kv_block_size(g.kv_cache_spec, dcp) for g in groups)
@@ -374,21 +376,10 @@ def resolve_pool_cache_geometry(vllm_config, kv_cache_config, *, use_layerwise: 
         else (cache.block_size * dcp,)
     )
     page_alignment = math.lcm(*(block_sizes[i] for i in group_ids))
-    if kv_cache_config is None:
-        if isinstance(cache.prefix_match_unit, int):
-            raise ValueError("AscendStore requires a resolved KVCacheConfig with prefix_match_unit")
-        hash_size = hit_alignment = page_alignment
-    else:
-        hash_size = getattr(kv_cache_config, "hash_block_size", None)
-        hit_alignment = getattr(kv_cache_config, "cache_hit_alignment_tokens", None)
-        # Match the upstream factory: an unresolved alignment keeps whole-page
-        # hits. Only legacy whole-page/layerwise callers may resolve the hash.
-        if hit_alignment is None:
-            hit_alignment = page_alignment
-        if hash_size is None:
-            if not use_layerwise and hit_alignment < page_alignment:
-                raise ValueError("AscendStore partial hits require Core-resolved hash_block_size")
-            _, hash_size = kv_cache_utils.resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+    hash_size = kv_cache_config.hash_block_size
+    hit_alignment = kv_cache_config.cache_hit_alignment_tokens
+    if hit_alignment is None:
+        hit_alignment = page_alignment
     if any(block_sizes[i] % hash_size for i in group_ids):
         raise ValueError(
             f"AscendStore cannot fold Core hash size {hash_size} into cacheable pages "
@@ -406,7 +397,7 @@ def resolve_pool_cache_geometry(vllm_config, kv_cache_config, *, use_layerwise: 
             kv_cache_spec=kv_cache_utils.resolve_dcp_kv_cache_spec(group.kv_cache_spec, dcp),
             is_eagle_group=False if producer_only else group.is_eagle_group,
         )
-        for group in groups or []
+        for group in groups
     )
     geometry = PoolCacheGeometry(
         block_sizes=block_sizes,
@@ -416,7 +407,7 @@ def resolve_pool_cache_geometry(vllm_config, kv_cache_config, *, use_layerwise: 
         transfer_granularity=page_alignment,
         groups=resolved_groups,
         use_eagle=use_eagle,
-        retention_interval=getattr(kv_cache_config, "prefix_cache_retention_interval", None),
+        retention_interval=kv_cache_config.prefix_cache_retention_interval,
         use_layerwise=use_layerwise,
     )
     if geometry.partial_hits and extra.get("discard_partial_chunks", True) is not True:

@@ -1692,8 +1692,8 @@ cache managers, and the `SchedulerOutput.kv_connector_block_state` handoff,
 including `boundary_state_offloads`. AscendStore does not patch Core. If the
 cache plan has not supplied a hit alignment, AscendStore keeps whole-page hits
 and does not infer partial-hit support. Partial recovery requires Core to supply
-both the hash size and hit alignment. Legacy whole-page and layerwise callers
-may still resolve a missing hash size through Core's block-size resolver. No
+both the hash size and hit alignment. All paths consume the resolved
+`KVCacheConfig` supplied by Core; AscendStore does not recompute a missing hash size. No
 custom module path or legacy prefix-mode, direct-only, or setup-lock option is
 needed. Those old options have no implementation in this connector.
 

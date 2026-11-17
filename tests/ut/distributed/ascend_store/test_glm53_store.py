@@ -19,6 +19,7 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 
+from tests.ut.distributed.ascend_store.cache_config_helpers import make_resolved_cache_config
 from tests.ut.distributed.ascend_store.test_mooncake_hybrid import MemoryRangeStore
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker, start_patch
 from tests.ut.models.test_glm5next_cache_config import make_config, make_specs
@@ -174,7 +175,9 @@ class TestGLM53Store(unittest.TestCase):
                     "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend."
                     "MooncakeBackend.create_scheduler_client",
                 )
-                scheduler = KVPoolScheduler(worker.vllm_config, False, plan)
+                scheduler = KVPoolScheduler(
+                    worker.vllm_config, False, make_resolved_cache_config(worker.vllm_config, plan)
+                )
                 self.assertEqual(worker.hash_block_size, prefix_unit or 512)
                 self.assertEqual(scheduler.hash_block_size, worker.hash_block_size)
                 self.assertEqual(worker.cacheable_group_ids, [0, 2, 3, 4])
@@ -436,7 +439,11 @@ class TestGLM53Store(unittest.TestCase):
         # make_worker pins to retention 0 (semantic checkpoints only); this
         # round-trip persists every block, so look it up densely.
         workers[0][0].vllm_config.cache_config.prefix_cache_retention_interval = None
-        scheduler = create_kv_pool_scheduler(workers[0][0].vllm_config, True, workers[0][0].kv_cache_config)
+        scheduler = create_kv_pool_scheduler(
+            workers[0][0].vllm_config,
+            True,
+            make_resolved_cache_config(workers[0][0].vllm_config, workers[0][0].kv_cache_config),
+        )
         scheduler.store_scheduler.batch_is_readable.side_effect = lambda keys: [key in readable for key in keys]
         hit_request = SimpleNamespace(
             request_id="hit", prompt_token_ids=[1] * 513, num_tokens=513, block_hashes=[block_hash]
@@ -465,7 +472,9 @@ class TestGLM53Store(unittest.TestCase):
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend."
             "MooncakeBackend.create_scheduler_client",
         )
-        scheduler = create_kv_pool_scheduler(worker.vllm_config, True, plan)
+        scheduler = create_kv_pool_scheduler(
+            worker.vllm_config, True, make_resolved_cache_config(worker.vllm_config, plan)
+        )
         self.assertTrue(worker.use_block_key_layerwise)
         self.assertTrue(scheduler.use_block_key_layerwise)
         self.assertEqual(worker.cacheable_group_ids, [0, 2, 3, 4])
