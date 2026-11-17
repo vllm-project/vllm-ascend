@@ -121,7 +121,7 @@ a transient single-shard partition for that invocation.
 |------|------|---------|
 | Recommended | `--test-list-file <file>` | PR precision testing (coverage/AST recommendation) |
 | Explicit | `--explicit-e2e-tests <path>...` | `/e2e` PR comment command |
-| Full suite | `--all-tests` | `ready-all` / `main2main` PRs, scheduled full scans |
+| Full suite | `--all-tests` | `main2main` PRs, scheduled full scans |
 | Curated | `--curated <name>` | Curated suites (e.g. A5) |
 
 The `main2main` PR label reuses the full-suite selection and executes it twice,
@@ -232,7 +232,7 @@ python3 .github/workflows/scripts/select_tests.py \
   --explicit-e2e-tests \
     tests/e2e/pull_request/one_card/test_foo.py::TestClass::test_method
 
-# Run the full suite (mirrors ready-all PRs and scheduled scans)
+# Run the full suite (mirrors main2main PRs and scheduled scans)
 python3 .github/workflows/scripts/select_tests.py --all-tests
 
 # Run a curated suite

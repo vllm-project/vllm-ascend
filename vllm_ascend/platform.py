@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 import os
 from importlib import import_module, util
-from typing import TYPE_CHECKING, Any, get_args
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import torch
@@ -336,6 +336,9 @@ class NPUPlatform(Platform):
             # vLLM resolves this import path to the backend class.
             return "vllm_ascend.attention.fa_v1.AscendFlashAttentionBackend"
 
+        if _validate_flash_attn_npu_3(backend_key, attn_selector_config):
+            return "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
+
         backend_map = {
             (True, False, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
             (False, False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
@@ -392,6 +395,14 @@ class NPUPlatform(Platform):
 
         adapt_patch(is_global_patch=True)
 
+        # Eager side-effect import: registers the Ascend KV-cache dtype
+        # handlers (fp8 -> torch.float8_e4m3fn, int8, mxfp8) via vLLM's
+        # register_kv_cache_dtype mechanism. This runs in the launcher
+        # process, so CacheConfig._validate_cache_dtype sees the registered
+        # dtypes. Worker processes re-run the registration through the eager
+        # import in vllm_ascend/worker/worker.py.
+        from vllm_ascend.core import kv_cache_dtype_handlers  # noqa: F401
+
         # For online serving, "ascend" quantization method is not a choice natively,
         # so we need to add "ascend" quantization method to quantization methods list
         # and the user can enable quantization using "vllm serve --quantization ascend".
@@ -401,13 +412,13 @@ class NPUPlatform(Platform):
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
             # Same pattern for --kv-cache-dtype: the argparse choices were
-            # built from the upstream CacheDType Literal before this patch
-            # widened it, so append the Ascend-only dtypes here.
+            # built before the Ascend handlers were registered, so append
+            # every registered dtype here (including int8/mxfp8).
             dtype_action = parser._option_string_actions.get("--kv-cache-dtype")
             if dtype_action and hasattr(dtype_action, "choices") and dtype_action.choices:
-                from vllm.config.cache import CacheConfig
+                from vllm.config.cache import KV_CACHE_DTYPES
 
-                for dtype in get_args(CacheConfig.__dataclass_fields__["cache_dtype"].type):
+                for dtype in KV_CACHE_DTYPES:
                     if dtype not in dtype_action.choices:
                         dtype_action.choices.append(dtype)
 
@@ -1792,7 +1803,13 @@ def _validate_flash_attn_backend(backend_key, selector) -> bool:
 
     config = get_current_vllm_config_or_none()
     spec = config.speculative_config if config is not None else None
-    if spec is None or not _is_supported_flash_attn_draft(spec, backends.model_tag):
+    if spec is None or spec.draft_model_config is None:
+        return False
+    if backends.model_tag == "dspark_head" and {"MiniMaxM31FlashA3DSparkModel", "DSparkMiniMaxDraftModel"}.intersection(
+        spec.draft_model_config.architectures or ()
+    ):
+        return _validate_minimax_dspark_flash_attn(config, selector)
+    if not _is_supported_flash_attn_draft(spec, backends.model_tag):
         return False
 
     from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
@@ -1810,6 +1827,100 @@ def _validate_flash_attn_backend(backend_key, selector) -> bool:
             or selector.use_batch_invariant
             or selector.use_per_head_quant_scales
         )
+    )
+
+
+def _validate_minimax_dspark_flash_attn(config, selector) -> bool:
+    """Keep the Flash checkpoint's eager-only guards separate from M3 drafts."""
+    from vllm.v1.attention.backend import AttentionType
+
+    spec = config.speculative_config
+    if spec.method != "dspark":
+        return False
+    if spec.target_model_config.hf_text_config.model_type != "minimax_m3_text":
+        return False
+    parallel = config.parallel_config
+    return (
+        parallel.pipeline_parallel_size == 1
+        and parallel.prefill_context_parallel_size == 1
+        and parallel.decode_context_parallel_size == 1
+        and not getattr(spec, "enable_adaptive_verification", False)
+        and selector.attn_type == AttentionType.DECODER
+        and selector.dtype in (torch.float16, torch.bfloat16)
+        and selector.kv_cache_dtype in (None, "auto", "float16", "bfloat16")
+        and not (
+            getattr(selector, "use_pcp", False)
+            or selector.use_dcp
+            or selector.use_mm_prefix
+            or selector.use_per_head_quant_scales
+            or selector.use_batch_invariant
+            or getattr(selector, "use_rswa", False)
+            or getattr(selector, "use_adaptive_verification", False)
+        )
+    )
+
+
+def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
+    """Select the optional A2/A3 FA3 ABI only for compatible MiniMax attention."""
+    if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
+        HardwareCapability.FLASH_ATTN_NPU_3
+    ):
+        return False
+
+    # Model configuration imports platforms during initialization.
+    from vllm.config import get_current_vllm_config_or_none
+    from vllm.v1.attention.backend import AttentionType
+
+    config = get_current_vllm_config_or_none()
+    spec = config.speculative_config if config is not None else None
+    if spec is None or spec.draft_model_config is None:
+        return False
+    if config is None or config.model_config is None or not _uses_minimax_fa3(config):
+        return False
+    parallel = config.parallel_config
+    return (
+        selector.attn_type == AttentionType.DECODER
+        and selector.dtype in (torch.float16, torch.bfloat16)
+        and selector.kv_cache_dtype in (None, "auto", "float16", "bfloat16")
+        and not any(
+            getattr(selector, flag, False)
+            for flag in (
+                "has_sink",
+                "use_pcp",
+                "use_dcp",
+                "use_mm_prefix",
+                "use_per_head_quant_scales",
+                "use_batch_invariant",
+                "use_adaptive_verification",
+                "use_rswa",
+            )
+        )
+        and parallel.pipeline_parallel_size == 1
+        and parallel.prefill_context_parallel_size == 1
+        and parallel.decode_context_parallel_size == 1
+        and config.cache_config.cache_dtype in ("auto", "float16", "bfloat16")
+        and not getattr(config.quant_config, "enable_c8_quant", False)
+        and not getattr(spec, "enable_adaptive_verification", False)
+        and util.find_spec("flash_attn_npu_3") is not None
+    )
+
+
+def _uses_minimax_fa3(config) -> bool:
+    """Keep unrelated models and drafts on their configured attention backend."""
+    architectures = config.model_config.hf_config.architectures or ()
+    spec = config.speculative_config
+    target = getattr(spec, "target_model_config", None)
+    target_hf = getattr(target, "hf_config", None)
+    draft_architectures = {
+        "DSparkMiniMaxDraftModel",
+        "MiniMaxM31FlashA3DSparkModel",
+        "Qwen3DSparkModel",
+        "Qwen3OmniDSparkModel",
+    }
+    return (
+        getattr(spec, "method", None) in ("dspark",)
+        and bool(draft_architectures.intersection(architectures))
+        and bool(_MINIMAX_M3_ARCHITECTURES.intersection(getattr(target_hf, "architectures", None) or ()))
     )
 
 
@@ -1949,6 +2060,12 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
         "Qwen4ExpForCausalLM",
         "Qwen4ExpForConditionalGeneration",
     ):
+        if engram_config is not None:
+            if getattr(engram_config, "disk_offload", False):
+                raise ValueError("Qwen PLE disk offload is not supported on Ascend")
+            if engram_config.cpu_offload:
+                if engram_config.embedding_across_dp or engram_config.use_thp:
+                    raise ValueError("Qwen PLE UVA offload requires ETP=TP without THP")
         # Qwen4Exp PLE is managed by its model-specific implementation and the
         # upstream ngram_embedding, which reads engram_config directly. Keep the
         # config flowing to upstream instead of clearing it; model/layer/device
