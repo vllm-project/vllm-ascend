@@ -1606,7 +1606,7 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `kv_load_failure_policy` | str | fail | No | recompute / fail | Behavior when KV loading fails: `recompute` rolls back and recomputes (does not yet support hybrid attention models like DeepSeekV4, Qwen 3.5), `fail` terminates the request. When using MultiConnector, configure on the top-level `kv-transfer-config`. |
 | `lookup_rpc_port` | str | No default | Yes | Distinct service identifier (e.g., "0", "1") | Local IPC identifier between pooling scheduler and worker processes. DP replicas within a service are isolated automatically; independently launched services sharing the RPC base directory need unique values. The legacy name `mooncake_rpc_port` is deprecated; use `lookup_rpc_port`. |
-| `load_async` | bool | true for hash recovery; false otherwise | No | true / false | Whether to enable asynchronous loading. An explicit value overrides the path-specific default. |
+| `load_async` | bool | false | No | true / false | Whether to enable asynchronous loading, including hash recovery. |
 | `discard_partial_chunks` | bool | true | No | true / false | Existing save policy: discard incomplete ordinary transfer chunks. Non-layerwise hash recovery requires the default `true`; this does not disable hash-boundary checkpoint saves or fine-grained hits. |
 | `backend` | str | mooncake | No | mooncake / memcache / yuanrong | KV Pool storage backend. |
 | `consumer_is_to_put` | bool | false | No | true / false | Whether Decode node puts KV Cache into KV Pool. |

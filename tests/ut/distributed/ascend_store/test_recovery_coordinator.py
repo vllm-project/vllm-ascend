@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import replace
 from math import lcm
 
 import pytest
@@ -13,7 +12,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
     SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
@@ -21,7 +19,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     ExternalCachedBlockPool,
-    _converge_spec,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
@@ -63,51 +60,6 @@ def _make_coord(
         retention_interval=retention_interval,
         enable_partial_hash_hits=enable_partial_hash_hits,
     )
-
-
-@pytest.mark.parametrize("extra_retained_tokens", [0, 3])
-@pytest.mark.parametrize("uniform", [False, True])
-def test_converge_spec_covers_retained_window_without_mutating_input(extra_retained_tokens, uniform):
-    spec = SlidingWindowSpec(
-        block_size=8,
-        num_kv_heads=8,
-        head_size=64,
-        dtype=None,
-        sliding_window=16,
-        extra_retained_tokens=extra_retained_tokens,
-    )
-    wrapped = UniformTypeKVCacheSpecs.from_specs({"L0": spec}) if uniform else spec
-    converged = _converge_spec(wrapped)
-    assert converged == replace(spec, sliding_window=16 + extra_retained_tokens, extra_retained_tokens=0)
-    assert spec.sliding_window == 16
-    assert spec.extra_retained_tokens == extra_retained_tokens
-    assert _converge_spec(converged) is converged
-
-
-def test_converge_spec_preserves_full_attention():
-    spec = _full(16)
-    assert _converge_spec(spec) is spec
-
-
-def test_group_verification_uses_coordinator_state_and_converged_specs():
-    spec = SlidingWindowSpec(
-        block_size=8,
-        num_kv_heads=8,
-        head_size=64,
-        dtype=None,
-        sliding_window=16,
-        extra_retained_tokens=3,
-    )
-    groups = [
-        KVCacheGroupSpec(["L0"], spec),
-        KVCacheGroupSpec(["mtp"], _converge_spec(spec), is_eagle_group=True),
-    ]
-    coord = _make_coord(groups, hash_block_size=8)
-    coord._verify_and_split_kv_cache_groups()
-    assert len(coord.attention_groups) == 1
-    assert coord.attention_groups[0][1] == [0, 1]
-    assert coord.eagle_group_ids == {0, 1}
-    assert coord.group_effective_specs == [_converge_spec(spec)] * 2
 
 
 # ----- ExternalCachedBlockPool -----
@@ -509,42 +461,6 @@ def test_store_mask_retention_interval_zero_eagle_round_trip(num_prompt_tokens):
         cached_block_pool=ExternalCachedBlockPool(coord.hash_block_size, exists),
     )
     assert hit == 64
-
-
-@pytest.mark.parametrize("extra_retained_tokens", [0, 3])
-def test_load_mask_restores_mtp_replay_tail(extra_retained_tokens):
-    """An external SWA hit allocates the MTP re-prefill tail below the window,
-    so the store must keep it and the load must restore it; otherwise those
-    blocks hold stale KV under valid prefix hashes."""
-    swa = SlidingWindowSpec(
-        block_size=8,
-        num_kv_heads=8,
-        head_size=64,
-        dtype=None,
-        sliding_window=8,
-        extra_retained_tokens=extra_retained_tokens,
-    )
-    groups = [KVCacheGroupSpec(["L0"], _full(32)), KVCacheGroupSpec(["L1"], swa)]
-    coord = _make_coord(groups, hash_block_size=8, retention_interval=0)
-    hashes = _hashes(96 // coord.hash_block_size)
-    exists: set[tuple[int, bytes]] = set()
-    store_masks = coord.store_mask(96, num_prompt_tokens=96)
-    for gid, (group, mask) in enumerate(zip(groups, store_masks, strict=True)):
-        group_hashes = get_block_hashes(hashes, group.kv_cache_spec.block_size, coord.hash_block_size)
-        for chunk_id, block_hash in enumerate(group_hashes):
-            if mask is None or mask[chunk_id]:
-                exists.add((gid, bytes(block_hash)))
-
-    _masks, hit = coord.find_longest_cache_hit(
-        hashes,
-        max_length=96,
-        cached_block_pool=ExternalCachedBlockPool(coord.hash_block_size, exists),
-    )
-    assert hit == 64
-    loaded = [i for i, v in enumerate(coord.load_mask(hashes, hit)[1]) if v]
-    # add_local_computed_blocks pads only the blocks below the retained window.
-    first_allocated = (hit - swa.sliding_window - extra_retained_tokens + 1) // 8
-    assert loaded == list(range(first_allocated, hit // 8))
 
 
 def test_store_mask_retention_interval_keeps_segment_and_replay_tails():

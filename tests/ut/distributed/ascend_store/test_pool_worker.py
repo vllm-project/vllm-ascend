@@ -259,6 +259,7 @@ class TestPCPPoolWorker(unittest.TestCase):
         self.assertEqual(worker.grouped_block_size, [640])
         self.assertEqual(worker.cache_transfer_granularity, 640)
         self.assertTrue(worker.enable_partial_hash_hits)
+        self.assertFalse(worker.load_async)
 
     def test_nonzero_pcp_rank_keeps_dcp_save_leader(self):
         for dcp_size, tp_rank, expected in ((1, 0, False), (2, 1, True), (2, 3, False)):

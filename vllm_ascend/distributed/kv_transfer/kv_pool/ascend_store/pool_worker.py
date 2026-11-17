@@ -229,7 +229,6 @@ class BaseKVPoolWorker(ABC):
         self.enable_partial_hash_hits = self.pool_cache_geometry.partial_hits
         if self.enable_partial_hash_hits:
             self.use_eagle = self.pool_cache_geometry.use_eagle
-            self.load_async = extra_config.get("load_async", True)
         self.grouped_block_size = list(self.pool_cache_geometry.block_sizes)
         self.hash_block_size = self.pool_cache_geometry.hash_block_size
         self.block_size = self.grouped_block_size[0]

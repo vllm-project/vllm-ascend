@@ -19,7 +19,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
-    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -179,9 +178,7 @@ class AscendStoreCoordinator:
 
         for group_id, group in enumerate(self.kv_cache_groups):
             spec = _unwrap_spec(group.kv_cache_spec)
-            effective_spec = _converge_spec(
-                _copy_spec_with_block_size(spec, self.group_effective_block_sizes[group_id])
-            )
+            effective_spec = _copy_spec_with_block_size(spec, self.group_effective_block_sizes[group_id])
             self.group_effective_specs.append(effective_spec)
             if group_id not in self.cacheable_group_ids:
                 continue
@@ -467,22 +464,6 @@ class AscendStoreCoordinator:
 def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
-    return spec
-
-
-def _converge_spec(spec: KVCacheSpec) -> KVCacheSpec:
-    """Return the coverage spec used to converge external cache hits.
-
-    SWA recovery also needs the MTP re-prefill tail, so include the extra
-    retained tokens in the window used by lookup, load and store.
-    """
-    spec = _unwrap_spec(spec)
-    if isinstance(spec, SlidingWindowSpec) and spec.extra_retained_tokens:
-        return replace(
-            spec,
-            sliding_window=spec.sliding_window + spec.extra_retained_tokens,
-            extra_retained_tokens=0,
-        )
     return spec
 
 
