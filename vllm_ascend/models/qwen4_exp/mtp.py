@@ -20,6 +20,7 @@ import regex as re
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.model_executor.models.config import _strip_qwen4_exp_mrope
 from vllm.models.qwen4_exp.amd import mtp as upstream_mtp
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import iter_rope_parameters
@@ -105,10 +106,30 @@ def _remap_modelslim_mtp_layer_ids(
 _upstream_make_draft_vllm_config = upstream_mtp._make_draft_vllm_config
 
 
+def _align_draft_rope_with_target(vllm_config: VllmConfig) -> None:
+    """Keep the Qwen4Exp MTP draft on the target's actual RoPE contract.
+
+    vLLM rebuilds the draft ``ModelConfig`` without propagating the target's
+    ``language_model_only`` option.  By this point the target has already had
+    M-RoPE removed, so mirror that canonical transformation onto the draft.
+    """
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None or speculative_config.draft_model_config is None:
+        return
+
+    target_model_config = vllm_config.model_config
+    draft_model_config = speculative_config.draft_model_config
+    if not target_model_config.uses_mrope and draft_model_config.uses_mrope:
+        _strip_qwen4_exp_mrope(draft_model_config)
+
+
 def _make_draft_vllm_config(
     vllm_config: VllmConfig,
     mtp_start_layer_idx: int,
 ) -> VllmConfig:
+    # Align the speculator-owned config before upstream derives the runtime
+    # draft config and its QSA cache specs from it.
+    _align_draft_rope_with_target(vllm_config)
     # Run before the Qwen4Exp MTP layers construct their rotary embeddings so
     # graph capture cannot retain an undersized cache.
     _align_qwen4_exp_mtp_position_cache(vllm_config)

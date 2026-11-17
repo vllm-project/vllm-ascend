@@ -11,7 +11,6 @@ MRoPE cache gather.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import torch
@@ -148,18 +147,14 @@ class Qwen4ExpPreparedInputAdapter:
         )
         self._rope_buffers: dict[tuple[int, tuple[int, ...], torch.dtype, torch.device], torch.Tensor] = {}
         self._metadata_buffers: dict[tuple[object, ...], torch.Tensor] = {}
-        self._prepare_gbsa_enabled = os.getenv("VLLM_ASCEND_QWEN4_PREPARE_GBSA", "1") != "0"
-        self._prepare_lightning_enabled = os.getenv("VLLM_ASCEND_QWEN4_PREPARE_LIGHTNING", "1") != "0"
-        self._prepare_rope_enabled = os.getenv("VLLM_ASCEND_QWEN4_PREPARE_ROPE", "1") != "0"
-        if self._prepare_rope_enabled:
-            for layer in self._layers:
-                rotary = layer.rotary_emb
-                if (
-                    not layer.layer_name.startswith("mtp.")
-                    and isinstance(rotary, torch.nn.Module)
-                    and not isinstance(rotary, _Qwen4ExpPreparedRotaryEmbedding)
-                ):
-                    layer.rotary_emb = _Qwen4ExpPreparedRotaryEmbedding(rotary)
+        for layer in self._layers:
+            rotary = layer.rotary_emb
+            if (
+                not layer.layer_name.startswith("mtp.")
+                and isinstance(rotary, torch.nn.Module)
+                and not isinstance(rotary, _Qwen4ExpPreparedRotaryEmbedding)
+            ):
+                layer.rotary_emb = _Qwen4ExpPreparedRotaryEmbedding(rotary)
 
     def prepare_inputs(self, input_batch: Any) -> None:
         """Gather QSA MRoPE rows into graph-stable buffers before forward."""
@@ -170,8 +165,6 @@ class Qwen4ExpPreparedInputAdapter:
 
     def prepare_positions(self, positions: torch.Tensor, num_tokens: int) -> None:
         """Prepare one- or three-axis MRoPE positions for capture/replay."""
-        if not self._prepare_rope_enabled:
-            return
         if positions.ndim == 1:
             positions = positions[:num_tokens]
         elif positions.ndim == 2:
@@ -229,17 +222,16 @@ class Qwen4ExpPreparedInputAdapter:
             compressed = metadata.get(layer.indexer.compressed_key_cache.prefix)
             if main is None or raw is None or compressed is None:
                 continue
-            if self._prepare_lightning_enabled:
-                self._prepare_lightning(
-                    layer,
-                    compressed,
-                    full_graph=full_graph,
-                    prepared_this_step=prepared_this_step,
-                )
+            self._prepare_lightning(
+                layer,
+                compressed,
+                full_graph=full_graph,
+                prepared_this_step=prepared_this_step,
+            )
             # Mixed Prefill/Decode dispatch slices GBSA rows dynamically.  Keep
             # its existing per-span fallback; the hot decode-only path has no
             # host request plan and can safely reuse one prepared schedule.
-            if self._prepare_gbsa_enabled and getattr(main, "qsa_request_plan", None) is None:
+            if getattr(main, "qsa_request_plan", None) is None:
                 self._prepare_gbsa(
                     layer,
                     main,
