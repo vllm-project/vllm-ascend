@@ -221,6 +221,82 @@ def test_partial_tail_non_mamba_puts_follow_upstream_eagle_drop(blocks, expected
     assert scheduler._partial_tail_non_mamba_puts(req_meta) == expected
 
 
+@pytest.fixture
+def finishing_tail():
+    scheduler = object.__new__(KVPoolScheduler)
+    scheduler.can_put = True
+    scheduler.enable_partial_hash_hits = True
+    scheduler.cache_coordinator = SimpleNamespace(
+        mamba_group_ids=[1],
+        hash_block_size=4,
+        lcm_block_size=16,
+        use_eagle=True,
+        eagle_proof_margin_by_group={},
+    )
+    scheduler.grouped_block_size = [16, 16]
+    scheduler.cacheable_group_ids = [0, 1]
+    scheduler.num_speculative_blocks_by_group = {1: 1}
+    scheduler._request_trackers = {"tail": SimpleNamespace(prefill_end_tokens=65, num_prompt_tokens=65)}
+    scheduler._finished_partial_tail_metas = {}
+    scheduler._in_flight_save_blocks = InFlightSaveBlockTracker(2)
+    scheduler._block_pool = SimpleNamespace(blocks=list(range(100)), touch=Mock(), free_blocks=Mock())
+    request = SimpleNamespace(
+        request_id="tail",
+        num_prompt_tokens=49,
+        num_computed_tokens=65,
+        block_hashes=[bytes([i]) for i in range(16)],
+    )
+    return scheduler, request
+
+
+def test_finished_partial_tail_pins_exact_sources_through_next_step(finishing_tail):
+    scheduler, request = finishing_tail
+    tables = ([1, 2, 3, 4], [50])
+    # Duplicate entries must not take duplicate source references.
+    assert scheduler.register_finished_partial_tail(request, tables, [(1, 50, 44), (1, 50, 44)]) is False
+    req_meta = scheduler._finished_partial_tail_metas["tail"]
+    assert req_meta.num_prompt_tokens == 49
+    assert req_meta.prefill_end_tokens == 65
+    assert req_meta.token_len_chunk == 0 and req_meta.can_save
+    assert req_meta.boundary_puts == [(0, 3, 44), (1, 50, 44), (1, 50, 44)]
+    scheduler._block_pool.touch.assert_called_once_with([3, 50])
+    # Core may now clear the request's containers. The queued save has its own
+    # snapshots and references and requires no current block table next step.
+    tables[0].clear()
+    request.block_hashes.clear()
+    scheduler._request_trackers.clear()
+    assert req_meta.block_ids_by_group == [[1, 2, 3, 4], [50]]
+    assert len(req_meta.block_hashes) == 16
+    meta = metadata.AscendConnectorMetadata(preempted_req_ids=set())
+    state = SimpleNamespace(boundary_state_offloads={}, get_block_ids=Mock(side_effect=AssertionError("finished")))
+    scheduler._prepare_boundary_saves(meta, SimpleNamespace(kv_connector_block_state=state))
+    assert meta.requests == [req_meta]
+    assert not scheduler._finished_partial_tail_metas
+    scheduler.retain_blocks_for_save(req_meta)
+    scheduler._block_pool.touch.assert_called_once_with([3, 50])
+    tracker = scheduler._in_flight_save_blocks
+    tracker.complete({req_meta.event_id: 1}, scheduler._block_pool)
+    scheduler._block_pool.free_blocks.assert_not_called()
+    tracker.complete({req_meta.event_id: 1}, scheduler._block_pool)
+    scheduler._block_pool.free_blocks.assert_called_once_with([50, 3])
+    assert not tracker.has_pending_work()
+
+
+@pytest.mark.parametrize("offloads", [[], [(1, 50, 68)], [(0, 3, 44)], [(1, 0, 44)]])
+def test_finished_partial_tail_rejects_unusable_handoff(finishing_tail, offloads):
+    scheduler, request = finishing_tail
+    assert scheduler.register_finished_partial_tail(request, ([1, 2, 3], [50]), offloads) is False
+    assert not scheduler._finished_partial_tail_metas
+    scheduler._block_pool.touch.assert_not_called()
+
+
+def test_finished_partial_tail_requires_common_boundary(finishing_tail):
+    scheduler, request = finishing_tail
+    with pytest.raises(ValueError, match="must share a boundary"):
+        scheduler.register_finished_partial_tail(request, ([1, 2, 3], [50]), [(1, 50, 44), (1, 51, 40)])
+    scheduler._block_pool.touch.assert_not_called()
+
+
 def test_core_boundary_offload_is_not_positional_recurrent_table():
     scheduler = object.__new__(KVPoolScheduler)
     scheduler.enable_partial_hash_hits = True

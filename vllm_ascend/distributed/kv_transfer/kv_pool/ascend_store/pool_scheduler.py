@@ -949,38 +949,53 @@ class KVPoolScheduler(BaseKVPoolScheduler):
             meta.add_request(req_meta)
         self._finished_partial_tail_metas.clear()
 
-    def register_finished_partial_tail(self, request, block_ids, partial_tail_offloads) -> bool:
-        """Take job-owned references before Core tears down a finishing request."""
-        if not self.enable_partial_hash_hits or not self.can_put or not partial_tail_offloads:
+    def register_finished_partial_tail(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        """Queue and pin a finish-time tail for the next connector step."""
+        if not self.can_put or not partial_tail_offloads:
             return False
         tracker = self._request_trackers.get(request.request_id)
         if tracker is None or not any(block_ids):
             return False
         boundaries = {boundary for _, _, boundary in partial_tail_offloads}
         if len(boundaries) != 1:
-            raise ValueError("A partial-tail handoff must have one common boundary")
-        if next(iter(boundaries)) > (tracker.prefill_end_tokens or tracker.num_prompt_tokens or 0):
+            raise ValueError("Partial-tail offloads for one request must share a boundary")
+        boundary_tokens = next(iter(boundaries))
+        if boundary_tokens > tracker.prefill_end_tokens:
             return False
-        if any(
-            group not in self.cache_coordinator.mamba_group_ids or block <= 0
-            for group, block, _ in partial_tail_offloads
-        ):
-            return False
+
+        coord = self.cache_coordinator
+        assert coord is not None
+        mamba_puts: list[BoundaryPut] = []
+        for group_id, block_id, boundary in partial_tail_offloads:
+            # Ascend retains Core's group IDs instead of remapping Store groups.
+            if group_id not in coord.mamba_group_ids:
+                return False
+            if block_id == NULL_BLOCK_ID:
+                return False
+            mamba_puts.append(BoundaryPut(group_id, block_id, boundary))
         req_meta = ReqMeta(
             req_id=request.request_id,
             token_len_chunk=0,
             can_save=True,
             block_ids_by_group=[list(group) for group in block_ids],
             block_hashes=list(request.block_hashes),
-            num_prompt_tokens=tracker.num_prompt_tokens,
+            num_prompt_tokens=request.num_prompt_tokens,
             prefill_end_tokens=tracker.prefill_end_tokens,
             completed_token_len=request.num_computed_tokens,
-            boundary_puts=[BoundaryPut(*put) for put in partial_tail_offloads],
+            boundary_puts=mamba_puts,
         )
-        req_meta.boundary_puts = [*self._partial_tail_non_mamba_puts(req_meta), *req_meta.boundary_puts]
+        req_meta.boundary_puts = [*self._partial_tail_non_mamba_puts(req_meta), *mamba_puts]
         assert request.request_id not in self._finished_partial_tail_metas
-        self.retain_blocks_for_save(req_meta)
+        # This job has no normal save range. Pin only its exact boundary sources;
+        # an empty group map excludes ordinary tables from the shared tracker.
+        self._in_flight_save_blocks.retain(req_meta, {}, self._block_pool)
         self._finished_partial_tail_metas[request.request_id] = req_meta
+        # The store job owns exact block refs, so request cleanup need not wait.
         return False
 
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> StoreLookupResult | None:
