@@ -603,13 +603,16 @@ class NPUModelRunner(GPUModelRunner):
     def shutdown(self) -> None:
         model = getattr(self, "model", None)
         # Include private/shared UVA owners, which have no MemFabric client.
-        shared_embeddings = list(getattr(self, "_shared_engram_shutdown_pending", None) or [])
+        pending_owners = list(getattr(self, "_shared_engram_shutdown_pending", None) or [])
+        shared_embeddings = [owner for owner in pending_owners if getattr(owner, "local_vmm", False) is not True]
         if model is not None:
             owner_ids = {id(owner) for owner in shared_embeddings}
             shared_embeddings.extend(
                 module
                 for module in model.modules()
-                if id(module) not in owner_ids and callable(getattr(module, "close_host_offload", None))
+                if id(module) not in owner_ids
+                and getattr(module, "local_vmm", False) is not True
+                and callable(getattr(module, "close_host_offload", None))
             )
         # Drop C8 packet views before the parent collects tensors and
         # empties the allocator cache.
@@ -621,11 +624,14 @@ class NPUModelRunner(GPUModelRunner):
             zeroer.entries.clear()
             self.kv_block_zeroer = zeroer.delegate
         if not hasattr(self, "_pending_engram_vmm"):
-            self._pending_engram_vmm = (
-                [module for module in model.modules() if getattr(module, "local_vmm", False) is True]
-                if model is not None
-                else []
-            )
+            self._pending_engram_vmm = [owner for owner in pending_owners if getattr(owner, "local_vmm", False) is True]
+            if model is not None:
+                owner_ids = {id(owner) for owner in self._pending_engram_vmm}
+                self._pending_engram_vmm.extend(
+                    module
+                    for module in model.modules()
+                    if id(module) not in owner_ids and getattr(module, "local_vmm", False) is True
+                )
         self._shared_engram_shutdown_pending = shared_embeddings
         if not getattr(self, "_shared_engram_parent_stopped", False):
             super().shutdown()

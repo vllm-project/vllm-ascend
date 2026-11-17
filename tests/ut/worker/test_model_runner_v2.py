@@ -2096,6 +2096,18 @@ def test_shutdown_continues_after_synchronized_vmm_release_failure():
     assert runner._pending_engram_vmm == [last]
 
 
+def test_shutdown_deduplicates_pending_local_vmm_owner():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    table = SimpleNamespace(local_vmm=True, close_host_offload=Mock())
+    runner.model = SimpleNamespace(modules=lambda: [table])
+    runner._shared_engram_shutdown_pending = [table]
+    with patch.object(GPUModelRunner, "shutdown"):
+        runner.shutdown()
+    table.close_host_offload.assert_called_once_with()
+    assert runner._pending_engram_vmm == []
+    assert runner._shared_engram_shutdown_pending == []
+
+
 def test_shutdown_releases_shared_engram_after_parent_cleanup():
     runner = NPUModelRunner.__new__(NPUModelRunner)
     embedding = MagicMock()
