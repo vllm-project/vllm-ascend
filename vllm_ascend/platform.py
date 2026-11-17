@@ -89,7 +89,7 @@ logger.info_once(
 )
 
 _CUSTOM_OP_REGISTERED = False
-# Removing an architecture disables target FA3 without disabling its draft.
+# Targets with audited FIA attention may opt into FA3; drafts are selected separately.
 _FA3_TARGET_MODEL_ALLOWLIST = frozenset({"Qwen3_5ForConditionalGeneration"})
 _MINIMAX_M3_ARCHITECTURES = frozenset(
     {
@@ -1855,7 +1855,7 @@ def _validate_minimax_dspark_flash_attn(config, selector) -> bool:
 
 
 def _validate_flash_attn_npu_3(backend_key, selector) -> str | None:
-    """Resolve supported FA3 drafts and allowlisted Qwen targets in one place."""
+    """Select allowlisted FIA targets and supported drafts independently."""
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
         HardwareCapability.FLASH_ATTN_NPU_3
     ):
@@ -1870,24 +1870,29 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> str | None:
     if spec is None or spec.draft_model_config is None:
         return None
 
-    is_qwen = spec.method == "dflash"
-    if is_qwen:
-        # Loader scopes can expose the draft config, so check the target explicitly.
-        architecture = getattr(spec.target_model_config, "architecture", None)
+    from vllm.compilation import backends
+
+    # Loader scopes can expose a draft config, so identify the target explicitly.
+    architecture = getattr(spec.target_model_config, "architecture", None)
+    model_tag = backends.model_tag
+    if model_tag == "backbone":
+        if architecture not in _FA3_TARGET_MODEL_ALLOWLIST:
+            return None
+    elif model_tag == "dflash_head":
+        if architecture != "Qwen3_5ForConditionalGeneration":
+            return None
+    elif model_tag != "dspark_head":
+        return None
+
+    uses_fia = model_tag in ("backbone", "dflash_head")
+    if uses_fia:
         if (
-            not getattr(config, "use_v2_model_runner", False)
-            or architecture != "Qwen3_5ForConditionalGeneration"
+            spec.method != "dflash"
+            or not getattr(config, "use_v2_model_runner", False)
             or "DFlash2DraftModel" not in (spec.draft_model_config.architectures or ())
             or not 0 < selector.head_size <= 256
             or (selector.kv_cache_dtype == "float16" and selector.dtype != torch.float16)
             or (selector.kv_cache_dtype == "bfloat16" and selector.dtype != torch.bfloat16)
-        ):
-            return None
-
-        from vllm.compilation import backends
-
-        if backends.model_tag != "dflash_head" and (
-            backends.model_tag != "backbone" or architecture not in _FA3_TARGET_MODEL_ALLOWLIST
         ):
             return None
     elif not (
@@ -1926,7 +1931,7 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> str | None:
     ):
         return None
 
-    if is_qwen:
+    if uses_fia:
         # This is a different ABI from training-consistency flash_attn_npu_v3.
         module = import_module("flash_attn_npu_3")
         if not callable(getattr(module, "get_scheduler_metadata", None)) or not callable(

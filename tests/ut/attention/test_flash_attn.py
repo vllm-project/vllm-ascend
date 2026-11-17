@@ -345,9 +345,11 @@ def test_qwen_target_allowlist_leaves_draft_selection_independent(monkeypatch, q
     assert r.select("backbone") == "AscendAttentionBackend"
     assert r.select() == "AscendFlashAttentionBackend"
     assert r.select("dflash2_candidate_selector") == "AscendAttentionBackend"
-    # An allowlist entry cannot bypass the backend's supported architecture.
+    # Target opt-in does not expand the independently supported draft path.
     r.target.architecture = "Qwen3_5MoeForConditionalGeneration"
-    assert r.select("backbone") == "AscendAttentionBackend"
+    expected = "AscendFlashAttentionBackend" if r.target.architecture in allowlist else "AscendAttentionBackend"
+    assert r.select("backbone") == expected
+    assert r.select() == "AscendAttentionBackend"
 
 
 @pytest.mark.parametrize(

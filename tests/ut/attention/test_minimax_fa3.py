@@ -66,6 +66,7 @@ def selection(monkeypatch, profiles):
         kv_cache_dtype="auto",
     )
     monkeypatch.setitem(sys.modules, "vllm.config", NS(get_current_vllm_config_or_none=lambda: runtime.config))
+    monkeypatch.setitem(sys.modules, "vllm.compilation", NS(backends=NS(model_tag="dspark_head")))
     monkeypatch.setitem(sys.modules, "vllm.v1.attention.backend", NS(AttentionType=NS(DECODER="decoder")))
     namespace = {
         "torch": torch,
