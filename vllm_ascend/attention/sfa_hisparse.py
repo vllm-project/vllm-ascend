@@ -46,6 +46,9 @@ def finish_hisparse_kv_update(cache, metadata) -> None:
     """
     if getattr(metadata, "hisparse_for_capture", False):
         return
+    # Core finish_kv_update uses local query metadata; PCP mirror submission
+    # must use gathered writes, which can include prefill from another rank.
+    # Core exposes no backend hook to override this submission policy.
     has_prefill = getattr(metadata, "hisparse_write_has_prefill", None)
     if has_prefill is None:
         cache.finish_kv_update()
