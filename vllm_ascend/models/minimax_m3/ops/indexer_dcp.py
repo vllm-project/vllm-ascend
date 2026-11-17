@@ -16,7 +16,7 @@ INDEX_BLOCK_SIZE = tl.constexpr(128)
 INDEX_HEAD_DIM = tl.constexpr(128)
 SCORE_ALIGNMENT = 16
 MAX_GEMM_QUERY_ROWS = 128
-GATHER_BLOCKS_PER_TILE = 16
+GATHER_BLOCKS_PER_TILE = 64
 SCORE_FILL_VALUE = tl.constexpr(float("-inf"))
 
 
@@ -136,14 +136,20 @@ def _gather_index_shard_scores(
     block_tiles,
     TILE: tl.constexpr,
     CAUSAL: tl.constexpr,
+    GATHERED_QUERY: tl.constexpr = False,
 ):
     # GEMM rows flatten (token, head). Select only this request's physical
     # pages, then mask interleaved positions before taking the block maximum.
     program = tl.program_id(0)
     row = program // block_tiles
     absolute_row = row_start + row
-    token = absolute_row // HEADS
-    head = absolute_row % HEADS
+    if GATHERED_QUERY:
+        local_heads: tl.constexpr = HEADS // SIZE
+        token = absolute_row // local_heads % tokens
+        head = absolute_row // (tokens * local_heads) * local_heads + absolute_row % local_heads
+    else:
+        token = absolute_row // HEADS
+        head = absolute_row % HEADS
     request = token // query_len
     columns = program % block_tiles * TILE + tl.arange(0, TILE)
     lane = tl.arange(0, INDEX_BLOCK_SIZE // SIZE)
@@ -172,6 +178,7 @@ def index_shard_scores(
     rank: int,
     *,
     causal: bool = True,
+    gathered_query: bool = False,
 ) -> torch.Tensor:
     """Score the compact pool with GEMM, then gather each request's block maxima.
 
@@ -179,10 +186,12 @@ def index_shard_scores(
     to logical 128-token pages. Dense storage is a view; padded/strided storage
     may need a compact copy. FP16 score storage matches CANN's BF16 QK precision
     and stays FP16 through ReduceScatter and into the FP32 TopK preparation.
+    ``gathered_query`` consumes contiguous [TP, token, local head, dim] storage
+    directly, avoiding the AllGather's otherwise necessary layout conversion.
     """
     if size not in (2, 4) or not 0 <= rank < size:
         raise ValueError("M3 index scores require TP2/TP4 and a valid shard rank")
-    if query.ndim != 3 or cache.ndim != 3 or block_table.ndim != 2 or seq_lens.ndim != 1:
+    if query.ndim != (4 if gathered_query else 3) or cache.ndim != 3 or block_table.ndim != 2 or seq_lens.ndim != 1:
         raise ValueError("M3 index scores require rank-3 queries/cache, rank-2 table and rank-1 lengths")
     if block_table.dtype not in (torch.int32, torch.int64) or seq_lens.dtype not in (torch.int32, torch.int64):
         raise ValueError("M3 index scores require int32/int64 block tables and lengths")
@@ -194,12 +203,16 @@ def index_shard_scores(
         raise ValueError("M3 compact index scores require BF16 queries and keys")
     if cache.shape[1:] != (128 // size, 128) or query.shape[-1] != 128:
         raise ValueError("M3 compact index scores require 128-wide keys and compact 128-token pages")
-    if query_len <= 0 or query.shape[0] != seq_lens.numel() * query_len:
+    tokens = query.shape[1] if gathered_query else query.shape[0]
+    heads = query.shape[0] * query.shape[2] if gathered_query else query.shape[1]
+    if gathered_query and (query.shape[0] != size or not query.is_contiguous()):
+        raise ValueError("M3 gathered index queries require contiguous [TP, token, local head, dim] storage")
+    if query_len <= 0 or tokens != seq_lens.numel() * query_len:
         raise ValueError("M3 compact index scores require uniform decode query lengths")
     if block_table.shape[0] != seq_lens.numel():
         raise ValueError("M3 compact index scores require one block table per sequence")
     width = triton.cdiv(block_table.shape[1], SCORE_ALIGNMENT) * SCORE_ALIGNMENT
-    scores = torch.empty((query.shape[1], query.shape[0], width), dtype=torch.float16, device=query.device)
+    scores = torch.empty((heads, tokens, width), dtype=torch.float16, device=query.device)
     if scores.numel() == 0:
         return scores
     queries = query.reshape(-1, 128).contiguous()
@@ -219,8 +232,8 @@ def index_shard_scores(
             raw.stride(0),
             block_table.stride(0),
             block_table.shape[1],
-            query.shape[0],
-            query.shape[1],
+            tokens,
+            heads,
             query_len,
             width,
             size,
@@ -228,6 +241,7 @@ def index_shard_scores(
             block_tiles,
             GATHER_BLOCKS_PER_TILE,
             causal,
+            gathered_query,
         )
         # Avoid retaining two large GEMM outputs when the next tile allocates.
         del raw
@@ -242,3 +256,17 @@ def reduce_scatter_index_scores(scores: torch.Tensor, tp_group) -> torch.Tensor:
     output = torch.empty((local_heads, *scores.shape[1:]), dtype=scores.dtype, device=scores.device)
     dist.reduce_scatter_tensor(output, scores.contiguous(), op=dist.ReduceOp.MAX, group=tp_group.device_group)
     return output
+
+
+def gather_index_queries_async(query: torch.Tensor, tp_group):
+    """Start Q AllGather without waiting on the compute stream.
+
+    The caller retains the contiguous input until ``work.wait()`` and orders
+    all readers after that wait. Keep rank-major storage for the score GEMM;
+    converting it to token-major would introduce an extra device copy.
+    """
+    if query.ndim != 3 or not query.is_contiguous():
+        raise ValueError("M3 asynchronous query gather requires contiguous [token, head, dim] input")
+    gathered = torch.empty((tp_group.world_size, *query.shape), dtype=query.dtype, device=query.device)
+    work = dist.all_gather_into_tensor(gathered.flatten(0, 1), query, group=tp_group.device_group, async_op=True)
+    return gathered, work

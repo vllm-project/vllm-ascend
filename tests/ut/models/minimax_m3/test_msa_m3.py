@@ -16,11 +16,10 @@ import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import FullAttentionSpec
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.utils import AscendDeviceType
 
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseAttention
 from vllm_ascend.models.minimax_m3 import msa_m3 as msa_m3_module
 from vllm_ascend.models.minimax_m3.minimax_m3 import (
@@ -63,6 +62,7 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
 )
 from vllm_ascend.ops.triton.msa import msa_m3_index_postprocess
 from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import FP32_INDEX_SENTINEL
+from vllm_ascend.utils import AscendDeviceType
 
 
 @pytest.mark.parametrize(
@@ -1327,7 +1327,7 @@ def test_sparse_attention_uses_split_indexer_projection_when_quant_types_differ(
     mock_kv_dtype.return_value = torch.bfloat16
     mock_sparse_impl.return_value = SimpleNamespace(name="impl")
     split_indexer_proj = SimpleNamespace(name="indexer_proj")
-    runtime_indexer = SimpleNamespace(name="runtime_indexer")
+    runtime_indexer = SimpleNamespace(name="runtime_indexer", index_cache=SimpleNamespace(overlap=False))
     mock_indexer_linear.return_value = split_indexer_proj
     mock_indexer.return_value = runtime_indexer
     quant_config = SimpleNamespace(

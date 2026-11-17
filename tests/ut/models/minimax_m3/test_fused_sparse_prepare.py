@@ -61,6 +61,7 @@ def test_fused_forward_skips_materialized_prepare_and_insert():
     qkv = torch.randn(4, 1536, dtype=torch.bfloat16)
     positions = torch.arange(4)
     layer = SimpleNamespace(
+        dcp_overlap=False,
         _can_fuse_sparse_prepare=Mock(return_value=True),
         qkv_proj=Mock(return_value=(qkv, None)),
         indexer_proj=None,
@@ -104,6 +105,7 @@ def test_separate_index_projection_uses_fusion_without_concatenation():
     index_qk = torch.randn(4, 256, dtype=torch.bfloat16)
     positions = torch.arange(4)
     layer = SimpleNamespace(
+        dcp_overlap=False,
         _can_fuse_sparse_prepare=Mock(return_value=True),
         qkv_proj=Mock(return_value=(qkv, None)),
         indexer_proj=Mock(return_value=(index_qk, None)),

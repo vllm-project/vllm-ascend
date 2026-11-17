@@ -7,9 +7,9 @@ from typing import Any
 import pytest
 import torch
 import torch_npu  # noqa: F401
+
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-
 from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import index_decode_topk_fused
 
 

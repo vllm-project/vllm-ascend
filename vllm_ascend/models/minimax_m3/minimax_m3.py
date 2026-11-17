@@ -346,6 +346,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             kv_cache_dtype=self.kv_cache_dtype,
             kv_cache_torch_dtype=self.kv_cache_torch_dtype,
         )
+        self.dcp_overlap = self.indexer.index_cache.overlap and self.indexer_proj is not None
 
         compilation_config = vllm_config.compilation_config
         if self.layer_name in compilation_config.static_forward_context:
@@ -559,12 +560,84 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         topk_idx = self.indexer(index_query)
         self.impl.forward(self, query, self.kv_cache, topk_idx, attn_output)
 
+    def _run_dcp_overlap(self, hidden_states: torch.Tensor, positions: torch.Tensor, attn_output: torch.Tensor) -> None:
+        """Hide index Q AllGather behind main QKV projection and fused cache writes."""
+        from vllm_ascend.models.minimax_m3.ops.indexer_dcp import gather_index_queries_async
+        from vllm_ascend.ops.triton.msa.minimax_dcp_prepare import (
+            minimax_dcp_index_prepare,
+            minimax_dcp_main_prepare,
+        )
+
+        metadata = get_forward_context().attn_metadata
+        index_meta = metadata[self.indexer.index_cache.prefix] if isinstance(metadata, dict) else None
+        if index_meta is None or index_meta.num_prefills > 0 or index_meta.num_decodes == 0:
+            # Preserve profiling, prefill and mixed-batch behavior and the
+            # original combined prepare kernel. No extra collective is issued.
+            qkv, _ = self.qkv_proj(hidden_states)
+            index_qk, _ = self.indexer_proj(hidden_states)
+            if index_meta is None:
+                attn_output.zero_()
+            else:
+                self._run_fused_sparse_attention(qkv, positions, attn_output, index_qk)
+            return
+
+        main_meta = metadata[self.layer_name]
+        group = get_tp_group()
+        index_cache = self.indexer.index_cache.kv_cache
+        if isinstance(index_cache, (tuple, list)):
+            index_cache = index_cache[0]
+        index_qk, _ = self.indexer_proj(hidden_states)
+        index_query = minimax_dcp_index_prepare(
+            index_qk,
+            self.rotary_emb.cos_sin_cache,
+            positions,
+            self.index_q_norm.weight,
+            self.index_k_norm.weight,
+            index_cache,
+            index_meta.slot_mapping,
+            index_meta.num_actual_tokens,
+            self.num_idx_heads,
+            self.index_q_norm.variance_epsilon,
+            group.world_size,
+            group.rank_in_group,
+        )
+        # Retain the input and gathered storage through Work.wait(). HCCL
+        # launches on its own communication stream; no extra user stream or
+        # host/device synchronization is needed here.
+        num_decode_tokens = min(index_meta.num_actual_tokens, index_meta.num_decode_tokens)
+        decode_query = index_query[:num_decode_tokens].view(-1, self.num_idx_heads, self.idx_head_dim).contiguous()
+        gathered_query, work = gather_index_queries_async(decode_query, group)
+        qkv, _ = self.qkv_proj(hidden_states)
+        key_cache, value_cache = self.kv_cache
+        query = minimax_dcp_main_prepare(
+            qkv,
+            self.rotary_emb.cos_sin_cache,
+            positions,
+            self.q_norm.weight,
+            self.k_norm.weight,
+            key_cache,
+            value_cache,
+            main_meta.slot_mapping,
+            main_meta.num_actual_tokens,
+            self.num_heads,
+            self.num_kv_heads,
+            self.q_norm.variance_epsilon,
+        )
+        work.wait()
+        topk, select_num_idx = self.indexer.impl.decode_dcp(gathered_query, index_meta, gathered_query=True)
+        self.impl.forward(self, query, self.kv_cache, (topk, None, select_num_idx), attn_output)
+
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         if self._can_fuse_sparse_prepare(positions, hidden_states):
+            if self.dcp_overlap:
+                attn_out = hidden_states.new_empty((hidden_states.shape[0], self.q_size))
+                torch.ops.vllm.minimax_m3_dcp_overlap_forward(hidden_states, positions, attn_out, self.layer_name)
+                projected, _ = self.o_proj(attn_out)
+                return projected
             qkv, _ = self.qkv_proj(hidden_states)
             index_qk = self.indexer_proj(hidden_states)[0] if self.indexer_proj is not None else None
             attn_out = hidden_states.new_empty((hidden_states.shape[0], self.q_size))

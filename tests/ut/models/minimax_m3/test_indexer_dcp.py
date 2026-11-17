@@ -61,6 +61,16 @@ def test_disabled_cache_keeps_replicated_layout():
     assert spec.page_size_bytes == 128 * 128 * 2
 
 
+def test_overlap_requires_context_sharding():
+    cfg = config(enabled=False)
+    cfg.additional_config["enable_minimax_m3_indexer_dcp_overlap"] = True
+    with (
+        patch("vllm_ascend.models.minimax_m3.msa_m3.get_current_vllm_config", return_value=cfg),
+        pytest.raises(ValueError, match="overlap requires"),
+    ):
+        AscendMiniMaxM3IndexerCache(head_dim=128, prefix="indexer")
+
+
 @pytest.mark.parametrize("tp", [1, 8])
 def test_rejects_unsupported_tp(tp):
     with (

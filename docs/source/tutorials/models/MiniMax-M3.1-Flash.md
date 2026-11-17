@@ -38,9 +38,21 @@ FP16 MAX reduce-scatter before the existing TopK selection. Prefill gathers
 live index pages for the existing CANN operator. The added communication
 trades latency for capacity; serving gains depend on the workload.
 
-For PD, enable the option on both roles, use the same TP size, and select
+For W8A8 models with separate main and index projections, additionally set
+`"enable_minimax_m3_indexer_dcp_overlap": true` to overlap decode index-query
+AllGather with the main QKV projection and fused main Norm/RoPE/cache writes.
+This option defaults to `false` and requires indexer context sharding. The
+score GEMM reads the gathered layout directly, avoiding a query reorder copy.
+ReduceScatter still completes before TopK. Prefill, mixed batches, unsupported
+prepare shapes and models with a single packed projection retain the original
+path. The option moves decode projections inside an opaque attention op, so
+qualify performance with the same compiler fusion settings in both runs.
+It does not change cache capacity or the PD cache format.
+
+For PD, enable `enable_minimax_m3_indexer_dcp` on both roles, use the same TP size, and select
 `MooncakeConnectorV2`. PP layer partitioning may differ. Unsharded producers
 and sharded consumers have incompatible index-cache layouts.
+The overlap option can be enabled on D alone.
 
 Run the standalone benchmark on the matching CANN/torch_npu stack:
 

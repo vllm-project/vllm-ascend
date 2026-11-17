@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch_npu  # noqa: F401
+
 from tests.e2e.conftest import wait_until_npu_memory_free
 
 

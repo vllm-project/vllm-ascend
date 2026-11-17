@@ -274,6 +274,12 @@ class AscendMiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
             (getattr(config, "additional_config", None) or {}).get("enable_minimax_m3_indexer_dcp", False),
             "additional_config.enable_minimax_m3_indexer_dcp",
         )
+        self.overlap = validate_additional_config_bool(
+            (getattr(config, "additional_config", None) or {}).get("enable_minimax_m3_indexer_dcp_overlap", False),
+            "additional_config.enable_minimax_m3_indexer_dcp_overlap",
+        )
+        if self.overlap and not enabled:
+            raise ValueError("M3 indexer DCP overlap requires enable_minimax_m3_indexer_dcp")
         self.context_parallel_size = config.parallel_config.tensor_parallel_size if enabled else 1
         if enabled:
             if self.context_parallel_size not in (2, 4):
@@ -548,6 +554,39 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             kv_cache_torch_dtype=kv_cache_torch_dtype,
         )
 
+    def decode_dcp(self, query: torch.Tensor, metadata: AscendMiniMaxM3IndexerMetadata, *, gathered_query=False):
+        """Finish index scoring after the caller has ordered query-gather completion."""
+        from vllm_ascend.models.minimax_m3.ops.indexer_dcp import index_shard_scores, reduce_scatter_index_scores
+
+        group = get_tp_group()
+        kv = self.index_cache.kv_cache
+        if isinstance(kv, (tuple, list)):
+            kv = kv[0]
+        d = metadata.decode
+        assert d is not None
+        scores = index_shard_scores(
+            query,
+            kv,
+            d.block_table,
+            d.seq_lens,
+            d.decode_query_len,
+            group.world_size,
+            group.rank_in_group,
+            causal=metadata.causal_mask is not None,
+            gathered_query=gathered_query,
+        )
+        local_scores = reduce_scatter_index_scores(scores, group)
+        return index_decode_topk_fused(
+            local_scores,
+            d.seq_lens - d.decode_query_len,
+            d.decode_query_len,
+            self.topk_blocks,
+            local_scores.shape[-1],
+            init_blocks=self.init_blocks,
+            local_blocks=self.local_blocks,
+            sort_indices=True,
+        )
+
     def forward(
         self,
         index_query: torch.Tensor,
@@ -579,34 +618,9 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             assert d is not None
             decode_iq = iq[:num_decode_tokens]
             if shard_index_cache:
-                from vllm_ascend.models.minimax_m3.ops.indexer_dcp import (
-                    index_shard_scores,
-                    reduce_scatter_index_scores,
-                )
-
                 group = get_tp_group()
                 full_query = group.all_gather(decode_iq.contiguous(), dim=1)
-                scores = index_shard_scores(
-                    full_query,
-                    kv,
-                    d.block_table,
-                    d.seq_lens,
-                    d.decode_query_len,
-                    group.world_size,
-                    group.rank_in_group,
-                    causal=index_md.causal_mask is not None,
-                )
-                local_scores = reduce_scatter_index_scores(scores, group)
-                decode_topk, decode_select_num_idx = index_decode_topk_fused(
-                    local_scores,
-                    d.seq_lens - d.decode_query_len,
-                    d.decode_query_len,
-                    self.topk_blocks,
-                    local_scores.shape[-1],
-                    init_blocks=self.init_blocks,
-                    local_blocks=self.local_blocks,
-                    sort_indices=True,
-                )
+                decode_topk, decode_select_num_idx = self.decode_dcp(full_query, index_md)
             elif _USE_ASCENDC_INDEX_SCORE_DECODE:
                 decode_topk, decode_select_num_idx = minimax_m3_index_decode_ascendc(
                     decode_iq,
@@ -1631,6 +1645,28 @@ def minimax_m3_fused_sparse_forward_fake(
     index_qk: torch.Tensor | None = None,
 ) -> None:
     return
+
+
+def minimax_m3_dcp_overlap_forward(
+    hidden_states: torch.Tensor, positions: torch.Tensor, attn_output: torch.Tensor, layer_name: str
+) -> None:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    layer._run_dcp_overlap(hidden_states, positions, attn_output)
+
+
+def minimax_m3_dcp_overlap_forward_fake(
+    hidden_states: torch.Tensor, positions: torch.Tensor, attn_output: torch.Tensor, layer_name: str
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="minimax_m3_dcp_overlap_forward",
+    op_func=minimax_m3_dcp_overlap_forward,
+    mutates_args=["attn_output"],
+    fake_impl=minimax_m3_dcp_overlap_forward_fake,
+    dispatch_key="PrivateUse1",
+)
 
 
 direct_register_custom_op(
