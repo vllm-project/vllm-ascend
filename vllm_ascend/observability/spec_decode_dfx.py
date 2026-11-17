@@ -20,9 +20,9 @@ import torch
 from vllm.logger import logger as _vllm_logger
 
 # Reuse the shared 'vllm' namespace logger: vllm's handler tree only
-# covers that namespace, so init_logger(__name__) inside vllm_ascend
-# would create an unhandled logger whose output is silently dropped
-# (enforced by the repository logger-convention check).
+# covers that namespace; a module-local logger inside vllm_ascend would
+# have no handler and silently drop every record (the repository
+# logger-convention check enforces this).
 _logger = _vllm_logger
 
 _NAN_ROW_FMT_LIMIT = 8
