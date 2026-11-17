@@ -152,7 +152,9 @@ def worker(monkeypatch, request):
     spec.sliding_window = None
     spec.is_circular = False
     config = SimpleNamespace(
-        speculative_config=None, model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="test"))
+        speculative_config=None,
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="test")),
+        compilation_config=SimpleNamespace(static_forward_context={}),
     )
 
     def initialize(self, *args):
