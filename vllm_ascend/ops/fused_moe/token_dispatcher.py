@@ -27,9 +27,7 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
-from vllm.logger import logger
 
-from vllm_ascend.a2_mega_moe import a2_prefill_enabled
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
@@ -246,18 +244,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         token_dispatch_input: MoETokenDispatchInput,
     ):
         kwargs_mc2 = self.get_dispatch_mc2_kwargs(token_dispatch_input)
-        if a2_prefill_enabled(get_ascend_config()):
-            logger.info(
-                "A2_MEGA_MOE op_enter op=npu_moe_distribute_dispatch_v2 ep_rank=%s "
-                "x_shape=%s dtype=%s global_bs=%s comm_alg=%s quant_mode=%s ep_size=%s",
-                self.ep_rank_id,
-                tuple(kwargs_mc2["x"].shape),
-                kwargs_mc2["x"].dtype,
-                self.global_bs,
-                self.mc2_comm_alg,
-                kwargs_mc2["quant_mode"],
-                self.ep_world_size,
-            )
         output = torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2)
         # comm_stream.wait_stream(torch.npu.current_stream())
         (

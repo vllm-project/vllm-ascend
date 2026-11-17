@@ -61,7 +61,7 @@ Keep FlashComm disabled for the bounded-replay layout. Do not add this opt-in to
 | --- | --- | --- |
 | `enable_fused_mc2` | `0` | Set to `2` to request the CANN MegaMoE package. `1` selects the legacy fused operator. |
 | `a2_mega_moe_prefill.enabled` | `false` | Enable the supported A2 P-only backend. Requires `enable_fused_mc2=2`. |
-| `a2_mega_moe_prefill.scope` | `"prefill"` | Only `prefill` is supported; `all` and `prefill_mixed` are rejected. |
+| `a2_mega_moe_prefill.scope` | `"prefill"` | Restricts deployment to the eager P worker; it does not filter individual batches by phase. Other values are rejected. |
 
 Missing CANN dependencies or unsupported worker settings fail validation.
 The existing fused-MC2 configuration disables shared-expert multistream overlap.
@@ -69,26 +69,26 @@ Shared-expert computation and routed scaling otherwise retain existing semantics
 
 ## Selection and resource ownership
 
-Each eager forward votes explicit DSA request-phase counts over the EP CPU
-group before selecting the collective backend. A decode, mixed or unknown phase
-on any participating rank vetoes MegaMoE for all ranks. Empty replicas may join
-prefill peers with no active rows. A one-token prefix-cache tail is prefill;
-query length is not used to infer the phase. All-empty real batches fall back.
-This adds a small Gloo collective per eligible forward; include its cost when
-measuring P-side latency and throughput.
+Startup validates the P-only model, topology, quantization, dependencies and
+mandatory eager execution. Once enabled, every main-model MoE execution uses
+CANN MegaMoE: real prefill, memory profiling, idle DP dummy batches and SWA
+bounded replay. The backend does not depend on per-rank request-phase metadata
+or token counts, and there is no per-forward EP CPU vote.
 
-Explicit eager memory profiling also initializes and measures MegaMoE resources.
-Allocation alone does not prove real requests used MegaMoE. The temporary
-validation diagnostics below show the selected backend outside profiling.
-Capture never selects this path. The P worker remains eager, including SWA
-bounded replay. Bounded replay's compact decoder rows retain their own active
-mask and are not treated as autoregressive decode.
+Idle DP ranks join the same MegaMoE collective as ranks with real prefill.
+Their dummy rows are excluded by the active mask derived from `is_padding`;
+a dummy's decode-shaped attention metadata does not change the MoE backend.
+PCP padding and bounded replay's compact rows retain their own active masks.
+KV-transfer-only forward contexts do not introduce a MoE selection collective.
+The existing startup `--enforce-eager` requirement rejects graph execution for
+the main model.
 
 MRv2 may enter a draft with the target's forward configuration. Routed draft
 layers explicitly select their ordinary backend from their own model config.
-Main-model W4A8 uses the existing expert TensorList format for both MegaMoE and
-ordinary GMM fallback. No complete second execution-weight copy is retained;
-loading and NZ conversion may still have a transient memory peak.
+Main-model W4A8 retains the existing expert TensorList weight format.
+When this opt-in is enabled, the main model has no ordinary MoE fallback.
+No complete second execution-weight copy is retained; loading and NZ conversion
+may still have a transient memory peak.
 
 The sender reservation uses the scheduler budget conservatively, without dividing
 by PCP8 or applying a token-count selection cutoff. For per-rank sender capacity
@@ -97,50 +97,6 @@ identical resources. The A2 path uses this bound instead of the general
 `mega_moe_max_tokens` hint. Large scheduler budgets can substantially increase
 communication memory and workspace; measure available KV capacity and peak HBM.
 Inputs larger than the allocated sender capacity fail rather than truncating.
-Ordinary fallback retains its original 512-token-per-rank MC2 selection limit.
-
-## Temporary validation diagnostics
-
-With `a2_mega_moe_prefill.enabled=true`, this validation build logs every forward
-at INFO level by default. No extra configuration or DEBUG logging is needed.
-Collect the output of **both P DP processes**, including all 16 EP workers:
-
-```shell
-rg 'A2_MEGA_MOE' p-dp0.log p-dp1.log
-```
-
-- `batch`: local and PCP-global request counts, token counts, appended padding
-  rows, `is_dummy`, `is_cpp_profile`, CPU prefill flags and scheduled lengths.
-  Appended padding excludes padding already present inside the local batch.
-- `eligibility`: draft identity, runner, package/hardware support, fused-MC2
-  setting, EP/LoRA state, DP/TP/PCP, token count, graph and profile flags.
-- `vote_enter`: local `(prefill, veto)` and attention metadata counts. Shared
-  metadata objects are grouped by identity; `aliases` counts their layer names.
-  Reasons distinguish empty rows, decode/mixed requests, missing/invalid counts
-  and inconsistent request counts.
-- `vote_exit`: EP-wide MAX of the two vote fields and the resulting selection.
-  A local veto of 1 identifies a rank rejecting fusion; a global veto of 1
-  rejects fusion for every rank. A global prefill of 0 also rejects fusion.
-- `gate_skip`: graph execution rejects fusion; `profile_forced` selects fusion
-  only for resource profiling, without a phase vote.
-- `decision`: selected communication method and fallback reason/capacity.
-- `op_enter`: actual entry into `cann_mega_moe` or ordinary
-  `npu_moe_distribute_dispatch_v2`, including the input shape and quantization
-  mode. Ordinary MC2 also logs its communication algorithm. This line precedes
-  the operator call and does not establish successful kernel completion.
-
-Start with `profile=False` eligibility records from a failing request, then
-compare the batch flags and local votes across ranks. For example, local
-`(1, 0)` with global `[1, 1]` means another rank vetoed the request; find its
-`vote_enter` with local `(0, 1)` and inspect its batch/metadata reason.
-`op_enter ... x_shape=(512, 5120)` confirms the actual MC2 input has 512 rows,
-even if only some rows are active.
-
-These diagnostics leave routing and existing collectives unchanged. They read
-CPU metadata and tensor shapes/dtypes without copying device tensor contents.
-They log neither prompts nor request IDs. Per-forward and per-layer output can
-be large and affect timing; this commit is intended for fault reproduction,
-not performance measurement.
 
 ## Validation and rollback
 

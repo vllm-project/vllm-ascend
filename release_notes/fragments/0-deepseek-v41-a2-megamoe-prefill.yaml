@@ -1,10 +1,14 @@
 pr: 0
 entries:
   - category: feature
-    text: Added an experimental opt-in CANN MegaMoE prefill backend for DeepSeek V4.1 Flash W4A8 on A2 DP2/TP1/PCP8 P workers, with coordinated EP16 selection and ordinary draft/fallback execution. Includes temporary default INFO diagnostics for batch phases, eligibility, EP votes, backend decisions and operator inputs during validation.
+    text: Added an experimental opt-in CANN MegaMoE prefill backend for DeepSeek V4.1 Flash W4A8 on A2 DP2/TP1/PCP8 P workers, with startup validation, fixed main-model routing and ordinary draft execution.
     model: DeepSeek-V4.1-Flash
     hardware: [A2]
   - category: bugfix
     text: Fixed A2 MegaMoE prefill startup with DSpark replicated PCP draft configuration, including subsequent draft-model loading and configuration copies. Unified draft identification for ordinary MoE routing and restricted the W4A8 requirement to the target model.
+    model: DeepSeek-V4.1-Flash
+    hardware: [A2]
+  - category: bugfix
+    text: Removed per-forward phase votes and temporary diagnostics from A2 MegaMoE selection. Idle P dummy workers now use the same backend as real prefill workers, and KV-only contexts no longer start an EP selection collective.
     model: DeepSeek-V4.1-Flash
     hardware: [A2]

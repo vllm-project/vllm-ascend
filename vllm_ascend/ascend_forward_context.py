@@ -1,4 +1,3 @@
-import logging
 import math
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -11,12 +10,7 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
-from vllm_ascend.a2_mega_moe import (
-    a2_prefill_enabled,
-    prefill_metadata_summary,
-    prefill_vote,
-    select_prefill_from_votes,
-)
+from vllm_ascend.a2_mega_moe import a2_prefill_enabled
 from vllm_ascend.a2_mega_moe import is_draft_model as is_a2_draft_model
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.device.hardware_profile import (
@@ -122,72 +116,6 @@ def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
     )
 
 
-def select_a2_mega_moe_prefill(metadata: Any, *, in_profile_run: bool, graph_enabled: bool) -> bool:
-    """Agree once per forward, including idle PCP/DP peers, over the CPU group.
-
-    Local request phases must never select different collective kernels. This
-    small Gloo vote does not copy a device tensor or synchronize the NPU stream.
-    """
-    if graph_enabled:
-        logger.info("A2_MEGA_MOE gate_skip reason=graph_enabled profile=%s", in_profile_run)
-        return False
-    if in_profile_run:
-        logger.info("A2_MEGA_MOE gate_skip reason=profile_forced selected=True")
-        return True
-    from vllm_ascend.distributed.parallel_state import get_mc2_group
-
-    local_vote = prefill_vote(metadata)
-    group = get_mc2_group()
-    ep_rank = getattr(group, "rank_in_group", "?")
-    if logger.isEnabledFor(logging.INFO):
-        logger.info(
-            "A2_MEGA_MOE vote_enter ep_rank=%s local=%s metadata=%s",
-            ep_rank,
-            local_vote,
-            prefill_metadata_summary(metadata),
-        )
-    votes = torch.tensor(local_vote, dtype=torch.int32, device="cpu")
-    torch.distributed.all_reduce(votes, op=torch.distributed.ReduceOp.MAX, group=group.cpu_group)
-    global_vote = votes.tolist()
-    selected = select_prefill_from_votes(*global_vote)
-    logger.info(
-        "A2_MEGA_MOE vote_exit ep_rank=%s local=%s global=%s selected=%s", ep_rank, local_vote, global_vote, selected
-    )
-    return selected
-
-
-def _log_a2_mega_moe_eligibility(
-    config: VllmConfig, draft_arg: bool, num_tokens: int | None, graph_enabled: bool, in_profile_run: bool
-) -> None:
-    """Log CPU eligibility state once per selection, before a possible EP vote."""
-    ascend = get_ascend_config()
-    parallel = config.parallel_config
-    group = get_ep_group()
-    logger.info(
-        "A2_MEGA_MOE eligibility ep_rank=%s enabled=%s draft_arg=%s draft_config=%s runner=%s "
-        "package_supported=%s hardware_supported=%s fused_mc2=%s moe=%s ep_enabled=%s ep_size=%s "
-        "has_lora=%s dp=%s tp=%s pcp=%s tokens=%s graph=%s profile=%s",
-        getattr(group, "rank_in_group", "?"),
-        a2_prefill_enabled(ascend),
-        draft_arg,
-        is_a2_draft_model(config),
-        getattr(config.model_config, "runner_type", None),
-        is_mega_moe_supported(),
-        get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE),
-        ascend.enable_fused_mc2,
-        is_moe_model(config),
-        parallel.enable_expert_parallel,
-        group.world_size,
-        getattr(config, "lora_config", None) is not None,
-        parallel.data_parallel_size,
-        parallel.tensor_parallel_size,
-        parallel.prefill_context_parallel_size,
-        num_tokens,
-        graph_enabled,
-        in_profile_run,
-    )
-
-
 @contextmanager
 def set_ascend_forward_context(
     attn_metadata: Any,
@@ -246,9 +174,6 @@ def set_ascend_forward_context(
             vllm_config,
             is_draft_model=is_draft_model,
             draft_moe_quant_type=draft_moe_quant_type,
-            attn_metadata=attn_metadata,
-            in_profile_run=in_profile_run,
-            graph_enabled=aclgraph_runtime_mode != CUDAGraphMode.NONE,
         )
 
         forward_context.moe_comm_type = moe_comm_type
@@ -484,10 +409,6 @@ def select_moe_comm_method(
     vllm_config: VllmConfig,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
-    *,
-    attn_metadata: Any = None,
-    in_profile_run: bool = False,
-    graph_enabled: bool = False,
 ) -> MoECommType | None:
     """Select the MoE communication method from the active hardware policy,
     parallel settings, and token count.
@@ -504,26 +425,16 @@ def select_moe_comm_method(
     if not is_moe_model(vllm_config):
         return None
 
-    mc2_tokens_capacity = get_mc2_tokens_capacity()
     a2_enabled = a2_prefill_enabled(get_ascend_config())
+    if a2_enabled and not is_draft_model and not is_a2_draft_model(vllm_config):
+        # Startup validates the P-only W4A8 topology and eager execution.
+        # Every target forward, including idle DP dummy peers, uses MegaMoE.
+        # Selecting here performs no collective in KV-only forward contexts.
+        return MoECommType.FUSED_MC2
+
+    mc2_tokens_capacity = get_mc2_tokens_capacity()
     if a2_enabled:
-        if logger.isEnabledFor(logging.INFO):
-            _log_a2_mega_moe_eligibility(vllm_config, is_draft_model, num_tokens, graph_enabled, in_profile_run)
-        eligible = not is_draft_model and use_cann_megamoe(vllm_config)
-        if eligible and select_a2_mega_moe_prefill(
-            attn_metadata, in_profile_run=in_profile_run, graph_enabled=graph_enabled
-        ):
-            logger.debug("A2 MegaMoE selected for DeepSeek V4.1 P prefill (profile=%s)", in_profile_run)
-            logger.info("A2_MEGA_MOE decision method=FUSED_MC2 reason=prefill_gate_pass tokens=%s", num_tokens)
-            return MoECommType.FUSED_MC2
-        if is_draft_model:
-            rejection = "draft_arg"
-        elif not eligible:
-            rejection = "config_ineligible"
-        else:
-            rejection = "graph_enabled" if graph_enabled else "phase_rejected"
-        # MegaMoE's sender reservation is larger than ordinary MC2's supported
-        # per-rank capacity. Preserve the original fallback selection threshold.
+        # Drafts retain their ordinary backend and its selection capacity.
         mc2_tokens_capacity = min(
             mc2_tokens_capacity, _MC2_TOKENS_PER_RANK_LIMIT * vllm_config.parallel_config.tensor_parallel_size
         )
@@ -557,14 +468,6 @@ def select_moe_comm_method(
         is_draft_model,
         draft_moe_quant_type,
     )
-    if a2_enabled:
-        logger.info(
-            "A2_MEGA_MOE decision method=%s reason=%s tokens=%s fallback_capacity=%s",
-            moe_comm_type,
-            rejection,
-            num_tokens,
-            mc2_tokens_capacity,
-        )
     return moe_comm_type
 
 

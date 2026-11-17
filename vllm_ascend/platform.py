@@ -741,13 +741,7 @@ class NPUPlatform(Platform):
 
         # NOTE: Must use max_tokens_across_dp instead of num_tokens for MoE comm method selection
         # to ensure consistent communication method across all DP ranks
-        moe_comm_type = select_moe_comm_method(
-            max_tokens_across_dp,
-            vllm_config,
-            attn_metadata=attn_metadata,
-            in_profile_run=in_profile_run,
-            graph_enabled=cudagraph_runtime_mode != CUDAGraphMode.NONE,
-        )
+        moe_comm_type = select_moe_comm_method(max_tokens_across_dp, vllm_config)
         moe_comm_method = get_moe_comm_method(moe_comm_type)
 
         mc2_mask = None

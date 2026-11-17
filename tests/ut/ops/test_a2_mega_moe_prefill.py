@@ -9,14 +9,13 @@ import copy
 import dataclasses
 import importlib.util
 import json
-import logging
+import math
 import sys
 from pathlib import Path
 from types import SimpleNamespace as NS
 from typing import Any
 from unittest.mock import Mock
 
-import numpy as np
 import pytest
 import torch
 from pydantic import TypeAdapter, ValidationError, model_validator
@@ -328,241 +327,129 @@ def test_invalid_model_shape(field, value):
         validate(cfg)
 
 
-def phase(prefills, decodes=0):
-    return NS(num_reqs=prefills + decodes, num_prefills=prefills, num_decodes=decodes, max_query_len=1)
-
-
-@pytest.mark.parametrize(
-    "metadata,expected",
-    [
-        ({"encoder": phase(2), "decoder": phase(2)}, (1, 0)),
-        ({"one_token_prefix_tail": phase(1)}, (1, 0)),
-        ({"bounded_replay": phase(2)}, (1, 0)),
-        ({"empty_peer": phase(0)}, (0, 0)),
-        ({"mixed": phase(1, 1)}, (0, 1)),
-        ({"decode": phase(0, 1)}, (0, 1)),
-        ({"unknown": NS(max_query_len=4096)}, (0, 1)),
-        ({}, (0, 1)),
-        (None, (0, 1)),
-    ],
-)
-def test_cpu_phase_evidence(metadata, expected):
-    assert policy.prefill_vote(metadata) == expected
-
-
-def test_group_vote_includes_idle_and_veto_peers():
-    for peer in (phase(0), phase(2), phase(0, 1), NS()):
-        votes = [policy.prefill_vote(phase(1))] * 8 + [policy.prefill_vote(peer)] * 8
-        prefill, veto = map(max, zip(*votes))
-        assert policy.select_prefill_from_votes(prefill, veto) == (
-            peer.num_decodes == 0 if hasattr(peer, "num_decodes") else False
-        )
-
-
-def test_empty_pcp_placeholder_does_not_veto_peer_prefill():
-    placeholder = phase(0, 1)
-    placeholder.num_actual_tokens = 0
-    assert policy.prefill_vote(placeholder) == (0, 0)
-
-
-@pytest.mark.parametrize(
-    "metadata,reason",
-    [
-        (phase(1), "prefill"),
-        (phase(0, 1), "decode_or_mixed"),
-        (NS(), "invalid_or_missing_counts"),
-        (NS(num_actual_tokens=0), "empty_tokens"),
-        (phase(0), "empty_requests"),
-        (NS(num_reqs=2, num_prefills=1, num_decodes=0), "request_count_mismatch"),
-    ],
-)
-def test_vote_diagnostics_explain_and_deduplicate_metadata(metadata, reason):
-    summary = policy.prefill_metadata_summary({"layer.0": metadata, "layer.1": metadata})
-    assert len(summary) == 1 and summary[0]["aliases"] == 2
-    assert summary[0]["reason"] == reason
-    assert summary[0]["vote"] == policy.prefill_vote(metadata)
-
-
-def test_vote_diagnostics_do_not_read_or_render_device_values():
-    class DeviceValue:
-        def __repr__(self):
-            raise AssertionError("logging read a device value")
-
-    summary = policy.prefill_metadata_summary(NS(num_reqs=DeviceValue()))
-    assert summary[0]["num_reqs"] == "DeviceValue"
-    assert summary[0]["reason"] == "invalid_or_missing_counts"
-    assert "DeviceValue" in str(summary)
-
-
 def selector_namespace(enabled=True):
     ns = dict(
         torch=torch,
-        logging=logging,
-        prefill_vote=policy.prefill_vote,
-        select_prefill_from_votes=policy.select_prefill_from_votes,
         a2_prefill_enabled=policy.a2_prefill_enabled,
         is_a2_draft_model=policy.is_draft_model,
         get_ascend_config=lambda: NS(
             a2_mega_moe_prefill=policy.A2MegaMoEPrefillConfig(enabled=enabled), enable_fused_mc2=1
         ),
-        get_mc2_tokens_capacity=lambda: 4096,
+        get_mc2_tokens_capacity=Mock(return_value=4096 if enabled else 512),
         _MC2_TOKENS_PER_RANK_LIMIT=512,
         is_moe_model=lambda cfg: True,
-        use_cann_megamoe=lambda cfg: not policy.is_draft_model(cfg),
-        get_ep_group=lambda: NS(world_size=16, rank_in_group=0),
-        is_mega_moe_supported=lambda: True,
-        HardwareCapability=NS(CANN_MEGAMOE="mega"),
+        use_cann_megamoe=Mock(side_effect=AssertionError("target eligibility must be validated at startup")),
+        get_ep_group=lambda: NS(world_size=16),
         MoECommType=NS(FUSED_MC2="fused", MC2="mc2", ALLGATHER="gather"),
         QuantType=NS(NONE="none"),
         MoECommPolicy=NS(ALLGATHER="gather"),
-        get_current_hardware_profile=lambda: NS(moe_comm_policy="a2", supports=lambda capability: True),
+        get_current_hardware_profile=lambda: NS(moe_comm_policy="a2"),
         logger=Mock(),
     )
     functions(
         "vllm_ascend/ascend_forward_context.py",
-        [
-            "select_moe_comm_method",
-            "_select_capacity_and_expert_density_moe_comm_method",
-            "_log_a2_mega_moe_eligibility",
-        ],
+        ["select_moe_comm_method", "_select_capacity_and_expert_density_moe_comm_method"],
         ns,
     )
     ns["_MOE_COMM_SELECTORS"] = {"a2": ns["_select_capacity_and_expert_density_moe_comm_method"]}
     return ns
 
 
-def test_selector_and_fallback_threshold():
+@pytest.mark.parametrize("tokens", [None, 0, 1, 6, 256, 257, 512, 513, 4096, 4097])
+def test_validated_p_target_always_selects_megamoe(tokens, monkeypatch):
     ns = selector_namespace()
-    ns["select_a2_mega_moe_prefill"] = Mock(return_value=True)
-    select = ns["select_moe_comm_method"]
-    assert select(4096, config(), in_profile_run=True) == "fused"
-    ns["select_a2_mega_moe_prefill"].return_value = False
-    assert select(512, config()) == "mc2"
-    assert select(513, config()) == "gather"
-    ns["select_a2_mega_moe_prefill"].reset_mock()
-    assert select(32, config(), is_draft_model=True) == "mc2"
-    ns["select_a2_mega_moe_prefill"].assert_not_called()
-
-
-def test_disabled_selector_does_not_vote():
-    ns = selector_namespace(enabled=False)
-    ns["select_a2_mega_moe_prefill"] = Mock(side_effect=AssertionError("disabled worker voted"))
-    assert ns["select_moe_comm_method"](32, config()) == "mc2"
+    reduce = Mock(side_effect=AssertionError("selection must not initiate a collective"))
+    monkeypatch.setattr(torch.distributed, "all_reduce", reduce)
+    assert ns["select_moe_comm_method"](tokens, config()) == "fused"
+    ns["get_mc2_tokens_capacity"].assert_not_called()
+    ns["use_cann_megamoe"].assert_not_called()
+    reduce.assert_not_called()
     ns["logger"].info.assert_not_called()
 
 
-@pytest.mark.parametrize("selected,method", [(True, "FUSED_MC2"), (False, "mc2")])
-def test_selection_diagnostics_are_visible_at_info(caplog, selected, method):
+def test_explicit_draft_keeps_ordinary_selection_capacity():
     ns = selector_namespace()
-    ns["logger"] = logging.getLogger("a2_moe_diagnostics")
-    ns["select_a2_mega_moe_prefill"] = Mock(return_value=selected)
-    caplog.set_level(logging.INFO, logger="a2_moe_diagnostics")
-    ns["select_moe_comm_method"](512, config())
-    assert "A2_MEGA_MOE eligibility ep_rank=0" in caplog.text
-    assert "package_supported=True hardware_supported=True fused_mc2=1" in caplog.text
-    assert "dp=2 tp=1 pcp=8 tokens=512 graph=False profile=False" in caplog.text
-    assert f"A2_MEGA_MOE decision method={method}" in caplog.text
-    if not selected:
-        assert "reason=phase_rejected tokens=512 fallback_capacity=512" in caplog.text
+    select = ns["select_moe_comm_method"]
+    assert select(512, config(), is_draft_model=True) == "mc2"
+    assert select(513, config(), is_draft_model=True) == "gather"
 
 
-def test_actual_collective_gate(monkeypatch, caplog):
-    group = object()
+@pytest.mark.parametrize("identity", ["draft", "architecture", "replicated"])
+def test_fixed_target_routing_preserves_all_draft_identities(identity):
+    ns = selector_namespace()
+    cfg = model_config_for_identity(identity)
+    assert ns["select_moe_comm_method"](32, cfg) == "mc2"
+    assert ns["select_moe_comm_method"](513, cfg) == "gather"
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_disabled_target_and_draft_routes(enabled):
+    ns = selector_namespace(enabled=enabled)
+    cfg = config()
+    if enabled:
+        cfg.model_config.runner_type = "draft"
+    assert ns["select_moe_comm_method"](512, cfg) == "mc2"
+    assert ns["select_moe_comm_method"](513, cfg) == "gather"
+
+
+def test_mrv2_real_dummy_and_kv_contexts_select_without_collectives(monkeypatch):
+    ns = selector_namespace()
+    reduce = Mock(side_effect=AssertionError("KV-only contexts must not initiate EP votes"))
+    monkeypatch.setattr(torch.distributed, "all_reduce", reduce)
     monkeypatch.setitem(
         sys.modules,
-        "vllm_ascend.distributed.parallel_state",
-        NS(get_mc2_group=lambda: NS(cpu_group=group, rank_in_group=3)),
+        "vllm_ascend.ascend_forward_context",
+        NS(
+            _is_decode_only_node=lambda cfg: False,
+            get_mc2_mask=lambda: None,
+            get_mrv2_in_profile_run=lambda: False,
+            sync_v2_extra_kwargs=lambda cfg: None,
+            use_cann_megamoe=lambda cfg: True,
+            select_moe_comm_method=ns["select_moe_comm_method"],
+        ),
     )
-    calls = []
-
-    def reduce(votes, op, group):
-        calls.append(votes.clone())
-        # Simulate a peer with a decode request. It must veto local prefill.
-        votes[1] = 1
-
-    monkeypatch.setattr(torch.distributed, "all_reduce", reduce)
-    caplog.set_level(logging.INFO, logger="a2_moe_vote")
-    ns = dict(
-        torch=torch,
-        logging=logging,
-        logger=logging.getLogger("a2_moe_vote"),
-        prefill_vote=policy.prefill_vote,
-        prefill_metadata_summary=policy.prefill_metadata_summary,
-        select_prefill_from_votes=policy.select_prefill_from_votes,
+    monkeypatch.setitem(
+        sys.modules, "vllm_ascend.ops.fused_moe.moe_comm_method", NS(get_moe_comm_method=lambda method: None)
     )
-    functions("vllm_ascend/ascend_forward_context.py", ["select_a2_mega_moe_prefill"], ns)
-    select = ns["select_a2_mega_moe_prefill"]
-    assert not select(phase(1), in_profile_run=False, graph_enabled=False)
-    assert len(calls) == 1 and calls[0].device.type == "cpu"
-    assert select(None, in_profile_run=True, graph_enabled=False)
-    assert not select(phase(1), in_profile_run=True, graph_enabled=True)
-    assert len(calls) == 1
-    assert "vote_enter ep_rank=3 local=(1, 0)" in caplog.text
-    assert "vote_exit ep_rank=3 local=(1, 0) global=[1, 1] selected=False" in caplog.text
-    assert "reason=profile_forced" in caplog.text and "reason=graph_enabled" in caplog.text
-
-
-@pytest.mark.parametrize("dummy", [False, True])
-def test_batch_diagnostics_show_local_and_global_cpu_phases(caplog, dummy):
-    ns = dict(
-        logger=logging.getLogger("a2_moe_batch"),
-        a2_prefill_enabled=policy.a2_prefill_enabled,
-        get_ascend_config=lambda: NS(a2_mega_moe_prefill=NS(enabled=True)),
-        get_ep_group=lambda: NS(rank_in_group=8),
-        get_dp_group=lambda: NS(rank_in_group=1),
+    monkeypatch.setitem(
+        sys.modules, "vllm_ascend.quantization.utils", NS(get_dynamic_mx_quant_scale_alg=lambda cfg: None)
     )
-    functions("vllm_ascend/worker/v2/model_states/default.py", ["_log_a2_moe_batch"], ns)
-    local = NS(
-        num_reqs=1,
-        num_tokens=512,
-        num_tokens_after_padding=520,
-        is_dummy=dummy,
-        is_prefilling_np=np.array([False]),
-        num_scheduled_tokens=np.array([512]),
+    monkeypatch.setitem(sys.modules, "vllm.config", NS(CUDAGraphMode=NS(NONE="none")))
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm.distributed",
+        NS(
+            get_dp_group=lambda: NS(world_size=2),
+            get_tensor_model_parallel_world_size=lambda: 1,
+        ),
     )
-    global_batch = NS(
-        num_reqs=1,
-        num_tokens=4096,
-        num_tokens_after_padding=4096,
-        is_dummy=dummy,
-        is_prefilling_np=np.array([True]),
-        num_scheduled_tokens=np.array([4096]),
-    )
-    caplog.set_level(logging.INFO, logger="a2_moe_batch")
-    ns["_log_a2_moe_batch"](local, NS(global_batch=global_batch))
-    assert "A2_MEGA_MOE batch ep_rank=8 dp_rank=1" in caplog.text
-    assert "'appended_padding_rows': 8" in caplog.text
-    assert f"'is_dummy': {dummy}" in caplog.text
-    assert "'is_prefilling': [False]" in caplog.text and "'is_prefilling': [True]" in caplog.text
-
-
-def test_mc2_logs_actual_shape_before_failing_operator(caplog):
-    tree = ast.parse((ROOT / "vllm_ascend/ops/fused_moe/token_dispatcher.py").read_text())
-    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "TokenDispatcherWithMC2")
-    dispatch = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "token_dispatch")
-    operator = Mock(side_effect=RuntimeError("simulated bs limit"))
-    ns = dict(
-        logger=logging.getLogger("a2_moe_operator"),
-        a2_prefill_enabled=policy.a2_prefill_enabled,
-        get_ascend_config=lambda: NS(a2_mega_moe_prefill=NS(enabled=True)),
-        torch_npu=NS(npu_moe_distribute_dispatch_v2=operator),
-    )
+    tree = ast.parse((ROOT / "vllm_ascend/platform.py").read_text())
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "NPUPlatform")
+    hook = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "set_additional_forward_context")
+    hook.decorator_list = []
+    ns["math"] = math
     exec(
         compile(
-            ast.Module(body=[dispatch], type_ignores=[]), "dispatch", "exec", flags=__future__.annotations.compiler_flag
+            ast.Module(body=[hook], type_ignores=[]), "platform", "exec", flags=__future__.annotations.compiler_flag
         ),
         ns,
     )
-    kwargs = dict(x=torch.empty(512, 5120), quant_mode=2)
-    dispatcher = NS(
-        get_dispatch_mc2_kwargs=lambda _: kwargs, ep_rank_id=8, ep_world_size=16, global_bs=0, mc2_comm_alg="fullmesh"
-    )
-    caplog.set_level(logging.INFO, logger="a2_moe_operator")
-    with pytest.raises(RuntimeError, match="simulated bs limit"):
-        ns["token_dispatch"](dispatcher, object())
-    operator.assert_called_once_with(**kwargs)
-    assert "op=npu_moe_distribute_dispatch_v2 ep_rank=8 x_shape=(512, 5120)" in caplog.text
-    assert "comm_alg=fullmesh quant_mode=2 ep_size=16" in caplog.text
+    cfg = config()
+    dp = NS(num_tokens_across_dp_cpu=torch.tensor([6, 6]))
+    # The log's DP0 real prefill and DP1 dummy both enter the same fixed backend.
+    for ep_rank in range(16):
+        real = ep_rank < 8
+        metadata = {
+            "attention": NS(
+                num_actual_tokens=3 if real else 6, num_reqs=1, num_prefills=int(real), num_decodes=int(not real)
+            )
+        }
+        result = ns[hook.name](None, metadata, cfg, dp, num_tokens=6)
+        assert result["moe_comm_type"] == "fused" and result["use_mega_moe"]
+    # Only DP0 later enters this KV-only context. It must not wait for EP8-15.
+    result = ns[hook.name](None, None, cfg, None, num_tokens=None)
+    assert result["num_tokens"] is None and result["mc2_mask"] is None
+    reduce.assert_not_called()
 
 
 def test_policy_keeps_a2_disabled_without_opt_in():
@@ -648,7 +535,8 @@ def test_sender_capacity_not_policy_threshold(enabled, budget, expected):
     assert ns["_mc2_tokens_capacity"] == expected
 
 
-def test_pcp_and_bounded_replay_mask_uses_real_padding():
+@pytest.mark.parametrize("padding", [[False, True, False, True], [True, True, True, True]])
+def test_pcp_replay_and_idle_dummy_masks_use_real_padding(padding):
     tree = ast.parse((ROOT / "vllm_ascend/ops/fused_moe/prepare_finalize.py").read_text())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "PrepareAndFinalizeWithMC2")
     prepare = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "prepare")
@@ -662,7 +550,7 @@ def test_pcp_and_bounded_replay_mask_uses_real_padding():
         MoEPrepareOutput=NS,
         get_ascend_config=lambda: NS(a2_mega_moe_prefill=NS(enabled=True)),
         a2_prefill_enabled=policy.a2_prefill_enabled,
-        get_forward_context=lambda: NS(is_padding=torch.tensor([False, True, False, True])),
+        get_forward_context=lambda: NS(is_padding=torch.tensor(padding)),
     )
     exec(
         compile(
@@ -671,7 +559,25 @@ def test_pcp_and_bounded_replay_mask_uses_real_padding():
         ns,
     )
     out = ns["prepare"](NS(tp_size=1), torch.ones(4, 8), torch.ones(4, 384))
-    assert out.mc2_mask.tolist() == [True, False, True, False]
+    assert out.mc2_mask.tolist() == [not value for value in padding]
+
+
+def test_fixed_route_rejects_input_above_sender_capacity_before_launch():
+    tree = ast.parse((ROOT / "vllm_ascend/ops/fused_moe/moe_comm_method.py").read_text())
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "FusedMC2CommImpl")
+    apply = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_apply_cann_mega_moe")
+    ns = dict(TokenDispatcherWithMC2=NS)
+    exec(
+        compile(
+            ast.Module(body=[apply], type_ignores=[]), "capacity", "exec", flags=__future__.annotations.compiler_flag
+        ),
+        ns,
+    )
+    operator = Mock(side_effect=AssertionError("oversize input must not reach the operator"))
+    comm = NS(token_dispatcher=NS(max_num_tokens_per_rank=4096), mega_moe=operator)
+    with pytest.raises(ValueError, match="received 4097 tokens per rank"):
+        ns[apply.name](comm, NS(hidden_states=torch.empty(4097, 1)), None, False)
+    operator.assert_not_called()
 
 
 def test_receive_capacity_covers_skewed_ep16_load():

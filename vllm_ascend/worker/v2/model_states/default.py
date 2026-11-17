@@ -26,9 +26,8 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed import get_dp_group, get_ep_group
+from vllm.distributed import get_dp_group
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.logger import logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheConfig
 from vllm.v1.utils import CpuGpuBuffer
@@ -37,7 +36,6 @@ from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.a2_mega_moe import a2_prefill_enabled
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import CopySfaRequestStates
@@ -68,33 +66,6 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
     from vllm_ascend.worker.v2.kvpp import KVPPRuntime
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext, AscendPCPManager
-
-
-def _log_a2_moe_batch(input_batch: AscendInputBatch, pcp_context: "AscendPCPAttentionContext | None") -> None:
-    """Log CPU batch state before metadata construction, including idle DP batches."""
-    if not a2_prefill_enabled(get_ascend_config()):
-        return
-
-    def summary(batch):
-        num_reqs = batch.num_reqs
-        return dict(
-            num_reqs=num_reqs,
-            num_tokens=batch.num_tokens,
-            num_tokens_after_padding=batch.num_tokens_after_padding,
-            appended_padding_rows=batch.num_tokens_after_padding - batch.num_tokens,
-            is_dummy=getattr(batch, "is_dummy", False),
-            is_cpp_profile=getattr(batch, "is_cpp_profile", False),
-            is_prefilling=batch.is_prefilling_np[:num_reqs].tolist(),
-            scheduled_tokens=batch.num_scheduled_tokens[:num_reqs].tolist(),
-        )
-
-    logger.info(
-        "A2_MEGA_MOE batch ep_rank=%s dp_rank=%s local=%s global=%s",
-        get_ep_group().rank_in_group,
-        get_dp_group().rank_in_group,
-        summary(input_batch),
-        summary(pcp_context.global_batch) if pcp_context is not None else None,
-    )
 
 
 class AscendModelState(DefaultModelState):
@@ -551,7 +522,6 @@ class AscendModelState(DefaultModelState):
         self.slot_mappings = slot_mappings
         self.kv_cache_config = kv_cache_config
         self.pcp_context = pcp_context
-        _log_a2_moe_batch(input_batch, pcp_context)
         build_metadata: Callable[..., Any] = build_attn_metadata
         if self.device_metadata is not None:
             build_metadata = partial(self.device_metadata.run_build, build_attn_metadata)
