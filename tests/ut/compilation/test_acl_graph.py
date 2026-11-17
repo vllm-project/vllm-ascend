@@ -25,19 +25,13 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, ForwardContext
 
 from tests.ut.base import TestBase
-from vllm_ascend.attention.context_parallel import mla_cp
 from vllm_ascend.attention.context_parallel.attention_cp import (
     AscendAttentionDCPMetadata,
     AscendMetadataForDecode,
     DCPFIAParamProvider,
 )
 from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
-from vllm_ascend.attention.context_parallel.mla_cp import (
-    AscendMLADCPDecodeMetadata,
-    AscendMlaDCPImpl,
-    MLASplitAttentionGraphParams,
-)
-from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
+from vllm_ascend.attention.context_parallel.mla_cp import MLADCPParamProvider
 from vllm_ascend.compilation import acl_graph
 from vllm_ascend.compilation.acl_graph import (
     ACLGraphEntry,
@@ -1016,105 +1010,6 @@ class TestDCPGraphParams(TestBase):
 
         acl_graph_mod._graph_params = self._prev_graph_params
 
-    @patch("vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX")
-    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch("vllm_ascend.attention.context_parallel.mla_cp.torch.npu.graph_task_update_end")
-    @patch("vllm_ascend.attention.context_parallel.mla_cp.torch.npu.graph_task_update_begin", MagicMock())
-    @patch(
-        "vllm_ascend.attention.context_parallel.mla_cp.torch_npu.npu_fused_infer_attention_score_v2.out",
-    )
-    @patch("vllm_ascend.attention.context_parallel.mla_cp.torch.npu.stream")
-    def test_update_mla_dcp_params(self, mock_stream, mock_fia, _mock_graph_task_end, mock_context, mock_extra_ctx):
-        mock_extra_ctx.is_draft_model = False
-        mock_extra_ctx.is_draft_model_prefill = False
-        input_positions = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8])
-        block_table = torch.zeros(2, 5, dtype=torch.long)
-        seq_lens = torch.tensor([4, 4])
-        cp_seq_len = torch.tensor([2, 2])
-        max_seq_lens = 4
-        seq_lens_list = [4, 4]
-        slot_mapping = torch.zeros(8, dtype=torch.long)
-        query_start_loc = torch.tensor([0, 4])
-        block_tables = torch.zeros(2, 5, dtype=torch.long)
-
-        decode = AscendMLADCPDecodeMetadata(
-            input_positions, block_table, seq_lens, max_seq_lens, seq_lens_list, cp_seq_len=cp_seq_len
-        )
-        metadata = AscendMLAMetadata(
-            8, slot_mapping, query_start_loc, seq_lens, seq_lens, block_tables, 4, 4, 0, decode=decode
-        )
-        forward_context = MagicMock()
-        forward_context.attn_metadata = {"attn_layer_0": metadata}
-        forward_context.is_draft_model = False
-        forward_context.additional_kwargs = {
-            "is_draft_model": False,
-            "is_draft_model_prefill": False,
-        }
-        mock_context.return_value = forward_context
-
-        num_heads = 256
-        scale = 0.1
-        num_kv_heads = 8
-        qk_head_dim = 96
-        qk_rope_head_dim = 32
-        qk_nope_head_dim = 64
-        query = torch.randn(4, num_heads, qk_head_dim)
-
-        q_nope = query[..., :qk_nope_head_dim]
-        q_pe = query[..., qk_rope_head_dim:]
-        k_nope = torch.randn(4, num_heads, qk_nope_head_dim)
-        k_pe = torch.randn(4, num_heads, qk_rope_head_dim)
-        input_layout = "BNSD"
-        actual_seq_lengths_kv = [1, 1]
-        out = torch.randn(2, 16, 128)
-        lse = torch.randn(2, 16, 8)
-        self.graph_params.attn_params[4] = []
-        self.graph_params.attn_params[4].append(
-            (
-                q_nope,
-                k_nope,
-                q_pe,
-                k_pe,
-                num_heads,
-                num_kv_heads,
-                input_layout,
-                None,
-                0,
-                scale,
-                block_table,
-                128,
-                None,
-                actual_seq_lengths_kv,
-                out,
-                lse,
-            )
-        )
-
-        with patch("torch_npu._C._npu_setStream", return_value=None):
-            AscendMlaDCPImpl.update_graph_params(self.update_stream, forward_context, 4)
-
-        _mock_graph_task_end.assert_called_once()
-        mock_fia.assert_called_once_with(
-            q_nope,
-            k_nope,
-            k_nope,
-            query_rope=q_pe,
-            key_rope=k_pe,
-            num_query_heads=num_heads,
-            num_key_value_heads=num_kv_heads,
-            input_layout=input_layout,
-            atten_mask=None,
-            sparse_mode=0,
-            softmax_scale=scale,
-            return_softmax_lse=True,
-            block_table=block_table,
-            block_size=128,
-            actual_seq_kvlen=[2, 2, 0, 0],
-            actual_seq_qlen=None,
-            workspace=self.graph_params.workspaces.get(4),
-            out=[out, lse],
-        )
-
     @patch("vllm_ascend.compilation.updatable_graph.torch.npu.graph_task_update_end")
     @patch("vllm_ascend.compilation.updatable_graph.torch.npu.graph_task_update_begin")
     def test_update_attn_dcp_params(self, mock_begin, mock_end):
@@ -1144,111 +1039,36 @@ class TestDCPGraphParams(TestBase):
         assert task.kwargs["actual_seq_lengths_kv"] == [1, 1]
 
 
-@pytest.mark.parametrize("graph_kind", ["main", "draft", "draft_prefill"])
-def test_mla_dcp_split_graph_update_preserves_cache_and_refreshes_lengths(graph_kind, monkeypatch):
-    """Replay must use the same FIA API as capture and refresh each split task."""
-    is_draft = graph_kind != "main"
-    monkeypatch.setattr(
-        mla_cp,
-        "_EXTRA_CTX",
-        SimpleNamespace(is_draft_model=is_draft, is_draft_model_prefill=graph_kind == "draft_prefill"),
-    )
-    query, query_rope = torch.randn(4, 2, 4), torch.randn(4, 2, 2)
-    backing = torch.zeros(100)
-    cache = backing.as_strided((3, 1, 2, 4), (24, 8, 4, 1), storage_offset=7)
-    cache_rope = backing.as_strided((3, 1, 2, 2), (24, 4, 2, 1), storage_offset=15)
-    current, current_rope = torch.randn(4, 1, 4), torch.randn(4, 1, 2)
-    mask = torch.ones(4, 4, dtype=torch.bool).triu(1)
-    workspace = torch.empty(64, dtype=torch.uint8)
-    metadata, tasks, expected = [], [], []
-    for step in range(2 if is_draft else 1):
-        table = torch.tensor([[0, 1], [2, 0]], dtype=torch.int32)
-        decode = SimpleNamespace(
-            actual_seq_lengths_q=[2 - step, 4], cp_history_seq_len=[3 + step, 2], block_table=table
-        )
-        metadata.append({"layer": SimpleNamespace(decode=decode)})
-        for scope in (CPKVScope.HISTORY, CPKVScope.CURRENT):
-            history = scope is CPKVScope.HISTORY
-            key, rope = (cache, cache_rope) if history else (current, current_rope)
-            output, lse = torch.empty_like(query), torch.empty(4, 2, 1, dtype=torch.float32)
-            tasks.append(
-                MLASplitAttentionGraphParams(
-                    (
-                        query,
-                        key,
-                        query_rope,
-                        rope,
-                        2,
-                        1,
-                        "TND",
-                        None if history else mask,
-                        0 if history else 3,
-                        0.5,
-                        None,
-                        2 if history else 0,
-                        [0, 0],
-                        [0, 0],
-                        output,
-                        lse,
-                    ),
-                    scope,
-                    "layer",
-                )
-            )
-            expected.append((decode, history, key, rope, output, lse))
-    handles, events = [object() for _ in tasks], [Mock() for _ in tasks]
-    graph = SimpleNamespace(workspaces={4: workspace}, attn_params={4: tasks}, handles={4: handles}, events={4: events})
-    getter = {
-        "main": "get_graph_params",
-        "draft": "get_draft_graph_params",
-        "draft_prefill": "get_draft_graph_prefill_params",
-    }
-    monkeypatch.setattr(mla_cp, getter[graph_kind], lambda: graph)
-    op = Mock()
-    monkeypatch.setattr(mla_cp.torch_npu.npu_fused_infer_attention_score_v2, "out", op)
-    begin, end = Mock(), Mock()
-    monkeypatch.setattr(torch.npu, "graph_task_update_begin", begin)
-    monkeypatch.setattr(torch.npu, "graph_task_update_end", end)
-    monkeypatch.setattr(torch.npu, "stream", lambda _stream: contextlib.nullcontext())
-    stream = object()
+@pytest.mark.parametrize("as_tensor", [False, True])
+@pytest.mark.parametrize("num_tokens,expected", [(0, [2, 3]), (2, [2, 3]), (4, [2, 3, 0, 0])])
+def test_mla_dcp_full_provider_refreshes_and_pads_lengths(as_tensor, num_tokens, expected):
+    lengths = torch.tensor([2, 3]) if as_tensor else [2, 3]
+    decode = SimpleNamespace(cp_seq_len=lengths)
+    provider = MLADCPParamProvider("layer", CPKVScope.FULL, num_tokens)
 
-    AscendMlaDCPImpl.update_graph_params(
-        stream,
-        SimpleNamespace(attn_metadata=metadata[0]),
-        4,
-        draft_attn_metadatas=metadata if is_draft else None,
-    )
+    assert provider.layer_name == ("layer", CPKVScope.FULL)
+    assert provider.resolve({"layer": SimpleNamespace(decode=decode)}) == {"actual_seq_kvlen": expected}
 
-    assert op.call_count == len(expected)
-    for call, (decode, history, key, rope, output, lse) in zip(op.call_args_list, expected):
-        assert all(actual is wanted for actual, wanted in zip(call.args, (query, key, key)))
-        kwargs = call.kwargs
-        assert kwargs["key_rope"] is rope
-        assert kwargs["query_rope"] is query_rope
-        assert kwargs["workspace"] is workspace
-        assert kwargs["out"][0] is output and kwargs["out"][1] is lse
-        assert kwargs["block_table"] is (decode.block_table if history else None)
-        assert kwargs["atten_mask"] is (None if history else mask)
-        assert kwargs["actual_seq_qlen"] == decode.actual_seq_lengths_q
-        assert kwargs["actual_seq_kvlen"] == (decode.cp_history_seq_len if history else decode.actual_seq_lengths_q)
-        assert kwargs["return_softmax_lse"] is True
-        assert kwargs["num_query_heads"] == 2 and kwargs["num_key_value_heads"] == 1
-        assert kwargs["softmax_scale"] == 0.5 and kwargs["input_layout"] == "TND"
-        assert kwargs["sparse_mode"] == (0 if history else 3)
-        assert kwargs["block_size"] == (2 if history else 0)
-        assert {
-            "num_heads",
-            "scale",
-            "softmax_lse_flag",
-            "actual_seq_lengths",
-            "actual_seq_lengths_kv",
-            "antiquant_mode",
-            "antiquant_scale",
-        }.isdisjoint(kwargs)
-        if history:
-            assert key.stride(0) == rope.stride(0) == 24
-            assert key.storage_offset() == 7 and rope.storage_offset() == 15
-    assert [call.args for call in begin.call_args_list] == [(stream, handle) for handle in handles]
-    assert end.call_count == len(tasks)
-    for event in events:
-        event.record.assert_called_once_with(stream)
+
+@pytest.mark.parametrize("scope", [CPKVScope.HISTORY, CPKVScope.CURRENT])
+def test_mla_dcp_split_provider_binds_current_metadata(scope):
+    table = torch.tensor([[0, 1]], dtype=torch.int32)
+    decode = SimpleNamespace(actual_seq_lengths_q=[1, 2], cp_history_seq_len=torch.tensor([3, 4]), block_table=table)
+    provider = MLADCPParamProvider("layer", scope, 2)
+    query = torch.randn(2, 2, 4)
+    task = GraphUpdateTask(Mock(), {"query": query, "actual_seq_kvlen": [0, 0]}, provider, 0, Mock(), Mock())
+
+    updated = task.bind(provider.resolve({"layer": SimpleNamespace(decode=decode)}))
+
+    assert updated.kwargs["query"] is query
+    assert updated.kwargs["actual_seq_qlen"] == [1, 2]
+    assert updated.kwargs["actual_seq_kvlen"] == ([3, 4] if scope is CPKVScope.HISTORY else [1, 2])
+    assert updated.kwargs["block_table"] is (table if scope is CPKVScope.HISTORY else None)
+    assert task.kwargs["actual_seq_kvlen"] == [0, 0]
+
+
+@pytest.mark.parametrize("scope", [CPKVScope.FULL, CPKVScope.HISTORY, CPKVScope.CURRENT])
+def test_mla_dcp_provider_rejects_missing_decode_metadata(scope):
+    provider = MLADCPParamProvider("layer", scope, 2)
+    with pytest.raises(AssertionError):
+        provider.resolve({"layer": SimpleNamespace(decode=None)})

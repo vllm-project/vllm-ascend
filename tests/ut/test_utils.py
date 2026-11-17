@@ -31,6 +31,14 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
 
 
+@pytest.mark.parametrize("dcp_size,expected", [(1, False), (2, True)])
+def test_use_updatable_graph_for_mla_depends_on_dcp_size(dcp_size, expected):
+    from vllm_ascend.attention.mla_v1 import AscendMLABackend
+
+    with mock.patch("vllm.distributed.get_dcp_group", return_value=SimpleNamespace(world_size=dcp_size)):
+        assert utils.use_updatable_graph(AscendMLABackend) is expected
+
+
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
 def test_register_customop_selects_gdn_before_import(device_type):
     from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
