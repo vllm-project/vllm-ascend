@@ -3,6 +3,9 @@ entries:
   - category: feature
     text: Replaced Kimi K3.1 paired KV cache storage with spec-driven block-outermost packing, defaulting to BLNHC with C8 indexer K/scale storage and PCP/DCP address mapping. Draft models are optional; layer-outermost layouts remain unsupported.
     model: kimi-k3.1
+  - category: feature
+    text: Added startup capacity search for omitted Kimi K3.1 block sizes using loaded cache specs and PP-wide geometry. Explicit block sizes are preserved; Mooncake V2 pull supports independent per-peer manager block sizes with native kernel-page and interleave alignment.
+    model: kimi-k3.1
   - category: bugfix
     text: Fixed RecoverSSM preempt offload to preserve the committed checkpoint at block boundaries and avoid shifting convolution history twice during resume.
     model: kimi-k3.1

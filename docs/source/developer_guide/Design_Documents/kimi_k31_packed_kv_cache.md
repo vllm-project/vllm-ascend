@@ -139,12 +139,29 @@ KDA/RecoverSSM state strides retain their existing contracts.
 
 ## Block-size selection
 
-Packing does not automatically choose a workload-specific optimal block size.
-Supply `--block-size` as a multiple of 128 and of the model's prefill checkpoint
-alignment. For P/D, also preserve Mooncake's requirement that the two manager
-block sizes divide one another. The platform keeps the configured size instead
-of growing a single MLA page to cover KDA. The planner validates actual row
-capacity after all real specs are available.
+When `--block-size` is omitted, startup searches capacity candidates after the
+target and optional draft layers are loaded. It uses their actual cache specs,
+including scale dtype, draft residency, KDA state shapes and RecoverSSM's
+persistent state count. Explicit `--block-size` values are preserved and still
+must satisfy native-page and prefill-checkpoint alignment.
+
+Candidates contain whole 128-token kernel pages and satisfy checkpoint,
+prefix-match-unit and configured CP-interleave alignment. The lower bound uses
+the model's packed-row sizing with reference TP16; the search stops at 65536
+tokens. The objective is the smallest worst-stage planner demand at the configured
+maximum context, including one null row. All PP stages exchange their actual
+specs and checkpoint alignments over the PP CPU group, group globally and score
+their projected rows, so recurrent-only stages also select the same block size.
+This is a cache-capacity objective, not a measured latency or workspace optimum.
+If the search range cannot satisfy the alignments, startup asks for an explicit B.
+
+Mooncake V2 pull (`MooncakeConnectorV2` / `MooncakePullConnector`) supports this
+search independently on P and D. Its full-attention transfer maps token positions
+into each peer's kernel pages: the two manager block sizes need not divide one
+another. Both peers must use the same kernel page size; each CP interleave must
+be a multiple of that size and divide its own manager block. Other KV connectors
+require explicit B until their transfer contracts are qualified. Numerical/graph
+and full-service validation remain separate from this startup capacity search.
 
 The following are CPU capacity calculations for one TP1 rank, one 1,048,576-token
 request, 24 MLA layers (656 bytes/token), 24 indexers (132 bytes/token), 69 KDA

@@ -72,6 +72,34 @@ def test_kimi_hybrid_pd_rejects_sub_kernel_interleave(connector, interleave):
         _validate_sfa_dcp_kv_sp(config)
 
 
+@pytest.mark.parametrize("cache_dtype", ["fp8", "int8"])
+def test_kimi_pd_defers_omitted_block_size_without_changing_interleave(cache_dtype):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(architecture="KimiK31ForConditionalGeneration"),
+        cache_config=SimpleNamespace(block_size=16, cache_dtype=cache_dtype, user_specified_block_size=False),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=16, cp_kv_cache_interleave_size=768),
+        kv_transfer_config=SimpleNamespace(kv_connector="MooncakeConnectorV2"),
+        use_v2_model_runner=True,
+    )
+    with (
+        patch("vllm_ascend.platform.model_uses_sfa_sparse", return_value=True),
+        patch("vllm_ascend.platform.enable_sp", return_value=False),
+    ):
+        _validate_sfa_dcp_kv_sp(config)
+    assert config.parallel_config.cp_kv_cache_interleave_size == 768
+    assert config.cache_config.block_size == 16
+
+
+def test_kimi_state_only_pp_rank_reaches_block_size_alignment():
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k31")),
+        cache_config=SimpleNamespace(block_size=128),
+    )
+    with patch.object(NPUPlatform, "_align_hybrid_block_size") as align:
+        NPUPlatform.update_block_size_for_backend(config)
+    align.assert_called_once_with(config, None)
+
+
 @pytest.mark.parametrize(
     ("pp_size", "method", "architecture", "model_type", "should_raise"),
     [

@@ -472,9 +472,21 @@ class NPUPlatform(Platform):
             vllm_config.cache_config.mamba_page_size_padded = None
             if vllm_config.cache_config.mamba_cache_mode == "align":
                 alignment = get_mamba_prefill_checkpoint_alignment(vllm_config) or 1
-                if vllm_config.cache_config.block_size % alignment:
+                if (
+                    vllm_config.cache_config.user_specified_block_size
+                    and vllm_config.cache_config.block_size % alignment
+                ):
                     raise ValueError(f"Kimi --block-size must be a multiple of checkpoint alignment {alignment}.")
+                if not vllm_config.cache_config.user_specified_block_size:
+                    # All PP ranks need the same provisional spec size before
+                    # gathering their possibly different checkpoint alignments.
+                    vllm_config.cache_config.block_size = 128
                 vllm_config.cache_config.mamba_block_size = vllm_config.cache_config.block_size
+            else:
+                vllm_config.cache_config.mamba_block_size = vllm_config.model_config.max_model_len
+            from vllm_ascend.models.kimi_k3.block_size import auto_select_packed_sfa_block_size
+
+            auto_select_packed_sfa_block_size(vllm_config)
             return
         if (
             vllm_config.model_config.use_mla
@@ -494,6 +506,11 @@ class NPUPlatform(Platform):
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
+        if model_config is not None and model_config.hf_config.model_type == "kimi_k31":
+            # Every PP rank participates, including recurrent-only stages that
+            # the parent's non-SSM backend discovery would otherwise skip.
+            cls._align_hybrid_block_size(vllm_config, None)
+            return
         # DeepSeek V4 keys its page-padding tables on the physical block size, which
         # check_and_update_config has already settled, and nothing this hook would do
         # applies to it. The parent's Phase 1 would replace that size with one derived from
@@ -1664,18 +1681,28 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
     hybrid_kernel_interleave = (
         getattr(model_config, "architecture", None) == "KimiK31ForConditionalGeneration"
         and vllm_config.use_v2_model_runner
-        and cache_config.cache_dtype == "fp8"
-        and vllm_config.kv_transfer_config is not None
-        and vllm_config.kv_transfer_config.kv_connector in ("MooncakeConnectorV2", "MooncakePullConnector")
+        and cache_config.cache_dtype in ("fp8", "int8")
+        and (
+            (vllm_config.kv_transfer_config is None and not getattr(cache_config, "user_specified_block_size", False))
+            or (
+                vllm_config.kv_transfer_config is not None
+                and vllm_config.kv_transfer_config.kv_connector in ("MooncakeConnectorV2", "MooncakePullConnector")
+            )
+        )
         and interleave > 0
-        and cache_config.block_size % interleave == 0
+        and (not getattr(cache_config, "user_specified_block_size", False) or cache_config.block_size % interleave == 0)
     )
     if use_dcp and hybrid_kernel_interleave:
         from vllm.v1.worker.utils import select_common_block_size
 
         from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 
-        kernel_block_size = select_common_block_size(cache_config.block_size, [AscendSFABackend])
+        # Omitted B is still a placeholder here, before loaded-layer search.
+        kernel_block_size = (
+            128
+            if not getattr(cache_config, "user_specified_block_size", False)
+            else select_common_block_size(cache_config.block_size, [AscendSFABackend])
+        )
         if interleave % kernel_block_size:
             raise ValueError(
                 "Mooncake local DCP interleave must be a positive multiple of the kernel block size: "
