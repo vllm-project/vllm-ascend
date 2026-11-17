@@ -1,7 +1,0 @@
-pr: 21997
-entries:
-  - category: feature
-    text: Added native data parallelism on Ascend 310P. DP replicas are self-contained
-      model replicas (MoE weights are sharded over the TP group only), so FULL ACL graph
-      decode capture works without cross-DP collectives. Also fixed DP device assignment,
-      bounded HCCL host-port allocation, and subgroup broadcast root handling.
