@@ -13,6 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
+[Role] Ascend linear weight preparation and parallel-layer integration.
+[Invariants] Finalize logical weight layout before applying private NZ storage.
+[Timeouts & Locks] No independent waits or locks; caller owns model loading.
+[Side-Effect Policy] Update layer weights during loading, never in forward.
+
 To customize linear communication groups or forward of classes in this file,
 extend new linear operations in linear_op.py.
 The classes in this file should not be modified, including AscendQKVParallelLinear,
@@ -106,6 +111,15 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
+        # TransposeBatchMatMulWeightNz consumes the same logical 3D layout as
+        # its ND variant. Finish the reshape before creating private storage;
+        # a subsequent contiguous() would otherwise materialize ND again.
+        # This also covers dummy loading, where weight_loader never runs.
+        if _should_reshape_wo_a_to_3d(layer.prefix, layer.weight.data.dtype) and layer.weight.data.ndim == 2:
+            layer.weight.data = (
+                layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous()
+            )
+
         keep_nd_weight = _should_keep_nd_for_compatibility_weight(layer.weight.data)
         skip_weight_nz_conversion = getattr(layer, "skip_weight_nz_conversion", False)
         # must use fp32 to avoid accuracy degradation in dsv4.
@@ -122,14 +136,6 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
             # shared_expert_gate in ND format, leaving non-310P policy intact.
             if not keep_nd_weight:
                 layer.weight.data = maybe_trans_nz(layer.weight.data)
-
-        # DSV4 wo_a is consumed by npu_transpose_batchmatmul in the 3D layout
-        # [n_local_groups, hidden_size, o_lora_rank]. Reshape it here so it
-        # applies to load-format=dummy too, where weight_loader never runs.
-        if _should_reshape_wo_a_to_3d(layer.prefix, layer.weight.data.dtype) and layer.weight.data.ndim == 2:
-            layer.weight.data = (
-                layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous()
-            )
 
     def apply(
         self,
