@@ -291,8 +291,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         len(phys_to_layer_idx),
                     )
 
-        if self._layerwise_reuse_layout is not None:
-            self.layerwise_key_layers = self.num_layers
         self.layer_load_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
         self.layer_save_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
         self.layer_load_finished_events: list[threading.Event] | None = None
