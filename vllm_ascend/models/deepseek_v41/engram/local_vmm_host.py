@@ -52,9 +52,9 @@ def _library(path: Path):
     return lib
 
 
-def retry_pending_rollbacks(library_path=None):
+def retry_pending_rollbacks(library_path=None, *, lib=None):
     library_path = library_path or Path(__file__).resolve().parents[3] / "libengram_host_vmm.so"
-    lib = _library(Path(library_path))
+    lib = lib or _library(Path(library_path))
     if lib.host_vmm_retry_rollbacks():
         raise EngramReleaseError(f"Engram VMM rollback: {lib.host_shared_last_error().decode()}")
 
@@ -66,7 +66,7 @@ class MappedHostBuffer:
     them. Stop all launches/graphs before close. Failed release stays retryable.
     """
 
-    def __init__(self, path, rows, width, dtype, *, owner, device, library_path=None):
+    def __init__(self, path, rows, width, dtype, *, owner, device, library_path=None, lib=None):
         if rows <= 0 or width <= 0 or dtype not in (torch.int8, torch.float32):
             raise ValueError("Host VMM requires positive INT8/FP32 dimensions")
         path = Path(path)
@@ -81,7 +81,7 @@ class MappedHostBuffer:
         self.row_bytes = width * torch.empty((), dtype=dtype).element_size()
         self.size = ((rows * self.row_bytes + GIB - 1) // GIB) * GIB
         library_path = library_path or Path(__file__).resolve().parents[3] / "libengram_host_vmm.so"
-        self.lib = _library(Path(library_path))
+        self.lib = lib or _library(Path(library_path))
         self.allocation = _Allocation()
         self.closed = False
         self._views: weakref.WeakSet[HostTableSlice] = weakref.WeakSet()

@@ -32,6 +32,7 @@ def load_module(monkeypatch):
         module = importlib.util.module_from_spec(spec)
         monkeypatch.setitem(sys.modules, spec.name, module)
         spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "_library", Mock(return_value=object()))
     return module
 
 
@@ -97,6 +98,8 @@ def test_combined_codes_and_scales_share_one_allocation(monkeypatch, tmp_path):
     group = types.SimpleNamespace(rank_in_group=0, cpu_group=object(), world_size=1)
     buf = module.LocalSharedVmmBuffer((2, 8), torch.int8, "cpu", group, scales_shape=(2, 1), scale_dtype=torch.float32)
     assert allocate.call_count == 1
+    module._library.assert_called_once()
+    assert allocate.call_args.kwargs["lib"] is module._library.return_value
     assert allocate.call_args.args[1:3] == (3, 8)
     buf.scales.publish(0, torch.tensor([[1.5], [2.5]]))
     assert bytes(backing[:16]) == bytes(16)
@@ -104,12 +107,37 @@ def test_combined_codes_and_scales_share_one_allocation(monkeypatch, tmp_path):
     assert buf.scales.ptrs.tolist() == [address + 16]
 
 
+def test_failed_allocation_retries_with_loaded_library(monkeypatch, tmp_path):
+    module = load_module(monkeypatch)
+    lib = module._library.return_value
+    monkeypatch.setattr(module.tempfile, "mkdtemp", lambda **_kwargs: str(tmp_path / "capability"))
+    (tmp_path / "capability").mkdir()
+    allocate = Mock(side_effect=RuntimeError("allocation failed"))
+    retry = Mock()
+    monkeypatch.setattr(module, "MappedHostBuffer", allocate)
+    monkeypatch.setattr(module, "retry_pending_rollbacks", retry)
+    monkeypatch.setattr(module.dist, "get_global_rank", lambda _group, rank: rank)
+    monkeypatch.setattr(module.dist, "broadcast_object_list", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(module.dist, "monitored_barrier", Mock())
+    monkeypatch.setattr(module.dist, "all_gather_object", lambda out, value, group: out.__setitem__(0, value))
+    group = types.SimpleNamespace(rank_in_group=0, cpu_group=object(), world_size=1)
+    with pytest.raises(module.EngramSharedInitError, match="allocation failed"):
+        module.LocalSharedVmmBuffer((1, 1), torch.int8, "cpu", group)
+    allocate.assert_called_once()
+    assert allocate.call_args.kwargs["lib"] is lib
+    retry.assert_called_once_with(lib=lib)
+    module._library.assert_called_once()
+
+
 def _missing_library_worker(rank, rendezvous, directory, missing_rank):
     with pytest.MonkeyPatch.context() as monkeypatch:
         module = load_module(monkeypatch)
         dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=2)
         monkeypatch.setattr(module.tempfile, "mkdtemp", lambda **_kwargs: directory)
-        monkeypatch.setattr(module, "retry_pending_rollbacks", lambda: None)
+        loader = Mock(side_effect=OSError("missing library") if rank == missing_rank else None, return_value=object())
+        monkeypatch.setattr(module, "_library", loader)
+        retry = Mock()
+        monkeypatch.setattr(module, "retry_pending_rollbacks", retry)
 
         class Mapping:
             def __init__(self, *_args, **_kwargs):
@@ -130,8 +158,9 @@ def _missing_library_worker(rank, rendezvous, directory, missing_rank):
                     None,
                     "npu:0",
                     group,
-                    library_error="missing library" if rank == missing_rank else None,
                 )
+            loader.assert_called_once()
+            assert retry.called is (rank != missing_rank)
         finally:
             dist.destroy_process_group()
 
@@ -173,7 +202,7 @@ def _rollback_worker(rank, rendezvous, directory, log_path, fail_consumer_close,
                     raise RuntimeError("injected cleanup failure")
 
         monkeypatch.setattr(module, "MappedHostBuffer", Mapping)
-        monkeypatch.setattr(module, "retry_pending_rollbacks", lambda: None)
+        monkeypatch.setattr(module, "retry_pending_rollbacks", lambda **_kwargs: None)
         group = types.SimpleNamespace(rank_in_group=rank, cpu_group=dist.group.WORLD, world_size=2)
         try:
             error_type = module.EngramSharedCleanupError if fail_consumer_close else module.EngramSharedInitError

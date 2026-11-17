@@ -128,6 +128,7 @@ def _rollback_local_engram_tables(model, error):
             except EngramSharedReleaseError as cleanup_error:
                 errors.append(str(cleanup_error))
             except Exception as cleanup_error:
+                # Rank synchronization is unknown; another collective may hang.
                 _retain_local_engram_tables(model)
                 message = f"{error}; Engram VMM cleanup failed: {cleanup_error}"
                 raise RuntimeError(message) from cleanup_error

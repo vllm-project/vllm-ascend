@@ -21,16 +21,8 @@ def local_vmm_available(group):
     cached = getattr(group, "_engram_local_vmm_available", None)
     if cached is not None:
         return cached
-    path = Path(__file__).resolve().parents[3] / "libengram_host_vmm.so"
-    error = None
     try:
-        _library(path)
-    except Exception as exc:  # noqa: BLE001 - propagate through the collective probe
-        error = f"{type(exc).__name__}: {exc}"
-    try:
-        probe = LocalSharedVmmBuffer(
-            (1, 1), torch.int8, torch.device("npu", torch.npu.current_device()), group, library_error=error
-        )
+        probe = LocalSharedVmmBuffer((1, 1), torch.int8, torch.device("npu", torch.npu.current_device()), group)
     except EngramSharedInitError as exc:
         logger.warning("Engram Host VMM runtime probe failed; using HostRegister: %s", exc)
         group._engram_local_vmm_available = False
@@ -106,7 +98,7 @@ class LocalSharedVmmBuffer:
     consumers before closing the creator.
     """
 
-    def __init__(self, shape, dtype, device, group, *, scales_shape=None, scale_dtype=None, library_error=None):
+    def __init__(self, shape, dtype, device, group, *, scales_shape=None, scale_dtype=None):
         self.group = group
         self.mapping = None
         self.view = None
@@ -115,7 +107,13 @@ class LocalSharedVmmBuffer:
         self.scales: LocalSharedVmmScaleView | None = None
         self.directory = None
         self.owner = group.rank_in_group == 0
-        self._library_unavailable = library_error is not None
+        self.lib = None
+        library_error = None
+        try:
+            path = Path(__file__).resolve().parents[3] / "libengram_host_vmm.so"
+            self.lib = _library(path)
+        except Exception as exc:  # noqa: BLE001 - synchronize library failures
+            library_error = f"{type(exc).__name__}: {exc}"
         allocation_shape = shape
         scale_offset = shape[0] * shape[1] * torch.empty((), dtype=dtype).element_size()
         if scales_shape is not None:
@@ -138,6 +136,7 @@ class LocalSharedVmmBuffer:
                     dtype,
                     owner=True,
                     device=device,
+                    lib=self.lib,
                 )
                 payload[0] = owner_path
             except Exception as exc:  # noqa: BLE001 - propagate to all ranks
@@ -164,6 +163,7 @@ class LocalSharedVmmBuffer:
                         dtype,
                         owner=False,
                         device=device,
+                        lib=self.lib,
                     )
                 assert self.mapping is not None
                 self.view = self.mapping.view(0, shape[0])
@@ -231,8 +231,8 @@ class LocalSharedVmmBuffer:
     def _close_with_rollbacks(self, retry_rollbacks):
         errors = []
         for cleanup in (
-            (retry_pending_rollbacks, self.close)
-            if retry_rollbacks and not getattr(self, "_library_unavailable", False)
+            (lambda: retry_pending_rollbacks(lib=self.lib), self.close)
+            if retry_rollbacks and getattr(self, "lib", None) is not None
             else (self.close,)
         ):
             try:
