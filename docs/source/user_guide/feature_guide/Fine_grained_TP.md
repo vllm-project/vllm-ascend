@@ -82,7 +82,7 @@ Set `qkv_iproj_tensor_parallel_size` above `1` when the deployment meets these c
 
 #### LM Head TP and Speculative Decoding
 
-LM head TP works with MTP, EAGLE, Gemma4 MTP, DFlash, and DSpark draft models, including probabilistic draft sampling. DSpark adaptive verification can also be combined with LM head TP when the draft checkpoint has a confidence head and the target uses a supported full-decode graph mode. A few combinations are not aligned with the group-row padding yet and fail fast at construction with an explicit error stating the reason — these are current scope decisions rather than defects:
+LM head TP works with EAGLE, DFlash, and DSpark draft models. A few combinations are not aligned with the group-row padding yet and fail fast at construction with an explicit error stating the reason — these are current scope decisions rather than defects:
 
 - DFlash2 draft models;
 - `use_local_argmax_reduction`.
