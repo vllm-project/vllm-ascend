@@ -112,10 +112,6 @@ class TPCommunication:
         work = dist.all_to_all_single(output, source, group=group.device_group, async_op=True)
         return PendingTensor(output, work, source)
 
-    def scatter(self, source, group):
-        shape = (source.shape[0] // group.world_size, *source.shape[1:])
-        return self._launch(source.contiguous(), source.new_empty(shape), group, dist.reduce_scatter_tensor)
-
 
 @dataclass
 class PendingGate:
@@ -277,34 +273,3 @@ class KDAProjectionTP:
             self.heads,
             self.head_dim,
         )
-
-
-def _restore_owner_chunks(outputs: list[PendingTensor], rows: int) -> torch.Tensor:
-    first = outputs[0].wait()
-    total = sum(pending.tensor.shape[0] for pending in outputs)
-    result = first.new_empty((total, *first.shape[1:]))
-    offset = 0
-    for index, pending in enumerate(outputs):
-        chunk = first if index == 0 else pending.wait()
-        result[offset : offset + chunk.shape[0]].copy_(chunk)
-        offset += chunk.shape[0]
-    return result[:rows]
-
-
-class ChunkedEmbeddingTP:
-    """CCU token-ID AG and embedding RS pipelined over two owner chunks."""
-
-    def __init__(self, group):
-        self.group = group
-        self.communication = TPCommunication()
-
-    def forward(self, layer, owner):
-        chunks = owner.tensor_split(2) if owner.shape[0] > 1 else (owner,)
-        gathered = [self.communication.gather(chunk.contiguous(), self.group) for chunk in chunks]
-        outputs = []
-        for pending in gathered:
-            partial = layer._lookup_partition(pending.wait())
-            outputs.append(self.communication.scatter(partial, self.group))
-        # Copy chunk0 while the final CCU RS is still pending. All ranks
-        # submit AG0, AG1, RS0, RS1, including padded and idle owners.
-        return _restore_owner_chunks(outputs, owner.shape[0])

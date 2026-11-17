@@ -31,7 +31,6 @@ from vllm_ascend.ops.vocab_parallel_embedding import (
     AscendVocabParallelEmbedding,
     VocabParallelMode,
     _resolve_vocab_parallel_plan,
-    embedding_finegrained_forward,
 )
 
 VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS = 128
@@ -62,7 +61,6 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         self.patches = [
             patch.object(parallel_state, "_MLP_TP", self.mock_group),
             patch.object(parallel_state, "_OTP", self.mock_group),
-            patch("vllm_ascend.ops.vocab_parallel_embedding.uses_aiv_communication", return_value=True),
             patch("vllm_ascend.utils.get_ascend_config", return_value=self.mock_ascend_config),
             patch("vllm_ascend.distributed.parallel_state.get_lmhead_tp_group", return_value=self.mock_group),
             patch(
@@ -309,7 +307,7 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         self.assertEqual(layer.num_added_embeddings_per_partition, layer.num_added_embeddings)
 
 
-def _exchange_embedding(monkeypatch, mode, tp_rank=0, tp_size=1, exchange_rank=0, model_type=None, aiv=True):
+def _exchange_embedding(monkeypatch, mode, tp_rank=0, tp_size=1, exchange_rank=0):
     """Keep real planning, weight loading and lookup; replace only runtime topology."""
     module = "vllm_ascend.ops.vocab_parallel_embedding"
     tp_group = SimpleNamespace(rank_in_group=tp_rank, world_size=tp_size, unique_name="tp")
@@ -317,8 +315,6 @@ def _exchange_embedding(monkeypatch, mode, tp_rank=0, tp_size=1, exchange_rank=0
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(prefill_context_parallel_size=2 if mode is VocabParallelMode.PCP_X_TP else 1),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
-        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type)),
-        compilation_config=SimpleNamespace(static_forward_context={}),
     )
     for name, value in (
         ("get_tp_group", tp_group),
@@ -331,55 +327,11 @@ def _exchange_embedding(monkeypatch, mode, tp_rank=0, tp_size=1, exchange_rank=0
         ("lmhead_tp_enable", False),
     ):
         monkeypatch.setattr(f"{module}.{name}", lambda value=value: value)
-    monkeypatch.setattr(f"{module}.uses_aiv_communication", lambda group: aiv)
     layer = AscendVocabParallelEmbedding(8, 2, padding_size=4, prefix="model.embed_tokens")
     weight = torch.arange(16, dtype=torch.float32).reshape(8, 2) + 1
     layer.weight_loader(layer.weight, weight)
     assert layer.parallel_mode is mode
     return layer, weight
-
-
-@pytest.mark.parametrize("model_type", ["kimi_linear", "glm5_next", "other"])
-@pytest.mark.parametrize("aiv", [True, False])
-@pytest.mark.parametrize("mode", [VocabParallelMode.FINE_GRAINED, VocabParallelMode.PCP_X_TP])
-def test_embedding_overlap_depends_on_layout_and_communication(monkeypatch, model_type, aiv, mode):
-    layer, _ = _exchange_embedding(monkeypatch, mode, model_type=model_type, aiv=aiv)
-    enabled = mode is VocabParallelMode.FINE_GRAINED and not aiv
-    assert (layer._embedding_pipeline is not None) is enabled
-
-
-@pytest.mark.parametrize("model_type", ["kimi_linear", "glm5_next", "other"])
-def test_embedding_pipeline_compilation_and_mm_lookup(monkeypatch, model_type):
-    layer, weight = _exchange_embedding(monkeypatch, VocabParallelMode.FINE_GRAINED, model_type=model_type, aiv=False)
-    seen = []
-
-    def pipeline(layer, owner):
-        seen.append(owner.clone())
-        return weight[owner]
-
-    monkeypatch.setattr(layer._embedding_pipeline, "forward", pipeline)
-    # Exercise the compiled custom-op boundary, rather than tracing Python
-    # stream creation and event operations into the model graph.
-    monkeypatch.setattr(torch.npu, "current_stream", lambda: None)
-    monkeypatch.setattr(torch.npu, "is_initialized", lambda: False)
-    context = ForwardContext({"model.embed_tokens": layer}, {}, {})
-    # The production op is registered for PrivateUse1. Reuse its real Python
-    # body as a scoped CPU kernel, leaving the schema/fake kernel unchanged.
-    library = torch.library.Library("vllm", "IMPL", "CPU")
-    library.impl("embedding_finegrained_forward", embedding_finegrained_forward)
-    try:
-        compiled = torch.compile(layer, backend="eager", fullgraph=True)
-        for ids in (torch.tensor([1, 3]), torch.tensor([2]), torch.empty(0, dtype=torch.long)):
-            with override_forward_context(context):
-                torch.testing.assert_close(compiled(ids), weight[ids])
-            with override_forward_context(None):
-                torch.testing.assert_close(layer(ids), weight[ids])
-    finally:
-        library._destroy()
-    assert len(seen) == 6
-    assert all(owner.shape == (8,) for owner in seen)
-    with override_forward_context(None), pytest.raises(ValueError, match="must cover"):
-        layer(torch.ones(9, dtype=torch.long))
 
 
 @pytest.mark.parametrize(
@@ -768,9 +720,8 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.assertTrue(torch.equal(logits, torch.tensor([[0.0, 1.0, 10.0, 11.0, 20.0, 21.0, 30.0]])))
 
 
-@pytest.mark.parametrize("model_type", ["kimi_linear", "glm5_next", "other"])
-def test_tied_embedding_uses_lmhead_exchange(monkeypatch, model_type):
-    layer, _ = _exchange_embedding(monkeypatch, VocabParallelMode.FINE_GRAINED, model_type=model_type, aiv=True)
+def test_tied_embedding_uses_lmhead_exchange(monkeypatch):
+    layer, _ = _exchange_embedding(monkeypatch, VocabParallelMode.FINE_GRAINED)
     group = SimpleNamespace(world_size=2, device_group=None, all_gather=lambda hidden, dim: torch.cat((hidden, hidden)))
     module = "vllm_ascend.ops.vocab_parallel_embedding"
     monkeypatch.setattr(f"{module}.get_lmhead_tp_group", lambda: group)
