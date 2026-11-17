@@ -6,7 +6,7 @@ import pytest
 import torch
 from vllm.compilation import backends
 from vllm.compilation.backends import set_model_tag
-from vllm.config import CacheConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, ParallelConfig, SchedulerConfig, VllmConfig
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 
@@ -187,7 +187,7 @@ def test_mxfp8_mla_fused_preprocess_owns_nz_conversion(
             dtype=torch.bfloat16,
             hf_config=SimpleNamespace(model_type="deepseek_v3"),
         ),
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
+        parallel_config=ParallelConfig(prefill_context_parallel_size=1, decode_context_parallel_size=1),
         cache_config=SimpleNamespace(cache_dtype="float16"),
         speculative_config=None,
     )
@@ -1736,6 +1736,13 @@ class TestAscendMLAImpl(TestBase):
         vllm_config.cache_config = MagicMock()
         vllm_config.cache_config.cache_dtype = "float16"
         init_ascend_config(vllm_config)
+
+        # is_dcp_enabled() in vllm_ascend.attention.utils reads the global
+        # vLLM config, which is not set on fresh xdist workers, so mock it
+        # like TestAscendMLABackend does.
+        self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=vllm_config)
+        self.utils_patcher.start()
+        self.addCleanup(self.utils_patcher.stop)
 
         num_heads = 256
         head_size = 1024

@@ -97,6 +97,7 @@ from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target
 from vllm_ascend.hisparse.pcp import adapt_pcp_hisparse_connector
 from vllm_ascend.kv_trace.kv_trace_runner import install_trace
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
+from vllm_ascend.models.host_offload import track_host_offload_owners
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
     runtime_guard_step,
@@ -330,7 +331,21 @@ class NPUModelRunner(GPUModelRunner):
         start_nz_warm_thread("thread")
         try:
             aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
-            super().load_model(load_dummy_weights, *args, **kwargs)
+            with track_host_offload_owners() as owners:
+                try:
+                    super().load_model(load_dummy_weights, *args, **kwargs)
+                except BaseException:
+                    # self.model may not exist yet. Close every recorded owner
+                    # without collectives and retain failures for shutdown retry.
+                    pending = getattr(self, "_shared_engram_shutdown_pending", [])
+                    for owner in owners:
+                        try:
+                            owner.close_host_offload()
+                        except Exception:
+                            pending.append(owner)
+                            logger.exception("Failed to release host offload after model loading failed")
+                    self._shared_engram_shutdown_pending = pending
+                    raise
             self.pd_dspark_aux_layer_ids = aux_layers
         finally:
             # Join even when weight loading fails: these threads touch the NPU
@@ -589,11 +604,15 @@ class NPUModelRunner(GPUModelRunner):
 
     def shutdown(self) -> None:
         model = getattr(self, "model", None)
-        shared_embeddings = getattr(self, "_shared_engram_shutdown_pending", None) or (
-            [module for module in model.modules() if getattr(module, "_shared_pool_client", None) is not None]
-            if model is not None
-            else []
-        )
+        # Include private/shared UVA owners, which have no MemFabric client.
+        shared_embeddings = list(getattr(self, "_shared_engram_shutdown_pending", None) or [])
+        if model is not None:
+            owner_ids = {id(owner) for owner in shared_embeddings}
+            shared_embeddings.extend(
+                module
+                for module in model.modules()
+                if id(module) not in owner_ids and callable(getattr(module, "close_host_offload", None))
+            )
         # Drop C8 packet views before the parent collects tensors and
         # empties the allocator cache.
         entries = getattr(self, "_c8_mxfp_v_scale_caches", None)
@@ -1345,6 +1364,25 @@ class NPUModelRunner(GPUModelRunner):
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or [])
         ):
             return True
+
+        if (
+            spec is not None
+            and self.speculator is not None
+            and spec.method == "dspark"
+            and spec.draft_model_config is not None
+            and {"MiniMaxM31FlashA3DSparkModel", "DSparkMiniMaxDraftModel"}.intersection(
+                spec.draft_model_config.architectures or ()
+            )
+            and self.model_config.hf_text_config.model_type == "minimax_m3_text"
+        ):
+            # Flash's sparse target uses device lengths, but a mixed target
+            # GQA backend still consumes the shared CPU length mirror.
+            backends = [group.backend for groups in self.attn_groups for group in groups]
+            return AscendFlashAttentionBackend in backends and all(
+                backend is AscendFlashAttentionBackend
+                or backend.get_name() in ("ASCEND_MINIMAX_M3_SPARSE", "ASCEND_MINIMAX_M3_SPARSE_INDEXER")
+                for backend in backends
+            )
 
         if spec is None or self.speculator is None or spec.method != "dspark" or spec.draft_model_config is None:
             return False
