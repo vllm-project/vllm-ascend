@@ -89,7 +89,6 @@ class AscendFlashAttentionMetadata(AttentionMetadata):
     # aliases the builder's cache dictionary for the current graph_key; eager
     # execution owns a fresh dictionary. This field only references tiling storage.
     scheduler_metadata: dict[tuple, torch.Tensor] = field(default_factory=dict)
-    full_attention_window: int | None = None
 
 
 class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAttentionMetadata]):
@@ -110,17 +109,11 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         self.capture_sizes = set(vllm_config.compilation_config.cudagraph_capture_sizes or [])
         speculative = vllm_config.speculative_config
         self.is_dflash = speculative is not None and speculative.method == "dflash"
-        # Layer ownership survives loader scopes and cache-spec merging. The
-        # speculator builds a separate draft-only group; mixed groups serve target forwards.
-        self.is_qwen_target = self.is_dflash and not all(
-            vllm_config.compilation_config.static_forward_context[name].is_draft_layer for name in layer_names
-        )
         self.use_graph_buffers = (
             self.is_dflash
             and vllm_config.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and (self.is_qwen_target or not speculative.enforce_eager)
+            and not speculative.enforce_eager
         )
-        self.block_table_buffers: dict[tuple, torch.Tensor] = {}
         self.capture_query_len = None
         if vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
             speculative = vllm_config.speculative_config
@@ -178,16 +171,6 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         query_start_loc = common.query_start_loc[: active_reqs + 1]
         seq_lens = common.seq_lens[:active_reqs]
         block_tables = common.block_table_tensor[:active_reqs]
-        full_attention_window = None
-        if self.is_qwen_target:
-            # The extra column keeps full attention on FA3's device-length window path.
-            full_attention_window = block_tables.shape[1] * self.block_size
-            key = (block_tables.data_ptr(), block_tables.shape[1])
-            if key not in self.block_table_buffers:
-                self.block_table_buffers[key] = block_tables.new_zeros((self.max_num_reqs, block_tables.shape[1] + 1))
-            padded = self.block_table_buffers[key][:active_reqs]
-            padded[:, :-1].copy_(block_tables)
-            block_tables = padded
         num_input_tokens = common.num_input_tokens or common.num_actual_tokens
         is_graph_capture_size = num_input_tokens in self.capture_sizes and (
             self.capture_query_len is None or common.max_query_len <= self.capture_query_len
@@ -201,12 +184,9 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
             else common.max_query_len
         )
         if self.is_dflash:
-            # Draft buckets can round beyond capture_sizes; target query bounds stay fixed.
+            # Draft buckets can round beyond capture_sizes.
             is_graph_capture_size = self.use_graph_buffers
             max_query_len = common.max_query_len
-            if self.is_qwen_target and is_graph_capture_size:
-                bound = self.capture_query_len
-                max_query_len = num_input_tokens if bound is None else max(max_query_len, bound)
         if is_graph_capture_size:
             # Distinct input buffers (including draft steps) and token buckets
             # must retain independent tiling storage even for identical specs.
@@ -239,9 +219,7 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
                 cu_seqlens_q=query_start_loc,
                 page_size=self.block_size,
                 causal=common.causal,
-                window_size=_get_window_size(
-                    sliding_window if sliding_window is not None else full_attention_window, common.causal
-                ),
+                window_size=_get_window_size(sliding_window, common.causal),
                 has_softcap=softcap != 0.0,
                 num_splits=0,
             )
@@ -267,7 +245,6 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
             max_query_len=max_query_len,
             causal=common.causal,
             scheduler_metadata=scheduler_metadata,
-            full_attention_window=full_attention_window,
         )
 
     def build_for_graph_capture(
@@ -393,10 +370,7 @@ class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):
                 max_seqlen_q=attn_metadata.max_query_len,
                 softmax_scale=self.scale,
                 causal=attn_metadata.causal,
-                window_size=_get_window_size(
-                    self.sliding_window if self.sliding_window is not None else attn_metadata.full_attention_window,
-                    attn_metadata.causal,
-                ),
+                window_size=_get_window_size(self.sliding_window, attn_metadata.causal),
                 softcap=self.logits_soft_cap,
                 scheduler_metadata=attn_metadata.scheduler_metadata[scheduler_key],
                 num_splits=0,

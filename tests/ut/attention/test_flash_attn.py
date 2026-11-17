@@ -321,35 +321,18 @@ def qwen_dflash2_fa3(monkeypatch, dflash2_config):
     [
         ("A2", "dflash_head", False, False, "AscendFlashAttentionBackend"),
         ("A3", "dflash_head", True, True, "AscendFlashAttentionBackend"),
-        ("A2", "backbone", False, False, "AscendFlashAttentionBackend"),
-        ("A3", "backbone", True, True, "AscendFlashAttentionBackend"),
-        ("A5", "backbone", False, False, "AscendAttentionBackend"),
+        ("A2", "backbone", False, False, "AscendAttentionBackend"),
+        ("A3", "backbone", True, True, "AscendAttentionBackend"),
+        ("A5", "dflash_head", False, False, "AscendAttentionBackend"),
         ("A2", "dflash2_candidate_selector", False, False, "AscendAttentionBackend"),
     ],
 )
-def test_qwen_dflash2_selects_only_its_target_and_draft(qwen_dflash2_fa3, hardware, tag, eager, draft_scope, expected):
+def test_qwen_dflash2_selects_only_its_draft(qwen_dflash2_fa3, hardware, tag, eager, draft_scope, expected):
     r = qwen_dflash2_fa3
     r.hardware, r.spec.enforce_eager = hardware, eager
     if draft_scope:
         r.config.model_config = r.draft
     assert r.select(tag) == expected
-
-
-@pytest.mark.parametrize("allowlist", [(), ("Qwen3_5MoeForConditionalGeneration",)])
-def test_qwen_target_allowlist_leaves_draft_selection_independent(monkeypatch, qwen_dflash2_fa3, allowlist):
-    from vllm_ascend import platform
-
-    r = qwen_dflash2_fa3
-    assert r.select("backbone") == "AscendFlashAttentionBackend"
-    monkeypatch.setattr(platform, "_FA3_TARGET_MODEL_ALLOWLIST", frozenset(allowlist))
-    assert r.select("backbone") == "AscendAttentionBackend"
-    assert r.select() == "AscendFlashAttentionBackend"
-    assert r.select("dflash2_candidate_selector") == "AscendAttentionBackend"
-    # Target opt-in does not expand the independently supported draft path.
-    r.target.architecture = "Qwen3_5MoeForConditionalGeneration"
-    expected = "AscendFlashAttentionBackend" if r.target.architecture in allowlist else "AscendAttentionBackend"
-    assert r.select("backbone") == expected
-    assert r.select() == "AscendAttentionBackend"
 
 
 @pytest.mark.parametrize(

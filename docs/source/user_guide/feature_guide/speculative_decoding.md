@@ -387,38 +387,31 @@ A few important things to consider when using DFlash2 draft models:
 5. The selector parameters (`selector_top_k`, `selector_rank`, ...) come from
    the draft checkpoint's `dflash_config` and need no user configuration.
 
-6. **A2/A3 device-side lengths for Qwen GDN targets**: model runner V2
-   automatically selects FA3 for `DFlash2DraftModel` and its dense
+6. **A2/A3 device-side lengths for DFlash2 drafts**: model runner V2
+   automatically selects FA3 for `DFlash2DraftModel` with a dense
    `Qwen3_5ForConditionalGeneration` target when the optional `flash_attn_npu`
    package provides the `flash_attn_npu_3` scheduler API (0.4.2.post2 or 0.5.0).
    The verified Qwen3.8-27B checkpoint declares this target architecture.
    Other architectures, including Qwen MoE, keep their existing backend.
-   The target architecture allowlist controls which FIA target paths may use
-   FA3, independently of the draft. It currently includes Qwen; MiniMax targets
-   retain their existing attention paths. Removing a target leaves draft
-   selection unchanged.
-
-   FA3 consumes exact device lengths after rejection, removing attention length
-   copies and the runner's paired length snapshot/Event wait. Queries use packed
-   TND in eager and graph execution. The Qwen target preserves full attention
-   using a full-context window and an unused page-table column. With FA3 0.5.0,
-   eager TND still reads one scalar query boundary per call; graph replay skips
-   that host check. Draft full attention at KV capacity >=1024 can also read
-   host lengths; a sliding window smaller than the capacity avoids that branch.
+   The Qwen target keeps FIA full attention and GDN; its attention length copies
+   remain. FA3 consumes the draft's exact device lengths after rejection, with
+   packed TND queries in eager and graph execution. With FA3 0.5.0, eager TND
+   still reads one scalar query boundary per call; graph replay skips that host
+   check. Draft full attention at KV capacity >=1024 can also read host lengths;
+   the draft's sliding window avoids that branch when smaller than the capacity.
 
    This path requires FP16/BF16 queries with matching unquantized KV, head size
    <=256, and PP/PCP/DCP sizes of 1. Unsupported attention features or missing
    APIs retain the existing backend. Skipping the runner Event additionally
    requires KV parallel size 1, without KV transfer, sparse KV offload or adaptive
-   verification. A quantized target cache can retain FIA while the draft uses
-   FA3; FIA then still copies its own lengths. Output-completion events remain.
+   verification. These runner optimizations apply with the existing FIA + GDN
+   target and an FA3 draft. Output-completion events remain.
    A5 and MiniMax keep their existing selection and synchronization behavior.
 
    Check numerical accuracy and graph replay on A2/A3 with:
 
     ```shell
     pytest -sv tests/e2e/pull_request/one_card/test_dflash2_fa3_precision.py
-    pytest -sv tests/e2e/pull_request/one_card/test_qwen_dflash2_fa3_precision.py
     ```
 
 ## Speculating using LiLiCorr

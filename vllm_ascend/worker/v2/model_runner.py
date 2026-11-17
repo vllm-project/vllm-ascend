@@ -1383,7 +1383,7 @@ class NPUModelRunner(GPUModelRunner):
                 and isinstance(getattr(self, "model_state", None), MambaHybridModelState)
                 and bool(draft_backends)
                 and all(backend is AscendFA3Backend for backend in draft_backends.values())
-                and any(backend in (AscendAttentionBackend, AscendFA3Backend) for backend in backends)
+                and AscendAttentionBackend in backends
                 and AscendGDNFusedAttentionBackend in backends
                 and all(
                     backend

@@ -89,8 +89,6 @@ logger.info_once(
 )
 
 _CUSTOM_OP_REGISTERED = False
-# Targets with audited FIA attention may opt into FA3; drafts are selected separately.
-_FA3_TARGET_MODEL_ALLOWLIST = frozenset({"Qwen3_5ForConditionalGeneration"})
 _MINIMAX_M3_ARCHITECTURES = frozenset(
     {
         "MiniMaxM3SparseForCausalLM",
@@ -338,8 +336,8 @@ class NPUPlatform(Platform):
             # vLLM resolves this import path to the backend class.
             return "vllm_ascend.attention.fa_v1.AscendFlashAttentionBackend"
 
-        if backend := _validate_flash_attn_npu_3(backend_key, attn_selector_config):
-            return backend
+        if _validate_flash_attn_npu_3(backend_key, attn_selector_config):
+            return "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
 
         backend_map = {
             (True, False, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
@@ -1854,12 +1852,12 @@ def _validate_minimax_dspark_flash_attn(config, selector) -> bool:
     )
 
 
-def _validate_flash_attn_npu_3(backend_key, selector) -> str | None:
-    """Select allowlisted FIA targets and supported drafts independently."""
+def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
+    """Select FA3 only for supported DFlash2 and MiniMax DSpark drafts."""
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
         HardwareCapability.FLASH_ATTN_NPU_3
     ):
-        return None
+        return False
 
     # Model configuration imports platforms during initialization.
     from vllm.config import get_current_vllm_config_or_none
@@ -1868,33 +1866,26 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> str | None:
     config = get_current_vllm_config_or_none()
     spec = config.speculative_config if config is not None else None
     if spec is None or spec.draft_model_config is None:
-        return None
+        return False
 
     from vllm.compilation import backends
 
-    # Loader scopes can expose a draft config, so identify the target explicitly.
-    architecture = getattr(spec.target_model_config, "architecture", None)
     model_tag = backends.model_tag
-    if model_tag == "backbone":
-        if architecture not in _FA3_TARGET_MODEL_ALLOWLIST:
-            return None
-    elif model_tag == "dflash_head":
-        if architecture != "Qwen3_5ForConditionalGeneration":
-            return None
-    elif model_tag != "dspark_head":
-        return None
+    if model_tag not in ("dflash_head", "dspark_head"):
+        return False
 
-    uses_fia = model_tag in ("backbone", "dflash_head")
-    if uses_fia:
+    is_dflash = model_tag == "dflash_head"
+    if is_dflash:
         if (
             spec.method != "dflash"
+            or getattr(spec.target_model_config, "architecture", None) != "Qwen3_5ForConditionalGeneration"
             or not getattr(config, "use_v2_model_runner", False)
             or "DFlash2DraftModel" not in (spec.draft_model_config.architectures or ())
             or not 0 < selector.head_size <= 256
             or (selector.kv_cache_dtype == "float16" and selector.dtype != torch.float16)
             or (selector.kv_cache_dtype == "bfloat16" and selector.dtype != torch.bfloat16)
         ):
-            return None
+            return False
     elif not (
         spec.method == "dspark"
         and config.model_config is not None
@@ -1903,7 +1894,7 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> str | None:
         and not getattr(config.quant_config, "enable_c8_quant", False)
     ):
         # Keep MiniMax's cache guards separate: a Qwen draft can have a quantized target.
-        return None
+        return False
 
     parallel = config.parallel_config
     if (
@@ -1929,16 +1920,16 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> str | None:
         )
         or util.find_spec("flash_attn_npu_3") is None
     ):
-        return None
+        return False
 
-    if uses_fia:
+    if is_dflash:
         # This is a different ABI from training-consistency flash_attn_npu_v3.
         module = import_module("flash_attn_npu_3")
         if not callable(getattr(module, "get_scheduler_metadata", None)) or not callable(
             getattr(module, "flash_attn_with_kvcache", None)
         ):
-            return None
-    return "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
+            return False
+    return True
 
 
 def _uses_minimax_fa3(config) -> bool:

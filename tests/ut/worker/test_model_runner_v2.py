@@ -2174,16 +2174,14 @@ def _qwen_dflash2_device_length_runner():
     runner.speculative_config.enable_adaptive_verification = False
     runner.speculator = SimpleNamespace(attn_backends={"draft.0": AscendFA3Backend})
     runner.attn_groups = [
-        [SimpleNamespace(backend=backend)] for backend in (AscendFA3Backend, AscendGDNFusedAttentionBackend)
+        [SimpleNamespace(backend=backend)] for backend in (AscendAttentionBackend, AscendGDNFusedAttentionBackend)
     ]
     return runner, output, batch
 
 
-@pytest.mark.parametrize("target_backend", [AscendAttentionBackend, AscendFA3Backend])
 @pytest.mark.parametrize("blocked", [None, "draft_backend", "target_backend", "model_state", "pp", "kv_transfer"])
-def test_qwen_dflash2_length_snapshot_and_wait_share_backend_guard(target_backend, blocked):
+def test_qwen_dflash2_length_snapshot_and_wait_share_backend_guard(blocked):
     runner, output, batch = _qwen_dflash2_device_length_runner()
-    runner.attn_groups[0][0].backend = target_backend
     if blocked == "draft_backend":
         runner.speculator.attn_backends["draft.0"] = AscendAttentionBackend
     elif blocked == "target_backend":
