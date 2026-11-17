@@ -1576,6 +1576,26 @@ def test_dummy_attention_context_uses_current_batch(pcp_rank, has_stale_batch):
     manager._block_tables.gather_block_tables.assert_not_called()
 
 
+@pytest.mark.parametrize("query_len", [1, 4])
+def test_hisparse_sharded_dummy_preserves_local_request_states(query_len):
+    config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    config.attention_config = SimpleNamespace(hisparse_config={})
+    manager = _make_factory_pcp_manager(config, 0)
+    manager.global_input_buffers = AscendInputBuffers(8, 64, torch.device("cpu"))
+    manager._block_tables = SimpleNamespace(get_dummy_block_tables=MagicMock(return_value=()))
+    manager._global_batch_slot_mappings = torch.empty(1, 64, dtype=torch.int64)
+    local_buffers = AscendInputBuffers(8, 64, torch.device("cpu"))
+    with (
+        patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"),
+        patch("vllm_ascend.worker.v2.pcp_manager.update_cos_sin"),
+    ):
+        dummy = AscendInputBatch.make_dummy(2, 2 * query_len, local_buffers, max_query_len=query_len)
+        context = manager.build_attention_context(dummy)
+    assert context.local_request_state_indices is dummy.idx_mapping
+    assert context.global_batch.num_reqs == 4
+    assert context.local_num_tokens == 2 * query_len
+
+
 def test_capture_input_uses_upstream_staging_path():
     manager = AscendPCPManager(2, 0, torch.device("cpu"))
     input_batch = SimpleNamespace()
