@@ -4,6 +4,7 @@ from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import AdaptiveVerificationManager
 
 from vllm_ascend.dynamic_spec import PHYSICAL_K_RECOMMEND_INTERVAL
@@ -169,12 +170,12 @@ def test_lower_k_profile_replays_are_sparse_but_max_k_is_unchanged():
     assert len(max_k) == 15
 
 
-def test_profile_interleaves_widths_without_reordering_upstream_samples():
+def test_profile_finishes_native_av_sweep_before_interleaving_widths():
     manager = configure_physical_k_profiling(FakeManager(), config())
     cases = list(manager.batches_to_profile([8]))
-    assert [case["profile_physical_k"] for case in cases[:6]] == [3, 4, 3, 4, 3, 4]
-    upstream = [case for case, is_upstream in zip(cases, manager._physical_k_profile_is_upstream) if is_upstream]
-    assert [case["num_tokens"] for case in upstream] == [8, 8]
+    assert cases[:2] == [{"num_tokens": 8, "context_len": 1024, "profile_physical_k": 4}] * 2
+    assert manager._physical_k_profile_is_upstream == [True, True] + [False] * (len(cases) - 2)
+    assert [case["profile_physical_k"] for case in cases[2:8]] == [3, 4, 3, 4, 3, 4]
 
 
 def test_lower_k_profile_median_ignores_one_cold_replay():
@@ -220,6 +221,18 @@ def test_worker_recommends_k_from_profile_cost_and_confidence():
     assert batch_size == 16
     assert physical_k == 3
     assert manager._physical_k_cost_saving == 3
+
+
+@pytest.mark.parametrize(("gain", "expected_k"), [(0.02, 4), (0.06, 3)])
+def test_downshift_requires_a_material_predicted_gain(gain, expected_k):
+    # With zero prefix survival, both candidate widths produce only bonus
+    # tokens. The 1 ms verify cost then gives precisely the requested gain.
+    manager = profiled_manager(4.0, 5.0 * (1.0 + gain) - 1.0)
+    manager._stale_confidences[manager._stale_idx].np.fill(0)
+
+    manager.get_num_tokens({"0": 5}, {"0": [1, 2, 3, 4]})
+
+    assert manager._physical_k_recommendation == (1, expected_k)
 
 
 def test_small_batch_gets_runtime_recommendation():

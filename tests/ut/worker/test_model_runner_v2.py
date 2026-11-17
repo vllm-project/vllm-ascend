@@ -65,6 +65,7 @@ def _make_runner(need_timing: bool = True):
     runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)  # type: ignore[assignment]
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
     runner.use_fia = False
+    runner._av_dsa_uses_cpu_length_bounds = False
     runner.sync_spec_pp_cpu_counts = False
     runner.speculative_config = None
     # vLLM main suppresses EPLB even for `skip_eplb` dummy runs, so the
@@ -1592,6 +1593,7 @@ def _prepare_inputs_runner(*, draft=False, full_cg=False, use_dcp=False, use_pp=
     draft_tokens = {"r0": [9], "r1": [8, 7]} if draft else {}
     scheduler_output = SimpleNamespace(
         scheduled_spec_decode_tokens=draft_tokens,
+        num_spec_tokens_to_schedule=2 if draft else 0,
         has_structured_output_requests=False,
         num_scheduled_tokens={"r0": 2, "r1": 2},
         scheduled_cached_reqs=SimpleNamespace(req_ids=["r0"] if speculator else []),
@@ -1679,6 +1681,31 @@ def test_prepare_inputs_common_path():
     assert out is partitioned
     runner.eplb.set_batch_phase.assert_called_once_with(True)
     np.testing.assert_array_equal(runner.input_buffers.seq_lens_cpu[:2], np.array([3, 4], dtype=np.int32))
+
+
+@pytest.mark.parametrize(
+    ("full_cg", "has_prefill", "supports_bounds", "expected"),
+    [
+        (True, False, True, [3, 4]),
+        (True, True, True, [2, 3]),
+        (False, False, True, [2, 3]),
+        (True, False, False, [2, 3]),
+    ],
+)
+def test_av_dsa_decode_keeps_cpu_length_bounds(full_cg, has_prefill, supports_bounds, expected):
+    runner, scheduler_output, state, desc = _prepare_inputs_runner(full_cg=full_cg)
+    runner.adaptive_verification = object()
+    runner._av_dsa_uses_cpu_length_bounds = supports_bounds
+    state.has_prefill = has_prefill
+    if not has_prefill:
+        state.is_prefilling_np.fill(False)
+        state.num_computed_prefill_tokens_np[:] = state.prefill_len_np
+    runner.input_buffers.seq_lens[:2] = torch.tensor([2, 3])
+
+    _run_prepare_inputs(runner, scheduler_output, state, desc)
+
+    assert runner.input_buffers.seq_lens_cpu[:2].tolist() == expected
+    assert runner.input_buffers.seq_lens[:2].tolist() == [2, 3]
 
 
 @pytest.mark.parametrize("num_spec_tokens", [0, 1, 5])

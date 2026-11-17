@@ -24,6 +24,7 @@ from vllm_ascend.dynamic_spec import (
 )
 
 _PROFILE_K: ContextVar[int | None] = ContextVar("ascend_profile_physical_k", default=None)
+_MIN_PREDICTED_DOWNSHIFT_GAIN = 0.03
 
 
 @contextmanager
@@ -93,7 +94,7 @@ def _extend_profile_batches(
     base: list[dict[str, int]],
     max_num_reqs: int,
     min_batch_size: int,
-) -> tuple[list[dict[str, int]], list[bool]]:
+) -> list[dict[str, int]]:
     """Add sparse power-of-two request counts through max_num_reqs.
 
     Upstream AV already derives most of these cases from graph capture sizes.
@@ -103,9 +104,8 @@ def _extend_profile_batches(
     """
 
     result = list(base)
-    is_upstream = [True] * len(base)
     if not base or max_num_reqs < min_batch_size:
-        return result, is_upstream
+        return result
     existing = {int(batch["num_tokens"]) for batch in base}
     wanted: set[int] = {max_num_reqs}
     size = _batch_bucket(min_batch_size)
@@ -116,8 +116,7 @@ def _extend_profile_batches(
     for num_tokens in sorted(wanted - existing):
         for _ in range(3):
             result.append({**template, "num_tokens": num_tokens})
-            is_upstream.append(False)
-    return result, is_upstream
+    return result
 
 
 def configure_physical_k_profiling(manager: Any, vllm_config: Any):
@@ -178,7 +177,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
 
     def batches_to_profile(self, capture_sizes) -> Iterator[dict[str, int]]:
         base = list(original_batches(capture_sizes))
-        covered, covered_is_upstream = _extend_profile_batches(
+        covered = _extend_profile_batches(
             base,
             int(getattr(self.req_states, "max_num_reqs", 0)),
             min_batch_size,
@@ -186,27 +185,20 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
         sparse = _sparse_profile_batches([case for case in covered if case["num_tokens"] >= min_batch_size])
         self._physical_k_profile_cases.clear()
         self._physical_k_profile_is_upstream.clear()
-        per_width_cases: dict[int, list[tuple[dict[str, int], bool]]] = {}
-        for physical_k in candidates:
-            # Preserve the complete upstream max-K profile so its verify-cost
-            # curves are unchanged. Lower physical widths only need robust
-            # medians for each distinct graph shape.
-            batches = covered if physical_k == max_k else sparse
-            upstream_flags = covered_is_upstream if physical_k == max_k else [False] * len(batches)
-            per_width_cases[physical_k] = list(zip(batches, upstream_flags))
-        # A sequential K sweep confounds width with device warmup/clock drift.
-        # Interleave nearby candidate timings while keeping the max-K samples
-        # in their original relative order for upstream AV cost curves.
+        # Native AV calibrates on consecutive max-K replays. Replay that sweep
+        # first, before the narrower graphs change the warmup history of the
+        # samples used to price target verification.
+        profile_plan = [(max_k, batch, True) for batch in base]
+        per_width_cases = {k: covered[len(base) :] if k == max_k else sparse for k in candidates}
+        # Alternate supplemental widths to limit timing drift in K pricing.
         for index in range(max(map(len, per_width_cases.values()))):
-            for physical_k in candidates:
-                if index >= len(per_width_cases[physical_k]):
-                    continue
-                batch, is_upstream = per_width_cases[physical_k][index]
-                case = dict(batch)
-                case["profile_physical_k"] = physical_k
-                self._physical_k_profile_cases.append(physical_k)
-                self._physical_k_profile_is_upstream.append(is_upstream)
-                yield case
+            for physical_k, batches in per_width_cases.items():
+                if index < len(batches):
+                    profile_plan.append((physical_k, batches[index], False))
+        for physical_k, batch, is_upstream in profile_plan:
+            self._physical_k_profile_cases.append(physical_k)
+            self._physical_k_profile_is_upstream.append(is_upstream)
+            yield {**batch, "profile_physical_k": physical_k}
 
     def set_initial_cost_curves(self, samples) -> None:
         cases = self._physical_k_profile_cases
@@ -429,6 +421,11 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
         if not scored:
             return None
         score, selected = max(scored)
+        full_score = next(value for value, k in scored if k == max_k)
+        # Small predicted wins can disappear once confidence and batch shape
+        # change between the scoring step and the next draft.
+        if score < full_score * (1.0 + _MIN_PREDICTED_DOWNSHIFT_GAIN):
+            score, selected = full_score, max_k
         full_cost = lookup_cost(self, max_k, batch_size)
         self._physical_k_cost_saving = next(
             (

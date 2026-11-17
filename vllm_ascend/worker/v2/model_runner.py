@@ -66,6 +66,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     fill_mxfp_v_scale_cache,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
@@ -156,6 +157,7 @@ class NPUModelRunner(GPUModelRunner):
         # Adaptive verification uses this flag to apply FIA-specific query
         # boundary and sequence length padding during FULL graph execution.
         self.use_fia = False
+        self._av_dsa_uses_cpu_length_bounds = False
         self._uses_flashmla = False
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
@@ -583,6 +585,29 @@ class NPUModelRunner(GPUModelRunner):
             for groups in self.attn_groups
             for group in groups
         )
+        self._av_dsa_uses_cpu_length_bounds = False
+        if (
+            self.adaptive_verification is not None
+            and self.model_config.architecture == "DeepseekV4ForCausalLM"
+            and self.speculative_config is not None
+            and self.speculative_config.method == "dspark"
+            and not self.use_fia
+            and self.parallel_config.pipeline_parallel_size == 1
+            and self.parallel_config.prefill_context_parallel_size == 1
+            and self.parallel_config.decode_context_parallel_size == 1
+            and self.vllm_config.kv_transfer_config is None
+            and not sparse_cfg.enabled
+            and getattr(self.model_state, "decoder_replay", None) is None
+        ):
+            target_backends = {
+                group.backend
+                for groups in self.attn_groups
+                for group in groups
+                if any(layer_name not in draft_layer_names for layer_name in group.layer_names)
+            }
+            self._av_dsa_uses_cpu_length_bounds = bool(target_backends) and all(
+                issubclass(backend, AscendDSABackend) for backend in target_backends
+            )
 
         self.kvpp = KVPPRuntime.create_from_kv_cache(
             vllm_config=self.vllm_config,
@@ -1042,10 +1067,13 @@ class NPUModelRunner(GPUModelRunner):
                 torch.from_numpy(dummy_seq_lens_np), non_blocking=False
             )
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
-        # ascend also consumes the CPU seq_lens metadata.
-        # Scheduler-side values are only upper bounds for AV. Copy the exact
-        # final real-request seq_lens back from the device.
-        if adaptive_verification_manager is not None:
+        # DSA decode consumes exact per-request lengths on the device. Its
+        # CPU metadata only needs a maximum bound, already populated above.
+        if adaptive_verification_manager is not None and (
+            not self._av_dsa_uses_cpu_length_bounds
+            or batch_desc.cg_mode != CUDAGraphMode.FULL
+            or batch_req_state.has_prefill
+        ):
             self.input_buffers.seq_lens_np[:num_reqs] = seq_lens[:num_reqs].cpu().numpy()
         # Pad for full CUDA graph mode.
         self.input_buffers.seq_lens_np[num_reqs:] = 0
