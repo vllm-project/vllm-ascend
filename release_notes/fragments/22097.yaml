@@ -1,0 +1,5 @@
+pr: 22097
+entries:
+  - category: bugfix
+    text: Fixed Ascend MoE paths that expected different weight payload types, preventing failures with SWIGLUOAI and quantized MoE LoRA configurations.
+    hardware: [A2, A3, A5]
