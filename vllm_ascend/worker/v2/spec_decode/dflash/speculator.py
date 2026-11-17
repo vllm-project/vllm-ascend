@@ -140,7 +140,8 @@ def prepare_dflash_inputs_factory(
             kv_cache_block_size=kv_cache_block_size,
         )
 
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
+        return prepare_with_block_size
 
         def prepare_with_block_size(
             input_buffers: InputBuffers,
