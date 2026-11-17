@@ -125,6 +125,31 @@ def test_requires_runner_dp_token_padding(
 
 
 @pytest.mark.parametrize(
+    ("num_tokens", "descriptor_tokens", "tp_size", "requires_padding", "expected"),
+    [
+        (55, 55, 8, True, 56),
+        (56, 55, 8, True, 56),
+        (55, 64, 8, True, 64),
+        (55, 55, 8, False, 55),
+    ],
+)
+def test_get_num_tokens_after_padding(
+    monkeypatch,
+    num_tokens,
+    descriptor_tokens,
+    tp_size,
+    requires_padding,
+    expected,
+):
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=tp_size))
+    batch_desc = SimpleNamespace(num_tokens=descriptor_tokens)
+    monkeypatch.setattr(runner, "_requires_runner_dp_token_padding", lambda: requires_padding)
+
+    assert runner._get_num_tokens_after_padding(num_tokens, batch_desc) == expected
+
+
+@pytest.mark.parametrize(
     ("dummy", "profile", "fail"),
     [
         (False, False, False),
@@ -537,9 +562,18 @@ def test_adaptive_verification_pads_fia_query_boundaries(
 def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
     source_path = Path(__file__).parents[3] / "vllm_ascend" / "worker" / "v2" / "model_runner.py"
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    prepare_inputs = functions["_prepare_inputs_impl"]
+    padding_helper = functions["_get_num_tokens_after_padding"]
     padding_assignments = [
         node
-        for node in ast.walk(tree)
+        for node in ast.walk(prepare_inputs)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "num_tokens_after_padding" for target in node.targets)
+    ]
+    helper_assignments = [
+        node
+        for node in ast.walk(padding_helper)
         if isinstance(node, ast.Assign)
         and any(isinstance(target, ast.Name) and target.id == "num_tokens_after_padding" for target in node.targets)
     ]
@@ -553,8 +587,11 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
     # graph descriptor, and forwards the whole descriptor through the retained
     # PCPManager API (vLLM #57980), also retained in v0.33.0.
     assert len(padding_assignments) == 2
-    assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
+    assert ast.unparse(padding_assignments[0].value) == ("self._get_num_tokens_after_padding(num_tokens, batch_desc)")
     assert ast.unparse(padding_assignments[1].value) == "global_graph_num_reqs * batch_desc.uniform_token_count"
+    assert len(helper_assignments) == 2
+    assert ast.unparse(helper_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
+    assert ast.unparse(helper_assignments[1].value).startswith("round_up(")
 
     assert len(partition_calls) == 1
     partition_call = partition_calls[0]

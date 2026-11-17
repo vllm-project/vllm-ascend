@@ -478,6 +478,46 @@ def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, run
     assert compressed.is_contiguous()
 
 
+@pytest.mark.parametrize("runner_kind", ["v2", "v2_main"])
+def test_runner_materializes_smaller_qsa_raw_pages_in_largest_region(monkeypatch, runner_kind) -> None:
+    groups = _groups()
+    raw_group = groups[1]
+    raw_spec = raw_group.kv_cache_spec
+    raw_specs = {name: raw_spec for name in raw_group.layer_names}
+    raw_specs[raw_group.layer_names[0]] = replace(raw_spec, head_size=44)
+    padded_page_size = raw_specs[raw_group.layer_names[0]].real_page_size_bytes
+    groups[1] = KVCacheGroupSpec(
+        raw_group.layer_names,
+        UniformTypeKVCacheSpecs(
+            block_size=raw_spec.block_size,
+            kv_cache_specs=raw_specs,
+        ),
+    )
+    config = get_qwen4_exp_kv_cache_config(
+        SimpleNamespace(
+            cache_config=SimpleNamespace(
+                num_gpu_blocks_override=3,
+                prefix_cache_retention_interval=None,
+            )
+        ),
+        groups,
+        10**9,
+    )
+    assert config is not None
+
+    _, caches, layout = _allocate_mrv2_kv_cache(
+        config,
+        monkeypatch,
+        use_main=runner_kind == "v2_main",
+    )
+    assert layout is not None
+    raw_qsa = caches["model.layers.11.self_attn.indexer.raw_key_cache"]
+    assert raw_qsa.shape == (3, 8, 1, 32)
+    assert raw_qsa[0].numel() * raw_qsa.element_size() < padded_page_size
+    assert raw_qsa.stride(0) * raw_qsa.element_size() == padded_page_size
+    assert layout.region("r4").page_size_bytes == padded_page_size
+
+
 def test_qsa_source_sets_must_match() -> None:
     groups = _groups()
     groups[1].layer_names[-1] = "model.layers.46.self_attn.indexer.raw_key_cache"
