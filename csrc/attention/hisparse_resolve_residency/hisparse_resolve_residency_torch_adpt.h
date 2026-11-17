@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-#ifndef HI_SPARSE_RESOLVE_RESIDENCY_TORCH_ADPT_H
-#define HI_SPARSE_RESOLVE_RESIDENCY_TORCH_ADPT_H
+#ifndef HISPARSE_RESOLVE_RESIDENCY_TORCH_ADPT_H
+#define HISPARSE_RESOLVE_RESIDENCY_TORCH_ADPT_H
 
 #include <ATen/ATen.h>
 #include <string>
@@ -113,4 +113,4 @@ inline void resolve_residency(
 
 }  // namespace vllm_ascend::hisparse
 
-#endif  // HI_SPARSE_RESOLVE_RESIDENCY_TORCH_ADPT_H
+#endif  // HISPARSE_RESOLVE_RESIDENCY_TORCH_ADPT_H
