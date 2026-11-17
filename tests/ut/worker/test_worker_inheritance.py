@@ -95,7 +95,7 @@ def worker_constructor(monkeypatch):
     monkeypatch.setattr(ascend_forward_context, "sync_v2_extra_kwargs", record("sync"))
     monkeypatch.setattr(utils, "adapt_patch", record("patches"))
     kda = ModuleType("vllm_ascend.patch.worker.patch_kda_recoverssm")
-    kda.patch_kda_recoverssm = record("kda")
+    kda.patch_kda_recoverssm = record("kda")  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, kda.__name__, kda)
     monkeypatch.setattr(vllm_ascend, "ops", SimpleNamespace(register_dummy_fusion_op=record("ops")))
     monkeypatch.setattr(worker_module.envs_ascend, "COMPILE_CUSTOM_KERNELS", True)
@@ -125,7 +125,7 @@ def worker_constructor(monkeypatch):
     monkeypatch.setattr(gpu_worker.torch, "set_float32_matmul_precision", Mock())
     monkeypatch.setattr(gpu_worker, "validate_worker_profiler_config", record("validate_profiler"))
     executor_module = ModuleType("vllm.distributed.elastic_ep.elastic_execute")
-    executor_module.ElasticEPScalingExecutor = Mock()
+    executor_module.ElasticEPScalingExecutor = Mock()  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, executor_module.__name__, executor_module)
     original_parent_init = gpu_worker.Worker.__init__
     parent_calls = Mock()
@@ -243,7 +243,7 @@ def test_310p_constructor_device_runner_and_export(worker_constructor, monkeypat
     compile_mode = Mock()
     monkeypatch.setattr(worker_310p.torch_npu.npu, "set_compile_mode", compile_mode)
     runner_module = ModuleType("vllm_ascend._310p.worker.v2.model_runner")
-    runner_module.NPUModelRunner310V2 = Mock(return_value=runner)
+    runner_module.NPUModelRunner310V2 = Mock(return_value=runner)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, runner_module.__name__, runner_module)
     worker.init_device()
     init_device.assert_called_once_with()
@@ -253,7 +253,7 @@ def test_310p_constructor_device_runner_and_export(worker_constructor, monkeypat
     assert worker.model_runner is runner
 
     loader_module = ModuleType("vllm_ascend._310p.sharded_state_loader_310p")
-    loader_module.ShardedStateLoader310 = loader = Mock()
+    loader_module.ShardedStateLoader310 = loader = Mock()  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, loader_module.__name__, loader_module)
     worker.save_sharded_state("output", pattern="part-{rank}", max_size=1024)
     loader.save_model.assert_called_once_with(runner.model, "output", pattern="part-{rank}", max_size=1024)
@@ -269,7 +269,7 @@ def xlite_worker_module(monkeypatch):
     previous_module = sys.modules.get(name)
     previous_attribute = getattr(package, "xlite_worker", None)
     runner_module = ModuleType("vllm_ascend.xlite.xlite_model_runner")
-    runner_module.XliteModelRunnerV2 = Mock(__name__="XliteModelRunnerV2")
+    runner_module.XliteModelRunnerV2 = Mock(__name__="XliteModelRunnerV2")  # type: ignore[attr-defined]
     with monkeypatch.context() as scoped:
         scoped.setitem(sys.modules, runner_module.__name__, runner_module)
         try:

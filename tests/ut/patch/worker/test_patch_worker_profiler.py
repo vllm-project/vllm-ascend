@@ -36,10 +36,10 @@ class TestWorkerProfilerPatch(unittest.TestCase):
         self.platform = SimpleNamespace(device_type="npu")
         self.wrapper = modules["vllm.profiler.wrapper"]
         self.worker = modules["vllm.v1.worker.gpu_worker"]
-        self.wrapper.validate_worker_profiler_config = self.original
-        self.worker.validate_worker_profiler_config = self.original
-        modules["vllm.config.profiler"].ProfilerConfig = SimpleNamespace
-        modules["vllm.platforms"].current_platform = self.platform
+        self.wrapper.validate_worker_profiler_config = self.original  # type: ignore[attr-defined]
+        self.worker.validate_worker_profiler_config = self.original  # type: ignore[attr-defined]
+        modules["vllm.config.profiler"].ProfilerConfig = SimpleNamespace  # type: ignore[attr-defined]
+        modules["vllm.platforms"].current_platform = self.platform  # type: ignore[attr-defined]
         # Model the parent's cached from-import before the patch is loaded.
         exec("def construct(config):\n    validate_worker_profiler_config(config)\n", self.worker.__dict__)
         with patch.dict(sys.modules, modules):
