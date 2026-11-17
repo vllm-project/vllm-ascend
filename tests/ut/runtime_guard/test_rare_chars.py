@@ -35,7 +35,7 @@ from vllm_ascend.observability.runtime_guard.detector.rare import (
 )
 from vllm_ascend.observability.runtime_guard.detector.rare_chars import (
     RareCharsDetector,
-    device_chosen_token_ids,
+    last_sampled_token_ids,
 )
 from vllm_ascend.observability.runtime_guard.hooks import need_pre_sample_hook
 from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
@@ -150,9 +150,9 @@ def test_need_pre_sample_hook_for_rare_chars(tmp_path: Path):
     assert need_pre_sample_hook(guard) is False
 
 
-def test_device_chosen_token_ids_stay_on_device():
+def test_last_sampled_token_ids_stay_on_device():
     ids = torch.tensor([[7, -1], [-1, -1], [3, 9]], dtype=torch.int32)
-    chosen = device_chosen_token_ids(ids)
+    chosen = last_sampled_token_ids(ids)
     assert chosen.device == ids.device
     assert chosen.tolist() == [7, -1, 9]
 
