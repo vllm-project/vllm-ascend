@@ -100,6 +100,7 @@ from vllm_ascend.observability.runtime_guard.hooks import (
 )
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
+from vllm_ascend.patch.worker.patch_v2.patch_adaptive_verification import configure_adaptive_verification
 from vllm_ascend.utils import (
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
@@ -454,6 +455,7 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
             )
+        configure_adaptive_verification(self.adaptive_verification, self.ascend_config.av_score_tolerance)
 
     def initialize_kv_cache(
         self,

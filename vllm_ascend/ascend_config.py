@@ -23,7 +23,7 @@ import os
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, TypeAdapter, field_validator, model_validator
+from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -567,6 +567,12 @@ class AscendConfig:
     model_config = ConfigDict(extra="forbid")
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----
+    av_score_tolerance: float = Field(default=0.0, ge=0, lt=1, allow_inf_nan=False)
+    """Allowed relative loss in predicted adaptive-verification throughput.
+
+    Zero preserves upstream budget selection. Must be finite and in [0, 1).
+    """
+
     enable_cpu_binding: bool = True
     multistream_dsv4_dsa_overlap: bool = True
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
