@@ -27,6 +27,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
     UniformTypeKVCacheSpecs,
+    get_kv_cache_spec_kind,
+    get_kv_cache_spec_sliding_window,
 )
 
 from vllm_ascend.ascend_config import KVPPConfig
@@ -467,6 +469,7 @@ class KVPoolWorker:
         self.enable_kv_events = False
         if kv_event_config and kv_event_config.enable_kv_cache_events:
             self.enable_kv_events = True
+        self.kv_event_group_metadata = self._infer_kv_event_group_metadata() if self.enable_kv_events else []
 
     def _init_state_vars(self) -> None:
         self.kv_send_thread: KVTransferThread | None = None
@@ -889,6 +892,7 @@ class KVPoolWorker:
                     self.group_uses_align_state,
                     self.enable_kv_events,
                     worker=self if self.tp_mismatch else None,
+                    group_event_metadata=self.kv_event_group_metadata,
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
@@ -947,6 +951,18 @@ class KVPoolWorker:
                 )
             )
         return group_uses_align_state
+
+    def _infer_kv_event_group_metadata(self) -> list[tuple[str | None, int | None]]:
+        """Describe each resolved KV group in AscendStore BlockStored events."""
+        if self.kv_cache_config is None:
+            return [("full_attention", None)]
+        return [
+            (
+                get_kv_cache_spec_kind(group.kv_cache_spec).value,
+                get_kv_cache_spec_sliding_window(group.kv_cache_spec),
+            )
+            for group in self.kv_cache_config.kv_cache_groups
+        ]
 
     @staticmethod
     def _uses_mamba_kv_cache(use_hybrid: bool, kv_cache_config: KVCacheConfig | None):
@@ -3611,6 +3627,9 @@ class KVPoolWorker:
                     else req_meta.original_block_size
                 )
                 stored_events: list[BlockStored] = []
+                event_kind, event_window = (
+                    self.kv_event_group_metadata[0] if self.kv_event_group_metadata else ("full_attention", None)
+                )
                 prev_key = None
                 for idx, (start, end, _base_key) in enumerate(
                     self.token_database.process_tokens(token_len, req_meta.block_hashes)
@@ -3618,7 +3637,11 @@ class KVPoolWorker:
                     if idx >= len(req_meta.block_hashes):
                         break
                     block_hash = maybe_convert_block_hash(req_meta.block_hashes[idx])
-                    token_ids = req_meta.token_ids[start:end] if req_meta.token_ids is not None else None
+                    token_ids = (
+                        []
+                        if event_kind == "mamba"
+                        else (req_meta.token_ids[start:end] if req_meta.token_ids is not None else None)
+                    )
                     stored_events.append(
                         BlockStored(
                             block_hashes=[block_hash],
@@ -3628,6 +3651,9 @@ class KVPoolWorker:
                             lora_id=None,
                             medium="cpu",
                             lora_name=None,
+                            group_idx=0,
+                            kv_cache_spec_kind=event_kind,
+                            kv_cache_spec_sliding_window=event_window,
                         )
                     )
                     prev_key = block_hash
@@ -4046,6 +4072,16 @@ class KVPoolWorker:
         if self.enable_kv_events and self.kv_send_thread is not None:
             # collect store kv events form sending thread
             events = self.kv_send_thread.get_kv_events()
+            if self.use_mamba:
+                from .event_layout import attach_deployment_layout, build_deployment_layout, deployment_announcement
+
+                if not hasattr(self, "_kv_event_deployment"):
+                    self._kv_event_deployment = build_deployment_layout(self)
+                if self._kv_event_deployment is not None:
+                    if not getattr(self, "_kv_event_deployment_sent", False):
+                        events.insert(0, deployment_announcement(self._kv_event_deployment, self.hash_block_size))
+                        self._kv_event_deployment_sent = True
+                    return attach_deployment_layout(events, self._kv_event_deployment)
             return events
         return []
 

@@ -683,6 +683,47 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         events = t.get_kv_events()
         self.assertEqual(len(events), 1)
 
+    def test_checkpoint_event_preserves_group_and_omits_prompt_tokens(self):
+        thread, _ = self._make_thread([0], enable_kv_event=True)
+        thread.group_event_metadata = [("mamba", None)]
+        request = ReqMeta(
+            req_id="checkpoint",
+            token_len_chunk=16,
+            block_ids=[1],
+            block_hashes=[b"h0"],
+            token_ids=list(range(16)),
+            original_block_size=16,
+        )
+        thread.add_stored_request(request.req_id)
+        thread.request_queue.put(request)
+        thread._handle_request(request)
+
+        (event,) = thread.get_kv_events()
+        self.assertEqual(event.group_idx, 0)
+        self.assertEqual(event.kv_cache_spec_kind, "mamba")
+        self.assertIsNone(event.kv_cache_spec_sliding_window)
+        self.assertEqual(event.token_ids, [])
+        self.assertEqual(event.block_hashes, [b"h0"])
+
+    def test_failed_put_does_not_publish_events_and_completes_request(self):
+        thread, store = self._make_thread([0], enable_kv_event=True)
+        store.put = MagicMock(return_value=False)
+        request = ReqMeta(
+            req_id="failed-put",
+            token_len_chunk=16,
+            block_ids=[1],
+            block_hashes=[b"h0"],
+            token_ids=list(range(16)),
+            original_block_size=16,
+        )
+        thread.add_stored_request(request.req_id)
+        thread.request_queue.put(request)
+        thread._handle_request(request)
+
+        store.put.assert_called_once()
+        self.assertEqual(thread.get_kv_events(), [])
+        self.assertFalse(thread.is_stored_request(request.req_id))
+
     def test_add_dec_delete_stored_request(self):
         t, _ = self._make_thread()
         t.add_stored_request("r1")

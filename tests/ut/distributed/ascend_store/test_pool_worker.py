@@ -27,7 +27,13 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 
 # isort: split
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    MambaSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import LayerBatchBuilder
@@ -1058,6 +1064,46 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         self.assertEqual(worker.token_database.partitions, [16, 16])
 
 
+class TestKVPoolWorkerEventMetadata(unittest.TestCase):
+    def test_group_metadata_uses_resolved_specs(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        worker = KVPoolWorker.__new__(KVPoolWorker)
+        worker.kv_cache_config = None
+        self.assertEqual(worker._infer_kv_event_group_metadata(), [("full_attention", None)])
+
+        worker = make_worker(
+            self,
+            enable_kv_events=True,
+            kv_cache_config=SimpleNamespace(
+                kv_cache_groups=[
+                    KVCacheGroupSpec(
+                        layer_names=["layer.0"],
+                        kv_cache_spec=FullAttentionSpec(
+                            block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float16
+                        ),
+                    ),
+                    KVCacheGroupSpec(
+                        layer_names=["layer.1"],
+                        kv_cache_spec=MambaSpec(
+                            block_size=16, shapes=((2, 2),), dtypes=(torch.float16,), mamba_cache_mode="align"
+                        ),
+                    ),
+                    KVCacheGroupSpec(
+                        layer_names=["layer.2"],
+                        kv_cache_spec=SlidingWindowSpec(
+                            block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float16, sliding_window=32
+                        ),
+                    ),
+                ]
+            ),
+        )
+        self.assertEqual(
+            worker.kv_event_group_metadata,
+            [("full_attention", None), ("mamba", None), ("sliding_window", 32)],
+        )
+
+
 class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
     """Test register_kv_caches, start_load_kv, wait_for_save, get_finished, lookup_scheduler."""
 
@@ -1195,6 +1241,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(recv_thread.call_args.args[2], worker.grouped_block_size)
         self.assertIsNone(send_thread.call_args.kwargs["worker"])
         self.assertIsNone(recv_thread.call_args.kwargs["worker"])
+        self.assertEqual(send_thread.call_args.kwargs["group_event_metadata"], worker.kv_event_group_metadata)
         event.return_value.wait.assert_called()
 
     def test_register_kv_caches_initializes_layerwise_memcache(self):

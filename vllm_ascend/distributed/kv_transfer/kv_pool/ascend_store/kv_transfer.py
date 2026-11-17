@@ -953,6 +953,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         group_uses_align_state: list[bool] | None = None,
         enable_kv_event: bool = False,
         worker: Any = None,
+        *,
+        group_event_metadata: list[tuple[str | None, int | None]] | None = None,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheSendingThread"
@@ -963,6 +965,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.kv_role = kv_role
         self.group_uses_align_state = group_uses_align_state or []
         self.enable_kv_event = enable_kv_event
+        self.group_event_metadata = group_event_metadata or []
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
         self.worker = worker
@@ -1195,7 +1198,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 addrs.append(addr)
                 sizes.append(size)
                 if self.enable_kv_event:
-                    token_ids = req_meta.token_ids[start : ends[index]] if req_meta.token_ids is not None else None
+                    event_kind = None
+                    event_window = None
+                    if group_id < len(self.group_event_metadata):
+                        event_kind, event_window = self.group_event_metadata[group_id]
+                    token_ids = (
+                        []
+                        if event_kind == "mamba"
+                        else (req_meta.token_ids[start : ends[index]] if req_meta.token_ids is not None else None)
+                    )
                     block_size = (
                         req_meta.original_block_size[group_id]
                         if isinstance(req_meta.original_block_size, list)
@@ -1215,6 +1226,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                             lora_id=None,
                             medium="cpu",
                             lora_name=None,
+                            group_idx=group_id,
+                            kv_cache_spec_kind=event_kind,
+                            kv_cache_spec_sliding_window=event_window,
                         )
                         stored_events.append(stored_event)
                         logger.debug("Added kv cache event '%s' to kv cache events queue", stored_event)
