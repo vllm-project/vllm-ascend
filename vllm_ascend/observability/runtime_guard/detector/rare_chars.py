@@ -57,8 +57,8 @@ def _algo_knobs() -> tuple[dict[str, Any], str, bool]:
     return cfg, think_end, alert_monitor
 
 
-def device_chosen_token_ids(sampled_token_ids: torch.Tensor) -> torch.Tensor:
-    """Last valid sampled id per row on device; empty rows → ``-1``."""
+def last_sampled_token_ids(sampled_token_ids: torch.Tensor) -> torch.Tensor:
+    """Last valid sampled id per row; empty rows → ``-1``."""
     ids = sampled_token_ids.detach()
     if ids.numel() == 0:
         return ids.reshape(-1).to(dtype=torch.int64)
@@ -71,41 +71,41 @@ def device_chosen_token_ids(sampled_token_ids: torch.Tensor) -> torch.Tensor:
     valid = ids >= 0
     lengths = valid.sum(dim=-1)
     last = (lengths - 1).clamp(min=0)
-    chosen = ids.gather(1, last.unsqueeze(1)).reshape(-1).to(dtype=torch.int64)
-    return torch.where(lengths > 0, chosen, torch.full_like(chosen, -1))
+    token_ids = ids.gather(1, last.unsqueeze(1)).reshape(-1).to(dtype=torch.int64)
+    return torch.where(lengths > 0, token_ids, torch.full_like(token_ids, -1))
 
 
-def pack_rare_step(cpu: Any, sampled: Any, n_req: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Host ``(token_ids, top1, chosen)`` arrays for one step."""
-    if isinstance(cpu, torch.Tensor):
-        pairs = cpu.detach()
+def build_rare_feed_arrays(host_logprobs: Any, sampled: Any, n_req: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Host ``(token_ids, top1_logprobs, sampled_logprobs)`` for one step."""
+    if isinstance(host_logprobs, torch.Tensor):
+        pairs = host_logprobs.detach()
         if pairs.device.type != "cpu":
             pairs = pairs.cpu()
         pairs_np = pairs.numpy()
     else:
-        pairs_np = np.asarray(cpu)
+        pairs_np = np.asarray(host_logprobs)
     if pairs_np.ndim != 2 or pairs_np.shape[1] < 2:
-        raise ValueError(f"rare pair tensor must be [rows, 2], got shape={getattr(pairs_np, 'shape', None)}")
+        raise ValueError(f"rare logprobs must be [rows, 2], got shape={getattr(pairs_np, 'shape', None)}")
     n = min(int(n_req), int(pairs_np.shape[0]))
     if n <= 0:
         empty_i = np.zeros(0, np.int64)
         empty_f = np.zeros(0, np.float64)
         return empty_i, empty_f, empty_f
     base = np.ascontiguousarray(pairs_np[:n], dtype=np.float64)
-    top1 = np.empty(n, dtype=np.float64)
-    chosen = np.empty(n, dtype=np.float64)
-    top1[:] = base[:, 0]
-    chosen[:] = base[:, 1]
-    return _last_token_ids(sampled, n), top1, chosen
+    top1_logprobs = np.empty(n, dtype=np.float64)
+    sampled_logprobs = np.empty(n, dtype=np.float64)
+    top1_logprobs[:] = base[:, 0]
+    sampled_logprobs[:] = base[:, 1]
+    return _last_token_ids(sampled, n), top1_logprobs, sampled_logprobs
 
 
 def _last_token_ids(sampled: Any, n: int) -> np.ndarray:
     if not isinstance(sampled, torch.Tensor):
         sampled = torch.as_tensor(sampled, dtype=torch.int64)
-    chosen = device_chosen_token_ids(sampled)
-    if chosen.device.type != "cpu":
-        chosen = chosen.detach().cpu()
-    return np.ascontiguousarray(chosen.numpy()[:n], dtype=np.int64)
+    token_ids = last_sampled_token_ids(sampled)
+    if token_ids.device.type != "cpu":
+        token_ids = token_ids.detach().cpu()
+    return np.ascontiguousarray(token_ids.numpy()[:n], dtype=np.int64)
 
 
 @dataclass

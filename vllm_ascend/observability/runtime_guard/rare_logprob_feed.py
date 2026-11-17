@@ -13,11 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Dedicated queue: wait for rare_chars collect, issue pair D2H, then pack+feed.
+"""Background queue: wait rare logprobs ready, D2H, then pack+feed.
 
-Separate from ActionQueue so pair completion does not contend with report/dump
+Separate from ActionQueue so feed completion does not contend with report/dump
 jobs and a short ActionQueue cannot drop rare_chars feeds under high concurrency.
-The sample / get_output path only submits; this worker owns collect-wait + copy.
 """
 
 from __future__ import annotations
@@ -26,17 +25,28 @@ import contextlib
 import queue
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+import torch
 
 from vllm_ascend.logger import init_logger_ascend
 
 logger = init_logger_ascend(__name__)
 
-# Larger than ActionQueue(64): these jobs mostly wait on DMA then do light host work.
 _MAXSIZE = 512
 
 
-class RarePairWaitQueue:
-    """One worker thread. Jobs wait for collect, issue pair D2H, then host work."""
+@dataclass
+class RareLogprobBatch:
+    """One step of device ``[rows, 2]`` = (top1_logprob, sampled_logprob) + ready event."""
+
+    device_logprobs: torch.Tensor
+    ready_event: Any
+
+
+class RareLogprobFeedQueue:
+    """One worker thread for rare_chars logprob wait / D2H / feed jobs."""
 
     def __init__(self, maxsize: int = _MAXSIZE) -> None:
         self._q: queue.Queue[Callable[[], None] | None] = queue.Queue(maxsize=maxsize)
@@ -52,7 +62,7 @@ class RarePairWaitQueue:
                 return
             self._thread = threading.Thread(
                 target=self._loop,
-                name="rare-pair-wait",
+                name="rare-logprob-feed",
                 daemon=True,
             )
             self._started = True
@@ -90,24 +100,24 @@ class RarePairWaitQueue:
                     return
                 item()
             except Exception:
-                logger.exception("[rare_pair_wait] job failed")
+                logger.exception("[rare_logprob_feed] job failed")
             finally:
                 self._q.task_done()
 
 
-_QUEUE: RarePairWaitQueue | None = None
+_QUEUE: RareLogprobFeedQueue | None = None
 _QUEUE_LOCK = threading.Lock()
 
 
-def get_rare_pair_wait_queue() -> RarePairWaitQueue:
+def get_rare_logprob_feed_queue() -> RareLogprobFeedQueue:
     global _QUEUE
     with _QUEUE_LOCK:
         if _QUEUE is None:
-            _QUEUE = RarePairWaitQueue()
+            _QUEUE = RareLogprobFeedQueue()
         return _QUEUE
 
 
-def reset_rare_pair_wait_queue_for_tests() -> None:
+def reset_rare_logprob_feed_queue_for_tests() -> None:
     """Drop singleton (unit tests only)."""
     global _QUEUE
     with _QUEUE_LOCK:

@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # mypy: ignore-errors
-"""UT: async rare_chars pair wait queue + per-step hold (no single-slot race)."""
+"""UT: async rare_chars logprob feed queue + per-step RareLogprobBatch."""
 
 from __future__ import annotations
 
@@ -23,39 +23,40 @@ from unittest.mock import MagicMock
 
 from vllm_ascend.observability.runtime_guard.hooks import AscendAsyncOutput
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
-from vllm_ascend.observability.runtime_guard.rare_pair_wait import (
-    get_rare_pair_wait_queue,
-    reset_rare_pair_wait_queue_for_tests,
+from vllm_ascend.observability.runtime_guard.rare_logprob_feed import (
+    RareLogprobBatch,
+    get_rare_logprob_feed_queue,
+    reset_rare_logprob_feed_queue_for_tests,
 )
 from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
 
 
-def test_rare_pair_jobs_block_reap_without_force():
+def test_rare_feed_jobs_block_reap_without_force():
     RequestGuardStore.reset_for_tests()
     try:
         store = RequestGuardStore.get()
         store.max_deferred_waves = 2
         store.get_or_create("r1")
         store.mark_finished(["r1"], wave=1)
-        store.add_rare_pair_jobs(["r1"])
+        store.add_rare_feed_jobs(["r1"])
         assert store.list_reapable(current_wave=2) == []  # age < cap
-        # Past cap → force clear rare_pair_jobs and reap.
+        # Past cap → force clear rare_feed_jobs and reap.
         assert store.list_reapable(current_wave=100) == ["r1"]
     finally:
         RequestGuardStore.reset_for_tests()
 
 
-def test_mark_finished_defers_rare_finish_when_async_pair_enabled():
+def test_mark_finished_defers_rare_finish_when_rare_enabled():
     RequestGuardStore.reset_for_tests()
     try:
         p = object.__new__(RuntimeGuardProcessor)
-        p.wave_tracker = SimpleNamespace(current_wave=lambda: 3)
+        p.wave_tracker = SimpleNamespace(current_wave=lambda: 3, discard_many=lambda *_: None)
         p.runtime_config = MagicMock()
         p.runtime_config.detector_get.return_value = True
         p.detectors = MagicMock()
         p.detectors.finish_rare_chars.return_value = []
+        p.detectors.rare_chars_enabled.return_value = True
         p.detectors.get.return_value = None
-        p._enable_rare_chars_finish_on_reap()
 
         p.mark_finished(["r1"])
         p.detectors.finish_rare_chars.assert_not_called()
@@ -68,9 +69,9 @@ def test_mark_finished_defers_rare_finish_when_async_pair_enabled():
         RequestGuardStore.reset_for_tests()
 
 
-def test_consume_rare_pairs_async_submits_and_releases_pin():
+def test_feed_rare_logprobs_async_submits_and_releases_pin():
     RequestGuardStore.reset_for_tests()
-    reset_rare_pair_wait_queue_for_tests()
+    reset_rare_logprob_feed_queue_for_tests()
     try:
         p = object.__new__(RuntimeGuardProcessor)
         p.runner = SimpleNamespace()
@@ -84,67 +85,67 @@ def test_consume_rare_pairs_async_submits_and_releases_pin():
         def _pack_and_feed(cpu, sampled, req_ids, n_req):
             fed.append((list(req_ids), n_req))
 
-        p._rare_pair_pack_and_feed = _pack_and_feed  # type: ignore[method-assign]
+        p._pack_and_feed_rare = _pack_and_feed  # type: ignore[method-assign]
         p._reap_finished_requests = lambda: None  # type: ignore[method-assign]
         materialized: list[object] = []
 
-        def _materialize(hold, collect_event):
-            if collect_event is not None:
-                collect_event.synchronize()
+        def _copy(batch):
+            if batch.ready_event is not None:
+                batch.ready_event.synchronize()
             cpu = object()
             materialized.append(cpu)
             return cpu
 
-        p._materialize_rare_pair_cpu = _materialize  # type: ignore[method-assign]
+        p._copy_rare_batch_to_host = _copy  # type: ignore[method-assign]
 
         store = RequestGuardStore.get()
         store.get_or_create("a")
         store.mark_finished(["a"], wave=0)
 
-        collect_event = MagicMock()
-        pending = (object(), collect_event)
+        ready_event = MagicMock()
+        batch = RareLogprobBatch(device_logprobs=object(), ready_event=ready_event)
         output = SimpleNamespace(req_ids=["a"], sampled_token_ids=None)
-        p.consume_rare_pairs(output, pending=pending)
+        p.feed_rare_logprobs(output, batch=batch)
 
-        q = get_rare_pair_wait_queue()
+        q = get_rare_logprob_feed_queue()
         q._q.join()
-        collect_event.synchronize.assert_called_once()
+        ready_event.synchronize.assert_called_once()
         assert len(materialized) == 1
         assert fed == [(["a"], 1)]
         assert store.get_state("a") is not None
-        assert store.get_state("a").rare_pair_jobs == 0
+        assert store.get_state("a").rare_feed_jobs == 0
     finally:
-        reset_rare_pair_wait_queue_for_tests()
+        reset_rare_logprob_feed_queue_for_tests()
         RequestGuardStore.reset_for_tests()
 
 
-def test_per_step_rare_pair_survives_overlapping_sample():
-    """Two steps' holds must not share a single processor slot."""
+def test_per_step_rare_batch_survives_overlapping_sample():
+    """Two steps' batches must not share a single processor slot."""
     RequestGuardStore.reset_for_tests()
     try:
         p = object.__new__(RuntimeGuardProcessor)
         p.runner = SimpleNamespace(main_stream=None, runtime_guard=None)
-        hold1, ev1 = object(), MagicMock()
-        hold2, ev2 = object(), MagicMock()
-        p._step_rare_pair = (hold2, ev2)
-        got = p.take_step_rare_pair()
-        assert got == (hold2, ev2)
-        assert p.take_step_rare_pair() is None
+        batch1 = RareLogprobBatch(device_logprobs=object(), ready_event=MagicMock())
+        batch2 = RareLogprobBatch(device_logprobs=object(), ready_event=MagicMock())
+        p._step_rare_batch = batch2
+        got = p.take_step_rare_batch()
+        assert got is batch2
+        assert p.take_step_rare_batch() is None
 
-        # AscendAsyncOutput owns its pending independently of processor slot.
+        # AscendAsyncOutput owns its batch independently of processor slot.
         consumed: list[object] = []
 
-        def _consume(output, *, pending=None):
-            consumed.append(pending)
+        def _feed(output, *, batch=None):
+            consumed.append(batch)
 
-        p.consume_rare_pairs = _consume  # type: ignore[method-assign]
+        p.feed_rare_logprobs = _feed  # type: ignore[method-assign]
         p.runner.runtime_guard = p
         inner = MagicMock()
         inner.get_output.return_value = SimpleNamespace(req_ids=["x"], sampled_token_ids=None)
-        out_a = AscendAsyncOutput(inner, p.runner, rare_pair=(hold1, ev1))
-        out_b = AscendAsyncOutput(inner, p.runner, rare_pair=(hold2, ev2))
+        out_a = AscendAsyncOutput(inner, p.runner, rare_batch=batch1)
+        out_b = AscendAsyncOutput(inner, p.runner, rare_batch=batch2)
         out_a.get_output()
         out_b.get_output()
-        assert consumed == [(hold1, ev1), (hold2, ev2)]
+        assert consumed == [batch1, batch2]
     finally:
         RequestGuardStore.reset_for_tests()

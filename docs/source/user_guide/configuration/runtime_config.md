@@ -131,14 +131,14 @@ Algorithm knobs live in packaged ``detector/rare/rare.json`` (not runtime_config
 per-tokenizer rare table is always built at model warmup from the served
 tokenizer; the shared GB model (`rare_gb.npz`) ships with the package.
 
-Guard collects `(top1, chosen)` natural-log logprobs from a pre-sample logits
+Guard collects `(top1, sampled)` natural-log logprobs from a pre-sample logits
 stash via Ascend Triton ``_narrow_collect_partials`` / ``_narrow_collect_finish`` (no API
 ``SamplingParams.logprobs``). Sampled ids stay on device and the kernels read
-logits by stride. Each step's device pair is attached to that step's
-``AscendAsyncOutput`` (no shared runner slot). ``get_output`` only submits to a
-dedicated rare-pair wait queue; that worker waits for collect, issues the pair
-D2H, then pack+feeds. Request finish flushes look-ahead only after those
-jobs drain. Prefer shadow/`report` first — strict-tier holdout false-positive
+logits by stride. Each step's ``RareLogprobBatch`` is attached to that step's
+``AscendAsyncOutput`` (no shared runner slot). ``get_output`` only submits to
+``RareLogprobFeedQueue``; that worker waits for collect, issues the D2H, then
+pack+feeds. Request finish flushes look-ahead at reap after ``rare_feed_jobs``
+drain. Prefer shadow/`report` first — strict-tier holdout false-positive
 rate can exceed 0.1% on some corpora.
 
 ### manual_trigger

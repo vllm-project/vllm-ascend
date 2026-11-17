@@ -183,14 +183,14 @@ def runtime_guard_sample_tokens(sample_tokens_fn):
         output = result.model_runner_output
         if guard.needs_sample_phase_hooks():
             output = maybe_wrap_v2_async_output(output, self)
-            # Non-AsyncOutput path: consume the step's rare pair immediately.
-            # Async path attaches the hold onto AscendAsyncOutput instead.
-            take = getattr(guard, "take_step_rare_pair", None)
-            consume = getattr(guard, "consume_rare_pairs", None)
-            if callable(take) and callable(consume) and not isinstance(output, AscendAsyncOutput):
-                pending = take()
-                if pending is not None:
-                    consume(output, pending=pending)
+            # Non-AsyncOutput path: feed this step's rare batch immediately.
+            # Async path attaches the batch onto AscendAsyncOutput instead.
+            take = getattr(guard, "take_step_rare_batch", None)
+            feed = getattr(guard, "feed_rare_logprobs", None)
+            if callable(take) and callable(feed) and not isinstance(output, AscendAsyncOutput):
+                batch = take()
+                if batch is not None:
+                    feed(output, batch=batch)
         return output
 
     return wrapper
@@ -414,19 +414,20 @@ def maybe_wrap_v2_async_output(output: Any, runner: Any) -> Any:
     Non-output ranks keep the bare ``AsyncOutput`` (unique_reply_rank already
     forwards only TP0 into ``get_output``).
 
-    Attaches this step's rare_chars device hold onto the wrapper so async
-    scheduling cannot overwrite a single runner-level slot before ``get_output``.
+    Attaches this step's rare_chars :class:`RareLogprobBatch` onto the wrapper
+    so async scheduling cannot overwrite a single runner-level slot before
+    ``get_output``.
     """
     if not isinstance(output, AsyncOutput):
         return output
     if not is_async_output_rank():
         return output
-    rare_pair = None
+    rare_batch = None
     guard = getattr(runner, "runtime_guard", None)
-    take = getattr(guard, "take_step_rare_pair", None) if guard is not None else None
+    take = getattr(guard, "take_step_rare_batch", None) if guard is not None else None
     if callable(take):
-        rare_pair = take()
-    return AscendAsyncOutput(output, runner, rare_pair=rare_pair)
+        rare_batch = take()
+    return AscendAsyncOutput(output, runner, rare_batch=rare_batch)
 
 
 class AscendAsyncOutput(AsyncModelRunnerOutput):
@@ -435,22 +436,22 @@ class AscendAsyncOutput(AsyncModelRunnerOutput):
     Must be the only after-sample IO append for v2: ``AsyncOutput.sampled_token_ids``
     is padded until ``get_output`` trims with ``num_sampled`` (W2-3 / D-11).
 
-    ``rare_pair`` is the per-step ``(device_hold, collect_event)`` for rare_chars;
+    ``rare_batch`` is the per-step :class:`RareLogprobBatch` for rare_chars;
     owned by this output object so overlapping async steps cannot cross-feed.
     """
 
-    def __init__(self, inner: AsyncOutput, runner: Any, *, rare_pair: Any = None):
+    def __init__(self, inner: AsyncOutput, runner: Any, *, rare_batch: Any = None):
         self._inner = inner
         self._runner = runner
-        self._rare_pair = rare_pair
+        self._rare_batch = rare_batch
 
     def get_output(self) -> ModelRunnerOutput:
         output = self._inner.get_output()
         guard = getattr(self._runner, "runtime_guard", None)
         if guard is not None:
-            pending = self._rare_pair
-            self._rare_pair = None
-            guard.consume_rare_pairs(output, pending=pending)
+            batch = self._rare_batch
+            self._rare_batch = None
+            guard.feed_rare_logprobs(output, batch=batch)
         _safe_check_after_sample(self._runner, output)
         return output
 

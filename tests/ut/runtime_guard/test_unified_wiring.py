@@ -34,7 +34,7 @@ class _FakeDfx:
     def check_before_sample(self, **kwargs):
         self.calls.append(kwargs)
 
-    def consume_rare_pairs(self, output, pending=None):
+    def feed_rare_logprobs(self, output, batch=None):
         return None
 
 
@@ -269,10 +269,10 @@ def test_d11_ascend_async_output_appends_trimmed_once():
             RequestIoSnapshotManager.get().append_batch(req_ids, sampled_token_ids)
             appended.append((list(sampled_token_ids), list(req_ids or [])))
 
-        def consume_rare_pairs(self, output, pending=None):
+        def feed_rare_logprobs(self, output, batch=None):
             return None
 
-        def take_step_rare_pair(self):
+        def take_step_rare_batch(self):
             return None
 
     runner = SimpleNamespace(runtime_guard=_Guard())

@@ -393,13 +393,6 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
 
     # ---- sample / get_output hooks ----------------------------------------
 
-    def _enable_rare_chars_finish_on_reap(self) -> None:
-        """Pair sync+feed runs off ``mark_finished``; flush look-ahead at reap."""
-        self._rare_chars_finish_on_reap = True
-
-    def _rare_chars_finish_deferred(self) -> bool:
-        return bool(getattr(self, "_rare_chars_finish_on_reap", False))
-
     def mark_finished(self, finished_req_ids: Any) -> None:
         """Mark requests finished; defer Store.clear until last sample is consumed.
 
@@ -409,16 +402,11 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         detect / append still see the same state. Sidecars + clear happen in
         :meth:`_reap_finished_requests`.
 
-        ``rare_chars`` look-ahead flush normally runs here. When pair D2H+feed
-        is async (default), finish is deferred to reap after ``rare_pair_jobs``
-        drain — otherwise ``finish_row`` sets ``_done`` and drops queued tokens.
+        When ``rare_chars`` is enabled, look-ahead flush runs at reap (after
+        ``rare_feed_jobs`` drain) so async D2H+feed cannot race ``finish_row``.
         """
         if not finished_req_ids:
             return
-        ids = [str(r) for r in finished_req_ids if r]
-        if ids and not self._rare_chars_finish_deferred() and self.detectors.rare_chars_enabled():
-            for alert in self.detectors.finish_rare_chars(ids):
-                self._handle_alert(alert, detector=self.detectors.get(alert.incident_type))
         RequestGuardStore.get().mark_finished(finished_req_ids, wave=self._current_wave())
 
     def _current_wave(self) -> int:
@@ -431,8 +419,8 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         reapable = store.list_reapable(current_wave=wave)
         if not reapable:
             return
-        # Async pair path: feeds done (rare_pair_jobs==0). Flush look-ahead, then clear.
-        if self._rare_chars_finish_deferred() and self.detectors.rare_chars_enabled():
+        # rare_feed_jobs==0 (or force-cleared). Flush look-ahead, then clear.
+        if self.detectors.rare_chars_enabled():
             for alert in self.detectors.finish_rare_chars(reapable):
                 self._handle_alert(alert, detector=self.detectors.get(alert.incident_type))
         store.clear_many(reapable, detectors=self.detectors)
@@ -531,13 +519,12 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         Appending ``AsyncOutput.sampled_token_ids`` (padded numpy) here inflated
         cumulative IO and false-triggered ``token_repeat`` (W2-3 / D-11).
         """
-        # sample and mark_finished are shared. Detectors off still stamps
-        # finish before end-of-wave so a same-wave manual report can read the
-        # prompt cache; reap waits until the next ``sync_for_step``.
+        # Detectors off still stamps finish before end-of-wave so a same-wave
+        # manual report can read the prompt cache; reap waits until the next
+        # ``sync_for_step``.
         result = sample_fn()
-        # Hook 3: mark_finished
-        self._soft_fail("mark_finished", lambda: self.mark_finished(result.finished_req_ids))
         if not self.needs_sample_phase_hooks():
+            self._soft_fail("mark_finished", lambda: self.mark_finished(result.finished_req_ids))
             # End-of-wave gate uses collectives — do not soft-fail (desync/hang).
             self.end_of_wave_sync(has_scheduled_tokens=True)
             return result
@@ -554,7 +541,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
                 sampled_token_ids=getattr(result.sampler_output, "sampled_token_ids", None),
             ),
         )
-        # Hook 3: mark_finished
+        # Hook 3: mark_finished (once; after rare collect stash)
         self._soft_fail("mark_finished", lambda: self.mark_finished(result.finished_req_ids))
         # Hook 4: check_after_spec (spec only). Gate here to skip the
         # accepted_token_nums_fn callback when detection is off; soft-fail
@@ -631,7 +618,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         self._schedule_rare_collect(logits, sampled_token_ids)
 
     def _schedule_rare_collect(self, logits: Any, sampled_token_ids: Any) -> None:
-        """Launch (top1, chosen) on main; D2H+feed deferred to RarePairWaitQueue."""
+        """Launch (top1, sampled) on main; D2H+feed deferred to RareLogprobFeedQueue."""
         from vllm_ascend.observability.runtime_guard.hooks import is_async_output_rank
 
         if not is_async_output_rank():
@@ -643,55 +630,58 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             pass
         import torch
 
-        from vllm_ascend.observability.runtime_guard.detector.rare_chars import device_chosen_token_ids
+        from vllm_ascend.observability.runtime_guard.detector.rare_chars import last_sampled_token_ids
 
         if not isinstance(logits, torch.Tensor) or not isinstance(sampled_token_ids, torch.Tensor):
             return
         if logits.numel() == 0 or logits.dim() != 2:
             return
         try:
-            chosen = device_chosen_token_ids(sampled_token_ids)
-            if chosen.numel() != logits.shape[0]:
+            token_ids = last_sampled_token_ids(sampled_token_ids)
+            if token_ids.numel() != logits.shape[0]:
                 return
             from vllm_ascend.worker.v2.sample.logprob import compute_top1_and_chosen_logprobs
 
-            packed = compute_top1_and_chosen_logprobs(logits, chosen, packed=True)
-            self._queue_rare_pair_device_only(packed)
+            packed = compute_top1_and_chosen_logprobs(logits, token_ids, packed=True)
+            self._stash_rare_batch(packed)
         except Exception:
             logger.exception("[runtime_guard: rare_chars] collect failed")
 
-    def _queue_rare_pair_device_only(self, packed: Any) -> None:
-        """Stash this step's device ``[rows, 2]`` hold + collect-done event."""
+    def _stash_rare_batch(self, packed: Any) -> None:
+        """Stash this step's :class:`RareLogprobBatch` for AsyncOutput."""
         import torch
 
-        leaked = getattr(self, "_step_rare_pair", None)
-        if leaked is not None:
-            hold, event = leaked
-            if event is not None:
-                event.synchronize()
-            del hold
-            logger.warning("[runtime_guard: rare_chars] dropped unconsumed step rare pair")
-        main_stream = getattr(self.runner, "main_stream", None)
-        collect_ev = torch.cuda.Event(blocking=True)
-        if main_stream is not None:
-            collect_ev.record(main_stream)
-        else:
-            collect_ev.record()
-        self._step_rare_pair = (packed, collect_ev)
+        from vllm_ascend.observability.runtime_guard.rare_logprob_feed import RareLogprobBatch
 
-    def take_step_rare_pair(self) -> tuple[Any, Any] | None:
-        """Detach this step's ``(device_hold, collect_event)`` for AsyncOutput."""
-        pending = getattr(self, "_step_rare_pair", None)
-        self._step_rare_pair = None
+        leaked = getattr(self, "_step_rare_batch", None)
+        if leaked is not None:
+            if leaked.ready_event is not None:
+                leaked.ready_event.synchronize()
+            del leaked
+            logger.warning("[runtime_guard: rare_chars] dropped unconsumed step rare batch")
+        main_stream = getattr(self.runner, "main_stream", None)
+        ready_event = torch.cuda.Event(blocking=True)
+        if main_stream is not None:
+            ready_event.record(main_stream)
+        else:
+            ready_event.record()
+        self._step_rare_batch = RareLogprobBatch(device_logprobs=packed, ready_event=ready_event)
+
+    def take_step_rare_batch(self) -> Any | None:
+        """Detach this step's :class:`RareLogprobBatch` for AsyncOutput."""
+        pending = getattr(self, "_step_rare_batch", None)
+        self._step_rare_batch = None
         return pending
 
-    def _materialize_rare_pair_cpu(self, packed: Any, collect_event: Any) -> Any:
+    def _copy_rare_batch_to_host(self, batch: Any) -> Any:
         """Wait for collect, then D2H ``[rows, 2]`` to pinned host memory."""
         import torch
         from vllm.v1.worker.gpu.async_utils import stream as copy_stream_ctx
 
-        if collect_event is not None:
-            collect_event.synchronize()
+        packed = batch.device_logprobs
+        ready_event = batch.ready_event
+        if ready_event is not None:
+            ready_event.synchronize()
         if packed is None:
             return None
         runner = self.runner
@@ -708,60 +698,60 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         copy_ev.synchronize()
         return cpu
 
-    def consume_rare_pairs(self, output: Any, *, pending: tuple[Any, Any] | None = None) -> None:
-        """Submit pair D2H + rare_chars feed onto RarePairWaitQueue."""
-        if pending is None:
+    def feed_rare_logprobs(self, output: Any, *, batch: Any | None = None) -> None:
+        """Submit rare logprob D2H + detector feed onto RareLogprobFeedQueue."""
+        if batch is None:
             return
-        hold, collect_event = pending
         req_ids = [str(rid) for rid in (getattr(output, "req_ids", None) or []) if rid]
         n_req = len(req_ids)
         sampled = getattr(output, "sampled_token_ids", None)
 
         if n_req <= 0:
-            if collect_event is not None:
-                collect_event.synchronize()
-            del hold
+            if batch.ready_event is not None:
+                batch.ready_event.synchronize()
+            del batch
             return
 
-        self._enable_rare_chars_finish_on_reap()
         pinned = tuple(rid for rid in req_ids[:n_req] if rid)
         store = RequestGuardStore.get()
         if pinned:
-            store.add_rare_pair_jobs(pinned)
+            store.add_rare_feed_jobs(pinned)
 
-        def _finish_pair(
-            pair_hold=hold,
-            collect_event=collect_event,
+        def _finish_feed(
+            rare_batch=batch,
             req_ids=req_ids,
             n_req=n_req,
             sampled=sampled,
             pinned_ids=pinned,
         ) -> None:
             try:
-                cpu = self._materialize_rare_pair_cpu(pair_hold, collect_event)
-                del pair_hold
+                cpu = self._copy_rare_batch_to_host(rare_batch)
+                del rare_batch
                 if cpu is not None and n_req > 0:
-                    self._rare_pair_pack_and_feed(cpu, sampled, req_ids, n_req)
+                    self._pack_and_feed_rare(cpu, sampled, req_ids, n_req)
             except Exception:
-                logger.exception("[runtime_guard: rare_chars] async pair finish failed")
+                logger.exception("[runtime_guard: rare_chars] async feed finish failed")
             finally:
                 if pinned_ids:
-                    RequestGuardStore.get().finish_rare_pair_jobs(pinned_ids)
+                    RequestGuardStore.get().finish_rare_feed_jobs(pinned_ids)
 
-        from vllm_ascend.observability.runtime_guard.rare_pair_wait import (
-            get_rare_pair_wait_queue,
+        from vllm_ascend.observability.runtime_guard.rare_logprob_feed import (
+            get_rare_logprob_feed_queue,
         )
 
-        ok = bool(get_rare_pair_wait_queue().submit(_finish_pair))
+        ok = bool(get_rare_logprob_feed_queue().submit(_finish_feed))
         if not ok:
             if pinned:
-                store.finish_rare_pair_jobs(pinned)
+                store.finish_rare_feed_jobs(pinned)
+            if batch.ready_event is not None:
+                batch.ready_event.synchronize()
+            del batch
             logger.warning(
-                "[runtime_guard: rare_chars] pair wait queue full; dropped sync+feed req_ids=%s",
+                "[runtime_guard: rare_chars] feed queue full; dropped sync+feed req_ids=%s",
                 req_ids,
             )
 
-    def _rare_pair_pack_and_feed(
+    def _pack_and_feed_rare(
         self,
         cpu: Any,
         sampled: Any,
@@ -769,11 +759,11 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         n_req: int,
     ) -> None:
         try:
-            from vllm_ascend.observability.runtime_guard.detector.rare_chars import pack_rare_step
+            from vllm_ascend.observability.runtime_guard.detector.rare_chars import build_rare_feed_arrays
 
-            token_ids, top1, chosen = pack_rare_step(cpu, sampled, n_req)
+            token_ids, top1, chosen = build_rare_feed_arrays(cpu, sampled, n_req)
         except Exception:
-            logger.exception("[runtime_guard: rare_chars] pair D2H materialize failed")
+            logger.exception("[runtime_guard: rare_chars] feed array materialize failed")
             return
         n = int(token_ids.shape[0])
         if n <= 0:
