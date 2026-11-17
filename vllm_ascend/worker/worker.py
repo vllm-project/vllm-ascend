@@ -1098,7 +1098,10 @@ class NPUWorker(WorkerBase):
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
-        self.model_runner._dummy_run(num_tokens, uniform_decode=True)
+        if getattr(self.model_runner, "moe_token_cut_model_graph", None) is not None:
+            self.model_runner._dummy_run(num_tokens, uniform_decode=True, token_cut_graph_runtime=True)
+        else:
+            self.model_runner._dummy_run(num_tokens, uniform_decode=True)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""

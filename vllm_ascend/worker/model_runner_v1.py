@@ -201,6 +201,13 @@ from vllm_ascend.worker.device_metadata import (
     DeviceMetadataTask,
     DeviceMetadataTaskProvider,
 )
+from vllm_ascend.worker.moe_token_cut_collective import deferred_request_ids_from_mask
+from vllm_ascend.worker.moe_token_cut_handoff import (
+    WorkerDeferredPlan,
+    attach_deferred_request_ids,
+    build_worker_deferred_plan,
+)
+from vllm_ascend.worker.moe_token_cut_state import MoETokenCutState
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
 
@@ -358,6 +365,21 @@ class NPUModelRunner(GPUModelRunner):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        self.moe_token_cut_state = MoETokenCutState(
+            self.ascend_config.moe_token_cut_config,
+            num_layers=getattr(self.model_config.hf_text_config, "num_hidden_layers", 0),
+            data_parallel_size=self.dp_size,
+        )
+        self._moe_token_cut_deferred_plan: WorkerDeferredPlan | None = None
+        self._moe_token_cut_hook_handles = []
+        self.moe_token_cut_model_graph = None
+        if self.ascend_config.moe_token_cut_config.graph_mode == "full_decode":
+            from vllm_ascend.worker.moe_token_cut_model_graph import MoETokenCutModelGraph
+
+            MoETokenCutModelGraph.validate_runtime()
+            self.moe_token_cut_model_graph = MoETokenCutModelGraph(
+                self.moe_token_cut_state, self.scheduler_config.max_num_seqs
+            )
         self.use_score_encoder_cache = is_score_encoder_cache_manager(self.vllm_config)
 
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
@@ -711,6 +733,8 @@ class NPUModelRunner(GPUModelRunner):
         return getattr(hf_config, "model_type", None) == "qwen3" and "Qwen3DSparkModel" in architectures
 
     def _use_aclgraph(self) -> bool:
+        if getattr(self, "moe_token_cut_model_graph", None) is not None:
+            return not self.model_config.enforce_eager
         return (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and (
@@ -835,6 +859,11 @@ class NPUModelRunner(GPUModelRunner):
         ).unsqueeze(1)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
+        token_cut_state = getattr(self, "moe_token_cut_state", None)
+        if token_cut_state is not None:
+            token_cut_state.discard_requests(
+                set(getattr(scheduler_output, "finished_req_ids", ()))
+            )
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
         req_data = scheduler_output.scheduled_cached_reqs
@@ -2063,6 +2092,7 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        self._moe_token_cut_deferred_plan = None
         if vllm_version_is("0.27.1"):
             if self.vllm_config.model_config.enable_return_routed_experts and self.routed_experts_initialized:
                 self.routed_experts_capturer.clear_buffer()
@@ -2166,7 +2196,7 @@ class NPUModelRunner(GPUModelRunner):
                         # returns True. before returning early here we call
                         # dummy run to ensure coordinate_batch_across_dp
                         # is called into to avoid out of sync issues.
-                        self._dummy_run(1, skip_gdn_state_update=True)
+                        self._dummy_run(1, skip_gdn_state_update=True, token_cut_graph_runtime=True)
                     if not has_kv_transfer_group():
                         # Return empty ModelRunnerOutput if no work to do.
                         return EMPTY_MODEL_RUNNER_OUTPUT
@@ -2381,6 +2411,24 @@ class NPUModelRunner(GPUModelRunner):
             get_pp_group().is_last_rank or self.broadcast_pp_output
         )
         active_device_metadata_executor = self._prepare_device_metadata_for_forward(cudagraph_mode)
+        is_single_token_decode = bool(
+            not use_spec_decode
+            and not scheduler_output.scheduled_new_reqs
+            and np.all(num_scheduled_tokens_np == 1)
+            and np.all(
+                self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                >= self.input_batch.num_prompt_tokens[:num_reqs]
+            )
+        )
+        self.moe_token_cut_state.begin_forward(
+            is_decode=is_single_token_decode,
+            is_profile_run=False,
+            is_draft_model=False,
+            num_actual_tokens=scheduler_output.total_num_scheduled_tokens,
+            request_ids=tuple(str(req_id) for req_id in req_ids),
+            allow_cut=getattr(scheduler_output, "moe_token_cut_allow_cut", None),
+            allow_restore=getattr(scheduler_output, "moe_token_cut_allow_restore", None),
+        )
         with (
             record_function_or_nullcontext("forward"),
             set_ascend_forward_context(
@@ -2396,6 +2444,7 @@ class NPUModelRunner(GPUModelRunner):
                 skip_compiled=has_encoder_input,
                 has_sinks=self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
+                moe_token_cut_state=self.moe_token_cut_state,
             ),
             self.maybe_get_kv_connector_output(
                 scheduler_output,
@@ -2636,6 +2685,10 @@ class NPUModelRunner(GPUModelRunner):
             apply_grammar_bitmask(scheduler_output, grammar_output, self.input_batch, logits)
             logits = logits.to(self.device).to(logits_dtype)
 
+        deferred_mask = self.moe_token_cut_state.take_global_deferred_mask()
+        if deferred_mask is not None:
+            self._install_moe_token_cut_deferred_mask(deferred_mask)
+
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
@@ -2793,6 +2846,7 @@ class NPUModelRunner(GPUModelRunner):
                     routing_data=self.routed_experts_cpu[:total].numpy(),
                     slot_mapping=self.routed_experts_slot_mapping_cpu[:total].numpy(),
                 )
+            self._attach_moe_token_cut_handoff(model_runner_output)
             return model_runner_output
 
         # Async path: produce a device-side snapshot that the async
@@ -2831,6 +2885,72 @@ class NPUModelRunner(GPUModelRunner):
             async_output.async_copy_ready_event,
         )
         return async_output
+
+    def _install_moe_token_cut_deferred_mask(
+        self,
+        deferred_mask: torch.Tensor,
+    ) -> WorkerDeferredPlan:
+        """Merge a global deferred mask into the existing sampling discards.
+
+        This method is the only intended synchronization point between the
+        device-side EP decision and host-side sampling bookkeeping. It must be
+        called after forward and before ``_bookkeeping_sync``.
+        """
+        if self.use_async_scheduling:
+            raise ValueError("MoE token-cut bookkeeping does not support async scheduling")
+
+        request_ids = tuple(self.input_batch.req_ids)
+        deferred_request_ids = deferred_request_ids_from_mask(
+            request_ids,
+            deferred_mask,
+        )
+        existing_discard_indices = tuple(
+            int(index)
+            for index in self.discard_request_indices.np[
+                : self.num_discarded_requests
+            ]
+        )
+        plan = build_worker_deferred_plan(
+            request_ids,
+            (deferred_request_ids,),
+            existing_discard_indices,
+        )
+
+        discard_count = len(plan.discard_indices)
+        row_count = len(request_ids)
+        if discard_count > len(self.discard_request_indices.np):
+            raise RuntimeError("MoE token-cut discard plan exceeds the Runner buffer")
+        if row_count > len(self.discard_request_mask.np):
+            raise RuntimeError("MoE token-cut request plan exceeds the Runner mask")
+
+        self.discard_request_indices.np[:discard_count] = np.asarray(
+            plan.discard_indices,
+            dtype=self.discard_request_indices.np.dtype,
+        )
+        self.num_discarded_requests = discard_count
+        self.discard_request_mask.np[:row_count].fill(False)
+        if plan.discard_indices:
+            self.discard_request_mask.np[list(plan.discard_indices)] = True
+        self.discard_request_indices.copy_to_gpu(discard_count)
+        self.discard_request_mask.copy_to_gpu(row_count)
+        self._moe_token_cut_deferred_plan = plan if deferred_request_ids else None
+        return plan
+
+    def _attach_moe_token_cut_handoff(
+        self,
+        model_runner_output: ModelRunnerOutput,
+    ) -> None:
+        """Attach the pending handoff only after bookkeeping cleared its rows."""
+        plan = self._moe_token_cut_deferred_plan
+        if plan is None:
+            return
+        try:
+            attach_deferred_request_ids(
+                model_runner_output,
+                plan.deferred_request_ids,
+            )
+        finally:
+            self._moe_token_cut_deferred_plan = None
 
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
     def _sample(self, logits, spec_decode_metadata):
@@ -3006,13 +3126,14 @@ class NPUModelRunner(GPUModelRunner):
         self,
         forward_context: ForwardContext,
         num_tokens_padded: int,
+        token_cut_phase: str = "after_launch",
     ) -> None:
         if (
             forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
             and not forward_context.capturing
             and not self.use_sparse and not self.use_compress
         ):
-            if self.enable_enpu:
+            if self.enable_enpu and getattr(forward_context, "moe_token_cut_graph_manager", None) is None:
                 torch.npu.current_stream().synchronize()
 
             update_full_graph_params(
@@ -3022,6 +3143,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_tokens_padded,
                 self.vllm_config,
                 self.speculative_config,
+                token_cut_phase=token_cut_phase,
             )
 
     def _model_forward(
@@ -3031,6 +3153,7 @@ class NPUModelRunner(GPUModelRunner):
         positions: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        _token_cut_graph_runtime: bool = True,
         **model_kwargs: dict[str, Any],
     ):
         assert self.model is not None
@@ -3045,6 +3168,13 @@ class NPUModelRunner(GPUModelRunner):
             **model_kwargs,
         }
         run_model = partial(self.model, **model_inputs)
+
+        if self.moe_token_cut_model_graph is not None and _token_cut_graph_runtime:
+            hidden_states = self.moe_token_cut_model_graph.run(
+                self, forward_context, model_inputs, num_tokens_padded
+            )
+            if hidden_states is not None:
+                return hidden_states
 
         if self.enable_enpu:
             # The soft segmentation scenario requires event.record first, then event.wait
@@ -3135,6 +3265,11 @@ class NPUModelRunner(GPUModelRunner):
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
+        # Token-cut chooses one fixed-capacity FULL descriptor only after EP
+        # agreement, inside _model_forward. Keep profile/prefill/mixed batches
+        # and generic dummy runs out of the ordinary FULL graph path.
+        if self.moe_token_cut_model_graph is not None:
+            force_eager = True
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
         has_initial_state = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
         if self.use_dcp:
@@ -3636,6 +3771,7 @@ class NPUModelRunner(GPUModelRunner):
         profile_seq_lens: int | None = None,
         profile_cpp: bool = False,
         skip_gdn_state_update: bool = False,
+        token_cut_graph_runtime: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # only support eager mode and piecewise graph now
         assert cudagraph_runtime_mode is None or cudagraph_runtime_mode.valid_runtime_modes()
@@ -3903,6 +4039,17 @@ class NPUModelRunner(GPUModelRunner):
                     return self.drafter.model.compute_logits(hidden_states[dummy_indices])
 
             active_device_metadata_executor = self._prepare_device_metadata_for_forward(cudagraph_runtime_mode)
+            dummy_token_cut_state = None
+            if self.dp_size > 1 and self.moe_token_cut_state.config.enabled:
+                # Idle DP workers still execute every MC2 layer. They must
+                # join token-cut collectives with no locally eligible requests.
+                dummy_token_cut_state = self.moe_token_cut_state
+                dummy_token_cut_state.begin_forward(
+                    is_decode=False,
+                    is_profile_run=is_profile,
+                    is_draft_model=False,
+                    num_actual_tokens=0,
+                )
             with set_ascend_forward_context(
                 attn_metadata,
                 self.vllm_config,
@@ -3916,9 +4063,11 @@ class NPUModelRunner(GPUModelRunner):
                 device_metadata_executor=active_device_metadata_executor,
                 has_sinks = self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
+                moe_token_cut_state=dummy_token_cut_state,
             ):
                 outputs = self._model_forward(
-                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
+                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds,
+                    _token_cut_graph_runtime=token_cut_graph_runtime,
                 )
             if active_device_metadata_executor is not None:
                 active_device_metadata_executor.release()
@@ -4004,6 +4153,46 @@ class NPUModelRunner(GPUModelRunner):
             # collect eplb heat for all requests.
             self.eplb_heat_collection_status =  True
 
+    def _register_moe_token_cut_capture_hooks(self) -> None:
+        """Capture Qwen3-MoE's post-attention hidden/residual boundary."""
+        token_cut_config = self.ascend_config.moe_token_cut_config
+        if not token_cut_config.enabled or token_cut_config.mode != "capture":
+            return
+
+        inner_model = getattr(self.model, "model", None)
+        layers = getattr(inner_model, "layers", None)
+        if layers is None:
+            raise RuntimeError("Unable to locate Qwen3-MoE decoder layers for token-cut capture")
+
+        start_layer = int(getattr(inner_model, "start_layer", 0))
+        for layer_idx, layer in enumerate(layers, start=start_layer):
+            if not hasattr(getattr(layer, "mlp", None), "experts"):
+                continue
+            post_attention_norm = getattr(layer, "post_attention_layernorm", None)
+            if post_attention_norm is None:
+                raise RuntimeError(
+                    f"Qwen3-MoE layer {layer_idx} has no post_attention_layernorm"
+                )
+
+            def capture_boundary(module, args, output, *, captured_layer_idx=layer_idx):
+                del module, args
+                if not isinstance(output, tuple) or len(output) != 2:
+                    raise RuntimeError(
+                        "Qwen3-MoE post_attention_layernorm must return "
+                        "(hidden_states, residuals)"
+                    )
+                self.moe_token_cut_state.set_layer_inputs(
+                    captured_layer_idx,
+                    output[0],
+                    output[1],
+                )
+
+            self._moe_token_cut_hook_handles.append(
+                post_attention_norm.register_forward_hook(capture_boundary)
+            )
+        if not self._moe_token_cut_hook_handles:
+            raise RuntimeError("No Qwen3-MoE sparse decoder layers found for token-cut capture")
+
     def load_model(self) -> None:
         load_model_start_time = time.perf_counter()
         logger.info("Starting to load model %s...", self.model_config.model)
@@ -4023,6 +4212,7 @@ class NPUModelRunner(GPUModelRunner):
                 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
                 DefaultModelLoader._init_ep_weight_filter = mock_pass
             self.model: nn.Module = get_model(vllm_config=self.vllm_config)
+            self._register_moe_token_cut_capture_hooks()
             for name, _ in self.model.named_parameters():
                 # sinks is a kind of parameter in attention
                 # only set in weight name
@@ -4118,6 +4308,7 @@ class NPUModelRunner(GPUModelRunner):
             if (
                 breakable_cudagraph.is_breakable_cudagraph_enabled()
                 and cudagraph_mode != CUDAGraphMode.NONE
+                and self.moe_token_cut_model_graph is None
             ):
                 self.model = BreakableACLGraphWrapper(
                     self.model,
@@ -5446,6 +5637,31 @@ class NPUModelRunner(GPUModelRunner):
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
+        if self.moe_token_cut_model_graph is not None:
+            from vllm.compilation.counter import compilation_counter
+            from vllm.compilation.monitor import set_cudagraph_capturing_enabled
+            from vllm.distributed.parallel_state import graph_capture
+
+            adapter = self.moe_token_cut_model_graph
+            compilation_counter.num_gpu_runner_capture_triggers += 1
+            set_cudagraph_capturing_enabled(True)
+            adapter.startup_capture = True
+            try:
+                with _torch_cuda_wrapper(), self._freeze_gc(), graph_capture(device=self.device):
+                    torch.npu.synchronize()
+                    before = torch.npu.mem_get_info()[0]
+                    self._dummy_run(
+                        adapter.capacity, uniform_decode=True, force_attention=True,
+                        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                        allow_microbatching=False, token_cut_graph_runtime=True, is_graph_capturing=True,
+                    )
+                    torch.npu.synchronize()
+                    graph_bytes = max(0, before - torch.npu.mem_get_info()[0])
+                logger.info("Captured token-cut decode with ACLGraphWrapper (capacity=%d)", adapter.capacity)
+                return graph_bytes
+            finally:
+                adapter.startup_capture = False
+                set_cudagraph_capturing_enabled(False)
         parent_module_name = _get_gpu_model_runner_module_name(self)
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
             cuda_graph_size = GPUModelRunner.capture_model(self)

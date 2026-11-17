@@ -1691,6 +1691,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         record_attention_compute_start()
         num_tokens = query.shape[0]
 
+        if getattr(attn_metadata, "moe_token_cut_model_graph", False):
+            return _EXTRA_CTX.moe_token_cut_state.model_graph_frame.attention(self, query, attn_metadata, output)
+
         if (
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
             and self.sliding_window is None
