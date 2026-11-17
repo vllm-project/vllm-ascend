@@ -35,6 +35,29 @@ weighted scatter API.
 
 ## Validation
 
+### Upstream integration and compilation scope
+
+The PR incorporates upstream main `3ae9de590` (2026-11-17). The kernel, EPLB
+wrapper, capability helper and regression tests are unchanged from tested
+candidate `8b66715c9`; the merge has local static validation, not a new full
+repository or model-level NPU run.
+
+The shared production entry point is
+`vllm_ascend.distributed.eplb.tensor_ops.count_allgather_tokens`; its NPU branch
+calls the public Triton wrapper. Test entry point:
+`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_eplb_count.py`.
+Integer outputs require exact equality (`rtol=0`, `atol=0`).
+
+Producer specialization depends on pointer dtypes/alignment, mask stride,
+TOPK, padded bin count, tile size and compiler target/options. Runtime route
+count, expert start and expert count use `do_not_specialize`; changing tensor
+contents alone does not require another variant. The reducer specializes on
+program count, padded reduction size, padded bins and valid expert count.
+These control its fixed tensor dimensions and output mask. Thus changes in the
+producer grid can also require a reducer variant. No new warmup registry or
+runtime configuration is introduced. Model startup/serving compilation counts,
+model accuracy and model performance remain unmeasured.
+
 ### Two-stage candidate (2026-11-17)
 
 A3 and A5 each passed 83/83 exact tests. Mutable Graph coverage includes
