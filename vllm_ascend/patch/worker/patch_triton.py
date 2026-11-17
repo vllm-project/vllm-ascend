@@ -7,6 +7,7 @@ from vllm.utils.math_utils import next_power_of_2
 
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.layernorm_guard import LayerNormFn
+from vllm_ascend.utils import vllm_version_is
 
 
 def _next_power_of_2(n):
@@ -166,23 +167,10 @@ thinking_budget._load_effective_token = _load_effective_token_ascend
 thinking_budget._update_committed_marker_cache_kernel = _update_committed_marker_cache_kernel_ascend
 trace_replay.apply_trace_tokens = apply_trace_tokens
 
+# Drop this guard when the paired vLLM release includes MRV2 suffix.
+if not vllm_version_is("0.33.0"):
+    import vllm.v1.worker.gpu.spec_decode.suffix.speculator as suffix_speculator
 
-def patch_suffix_kernels() -> None:
-    """Bind suffix launch adapters once per Ascend worker, including repeated setup.
-
-    Older vLLM lanes predate MRV2 suffix. Skip only that missing module; an
-    unrelated missing dependency must still fail rather than silently using
-    the GPU kernels. Remove these bindings when upstream has device dispatch.
-    """
-    module_name = "vllm.v1.worker.gpu.spec_decode.suffix.speculator"
-    try:
-        import vllm.v1.worker.gpu.spec_decode.suffix.speculator as suffix_speculator
-    except ModuleNotFoundError as exc:
-        if exc.name in ("vllm.v1.worker.gpu.spec_decode.suffix", module_name):
-            return
-        raise
-
-    # Lazy imports keep suffix device code out of older worker lanes.
     from vllm_ascend.ops.triton.spec_decode.suffix import (
         SuffixKernelLaunchAdapter,
         launch_suffix_finalize,
@@ -195,6 +183,3 @@ def patch_suffix_kernels() -> None:
     suffix_speculator._suffix_finalize_kernel = SuffixKernelLaunchAdapter(launch_suffix_finalize)
     suffix_speculator._suffix_observe_kernel = SuffixKernelLaunchAdapter(launch_suffix_observe)
     suffix_speculator._suffix_ingest_kernel = SuffixKernelLaunchAdapter(launch_suffix_ingest)
-
-
-patch_suffix_kernels()

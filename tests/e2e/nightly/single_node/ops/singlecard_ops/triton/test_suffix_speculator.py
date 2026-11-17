@@ -9,24 +9,22 @@ import pytest
 import torch
 from vllm.platforms import current_platform
 
+from vllm_ascend.utils import vllm_version_is
+
 if current_platform.device_type != "npu":
     pytest.skip("requires Ascend NPU", allow_module_level=True)
+if vllm_version_is("0.33.0"):
+    pytest.skip("requires upstream MRV2 suffix support", allow_module_level=True)
 
 from vllm_ascend.ops.triton.spec_decode.suffix import _suffix_local_scan_kernel  # noqa: E402
+
+# These tests instantiate the speculator without an NPUWorker.
+from vllm_ascend.patch.worker import patch_triton  # noqa: E402, F401
 from vllm_ascend.worker.v2.spec_decode.suffix.speculator import (  # noqa: E402
     AscendSuffixSpeculator as SuffixSpeculator,
 )
 
 DEVICE = torch.device("npu")
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _install_suffix_kernel_patches():
-    # These fixtures instantiate the speculator without creating an NPUWorker.
-    # Install the same persistent bindings that worker startup normally applies.
-    from vllm_ascend.patch.worker.patch_triton import patch_suffix_kernels
-
-    patch_suffix_kernels()
 
 
 def _local_draft(hist, k, depth):
