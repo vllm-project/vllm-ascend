@@ -101,12 +101,11 @@ def test_glm_dflash_selection_is_retained(selector_runtime):
     r = selector_runtime
     spec = r.config.speculative_config
     spec.method = "dflash"
-    spec.target_model_config.hf_text_config.model_type = "glm_moe_dsa"
+    spec.target_model_config.hf_text_config.model_type = "glm5_next_text"
     spec.draft_model_config.architectures = ["DFlash2DraftModel"]
     r.backends.model_tag = "dflash_head"
-    assert r.select((False, False, False), r.selector)
     spec.enforce_eager = False
-    assert not r.select((False, False, False), r.selector)
+    assert r.select((False, False, False), r.selector)
 
 
 def test_flash_attn_plan_cache_separates_causal_masks(monkeypatch):

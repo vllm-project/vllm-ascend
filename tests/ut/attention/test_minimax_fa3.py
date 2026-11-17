@@ -20,6 +20,62 @@ import torch
 ROOT = Path(__file__).resolve().parents[3]
 
 
+@pytest.mark.parametrize(
+    "method,eager,device_type,expected_calls",
+    [
+        ("dflash", True, "npu", 1),
+        ("dflash", False, "npu", 0),
+        ("dspark", True, "npu", 0),
+        ("dflash", True, "cpu", 0),
+    ],
+)
+def test_eager_dflash_scheduler_registration_completes_before_runtime(
+    fa3, monkeypatch, method, eager, device_type, expected_calls
+):
+    builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
+    builder.device = NS(type=device_type, index=0)
+    builder.block_size = 128
+    builder.scheduler_specs = {(32, 4, 128, torch.bfloat16, 0.1, 0.0, 2048)}
+    events = []
+    scheduler = Mock(side_effect=lambda **kwargs: events.append("scheduler") or torch.zeros(8, dtype=torch.uint8))
+    sync = Mock(side_effect=lambda *_: events.append("synchronize"))
+    fake_torch = NS(
+        int32=torch.int32,
+        arange=Mock(return_value=torch.tensor([0, 1], dtype=torch.int32)),
+        ones=Mock(return_value=torch.ones(1, dtype=torch.int32)),
+        npu=NS(synchronize=sync),
+    )
+    namespace = fa3._warmup_eager_dflash_scheduler.__globals__
+    monkeypatch.setitem(namespace, "torch", fake_torch)
+    monkeypatch.setitem(namespace, "get_scheduler_metadata", scheduler)
+    monkeypatch.setitem(namespace, "logger", NS(info=Mock()))
+    fa3._warmup_eager_dflash_scheduler(
+        NS(speculative_config=NS(method=method, enforce_eager=eager)),
+        builder.device,
+        builder.scheduler_specs,
+        builder.block_size,
+    )
+    assert scheduler.call_count == expected_calls
+    if expected_calls:
+        assert events == ["synchronize", "scheduler", "synchronize"]
+        args = scheduler.call_args.kwargs
+        assert args["batch_size"] == 1 and args["page_size"] == 128
+        assert args["num_heads_q"] == 32 and args["num_heads_kv"] == 4
+        torch.testing.assert_close(args["cu_seqlens_q"], torch.tensor([0, 1], dtype=torch.int32))
+        assert builder.scheduler_specs == {(32, 4, 128, torch.bfloat16, 0.1, 0.0, 2048)}
+        # Layers with the same operator contract share one initialization.
+        fa3._warmup_eager_dflash_scheduler(
+            NS(speculative_config=NS(method=method, enforce_eager=eager)),
+            builder.device,
+            builder.scheduler_specs,
+            builder.block_size,
+        )
+        assert scheduler.call_count == 1
+        assert sync.call_count == 2
+    else:
+        sync.assert_not_called()
+
+
 def execute_nodes(path, names, namespace):
     tree = ast.parse(path.read_text())
     nodes = [node for node in tree.body if getattr(node, "name", None) in names]
@@ -67,6 +123,7 @@ def selection(monkeypatch, profiles):
     )
     monkeypatch.setitem(sys.modules, "vllm.config", NS(get_current_vllm_config_or_none=lambda: runtime.config))
     monkeypatch.setitem(sys.modules, "vllm.v1.attention.backend", NS(AttentionType=NS(DECODER="decoder")))
+    monkeypatch.setitem(sys.modules, "vllm.compilation", NS(backends=NS(model_tag="backbone")))
     namespace = {
         "torch": torch,
         "HardwareCapability": profiles.HardwareCapability,
@@ -80,7 +137,9 @@ def selection(monkeypatch, profiles):
         "_validate_flash_attn_backend": lambda *args: False,
     }
     path = ROOT / "vllm_ascend/platform.py"
-    execute_nodes(path, {"_validate_flash_attn_npu_3", "_uses_minimax_fa3"}, namespace)
+    execute_nodes(
+        path, {"_validate_flash_attn_npu_3", "_uses_minimax_fa3", "_is_supported_flash_attn_draft"}, namespace
+    )
     cls = next(n for n in ast.parse(path.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "NPUPlatform")
     method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_select_attn_backend_cls")
     method.decorator_list = []
@@ -191,7 +250,10 @@ def fa3():
         "AttentionType": NS(DECODER="decoder"),
         "logger": NS(info_once=lambda *args, **kwargs: None),
         "get_scheduler_metadata": Mock(),
+        "get_current_vllm_config_or_none": lambda: None,
+        "_FA3_WARMUP_KEYS": set(),
         "flash_attn_with_kvcache": Mock(),
+        "envs_vllm": NS(VLLM_KV_CACHE_LAYOUT="NHD"),
         "DeviceOperator": NS(reshape_and_cache=Mock()),
         "notify_kv_cache_written": Mock(),
     }
@@ -203,6 +265,7 @@ def fa3():
     namespace["attention_transfer_window"] = transfer
     names = {
         "_get_window_size",
+        "_warmup_eager_dflash_scheduler",
         "AscendFlashAttentionBackend",
         "AscendFlashAttentionMetadata",
         "AscendFlashAttentionMetadataBuilder",
@@ -267,6 +330,116 @@ def test_cache_write_precedes_attention_and_transfer_completion(fa3):
     events.clear()
     impl.forward(layer, query, None, None, cache, None, out)
     assert not events and not out.any()
+
+
+@pytest.mark.parametrize("device", ["A2", "A3"])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None,
+        "target_tag",
+        "other_target",
+        "other_draft",
+        "use_pcp",
+        "use_dcp",
+        "quantized_draft_kv",
+        "missing_operator",
+        "target_attention",
+        "no_model",
+    ],
+)
+def test_glm_dflash_local_draft_routing(selection, device, fault):
+    r = selection
+    r.device = getattr(r.profiles.AscendDeviceType, device)
+    target = NS(hf_text_config=NS(model_type="glm5_next_text"), hf_config=NS(architectures=["Glm5NextForCausalLM"]))
+    r.config.model_config = target
+    r.config.speculative_config = NS(
+        method="dflash",
+        enforce_eager=False,
+        target_model_config=target,
+        draft_model_config=NS(architectures=["DFlash2DraftModel"]),
+        enable_adaptive_verification=False,
+    )
+    # The target is distributed and C8-quantized; the selected draft layer is
+    # local with unquantized KV. Global topology must not reject that layer.
+    r.config.parallel_config = NS(
+        pipeline_parallel_size=2, prefill_context_parallel_size=8, decode_context_parallel_size=1
+    )
+    r.config.quant_config = NS(enable_c8_quant=True)
+    backends = sys.modules["vllm.compilation"].backends
+    backends.model_tag = "dflash_head"
+    if fault == "target_tag":
+        backends.model_tag = "backbone"
+    elif fault == "other_target":
+        target.hf_text_config.model_type = "other"
+    elif fault == "other_draft":
+        r.config.speculative_config.draft_model_config.architectures = ["Other"]
+    elif fault in ("use_pcp", "use_dcp"):
+        setattr(r.selector, fault, True)
+    elif fault == "quantized_draft_kv":
+        r.selector.kv_cache_dtype = "int8"
+    elif fault == "missing_operator":
+        r.installed = False
+    elif fault == "target_attention":
+        r.selector.use_mla = True
+        r.selector.use_sparse = True
+    elif fault == "no_model":
+        r.config.model_config = None
+    actual = r.select()
+    assert ("flash_attention_v3" in actual) == (fault is None)
+
+
+@pytest.mark.parametrize("layout", ["NHD", "HND", "LBHNC", "BLHNC"])
+@pytest.mark.parametrize("heads", [1, 8])
+def test_physical_cache_layout_write_and_fa3_view(fa3, layout, heads):
+    fa3.envs_vllm.VLLM_KV_CACHE_LAYOUT = layout
+    bnsd = layout in ("HND", "LBHNC", "BLHNC")
+    shape = fa3.AscendFlashAttentionBackend.get_kv_cache_shape(2, 128, heads, 16)
+    assert shape == ((2, 2, heads, 128, 16) if bnsd else (2, 2, 128, heads, 16))
+    cache = torch.zeros(shape, dtype=torch.bfloat16)
+    query = torch.ones(2, heads, 16, dtype=torch.bfloat16)
+    key = torch.arange(2 * heads * 16, dtype=torch.float32).reshape(2, heads, 16).to(torch.bfloat16)
+    value = key + 2
+    slots = torch.tensor([3, 129])
+
+    def write_cache(**kw):
+        assert kw.get("use_bnsd", False) is bnsd
+        for i, slot in enumerate(kw["slot_mapping"].tolist()):
+            block, offset = divmod(slot, 128)
+            for name in ("key", "value"):
+                dst = kw[name + "_cache"]
+                dst = dst[block, :, offset] if bnsd else dst[block, offset]
+                dst.copy_(kw[name][i])
+
+    def attention(q, k, v, **kwargs):
+        assert k.shape == v.shape == (2, 128, heads, 16)
+        assert k.data_ptr() == cache[0].data_ptr()
+        assert v.data_ptr() == cache[1].data_ptr()
+        assert k.stride() == ((heads * 128 * 16, 16, 128 * 16, 1) if bnsd else (128 * heads * 16, heads * 16, 16, 1))
+        for i, slot in enumerate(slots.tolist()):
+            block, offset = divmod(slot, 128)
+            assert torch.equal(k[block, offset], key[i])
+            assert torch.equal(v[block, offset], value[i])
+        return q
+
+    fa3.DeviceOperator.reshape_and_cache.side_effect = write_cache
+    fa3.flash_attn_with_kvcache.side_effect = attention
+    impl = fa3.AscendFlashAttentionImpl(heads, 16, 0.1, num_kv_heads=heads)
+    metadata = NS(
+        num_actual_tokens=2,
+        slot_mapping=slots,
+        seq_lens=torch.tensor([4, 2]),
+        block_tables=torch.tensor([[0], [1]]),
+        query_start_loc=torch.tensor([0, 1, 2]),
+        max_query_len=1,
+        causal=False,
+        scheduler_metadata={(heads, heads, 16, torch.bfloat16, 0.1, 0.0, None): torch.tensor([1])},
+    )
+    layer = NS(layer_name="draft", _k_scale_float=1.0, _v_scale_float=1.0)
+    output = torch.empty_like(query)
+    assert impl.forward(layer, query, key, value, cache, metadata, output) is output
+    fa3.flash_attn_with_kvcache.assert_called_once()
+    assert torch.equal(output, query)
 
 
 @pytest.mark.parametrize("method", [None, "eagle3", "dspark"])

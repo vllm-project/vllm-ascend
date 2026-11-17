@@ -163,11 +163,18 @@ def dflash2_config():
         model_config=SimpleNamespace(runner_type="generate", hf_config=SimpleNamespace(architectures=["DFlash2Model"])),
         speculative_config=SimpleNamespace(
             method="dflash",
-            target_model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm_moe_dsa")),
+            target_model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm5_next_text")),
             draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
             draft_sample_method="greedy",
-            enforce_eager=True,
+            enforce_eager=False,
         ),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+        ),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        quant_config=SimpleNamespace(enable_c8_quant=False),
     )
 
 
@@ -227,7 +234,7 @@ def test_dspark_selects_flash_attn_for_eager_and_graph_drafts(
     assert not select(config, selector, "dspark_head")
 
 
-def test_flash_attn_is_selected_only_for_a5_dflash2_eager_drafts(select_flash_attn, dflash2_config):
+def test_flash_attn_is_selected_only_for_a5_dflash2_drafts(select_flash_attn, dflash2_config):
     select, profile = select_flash_attn
     config = dflash2_config
     selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
@@ -239,6 +246,14 @@ def test_flash_attn_is_selected_only_for_a5_dflash2_eager_drafts(select_flash_at
     config.model_config = None
     assert not select(config, selector)
     assert not select(None, selector)
+
+
+@pytest.mark.parametrize("model_type", ["glm_moe_dsa", "glm5_next", "glm5_next_text"])
+def test_flash_attn_is_selected_for_supported_glm53_dflash2_targets(select_flash_attn, dflash2_config, model_type):
+    select, _ = select_flash_attn
+    dflash2_config.speculative_config.target_model_config.hf_text_config.model_type = model_type
+    selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
+    assert select(dflash2_config, selector)
 
 
 @pytest.mark.parametrize("tag", ["backbone", "eagle_head", "dflash2_candidate_selector"])
@@ -266,13 +281,11 @@ def test_flash_attn_selection_is_independent_of_draft_sampling(select_flash_attn
     [
         ("method", "eagle3"),
         ("method", "mtp"),
-        ("enforce_eager", False),
-        ("enforce_eager", None),
         ("architectures", ["DFlashDraftModel"]),
         ("architectures", None),
     ],
 )
-def test_other_drafts_and_graph_mode_retain_legacy_backend(select_flash_attn, dflash2_config, field, value):
+def test_other_drafts_retain_legacy_backend(select_flash_attn, dflash2_config, field, value):
     select, _ = select_flash_attn
     spec = dflash2_config.speculative_config
     setattr(spec.draft_model_config if field == "architectures" else spec, field, value)
@@ -280,7 +293,7 @@ def test_other_drafts_and_graph_mode_retain_legacy_backend(select_flash_attn, df
     assert not select(dflash2_config, selector)
 
 
-@pytest.mark.parametrize("model_type", ["qwen3", "deepseek_v32", "glm5_next"])
+@pytest.mark.parametrize("model_type", ["qwen3", "deepseek_v32", "other_glm"])
 def test_other_target_architectures_retain_legacy_backend(select_flash_attn, dflash2_config, model_type):
     select, _ = select_flash_attn
     dflash2_config.speculative_config.target_model_config.hf_text_config.model_type = model_type
