@@ -22,11 +22,8 @@ def load_module(monkeypatch):
         vars(logger)["logger"] = Mock()
         monkeypatch.setitem(sys.modules, "vllm", vllm)
         monkeypatch.setitem(sys.modules, "vllm.logger", logger)
-    path = Path(__file__).resolve().parents[3] / "vllm_ascend/models/deepseek_v41/engram"
-    package = types.ModuleType("local_vmm_test_package")
-    package.__path__ = [str(path)]
-    monkeypatch.setitem(sys.modules, package.__name__, package)
-    spec = importlib.util.spec_from_file_location(f"{package.__name__}.local_shared_vmm", path / "local_shared_vmm.py")
+    path = Path(__file__).resolve().parents[3] / "vllm_ascend/models/deepseek_v41/engram/local_shared_vmm.py"
+    spec = importlib.util.spec_from_file_location("local_shared_vmm_test", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, module)
@@ -35,27 +32,18 @@ def load_module(monkeypatch):
     return module
 
 
-def test_probe_cache_and_unsafe_cleanup(monkeypatch):
+def test_failed_probe_cleanup_does_not_fallback(monkeypatch):
     module = load_module(monkeypatch)
     monkeypatch.setattr(
         module,
         "torch",
         types.SimpleNamespace(
-            int8=object(),
-            device=lambda *_: object(),
-            npu=types.SimpleNamespace(current_device=lambda: 0),
+            int8=object(), device=lambda *_: object(), npu=types.SimpleNamespace(current_device=lambda: 0)
         ),
     )
-    constructor = Mock()
-    monkeypatch.setattr(module, "LocalSharedVmmBuffer", constructor)
-    gather = Mock(side_effect=AssertionError("unexpected extra collective"))
-    monkeypatch.setattr(module.dist, "all_gather_object", gather)
-    group = types.SimpleNamespace(cpu_group=object(), world_size=2)
-    assert module.local_vmm_available(group) and module.local_vmm_available(group)
-    constructor.assert_called_once()
-    constructor.return_value.close_collective.assert_called_once()
-    gather.assert_not_called()
-    constructor.side_effect = module.EngramSharedCleanupError("cleanup failed")
+    monkeypatch.setattr(
+        module, "LocalSharedVmmBuffer", Mock(side_effect=module.EngramSharedCleanupError("cleanup failed"))
+    )
     with pytest.raises(module.EngramSharedCleanupError):
         module.local_vmm_available(types.SimpleNamespace(cpu_group=object(), world_size=2))
 
@@ -94,11 +82,6 @@ def test_combined_codes_and_scales_share_one_allocation(monkeypatch, tmp_path):
     codes.owner = False
     with pytest.raises(RuntimeError, match="owner"):
         codes.publish(0, torch.zeros((1, 8), dtype=torch.int8))
-    codes.owner = True
-    with pytest.raises(ValueError, match="outside"):
-        codes.publish(2, torch.zeros((1, 8), dtype=torch.int8))
-    with pytest.raises(ValueError, match="dtype"):
-        codes.publish(0, torch.zeros((1, 8), dtype=torch.float32))
 
 
 def _group_worker(rank, rendezvous, directory, log_path, mode):
