@@ -60,7 +60,9 @@ class MemoryBackend(Backend):
     def set_device(self):
         pass
 
-    def register_buffer(self, ptrs, lengths):
+    def register_buffer(self, buffers):
+        ptrs = [buffer.address for buffer in buffers]
+        lengths = [buffer.size_bytes for buffer in buffers]
         self.regions.extend(zip(ptrs, lengths))
 
     def exists(self, keys):
@@ -70,14 +72,14 @@ class MemoryBackend(Backend):
     def check_address(self, addr, size):
         assert any(start <= addr and addr + size <= start + length for start, length in self.regions)
 
-    def put(self, keys, addrs, sizes):
+    def put(self, keys, addrs, sizes, *, host=None):
         for key, row, lengths in zip(keys, addrs, sizes, strict=True):
             for addr, size in zip(row, lengths, strict=True):
                 self.check_address(addr, size)
             self.payloads[key] = [ctypes.string_at(addr, size) for addr, size in zip(row, lengths, strict=True)]
         return [True] * len(keys)
 
-    def get(self, keys, addrs, sizes):
+    def get(self, keys, addrs, sizes, *, host=None):
         for key, row, lengths in zip(keys, addrs, sizes, strict=True):
             for addr, size, data in zip(row, lengths, self.payloads[key], strict=True):
                 self.check_address(addr, size)

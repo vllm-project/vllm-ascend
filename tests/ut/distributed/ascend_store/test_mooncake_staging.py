@@ -8,13 +8,14 @@ from unittest.mock import Mock, call
 
 import pytest
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_bulk
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_staging
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import BatchResultShapeError
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor
 
 
 @pytest.fixture
 def registered(monkeypatch):
-    monkeypatch.setattr(mooncake_bulk, "_HOST_STAGING_BYTES", 16)
+    monkeypatch.setattr(mooncake_staging, "_HOST_STAGING_BYTES", 16)
     host = ctypes.create_string_buffer(b"...............................")
     device = ctypes.create_string_buffer(8)
     host_ptr = ctypes.addressof(host)
@@ -22,7 +23,7 @@ def registered(monkeypatch):
     sdk = Mock()
     sdk.register_buffer.return_value = 0
     sdk.unregister_buffer.return_value = 0
-    bulk = mooncake_bulk.MooncakeMixedBulk(sdk, {host_ptr: ctypes.sizeof(host)})
+    bulk = mooncake_staging.MooncakeHostStaging(sdk, {host_ptr: ctypes.sizeof(host)})
     try:
         bulk.register([host_ptr, device_ptr], [ctypes.sizeof(host), ctypes.sizeof(device)])
         assert sdk.register_buffer.call_args_list == [
@@ -112,25 +113,68 @@ def test_mooncake_mixed_config_prevents_early_outer_timeout(monkeypatch, tmp_pat
 def test_mooncake_partial_registration_rolls_back_device_and_staging(monkeypatch):
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
 
-    monkeypatch.setattr(mooncake_bulk, "_HOST_STAGING_BYTES", 16)
+    monkeypatch.setattr(mooncake_staging, "_HOST_STAGING_BYTES", 16)
     backend = MooncakeBackend.__new__(MooncakeBackend)
     sdk = Mock()
     sdk.register_buffer.side_effect = [0, 0, 0, -600]
     sdk.unregister_buffer.return_value = 0
     backend.store = sdk
     backend._store_initialized = backend._use_store_independent_te = True
-    backend._mixed_bulk = None
+    backend._host_staging = None
 
     with pytest.raises(RuntimeError, match="registration failed.*-600"):
-        backend.register_bulk_buffers([100, 200, 300], [32, 64, 128], host_ranges={100: 32})
+        backend.register_buffer(
+            [
+                BufferDescriptor(address=100, size_bytes=32, host=True),
+                BufferDescriptor(address=200, size_bytes=64),
+                BufferDescriptor(address=300, size_bytes=128),
+            ]
+        )
 
     send_ptr = sdk.register_buffer.call_args_list[0].args[0]
     recv_ptr = sdk.register_buffer.call_args_list[1].args[0]
     assert sdk.register_buffer.call_args_list == [call(send_ptr, 16), call(recv_ptr, 16), call(200, 64), call(300, 128)]
     assert sdk.unregister_buffer.call_args_list == [call(200), call(recv_ptr), call(send_ptr)]
     sdk.close.assert_called_once_with()
-    assert backend._mixed_bulk is None and backend.store is None
+    assert backend._host_staging is None and backend.store is None
     assert not backend._store_initialized
+
+
+def test_backend_routes_both_memory_kinds_through_the_same_get_and_put(registered, monkeypatch):
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
+
+    staging, sdk, host, device = registered
+    backend = MooncakeBackend.__new__(MooncakeBackend)
+    backend._host_staging = staging
+    monkeypatch.setattr(backend, "_build_replicate_config", Mock(return_value=object()))
+    sdk.batch_put_from_multi_buffers.return_value = [0]
+    sdk.batch_get_into_multi_buffers.return_value = [8]
+    for host_resident, buffer in ((True, host), (False, device)):
+        address = ctypes.addressof(buffer)
+        assert backend.put(["key"], [[address]], [[8]], host=host_resident) == [True]
+        put_address = sdk.batch_put_from_multi_buffers.call_args.args[1][0][0]
+        assert (put_address == address) is (not host_resident)
+        assert backend.get(["key"], [[address]], [[8]], host=host_resident) == [0]
+        get_address = sdk.batch_get_into_multi_buffers.call_args.args[1][0][0]
+        assert (get_address == address) is (not host_resident)
+
+
+def test_explicit_device_batch_keeps_the_device_only_backend_path(monkeypatch):
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
+
+    backend = MooncakeBackend.__new__(MooncakeBackend)
+    backend._host_staging = None
+    backend._lazy_init = False
+    backend._store_initialized = True
+    backend.store = Mock()
+    monkeypatch.setattr(backend, "_build_replicate_config", Mock(return_value=object()))
+    backend.store.batch_put_from_multi_buffers.return_value = [0]
+    backend.store.batch_get_into_multi_buffers.return_value = [8]
+    assert backend.put(["key"], [[100]], [[8]], host=False) == [True]
+    assert backend.get(["key"], [[100]], [[8]], host=False) == [0]
+    for operation in (backend.put, backend.get):
+        with pytest.raises(RuntimeError, match="Host buffers have not been registered"):
+            operation(["key"], [[100]], [[8]], host=True)
 
 
 def test_host_get_completes_while_host_put_waits_in_sdk(registered):
@@ -196,10 +240,10 @@ def test_invalid_later_host_key_does_not_issue_earlier_batch(registered):
 
 
 def test_staging_pages_are_faulted_and_zeroed_before_registration(monkeypatch):
-    monkeypatch.setattr(mooncake_bulk, "_HOST_STAGING_BYTES", 16)
+    monkeypatch.setattr(mooncake_staging, "_HOST_STAGING_BYTES", 16)
     sdk = Mock()
     sdk.unregister_buffer.return_value = 0
-    bulk = mooncake_bulk.MooncakeMixedBulk(sdk, {100: 32})
+    bulk = mooncake_staging.MooncakeHostStaging(sdk, {100: 32})
 
     def register(ptr, size):
         assert ctypes.string_at(ptr, size) == bytes(size)
@@ -216,14 +260,14 @@ def test_staging_pages_are_faulted_and_zeroed_before_registration(monkeypatch):
 def test_backend_closes_store_before_releasing_failed_deregistration(monkeypatch):
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
 
-    monkeypatch.setattr(mooncake_bulk, "_HOST_STAGING_BYTES", 16)
+    monkeypatch.setattr(mooncake_staging, "_HOST_STAGING_BYTES", 16)
     backend = MooncakeBackend.__new__(MooncakeBackend)
     sdk = Mock()
     sdk.register_buffer.return_value = 0
     sdk.unregister_buffer.return_value = -1
-    bulk = mooncake_bulk.MooncakeMixedBulk(sdk, {100: 32})
+    bulk = mooncake_staging.MooncakeHostStaging(sdk, {100: 32})
     bulk.register([100], [32])
-    backend._mixed_bulk, backend.store = bulk, sdk
+    backend._host_staging, backend.store = bulk, sdk
     backend._store_initialized = True
 
     def close_store():
@@ -234,6 +278,6 @@ def test_backend_closes_store_before_releasing_failed_deregistration(monkeypatch
         backend.close()
     sdk.close.assert_called_once_with()
     assert bulk._send.buffer.closed and bulk._recv.buffer.closed
-    assert backend.store is None and backend._mixed_bulk is None
+    assert backend.store is None and backend._host_staging is None
     backend.close()
     sdk.close.assert_called_once_with()

@@ -33,11 +33,13 @@ from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import DEVICE_BUFFER_ALIGNMENT, BufferDescriptor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import (
     HiSparseStoreViews,
-    hisparse_layout_id,
+    has_hisparse_layout,
     plan_hisparse_store_views,
+    store_model_name,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreBatch,
@@ -343,12 +345,9 @@ class BaseKVPoolWorker(ABC):
                     for i in range(2, remaining_layers + 2):
                         partitions[-i] += 1
 
-        model_name = model_config.model.rstrip("/").split("/")[-1]
-        if getattr(self.kv_cache_config, "hisparse_host_num_blocks", None) is not None:
-            # Earlier keys may contain draft pages exported before their Host mirror.
-            assert self.kv_cache_config is not None
-            layout_id = hisparse_layout_id(self.kv_cache_config, self.dcp_size, self.cache_transfer_granularity)
-            model_name = f"{model_name}:hisparse-v3:{model_config.dtype}:{layout_id}"
+        model_name = store_model_name(
+            model_config, self.kv_cache_config, self.dcp_size, self.cache_transfer_granularity
+        )
         self.metadata: list[KeyMetadata] = []
         for group_id in range(self.num_kv_cache_groups):
             # the mamba kv_heads is not same with the full attention, can't share the cache data
@@ -685,7 +684,7 @@ class BaseKVPoolWorker(ABC):
         """
         if not self.use_hybrid:
             return
-        alignment = 2 * 1024 * 1024
+        alignment = DEVICE_BUFFER_ALIGNMENT
         for storage_key in registered_regions:
             if self._transfer_layout is not None and storage_key in self._transfer_layout.host_storage_keys:
                 continue
@@ -728,17 +727,15 @@ class BaseKVPoolWorker(ABC):
 
     def _host_block_count(self, name: str) -> int | None:
         layout = self._transfer_layout
-        return layout.host_num_blocks if layout is not None and name in layout.host_layers else None
+        return layout.block_count(name) if layout is not None else None
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         if self.use_recoverssm:
             kv_caches = self._recoverssm_store_caches(kv_caches)
         excluded_layer_names = None
         self._transfer_layout = None
-        if (
-            self.kv_cache_config is not None
-            and getattr(self.kv_cache_config, "hisparse_host_num_blocks", None) is not None
-        ):
+        if has_hisparse_layout(self.kv_cache_config):
+            assert self.kv_cache_config is not None
             self._transfer_layout, kv_caches, excluded_layer_names = plan_hisparse_store_views(
                 self.kv_cache_config,
                 kv_caches,
@@ -827,8 +824,6 @@ class BaseKVPoolWorker(ABC):
                     registered_regions[storage_key] = (start, end)
 
         self._align_kv_ptrs(registered_regions)
-        ptrs = [start for start, _ in registered_regions.values()]
-        lengths = [end - start for start, end in registered_regions.values()]
 
         if self.kv_cache_config is not None and self.use_hybrid:
             for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
@@ -880,16 +875,13 @@ class BaseKVPoolWorker(ABC):
                 self.sub_size_bytes,
             )
 
-        # Register buffers before starting the transfer threads.
-        if self._transfer_layout is not None:
-            host_ranges = {
-                start: end - start
-                for key, (start, end) in registered_regions.items()
-                if key in self._transfer_layout.host_storage_keys
-            }
-            self.m_store.register_bulk_buffers(ptrs, lengths, host_ranges=host_ranges)
-        else:
-            self.m_store.register_buffer(ptrs, lengths)
+        # Residency and alignment are registration metadata, independent of the backend.
+        buffers = (
+            self._transfer_layout.buffer_descriptors(registered_regions)
+            if self._transfer_layout is not None
+            else [BufferDescriptor(address=start, size_bytes=end - start) for start, end in registered_regions.values()]
+        )
+        self.m_store.register_buffer(buffers)
         self._start_kv_transfer_threads()
 
     def _record_kv_connector_operation(self, operation: str, duration_seconds: float, num_keys: int) -> None:
@@ -1382,11 +1374,7 @@ class KVPoolWorker(BaseKVPoolWorker):
         kv_cache_config: KVCacheConfig | None = None,
     ) -> None:
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
-        self._bulk_save_fence: Callable[[], None] | None = None
         self._init_cache_layout()
-
-    def set_bulk_save_fence(self, fence: Callable[[], None]) -> None:
-        self._bulk_save_fence = fence
 
     def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> bool:
         return False
@@ -1636,8 +1624,6 @@ class KVPoolWorker(BaseKVPoolWorker):
             )
         requests = [request for request in connector_metadata.requests if request.can_save]
         if requests:
-            if self._bulk_save_fence is not None:
-                self._bulk_save_fence()
             current_event = torch.npu.Event()
             current_event.record()
             for request in requests:
@@ -1645,6 +1631,9 @@ class KVPoolWorker(BaseKVPoolWorker):
                 request.current_event = current_event
             self._previous_save_batch = send_thread.add_save_batch(requests)
         # Complete queued PUTs before the next prefill chunk can reuse SWA slots.
+        # Sender-side event waits protect byte visibility; this drain separately
+        # protects the lifetime of the source pages. Removing it requires page
+        # reservations or an owned snapshot until every queued PUT completes.
         send_thread.request_queue.join()
         send_thread.raise_if_failed()
 

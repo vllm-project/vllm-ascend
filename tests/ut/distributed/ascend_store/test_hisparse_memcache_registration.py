@@ -24,11 +24,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_b
     MemcacheBackend,
     MmcDirect,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import (
+    aligned_hisparse_allocation_config,
     hisparse_layout_id,
-    with_aligned_hisparse_slab,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import get_bulk_by_residency
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import get_by_residency
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 from vllm_ascend.hisparse.binding import prepare_hisparse_cache_views
 
@@ -114,7 +115,7 @@ def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool,
     owner = torch.empty(0, dtype=torch.int8).set_(storage[begin : begin + padded_size], 0, (padded_size,), (1,))
     assert owner.data_ptr() % SLAB_ALIGNMENT == misalignment
     context = {source_name: SimpleNamespace(), indexer_name: SimpleNamespace()}
-    allocation_config = with_aligned_hisparse_slab(cache_config)
+    allocation_config = aligned_hisparse_allocation_config(cache_config)
     with patch("vllm.v1.worker.utils.torch.zeros", return_value=owner) as allocate:
         assert [tensor.size for tensor in allocation_config.kv_cache_tensors] == [
             host_tensor.size,
@@ -168,11 +169,15 @@ def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool,
     assert worker.group_block_len[1] == ([16384, 512] if indexer_c8 else [32768])
     assert worker.group_block_stride[1] == ([17408, 17408] if indexer_c8 else [98304])
     assert all(worker.group_block_len[index] == [] for index in range(2, len(groups)))
-    worker.m_store.register_bulk_buffers.assert_called_once()
-    ptrs, lengths = worker.m_store.register_bulk_buffers.call_args.args
-    assert worker.m_store.register_bulk_buffers.call_args.kwargs == {
-        "host_ranges": {source.data_ptr(): num_host_blocks * 32768},
-    }
+    worker.m_store.register_buffer.assert_called_once()
+    (buffers,) = worker.m_store.register_buffer.call_args.args
+    ptrs = [buffer.address for buffer in buffers]
+    lengths = [buffer.size_bytes for buffer in buffers]
+    assert worker.m_store.register_buffer.call_args.kwargs == {}
+    assert [buffer for buffer in buffers if buffer.host] == [
+        BufferDescriptor(address=source.data_ptr(), size_bytes=num_host_blocks * 32768, host=True)
+    ]
+    assert all(buffer.alignment_bytes == SLAB_ALIGNMENT for buffer in buffers if not buffer.host)
     assert lengths[ptrs.index(source.data_ptr())] == num_host_blocks * 32768
     assert worker._transfer_layout is not None
     assert worker._transfer_layout.host_groups == frozenset({0})
@@ -212,7 +217,7 @@ def test_hisparse_alignment_is_scoped_to_the_padded_allocation():
     prepare_hisparse_cache_views(config, caches, {})
     assert caches["cache"] is original
     with pytest.raises(ValueError, match="reserved alignment padding"):
-        prepare_hisparse_cache_views(with_aligned_hisparse_slab(config), caches, {})
+        prepare_hisparse_cache_views(aligned_hisparse_allocation_config(config), caches, {})
     prepare_hisparse_cache_views(config, caches, {})
     assert caches["cache"] is original
 
@@ -237,7 +242,7 @@ def test_hisparse_late_view_failure_leaves_all_bindings_untouched(wrong_storage)
     context = {name: SimpleNamespace(hisparse_block_stride=99) for name in names}
     message = "share one backing allocation" if wrong_storage else "Unexpected HiSparse indexer cache shape"
 
-    allocation_config = with_aligned_hisparse_slab(config)
+    allocation_config = aligned_hisparse_allocation_config(config)
     with pytest.raises(ValueError, match=message):
         prepare_hisparse_cache_views(allocation_config, caches, context)
     assert all(caches[name] is original[name] for name in names)
@@ -257,13 +262,13 @@ def test_memcache_splits_host_and_device_batches_without_reordering(memcache_bac
     backend.store.batch_put_from_layers.return_value = [0]
     assert backend.put(keys[:1], addresses[:1], sizes[:1], host=True) == [True]
     backend.store.batch_put_from_layers.assert_called_once_with(["host"], [[1100]], [[100]], MmcDirect.COPY_H2G.value)
-    assert get_bulk_by_residency(backend, keys, addresses, sizes, host_keys=[True, False, False]) == [0, 0, -7]
+    assert get_by_residency(backend, keys, addresses, sizes, host_keys=[True, False, False]) == [0, 0, -7]
     assert backend.store.batch_get_into_layers.call_args_list == [
         call(["device1", "device2"], [[1100], [4000]], [[100], [100]], MmcDirect.COPY_G2L.value),
         call(["host"], [[1100]], [[100]], MmcDirect.COPY_G2H.value),
     ]
     with pytest.raises(ValueError, match="memory kind per key"):
-        get_bulk_by_residency(backend, keys, addresses, sizes, host_keys=[True])
+        get_by_residency(backend, keys, addresses, sizes, host_keys=[True])
     assert backend.put(keys, addresses[:1], sizes, host=True) is False
     assert "Invalid HiSparse MemCache PUT metadata" in caplog.text
 
@@ -273,7 +278,7 @@ def test_memcache_bounds_each_hisparse_host_get_lease(memcache_backend) -> None:
     backend.store.batch_get_into_layers.side_effect = [[0], [-3106], [0]]
     key_size = 130 * 1024 * 1024
 
-    assert get_bulk_by_residency(
+    assert get_by_residency(
         backend, ["one", "two", "three"], [[1], [2], [3]], [[key_size]] * 3, host_keys=[True] * 3
     ) == [
         0,
@@ -293,7 +298,7 @@ def test_memcache_oversized_hisparse_get_only_splits_the_host_batch(memcache_bac
     host_size = 257 * mib
     backend.store.batch_get_into_layers.side_effect = [[0, 0], [0], [0], [0]]
 
-    results = get_bulk_by_residency(
+    results = get_by_residency(
         backend,
         ["device1", "host1", "host-large", "device2", "host2"],
         [[1], [2], [3, 4], [5], [6]],
@@ -314,7 +319,7 @@ def test_memcache_hisparse_get_fails_when_sdk_result_count_differs(memcache_back
     backend = memcache_backend
     backend.store.batch_get_into_layers.side_effect = [[0], results]
 
-    result = get_bulk_by_residency(
+    result = get_by_residency(
         backend,
         ["host1", "device", "host2"],
         [[1], [2], [3]],
@@ -445,7 +450,13 @@ def test_memcache_hisparse_registration_rolls_back_on_sdk_error(memcache_backend
     backend.store.unregister_buffer.return_value = 0
 
     with pytest.raises(RuntimeError, match="buffer registration failed: size=20, result=-7"):
-        backend.register_buffer([100, 200, 300], [10, 20, 30], check_result=True)
+        backend.register_buffer(
+            [
+                BufferDescriptor(address=100, size_bytes=10, host=True),
+                BufferDescriptor(address=200, size_bytes=20),
+                BufferDescriptor(address=300, size_bytes=30),
+            ]
+        )
 
     assert backend.store.register_buffer.call_args_list == [call(100, 10), call(200, 20)]
     backend.store.unregister_buffer.assert_called_once_with(100, 10)
@@ -453,7 +464,7 @@ def test_memcache_hisparse_registration_rolls_back_on_sdk_error(memcache_backend
 
     # Preserve the existing behavior for regular AscendStore users.
     backend.store.register_buffer.side_effect = [-7]
-    backend.register_buffer([200], [20])
+    backend.register_buffer([BufferDescriptor(address=200, size_bytes=20)])
     backend.store.unregister_buffer.assert_called_once_with(100, 10)
 
 
@@ -465,7 +476,13 @@ def test_memcache_hisparse_registration_keeps_error_if_rollback_fails(memcache_b
     backend.store.unregister_buffer.side_effect = [rollback_result, 0]
 
     with pytest.raises(ValueError, match="SDK rejected registration") as raised:
-        backend.register_buffer([100, 200, 300], [10, 20, 30], check_result=True)
+        backend.register_buffer(
+            [
+                BufferDescriptor(address=100, size_bytes=10, host=True),
+                BufferDescriptor(address=200, size_bytes=20),
+                BufferDescriptor(address=300, size_bytes=30),
+            ]
+        )
 
     assert raised.value is registration_error
     assert backend.store.unregister_buffer.call_args_list == [call(200, 20), call(100, 10)]
@@ -473,10 +490,10 @@ def test_memcache_hisparse_registration_keeps_error_if_rollback_fails(memcache_b
     assert "HiSparse MemCache buffer rollback failed: size=20" in caplog.text
 
 
-def test_memcache_hisparse_registration_rejects_mismatched_arguments(memcache_backend):
+def test_memcache_hisparse_registration_rejects_invalid_descriptor(memcache_backend):
     backend = memcache_backend
-    with pytest.raises(ValueError, match="buffer pointers and sizes must have the same length"):
-        backend.register_buffer([100, 200], [10], check_result=True)
+    with pytest.raises(ValueError, match="address and size must be positive"):
+        backend.register_buffer([BufferDescriptor(address=100, size_bytes=0, host=True)])
     backend.store.register_buffer.assert_not_called()
     assert backend._pending_buffers is None
 
@@ -485,16 +502,29 @@ def test_memcache_hisparse_rollback_keeps_earlier_registration_and_allows_retry(
     backend = memcache_backend
     backend.store.register_buffer.side_effect = [0, 0, -7, 0, 0]
     backend.store.unregister_buffer.return_value = 0
-    backend.register_buffer([100, 100], [10, 10], check_result=True)
+    backend.register_buffer(
+        [
+            BufferDescriptor(address=100, size_bytes=10, host=True),
+            BufferDescriptor(address=100, size_bytes=10, host=True),
+        ]
+    )
 
     with pytest.raises(RuntimeError, match="result=-7"):
-        backend.register_buffer([100, 200, 300], [10, 20, 30], check_result=True)
+        backend.register_buffer(
+            [
+                BufferDescriptor(address=100, size_bytes=10, host=True),
+                BufferDescriptor(address=200, size_bytes=20),
+                BufferDescriptor(address=300, size_bytes=30),
+            ]
+        )
     backend.store.unregister_buffer.assert_called_once_with(200, 20)
-    backend.register_buffer([100, 200], [10, 20], check_result=True)
+    backend.register_buffer(
+        [BufferDescriptor(address=100, size_bytes=10, host=True), BufferDescriptor(address=200, size_bytes=20)]
+    )
     with pytest.raises(RuntimeError, match="already registered with size=10, requested size=11"):
-        backend.register_buffer([100], [11], check_result=True)
+        backend.register_buffer([BufferDescriptor(address=100, size_bytes=11, host=True)])
     backend.unregister_buffer([100], [10])
-    backend.register_buffer([100], [11], check_result=True)
+    backend.register_buffer([BufferDescriptor(address=100, size_bytes=11, host=True)])
     assert backend.store.register_buffer.call_args_list == [
         call(100, 10),
         call(200, 20),

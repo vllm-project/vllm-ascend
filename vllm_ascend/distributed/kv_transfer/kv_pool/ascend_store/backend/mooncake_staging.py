@@ -31,7 +31,7 @@ class _HostStaging:
         ctypes.memset(self.base, 0, _HOST_STAGING_BYTES)
 
 
-class MooncakeMixedBulk:
+class MooncakeHostStaging:
     def __init__(self, store: Any, host_ranges: dict[int, int]) -> None:
         self.store = store
         self._host_ranges = host_ranges.copy()

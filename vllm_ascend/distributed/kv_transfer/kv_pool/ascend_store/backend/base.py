@@ -10,6 +10,8 @@ from vllm.config import ParallelConfig
 from vllm.platforms import current_platform
 from vllm.platforms.interface import set_assigned_physical_gpu_ids
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor
+
 # QoS range supported by the pooled KV store backends. A larger value
 # means a higher transfer priority.
 QOS_VALUE_MIN = 0
@@ -75,28 +77,12 @@ class Backend(ABC):
     layerwise_data_plane: str | None = None
     # Whether the connector must filter existing keys before calling put().
     requires_exists_before_put: bool = True
-    strict_bulk_get: bool = False
+    strict_get_results: bool = False
 
     @classmethod
     def validate_mixed_bulk_config(cls) -> None:
         """Opt in to whole-block transfer of both DDR and device buffers."""
         raise ValueError(f"{cls.__name__} does not support mixed Host/Device bulk transfers")
-
-    def register_bulk_buffers(self, ptrs: list[int], lengths: list[int], *, host_ranges: dict[int, int]) -> None:
-        """Register all bulk buffers, or fail initialization."""
-        raise NotImplementedError
-
-    def get_bulk(
-        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool
-    ) -> list[int] | None:
-        """Return one status per key (zero on complete read)."""
-        raise NotImplementedError
-
-    def put_bulk(
-        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool
-    ) -> list[bool] | bool | None:
-        """Write one homogeneous batch; report success per key."""
-        raise NotImplementedError
 
     @abstractmethod
     def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False):
@@ -140,7 +126,8 @@ class Backend(ABC):
         pass
 
     @abstractmethod
-    def register_buffer(self, ptrs: list[int], lengths: list[int]):
+    def register_buffer(self, buffers: list[BufferDescriptor]) -> None:
+        """Register typed ranges; Host buffers require checked registration."""
         pass
 
     @abstractmethod
@@ -210,14 +197,19 @@ class Backend(ABC):
         raise NotImplementedError(f"{type(self).__name__} does not support batch_get_end")
 
     @abstractmethod
-    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> bool | list[bool] | None:
+    def put(
+        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool | None = None
+    ) -> bool | list[bool] | None:
         """Store a batch, returning False for a detected backend failure.
 
         A per-key boolean list preserves partial-success information. ``None``
         remains valid for legacy backends that report failures by raising.
+        ``host`` explicitly selects a homogeneous Host/Device batch. Omit it
+        for existing device-only callers and their legacy result conventions.
         """
         pass
 
     @abstractmethod
-    def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+    def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool | None = None):
+        """Read a homogeneous batch, with one status per key (zero on success)."""
         pass

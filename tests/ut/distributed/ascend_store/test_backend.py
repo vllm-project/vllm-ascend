@@ -60,6 +60,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend import (
     YuanrongConfig,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor
 
 
 def _format_log_call(call):
@@ -924,7 +925,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             ) as mock_te,
             patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.get_ip"),
         ):
-            b.register_buffer([100], [200])
+            b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
             mock_te.register_buffer.assert_called_once()
 
     def test_layerwise_put_start_passes_replicate_config(self):
@@ -968,7 +969,9 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.global_te"
         ) as mock_te:
-            b.register_buffer([100, 101], [200, 201])
+            b.register_buffer(
+                [BufferDescriptor(address=100, size_bytes=200), BufferDescriptor(address=101, size_bytes=201)]
+            )
             b.store.register_buffer.assert_any_call(100, 200)
             b.store.register_buffer.assert_any_call(101, 201)
             self.assertEqual(b.store.register_buffer.call_count, 2)
@@ -977,7 +980,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
     def test_register_buffer_skips_fabric_mem(self):
         b = self._make_backend()
         b._use_fabric_mem = True
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.register_buffer.assert_not_called()
 
     def test_setup_store_with_store_independent_te(self):
@@ -1356,7 +1359,7 @@ class TestYuanrongBackendMethods(unittest.TestCase):
 
     def test_register_buffer_noop_when_remote_h2d_disabled(self):
         b = self._make_backend()
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.pre_register_device_memory.assert_not_called()
 
     def test_register_buffer_noop_when_pregister_toggle_off(self):
@@ -1374,13 +1377,13 @@ class TestYuanrongBackendMethods(unittest.TestCase):
             and not b.config.enable_fabric_mem
             and b.config.enable_dev_mem_pregister
         )
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.pre_register_device_memory.assert_not_called()
 
     def test_register_buffer_when_remote_h2d_enabled_hixl(self):
         b = self._make_backend()
         b._needs_dev_mem_pregister = True
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.pre_register_device_memory.assert_called_once_with([100], [200])
 
     def test_register_buffer_noop_when_p2p_transfer_link(self):
@@ -1389,7 +1392,7 @@ class TestYuanrongBackendMethods(unittest.TestCase):
         b.config.enable_remote_h2d = True
         b.config.remote_h2d_transport_backend = "P2P_TRANSFER"
         b._needs_dev_mem_pregister = False
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.pre_register_device_memory.assert_not_called()
 
     def test_register_buffer_noop_when_fabric_mem(self):
@@ -1405,14 +1408,14 @@ class TestYuanrongBackendMethods(unittest.TestCase):
             and b.config.remote_h2d_transport_backend == "HIXL"
             and not b.config.enable_fabric_mem
         )
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.pre_register_device_memory.assert_not_called()
 
     def test_register_buffer_idempotent(self):
         b = self._make_backend()
         b._needs_dev_mem_pregister = True
-        b.register_buffer([100], [200])
-        b.register_buffer([300], [400])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
+        b.register_buffer([BufferDescriptor(address=300, size_bytes=400)])
         b.store.pre_register_device_memory.assert_called_once_with([100], [200])
 
     def test_register_buffers_if_needed_no_buffers(self):
@@ -1717,7 +1720,7 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
     def test_register_buffer(self):
         b = self._make_backend()
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.register_buffer.assert_called_once()
 
     def test_unregister_buffer(self):

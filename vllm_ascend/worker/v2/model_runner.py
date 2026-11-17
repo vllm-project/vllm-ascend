@@ -88,6 +88,10 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_kv import (
     apply_dspark_resident_kv_specs,
     get_resident_dspark_layer_names,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import (
+    aligned_hisparse_allocation_config,
+    uses_hisparse_store,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     get_layerwise_reuse_layout,
 )
@@ -515,17 +519,8 @@ class NPUModelRunner(GPUModelRunner):
                 else set()
             )
         allocation_config = kv_cache_config
-        transfer = self.vllm_config.kv_transfer_config
-        if (
-            getattr(kv_cache_config, "hisparse_host_num_blocks", None) is not None
-            and transfer is not None
-            and transfer.has_connector("AscendStoreConnector")
-        ):
-            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import (
-                with_aligned_hisparse_slab,
-            )
-
-            allocation_config = with_aligned_hisparse_slab(kv_cache_config)
+        if uses_hisparse_store(self.vllm_config, kv_cache_config):
+            allocation_config = aligned_hisparse_allocation_config(kv_cache_config)
         with graph_manager_wrapper(self):
             self._initialize_kv_cache_upstream(allocation_config, kv_cache_allocation_context)
             self._target_uses_flashmla = self._has_target_flashmla_attention()

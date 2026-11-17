@@ -9,21 +9,43 @@ import json
 from collections.abc import Callable
 from copy import copy
 from dataclasses import dataclass, fields
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_interface import AlignedKVCacheTensor
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import DEVICE_BUFFER_ALIGNMENT, BufferDescriptor
 
-if TYPE_CHECKING:
-    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSparseConnectorWorker
-
-
-_SLAB_ALIGNMENT = 2 * 1024 * 1024
+_HISPARSE_CACHE_NAMESPACE = "hisparse-v3"
 
 
-def with_aligned_hisparse_slab(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
+def has_hisparse_layout(config: KVCacheConfig | None) -> bool:
+    """Use the same layout predicate during connector setup and view binding."""
+    if config is None:
+        return False
+    host_blocks = getattr(config, "hisparse_host_num_blocks", None)
+    return (isinstance(host_blocks, int) and not isinstance(host_blocks, bool)) or any(
+        getattr(group, "role", None) == "hisparse_source" for group in getattr(config, "kv_cache_groups", ())
+    )
+
+
+def uses_hisparse_store(vllm_config: Any, config: KVCacheConfig | None) -> bool:
+    transfer = vllm_config.kv_transfer_config
+    return has_hisparse_layout(config) and transfer is not None and transfer.has_connector("AscendStoreConnector")
+
+
+def store_model_name(model_config: Any, config: KVCacheConfig | None, dcp_size: int, granularity: int) -> str:
+    name = model_config.model.rstrip("/").split("/")[-1]
+    if not has_hisparse_layout(config):
+        return name
+    assert config is not None
+    # Older keys may contain draft pages saved before their Host mirror.
+    layout_id = hisparse_layout_id(config, dcp_size, granularity)
+    return f"{name}:{_HISPARSE_CACHE_NAMESPACE}:{model_config.dtype}:{layout_id}"
+
+
+def aligned_hisparse_allocation_config(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
     """Pass the original size through Core's config copies on the padded descriptors."""
     original_tensors = kv_cache_config.kv_cache_tensors
     device_sizes = {
@@ -40,9 +62,9 @@ def with_aligned_hisparse_slab(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
         if t.host_resident
         else AlignedKVCacheTensor(
             **{f.name: getattr(t, f.name) for f in fields(KVCacheTensor) if f.init and f.name != "size"},
-            size=size + _SLAB_ALIGNMENT - 1,
+            size=size + DEVICE_BUFFER_ALIGNMENT - 1,
             logical_size=size,
-            alignment=_SLAB_ALIGNMENT,
+            alignment=DEVICE_BUFFER_ALIGNMENT,
         )
         for t in original_tensors
     ]
@@ -55,6 +77,20 @@ class HiSparseStoreViews:
     host_layers: frozenset[str]
     host_storage_keys: frozenset[int]
     host_groups: frozenset[int]
+
+    def block_count(self, layer_name: str) -> int | None:
+        return self.host_num_blocks if layer_name in self.host_layers else None
+
+    def buffer_descriptors(self, regions: dict[int, tuple[int, int]]) -> list[BufferDescriptor]:
+        return [
+            BufferDescriptor(
+                address=start,
+                size_bytes=end - start,
+                host=storage in self.host_storage_keys,
+                alignment_bytes=1 if storage in self.host_storage_keys else DEVICE_BUFFER_ALIGNMENT,
+            )
+            for storage, (start, end) in regions.items()
+        ]
 
 
 def plan_hisparse_store_views(
@@ -128,36 +164,3 @@ def hisparse_layout_id(kv_cache_config: KVCacheConfig, dcp_size: int, transfer_g
     )
     identity = (dcp_size, transfer_granularity, groups, block_strides)
     return hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()[:24]
-
-
-def finish_draft_host_mirror_for_save(worker: HiSparseConnectorWorker) -> None:
-    """Make Core's pending draft rows durable before the external Host PUT."""
-    pending = getattr(worker, "_draft_mirror_pending", None)
-    if pending is False:
-        return
-    if pending is not True:
-        raise RuntimeError("HiSparse bulk save requires Core's _draft_mirror_pending flag.")
-
-    draft_layers = getattr(worker, "_draft_layers", None)
-    enqueue_row_dma = getattr(worker, "_enqueue_row_dma", None)
-    if not isinstance(draft_layers, tuple) or not draft_layers or not callable(enqueue_row_dma):
-        raise RuntimeError("HiSparse bulk save requires Core's pending draft layers and row DMA hook.")
-    if (
-        not isinstance(getattr(worker, "_dma_submitted", None), bool)
-        or getattr(worker, "host_write_event", None) is None
-    ):
-        raise RuntimeError("HiSparse bulk save requires Core's DMA submission flag and Host write event.")
-
-    # Called by the bulk Store during Core's post-draft finalize_step. Core
-    # ordinarily defers the draft Host copy until the next start_step, too
-    # late for this step's PUT. Consume only the draft-mirror flag so Core's
-    # _finish_previous_step still submits its post-forward page transfers.
-    # Replace this adapter when Core exposes a public draft-row flush hook.
-    compute_stream = torch.accelerator.current_stream()
-    draft_ready = torch.Event()
-    draft_ready.record(compute_stream)
-    enqueue_row_dma(draft_layers, ready_event=draft_ready)
-    worker._draft_mirror_pending = False
-    if worker._dma_submitted:
-        compute_stream.wait_event(worker.host_write_event)
-        worker._dma_submitted = False

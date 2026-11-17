@@ -27,7 +27,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     set_scheduler_device,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_bulk import MooncakeMixedBulk
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_staging import MooncakeHostStaging
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, buffer_arrays
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_sharded_mamba_group_ids
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
@@ -425,7 +426,7 @@ class MooncakeBackend(Backend):
         self._contribute_memory = contribute_memory
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
-        self._mixed_bulk: MooncakeMixedBulk | None = None
+        self._host_staging: MooncakeHostStaging | None = None
         self._prefetch_conf = SsdPrefetchConf.disabled()
 
         if not self._lazy_init:
@@ -603,17 +604,18 @@ class MooncakeBackend(Backend):
                 "and prevent reuse of a buffer with an outstanding transfer."
             )
 
-    def register_bulk_buffers(self, ptrs: list[int], lengths: list[int], *, host_ranges: dict[int, int]) -> None:
+    def _register_host_buffers(self, buffers: list[BufferDescriptor]) -> None:
         if not self._use_store_independent_te:
             raise RuntimeError("Mooncake mixed bulk registration requires a Store-owned transfer engine")
-        if self._mixed_bulk is not None:
+        if self._host_staging is not None:
             raise RuntimeError("Mooncake mixed bulk buffers are already registered")
         self.ensure_initialized()
         assert self.store is not None
-        bulk = MooncakeMixedBulk(self.store, host_ranges)
-        self._mixed_bulk = bulk
+        host_ranges = {buffer.address: buffer.size_bytes for buffer in buffers if buffer.host}
+        staging = MooncakeHostStaging(self.store, host_ranges)
+        self._host_staging = staging
         try:
-            bulk.register(ptrs, lengths)
+            staging.register(*buffer_arrays(buffers))
         except Exception:
             try:
                 self.close()
@@ -622,33 +624,27 @@ class MooncakeBackend(Backend):
             raise
 
     def close(self) -> None:
-        bulk = self._mixed_bulk
+        staging = self._host_staging
         store = self.store
         try:
-            if bulk is not None:
-                bulk.close()
+            if staging is not None:
+                staging.close()
         finally:
             # This backend owns the Store. If deregistration failed, shut its
             # engine down before releasing memory it may still have registered.
             if store is not None:
                 store.close()
-            if bulk is not None:
-                bulk.release_staging()
-            self._mixed_bulk = None
+            if staging is not None:
+                staging.release_staging()
+            self._host_staging = None
             self.store = None
             self._store_initialized = False
 
-    def get_bulk(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool) -> list[int]:
-        if self._mixed_bulk is None:
-            raise RuntimeError("Mooncake mixed bulk buffers have not been registered")
-        return self._mixed_bulk.get(keys, addrs, sizes, host=host)
-
-    def put_bulk(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool) -> list[bool]:
-        if self._mixed_bulk is None:
-            raise RuntimeError("Mooncake mixed bulk buffers have not been registered")
-        return self._mixed_bulk.put(keys, addrs, sizes, self._build_replicate_config(), host=host)
-
-    def register_buffer(self, ptrs: list[int], lengths: list[int]):
+    def register_buffer(self, buffers: list[BufferDescriptor]) -> None:
+        if any(buffer.host for buffer in buffers):
+            self._register_host_buffers(buffers)
+            return
+        ptrs, lengths = buffer_arrays(buffers)
         if self._use_store_independent_te or self._prefetch_conf.use_dict_setup:
             assert self.store is not None
             for ptr, length in zip(ptrs, lengths):
@@ -779,7 +775,14 @@ class MooncakeBackend(Backend):
             raise RuntimeError("Mooncake client does not support batch_get_session_end")
         return int(method(keys))
 
-    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[bool] | bool:
+    def put(
+        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool | None = None
+    ) -> list[bool] | bool:
+        if host is not None:
+            if self._host_staging is not None:
+                return self._host_staging.put(keys, addrs, sizes, self._build_replicate_config(), host=host)
+            if host:
+                raise RuntimeError("Mooncake Host buffers have not been registered")
         self.ensure_initialized()
         assert self.store is not None
         try:
@@ -813,7 +816,12 @@ class MooncakeBackend(Backend):
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
             return False
 
-    def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+    def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool | None = None):
+        if host is not None:
+            if self._host_staging is not None:
+                return self._host_staging.get(keys, addrs, sizes, host=host)
+            if host:
+                raise RuntimeError("Mooncake Host buffers have not been registered")
         if self._lazy_init and not self._store_initialized:
             logger.error(
                 "Failed to get %d keys out of %d. Store is not initialized; "

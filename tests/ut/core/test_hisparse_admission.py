@@ -30,7 +30,7 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.request import Request
 
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import with_aligned_hisparse_slab
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import aligned_hisparse_allocation_config
 from vllm_ascend.hisparse.binding import prepare_hisparse_cache_views
 
 BLOCK_SIZE = 16
@@ -215,7 +215,7 @@ def test_slab_reservation_requires_one_shared_device_size(device_sizes):
     ]
     cache = KVCacheConfig(1, tensors, [])
     with pytest.raises(ValueError, match="requires one shared device slab size"):
-        with_aligned_hisparse_slab(cache)
+        aligned_hisparse_allocation_config(cache)
     assert cache.kv_cache_tensors is tensors
 
 
@@ -224,7 +224,7 @@ def test_slab_reservation_preserves_runner_config_on_failed_binding():
     tensors = cache.kv_cache_tensors
     device_tensor = next(tensor for tensor in tensors if not tensor.host_resident)
     # The Core runner deep-copies its config and binds the views on that copy.
-    core_cache = deepcopy(with_aligned_hisparse_slab(cache))
+    core_cache = deepcopy(aligned_hisparse_allocation_config(cache))
     with pytest.raises(ValueError, match="missing its reserved alignment padding"):
         assert core_cache.kv_cache_tensors[1].size > device_tensor.size
         name = device_tensor.layers[0]
@@ -365,8 +365,8 @@ def test_failed_resident_import_releases_reservation_and_can_retry_with_another_
 
 def test_hisparse_slab_padding_is_idempotent():
     _, cache = _cache_configs()
-    aligned = with_aligned_hisparse_slab(cache)
-    repeated = with_aligned_hisparse_slab(aligned)
+    aligned = aligned_hisparse_allocation_config(cache)
+    repeated = aligned_hisparse_allocation_config(aligned)
     assert [t.size for t in repeated.kv_cache_tensors] == [t.size for t in aligned.kv_cache_tensors]
     assert [t.size for t in cache.kv_cache_tensors] != [t.size for t in aligned.kv_cache_tensors]
 
