@@ -11,6 +11,19 @@ from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_shard
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 
+try:
+    from vllm_ascend.observability.ms_metrics.handlers.rl_router_replay import record_routed_experts_state
+except ImportError:
+    # ``ms_service_metric`` is an optional dependency; the handlers package
+    # imports it at module scope, so KV cache init must work without it.
+    record_routed_experts_state = None
+
+
+def _report_router_replay(state: str, value: int) -> None:
+    """Report one router-replay state; a no-op without the metrics framework."""
+    if record_routed_experts_state is not None:
+        record_routed_experts_state(state, value)
+
 
 # TODO: Remove once upstream GPUModelRunner dispatches sharded PCP decode with
 # rank-local request counts.
@@ -223,7 +236,11 @@ def initialize_kv_cache(
         self.kv_connector = upstream.get_kv_connector(self.vllm_config, kv_caches_dict)
         # vLLM main carries routed-experts output through the AuxOutput
         # connector, which the V2 NPUModelRunner relies on via super().
-        if self.vllm_config.aux_output_config.enabled:
+        aux_output_enabled = self.vllm_config.aux_output_config.enabled
+        _report_router_replay("enabled", int(aux_output_enabled))
+        _report_router_replay("ready", 0)
+        _report_router_replay("capturing", 0)
+        if aux_output_enabled:
             if vllm_version_is("0.33.0"):
                 self.aux_output_connector = upstream.get_aux_output_connector(  # type: ignore[call-arg]
                     self.model, self.vllm_config, kv_cache_config
@@ -238,6 +255,7 @@ def initialize_kv_cache(
                 self.aux_output_connector.initialize_output_storage(  # type: ignore[attr-defined]
                     kv_cache_config
                 )
+            _report_router_replay("ready", 1)
 
 
 upstream.copy_kv_cache_blocks_inplace = copy_kv_cache_blocks_inplace

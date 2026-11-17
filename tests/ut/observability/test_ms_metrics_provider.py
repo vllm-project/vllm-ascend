@@ -452,6 +452,30 @@ def test_symbol_hook_handlers_honor_level_and_labels(monkeypatch):
     metrics.record_metric.assert_not_called()
 
 
+def test_record_routed_experts_state_records_0_1_gauge(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_rl_router_replay_state", "rl_router_replay")
+
+    handlers.record_routed_experts_state("ready", 1)
+
+    metrics.get_or_create_metric.assert_called_once_with(
+        metric_name="rl:routed_experts_state",
+        metric_type="gauge",
+        label_names=["state"],
+    )
+    metrics.record_metric.assert_called_once_with(
+        "rl:routed_experts_state",
+        value=1.0,
+        labels={"state": "ready"},
+    )
+
+
 def test_custom_handlers_are_not_factory_created_from_yaml_metrics():
     """A custom handler entry must not declare a yaml ``metrics`` block.
 

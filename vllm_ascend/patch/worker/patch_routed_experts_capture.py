@@ -29,7 +29,18 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedE
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 
+try:
+    from vllm_ascend.observability.ms_metrics.handlers.rl_router_replay import record_routed_experts_state
+except ImportError:
+    # ``ms_service_metric`` is an optional dependency; the handlers package
+    # imports it at module scope, so capture must work without it.
+    record_routed_experts_state = None
+
 logger = logging.getLogger(__name__)
+
+# ``capture`` runs once per MoE layer per step, so the ``capturing`` state is
+# latched after the first call instead of being recorded on the hot path.
+_capturing_reported = False
 
 # Strategies whose ``prepare()`` splits the token dimension across the TP group.
 # ALLGATHER is absent on purpose: it gathers the batch before routing.
@@ -135,6 +146,11 @@ def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
         layer_id: The layer index.
         topk_ids: Tensor of shape (batch_size, num_routed_experts).
     """
+
+    global _capturing_reported
+    if not _capturing_reported and record_routed_experts_state is not None:
+        record_routed_experts_state("capturing", 1)
+        _capturing_reported = True
 
     ctx = get_forward_context()
     if ctx.dp_metadata is None:  # single dp
