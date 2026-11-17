@@ -294,6 +294,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         len(phys_to_layer_idx),
                     )
 
+        self.layer_load_finished_events: list[threading.Event] | None = None
+        self.layer_save_finished_events: list[threading.Event] | None = None
+
         self.next_layer_to_submit = 0
         self.layerwise_offload = False
         self.prefetch_layer_map: dict[int, tuple[int, ...]] = {}
@@ -336,8 +339,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     raise ValueError("layerwise_prefetch_layers must be a positive integer")
         self.layer_load_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
         self.layer_save_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
-        self.layer_load_finished_events: list[threading.Event] | None = None
-        self.layer_save_finished_events: list[threading.Event] | None = None
         self.sync_save_events: list[torch.npu.Event] | None = None
 
         logger.info(
