@@ -1,0 +1,5 @@
+pr: 21023
+entries:
+  - category: bugfix
+    text: Fixed DeepSeek V4.1 DSpark auxiliary hidden-state capture on MRV2 so the draft consumes the intended zero-based attention inputs, sampled after Engram injection and including the final boundary.
+    model: deepseek-v4.1
