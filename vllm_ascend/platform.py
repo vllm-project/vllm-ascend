@@ -230,6 +230,27 @@ class NPUPlatform(Platform):
         return "vllm_ascend.compilation.compiler_interface.AscendCompiler"
 
     @classmethod
+    def get_draft_lm_head_quantization_methods(cls) -> dict[str, str]:
+        """Ascend formats for the drafter's quantized LM head copy.
+
+        Maps each `draft_lm_head_quantization` format to the qualified name
+        of a zero-argument factory in vllm_ascend.quantization.draft_lm_head.
+        The core "fp8"/"nvfp4" formats have no Ascend execution path and are
+        shadowed with factories that raise a clear error. 310P (COMPATIBILITY
+        family) has no online LM head quantization support yet.
+        """
+        family = get_current_hardware_profile().device_adaptor_family
+        methods = {
+            "fp8": "vllm_ascend.quantization.draft_lm_head.create_unsupported_fp8_method",
+            "nvfp4": "vllm_ascend.quantization.draft_lm_head.create_unsupported_nvfp4_method",
+        }
+        if family is DeviceAdaptorFamily.FP8_OPTIMIZED:
+            methods["mxfp8"] = "vllm_ascend.quantization.draft_lm_head.create_mxfp8_lm_head_method"
+        elif family is DeviceAdaptorFamily.STANDARD:
+            methods["int8"] = "vllm_ascend.quantization.draft_lm_head.create_int8_lm_head_method"
+        return methods
+
+    @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm_ascend.lora.punica_npu.PunicaWrapperNPU"
 
