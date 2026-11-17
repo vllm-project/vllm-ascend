@@ -98,6 +98,32 @@ identical resources. The A2 path uses this bound instead of the general
 communication memory and workspace; measure available KV capacity and peak HBM.
 Inputs larger than the allocated sender capacity fail rather than truncating.
 
+## Runtime logs
+
+Key diagnostics are enabled at the default INFO level when the opt-in is enabled.
+Collect all P worker output and filter it with:
+
+```shell
+rg 'A2_MEGA_MOE' p.log
+```
+
+- `policy`: prints the fixed main-model backend and DP/TP/PCP once per worker.
+  It describes the selection policy; it does not prove an operator was called.
+- `draft_route`: prints each distinct ordinary draft backend/quantization/capacity
+  combination once per worker.
+- `batch`: prints one CPU summary per target attention preparation, including
+  dummy/CPP-profile flags, request/prefill counts and local/padded/global tokens.
+- `op_enter`: records the first MegaMoE call in each forward context, including
+  EP rank, profile flag, input shape, sender capacity, quantization mode and
+  mask shape/dtype. `profile=False` distinguishes runtime from memory profiling;
+  match the worker prefix to `batch dummy=False` to identify a real request.
+- `op_return`: records return from that operator call. NPU execution is
+  asynchronous; this line does not establish device completion or accuracy.
+
+Nested replay contexts get their own first-call records. Standalone operator
+tests without a forward context log each call. No device tensor contents are
+read for these logs, and no selection collective is added.
+
 ## Validation and rollback
 
 CPU policy and extracted production-function checks can run without vLLM/NPU:

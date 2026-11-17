@@ -16,6 +16,7 @@ from types import SimpleNamespace as NS
 from typing import Any
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 from pydantic import TypeAdapter, ValidationError, model_validator
@@ -365,6 +366,13 @@ def test_validated_p_target_always_selects_megamoe(tokens, monkeypatch):
     ns["use_cann_megamoe"].assert_not_called()
     reduce.assert_not_called()
     ns["logger"].info.assert_not_called()
+    ns["logger"].info_once.assert_called_once_with(
+        "A2_MEGA_MOE policy target=FUSED_MC2 draft=ordinary phase_vote=False dp=%s tp=%s pcp=%s",
+        2,
+        1,
+        8,
+        scope="process",
+    )
 
 
 def test_explicit_draft_keeps_ordinary_selection_capacity():
@@ -372,6 +380,8 @@ def test_explicit_draft_keeps_ordinary_selection_capacity():
     select = ns["select_moe_comm_method"]
     assert select(512, config(), is_draft_model=True) == "mc2"
     assert select(513, config(), is_draft_model=True) == "gather"
+    assert ns["logger"].info_once.call_args.args[1:] == ("gather", "none", 512)
+    assert ns["logger"].info_once.call_args.kwargs == {"scope": "process"}
 
 
 @pytest.mark.parametrize("identity", ["draft", "architecture", "replicated"])
@@ -578,6 +588,91 @@ def test_fixed_route_rejects_input_above_sender_capacity_before_launch():
     with pytest.raises(ValueError, match="received 4097 tokens per rank"):
         ns[apply.name](comm, NS(hidden_states=torch.empty(4097, 1)), None, False)
     operator.assert_not_called()
+
+
+@pytest.mark.parametrize("dummy", [False, True])
+def test_batch_summary_logs_cpu_counts_without_collectives(dummy):
+    ns = dict(
+        logger=Mock(),
+        np=np,
+        a2_prefill_enabled=policy.a2_prefill_enabled,
+        get_ascend_config=lambda: NS(a2_mega_moe_prefill=NS(enabled=True)),
+    )
+    functions("vllm_ascend/worker/v2/model_states/default.py", ["_log_a2_mega_moe_batch"], ns)
+    batch = NS(
+        is_dummy=dummy,
+        is_cpp_profile=False,
+        num_reqs=1,
+        is_prefilling_np=np.array([not dummy]),
+        num_tokens=3,
+        num_tokens_after_padding=6,
+    )
+    ns["_log_a2_mega_moe_batch"](batch, NS(global_batch=NS(num_tokens=40)))
+    assert ns["logger"].info.call_args.args[1:] == (dummy, False, 1, int(not dummy), 3, 6, 40)
+
+
+@pytest.mark.parametrize("profile", [False, True, None])
+@pytest.mark.parametrize("failure", [False, True])
+def test_operator_logs_first_call_per_context_without_reading_device_values(profile, failure):
+    tree = ast.parse((ROOT / "vllm_ascend/ops/fused_moe/moe_comm_method.py").read_text())
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "FusedMC2CommImpl")
+    apply = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_apply_cann_mega_moe")
+    context = NS(additional_kwargs={"in_profile_run": profile})
+    logger = Mock()
+    ns = dict(
+        torch=torch,
+        cast=lambda _, value: value,
+        TokenDispatcherWithMC2=NS,
+        logger=logger,
+        a2_prefill_enabled=policy.a2_prefill_enabled,
+        get_ascend_config=lambda: NS(a2_mega_moe_prefill=NS(enabled=True)),
+        is_forward_context_available=lambda: profile is not None,
+        get_forward_context=lambda: context,
+        get_current_hardware_profile=lambda: NS(supports=lambda capability: False),
+        HardwareCapability=NS(CANN_MEGAMOE_MXFP="mxfp"),
+        moe_utils=NS(_get_cann_mega_moe_quant_settings=lambda quant: (2, torch.int8, 285)),
+    )
+    exec(
+        compile(
+            ast.Module(body=[apply], type_ignores=[]), "operator", "exec", flags=__future__.annotations.compiler_flag
+        ),
+        ns,
+    )
+    x = torch.empty(6, 8, dtype=torch.bfloat16)
+    operator = Mock(return_value=(x, torch.zeros(2)))
+    comm = NS(
+        token_dispatcher=NS(max_num_tokens_per_rank=4096, global_bs=0, ep_rank_id=8),
+        mega_moe_symm_buffer=NS(),
+        mega_moe=operator,
+    )
+    weights = NS(w1=x, w2=x, w1_scale=x, w2_scale=x, w1_scale_bias=x, w2_scale_bias=x)
+    inputs = NS(
+        hidden_states=x,
+        topk_ids=torch.zeros(6, 2, dtype=torch.int32),
+        topk_weights=torch.ones(6, 2),
+        quant=NS(quant_type="w4a8"),
+        routing=NS(mc2_mask=torch.zeros(6, dtype=torch.bool)),
+        layer=NS(),
+    )
+    if failure:
+        operator.side_effect = RuntimeError("operator failure")
+        with pytest.raises(RuntimeError, match="operator failure"):
+            ns[apply.name](comm, inputs, weights, False)
+        assert logger.info.call_count == 1
+        assert "op_enter" in logger.info.call_args.args[0]
+    else:
+        for _ in range(2):
+            ns[apply.name](comm, inputs, weights, False)
+        assert operator.call_count == 2
+        assert logger.info.call_count == (2 if profile is not None else 4)
+        assert "op_return" in logger.info.call_args.args[0]
+        context.additional_kwargs = {"in_profile_run": profile}
+        ns[apply.name](comm, inputs, weights, False)
+        assert logger.info.call_count == (4 if profile is not None else 6)
+    enter = logger.info.call_args_list[0].args
+    assert enter[1:] == (8, profile if profile is not None else False, (6, 8), 4096, 2, (6,), torch.int8)
+    for call in logger.info.call_args_list:
+        assert not any(isinstance(arg, torch.Tensor) for arg in call.args)
 
 
 def test_receive_capacity_covers_skewed_ep16_load():

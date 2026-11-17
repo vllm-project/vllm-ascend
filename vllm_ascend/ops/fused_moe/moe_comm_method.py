@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import cast
 
 import torch
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
@@ -546,6 +547,25 @@ class FusedMC2CommImpl(MoECommMethod):
         activation_kwargs = getattr(layer, "mega_moe_activation_kwargs", None)
         if activation_kwargs is None:
             activation_kwargs = getattr(self, "mega_moe_activation_kwargs", {}) or {}
+        log_call = False
+        if a2_prefill_enabled(get_ascend_config()):
+            # Keep only the first MoE call per context. A context is fresh for
+            # each main/replay forward; direct operator tests may have none.
+            extras = get_forward_context().additional_kwargs if is_forward_context_available() else {}
+            log_call = not extras.get("_a2_mega_moe_call_logged", False)
+            if log_call:
+                extras["_a2_mega_moe_call_logged"] = True
+                logger.info(
+                    "A2_MEGA_MOE op_enter op=cann_mega_moe ep_rank=%s profile=%s x_shape=%s "
+                    "sender_capacity=%s quant_mode=%s mask_shape=%s mask_dtype=%s",
+                    self.token_dispatcher.ep_rank_id,
+                    extras.get("in_profile_run", False),
+                    tuple(fused_experts_input.hidden_states.shape),
+                    num_max_tokens,
+                    dispatch_quant_mode,
+                    tuple(x_active_mask.shape) if x_active_mask is not None else None,
+                    x_active_mask.dtype if x_active_mask is not None else None,
+                )
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
             fused_experts_input.topk_ids.to(torch.int32),
@@ -562,6 +582,12 @@ class FusedMC2CommImpl(MoECommMethod):
             weight2_type=weight_type,
             **activation_kwargs,
         )
+        if log_call:
+            logger.info(
+                "A2_MEGA_MOE op_return op=cann_mega_moe ep_rank=%s x_shape=%s",
+                self.token_dispatcher.ep_rank_id,
+                tuple(out.shape),
+            )
         # NOTE: self.expert_token_nums is only used by the
         # mega_moe path (enable_fused_mc2 == 1) as a
         # pre-allocated in/out buffer. The MegaMoe op returns a fresh

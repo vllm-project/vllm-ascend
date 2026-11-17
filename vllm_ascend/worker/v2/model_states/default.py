@@ -28,6 +28,7 @@ import torch.distributed as dist
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dp_group
 from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.logger import logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheConfig
 from vllm.v1.utils import CpuGpuBuffer
@@ -36,6 +37,7 @@ from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.a2_mega_moe import a2_prefill_enabled
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import CopySfaRequestStates
@@ -66,6 +68,22 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
     from vllm_ascend.worker.v2.kvpp import KVPPRuntime
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext, AscendPCPManager
+
+
+def _log_a2_mega_moe_batch(input_batch: AscendInputBatch, pcp_context: "AscendPCPAttentionContext | None") -> None:
+    """Summarize CPU batch state once before building target attention metadata."""
+    if a2_prefill_enabled(get_ascend_config()):
+        logger.info(
+            "A2_MEGA_MOE batch dummy=%s cpp_profile=%s reqs=%s prefill_reqs=%s "
+            "local_tokens=%s padded_tokens=%s global_tokens=%s",
+            input_batch.is_dummy,
+            input_batch.is_cpp_profile,
+            input_batch.num_reqs,
+            int(np.count_nonzero(input_batch.is_prefilling_np[: input_batch.num_reqs])),
+            input_batch.num_tokens,
+            input_batch.num_tokens_after_padding,
+            pcp_context.global_batch.num_tokens if pcp_context is not None else input_batch.num_tokens,
+        )
 
 
 class AscendModelState(DefaultModelState):
@@ -522,6 +540,7 @@ class AscendModelState(DefaultModelState):
         self.slot_mappings = slot_mappings
         self.kv_cache_config = kv_cache_config
         self.pcp_context = pcp_context
+        _log_a2_mega_moe_batch(input_batch, pcp_context)
         build_metadata: Callable[..., Any] = build_attn_metadata
         if self.device_metadata is not None:
             build_metadata = partial(self.device_metadata.run_build, build_attn_metadata)

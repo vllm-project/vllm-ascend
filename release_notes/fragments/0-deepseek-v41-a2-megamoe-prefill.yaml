@@ -1,7 +1,7 @@
 pr: 0
 entries:
   - category: feature
-    text: Added an experimental opt-in CANN MegaMoE prefill backend for DeepSeek V4.1 Flash W4A8 on A2 DP2/TP1/PCP8 P workers, with startup validation, fixed main-model routing and ordinary draft execution.
+    text: Added an experimental opt-in CANN MegaMoE prefill backend for DeepSeek V4.1 Flash W4A8 on A2 DP2/TP1/PCP8 P workers, with startup validation, fixed main-model routing and ordinary draft execution. Key INFO logs report routing policy, batch summaries and the first operator call in each forward context.
     model: DeepSeek-V4.1-Flash
     hardware: [A2]
   - category: bugfix

@@ -430,6 +430,14 @@ def select_moe_comm_method(
         # Startup validates the P-only W4A8 topology and eager execution.
         # Every target forward, including idle DP dummy peers, uses MegaMoE.
         # Selecting here performs no collective in KV-only forward contexts.
+        parallel = vllm_config.parallel_config
+        logger.info_once(
+            "A2_MEGA_MOE policy target=FUSED_MC2 draft=ordinary phase_vote=False dp=%s tp=%s pcp=%s",
+            parallel.data_parallel_size,
+            parallel.tensor_parallel_size,
+            parallel.prefill_context_parallel_size,
+            scope="process",
+        )
         return MoECommType.FUSED_MC2
 
     mc2_tokens_capacity = get_mc2_tokens_capacity()
@@ -468,6 +476,14 @@ def select_moe_comm_method(
         is_draft_model,
         draft_moe_quant_type,
     )
+    if a2_enabled:
+        logger.info_once(
+            "A2_MEGA_MOE draft_route method=%s quant=%s capacity=%s",
+            moe_comm_type,
+            draft_moe_quant_type,
+            mc2_tokens_capacity,
+            scope="process",
+        )
     return moe_comm_type
 
 
