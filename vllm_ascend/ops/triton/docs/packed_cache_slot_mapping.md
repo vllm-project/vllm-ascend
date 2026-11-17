@@ -7,7 +7,7 @@
   page/row coordinate buffer and a flat physical-slot buffer in a single Triton
   launch. It replaces the eager
   `compressed_slot_mapping` + `where`/`floor_divide`/`remainder`/`copy_` chain
-  (roughly seven elementwise NPU ops per group) used by the DeepSeek V4.1 (DSA)
+  used by the DeepSeek V4.1 (DSA)
   metadata builder in `vllm_ascend/attention/dsa_v41.py`.
 - **Formula**: Let `s` be a slot id and `p` the parallel position, with
   `B` the storage block size:
@@ -38,7 +38,7 @@
      slot to the flat buffer. Both are caller-owned persistent buffers, so ACL
      graph capture keeps stable addresses.
 - **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products. The kernel
-  reproduces the eager metadata chain on every Ascend platform; it is not gated
+  implements the shared metadata contract; it is not gated
   to the A5 packed-cache ABI. Works in eager and ACL graph modes.
 
 ## Parameters
@@ -92,9 +92,8 @@ nothing.
 - **Differences**:
     - NPU adaptation for performance: the per-group eager elementwise chain is
       fused into one launch, the power-of-two page split becomes a shift/mask,
-      and the ratio-2 completion test becomes low-bit tests, so the kernel holds
-      no INT64 division. Measured over 1..256 tokens, `BLOCK_SIZE = 8` is
-      1.76x-3.61x faster than 64.
+      and the ratio-2 completion test becomes low-bit tests. Non-power-of-two
+      page sizes retain division and remainder.
     - Modified for a specific vllm-ascend logic: ratio-2 planes write only
       completed pairs (`s` and `p` odd). This reproduces
       `compressed_slot_mapping`'s `(s + 1) % ratio == 0` test plus the caller's
@@ -106,7 +105,9 @@ nothing.
 ## Test Cases
 
 - **Reference implementation**: the eager chain of `_build_cache_slots` in
-  `vllm_ascend/attention/dsa_v41.py`.
+  `vllm_ascend/attention/dsa_v41.py`, using division and remainder. The old
+  ratio-1 path requires upstream PAD slots; its stale-positive-tail case is
+  tested separately against the fused valid-range contract.
 - **Accuracy criterion**: exact comparison (`rtol=0, atol=0`). Pages, rows and
   flat slots are integer indices, so the general FP16/BF16/FP32 tolerance table
   does not apply.
@@ -114,7 +115,7 @@ nothing.
   decode with 6 concurrent requests, 256 for the decode upper bound, 8192 for
   prefill `max_num_batched_tokens`, storage block size 128), plus the boundaries
   the kernel branches on: single token, grid saturation at 320 tokens, the
-  ratio-1 SWA plane where positions are never dereferenced, a non power-of-two
+  ratio-1 SWA plane using slots as the positions placeholder, a non power-of-two
   page, a page boundary, padded FULL-graph carriers, negative slots, 64-bit slot
   ids above 2^40, non-contiguous inputs and ACL graph replay.
 

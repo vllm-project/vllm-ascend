@@ -3,7 +3,6 @@ entries:
   - category: performance
     text: >-
       DeepSeek V4.1 now runs the packed-cache slot-mapping and C2 ring-metadata Triton kernels on
-      A2 and A3 instead of the elementwise PyTorch chains, removing about 89% of the per-group
-      slot-mapping launch overhead and improving decode throughput and time to first token.
+      A2 and A3 instead of the elementwise PyTorch chains, reducing metadata construction overhead.
     model: deepseek-v4.1
     hardware: [A2, A3]

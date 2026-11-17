@@ -55,8 +55,9 @@ def reference(
     if skip_update:
         complete = torch.zeros_like(complete)
     source_positions = torch.where(complete, positions - 1, torch.zeros_like(positions))
-    cos = source_cos[source_positions].reshape(num_tokens, rope_dim).to(output_dtype)
-    sin = source_sin[source_positions].reshape(num_tokens, rope_dim).to(output_dtype)
+    gather_idx = source_positions.reshape(-1, 1, 1, 1).expand(num_tokens, 1, 1, rope_dim)
+    cos = torch.gather(source_cos, 0, gather_idx).reshape(num_tokens, rope_dim).to(output_dtype)
+    sin = torch.gather(source_sin, 0, gather_idx).reshape(num_tokens, rope_dim).to(output_dtype)
     return ring, complete, source_positions, cos, sin
 
 

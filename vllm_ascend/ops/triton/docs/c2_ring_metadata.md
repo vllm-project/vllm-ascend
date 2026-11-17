@@ -8,8 +8,8 @@
   RoPE rows gathered for that source position. It replaces the eager
   `clamp`/`where`/`copy_`/`gather` chain in
   `AscendDSAV41StateMetadataBuilder._build_compressor_cache`
-  (`vllm_ascend/attention/dsa_v41.py`), which needed four separate NPU
-  kernels plus a strided `torch.gather`.
+  (`vllm_ascend/attention/dsa_v41.py`), replacing multiple eager operations
+  and RoPE gathers with one launch.
 - **Formula**: With `starts = query_start_loc[req]`,
   `ends = query_start_loc[req + 1]`, `qlen = ends - starts`,
   `used = max(min(ends, num_actual_tokens) - starts, 0)`:
@@ -98,9 +98,8 @@ The launch returns `None`; all five outputs are caller-owned buffers.
   `vllm_ascend/attention/dsa_v41.py`; there is no upstream vLLM operator with
   this interface.
 - **Differences**:
-    - NPU adaptation for performance: the eager chain's four elementwise kernels
-      plus the strided `torch.gather` collapse into one launch, and the request
-      and token axes share a grid instead of being two separate launches.
+    - NPU adaptation for performance: eager metadata operations and RoPE gathers
+      collapse into one launch, with request and token tiles sharing a grid.
     - Modified for a specific vllm-ascend logic: gating moved from
       `_uses_a5_packed_cache` to the presence of the full-source RoPE buffers,
       so A2/A3 also run this kernel. The eager chain remains for callers without

@@ -27,22 +27,23 @@ def reference(
     compress_ratio: int,
     skip_update: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Eager chain from ``AscendDSAV41MetadataBuilder._build_cache_slots``."""
+    """CPU reference for the original eager slot-mapping chain."""
     slots = slots.to(torch.int64)
-    valid_end = min(int(query_start_loc[num_actual_reqs]), num_actual_tokens)
-    valid = (slots >= 0) & (torch.arange(slots.shape[0]) < valid_end)
     if compress_ratio == 2:
-        positions = positions.to(torch.int64)
-        valid &= ((slots & 1) == 1) & ((positions & 1) == 1)
+        complete = (slots >= 0) & ((slots + 1).remainder(compress_ratio) == 0)
+        slots = torch.where(complete, slots // compress_ratio, -1)
+    valid = slots >= 0
+    if compress_ratio == 2:
         if skip_update:
             valid.zero_()
-        physical = slots >> 1
-    else:
-        physical = slots
-    clamped = physical.clamp_min(0)
+        else:
+            valid_end = min(int(query_start_loc[num_actual_reqs]), num_actual_tokens)
+            valid &= torch.arange(slots.shape[0]) < valid_end
+            valid &= positions.remainder(2) == 1
+    clamped = slots.clamp_min(0)
     pages = torch.where(valid, clamped // page_size, torch.full_like(clamped, -1))
     rows = torch.where(valid, clamped % page_size, torch.full_like(clamped, -1))
-    flat = torch.where(valid, physical, torch.full_like(physical, -1))
+    flat = torch.where(valid, slots, torch.full_like(slots, -1))
     return torch.stack((pages, rows), dim=1), flat
 
 
@@ -137,6 +138,28 @@ def test_matches_eager_chain(num_tokens: int, compress_ratio: int, page_size: in
 
     gc.collect()
     torch.npu.empty_cache()
+
+
+@torch.inference_mode()
+def test_ratio_one_without_positions() -> None:
+    slots, _, query_start_loc = make_case(37, 3, 1 << 16)
+    expected = reference(slots.cpu(), slots.cpu(), query_start_loc.cpu(), 3, 37, 128, 1)
+    actual = run_kernel(slots, slots, query_start_loc, 3, 37, 128, 1)
+    for got, want in zip(actual, expected):
+        validate_cmp(got, want)
+
+
+@torch.inference_mode()
+def test_ratio_one_masks_stale_positive_tail() -> None:
+    slots = torch.arange(1, 17, dtype=torch.int32, device="npu")
+    query_start_loc = torch.tensor([0, 16], dtype=torch.int32, device="npu")
+    actual = run_kernel(slots, slots, query_start_loc, 1, 8, 128, 1)
+    # The old ratio-1 eager path relies on upstream PAD slots; fused also clips valid_end.
+    padded_slots = slots.cpu()
+    padded_slots[8:] = -1
+    expected = reference(padded_slots, padded_slots, query_start_loc.cpu(), 1, 8, 128, 1)
+    for got, want in zip(actual, expected):
+        validate_cmp(got, want)
 
 
 @pytest.mark.parametrize("page_size", [16, 128])
@@ -319,6 +342,8 @@ def test_graph_replay_keeps_buffers_and_semantics(compress_ratio: int) -> None:
     pointer = (captured_coordinates.data_ptr(), captured_flat.data_ptr())
     for seed in (0, 1, 2):
         fresh_slots, fresh_positions, _ = make_case(tokens, requests, 1 << 20, seed=seed)
+        if compress_ratio == 1:
+            fresh_slots[actual_tokens:] = -1
         slots.copy_(fresh_slots)
         positions.copy_(fresh_positions)
         graph.replay()
