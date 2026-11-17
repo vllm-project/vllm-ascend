@@ -459,7 +459,8 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
         (False, 7, None),
         (False, 8, "GLM AscendC KDA supports at most seven speculative tokens"),
         (True, 8, None),
-        (True, 9, "GLM KDA RecoverSSM supports at most 8 speculative tokens"),
+        (True, 9, None),
+        (True, 16, None),
     ],
 )
 def test_kda_speculative_token_limit_by_backend(monkeypatch, recover, num_spec, error):

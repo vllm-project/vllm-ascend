@@ -46,9 +46,6 @@ if TYPE_CHECKING:
     from vllm.models.kimi_k3.nvidia.ops.recoverssm import KDARecoverSSMRecords
 
 
-KDA_RECOVERSSM_MAX_SPECULATIVE_TOKENS = 8
-
-
 class Glm5NextGDNHostMetadataBackend(AscendGDNHostMetadataBackend):
     @classmethod
     def supports_pcp(cls) -> bool:
@@ -267,12 +264,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         if config.linear_head_dim != 128 or vllm_config.model_config.dtype != torch.bfloat16:
             raise ValueError("GLM AscendC KDA requires BF16 activations and head_dim=128.")
         num_spec = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
-        if self.use_recoverssm:
-            if num_spec > KDA_RECOVERSSM_MAX_SPECULATIVE_TOKENS:
-                raise ValueError(
-                    f"GLM KDA RecoverSSM supports at most {KDA_RECOVERSSM_MAX_SPECULATIVE_TOKENS} speculative tokens."
-                )
-        elif num_spec + 1 > KDA_MAX_RECURRENT_TOKENS:
+        if not self.use_recoverssm and num_spec + 1 > KDA_MAX_RECURRENT_TOKENS:
             raise ValueError("GLM AscendC KDA supports at most seven speculative tokens.")
         if not 2 <= config.linear_conv_kernel_dim <= 4:
             raise ValueError("GLM AscendC causal-conv requires a kernel width in [2, 4].")
