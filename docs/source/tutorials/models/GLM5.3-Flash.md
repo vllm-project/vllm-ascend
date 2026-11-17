@@ -446,6 +446,10 @@ After starting all nodes of the selected deployment, open another terminal and r
 
 Before starting any role script, verify [multi-node communication](../../getting_started/installation.md#installation-multi-node-interconnect), select the matching host IP and interface on every node, and allow the DP RPC, API, HCCL socket, Mooncake handshake/control, and transfer-engine ports through the firewall. Use the port settings in the selected hardware tab; allowing only the proxy port is insufficient. Physical node count and the number of DP engines are different: follow each tab's topology and endpoint mapping.
 
+!!! note
+
+    The `prefill` and `decode` entries under `kv_connector_extra_config` are legacy compatibility fields. `MooncakeConnectorV2` negotiates the Prefill and Decode topology through its handshake metadata and does not read these entries, so the examples on this page omit them. Scripts copied from older guides that still set them continue to work. Connector-specific keys such as `backend` and `use_layerwise` used by `AscendStoreConnector` in [Section 5.4](#54-prefill-decode-disaggregation-with-kv-cache-pool) are unrelated to these entries and remain required.
+
 The 950DT products, A3 series and A2 series deployments use the same `launch_online_dp.py` script to
 start one vLLM process per local DP rank. Save it on every Prefill and Decode
 node before following the platform-specific instructions below.
@@ -588,11 +592,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
                 "kv_connector": "MooncakeConnectorV2",
                 "kv_role": "kv_producer",
                 "engine_id": "0",
-                "kv_port": "30100",
-                "kv_connector_extra_config": {
-                  "prefill": {"dp_size": 1, "tp_size": 8},
-                  "decode": {"dp_size": 8, "tp_size": 1}
-                }
+                "kv_port": "30100"
               }'
             ```
 
@@ -649,11 +649,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
                 "kv_connector": "MooncakeConnectorV2",
                 "kv_role": "kv_consumer",
                 "engine_id": "1",
-                "kv_port": "30800",
-                "kv_connector_extra_config": {
-                  "prefill": {"dp_size": 1, "tp_size": 8},
-                  "decode": {"dp_size": 8, "tp_size": 1}
-                }
+                "kv_port": "30800"
               }'
             ```
 
@@ -719,7 +715,6 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       with video input disabled through `--limit-mm-per-prompt`.
     - `MooncakeConnectorV2` uses `kv_producer` on Prefill and `kv_consumer`
       on Decode, with base KV ports `30100` and `30800`, respectively.
-      Both roles declare Prefill DP1/TP8 and Decode DP8/TP1.
     - `HCCL_IF_IP` and the socket interface variables select each node's
       communication network. `HCCL_BUFFSIZE` is `3072` on Prefill and
       `1024` on Decode. The DP RPC, API, Mooncake and proxy ports must be
@@ -1074,9 +1069,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
         "engine_id": "0",
         "kv_port": "36000",
         "kv_connector_extra_config": {
-          "use_ascend_direct": true,
-          "prefill": {"dp_size": 2, "tp_size": 8},
-          "decode": {"dp_size": 8, "tp_size": 2}
+          "use_ascend_direct": true
         }
       }' \
       --prefix-cache-retention-interval None
@@ -1208,9 +1201,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
         "engine_id": "1",
         "kv_port": "30100",
         "kv_connector_extra_config": {
-          "use_ascend_direct": true,
-          "prefill": {"dp_size": 2, "tp_size": 8},
-          "decode": {"dp_size": 8, "tp_size": 2}
+          "use_ascend_direct": true
         }
       }' \
       --prefix-cache-retention-interval None
@@ -1321,9 +1312,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       D0 and D1 each run four API-serving TP2 engines(total DP8) through their
       node-specific wrapper scripts.
     - `kv_connector_extra_config` enables `use_ascend_direct` for direct
-      NPU-to-NPU KV transfer and declares the actual Prefill and Decode
-      `{dp_size, tp_size}` topology. The declared values must match the
-      real deployment.
+      NPU-to-NPU KV transfer.
     - Prefill uses `--max-num-seqs 64` and `--max-num-batched-tokens 4096`
       without `--enforce-eager`; Decode uses `--max-num-seqs 60` and
       `--max-num-batched-tokens 192` with `FULL_DECODE_ONLY` graph mode.
@@ -1761,7 +1750,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
         --kv-transfer-config '{
           "kv_connector":"MultiConnector","kv_role":"kv_producer","kv_port":"'"$KV_PORT"'","engine_id":"'"$ENGINE_ID"'",
           "kv_connector_extra_config":{"connectors":[
-            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"'"$KV_PORT"'","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":8},"decode":{"dp_size":8,"tp_size":2}}},
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"'"$KV_PORT"'","kv_connector_extra_config":{"use_ascend_direct":true}},
             {"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"mooncake","use_layerwise":false,"lookup_rpc_port":"'"$LOOKUP_PORT"'"}}
           ]}
         }' \
@@ -1788,7 +1777,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
       --kv-transfer-config '{
         "kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_port":"'"$KV_PORT"'","engine_id":"'"$ENGINE_ID"'",
         "kv_connector_extra_config":{"connectors":[
-          {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"'"$KV_PORT"'","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":8},"decode":{"dp_size":8,"tp_size":2}}},
+          {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"'"$KV_PORT"'","kv_connector_extra_config":{"use_ascend_direct":true}},
           {"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"mooncake","use_layerwise":false,"consumer_is_to_load":false,"consumer_is_to_put":false,"lookup_rpc_port":"'"$LOOKUP_PORT"'"}}
         ]}
       }'
@@ -1818,9 +1807,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
             "kv_role": "kv_producer",
             "kv_port": "${KV_PORT}",
             "kv_connector_extra_config": {
-              "use_ascend_direct": true,
-              "prefill": {"dp_size": 2, "tp_size": 8},
-              "decode": {"dp_size": 8, "tp_size": 2}
+              "use_ascend_direct": true
             }
           },
           {
@@ -1861,9 +1848,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
             "kv_role": "kv_consumer",
             "kv_port": "${KV_PORT}",
             "kv_connector_extra_config": {
-              "use_ascend_direct": true,
-              "prefill": {"dp_size": 2, "tp_size": 8},
-              "decode": {"dp_size": 8, "tp_size": 2}
+              "use_ascend_direct": true
             }
           },
           {

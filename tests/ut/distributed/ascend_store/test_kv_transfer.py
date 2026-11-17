@@ -590,7 +590,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 req = ReqMeta(
                     req_id="r1",
                     token_len_chunk=16 * len(exists),
-                    block_ids=list(range(len(exists))),
+                    block_ids=list(range(1, len(exists) + 1)),
                     block_hashes=[f"h{i}" for i in range(len(exists))],
                     current_event=None,
                 )
@@ -609,7 +609,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
-            block_ids=[0, 1],
+            block_ids=[1, 2],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             current_event=None,
         )
@@ -622,6 +622,27 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertEqual(len(keys), 2)
         store.exists.assert_not_called()
 
+    def test_handle_request_skips_null_blocks_without_exists_check(self):
+        for block_ids, expected_hashes in (([0, 2], ["h1"]), ([0, 0], [])):
+            with self.subTest(block_ids=block_ids):
+                thread, store = self._make_thread()
+                store.requires_exists_before_put = False
+                store.exists = MagicMock(side_effect=AssertionError("unexpected exists lookup"))
+                thread._prepare_value = MagicMock(wraps=thread._prepare_value)
+                req = ReqMeta("r1", token_len_chunk=32, block_ids=block_ids, block_hashes=["h0", "h1"])
+                thread.add_stored_request("r1")
+                thread.request_queue.put(req)
+
+                thread._handle_request(req)
+
+                actual = [key.rsplit("@", 1)[1] for keys, _, _ in store.put_calls for key in keys]
+                self.assertEqual(actual, expected_hashes)
+                self.assertEqual(thread._prepare_value.call_count, len(expected_hashes))
+                for args in thread._prepare_value.call_args_list:
+                    self.assertGreater(args.kwargs["block_id"], 0)
+                self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+                store.exists.assert_not_called()
+
     def test_handle_request_keeps_exists_check_for_kv_events(self):
         t, store = self._make_thread([1, 0], enable_kv_event=True)
         store.requires_exists_before_put = False
@@ -629,7 +650,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
-            block_ids=[0, 1],
+            block_ids=[1, 2],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             current_event=None,
             token_ids=list(range(32)),
@@ -650,7 +671,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids=[1],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             current_event=None,
             token_ids=list(range(16)),
@@ -681,7 +702,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids=[1],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             current_event=event,
         )
@@ -706,7 +727,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
-            block_ids=[0, 1],
+            block_ids=[1, 2],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             current_event=None,
         )
@@ -1030,7 +1051,7 @@ class TestKVTransferTpMismatchDispatch(unittest.TestCase):
                             req = ReqMeta(
                                 req_id="r1",
                                 token_len_chunk=16,
-                                block_ids=[0],
+                                block_ids=[1],
                                 block_hashes=[b"h0"],
                                 event_id=chunk,
                             )

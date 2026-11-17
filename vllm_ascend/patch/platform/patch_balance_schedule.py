@@ -192,6 +192,8 @@ class BalanceScheduler(Scheduler):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        # Whether any scheduled request has a synchronous connector KV load.
+        has_sync_kv_loads = False
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -675,6 +677,9 @@ class BalanceScheduler(Scheduler):
                     continue
 
                 self.running.append(request)
+                if num_external_computed_tokens > 0:
+                    # load_kv_async is False here
+                    has_sync_kv_loads = True
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
@@ -812,6 +817,7 @@ class BalanceScheduler(Scheduler):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            has_sync_kv_loads=has_sync_kv_loads,
         )
         scheduler_output_kwargs["kv_connector_block_state"] = kv_connector_block_state
         scheduler_output = SchedulerOutput(**scheduler_output_kwargs)
