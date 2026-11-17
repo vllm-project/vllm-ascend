@@ -151,6 +151,10 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
             layer.weight_offset.data = layer.weight_offset.data.flatten()
 
 
+# [V18PORT] w8a8-local slot layer registry (manager-independent)
+_V18PORT_SLOT_LAYERS = {}
+
+
 @register_scheme("W8A8_DYNAMIC", "moe")
 class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
     """FusedMoE method for Ascend W8A8_DYNAMIC."""
@@ -168,6 +172,11 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
         self.in_dtype = vllm_config.model_config.dtype
         self.supports_eplb = True
+
+        # MoE expert weight offload: H2D from CPU pinned mirror to NPU 2-slot
+        # rotation. Uses per-expert views (like dynamic_eplb) with a
+        # MoEOffloadManager. Compatible with FUSED_MC2=0/1.
+        self.moe_offload = bool(ascend_config.moe_offload_config.enabled)
 
         try:
             device_group = get_mc2_group().device_group
@@ -300,7 +309,12 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             and get_ascend_config().enable_fused_mc2 == 1
             and act_name != "swigluoai_uninterleave"
         )
-        if self.dynamic_eplb:
+        if self.moe_offload:
+            from vllm_ascend.moe_offload import MoEOffloadManager
+            manager = MoEOffloadManager.get_instance()
+            if manager.is_offload_managed(layer.layer_name):
+                manager.prepare_layer(layer.layer_name)
+        if self.dynamic_eplb or self.moe_offload:
             w1 = layer.w13_weight_list
             w1_scale = layer.fused_w1_scale_list if fused_scale_flag else layer.w13_weight_scale_fp32_list
             w2 = layer.w2_weight_list
@@ -350,6 +364,9 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 swiglu_beta=getattr(layer, "swiglu_beta", 0.0),
             )
         )
+        if self.moe_offload:
+            if manager.is_offload_managed(layer.layer_name):
+                manager.finish_layer_and_preload(layer.layer_name)
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result
         return final_hidden_states
@@ -372,7 +389,147 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.fused_w1_scale = scale_from_float_to_int64(layer.w13_weight_scale.data)
             layer.fused_w2_scale = scale_from_float_to_int64(layer.w2_weight_scale.data)
 
-        if self.dynamic_eplb:
+        import re as _re
+        _m = _re.search(r"layers\.(\d+)", layer.layer_name)
+        _layer_idx = int(_m.group(1)) if _m else -1
+        _do_offload = False
+        if self.moe_offload:
+            from vllm_ascend.moe_offload import MoEOffloadManager
+            if MoEOffloadManager._instance is not None:
+                _top = MoEOffloadManager._instance.topology
+                _do_offload = (
+                    _top.moe_layer_offset
+                    <= _layer_idx
+                    < _top.moe_layer_offset + _top.moe_layer_count
+                )
+                # v0.18 semantics: the resident tail keeps its weights
+                # EXCLUSIVELY resident on the NPU — never aliased to a
+                # slot. Routes it through the per-expert clone branch
+                # below so the ORIGINAL EPLB D2D path applies to it
+                # (like the MTP layer).
+                if (
+                    _do_offload
+                    and MoEOffloadManager._instance.resident_tail_layer
+                    == _layer_idx
+                ):
+                    _do_offload = False
+
+        if _do_offload:
+            _mc2 = get_ascend_config().enable_fused_mc2 == 1
+            _mgr = MoEOffloadManager.get_instance()
+            _top = _mgr.topology
+            _rel = _layer_idx - _top.moe_layer_offset
+
+            # Shared experts MUST stay resident on NPU; refuse mix_placement.
+            if getattr(layer, "mix_placement", False):
+                raise RuntimeError(
+                    "mix_placement is enabled: shared "
+                    "experts would enter the offload path. Shared experts "
+                    "must stay resident on NPU (unsupported configuration)."
+                )
+
+            # Extract the ACTUAL global expert IDs held by this rank from
+            # the layer's expert_map (global_id -> local_position). The
+            # identity fallback is WRONG under EP.
+            _emap = getattr(layer, "_expert_map", None)
+            if _emap is None:
+                _em = getattr(layer, "expert_map_manager", None)
+                _emap = getattr(_em, "_expert_map", None) if _em is not None else None
+            if _emap is None:
+                _re = getattr(layer, "routed_experts", None)
+                _em = getattr(_re, "expert_map_manager", None) if _re is not None else None
+                _emap = getattr(_em, "_expert_map", None) if _em is not None else None
+            if _emap is None:
+                raise RuntimeError(
+                    f"cannot locate expert_map on "
+                    f"{layer.layer_name} for EPLB-compatible registration")
+            if _emap.device.type == "npu":
+                _emap = _emap.cpu()
+            _E_local = int(layer.w13_weight.data.shape[0])
+            _global_ids = [-1] * _E_local
+            for _g, _pos in enumerate(_emap.tolist()):
+                if 0 <= _pos < _E_local:
+                    _global_ids[_pos] = _g
+
+            # Flat expert params for D2H (raw bytes, quant-agnostic).
+            # Only tensors actually consumed by apply(): weights (int8 NZ),
+            # per-channel scales (fp32 path) and fused int64 scales (MC2
+            # path). weight_offset is not used by the MoE forward path.
+            _param_names = (
+                "w13_weight",
+                "w2_weight",
+                "w13_weight_scale_fp32",
+                "w2_weight_scale",
+                "fused_w1_scale",
+                "fused_w2_scale",
+            )
+            _ep = [
+                layer.w13_weight.data,
+                layer.w2_weight.data,
+                layer.w13_weight_scale_fp32,
+                layer.w2_weight_scale.data,
+                layer.fused_w1_scale if _mc2 else None,
+                layer.fused_w2_scale if _mc2 else None,
+            ]
+            _mgr.register_layer(layer.layer_name, _ep,
+                                param_names=_param_names,
+                                global_ids=_global_ids)
+            _mgr.register_moe_module(layer.layer_name, layer)
+
+            if _rel < _top.moe_slot_count:
+                # Slot layer: VIEWS (not clones) into contiguous storage.
+                layer.w13_weight_list = list(layer.w13_weight.data.unbind(dim=0))
+                layer.w2_weight_list = list(layer.w2_weight.data.unbind(dim=0))
+                layer.w13_weight_scale_fp32_list = list(layer.w13_weight_scale_fp32.unbind(dim=0))
+                layer.w2_weight_scale_list = list(layer.w2_weight_scale.data.unbind(dim=0))
+                if _mc2:
+                    layer.fused_w1_scale_list = list(
+                        layer.fused_w1_scale.view(len(layer.w13_weight_list), -1).unbind(dim=0)
+                    )
+                    layer.fused_w2_scale_list = list(
+                        layer.fused_w2_scale.view(len(layer.w2_weight_list), -1).unbind(dim=0)
+                    )
+                # Store flat tensor refs for batched H2D (views share this storage)
+                layer._offload_w13_weight = layer.w13_weight.data
+                layer._offload_w2_weight = layer.w2_weight.data
+                layer._offload_w13_weight_scale_fp32 = layer.w13_weight_scale_fp32
+                layer._offload_w2_weight_scale = layer.w2_weight_scale.data
+                if _mc2:
+                    layer._offload_fused_w1_scale = layer.fused_w1_scale
+                    layer._offload_fused_w2_scale = layer.fused_w2_scale
+                _V18PORT_SLOT_LAYERS[_rel] = layer
+            else:
+                # Non-slot: share slot per-expert lists AND flat storage refs
+                _sl = _V18PORT_SLOT_LAYERS[_rel % _top.moe_slot_count]
+                layer.w13_weight_list = _sl.w13_weight_list
+                layer.w2_weight_list = _sl.w2_weight_list
+                layer.w13_weight_scale_fp32_list = _sl.w13_weight_scale_fp32_list
+                layer.w2_weight_scale_list = _sl.w2_weight_scale_list
+                if _mc2:
+                    layer.fused_w1_scale_list = _sl.fused_w1_scale_list
+                    layer.fused_w2_scale_list = _sl.fused_w2_scale_list
+                # Share flat storage refs for batched H2D
+                layer._offload_w13_weight = _sl._offload_w13_weight
+                layer._offload_w2_weight = _sl._offload_w2_weight
+                layer._offload_w13_weight_scale_fp32 = _sl._offload_w13_weight_scale_fp32
+                layer._offload_w2_weight_scale = _sl._offload_w2_weight_scale
+                if hasattr(_sl, "_offload_fused_w1_scale"):
+                    layer._offload_fused_w1_scale = _sl._offload_fused_w1_scale
+                if hasattr(_sl, "_offload_fused_w2_scale"):
+                    layer._offload_fused_w2_scale = _sl._offload_fused_w2_scale
+
+            del layer.w13_weight
+            del layer.w2_weight
+            del layer.w13_weight_scale
+            del layer.w13_weight_scale_fp32
+            del layer.w2_weight_scale
+            del layer.w13_weight_offset
+            del layer.w2_weight_offset
+            if _mc2:
+                del layer.fused_w1_scale
+                del layer.fused_w2_scale
+            torch.npu.empty_cache()
+        elif self.dynamic_eplb or self.moe_offload:
             layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
             layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
             layer.w13_weight_scale_fp32_list = [

@@ -720,7 +720,61 @@ class NPUWorker(WorkerBase):
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
 
+    def _init_offload_manager(self) -> None:
+        """Initialize the MoE weight offload manager before model loading."""
+        from vllm_ascend.moe_offload import MoEOffloadManager
+        from vllm_ascend.moe_offload.manager import LayerTopology
+
+        model_config = self.vllm_config.model_config
+        hf_config = model_config.hf_text_config
+        num_hidden_layers = int(hf_config.num_hidden_layers)
+        dense_replace = int(getattr(hf_config, "first_k_dense_replace", 0))
+        tp_size = self.parallel_config.tensor_parallel_size
+        dp_size = self.parallel_config.data_parallel_size
+        num_experts = int(getattr(hf_config, "n_routed_experts", 0))
+        enable_ep = self.parallel_config.enable_expert_parallel
+        ep_size = dp_size * tp_size if enable_ep else 1
+        from vllm_ascend.ascend_config import get_ascend_config
+        _ac = get_ascend_config()
+        num_redundant = (
+            int(_ac.eplb_config.num_redundant_experts)
+            if _ac.eplb_config.dynamic_eplb else 0)
+        num_local_experts = (num_experts + num_redundant) // ep_size if ep_size > 0 else (num_experts + num_redundant)
+
+        # PP-aware MoE layer range: with pipeline parallelism each stage
+        # loads only its own layers, so the offload topology (rotation,
+        # slot assignment, mirror) must be scoped to this stage's layers.
+        # Use vllm's own partition logic (VLLM_PP_LAYER_PARTITION aware)
+        # to stay consistent with the engine's actual layer placement.
+        pp_size = self.parallel_config.pipeline_parallel_size
+        if pp_size > 1:
+            from vllm.distributed import get_pp_group
+            from vllm.distributed.utils import get_pp_indices
+
+            pp_rank = get_pp_group().rank_in_group
+            stage_start, stage_end = get_pp_indices(num_hidden_layers, pp_rank, pp_size)
+            moe_start = max(dense_replace, stage_start)
+            moe_end = min(num_hidden_layers, stage_end)
+        else:
+            moe_start, moe_end = dense_replace, num_hidden_layers
+
+        topology = LayerTopology(
+            moe_layer_offset=moe_start,
+            moe_layer_count=moe_end - moe_start,
+            moe_slot_count=get_ascend_config().moe_offload_config.slot_count,
+            num_local_experts=num_local_experts,
+        )
+        MoEOffloadManager.get_instance(
+            topology=topology,
+            pin_mirror=get_ascend_config().moe_offload_config.pin_memory,
+        )
+
     def load_model(self) -> None:
+        from vllm_ascend.ascend_config import get_ascend_config
+        _bf = get_ascend_config().moe_offload_config
+        if _bf.enabled:
+            self._init_offload_manager()
+
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
             assert allocator.get_current_usage() == 0, "Sleep mode can only be used for one instance per process."
@@ -732,6 +786,11 @@ class NPUWorker(WorkerBase):
 
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
+
+        if get_ascend_config().moe_offload_config.enabled:
+            from vllm_ascend.moe_offload import MoEOffloadManager
+            manager = MoEOffloadManager.get_instance()
+            manager.finalize_and_prime()
 
         if self.vllm_config.weight_transfer_config is not None:
             from vllm.distributed.weight_transfer.factory import (

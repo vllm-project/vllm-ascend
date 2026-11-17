@@ -233,6 +233,10 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
             layer.weight.data = torch_npu.npu_convert_weight_to_int4pack(layer.weight.data.to(torch.int32))
 
 
+# [V18PORT] w4a8-local slot layer registry (manager-independent)
+_V18PORT_SLOT_LAYERS = {}
+
+
 @register_scheme("W4A8_DYNAMIC", "moe")
 class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
     """FusedMoE method for Ascend W4A8_DYNAMIC.
@@ -373,6 +377,13 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             1 if vllm_config.parallel_config.enable_expert_parallel else get_tensor_model_parallel_world_size()
         )
         self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
+        # MoE expert weight offload: H2D from CPU pinned mirror to NPU 2-slot rotation.
+        # Uses per-expert NZ int8 storage (like dynamic_eplb) with a MoEOffloadManager.
+        # Compatible with FlashComm1, FUSED_MC2=0/1, INT8 KV cache.
+        self.moe_offload = bool(get_ascend_config().moe_offload_config.enabled)
+        # Weight offload and dynamic EPLB can coexist: EPLB updates expert_map
+        # (metadata only via patch_eplb_offload.py), weight offload follows
+        # expert_map to H2D the correct global expert per local position.
         if self.new_quant_version and self.tp_size > 16:
             raise ValueError("The current weight does not support moe part tp>16.")
 
@@ -559,7 +570,13 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
-        if self.dynamic_eplb:
+        if self.moe_offload:
+            from vllm_ascend.moe_offload import MoEOffloadManager
+            manager = MoEOffloadManager.get_instance()
+            if manager.is_offload_managed(layer.layer_name):
+                manager.prepare_layer(layer.layer_name)
+
+        if self.dynamic_eplb or self.moe_offload:
             w1 = [i.view(torch.int32) for i in layer.w13_weight_list]
             w1_scale = layer.w13_weight_scale_list
             w2 = [i.view(torch.int32) for i in layer.w2_weight_list]
@@ -587,7 +604,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             w2_scale_bias = [layer.w2_scale_bias.detach()] if hasattr(layer, "w2_scale_bias") else None
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
-        return moe_comm_method.fused_experts(
+        final_hidden_states = moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
                 topk_weights=topk_weights,
@@ -612,6 +629,12 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 swiglu_limit=layer.swiglu_limit,
             )
         )
+
+        if self.moe_offload:
+            if manager.is_offload_managed(layer.layer_name):
+                manager.finish_layer_and_preload(layer.layer_name)
+
+        return final_hidden_states
 
     def process_scale(self, weight: torch.Tensor, scale, per_group_scale):
         scale = scale.transpose(1, 2).contiguous()
@@ -799,7 +822,141 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         if self.is_per_channel_weight:
             layer.w13_weight_scale.data = self.maybe_squeeze_per_channel_weight_scale(layer.w13_weight_scale.data)
 
-        if self.dynamic_eplb:
+        import re as _re
+        _m = _re.search(r"layers\.(\d+)", layer.layer_name)
+        _layer_idx = int(_m.group(1)) if _m else -1
+        _do_offload = False
+        if self.moe_offload:
+            from vllm_ascend.moe_offload import MoEOffloadManager
+            if MoEOffloadManager._instance is not None:
+                _top = MoEOffloadManager._instance.topology
+                _do_offload = _top.moe_layer_offset <= _layer_idx < _top.moe_layer_offset + _top.moe_layer_count
+                # v0.18 semantics: the resident tail (odd MoE count)
+                # keeps its weights EXCLUSIVELY resident on the NPU —
+                # never aliased to a slot. Excluded here so it takes the
+                # per-expert clone branch (original EPLB D2D, like MTP).
+                if (
+                    _do_offload
+                    and MoEOffloadManager._instance.resident_tail_layer
+                    == _layer_idx
+                ):
+                    _do_offload = False
+
+        if _do_offload:
+            from vllm_ascend.moe_offload import MoEOffloadManager as _WOM
+            _mgr = _WOM.get_instance()
+            _top = _mgr.topology
+            _rel = _layer_idx - _top.moe_layer_offset
+
+            # NZ cast BEFORE registration: the mirror/slot must hold NZ
+            # int8 bytes (the forward path reinterprets via view(int32)).
+            # 0.26 moved the cast into each branch; the offload branch
+            # needs its own (weights are registered pre-pack_to_int32).
+            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+
+            # Build flat expert_params for D2H (6 flat tensors, not 102 per-expert clones)
+            # 6-param unified mirror (aligned with w8a8_dynamic): the
+            # EPLB D2D exchange swaps ALL adaptor weight params, so the
+            # mirror must cover the same set (otherwise send/recv op
+            # counts mismatch across ranks).
+            _param_names = (
+                "w13_weight",
+                "w2_weight",
+                "w13_weight_scale",
+                "w2_weight_scale",
+                "w13_scale_bias",
+                "w2_scale_bias",
+            )
+            _ep = [
+                layer.w13_weight.data,
+                layer.w2_weight.data,
+                layer.w13_weight_scale.data,
+                layer.w2_weight_scale.data,
+                layer.w13_scale_bias.data if hasattr(layer, "w13_scale_bias") else None,
+                layer.w2_scale_bias.data if hasattr(layer, "w2_scale_bias") else None,
+            ]
+            # Extract the ACTUAL global expert ids held by this rank from
+            # the layer's expert_map (global id -> local position). The
+            # identity fallback is WRONG under EP — each rank holds a
+            # subset of global experts determined by the EP placement.
+            _emap = getattr(layer, "_expert_map", None)
+            if _emap is None:
+                _em = getattr(layer, "expert_map_manager", None)
+                _emap = getattr(_em, "_expert_map", None) if _em is not None else None
+            if _emap is None:
+                _re = getattr(layer, "routed_experts", None)
+                _em = getattr(_re, "expert_map_manager", None) if _re is not None else None
+                _emap = getattr(_em, "_expert_map", None) if _em is not None else None
+            if _emap is None:
+                raise RuntimeError(
+                    f"cannot locate expert_map on "
+                    f"{layer.layer_name} for EPLB-compatible registration")
+            if _emap.device.type == "npu":
+                _emap = _emap.cpu()
+            _E_local = int(layer.w13_weight.data.shape[0])
+            _global_ids = [-1] * _E_local
+            for _g, _pos in enumerate(_emap.tolist()):
+                if 0 <= _pos < _E_local:
+                    _global_ids[_pos] = _g
+            _mgr.register_layer(layer.layer_name, _ep,
+                                param_names=_param_names,
+                                global_ids=_global_ids)
+            _mgr.register_moe_module(layer.layer_name, layer)
+
+            if _rel < _top.moe_slot_count:
+                # Slot layer: create VIEWS (not clones) into contiguous storage.
+                # H2D into the flat tensor updates all views automatically.
+                layer.w13_weight_list = list(layer.w13_weight.data.unbind(dim=0))
+                layer.w2_weight_list = list(layer.w2_weight.data.unbind(dim=0))
+                layer.w13_weight_scale_list = list(layer.w13_weight_scale.data.unbind(dim=0))
+                layer.w2_weight_scale_list = list(layer.w2_weight_scale.data.unbind(dim=0))
+                layer.w13_scale_bias_list = (
+                    list(layer.w13_scale_bias.data.unbind(dim=0))
+                    if hasattr(layer, "w13_scale_bias") else None
+                )
+                layer.w2_scale_bias_list = (
+                    list(layer.w2_scale_bias.data.unbind(dim=0))
+                    if hasattr(layer, "w2_scale_bias") else None
+                )
+                # Store flat tensor refs for batched H2D (views share this storage)
+                layer._offload_w13_weight = layer.w13_weight.data
+                layer._offload_w2_weight = layer.w2_weight.data
+                layer._offload_w13_weight_scale = layer.w13_weight_scale.data
+                layer._offload_w2_weight_scale = layer.w2_weight_scale.data
+                if hasattr(layer, "w13_scale_bias"):
+                    layer._offload_w13_scale_bias = layer.w13_scale_bias.data
+                if hasattr(layer, "w2_scale_bias"):
+                    layer._offload_w2_scale_bias = layer.w2_scale_bias.data
+                _V18PORT_SLOT_LAYERS[_rel] = layer
+            else:
+                # Non-slot: share slot per-expert lists AND flat storage refs
+                # for ALL SIX params. Scales MUST follow the slot layout:
+                # keeping them resident-per-layer leaves them in the OLD
+                # expert order after an EPLB rearrange while the weights
+                # (via the slot) are in the NEW order — a weight/scale
+                # mismatch that corrupts every expert's quantization.
+                _sl = _V18PORT_SLOT_LAYERS[_rel % _top.moe_slot_count]
+                layer.w13_weight_list = _sl.w13_weight_list
+                layer.w2_weight_list = _sl.w2_weight_list
+                layer.w13_weight_scale_list = _sl.w13_weight_scale_list
+                layer.w2_weight_scale_list = _sl.w2_weight_scale_list
+                if _sl.w13_scale_bias_list is not None:
+                    layer.w13_scale_bias_list = _sl.w13_scale_bias_list
+                    layer.w2_scale_bias_list = _sl.w2_scale_bias_list
+                layer._offload_w13_weight = _sl._offload_w13_weight
+                layer._offload_w2_weight = _sl._offload_w2_weight
+                layer._offload_w13_weight_scale = _sl._offload_w13_weight_scale
+                layer._offload_w2_weight_scale = _sl._offload_w2_weight_scale
+                if hasattr(_sl, "_offload_w13_scale_bias"):
+                    layer._offload_w13_scale_bias = _sl._offload_w13_scale_bias
+                    layer._offload_w2_scale_bias = _sl._offload_w2_scale_bias
+
+            # [V18PORT] free only the big weights; scales stay resident
+            del layer.w13_weight
+            del layer.w2_weight
+            torch.npu.empty_cache()
+        elif self.dynamic_eplb or self.moe_offload:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
             layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
             layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]

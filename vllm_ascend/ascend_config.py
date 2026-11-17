@@ -78,6 +78,9 @@ class AscendConfig:
         eplb_config = additional_config.get("eplb_config", {})
         self.eplb_config = EplbConfig(eplb_config)
 
+        moe_offload_user_cfg = additional_config.get("moe_offload_config", additional_config.get("bifrost_config", {}))
+        self.moe_offload_config = MoEOffloadConfig(moe_offload_user_cfg)
+
         from vllm_ascend import envs as ascend_envs
 
         self.scheduler_config = SchedulerConfig(
@@ -1137,3 +1140,52 @@ def get_ascend_config():
     if _ASCEND_CONFIG is None or not _is_ascend_config_initialized(_ASCEND_CONFIG):
         raise RuntimeError("Ascend config is not initialized. Please call init_ascend_config first.")
     return _ASCEND_CONFIG
+
+
+class MoEOffloadConfig:
+    """
+    Configuration Object for moe_offload_config from additional_config
+    (legacy "bifrost_config" top-level key and "weight_offload" field alias
+    still accepted).
+
+    Controls the MoE expert weight offload (CPU mirror + NPU slot
+    rotation). Passed via additional_config so it reaches EngineCore /
+    worker processes through the serialized VllmConfig.
+
+    Note on pin_memory: pinned host memory has a driver-level cap
+    (~460 GiB observed on a3 hosts). W8A8 mirrors may exceed it,
+    so large-quant deployments must set pin_memory=false to fall back
+    to pageable memory.
+    """
+
+    _defaults = {
+        "enabled": False,
+        "slot_count": 2,
+        "pin_memory": True,
+    }
+
+    def __init__(self, user_config: dict | None = None):
+        if user_config is None:
+            user_config = {}
+        self.config = self._defaults.copy()
+        if user_config and isinstance(user_config, dict):
+            # legacy field alias from older scripts
+            if "weight_offload" in user_config:
+                user_config.setdefault("enabled", user_config.pop("weight_offload"))
+            for key, value in user_config.items():
+                if key in self.config:
+                    self.config[key] = value
+                else:
+                    raise ValueError(f"Config has no attribute '{key}'")
+        self._validate_config()
+
+    def __getattr__(self, key):
+        if key in self.config:
+            return self.config[key]
+        raise AttributeError(f"Config has no attribute '{key}'")
+
+    def _validate_config(self):
+        if not isinstance(self.config["slot_count"], int) or self.config["slot_count"] < 1:
+            raise ValueError(f"slot_count must be a positive integer; got {self.config['slot_count']}")
+        if not isinstance(self.config["pin_memory"], bool):
+            raise TypeError("pin_memory must be a boolean")
