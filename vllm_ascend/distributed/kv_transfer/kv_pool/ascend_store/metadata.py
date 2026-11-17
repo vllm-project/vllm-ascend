@@ -22,16 +22,6 @@ if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import LayerPoolKey
 
 
-def dense_cache_segments(
-    base: int, block_len: int, block_stride: int, scale: int, *, kernel_stride: int
-) -> list[tuple[int, int, int]]:
-    """Describe a logical page using dense kernel pages, excluding padding."""
-    kernel_bytes = block_len // scale
-    if scale == 1 or kernel_stride == kernel_bytes:
-        return [(base, block_len, block_stride)]
-    return [(base + index * kernel_stride, kernel_bytes, block_stride) for index in range(scale)]
-
-
 def is_kv_save_role(kv_role: str, consumer_is_to_put: bool) -> bool:
     return kv_role in ("kv_producer", "kv_both") or consumer_is_to_put
 

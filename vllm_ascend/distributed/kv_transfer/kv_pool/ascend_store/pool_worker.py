@@ -61,7 +61,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     TailKeyBoundary,
     block_hash_to_bytes,
     block_hash_to_str,
-    dense_cache_segments,
     get_block_hashes,
     get_engine_transfer_config,
     get_group_cache_family,
@@ -489,35 +488,13 @@ class BaseKVPoolWorker(ABC):
         Partial layerwise transfers also retain each segment's token interval.
         """
         block_len, block_stride, _, scale = self._get_cache_block_metadata(cache)
-        if self.enable_partial_hash_hits and not cache[0].is_contiguous():
-            # A shared HND slab can interleave heads/layers inside a physical
-            # page as well as between pages. Enumerate dense suffixes using
-            # actual strides; never copy the intervening padding or siblings.
-            suffix_axis = cache.ndim - 1
-            suffix_elements = cache.shape[suffix_axis]
-            if cache.stride(suffix_axis) != 1:
-                raise ValueError("AscendStore requires a dense innermost KV dimension")
-            while suffix_axis > 1 and cache.stride(suffix_axis - 1) == suffix_elements:
-                suffix_axis -= 1
-                suffix_elements *= cache.shape[suffix_axis]
-            import itertools
-
-            return [
-                (
-                    cache.data_ptr()
-                    + (kernel * cache.stride(0) + sum(i * s for i, s in zip(indices, cache.stride()[1:suffix_axis])))
-                    * cache.element_size(),
-                    suffix_elements * cache.element_size(),
-                    block_stride,
-                )
-                for kernel in range(scale)
-                for indices in itertools.product(*(range(n) for n in cache.shape[1:suffix_axis]))
-            ]
         physical_bytes = block_len // scale
         physical_stride = block_stride // scale
-        if scale > 1 and physical_stride != physical_bytes and not cache[0].is_contiguous():
+        if scale == 1 or physical_stride == physical_bytes:
+            return [(cache.data_ptr(), block_len, block_stride)]
+        if not cache[0].is_contiguous():
             raise ValueError("Segmented KV pool transfer requires contiguous data inside each physical block.")
-        return dense_cache_segments(cache.data_ptr(), block_len, block_stride, scale, kernel_stride=physical_stride)
+        return [(cache.data_ptr() + index * physical_stride, physical_bytes, block_stride) for index in range(scale)]
 
     def _get_combined_cache_transfer_segments(
         self, caches: tuple[torch.Tensor, ...], group_id: int
