@@ -419,17 +419,31 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
         head_dim = self.head_size
         nz_last = QFA_INT8_NZ_DIM_FRAG
 
-        # Scatter payloads into the NZ views: token rows are [T, N, Df, 32];
-        # index_put with (page, n, pos) triple broadcasts the Df*32 tail.
-        idx_n = torch.arange(n_heads, device=pages.device).view(1, n_heads)
+        # Scatter payloads into the NZ views. A token's K/V payload is the
+        # [Df, 32] tail at (page, n, :, pos, :): index the leading four dims
+        # with (page, n, df, pos) tensors broadcast to [T, N, Df] and leave
+        # the 32-wide fragment axis implicit. The 3-index form leaves
+        # (Bs, 32) as the trailing dims and mismatches the [T, N, Df, 32]
+        # payload (probe v2 verified index_put on the 4-D BNBD layout, not
+        # this 5-D NZ one).
+        num_frags = head_dim // nz_last
+        idx_n = torch.arange(n_heads, device=pages.device).view(1, n_heads, 1)
+        idx_df = torch.arange(num_frags, device=pages.device).view(1, 1, num_frags)
+        nz_index = (
+            pages.view(num_tokens, 1, 1).expand(num_tokens, n_heads, num_frags),
+            idx_n.expand(num_tokens, n_heads, num_frags),
+            idx_df.expand(num_tokens, n_heads, num_frags),
+            pos.view(num_tokens, 1, 1).expand(num_tokens, n_heads, num_frags),
+        )
+        payload_src = k_int8.view(num_tokens, n_heads, num_frags, nz_last)
+        k_nz.index_put_(nz_index, payload_src)
+        payload_src_v = v_int8.view(num_tokens, n_heads, num_frags, nz_last)
+        v_nz.index_put_(nz_index, payload_src_v)
+        # K descale [T, N] -> (Bn, N, Bs): the 3-D view is fully indexed.
         idx_page = pages.view(num_tokens, 1).expand(num_tokens, n_heads)
+        idx_n_2d = idx_n.view(1, n_heads).expand(num_tokens, n_heads)
         idx_pos = pos.view(num_tokens, 1).expand(num_tokens, n_heads)
-        payload_src = k_int8.view(num_tokens, n_heads, head_dim // nz_last, nz_last)
-        k_nz.index_put_((idx_page, idx_n, idx_pos), payload_src)
-        payload_src_v = v_int8.view(num_tokens, n_heads, head_dim // nz_last, nz_last)
-        v_nz.index_put_((idx_page, idx_n, idx_pos), payload_src_v)
-        # K descale [T, N] -> (Bn, N, Bs)
-        k_descale.index_put_((idx_page, idx_n, idx_pos), k_descale_tok)
+        k_descale.index_put_((idx_page, idx_n_2d, idx_pos), k_descale_tok)
 
         from vllm_ascend.attention.attention_v1 import notify_kv_cache_written
 
