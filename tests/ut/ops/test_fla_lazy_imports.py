@@ -154,8 +154,18 @@ class TestFLAImportBoundaries(unittest.TestCase):
                 # Function bodies execute at use time, not module discovery.
                 return
 
+            def visit_If(self, node):
+                if isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING":
+                    for statement in node.orelse:
+                        self.visit(statement)
+                else:
+                    self.generic_visit(node)
+
             def visit_ImportFrom(self, node):
-                if node.module and node.module.startswith("vllm.third_party.flash_linear_attention"):
+                # Importing a Kimi submodule also loads its model package and FLA.
+                if node.module and node.module.startswith(
+                    ("vllm.third_party.flash_linear_attention", "vllm.models.kimi_k3")
+                ):
                     raise AssertionError(f"eager FLA import at line {node.lineno}: {node.module}")
 
         for path in paths:
