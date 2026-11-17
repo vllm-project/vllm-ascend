@@ -627,11 +627,7 @@ class BaseKVPoolWorker(ABC):
                 )
                 for segments in cache_segments:
                     for segment_index, (base_addr, block_len, block_stride) in enumerate(segments):
-                        # Hash recovery reads physical pages, not token slices:
-                        # each strided head descriptor spans the entire page.
-                        group_cache_entry_segments.append(
-                            (0, 1) if self.enable_partial_hash_hits else (segment_index, len(segments))
-                        )
+                        group_cache_entry_segments.append((segment_index, len(segments)))
                         group_addrs.append(base_addr)
                         group_block_lens.append(block_len)
                         group_block_strides.append(block_stride)
