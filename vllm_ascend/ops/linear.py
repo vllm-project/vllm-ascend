@@ -556,6 +556,8 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
             hf_config = get_current_vllm_config().model_config.hf_text_config
             self.n_local_groups = getattr(hf_config, "o_groups", 0) // self.tp_size
             self.o_lora_rank = getattr(hf_config, "o_lora_rank", 0)
+        # vLLM #63752: custom allocation bypasses the stacked initializer.
+        self.loaded_shard_ids: dict[str, set[str | int]] = {}
 
     def forward(
         self,

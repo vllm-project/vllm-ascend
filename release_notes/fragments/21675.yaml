@@ -1,0 +1,22 @@
+pr: 21675
+entries:
+  - category: feature
+    text: Added MLA attention mode support for DFlash2 draft models in speculative decoding on Ascend NPUs, enabled via dflash_config.attention_mode="mla" for checkpoints such as Kimi-K3.1-Dflash2-Preview.
+  - category: performance
+    text: Enabled the FlashMLA draft path and device-side sequence-length synchronization for the Kimi K3.1 target with DFlash2 drafts, removing per-step CPU length sync from the speculative decode hot path on verified parallel configurations.
+  - category: bugfix
+    text: Fixed DFlash2 MLA draft attention causality being resolved from a
+      non-existent layer attribute, which silently routed every draft layer
+      through the non-causal attention path and collapsed the speculative
+      acceptance rate for causal checkpoints such as Kimi-K3.1-Dflash2-Preview.
+      Causality is now resolved from the checkpoint config (is_causal, then
+      dflash_config.causal, then the layer_types sliding-attention fallback),
+      matching upstream vLLM.
+  - category: bugfix
+    text: Updated the DFlash2 draft attention metadata refresh to write
+      per-request query lengths onto the nested decode metadata used by
+      current upstream vLLM mains, keeping the flat-metadata fallback.
+  - category: bugfix
+    text: Initialized loaded_shard_ids on AscendColumnParallelLinear so
+      stacked-shard weight validation from upstream vLLM#63752 finds the
+      tracking dict on the plain column-parallel path used by the MLA draft.

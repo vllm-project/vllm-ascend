@@ -154,7 +154,11 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         """
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
         for layer_name, metadata in attn_metadata.items():
-            metadata.actual_seq_lengths_q = query_lens_list
+            decode_metadata = getattr(metadata, "decode", None)
+            if decode_metadata is not None:
+                decode_metadata.actual_seq_lengths_q = query_lens_list
+            else:
+                metadata.actual_seq_lengths_q = query_lens_list
             # Backend subclasses can use different metadata contracts (e.g.
             # device-length CANN FlashAttn). Restrict KV trimming to FIA itself.
             if self.attn_backends[layer_name] is not AscendAttentionBackend:

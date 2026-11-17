@@ -1220,7 +1220,9 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def _can_use_flashmla(self) -> bool:
         config = self.vllm_config
-        if config.speculative_config is not None and config.speculative_config.method != "dspark":
+        # Upstream restricts FlashMLA drafts to DSpark; the DFlash2 MLA
+        # draft shares the same metadata contract, so allow it as well.
+        if config.speculative_config is not None and config.speculative_config.method not in ("dspark", "dflash"):
             return False
         if not self._supports_flashmla(MLA_FLASH_SUPPORTED_Q_HEADS):
             return False
