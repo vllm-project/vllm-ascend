@@ -3,11 +3,13 @@
 """Offload keys must use the actual PP stage when PCP is also enabled."""
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise import pool_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     LayerwiseReuseLayout,
 )
@@ -58,3 +60,33 @@ def test_offload_uses_cache_stage_not_global_rank(pp_rank, start, end, pcp_rank)
     assert worker.prefetch_layer_map == {4: (1,)}
     assert worker.independent_layers == [0]
     assert worker._reused_layers_by_group == {0: set(range(1, end - start))}
+
+
+@pytest.mark.parametrize("tp_size", [1, 2])
+@pytest.mark.parametrize("pcp_size", [1, 4])
+@pytest.mark.parametrize("offload", [False, True])
+def test_snapshot_read_waits_for_tp_and_pcp_writers(monkeypatch, tp_size, pcp_size, offload):
+    order = []
+    monkeypatch.setattr(pool_worker, "get_tp_group", lambda: SimpleNamespace(barrier=lambda: order.append("tp")))
+    monkeypatch.setattr(
+        pool_worker, "get_pcp_group", lambda: SimpleNamespace(barrier=lambda: order.append("pcp")), raising=False
+    )
+    monkeypatch.setattr(pool_worker, "reset_attention_compute_start_gate", lambda: None)
+    worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
+    worker.use_layerwise = worker.use_layerwise_transfer = True
+    worker.layerwise_offload = offload
+    worker.tp_size, worker.pcp_size = tp_size, pcp_size
+    worker.use_kvpp = False
+    worker.kv_recv_thread = None
+    worker._save_disabled = Mock()
+    worker._drain_deferred_last_save = lambda: order.append("drain")
+    worker.process_layer_data = lambda requests: order.append("read")
+
+    worker.prepare_layerwise_step(SimpleNamespace(requests=[]))
+
+    expected = ["drain"]
+    if offload and tp_size > 1:
+        expected.append("tp")
+    if offload and pcp_size > 1:
+        expected.append("pcp")
+    assert order == [*expected, "read"]
