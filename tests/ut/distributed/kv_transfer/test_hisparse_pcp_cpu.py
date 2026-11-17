@@ -195,6 +195,26 @@ def test_capture_and_real_forward_keep_query_and_scatter_input_addresses():
     assert captured_slots.data_ptr() == cache.slot_mapping.data_ptr()
 
 
+def test_empty_query_rank_still_prepares_host_mirror(monkeypatch):
+    from vllm_ascend.hisparse.host_mirror import HostMirrorConnector
+
+    connector, cache, meta, _, _, _ = make_connector()
+    cache.num_actual_tokens = 0  # Other PCP ranks still produce gathered KV.
+    meta.hisparse_num_write_tokens = 6
+    meta.hisparse_write_req_id_per_token = torch.tensor([0, -1, -1, 1, -1, -1], dtype=torch.int32)
+    meta.hisparse_write_has_prefill = False
+    connector._pcp_attn_metadata = {"layer0": meta}
+    cache.runtime.eager_host_mirror = True
+    finish = Mock()
+    monkeypatch.setattr(ActiveKVConnector, "finish_forward", finish)
+    wrapper = HostMirrorConnector(connector, connector.kv_connector.connector_worker, None, None)
+    wrapper.finish_forward()
+    finish.assert_called_once()
+    assert cache.num_actual_tokens == 6
+    assert cache.req_id_per_token is meta.hisparse_write_req_id_per_token
+    assert cache.host_mirror_required
+
+
 @pytest.mark.parametrize("capture", [False, True])
 def test_sharded_decode_keeps_gathered_resident_and_host_rows(capture):
     connector, cache, meta, local, batch, manager = make_connector()
