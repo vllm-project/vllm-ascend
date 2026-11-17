@@ -30,8 +30,9 @@ if HAS_TRITON:
 # vLLM's DSA indexer resolves its decode top-k to "per_row" on non-CUDA platforms
 # and then calls vllm._custom_ops.top_k_per_row_decode, which only exists in the
 # CUDA extension. Rebinding those two names onto torch.ops._C_ascend keeps the
-# path working on NPU. Nothing here is Triton, so it is loaded on every device,
-# and the module is a no-op until the Ascend operator is registered.
+# path working on NPU. Nothing here is Triton, so it is loaded on every device;
+# the wrappers resolve torch.ops._C_ascend per call and fall back to vLLM's own
+# implementation until that operator is registered.
 import vllm_ascend.patch.worker.patch_indexer_topk  # noqa
 
 
