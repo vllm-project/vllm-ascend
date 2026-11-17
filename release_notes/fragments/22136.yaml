@@ -1,0 +1,4 @@
+pr: 22136
+entries:
+  - category: bugfix
+    text: HiSparse KV offloading on Ascend now builds host-resident cache groups with the HiSparse source manager instead of a plain full-attention manager, restoring host pool usage reporting and prefix-cache reuse for those groups.
