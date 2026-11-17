@@ -71,7 +71,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
-from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
+from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state, target_attn_groups_without_draft_flashmla
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
@@ -543,6 +543,9 @@ class NPUModelRunner(GPUModelRunner):
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
         draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
+        # The speculator owns separate builders and graph buffers for these
+        # layers. Building them with target lengths submits unused schedules.
+        self.attn_groups = target_attn_groups_without_draft_flashmla(self.attn_groups, draft_layer_names)
         self.use_fia = any(
             (group.backend is AscendAttentionBackend or group.backend is AscendMLABackend)
             and any(layer_name not in draft_layer_names for layer_name in group.layer_names)

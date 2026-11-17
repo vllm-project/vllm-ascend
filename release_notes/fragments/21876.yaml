@@ -8,5 +8,7 @@ entries:
       and single-child MultiConnector wrappers for supported pull connectors.
       Pass normalized device lengths to both operators without per-layer
       remasking or redundant runner-side connector checks.
+      Avoid preparing unused draft MLA metadata in the target runner and
+      refresh DSpark FULL-graph MLA schedules only at the replay entry point.
       Keep FIA for unavailable or unsupported paths
       and retain host-length synchronization for unsupported consumers.

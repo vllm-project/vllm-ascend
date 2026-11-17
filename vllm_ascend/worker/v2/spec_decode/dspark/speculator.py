@@ -334,13 +334,14 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 num_tokens=num_tokens_padded,
                 num_reqs=num_reqs_padded,
             )
-            attn_metadata = self._build_uniform_attn_metadata(
+            attn_metadata = self._build_attn_metadata(
                 num_reqs=num_reqs,
                 batch_desc=batch_desc,
-                num_query_per_req=self.num_query_per_req,
+                query_start_loc_np=self.arange_np[: num_reqs + 1] * self.num_query_per_req,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                 step=self.num_query_per_req,
                 causal=self._group_causal,
+                refresh_for_graph=True,
             )
 
         return [attn_metadata]
@@ -354,8 +355,19 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         step: int,
         causal: bool | Mapping[int, bool] = True,
         dcp_local_seq_lens: torch.Tensor | None = None,
+        *,
+        refresh_for_graph: bool = False,
     ) -> dict[str, Any] | None:
         """Build Ascend draft metadata through the upstream attention hook."""
+        if (
+            batch_desc.cg_mode == CUDAGraphMode.FULL
+            and (getattr(self, "use_flashmla", False) or getattr(self, "use_a3_mla_sink", False))
+            and not refresh_for_graph
+        ):
+            # FULL replay refreshes the captured buffers once in
+            # DFlashAclGraphManager.run_fullgraph. Upstream propose() discards
+            # this earlier metadata result when it chooses a FULL graph.
+            return None
         if self.attn_architecture not in ("GQA", "MLA"):
             # Non-MLA/GQA (e.g. SFA) delegates straight to upstream without
             # Ascend CPU-side DCP preparation.

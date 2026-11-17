@@ -31,6 +31,26 @@ FLASHMLA_MASK_SIZE = 2048
 FLASHMLA_MAX_BATCH_SIZE = 65535
 
 
+def target_attn_groups_without_draft_flashmla(attn_groups, draft_layer_names):
+    """Keep cache-group indices while leaving draft metadata to its own runner.
+
+    Only dedicated external-MLA draft groups are removed. Other backends and
+    mixed target/draft groups retain their existing metadata preparation.
+    """
+    return [
+        [
+            group
+            for group in groups
+            if not (
+                group.layer_names
+                and all(name in draft_layer_names for name in group.layer_names)
+                and getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
+            )
+        ]
+        for groups in attn_groups
+    ]
+
+
 def prepare_flashmla_batch_req_state(
     batch_state: "BatchReqState", uniform_token_count: int | None
 ) -> tuple["BatchReqState", int | None]:

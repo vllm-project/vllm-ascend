@@ -10,12 +10,15 @@ attention is the independent reference; this is not NPU or ACL graph evidence.
 import ast
 import runpy
 import sys
-from contextlib import contextmanager
+from collections.abc import Mapping
+from contextlib import contextmanager, nullcontext
 from enum import Enum
 from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -182,8 +185,11 @@ def runtime(monkeypatch):
         classmethod(lambda cls, config: cls(config, attention_op, metadata_op)),
     )
 
-    def builder(*, size=8, rank=0, interleave=1, heads=8, dtype=torch.float16, use_rope=False, speculative=True):
+    def builder(
+        *, size=8, rank=0, interleave=1, heads=8, dtype=torch.float16, use_rope=False, speculative=True, a3_adapter=None
+    ):
         impl = SimpleNamespace(
+            a3_mla_adapter=a3_adapter,
             num_heads=heads,
             scale=0.125,
             dtype=dtype,
@@ -257,6 +263,150 @@ def runtime(monkeypatch):
         recorded_streams=recorded_streams,
         current_query_storages=current_query_storages,
     )
+
+
+def dspark_metadata_class(parent):
+    """Execute the production dispatch hooks without importing the NPU runtime."""
+    path = ROOT / "vllm_ascend/worker/v2/spec_decode/dspark/speculator.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendDSparkSpeculator")
+    cls.bases = [ast.Name(id="Parent", ctx=ast.Load())]
+    cls.body = [
+        n
+        for n in cls.body
+        if isinstance(n, ast.FunctionDef)
+        and n.name in {"_build_attn_metadata", "build_draft_attn_metadatas", "_update_draft_attn_metadata"}
+    ]
+    scope = dict(
+        Parent=parent,
+        torch=torch,
+        np=np,
+        Any=Any,
+        Mapping=Mapping,
+        BatchExecutionDescriptor=SimpleNamespace,
+        CUDAGraphMode=SimpleNamespace(FULL="full"),
+        AscendAttentionState=SimpleNamespace(ChunkedPrefill="chunked"),
+        build_attn_metadata_wrapper=nullcontext,
+        build_attn_metadata_factory=lambda *args, **kwargs: nullcontext(),
+    )
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[])), str(path), "exec"), scope)
+    return scope[cls.name]
+
+
+def configure_dspark_metadata(spec, provider):
+    spec.use_flashmla = provider == "a5"
+    spec.use_a3_mla_sink = provider == "a3"
+    spec.attn_architecture = "MLA"
+    spec.num_query_per_req = 3
+    spec.arange_np = np.arange(9, dtype=np.int32)
+    spec.input_batch = SimpleNamespace(num_reqs=2)
+    spec._group_causal = True
+    spec.input_buffers = SimpleNamespace(positions=torch.arange(6))
+    spec.attn_vllm_config = SimpleNamespace(parallel_config=object())
+    spec._prepare_draft_dcp_metadata_inputs = lambda *args: (None, torch.zeros(2, dtype=torch.bool))
+
+
+@pytest.mark.parametrize("provider", ["a3", "a5"])
+def test_dspark_full_graph_refreshes_only_two_schedules_per_round(runtime, monkeypatch, provider):
+    """Regression: target + propose + replay previously submitted six schedules."""
+    a3 = sys.modules["vllm_ascend.attention.a3_mla_sink"]
+    calls = []
+    adapter = None
+    if provider == "a3":
+        monkeypatch.setattr(a3.A3MLAAdapter, "_check_lengths", lambda self, lengths, cu, used: lengths.numel())
+
+        def metadata_op(*args, **kwargs):
+            calls.append(args[6])
+            return torch.cat((args[6], kwargs["cu_seqlens_q"])).to(torch.uint8)
+
+        adapter = a3.A3MLAAdapter(a3.A3MLAConfig(8, 0.125, dtype=torch.float16), None, metadata_op)
+    builder = runtime.builder(size=8, a3_adapter=adapter)
+    inputs = common([17, 9], [3, 3], tokens=6)
+    flash = builder.build(inputs, 2, 6, False, retain_for_graph=True)
+    assert flash.current is not None
+    pointers = addresses(flash)
+    draft = SimpleNamespace(
+        layer_names=["draft.0"], get_metadata_builder=lambda _: SimpleNamespace(flashmla_state=builder)
+    )
+    target = SimpleNamespace(layer_names=["target.0"], get_metadata_builder=lambda _: object())
+    groups = [[target], [draft]]
+    filtered = runtime.api.target_attn_groups_without_draft_flashmla(groups, {"draft.0"})
+    assert filtered == [[target], []] and groups == [[target], [draft]]
+
+    class Parent:
+        def _build_attn_metadata(self, **kwargs):
+            current = builder.build(inputs, 2, 6, False)
+            return {"draft.0": SimpleNamespace(external_flashmla=current)}
+
+    spec = dspark_metadata_class(Parent)()
+    configure_dspark_metadata(spec, provider)
+    for lengths in ([23, 11], [7, 0], [31, 13]):
+        inputs.seq_lens.copy_(torch.tensor(lengths, dtype=torch.int32))
+        runtime.metadata_op.reset_mock()
+        calls.clear()
+        # Target phase: retained groups must not invoke the draft builder.
+        for bucket in filtered:
+            for group in bucket:
+                assert group is target
+        # Upstream propose's unused FULL-graph metadata result is skipped.
+        assert (
+            spec._build_attn_metadata(
+                2,
+                SimpleNamespace(cg_mode="full", num_reqs=2, num_tokens=6),
+                np.array([0, 3, 6]),
+                torch.tensor(lengths),
+                3,
+            )
+            is None
+        )
+        assert not calls and runtime.metadata_op.call_count == 0
+        # The real graph-manager entry refreshes the captured buffers once.
+        result = spec.build_draft_attn_metadatas(2, torch.tensor(lengths))[0]["draft.0"].external_flashmla
+        assert result is flash and addresses(result) == pointers
+        assert (len(calls) if provider == "a3" else runtime.metadata_op.call_count) == 2
+        expected = [sum(t % 8 == 0 for t in range(max(0, length - 3))) for length in lengths]
+        assert result.cache_lens[:2].tolist() == expected
+        assert result.used_q[:2].tolist() == [3, 3 if lengths[1] else 0]
+
+
+@pytest.mark.parametrize("provider", ["a3", "a5", "fia"])
+@pytest.mark.parametrize("mode", ["full", "piecewise", "eager"])
+def test_dspark_metadata_dispatch_preserves_non_full_and_fia(provider, mode):
+    calls = []
+
+    class Parent:
+        def _build_attn_metadata(self, **kwargs):
+            calls.append(kwargs)
+            return {"draft.0": SimpleNamespace(external_flashmla=None, decode=SimpleNamespace())}
+
+    spec = dspark_metadata_class(Parent)()
+    configure_dspark_metadata(spec, provider)
+    result = spec._build_attn_metadata(
+        2,
+        SimpleNamespace(cg_mode=mode, num_reqs=2, num_tokens=6),
+        np.array([0, 3, 6]),
+        torch.tensor([17, 9]),
+        3,
+    )
+    skipped = mode == "full" and provider != "fia"
+    assert (result is None) == skipped
+    assert len(calls) == int(not skipped)
+    if calls:
+        np.testing.assert_array_equal(calls[0]["query_start_loc_np"], [0, 3, 6])
+        assert "refresh_for_graph" not in calls[0]
+
+
+def test_target_group_filter_keeps_fia_mixed_and_empty_groups(runtime):
+    def group(names, external):
+        return SimpleNamespace(
+            layer_names=names, get_metadata_builder=lambda _: SimpleNamespace(flashmla_state=external)
+        )
+
+    fia = group(["draft.fia"], None)
+    mixed = group(["target", "draft.mixed"], object())
+    empty = group([], object())
+    groups = [[fia, mixed], [], [empty]]
+    assert runtime.api.target_attn_groups_without_draft_flashmla(groups, {"draft.fia", "draft.mixed"}) == groups
 
 
 def common(lengths, queries, *, tokens=None, causal=True):
