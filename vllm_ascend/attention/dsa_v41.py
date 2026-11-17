@@ -1139,7 +1139,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         # SWA uses original-token coordinates; circular state has no token slots.
         # Long KV and index K are addressed in completed compression groups.
         compressed = req.cache_kind in {"long_kv", "index_k"}
-        # Physical cache plane addressed by one logical token group.
         plane_ratio = req.compress_ratio if compressed else 1
         if req.is_compressor_state:
             # State writes use ring ownership metadata; this buffer stays PAD.
@@ -1156,22 +1155,12 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             prepared_flat_slots = self.common_v41_metadata.get(flat_slot_key)
             if prepared_slots is None or prepared_flat_slots is None:
                 active_slots = common.slot_mapping[: req.num_input_tokens]
-                # The fused kernel writes the same persistent [T, 2] coordinates
-                # and flat slots as the eager chain below, so it is valid on
-                # every Ascend platform, not only the A5 packed-cache ABI.
-                # Whether this cache group fits the kernel is the kernel's own
-                # contract, not a platform gate: the entry keeps the device
-                # check, and the kernel reports which shapes it can serve.
-                # The kernel implements the ratio-1 and ratio-2 planes only.
-                # Ratio 1 never reads positions, while ratio 2 reads them for
-                # the completion test, so a ratio-2 group without positions has
-                # to stay on the eager chain.
+                # Ratio 2 needs positions to identify completed pairs.
                 fused_slot_mapping_supported = plane_ratio in (1, 2) and (plane_ratio == 1 or req.positions is not None)
                 if active_slots.device.type == "npu" and fused_slot_mapping_supported:
                     prepared_slots, prepared_flat_slots = _fused_packed_slot_mapping(
                         active_slots,
-                        # Ratio 1 never dereferences positions; the slot ids only
-                        # provide a host-side stride, so they stand in for None.
+                        # Ratio 1 uses slots as an unused positions placeholder.
                         req.positions if req.positions is not None else active_slots,
                         common.query_start_loc,
                         req.num_input_tokens,

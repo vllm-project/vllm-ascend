@@ -48,8 +48,6 @@ def reference(
 
 
 def validate_cmp(actual: torch.Tensor, expected: torch.Tensor) -> None:
-    # Pages, rows and flat slots are integer indices: exact comparison is the
-    # applicable criterion for this operator type.
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
@@ -79,7 +77,6 @@ def run_kernel(
         coordinates_output=coordinates,
         flat_output=flat,
     )
-    # The launch must reuse the supplied graph-stable buffers.
     assert actual_coordinates.data_ptr() == coordinates.data_ptr()
     assert actual_flat.data_ptr() == flat.data_ptr()
     return actual_coordinates.cpu(), actual_flat.cpu()
@@ -91,8 +88,6 @@ def make_case(
     torch.manual_seed(seed)
     slots = torch.randint(-1, max_slot, (tokens,), dtype=torch.int32, device="npu")
     positions = torch.randint(-1, 2 * tokens + 2, (tokens,), dtype=torch.int64, device="npu")
-    # Uneven request boundaries: the only entry the kernel reads is the one at
-    # ``num_actual_reqs``, so the split itself is intentionally non-uniform.
     cuts = [0]
     for index in range(requests):
         remaining = tokens - cuts[-1]
@@ -100,16 +95,7 @@ def make_case(
     return slots, positions, torch.tensor(cuts, dtype=torch.int32, device="npu")
 
 
-# Real inference shapes: DeepSeek V4.1 on Ascend, storage block size 128 and
-# ``qk_rope_head_dim`` 64. ``page_size`` is the KV cache storage block size
-# reported by ``get_storage_block_size``.
-#   decode              : 6 concurrent requests -> 6 tokens
-#   decode upper bound  : 256 tokens (the occupancy sweep of the PR)
-#   prefill             : max_num_batched_tokens -> 8192 tokens
-# plus the boundaries the kernel branches on: single token, grid saturation at
-# 320 tokens (BLOCK_SIZE 8 saturates 40 vector cores), the ratio-1 SWA plane
-# (positions are never dereferenced), a non power-of-two page, and a page
-# boundary case.
+# DeepSeek V4.1 decode/prefill shapes and tile/page boundaries.
 TEST_CASES = [
     pytest.param(6, 2, 128, id="decode_c6_ratio2_page128"),
     pytest.param(256, 2, 128, id="decode_upper_ratio2_page128"),
@@ -165,8 +151,7 @@ def test_ratio_one_masks_stale_positive_tail() -> None:
 @pytest.mark.parametrize("page_size", [16, 128])
 @torch.inference_mode()
 def test_padded_graph_tail_stays_invalid(page_size: int) -> None:
-    # A captured carrier keeps slot ids from an earlier replay in its padding;
-    # those rows must never address a packed cache plane.
+    # Keep positive stale slots in the padded tail.
     tokens, actual_tokens, requests = 64, 37, 4
     slots, positions, query_start_loc = make_case(tokens, requests, 1 << 20)
     slots[actual_tokens:] = torch.randint(0, 1 << 20, (tokens - actual_tokens,), dtype=torch.int32, device="npu")
@@ -197,7 +182,6 @@ def test_ratio_two_writes_completed_pairs_only() -> None:
     actual_coordinates, actual_flat = run_kernel(slots, positions, query_start_loc, 2, 10, page_size, 2)
     validate_cmp(actual_coordinates, expected_coordinates)
     validate_cmp(actual_flat, expected_flat)
-    # Only completed pairs (odd slot and odd position) publish a cache row.
     assert (actual_flat[[1, 3, 7, 9]] != -1).all()
     assert (actual_flat[[0, 2, 4, 5, 6, 8]] == -1).all()
 

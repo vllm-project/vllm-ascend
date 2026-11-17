@@ -62,8 +62,6 @@ def reference(
 
 
 def validate_cmp(actual: torch.Tensor, expected: torch.Tensor) -> None:
-    # Ring rows and source positions are integer controls, the mask is boolean
-    # and the RoPE rows are gathered copies: exact comparison applies.
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
@@ -124,9 +122,6 @@ def make_case(
     seed: int = 41,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     torch.manual_seed(seed)
-    # Request boundaries split ``num_tokens`` evenly, so the trailing requests of
-    # a padded carrier extend past ``num_actual_tokens``; both the clamp and the
-    # ``live`` mask are exercised.
     cuts = [0]
     for index in range(num_reqs):
         remaining = num_tokens - cuts[-1]
@@ -136,18 +131,12 @@ def make_case(
     positions = torch.arange(num_tokens, dtype=torch.int64, device="npu")
     block_table = torch.randint(0, 4096, (num_reqs, 4), dtype=torch.int32, device="npu")
     source_rows = max(num_tokens, 1)
-    # Production shape: the full-source RoPE table is [rows, 1, 1, rope_dim] and
-    # the gathered output buffer is a separate [tokens, 1, 1, rope_dim] tensor.
     source_cos = torch.randn(source_rows, 1, 1, rope_dim, dtype=source_dtype, device="npu")
     source_sin = torch.randn(source_rows, 1, 1, rope_dim, dtype=source_dtype, device="npu")
     return query_start_loc, seq_lens, positions, block_table, source_cos, source_sin
 
 
-# Real inference shapes: DeepSeek V4.1 on Ascend, ``qk_rope_head_dim`` 64 and the
-# full-source RoPE table in the model dtype (bf16). The prefill case uses 2048
-# tokens; the padded case is a 64-token FULL-graph carrier with 37 live tokens.
-# Generic cases cover a non power-of-two rope width and an fp32 source table,
-# which is the eager-preparation dtype.
+# DeepSeek V4.1 decode/prefill shapes, padding and alternate RoPE layouts.
 TEST_CASES = [
     pytest.param(6, 6, 6, 6, 64, torch.bfloat16, False, id="decode_c6_rope64_bf16"),
     pytest.param(6, 6, 6, 6, 64, torch.bfloat16, True, id="decode_c6_rope64_bf16_skip"),
@@ -197,7 +186,6 @@ def test_matches_eager_chain(
 @pytest.mark.parametrize("num_reqs", [1, 70])
 @torch.inference_mode()
 def test_multi_program_split(num_reqs: int) -> None:
-    # REQ_BLOCK is 64 and TOKEN_BLOCK is 16, so both grid arms need coverage.
     num_tokens, rope_dim = 260, 64
     num_actual_reqs, num_actual_tokens = min(num_reqs, 4), 200
     case = make_case(num_reqs, num_tokens, rope_dim, num_actual_reqs)
@@ -224,11 +212,8 @@ def test_padded_graph_tail_and_dead_requests() -> None:
     num_actual_reqs, num_actual_tokens = 3, 37
     case = make_case(num_reqs, num_tokens, rope_dim, num_actual_reqs)
     ring, complete, source_positions, cos, sin = run_kernel(*case, num_reqs, num_actual_reqs, num_actual_tokens)
-    # Requests past ``num_actual_reqs`` publish no ring work: used == 0 and the
-    # first block is cleared, even though the block table still holds entries.
     assert (ring[1, num_actual_reqs:] == 0).all()
     assert (ring[4, num_actual_reqs:] == 0).all()
-    # Token rows past ``num_actual_tokens`` never mark a completed pair.
     assert not complete[num_actual_tokens:].any()
     assert (source_positions[num_actual_tokens:] == 0).all()
     # Incomplete rows gather the row-0 RoPE entry rather than zero-filling.
@@ -247,7 +232,6 @@ def test_skip_update_publishes_no_work() -> None:
     assert (ring[4] == 0).all()
     assert not complete.any()
     assert (source_positions == 0).all()
-    # The sequence-length-derived row is independent of the update switch.
     expected_ring0 = (
         case[1].cpu() - (case[0].cpu()[1 : num_reqs + 1].to(torch.int32) - case[0].cpu()[:num_reqs].to(torch.int32))
     ).clamp_min(0)
