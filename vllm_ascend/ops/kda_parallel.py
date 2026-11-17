@@ -71,7 +71,8 @@ class KDAMergedColumnParallelLinear(MergedColumnParallelLinear, KDAColumnParalle
         KDAColumnParallelLinear.__init__(self, input_size, sum(self.output_sizes), **kwargs)
         # vLLM #63752: custom allocation bypasses the stacked initializer.
         self.loaded_shard_ids: dict[str, set[str | int]] = {}
-        if not vllm_version_is("0.33.0"):
+        # #66784's pad-fill helpers only exist on the verified main revision.
+        if not vllm_version_is("0.34.0"):
             for name in self.padding_fill_params():
                 param = getattr(self, name)
                 self._zero_output_padding(param)
