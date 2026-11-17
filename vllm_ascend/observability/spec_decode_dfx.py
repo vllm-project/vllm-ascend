@@ -112,18 +112,18 @@ def log_nan_census(
                 _fmt_rows(coords, "req"),
             )
         if draft_logits is not None and draft_logits.numel() > 1:
-                    d_nan = torch.isnan(draft_logits).sum(dim=-1).view(-1)
-                    d_bad = d_nan.nonzero(as_tuple=True)[0]
-                    if d_bad.numel() > 0:
-                        limit_rows = d_bad[:_NAN_ROW_FMT_LIMIT]
-                        d_counts = d_nan[limit_rows].tolist()
-                        coords = _uniform_coords(limit_rows.tolist(), d_counts, num_speculative_steps)
-                        _logger.debug(
-                            "[dfx/nan] draft_logits: rows_with_nan=%d total_nan=%d %s",
-                            d_bad.numel(),
-                            int(d_nan.sum()),
-                            _fmt_rows(coords, "slot"),
-                        )
+            d_nan = torch.isnan(draft_logits).sum(dim=-1).view(-1)
+            d_bad = d_nan.nonzero(as_tuple=True)[0]
+            if d_bad.numel() > 0:
+                limit_rows = d_bad[:_NAN_ROW_FMT_LIMIT]
+                d_counts = d_nan[limit_rows].tolist()
+                coords = _uniform_coords(limit_rows.tolist(), d_counts, num_speculative_steps)
+                _logger.debug(
+                    "[dfx/nan] draft_logits: rows_with_nan=%d total_nan=%d %s",
+                    d_bad.numel(),
+                    int(d_nan.sum()),
+                    _fmt_rows(coords, "slot"),
+                )
     except Exception as e:  # diagnostics must never take down the sampler
         _logger.debug("[dfx/nan] target/draft census failed: %s", e)
 
