@@ -31,7 +31,7 @@ def _make_state(supports_mm_inputs, embedding):
 def _make_embedding(rank, events):
     # The real DP has tokens from both vocabulary shards. The other DP is idle.
     weight = torch.arange(32, dtype=torch.float32).view(8, 4)
-    gathered_ids = torch.zeros((2, 8), dtype=torch.int64)
+    gathered_ids = torch.zeros((2, 8), dtype=torch.int32)
     gathered_ids[0, :3] = torch.tensor([1, 5, 7])
     layer = AscendVocabParallelEmbedding.__new__(AscendVocabParallelEmbedding)
     torch.nn.Module.__init__(layer)
@@ -83,7 +83,9 @@ def test_real_and_idle_inputs_embeds_join_matching_embedding_collectives(monkeyp
         return real.inputs_embeds
 
     real.encoder_runner.get_inputs_embeds = embed
-    batch = SimpleNamespace(input_ids=torch.tensor([1, 5, 7, 0]), num_tokens=3, num_tokens_after_padding=4)
+    batch = SimpleNamespace(
+        input_ids=torch.tensor([1, 5, 7, 0], dtype=torch.int32), num_tokens=3, num_tokens_after_padding=4
+    )
     with patch.object(ModelState, "gather_mm_embeddings", return_value=([], torch.zeros(3, dtype=torch.bool))):
         result = real.prepare_inputs_embeds({}, batch, req_states=None)
     torch.testing.assert_close(result[:3], weight[batch.input_ids[:3]])
@@ -110,8 +112,8 @@ def test_dummy_embedding_reuses_ids_and_output_buffer(monkeypatch, supports_mm_i
     _, token_ids = state._embedding_tp_dummy_join
     second = state.dummy_inputs_embeds(num_tokens)
     assert state._embedding_tp_dummy_join[1] is token_ids
-    assert token_ids.dtype == torch.int64
-    torch.testing.assert_close(token_ids, torch.zeros(8, dtype=torch.int64))
+    assert token_ids.dtype == torch.int32
+    torch.testing.assert_close(token_ids, torch.zeros(8, dtype=torch.int32))
     assert first.shape == second.shape == (num_tokens, 4)
     if num_tokens:
         assert first.data_ptr() == second.data_ptr() == state.inputs_embeds.data_ptr()

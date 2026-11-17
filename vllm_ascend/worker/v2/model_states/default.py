@@ -402,7 +402,9 @@ class AscendModelState(DefaultModelState):
                     ):
                         capacity = module.embedding_tp_capacity
                         assert capacity is not None
-                        token_ids = torch.zeros(capacity, dtype=torch.int64, device=self.device)
+                        # Match MRV2 InputBuffers.input_ids: collective dtypes
+                        # must agree between real and idle DP ranks.
+                        token_ids = torch.zeros(capacity, dtype=torch.int32, device=self.device)
                         self._embedding_tp_dummy_join = (module, token_ids)
                         break
             if self._embedding_tp_dummy_join is not None:
