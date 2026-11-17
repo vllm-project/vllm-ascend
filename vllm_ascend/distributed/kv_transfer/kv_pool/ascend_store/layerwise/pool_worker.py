@@ -162,8 +162,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
         )
 
-    def _init_key_head_config(self, model_config, parallel_config) -> None:
-        super()._init_key_head_config(model_config, parallel_config)
+    def _init_key_head_config(self, model_config) -> None:
+        super()._init_key_head_config(model_config)
         if self.tp_mismatch:
             raise ValueError(
                 f"TP mismatch (local_tp={self.tp_size}, peer_tp={self.peer_tp_size}) "
