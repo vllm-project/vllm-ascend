@@ -6,6 +6,7 @@ import types
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -13,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 def load_file(name, relative):
     spec = importlib.util.spec_from_file_location(name, ROOT / relative)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
@@ -34,6 +36,8 @@ def config(**overrides):
 
 
 class ConfigTests(unittest.TestCase):
+    config_module: Any
+
     @classmethod
     def setUpClass(cls):
         cls.config_module = load_file("qwen_gdn_config_test", "vllm_ascend/models/qwen4_exp/recoverssm_config.py")
@@ -91,8 +95,8 @@ class CommitHostTests(unittest.TestCase):
         import torch
 
         self.torch = torch
-        self.layers = []
-        self.counts = []
+        self.layers: list[Any] = []
+        self.counts: list[torch.Tensor] = []
 
         def prepare(
             accepted,
@@ -202,10 +206,11 @@ class MetadataTests(unittest.TestCase):
         @dataclass
         class Metadata:
             num_spec_decodes: int
-            spec_state_indices_tensor: object
-            spec_query_start_loc: object
-            spec_sequence_masks_cpu: object
-            num_accepted_tokens: object
+            spec_state_indices_tensor: torch.Tensor
+            spec_query_start_loc: torch.Tensor
+            spec_sequence_masks_cpu: torch.Tensor
+            num_accepted_tokens: torch.Tensor
+            spec_decode_metadata: types.SimpleNamespace | None = None
 
         class Recover:
             pass
