@@ -8,10 +8,45 @@ import pytest
 pytest.importorskip("torch")
 pytest.importorskip("vllm")
 
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole  # noqa: E402
+
 from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import (  # noqa: E402
     AscendMultiConnector,
     MultiConnector,
 )
+
+
+@pytest.mark.parametrize(
+    "role, speculative_config, host_blocks, expected",
+    [
+        (KVConnectorRole.WORKER, SimpleNamespace(method="mtp"), 32, True),
+        (KVConnectorRole.WORKER, None, 32, False),
+        (KVConnectorRole.SCHEDULER, SimpleNamespace(method="mtp"), 32, False),
+        (KVConnectorRole.WORKER, SimpleNamespace(method="mtp"), None, False),
+    ],
+)
+def test_hisparse_save_fence_requires_worker_with_speculation_and_host_pool(
+    role, speculative_config, host_blocks, expected
+):
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="MultiConnector",
+            is_kv_producer=False,
+            is_kv_consumer=False,
+            kv_connector_extra_config={"connectors": []},
+        ),
+        speculative_config=speculative_config,
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=True),
+    )
+    with (
+        patch.object(MultiConnector, "__init__", return_value=None),
+        patch.object(AscendMultiConnector, "_configure_hisparse_host_save_fence") as configure,
+    ):
+        connector = AscendMultiConnector.__new__(AscendMultiConnector)
+        connector._connectors = []
+        connector.__init__(config, role, SimpleNamespace(hisparse_host_num_blocks=host_blocks))
+
+    assert configure.call_count == int(expected)
 
 
 def test_load_ready_observer_does_not_advance_child_attention_hooks():

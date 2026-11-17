@@ -36,6 +36,16 @@ def aligned_tensor(size: int) -> torch.Tensor:
     return backing[offset : offset + size]
 
 
+@pytest.fixture
+def memcache_backend() -> MemcacheBackend:
+    backend = MemcacheBackend.__new__(MemcacheBackend)
+    backend.store = Mock()
+    backend._store_initialized = True
+    backend._lazy_init = False
+    backend._pending_buffers = None
+    return backend
+
+
 @pytest.mark.parametrize("misalignment", [0, 1, SLAB_ALIGNMENT - 1])
 @pytest.mark.parametrize("indexer_c8", [False, True])
 def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool, misalignment: int) -> None:
@@ -198,12 +208,8 @@ def test_hisparse_alignment_is_scoped_to_the_padded_allocation():
     assert caches["cache"] is original
 
 
-def test_memcache_splits_host_and_device_batches_without_reordering(caplog) -> None:
-    backend = MemcacheBackend.__new__(MemcacheBackend)
-    backend.store = Mock()
-    backend._store_initialized = True
-    backend._lazy_init = False
-    backend._pending_buffers = None
+def test_memcache_splits_host_and_device_batches_without_reordering(memcache_backend, caplog) -> None:
+    backend = memcache_backend
     backend.store.batch_get_into_layers.side_effect = [[0, -7], [0]]
 
     keys = ["host", "device1", "device2"]
@@ -223,11 +229,8 @@ def test_memcache_splits_host_and_device_batches_without_reordering(caplog) -> N
     assert "Invalid HiSparse MemCache PUT metadata" in caplog.text
 
 
-def test_memcache_bounds_each_hisparse_host_get_lease() -> None:
-    backend = MemcacheBackend.__new__(MemcacheBackend)
-    backend.store = Mock()
-    backend._store_initialized = True
-    backend._lazy_init = False
+def test_memcache_bounds_each_hisparse_host_get_lease(memcache_backend) -> None:
+    backend = memcache_backend
     backend.store.batch_get_into_layers.side_effect = [[0], [-3106], [0]]
     key_size = 130 * 1024 * 1024
 
@@ -240,6 +243,44 @@ def test_memcache_bounds_each_hisparse_host_get_lease() -> None:
         call([key], [[index]], [[key_size]], MmcDirect.COPY_G2H.value)
         for index, key in enumerate(("one", "two", "three"), 1)
     ]
+
+
+def test_memcache_oversized_hisparse_get_only_splits_the_host_batch(memcache_backend) -> None:
+    backend = memcache_backend
+    mib = 1024 * 1024
+    device_size = 130 * mib
+    host_size = 257 * mib
+    backend.store.batch_get_into_layers.side_effect = [[0, 0], [0], [0], [0]]
+
+    results = backend.get(
+        ["device1", "host1", "host-large", "device2", "host2"],
+        [[1], [2], [3, 4], [5], [6]],
+        [[device_size], [mib], [host_size - mib, mib], [device_size], [mib]],
+        host_keys=[False, True, True, False, True],
+    )
+    assert results == [0] * 5
+    assert backend.store.batch_get_into_layers.call_args_list == [
+        call(["device1", "device2"], [[1], [5]], [[device_size], [device_size]], MmcDirect.COPY_G2L.value),
+        call(["host1"], [[2]], [[mib]], MmcDirect.COPY_G2H.value),
+        call(["host-large"], [[3, 4]], [[host_size - mib, mib]], MmcDirect.COPY_G2H.value),
+        call(["host2"], [[6]], [[mib]], MmcDirect.COPY_G2H.value),
+    ]
+
+
+@pytest.mark.parametrize("results", [[0], [0, 0, 0]])
+def test_memcache_hisparse_get_fails_when_sdk_result_count_differs(memcache_backend, caplog, results) -> None:
+    backend = memcache_backend
+    backend.store.batch_get_into_layers.side_effect = [[0], results]
+
+    result = backend.get(
+        ["host1", "device", "host2"],
+        [[1], [2], [3]],
+        [[100]] * 3,
+        host_keys=[True, False, True],
+    )
+    assert result is None
+    assert "BatchResultShapeError" in caplog.text
+    assert f"HiSparse Memcache GET returned {len(results)} results for 2 keys" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -315,11 +356,26 @@ def test_bulk_store_protocol_is_scoped_to_hisparse(monkeypatch, tmp_path, has_hi
             assert connector.connector_scheduler is scheduler.return_value
 
 
-def test_memcache_hisparse_registration_rolls_back_on_sdk_error():
-    backend = MemcacheBackend.__new__(MemcacheBackend)
-    backend.store = Mock()
-    backend._store_initialized = True
-    backend._pending_buffers = None
+@pytest.mark.parametrize(("first", "second"), [("device_sdma", "host_tcp"), ("host_tcp", "device_sdma")])
+def test_memcache_lazy_initialization_uses_first_protocol_for_regular_store(monkeypatch, tmp_path, first, second):
+    path = tmp_path / "mmc-local.conf"
+    path.write_text(
+        f"ock.mmc.local_service.protocol={first}\nock.mmc.local_service.protocol={second}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MMC_LOCAL_CONFIG_PATH", str(path))
+    with patch.object(MemcacheBackend, "_setup_store") as setup_store:
+        backend = MemcacheBackend(SimpleNamespace(), device_id=0, lazy_init=True)
+    if first == "device_sdma":
+        setup_store.assert_not_called()
+        assert backend.store is None
+    else:
+        setup_store.assert_called_once_with()
+        assert backend.store is setup_store.return_value
+
+
+def test_memcache_hisparse_registration_rolls_back_on_sdk_error(memcache_backend):
+    backend = memcache_backend
     backend.store.register_buffer.side_effect = [0, -7, 0]
     backend.store.unregister_buffer.return_value = 0
 
@@ -334,3 +390,27 @@ def test_memcache_hisparse_registration_rolls_back_on_sdk_error():
     backend.store.register_buffer.side_effect = [-7]
     backend.register_buffer([200], [20])
     backend.store.unregister_buffer.assert_called_once_with(100, 10)
+
+
+@pytest.mark.parametrize("rollback_result", [-23, RuntimeError("SDK unregister error")])
+def test_memcache_hisparse_registration_keeps_error_if_rollback_fails(memcache_backend, caplog, rollback_result):
+    backend = memcache_backend
+    registration_error = ValueError("SDK rejected registration")
+    backend.store.register_buffer.side_effect = [0, 0, registration_error]
+    backend.store.unregister_buffer.side_effect = [rollback_result, 0]
+
+    with pytest.raises(ValueError, match="SDK rejected registration") as raised:
+        backend.register_buffer([100, 200, 300], [10, 20, 30], check_result=True)
+
+    assert raised.value is registration_error
+    assert backend.store.unregister_buffer.call_args_list == [call(200, 20), call(100, 10)]
+    assert backend._pending_buffers is None
+    assert "HiSparse MemCache buffer rollback failed: size=20" in caplog.text
+
+
+def test_memcache_hisparse_registration_rejects_mismatched_arguments(memcache_backend):
+    backend = memcache_backend
+    with pytest.raises(ValueError, match="buffer pointers and sizes must have the same length"):
+        backend.register_buffer([100, 200], [10], check_result=True)
+    backend.store.register_buffer.assert_not_called()
+    assert backend._pending_buffers is None
