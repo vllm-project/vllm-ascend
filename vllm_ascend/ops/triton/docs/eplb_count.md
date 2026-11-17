@@ -132,10 +132,10 @@ at `fac549668`, which includes the adaptive row-tiled reducer and main
 `8cd3c3762`. The pinned baseline file is identical in main `3ae9de590` and
 `8cd3c3762`. All source hashes and results below refer to this final reducer.
 
-| Platform | Exact regression tests | Main vs two-stage Graph points | Faster points | Observed speedup range |
+| Platform | Exact regression tests | Main vs two-stage Graph exact checks | Faster points | Observed speedup range |
 | --- | ---: | ---: | ---: | ---: |
 | A3 | 453/453 passed | 141/141 passed | 115/141 | 0.371x–1.953x |
-| A5 | 453/453 passed | 141/141 passed | 137/141 | 0.389x–1164.719x |
+| A5 | 453/453 passed | 141/141 passed | Shared-target observation only | Not accepted as controlled performance |
 
 Both devices use CANN 9.2.1, Python 3.12.16, Torch 2.10.0+cpu,
 Torch-NPU 2.10.0.post7, Triton 3.6.0 and Triton-Ascend 3.6.0.post2.
@@ -148,19 +148,25 @@ Both `bishengir-compile` binaries have SHA256
 | A3 Ascend910_9362 | NpuArch2201 | 26.2.rc1.b081 | 40 |
 | A5 Ascend950DT_9582 | NpuArch3510 | 26.2.rc1.b088 | 64 |
 
-Each run uses one healthy device on a shared host; other devices have active
-jobs. These are measurements of this software/device combination. Every
-regression, observed sample range and raw sample is retained in the CSV.
-Faster-point counts refer to the measured medians, not a guaranteed speedup
-at every size or on other hosts.
+**A5 timing qualification:** another VLLM process was present on the same
+physical device (141.61.45.109, card 1). That process started at 16:35:16 +0800;
+the Graph matrix ran from 16:38:20 to 16:43:58 +0800 on 2026-11-17. The exact
+checks passed, but these timings are shared-target observations and are not
+accepted as controlled performance results. The A5 CSV retains all observed
+values with `timing_qualification=shared_target_load_observation_only`.
+Available replacement A5 devices were occupied at their pre-launch rechecks;
+a run without another workload on the target remains pending.
 
-A3 has 26 regressions, including the 512-expert cases: `(10240,8,512)` uniform
-is 620.32 us on main versus 1001.70 us here (0.619x). A5 has four regressions
-on small inputs. Its small-shape sample ranges reach about 15x within a point;
-the medians and raw samples are both reported to expose that variation.
+A3 used a healthy target with no other target-device process observed in the
+ownership checks; other host devices had active jobs. It has 26 regressions,
+including `(10240,8,512)` uniform: 620.32 us on main versus 1001.70 us here
+(0.619x). The worst measured ratio is 0.371x at `(1088,8,512)`. The implementation
+does not establish a universal speedup. Every observed range and raw sample
+is retained in the CSV; faster-point counts refer to measured medians.
 
 The following table uses INT64 IDs, contiguous masks and uniform local routes.
 Shapes are `(T, K, local_expert_count)`. Latencies are microseconds per call.
+All A5 columns are shared-target observations as qualified above.
 
 | Shape | A3 main | A3 two-stage | A3 speedup | A5 main | A5 two-stage | A5 speedup |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -210,7 +216,7 @@ Shapes are `(T, K, local_expert_count)`. Latencies are microseconds per call.
 
 For the original 81920-route/128-bin workload:
 
-| Device / distribution | Main (us) | Two-stage (us) | Speedup |
+| Device / distribution | Main (us) | Two-stage (us) | Observed ratio |
 | --- | ---: | ---: | ---: |
 | A3 / uniform | 614.63 | 545.29 | 1.127x |
 | A3 / hot | 715.32 | 523.94 | 1.365x |
