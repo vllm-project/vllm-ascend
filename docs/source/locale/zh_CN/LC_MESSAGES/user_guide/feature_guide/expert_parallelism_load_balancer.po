@@ -951,3 +951,6 @@ msgstr ""
 "      传输次数）。\n"
 "    - 使用 vLLM monitor 在运行时检测不均衡。\n"
 "    - 加载前务必验证专家映射 JSON 结构（使用 jq 或类似工具进行校验）。"
+
+msgid "| | Model Runner V2 | Model Runner V1 |"
+msgstr "| | 模型运行器 V2 | 模型运行器 V1 |"
