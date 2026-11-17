@@ -28,7 +28,7 @@ def test_partial_rotary_preserves_storage_and_adapts_native_signature(device, sh
     assert work.ndim == 4
     assert work.data_ptr() == x.data_ptr()
     assert actual_cos is cos
-    assert op.call_args.kwargs["partial_slice"] == [4, 8]
+    assert op.call_args.kwargs["partial_slice"] == [2, 8]
     if device == AscendDeviceType.A5:
         assert "negate_sin" not in op.call_args.kwargs
         torch.testing.assert_close(actual_sin, -sin if inverse else sin)
