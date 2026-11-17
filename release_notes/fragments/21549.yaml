@@ -9,7 +9,5 @@ entries:
       Mooncake prefill/decode separation requires matching RecoverSSM,
       prefix-caching and state settings on both sides. Validation is limited
       to specific 950DT configurations, including a P/D test using an
-      experimental image with modified parallelism checks; a PCP8 prefill-focused
-      run produced one output token per request and does not validate multi-token
-      decoding, and end-to-end functionality on other hardware, including 950PR,
-      remains unverified.
+      experimental image with modified parallelism checks; end-to-end
+      functionality on other hardware, including 950PR, remains unverified.
