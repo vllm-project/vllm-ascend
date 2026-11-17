@@ -20,6 +20,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     RequestTracker,
+    StoreLookupResult,
     block_hash_to_str,
     get_block_hashes,
     get_group_block_size,
@@ -128,7 +129,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
         )
 
-    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
+    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> StoreLookupResult | None:
         prompt_token_len = len(request.prompt_token_ids)
         if self.use_block_key_layerwise:
             token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
@@ -136,10 +137,10 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
                 token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
             if token_len < self.cache_transfer_granularity:
                 return None
-            return self._get_block_key_layerwise_hit_tokens(request, token_len, num_computed_tokens)
+            return StoreLookupResult(self._get_block_key_layerwise_hit_tokens(request, token_len, num_computed_tokens))
 
         if self.use_layerwise_transfer:
-            return self._get_layerwise_hit_tokens(request, prompt_token_len, num_computed_tokens)
+            return StoreLookupResult(self._get_layerwise_hit_tokens(request, prompt_token_len, num_computed_tokens))
 
         raise RuntimeError(f"Unsupported layerwise data plane: {self.layerwise_data_plane!r}")
 

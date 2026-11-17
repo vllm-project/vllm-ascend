@@ -32,6 +32,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     ReqMeta,
     RequestTracker,
+    StoreLookupResult,
     infer_group_block_sizes,
     infer_group_cache_families,
     infer_tp_mismatch_info,
@@ -123,7 +124,6 @@ class BaseKVPoolScheduler(ABC):
             )
         }
         self.enable_partial_hash_hits = self.pool_cache_geometry.partial_hits
-        self._lookup_tail_boundaries = {}
         if self.enable_partial_hash_hits:
             self.use_eagle = self.pool_cache_geometry.use_eagle
         self.grouped_block_size = list(self.pool_cache_geometry.block_sizes)
@@ -262,7 +262,6 @@ class BaseKVPoolScheduler(ABC):
         # A waiting request can be looked up again before it is admitted.
         # Never retain a load plan from an earlier hit across a miss/early return.
         self.load_specs.pop(request.request_id, None)
-        self._lookup_tail_boundaries.pop(request.request_id, None)
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_load:
             return 0, False
 
@@ -270,9 +269,10 @@ class BaseKVPoolScheduler(ABC):
         # it drops a local sub-block tail only if the remote hit strictly
         # extends it.
 
-        num_external_hit_tokens = self._lookup_external_hit_tokens(request, num_computed_tokens)
-        if not num_external_hit_tokens:
+        lookup_result = self._lookup_external_hit_tokens(request, num_computed_tokens)
+        if lookup_result is None or not lookup_result.hit_length:
             return 0, False
+        num_external_hit_tokens = lookup_result.hit_length
 
         store_skip_tokens = num_external_hit_tokens
         if self.use_eagle and not self.enable_partial_hash_hits:
@@ -325,7 +325,7 @@ class BaseKVPoolScheduler(ABC):
             kvpool_cached_tokens=num_external_hit_tokens,
             can_load=process_hit_without_alloc,
             kvpool_store_skip_tokens=store_skip_tokens,
-            tail_key_boundaries=self._lookup_tail_boundaries.pop(request.request_id, ()),
+            tail_key_boundaries=lookup_result.tail_key_boundaries,
         )
         logger.debug(
             "KV pool load spec created req=%s vllm_cached=%d kvpool_cached=%d "
@@ -353,7 +353,7 @@ class BaseKVPoolScheduler(ABC):
         return None
 
     @abstractmethod
-    def _lookup_external_hit_tokens(self, request: "Request", num_computed_tokens: int) -> int | None:
+    def _lookup_external_hit_tokens(self, request: "Request", num_computed_tokens: int) -> StoreLookupResult | None:
         """Return the external cache hit using the selected transfer mode."""
 
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
@@ -946,7 +946,7 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         self._finished_partial_tail_metas[request.request_id] = req_meta
         return False
 
-    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
+    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> StoreLookupResult | None:
         prompt_token_len = len(request.prompt_token_ids)
         if self.enable_partial_hash_hits:
             token_len = self.cache_coordinator.align_lookup_length(prompt_token_len)
@@ -954,14 +954,12 @@ class KVPoolScheduler(BaseKVPoolScheduler):
                 return None
             if self.client is None or self.client.closed:
                 self.client = LookupKeyClient(self.vllm_config)
-            result = self.client.lookup_result(
+            return self.client.lookup_result(
                 prompt_token_len,
                 request.block_hashes,
                 self.kv_cache_group_ids,
                 hbm_hit_tokens=num_computed_tokens,
             )
-            self._lookup_tail_boundaries[request.request_id] = result.tail_key_boundaries
-            return result.hit_length
         if len(self.cacheable_group_ids) != len(self.original_block_size):
             # Private compressor state is rebuilt from a whole token page.
             token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
@@ -975,9 +973,11 @@ class KVPoolScheduler(BaseKVPoolScheduler):
             return None
         if self.client is None or self.client.closed:
             self.client = LookupKeyClient(self.vllm_config)
-        return self.client.lookup(
-            token_len,
-            request.block_hashes,
-            self.kv_cache_group_ids,
-            hbm_hit_tokens=num_computed_tokens,
+        return StoreLookupResult(
+            self.client.lookup(
+                token_len,
+                request.block_hashes,
+                self.kv_cache_group_ids,
+                hbm_hit_tokens=num_computed_tokens,
+            )
         )

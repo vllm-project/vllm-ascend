@@ -51,6 +51,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     ReqMeta,
     RequestTracker,
+    StoreLookupResult,
+    TailKeyBoundary,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     BaseKVPoolScheduler,
@@ -2181,7 +2183,8 @@ def test_hash_hit_preserves_subpage_boundary_and_local_apc(local_start, pool_end
     scheduler = KVPoolScheduler(config, use_layerwise=False, kv_cache_config=geometry)
     assert scheduler.hash_block_size == 32
     assert scheduler.cache_transfer_granularity == 640
-    scheduler._lookup_external_hit_tokens = MagicMock(return_value=pool_end)
+    tail_boundaries = (TailKeyBoundary(0, 1920),)
+    scheduler._lookup_external_hit_tokens = MagicMock(return_value=StoreLookupResult(pool_end, tail_boundaries))
     request = SimpleNamespace(request_id="tail", num_tokens=1920)
     scheduler.load_specs["tail"] = LoadSpec(640, 1920, True)
     assert scheduler.load_async is (load_async is True)
@@ -2195,6 +2198,7 @@ def test_hash_hit_preserves_subpage_boundary_and_local_apc(local_start, pool_end
         assert load_spec.vllm_cached_tokens == local_start
         assert load_spec.kvpool_cached_tokens == local_start + expected
         assert load_spec.can_load
+        assert load_spec.tail_key_boundaries == tail_boundaries
     else:
         assert "tail" not in scheduler.load_specs
 
@@ -2204,8 +2208,7 @@ def test_lookup_early_return_discards_stale_load_spec(early_return):
     scheduler = KVPoolScheduler(
         make_config(), kv_cache_config=make_resolved_cache_config(make_config()), use_layerwise=False
     )
-    scheduler.load_specs["retry"] = LoadSpec(768, 12288, True)
-    scheduler._lookup_tail_boundaries["retry"] = ((0, 12288),)
+    scheduler.load_specs["retry"] = LoadSpec(768, 12288, True, tail_key_boundaries=(TailKeyBoundary(0, 12288),))
     request = SimpleNamespace(request_id="retry", prompt_token_ids=list(range(32)), num_tokens=32)
     local_tokens = 0
     if early_return == "consumer":
@@ -2217,7 +2220,50 @@ def test_lookup_early_return_discards_stale_load_spec(early_return):
         local_tokens = 32
     assert scheduler.get_num_new_matched_tokens(request, local_tokens) == (0, False)
     assert request.request_id not in scheduler.load_specs
-    assert request.request_id not in scheduler._lookup_tail_boundaries
+
+
+@pytest.mark.parametrize("partial", [False, True])
+@patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+def test_bulk_lookup_passes_result_directly_to_load_spec(mock_client_cls, partial):
+    config = make_config()
+    cache = make_resolved_cache_config(config)
+    if partial:
+        cache.hash_block_size = cache.cache_hit_alignment_tokens = 4
+    scheduler = KVPoolScheduler(config, use_layerwise=False, kv_cache_config=cache)
+    client = mock_client_cls.return_value
+    client.closed = False
+    boundaries = (TailKeyBoundary(0, 36),) if partial else ()
+    client.lookup_result.return_value = StoreLookupResult(32, boundaries)
+    client.lookup.return_value = 32
+    request = SimpleNamespace(request_id="lookup", prompt_token_ids=list(range(48)), num_tokens=48, block_hashes=[])
+
+    result = scheduler._lookup_external_hit_tokens(request, 16)
+    assert result == StoreLookupResult(32, boundaries)
+    assert scheduler.get_num_new_matched_tokens(request, 16) == (16, False)
+    assert scheduler.load_specs["lookup"].tail_key_boundaries == boundaries
+
+    client.lookup_result.return_value = StoreLookupResult(0)
+    client.lookup.return_value = 0
+    assert scheduler.get_num_new_matched_tokens(request, 16) == (0, False)
+    assert "lookup" not in scheduler.load_specs
+
+
+@pytest.mark.parametrize("block_key", [False, True])
+def test_layerwise_lookup_returns_result_without_tail_boundaries(block_key):
+    scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+    scheduler.use_block_key_layerwise = block_key
+    scheduler.use_layerwise_transfer = not block_key
+    scheduler.use_eagle = False
+    scheduler.cacheable_group_ids = [0]
+    scheduler.original_block_size = [16]
+    scheduler.cache_transfer_granularity = 16
+    scheduler._get_block_key_layerwise_hit_tokens = MagicMock(return_value=32)
+    scheduler._get_layerwise_hit_tokens = MagicMock(return_value=32)
+    request = SimpleNamespace(prompt_token_ids=list(range(48)))
+
+    assert scheduler._lookup_external_hit_tokens(request, 16) == StoreLookupResult(32)
+    selected = scheduler._get_block_key_layerwise_hit_tokens if block_key else scheduler._get_layerwise_hit_tokens
+    selected.assert_called_once_with(request, 48, 16)
 
 
 @pytest.mark.parametrize("pool_hit_tokens", [832, 896])
