@@ -438,3 +438,125 @@ def test_deepseek_v41_dspark_keeps_expert_count_when_optional_field_is_absent():
 
     assert not hasattr(text_config, "num_experts_per_tok")
     assert draft_model_config.model_arch_config.num_experts_per_token == 6
+
+
+def test_minimax_dspark_draft_config_short_circuits_the_generic_override(monkeypatch):
+    # The generic override rewrites minimax_m3_vl configs into MTP drafts;
+    # the DSpark draft must be normalized before it reaches that branch.
+    seen = []
+
+    def record_and_return(config, *args, **kwargs):
+        seen.append(config)
+        return config
+
+    monkeypatch.setattr(patch_speculative_config, "_orig_hf_config_override", record_and_return)
+    monkeypatch.setattr(
+        "vllm_ascend.models.minimax_m3.minimax_m3_dspark.draft_hf_override", lambda hf_config: "normalized"
+    )
+
+    draft = SimpleNamespace(model_type="minimax_m3_vl", architectures=["DSparkMiniMaxDraftModel"])
+    assert patch_speculative_config.SpeculativeConfig.hf_config_override(draft) == "normalized"
+
+    # Non-draft minimax configs keep going through the generic override.
+    target = SimpleNamespace(model_type="minimax_m3_vl", architectures=["MiniMaxM3SparseForConditionalGeneration"])
+    patch_speculative_config.SpeculativeConfig.hf_config_override(target)
+    assert seen == [target]
+
+
+@pytest.mark.parametrize("derived_quant", [None, {"quant_method": "ascend"}])
+def test_core_dspark_rewrite_is_restored_for_the_minimax_draft(monkeypatch, tmp_path, derived_quant):
+    # Core's dspark normalization rewrites unknown draft architectures into
+    # the generic DeepSeek DSpark draft; the wrapper must restore the MiniMax
+    # identity afterwards.
+    (tmp_path / "dspark").mkdir()
+    (tmp_path / "dspark" / "config.json").write_text("{}")
+    arch_rebuilds = []
+
+    def fake_core_post_init(self):
+        hf = self.draft_model_config.hf_config
+        hf.model_type = "deepseek_v4"
+        hf.architectures = ["DSparkDraftModel"]
+        self.draft_model_config.quantization = self.target_model_config.quantization
+
+    spec = SimpleNamespace(
+        method="dspark",
+        model=None,
+        target_model_config=SimpleNamespace(
+            model=str(tmp_path),
+            hf_config=SimpleNamespace(architectures=["MiniMaxM3SparseForConditionalGeneration"]),
+            quantization="ascend",
+        ),
+        target_parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        use_dspark=lambda: False,
+    )
+
+    def fake_update_arch():
+        arch_rebuilds.append(
+            (spec.draft_model_config.hf_config.model_type, spec.draft_model_config.hf_config.architectures)
+        )
+
+    spec.update_arch_ = fake_update_arch
+    draft_hf = SimpleNamespace(
+        model_type="minimax_m3_text",
+        architectures=["DSparkMiniMaxDraftModel"],
+        quantization_config=derived_quant,
+    )
+    draft_hf.update = lambda values: draft_hf.__dict__.update(values)
+    spec.draft_model_config = SimpleNamespace(hf_config=draft_hf, quantization=None)
+    monkeypatch.setattr(patch_speculative_config, "_orig_post_init", fake_core_post_init)
+
+    patch_speculative_config._dspark_post_init(spec)
+
+    hf_config = spec.draft_model_config.hf_config
+    assert hf_config.model_type == "minimax_m3_text"
+    assert hf_config.architectures == ["DSparkMiniMaxDraftModel"]
+    assert spec.model == str(tmp_path / "dspark")
+    assert arch_rebuilds == [("minimax_m3_text", ["DSparkMiniMaxDraftModel"])]
+    # Quantization: the core rewrite inherits the target's; the restore resets
+    # it and only the derived ascend config re-pins the method.
+    assert spec.draft_model_config.quantization == ("ascend" if derived_quant else None)
+
+
+def test_minimax_dspark_defaults_to_dspark_subfolder(tmp_path):
+    (tmp_path / "dspark").mkdir()
+    (tmp_path / "dspark" / "config.json").write_text("{}")
+    target = SimpleNamespace(model=str(tmp_path))
+
+    draft = patch_speculative_config._get_minimax_m3_dspark_draft(target)
+
+    assert draft == tmp_path / "dspark"
+
+
+def test_minimax_dspark_without_subfolder_raises(tmp_path):
+    target = SimpleNamespace(model=str(tmp_path))
+
+    with pytest.raises(ValueError, match="found no draft checkpoint in the 'dspark/' subfolder"):
+        patch_speculative_config._get_minimax_m3_dspark_draft(target)
+
+
+def test_minimax_dspark_default_gate_skips_foreign_requests(tmp_path):
+    m3_target = SimpleNamespace(
+        model=str(tmp_path), hf_config=SimpleNamespace(architectures=["MiniMaxM3SparseForCausalLM"])
+    )
+    other_target = SimpleNamespace(model=str(tmp_path), hf_config=SimpleNamespace(architectures=["Qwen3ForCausalLM"]))
+
+    # No dspark/ subfolder exists under tmp_path: the gate must stay silent
+    # (return None) for non-matching requests instead of raising.
+    assert (
+        patch_speculative_config._default_minimax_m3_dspark_draft(
+            SimpleNamespace(method="eagle", target_model_config=m3_target, model=None)
+        )
+        is None
+    )
+    assert (
+        patch_speculative_config._default_minimax_m3_dspark_draft(
+            SimpleNamespace(method="dspark", target_model_config=other_target, model=None)
+        )
+        is None
+    )
+    assert (
+        patch_speculative_config._default_minimax_m3_dspark_draft(
+            SimpleNamespace(method="dspark", target_model_config=m3_target, model=str(tmp_path / "other-draft"))
+        )
+        is None
+    )
