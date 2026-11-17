@@ -2,7 +2,7 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import (
     KVCacheEvent,
     KVConnectorKVEvents,
@@ -118,6 +118,13 @@ class AscendStoreKVEvents(KVConnectorKVEvents):
 
 
 class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
+    @classmethod
+    def supports_lookahead_block_hashes(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        # AscendStore's external coordinator retains the trailing EAGLE-block
+        # drop and prompt-token replay boundaries. It does not propagate the
+        # core lookahead length through its store/lookup masks.
+        return False
+
     @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
         """
