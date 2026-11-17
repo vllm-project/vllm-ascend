@@ -131,9 +131,11 @@ def test_capture_discards_pending_lookup_and_resets_history(state):
 
 def test_model_selects_ascend_state():
     from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41LLMForCausalLM
+    from vllm_ascend.models.deepseek_v41.model_state import DeepSeekV41ModelState
 
     model = AscendDeepseekV41LLMForCausalLM.__new__(AscendDeepseekV41LLMForCausalLM)
-    assert model.get_model_state_cls() is deepseek_v41.EngramModelState
+    assert model.get_model_state_cls() is DeepSeekV41ModelState
+    assert issubclass(DeepSeekV41ModelState, deepseek_v41.EngramModelState)
 
 
 def test_eager_hook_forwards_lookup_events(state):
