@@ -148,7 +148,9 @@ def register_cache_specs():
 def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     config = make_config()
     specs = make_specs(pool)
+    owner_geometry = {name: (spec.block_size, spec.page_size_padded) for name, spec in specs.items()}
     groups = get_glm5_next_kv_cache_groups(config, dict(reversed(list(specs.items()))))
+    assert {name: (spec.block_size, spec.page_size_padded) for name, spec in specs.items()} == owner_geometry
     layout = _get_glm5_next_cache_layout(groups)
     assert layout is not None
     assert groups[0].layer_names == [
@@ -158,6 +160,9 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     assert len(groups) == 5  # full, state, and three interleaved KDA groups
     assert layout.main_slot_count == layout.small_slot_count == 1
 
+    assert layout.main_page_size > layout.small_page_size
+    repeated = get_glm5_next_kv_cache_groups(config, specs)
+    assert _get_glm5_next_cache_layout(repeated) == layout
     bytes_per_block = layout.main_page_size + layout.small_page_size
     budget = 20 * bytes_per_block
     plan = get_glm5_next_kv_cache_config(config, groups, budget)
@@ -398,23 +403,6 @@ def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse
     plan = get_glm5_next_kv_cache_config(config, groups, budget)
     assert plan.num_blocks * get_glm5_next_pool_bytes_per_block(groups) == required
     assert sum(tensor.size for tensor in plan.kv_cache_tensors) == required
-
-
-@pytest.mark.parametrize("pool", [4, 16])
-def test_glm53_flash_planning_preserves_owner_specs_and_two_page_classes(pool):
-    specs = make_specs(pool)
-    owner_padding = {name: spec.page_size_padded for name, spec in specs.items()}
-    owner_blocks = {name: spec.block_size for name, spec in specs.items()}
-    groups = get_glm5_next_kv_cache_groups(make_config(), specs)
-    layout = _get_glm5_next_cache_layout(groups)
-    assert layout is not None
-    assert layout.main_page_size > layout.small_page_size
-    assert {name: spec.page_size_padded for name, spec in specs.items()} == owner_padding
-    assert {name: spec.block_size for name, spec in specs.items()} == owner_blocks
-    assert layout.main_page_size == specs["model.layers.3.attn"].page_size_bytes
-    assert layout.small_page_size == specs["model.layers.3.indexer.k_cache"].page_size_bytes
-    repeated = get_glm5_next_kv_cache_groups(make_config(), specs)
-    assert _get_glm5_next_cache_layout(repeated) == layout
 
 
 @pytest.mark.parametrize("large_owner", ["indexer", "tail"])

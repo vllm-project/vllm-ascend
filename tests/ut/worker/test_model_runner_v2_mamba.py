@@ -24,10 +24,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-from vllm_ascend.core.kv_cache_planning import (
-    _align_hybrid_attention_page_sizes,
-    align_hybrid_kv_cache_specs,
-)
+from vllm_ascend.core.kv_cache_planning import align_hybrid_kv_cache_specs
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import vllm_version_is
@@ -1087,69 +1084,6 @@ def test_spec_collection_keeps_owner_pages_until_planning(
     assert attention_spec.page_size_padded is None
 
 
-@pytest.mark.parametrize("include_mamba", [False, True])
-@patch("vllm_ascend.worker.v2.attn_utils.get_layers_from_vllm_config")
-def test_planning_rejects_nondivisible_hybrid_attention_pages(
-    mock_get_layers,
-    include_mamba,
-):
-    small_attention_spec = FullAttentionSpec(
-        block_size=4,
-        num_kv_heads=1,
-        head_size=3,
-        dtype=torch.float16,
-    )
-    large_attention_spec = FullAttentionSpec(
-        block_size=4,
-        num_kv_heads=1,
-        head_size=5,
-        dtype=torch.float16,
-    )
-    mamba_spec = MambaSpec(
-        block_size=4,
-        shapes=((2,), (4,)),
-        dtypes=(torch.float16, torch.float16),
-        page_size_padded=20,
-    )
-    assert small_attention_spec.page_size_bytes == 48
-    assert large_attention_spec.page_size_bytes == 80
-    assert mamba_spec.page_size_bytes == 20
-
-    class FakeAttention:
-        kv_sharing_target_layer_name = None
-        is_draft_layer = False
-
-        def __init__(self, spec):
-            self.spec = spec
-
-        def get_kv_cache_spec(self, _vllm_config):
-            return self.spec
-
-        def get_attn_backend(self):
-            return _FakeAttentionBackend
-
-    mamba_layer = MagicMock()
-    mamba_layer.is_draft_layer = False
-    mamba_layer.kv_sharing_target_layer_name = None
-    mamba_layer.get_kv_cache_spec.return_value = mamba_spec
-    mock_get_layers.return_value = {
-        "small_attn": FakeAttention(small_attention_spec),
-        "linear_attn": mamba_layer,
-        "large_attn": FakeAttention(large_attention_spec),
-    }
-
-    if include_mamba:
-        specs = get_kv_cache_spec(_mock_vllm_config())
-        assert specs["small_attn"] is small_attention_spec
-        with pytest.raises(ValueError, match="Cannot align hybrid attention K/V pages for small_attn"):
-            align_hybrid_kv_cache_specs(specs)
-    else:
-        del mock_get_layers.return_value["linear_attn"]
-        # Non-hybrid allocation does not use the shared Attention/Mamba layout.
-        specs = get_kv_cache_spec(_mock_vllm_config())
-        assert specs == {"small_attn": small_attention_spec, "large_attn": large_attention_spec}
-
-
 @pytest.mark.parametrize("full_block_size", [128, 512])
 @pytest.mark.parametrize("draft_num_kv_heads", [1, 2])
 @pytest.mark.parametrize("padded_sliding", [False, True])
@@ -1250,25 +1184,6 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
     assert specs["draft.full"].non_causal is True
     assert specs["target.gdn"] == mamba
     assert sliding.block_size == 128
-
-
-def test_hybrid_attention_alignment_rejects_different_k_v_proportions():
-    full = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=2, dtype=torch.float16)
-    # Equal total page sizes still do not make the K and V segments compatible.
-    sliding = SlidingWindowSpec(
-        block_size=128, num_kv_heads=1, head_size=1, head_size_v=3, dtype=torch.float16, sliding_window=4096
-    )
-    assert full.real_page_size_bytes == sliding.real_page_size_bytes
-    with pytest.raises(ValueError, match="matching K/V size ratios"):
-        _align_hybrid_attention_page_sizes({"full": full, "sliding": sliding})
-
-
-def test_hybrid_attention_alignment_preserves_mla_specs():
-    mla = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=8, dtype=torch.float16)
-    specs = {"mla": mla, "padded_mla": replace(mla, page_size_padded=4096)}
-    original = specs.copy()
-    _align_hybrid_attention_page_sizes(specs)
-    assert specs == original
 
 
 @patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.AscendMambaHybridModelState")

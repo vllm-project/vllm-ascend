@@ -2458,30 +2458,6 @@ def test_sfa_indexer_allocates_and_reshapes_scale_views(
             assert torch.all(backing[spec.page_size_bytes :] == 0)
 
 
-@pytest.mark.parametrize("indexer_dtype,indexer_scale_dim", [(torch.bfloat16, 0), (torch.int8, 1)])
-def test_sparse_hybrid_page_alignment_preserves_native_component_pages(indexer_dtype, indexer_scale_dim):
-    specs = {
-        "main": AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.bfloat16),
-        "indexer": AscendSFAIndexerCacheSpec(
-            block_size=128,
-            num_kv_heads=1,
-            head_size=128,
-            dtype=indexer_dtype,
-            scale_dim=indexer_scale_dim,
-            scale_dtype=torch.float16,
-        ),
-    }
-    original = dict(specs)
-    from vllm_ascend.core.kv_cache_planning import align_hybrid_kv_cache_specs
-
-    assert align_hybrid_kv_cache_specs(specs) == original
-    # PR4's paired planner aligns recurrent states to main pages separately.
-    # Enlarging token blocks to equalize MLA/indexer bytes changes ownership.
-    assert specs == original
-    assert specs["main"].page_size_bytes == 147456
-    assert specs["indexer"].page_size_bytes == (32768 if indexer_scale_dim == 0 else 16640)
-
-
 def test_sfa_indexer_li_c4_allocates_and_reshapes_scale_views(monkeypatch):
     layer_name = "model.layers.0.self_attn.indexer.k_cache"
     index_head_dim = 128

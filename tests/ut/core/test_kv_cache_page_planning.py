@@ -10,7 +10,7 @@ import pytest
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, SlidingWindowSpec
 
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.core.kv_cache_planning import align_hybrid_kv_cache_specs
 
 
@@ -23,7 +23,7 @@ def _state(elements):
 
 
 @pytest.mark.parametrize("include_attention", [False, True])
-def test_shared_pages_keep_existing_padding_and_owner_specs(include_attention):
+def test_shared_pages_preserve_owner_specs(include_attention):
     state = _state(32)
     specs = {"large_state": state, "small_state": _state(4)}
     if include_attention:
@@ -71,6 +71,33 @@ def test_descriptor_layout_does_not_resize_scheduler_blocks_or_state_pages():
     assert planned["state"] is larger_state
 
 
+@pytest.mark.parametrize("head_size,head_size_v", [(3, 3), (2, 6)])
+def test_planning_rejects_incompatible_contiguous_kv_pages(head_size, head_size_v):
+    # 48 versus 64 bytes is not divisible; 16K+48V versus 32K+32V has
+    # equal page sizes but incompatible K/V segments.
+    sliding = SlidingWindowSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=head_size,
+        head_size_v=head_size_v,
+        dtype=torch.float16,
+        sliding_window=16,
+    )
+    specs = {"full": _attention(), "sliding": sliding, "state": _state(32)}
+    with pytest.raises(ValueError, match="Cannot align hybrid attention K/V pages"):
+        align_hybrid_kv_cache_specs(specs)
+
+
+def test_planning_pads_mla_without_resizing_token_blocks():
+    # Its 24-byte latent page is not a divisible dense K/V segment.
+    mla = AscendMLAAttentionSpec(block_size=4, num_kv_heads=1, head_size=3, dtype=torch.float16)
+    planned = align_hybrid_kv_cache_specs({"full": _attention(), "mla": mla, "state": _state(32)})
+    assert planned["mla"].block_size == mla.block_size
+    assert planned["mla"].head_size == mla.head_size
+    assert planned["mla"].page_size_bytes == 128
+    assert mla.page_size_padded is None
+
+
 def test_indexer_keeps_its_own_page_class():
     indexer = AscendSFAIndexerCacheSpec(
         block_size=4,
@@ -105,32 +132,4 @@ def test_builder_aligns_before_default_grouping(monkeypatch):
 
     planned = upstream.call_args.args[1]
     assert planned["full"].page_size_bytes == 128
-    assert specs["full"].page_size_padded is None
-
-
-def test_builder_fallback_aligns_once_and_uses_unpatched_grouping(monkeypatch):
-    import vllm.v1.core.kv_cache_planning as upstream_planning
-
-    from vllm_ascend.core import kv_cache_config_builder as builder_module
-    from vllm_ascend.patch.platform import patch_kv_cache_utils  # noqa: F401
-
-    # Importing Ascend patches must leave the public upstream grouping entry intact.
-    assert upstream_planning.get_kv_cache_groups.__module__ == "vllm.v1.core.kv_cache_planning"
-    specs = {"full": _attention(), "state": _state(32)}
-    upstream = Mock(return_value=[])
-    align = Mock(wraps=builder_module.align_hybrid_kv_cache_specs)
-    monkeypatch.setattr(upstream_planning, "get_kv_cache_groups", upstream)
-    monkeypatch.setattr(builder_module, "align_hybrid_kv_cache_specs", align)
-    monkeypatch.setattr(builder_module, "get_qwen4_exp_kv_cache_groups", lambda *_: None)
-    monkeypatch.setattr(builder_module, "is_deepseek_v41_cache", lambda *_: False)
-    monkeypatch.setattr(builder_module, "group_and_unify_kv_cache_specs", lambda *_: None)
-    monkeypatch.setattr(builder_module, "_get_kimi_k3_dspark_mixed_kv_cache_groups", lambda *_: None)
-    config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
-        model_config=SimpleNamespace(supports_kv_cache_grouping=False, hf_config=SimpleNamespace(model_type="qwen3")),
-    )
-    assert builder_module.AscendKVCacheConfigBuilder().get_kv_cache_groups(config, specs) == []
-    align.assert_called_once_with(specs)
-    upstream.assert_called_once()
-    assert upstream.call_args.args[1]["full"].page_size_bytes == 128
     assert specs["full"].page_size_padded is None
