@@ -305,12 +305,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 stage_layers = range(stage_start, stage_start + stage_num_layers)
                 total_layers = getattr(self, "total_layers", None)
                 base_layers = getattr(self.hf_config, "num_hidden_layers", stage_num_layers)
-                cache_layout = LayerwiseCacheConfig.parse(
+                layerwise_settings = LayerwiseCacheConfig.parse(
                     total_layers if isinstance(total_layers, int) else base_layers,
                     self._extra_config,
                     stage_layers=stage_layers,
                 )
-                self.num_prefetch_layers = cache_layout.num_prefetch_layers
+                self.num_prefetch_layers = layerwise_settings.num_prefetch_layers
             else:
                 self.num_layers = self.layerwise_key_layers = len(layout.layers)
                 self.prefetch_layer_map = self._remap_layout_to_stage_local(layout.prefetch_layer_map, layout.layers)
