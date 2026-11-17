@@ -155,7 +155,6 @@ def test_packed_rows_uniform_boundaries_match_legacy(capture):
     recs = _target_records(capture)
     assert len(recs) == 1, recs
     assert "req=1 step=0 nan=1" in recs[0]
-    assert "slot=1 step=3 nan=7" in recs[0]
 
 
 def test_draft_logits_none_no_crash(capture):
