@@ -332,6 +332,21 @@ def test_qwen_dflash2_selects_only_its_target_and_draft(qwen_dflash2_fa3, hardwa
     assert r.select(tag) == expected
 
 
+@pytest.mark.parametrize("allowlist", [(), ("Qwen3_5MoeForConditionalGeneration",)])
+def test_qwen_target_allowlist_leaves_draft_selection_independent(monkeypatch, qwen_dflash2_fa3, allowlist):
+    from vllm_ascend import platform
+
+    r = qwen_dflash2_fa3
+    assert r.select("backbone") == "AscendQwenFlashAttentionBackend"
+    monkeypatch.setattr(platform, "_FA3_TARGET_MODEL_ALLOWLIST", frozenset(allowlist))
+    assert r.select("backbone") == "AscendAttentionBackend"
+    assert r.select() == "AscendDFlash2FlashAttentionBackend"
+    assert r.select("dflash2_candidate_selector") == "AscendAttentionBackend"
+    # An allowlist entry cannot bypass the backend's supported architecture.
+    r.target.architecture = "Qwen3_5MoeForConditionalGeneration"
+    assert r.select("backbone") == "AscendAttentionBackend"
+
+
 @pytest.mark.parametrize(
     "section,field,value",
     [

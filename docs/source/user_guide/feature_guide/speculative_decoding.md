@@ -393,6 +393,8 @@ A few important things to consider when using DFlash2 draft models:
    package provides the `flash_attn_npu_3` scheduler API (0.4.2.post2 or 0.5.0).
    The verified Qwen3.8-27B checkpoint declares this target architecture.
    Other architectures, including Qwen MoE, keep their existing backend.
+   The target architecture allowlist controls target FA3 independently of the
+   draft; removing a target from it leaves draft selection unchanged.
 
    FA3 consumes exact device lengths after rejection, removing attention length
    copies and the runner's paired length snapshot/Event wait. Queries use packed

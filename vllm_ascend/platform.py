@@ -89,6 +89,8 @@ logger.info_once(
 )
 
 _CUSTOM_OP_REGISTERED = False
+# Removing an architecture disables target FA3 without disabling its draft.
+_FA3_TARGET_MODEL_ALLOWLIST = frozenset({"Qwen3_5ForConditionalGeneration"})
 _MINIMAX_M3_ARCHITECTURES = frozenset(
     {
         "MiniMaxM3SparseForCausalLM",
@@ -336,12 +338,8 @@ class NPUPlatform(Platform):
             # vLLM resolves this import path to the backend class.
             return "vllm_ascend.attention.fa_v1.AscendFlashAttentionBackend"
 
-        if _validate_flash_attn_npu_3(backend_key, attn_selector_config):
-            return "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
-        if _validate_qwen_flash_attn_npu_3(backend_key, attn_selector_config):
-            return "vllm_ascend.attention.flash_attention_v3.AscendDFlash2FlashAttentionBackend"
-        if _validate_qwen_flash_attn_npu_3(backend_key, attn_selector_config, model_tag="backbone"):
-            return "vllm_ascend.attention.flash_attention_v3.AscendQwenFlashAttentionBackend"
+        if backend := _validate_flash_attn_npu_3(backend_key, attn_selector_config):
+            return backend
 
         backend_map = {
             (True, False, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
@@ -1856,43 +1854,61 @@ def _validate_minimax_dspark_flash_attn(config, selector) -> bool:
     )
 
 
-def _validate_qwen_flash_attn_npu_3(backend_key, selector, model_tag="dflash_head") -> bool:
-    """Use A2/A3 FA3 for the audited Qwen3.5 target and V2 DFlash2 draft."""
+def _validate_flash_attn_npu_3(backend_key, selector) -> str | None:
+    """Resolve supported FA3 drafts and allowlisted Qwen targets in one place."""
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
         HardwareCapability.FLASH_ATTN_NPU_3
     ):
-        return False
+        return None
 
     # Model configuration imports platforms during initialization.
     from vllm.config import get_current_vllm_config_or_none
     from vllm.v1.attention.backend import AttentionType
 
     config = get_current_vllm_config_or_none()
-    if config is None or not getattr(config, "use_v2_model_runner", False):
-        return False
-    spec = config.speculative_config
-    if spec is None or spec.method != "dflash":
-        return False
+    spec = config.speculative_config if config is not None else None
+    if spec is None or spec.draft_model_config is None:
+        return None
 
-    from vllm.compilation import backends
+    is_qwen = spec.method == "dflash"
+    if is_qwen:
+        # Loader scopes can expose the draft config, so check the target explicitly.
+        architecture = getattr(spec.target_model_config, "architecture", None)
+        if (
+            not getattr(config, "use_v2_model_runner", False)
+            or architecture != "Qwen3_5ForConditionalGeneration"
+            or "DFlash2DraftModel" not in (spec.draft_model_config.architectures or ())
+            or not 0 < selector.head_size <= 256
+            or (selector.kv_cache_dtype == "float16" and selector.dtype != torch.float16)
+            or (selector.kv_cache_dtype == "bfloat16" and selector.dtype != torch.bfloat16)
+        ):
+            return None
 
-    # Loader scopes can expose the draft config, so check the target explicitly.
-    if (
-        getattr(spec.target_model_config, "architecture", None) != "Qwen3_5ForConditionalGeneration"
-        or spec.draft_model_config is None
-        or "DFlash2DraftModel" not in (spec.draft_model_config.architectures or ())
-        or backends.model_tag != model_tag
+        from vllm.compilation import backends
+
+        if backends.model_tag == "dflash_head":
+            backend = "vllm_ascend.attention.flash_attention_v3.AscendDFlash2FlashAttentionBackend"
+        elif backends.model_tag == "backbone" and architecture in _FA3_TARGET_MODEL_ALLOWLIST:
+            backend = "vllm_ascend.attention.flash_attention_v3.AscendQwenFlashAttentionBackend"
+        else:
+            return None
+    elif (
+        spec.method == "dspark"
+        and config.model_config is not None
+        and _uses_minimax_fa3(config)
+        and config.cache_config.cache_dtype in ("auto", "float16", "bfloat16")
+        and not getattr(config.quant_config, "enable_c8_quant", False)
     ):
-        return False
+        # Keep MiniMax's cache guards separate: a Qwen draft can have a quantized target.
+        backend = "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
+    else:
+        return None
 
     parallel = config.parallel_config
     if (
         selector.attn_type != AttentionType.DECODER
-        or not 0 < selector.head_size <= 256
         or selector.dtype not in (torch.float16, torch.bfloat16)
         or selector.kv_cache_dtype not in (None, "auto", "float16", "bfloat16")
-        or (selector.kv_cache_dtype == "float16" and selector.dtype != torch.float16)
-        or (selector.kv_cache_dtype == "bfloat16" and selector.dtype != torch.bfloat16)
         or parallel.pipeline_parallel_size != 1
         or parallel.prefill_context_parallel_size != 1
         or parallel.decode_context_parallel_size != 1
@@ -1910,61 +1926,18 @@ def _validate_qwen_flash_attn_npu_3(backend_key, selector, model_tag="dflash_hea
                 "use_rswa",
             )
         )
+        or util.find_spec("flash_attn_npu_3") is None
     ):
-        return False
+        return None
 
-    # This is a different ABI from the training-consistency flash_attn_npu_v3.
-    if util.find_spec("flash_attn_npu_3") is None:
-        return False
-    module = import_module("flash_attn_npu_3")
-    return callable(getattr(module, "get_scheduler_metadata", None)) and callable(
-        getattr(module, "flash_attn_with_kvcache", None)
-    )
-
-
-def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
-    """Select the optional A2/A3 FA3 ABI only for compatible MiniMax attention."""
-    if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
-        HardwareCapability.FLASH_ATTN_NPU_3
-    ):
-        return False
-
-    # Model configuration imports platforms during initialization.
-    from vllm.config import get_current_vllm_config_or_none
-    from vllm.v1.attention.backend import AttentionType
-
-    config = get_current_vllm_config_or_none()
-    spec = config.speculative_config if config is not None else None
-    if spec is None or spec.draft_model_config is None:
-        return False
-    if config is None or config.model_config is None or not _uses_minimax_fa3(config):
-        return False
-    parallel = config.parallel_config
-    return (
-        selector.attn_type == AttentionType.DECODER
-        and selector.dtype in (torch.float16, torch.bfloat16)
-        and selector.kv_cache_dtype in (None, "auto", "float16", "bfloat16")
-        and not any(
-            getattr(selector, flag, False)
-            for flag in (
-                "has_sink",
-                "use_pcp",
-                "use_dcp",
-                "use_mm_prefix",
-                "use_per_head_quant_scales",
-                "use_batch_invariant",
-                "use_adaptive_verification",
-                "use_rswa",
-            )
-        )
-        and parallel.pipeline_parallel_size == 1
-        and parallel.prefill_context_parallel_size == 1
-        and parallel.decode_context_parallel_size == 1
-        and config.cache_config.cache_dtype in ("auto", "float16", "bfloat16")
-        and not getattr(config.quant_config, "enable_c8_quant", False)
-        and not getattr(spec, "enable_adaptive_verification", False)
-        and util.find_spec("flash_attn_npu_3") is not None
-    )
+    if is_qwen:
+        # This is a different ABI from training-consistency flash_attn_npu_v3.
+        module = import_module("flash_attn_npu_3")
+        if not callable(getattr(module, "get_scheduler_metadata", None)) or not callable(
+            getattr(module, "flash_attn_with_kvcache", None)
+        ):
+            return None
+    return backend
 
 
 def _uses_minimax_fa3(config) -> bool:
