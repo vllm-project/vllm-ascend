@@ -1,0 +1,4 @@
+pr: 21260
+entries:
+  - category: feature
+    text: Added an opt-in Model Runner V2 setting to export the committed expert placement after asynchronous EPLB rearrangement.
