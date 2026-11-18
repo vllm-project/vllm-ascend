@@ -559,6 +559,16 @@ def _aligned_dspark_index_width(window_size: int, block_size: int, alignment: in
     return ((min_width + alignment - 1) // alignment) * alignment
 
 
+def dspark_swa_indices_use_triton(device: torch.device) -> bool:
+    """Whether :func:`build_dspark_swa_indices` takes the triton fast path.
+
+    Callers that pre-allocate persistent output buffers use this to shape the
+    lengths buffer after the path contract: the triton variant emits ``[T, 1]``
+    lengths while the eager chain emits ``[T]``.
+    """
+    return build_dspark_swa_indices_triton is not None and device.type == "npu"
+
+
 def build_dspark_swa_indices(
     block_table: torch.Tensor,
     num_speculative_tokens: int,
@@ -569,6 +579,7 @@ def build_dspark_swa_indices(
     num_decode_tokens: int | None = None,
     index_width: int | None = None,
     indices_output: torch.Tensor | None = None,
+    lengths_output: torch.Tensor | None = None,
     buffer: torch.Tensor | None = None,
     *,
     use_logical_indices: bool = False,
@@ -585,6 +596,12 @@ def build_dspark_swa_indices(
     rows and the returned tensor is a slice view of ``buffer``. This keeps the
     address stable across async ACL-graph replays, where the DSA operator
     captures ``ori_sparse_indices``'s data pointer at capture time.
+
+    When ``indices_output``/``lengths_output`` are given, the freshly built
+    indices/lengths are written into them in place and returned, so callers
+    with persistent buffers keep stable addresses without a post-hoc copy.
+    The triton fast path forwards the outputs to the kernel; the eager chain
+    copies into them and validates their shapes.
     """
     if index_width is None:
         index_width = _aligned_dspark_index_width(window_size, num_speculative_tokens)
@@ -599,11 +616,9 @@ def build_dspark_swa_indices(
 
     if (
         use_logical_indices
-        and build_dspark_swa_indices_triton is not None
-        and query_start_loc.device.type == "npu"
         and num_decode_tokens is not None
-        and indices_output is None
         and buffer is None
+        and dspark_swa_indices_use_triton(query_start_loc.device)
     ):
         return build_dspark_swa_indices_triton(
             query_start_loc,
@@ -611,6 +626,8 @@ def build_dspark_swa_indices(
             num_decode_tokens,
             index_width,
             window_size,
+            indices_output=indices_output,
+            lengths_output=lengths_output,
         )
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
@@ -645,6 +662,15 @@ def build_dspark_swa_indices(
             )
         indices_output.copy_(per_token_slots)
         per_token_slots = indices_output
+
+    if lengths_output is not None:
+        if lengths_output.shape != per_token_lens.shape:
+            raise ValueError(
+                "DSpark SWA lengths output shape does not match active metadata: "
+                f"output={tuple(lengths_output.shape)}, active={tuple(per_token_lens.shape)}"
+            )
+        lengths_output.copy_(per_token_lens)
+        per_token_lens = lengths_output
 
     if buffer is not None:
         # Copy the freshly built indices into the caller-provided buffer and hand

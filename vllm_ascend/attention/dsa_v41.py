@@ -34,7 +34,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSABackend,
     _aligned_dspark_index_width,
     build_dspark_swa_indices,
-    build_dspark_swa_indices_triton,
+    dspark_swa_indices_use_triton,
     dsv4_dsa_overlap_stream,
 )
 from vllm_ascend.attention.utils import (
@@ -1282,7 +1282,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             # contents never advance with decoding.
             num_spec_tokens = self.vllm_config.speculative_config.num_speculative_tokens
             index_width = _aligned_dspark_index_width(window_size, num_spec_tokens)
-            use_triton = build_dspark_swa_indices_triton is not None and common.query_start_loc.device.type == "npu"
             if self._dspark_swa_indices is None:
                 self._dspark_swa_indices = torch.empty(
                     (self._max_tokens, 1, index_width), dtype=torch.int32, device=req.seq_lens.device
@@ -1291,6 +1290,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 # chain emits [T]; shape the persistent buffer after the
                 # path that fills it so each device keeps its existing
                 # graph-visible contract.
+                use_triton = dspark_swa_indices_use_triton(common.query_start_loc.device)
                 self._dspark_swa_lengths = torch.empty(
                     (self._max_tokens, 1) if use_triton else (self._max_tokens,),
                     dtype=torch.int32,
@@ -1299,30 +1299,21 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             indices_view = self._dspark_swa_indices[: req.num_actual_tokens]
             assert self._dspark_swa_lengths is not None
             lengths_view = self._dspark_swa_lengths[: req.num_actual_tokens]
-            if use_triton:
-                req.ori_sparse_indices, req.ori_topk_length = build_dspark_swa_indices_triton(
-                    common.query_start_loc[: req.num_reqs + 1],
-                    req.seq_lens,
-                    req.num_actual_tokens,
-                    index_width,
-                    window_size,
-                    indices_output=indices_view,
-                    lengths_output=lengths_view,
-                )
-            else:
-                req.ori_sparse_indices, ori_topk_length = build_dspark_swa_indices(
-                    common.block_table_tensor[: req.num_reqs],
-                    num_spec_tokens,
-                    window_size,
-                    req.storage_block_size,
-                    common.query_start_loc[: req.num_reqs + 1],
-                    req.seq_lens,
-                    req.num_actual_tokens,
-                    indices_output=indices_view,
-                    use_logical_indices=True,
-                )
-                lengths_view.copy_(ori_topk_length)
-                req.ori_topk_length = lengths_view
+            # The shared builder picks the triton kernel on NPU and forwards
+            # the persistent views; the eager fallback writes them in place.
+            req.ori_sparse_indices, req.ori_topk_length = build_dspark_swa_indices(
+                common.block_table_tensor[: req.num_reqs],
+                num_spec_tokens,
+                window_size,
+                req.storage_block_size,
+                common.query_start_loc[: req.num_reqs + 1],
+                req.seq_lens,
+                req.num_actual_tokens,
+                index_width=index_width,
+                indices_output=indices_view,
+                lengths_output=lengths_view,
+                use_logical_indices=True,
+            )
         replay_start = getattr(common, "replay_start", None)
         replay_visible_lens = None
         if replay_start is not None and req.cache_kind == "swa":

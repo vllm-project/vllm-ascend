@@ -3017,13 +3017,15 @@ def test_adaptive_query_bound_reaches_metadata(adaptive, prefill_tokens, expecte
 
 
 def test_dspark_indices_write_caller_output():
-    """indices_output is filled in place and returned as-is.
+    """indices_output/lengths_output are filled in place and returned as-is.
 
-    The V4.1 draft metadata builder passes a persistent buffer view so ACL
+    The V4.1 draft metadata builder passes persistent buffer views so ACL
     graph capture keeps stable addresses; the eager fallback must write into
-    it instead of returning a freshly allocated temporary.
+    them instead of returning freshly allocated temporaries, and must keep
+    the 1-D lengths contract of the eager chain.
     """
     indices_output = torch.full((3, 1, 8), -7, dtype=torch.int32)
+    lengths_output = torch.full((3,), -7, dtype=torch.int64)
     indices, lengths = build_dspark_swa_indices(
         block_table=torch.tensor([[5, 2]], dtype=torch.int32),
         num_speculative_tokens=3,
@@ -3034,8 +3036,31 @@ def test_dspark_indices_write_caller_output():
         num_decode_tokens=3,
         index_width=8,
         indices_output=indices_output,
+        lengths_output=lengths_output,
         use_logical_indices=True,
     )
     assert indices is indices_output
+    assert lengths is lengths_output
     assert indices[:, 0].tolist() == [[0, 1, 2, 3, 4, 5, -1, -1]] * 3
-    assert lengths.flatten().tolist() == [6] * 3
+    assert lengths.tolist() == [6] * 3
+    assert lengths.shape == (3,)
+
+
+def test_dspark_indices_output_shape_mismatch_raises():
+    """A persistent view with a stale shape must fail loudly, not broadcast."""
+    indices_output = torch.full((4, 1, 8), -7, dtype=torch.int32)
+    lengths_output = torch.full((4, 1), -7, dtype=torch.int64)
+    with pytest.raises(ValueError, match="indices output shape"):
+        build_dspark_swa_indices(
+            block_table=torch.tensor([[5, 2]], dtype=torch.int32),
+            num_speculative_tokens=3,
+            window_size=4,
+            block_size=4,
+            query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+            seq_lens=torch.tensor([6], dtype=torch.int32),
+            num_decode_tokens=3,
+            index_width=8,
+            indices_output=indices_output,
+            lengths_output=lengths_output,
+            use_logical_indices=True,
+        )

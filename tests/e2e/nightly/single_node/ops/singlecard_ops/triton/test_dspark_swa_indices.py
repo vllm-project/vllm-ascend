@@ -675,6 +675,44 @@ def test_gate_accepts_valid_config():
     assert dspark_swa_indices_supported(128, 64)
 
 
+def _logical_ref(qsl, seq_lens, num_tokens, index_width, window_size):
+    """Eager logical reference at full capacity, padded rows included.
+
+    Rows beyond the active tokens (dead requests in the padded query_start_loc)
+    must come out as -1 slots / 0 lengths, mirroring the kernel's pad-row
+    cleanup that a captured graph relies on.
+    """
+    query_lens = qsl[1:] - qsl[:-1]
+    prefix_lens = seq_lens - query_lens
+    start_pos = (prefix_lens - window_size).clamp(min=0)
+    visible_lens = seq_lens - start_pos
+    cols = torch.arange(index_width, device=qsl.device)
+    pos = (start_pos[:, None] + cols[None, :]).to(torch.int32)
+    slots = torch.where(cols[None, :] < visible_lens[:, None], pos, torch.full_like(pos, -1))
+    slots = slots.repeat_interleave(query_lens, dim=0).unsqueeze(1)
+    lens = visible_lens.repeat_interleave(query_lens, dim=0).to(torch.int32).unsqueeze(1)
+    pad = num_tokens - slots.shape[0]
+    if pad > 0:
+        slots = torch.cat([slots, torch.full((pad, 1, index_width), -1, dtype=torch.int32, device=qsl.device)])
+        lens = torch.cat([lens, torch.zeros((pad, 1), dtype=torch.int32, device=qsl.device)])
+    return slots, lens
+
+
+def _set_layout(qsl_buf, seq_buf, num_active, seq_values, query_len_per_req):
+    """Rewrite device metadata in place for a new step layout.
+
+    ``query_start_loc`` is padded with repeated end offsets and dead
+    ``seq_lens`` entries carry garbage, like the production buffers whose
+    stale tails the kernel must never leak into the outputs.
+    """
+    ends = [query_len_per_req * i for i in range(1, num_active + 1)]
+    qsl_buf[0] = 0
+    qsl_buf[1 : num_active + 1] = torch.tensor(ends, dtype=qsl_buf.dtype, device=qsl_buf.device)
+    qsl_buf[num_active + 1 :] = ends[-1]
+    seq_buf[:num_active] = torch.tensor(seq_values, dtype=seq_buf.dtype, device=seq_buf.device)
+    seq_buf[num_active:] = 777
+
+
 @pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
@@ -730,3 +768,78 @@ def test_logical_indices_triton_writes_persistent_outputs():
     torch.testing.assert_close(out_slots, ref_slots)
     torch.testing.assert_close(out_lens, ref_lens)
     assert not torch.equal(slots_buf, torch.full_like(slots_buf, -7)), "sentinel rows survived the rebuild"
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+def test_logical_indices_triton_graph_replay_rebuilds_new_layouts():
+    """Capture once, then replay with different layouts into the same buffers.
+
+    The FULL draft graph reuses the persistent buffers captured at max
+    capacity: every replay must rewrite indices AND lengths for the new
+    request lengths and the new number of active rows, and must clear the
+    rows beyond the active region (-1 slots / 0 lengths) instead of leaving
+    stale values from a previous step.
+    """
+
+    num_speculative_tokens = 4
+    window_size = 944
+    num_query_per_req = num_speculative_tokens + 1
+    num_reqs_cap = 4
+    T_cap = num_reqs_cap * num_query_per_req
+    index_width = ((window_size + num_speculative_tokens + 127) // 128) * 128
+
+    qsl_buf = torch.zeros(num_reqs_cap + 1, dtype=torch.int64, device=DEVICE)
+    seq_buf = torch.zeros(num_reqs_cap, dtype=torch.int64, device=DEVICE)
+    slots_buf = torch.full((T_cap, 1, index_width), -7, dtype=torch.int32, device=DEVICE)
+    lens_buf = torch.full((T_cap, 1), -7, dtype=torch.int32, device=DEVICE)
+
+    def launch():
+        return build_dspark_swa_indices_triton(
+            qsl_buf,
+            seq_buf,
+            T_cap,
+            index_width,
+            window_size,
+            indices_output=slots_buf,
+            lengths_output=lens_buf,
+        )
+
+    _set_layout(qsl_buf, seq_buf, num_reqs_cap, [1200, 1500, 800, 944], num_query_per_req)
+    for _ in range(3):
+        launch()  # warmup compiles the kernel outside capture
+    torch.npu.synchronize()
+
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        out_slots, out_lens = launch()
+    assert out_slots is slots_buf
+    assert out_lens is lens_buf
+
+    layouts = [
+        # (num_active_reqs, seq_lens contents) — capture layout first, then
+        # shrinks and re-grows with different request lengths, like a draft
+        # batch whose request count and lengths change per step.
+        (num_reqs_cap, [1200, 1500, 800, 944]),
+        (2, [1000, 1300]),
+        (3, [1100, 900, 1400]),
+    ]
+    for num_active, seq_values in layouts:
+        # Poison with sentinels so any row the replay fails to rewrite for
+        # the new layout is detected as stale, not silently matched.
+        slots_buf.fill_(-7)
+        lens_buf.fill_(-7)
+        torch.npu.synchronize()
+        _set_layout(qsl_buf, seq_buf, num_active, seq_values, num_query_per_req)
+        graph.replay()
+        torch.npu.synchronize()
+
+        ref_slots, ref_lens = _logical_ref(qsl_buf, seq_buf, T_cap, index_width, window_size)
+        torch.testing.assert_close(slots_buf, ref_slots)
+        torch.testing.assert_close(lens_buf, ref_lens)
+        pad_rows = T_cap - num_active * num_query_per_req
+        if pad_rows > 0:
+            assert (lens_buf[-pad_rows:] == 0).all(), "padded rows must carry zero lengths"
+            assert (slots_buf[-pad_rows:] == -1).all(), "padded rows must carry -1 slots"
