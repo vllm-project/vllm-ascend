@@ -469,6 +469,12 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
         self.assertEqual(_sparse_attention_layer_ids(config), {1, 3})
 
     def test_decoder_uses_transformers_layer_types(self) -> None:
+        self._assert_decoder_uses_transformers_layer_types()
+
+    def test_decoder_uses_transformers_layer_types_with_empty_legacy_config(self) -> None:
+        self._assert_decoder_uses_transformers_layer_types(sparse_attention_config={})
+
+    def _assert_decoder_uses_transformers_layer_types(self, **config_overrides) -> None:
         config = PretrainedConfig(
             hidden_size=16,
             num_attention_heads=4,
@@ -483,6 +489,7 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
             index_topk_blocks=16,
             index_block_size=128,
             index_local_blocks=1,
+            **config_overrides,
         )
         module = MiniMaxM3DecoderLayer.__module__
         with (

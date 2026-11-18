@@ -1018,7 +1018,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
             reduce_results=not self.use_sequence_parallel,
         )
         if layer_idx in _sparse_attention_layer_ids(config):
-            if sparse_attention_config is None:
+            if not sparse_attention_config:
                 sparse_attention_config = {
                     "sparse_num_index_heads": config.index_n_heads,
                     "sparse_index_dim": config.index_head_dim,
