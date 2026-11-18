@@ -52,6 +52,44 @@ if TYPE_CHECKING:
     from .shared_host import HostTableSlice
     from .shared_pool import SharedPoolClient
 
+HOST_OFFLOAD_STORAGE_ATTR = "_host_offload_storage"
+
+_HOST_OFFLOAD_PARAMS = (
+    ("weight", "_codes_uva"),
+    ("weight_scale_inv", "_scales_uva"),
+)
+
+
+def register_host_offload_storage(module: nn.Module) -> None:
+    """Expose a host-offloaded table's storage to reload and weight updates.
+
+    ``cpu_offload`` aliases ``weight``/``weight_scale_inv`` onto registered host
+    memory.  A layerwise reload moves the parameters to the meta device and would
+    materialize them again on the device - a full per-rank allocation for a table
+    this large (see ``worker/patch_offload_reload.py`` in
+    ``vllm_ascend/patch/__init__.py``).  Attaching the host range here gives the
+    reload the tensor to rebuild the parameter on, so an update lands in the
+    storage the lookup kernel already reads.
+    """
+    for param_name, holder_attr in _HOST_OFFLOAD_PARAMS:
+        param = getattr(module, param_name, None)
+        holder = getattr(module, holder_attr, None)
+        if holder is None:
+            continue
+        if not isinstance(param, nn.Parameter):
+            raise TypeError(f"{type(module).__name__}.{param_name} must be a Parameter to carry {holder_attr}")
+        # Registered storage, not a registered buffer: a non-persistent buffer
+        # that aliases a parameter's storage is deliberately not captured for
+        # reloading (`_is_non_persistent_parameter_alias_buffer`), and the
+        # quantized scale parameter is a second alias of the codes range.
+        try:
+            param.__dict__[HOST_OFFLOAD_STORAGE_ATTR] = holder.tensor
+        except AttributeError as exc:
+            raise RuntimeError(
+                f"{type(module).__name__}.{param_name} cannot carry its host storage; a layerwise reload would "
+                f"rebuild the offloaded table on the device and run out of memory"
+            ) from exc
+
 
 class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
     """TP(+EDP) head shard with BF16, INT8/FP32 or native MXFP8/E8M0."""
@@ -66,10 +104,18 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         storage_dtype: torch.dtype = torch.int8,
+        remote_reader=None,
         shared_pool_endpoint: str | None = None,
         shared_pool_identity: str | None = None,
         shared_pool_key: str | None = None,
     ) -> None:
+        self._remote_reader = remote_reader
+        if remote_reader is not None and shared_pool_endpoint:
+            raise ValueError("Remote reader and shared pool are mutually exclusive")
+        if remote_reader is not None and (
+            not cpu_offload or not dp_shared_memory or storage_dtype not in (torch.int8, torch.float8_e4m3fn)
+        ):
+            raise ValueError("Remote Engram requires INT8 or FP8 cpu_offload with dp_shared_memory")
         self._shared_pool_spec = (shared_pool_endpoint, shared_pool_identity, shared_pool_key)
         self._shared_pool_client: SharedPoolClient | None = None
         if shared_pool_endpoint and (
@@ -133,7 +179,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                 set_weight_attrs(
                     param, {"weight_loader": self._weight_loader, "engram_vocab_start": self.vocab_start_idx}
                 )
-            if cpu_offload:
+            if cpu_offload and remote_reader is None:
                 set_weight_attrs(self.weight, {"dummy_weight_value": 0})
                 if self.weight_scale_inv is not None:
                     scale_one = 127 if self.scale_dtype == torch.uint8 else 1.0
@@ -155,6 +201,8 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                     self._shared_pool_client = None
             raise
 
+        register_host_offload_storage(self)
+
     def _get_shard_info(self) -> tuple[int, int]:
         if self.dp_size == 1:
             return self.tp_size, get_tensor_model_parallel_rank()
@@ -165,6 +213,11 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         scales_shape = (self.part_num_embeddings, self.dim // self.block_size)
         device = torch.device("npu", torch.npu.current_device())
         quantized = self.storage_dtype != torch.bfloat16
+        if getattr(self, "_remote_reader", None) is not None:
+            return (
+                torch.empty(codes_shape, dtype=self.storage_dtype, device="meta"),
+                torch.empty(scales_shape, dtype=self.scale_dtype, device="meta"),
+            )
         pool_endpoint, identity, key = self._shared_pool_spec
         if pool_endpoint:
             from .common import warmup_shared_engram_aicpu
@@ -207,17 +260,23 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         if self._shared_group is not None:
             # One physical copy of the mapped range, registered by each
             # rank in the sharing group.
-            self._codes_uva = SharedUvaBuffer(codes_shape, self.storage_dtype, device, self._shared_group)
+            self._codes_uva = SharedUvaBuffer(
+                codes_shape, self.storage_dtype, device, self._shared_group, "_codes_uva", self
+            )
             if quantized:
-                self._scales_uva = SharedUvaBuffer(scales_shape, self.scale_dtype, device, self._shared_group)
+                self._scales_uva = SharedUvaBuffer(
+                    scales_shape, self.scale_dtype, device, self._shared_group, "_scales_uva", self
+                )
             return self._codes_uva.tensor, self._scales_uva.tensor if self._scales_uva is not None else None
-        self._codes_uva = HostUvaBuffer(codes_shape, self.storage_dtype, device)
+        self._codes_uva = HostUvaBuffer(codes_shape, self.storage_dtype, device, "_codes_uva", self)
         if quantized:
-            self._scales_uva = HostUvaBuffer(scales_shape, self.scale_dtype, device)
+            self._scales_uva = HostUvaBuffer(scales_shape, self.scale_dtype, device, "_scales_uva", self)
+            assert self._scales_uva.tensor is not None
             self._scales_uva.tensor.zero_()
         # Same reason as the device path: aclrtMallocHost hands back whatever
         # was in the pages, and the profiling forward looks up before the
         # checkpoint load fills them.
+        assert self._codes_uva.tensor is not None
         self._codes_uva.tensor.zero_()
         return self._codes_uva.tensor, self._scales_uva.tensor if self._scales_uva is not None else None
 
@@ -231,6 +290,10 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         stays retryable and a half-finished release never leaves a live
         parameter pointing at memory the other buffer has already freed.
         """
+        reader = getattr(self, "_remote_reader", None)
+        if reader is not None:
+            reader.close()
+            return
         client = getattr(self, "_shared_pool_client", None)
         if client is not None:
             client.close()
@@ -252,6 +315,11 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             buffer.close()
             setattr(self, name, None)
             param = getattr(self, alias)
+            # The released range is gone; drop the host storage the alias was
+            # rebuilt on so a later reload cannot materialize a parameter into
+            # unmapped host memory.
+            if isinstance(param, nn.Parameter):
+                param.__dict__.pop(HOST_OFFLOAD_STORAGE_ATTR, None)
             setattr(
                 self,
                 alias,
@@ -272,6 +340,8 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         self._checkpoint_key = key
 
     def _weight_loader(self, param, loaded_weight) -> None:
+        if getattr(self, "_remote_reader", None) is not None:
+            return
         if param is self.weight:
             self.load_checkpoint(self._checkpoint_path, self._checkpoint_key)
 
@@ -281,6 +351,8 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         Shared head slices have one writer per DP x PCP group. The final CPU
         collective synchronizes writes and propagates loading failures.
         """
+        if getattr(self, "_remote_reader", None) is not None:
+            return
         if getattr(self, "_shared_pool_client", None) is not None:
             pool_key = self._shared_pool_spec[2]
             assert pool_key is not None
@@ -400,23 +472,28 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                     self.weight_scale_inv.data[offset:target_end].copy_(scales)
         logger.info("Engram rows [%d, %d) loaded from %s", start, end, index[key])
 
-    def embed_gathered(self, gathered: torch.Tensor, num_tokens: int) -> torch.Tensor:
+    def embed_gathered(
+        self, gathered: torch.Tensor, num_tokens: int, *, cpu_ids=None, local_values=None
+    ) -> torch.Tensor:
         """Embed ids already gathered across the EDP group.
 
         ``gathered`` is ``[slot * EDP, n_hash_cols]`` rank-major; each replica
         keeps its own ``num_tokens`` window. Returns ``[num_tokens, n_hash_cols,
         dim]`` bf16 with the heads back in checkpoint order.
         """
-        # The kernel walks ids as [token, columns] with a unit inner stride, so
-        # the per-layer slice of the [tokens, layers, columns] hash buffer needs
-        # no copy. It writes every row (invalid ids store zeroes), so
-        # uninitialized output storage is safe.
-        out = torch.empty(
-            (gathered.shape[0], self.part_n_hash_cols, self.dim),
-            dtype=torch.bfloat16,
-            device=gathered.device,
-        )
-        self.lookup(gathered, out)
+        # The kernel supports the per-layer slice without a contiguous copy.
+        if local_values is not None:
+            out = local_values
+        else:
+            out = torch.empty(
+                (gathered.shape[0], self.part_n_hash_cols, self.dim),
+                dtype=torch.bfloat16,
+                device=gathered.device,
+            )
+            if cpu_ids is None:
+                self.lookup(gathered, out)
+            else:
+                self.lookup(gathered, out, cpu_ids=cpu_ids)
         if self.dp_size > 1:
             out = exchange_engram_rows(out, num_tokens)
         else:
@@ -446,13 +523,17 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         gathered = gather_engram_hashes(indices, dp_shared_memory=self._shared_group is not None)
         return self.embed_gathered(gathered, num_tokens)
 
-    def lookup(self, indices: torch.Tensor, out: torch.Tensor, background: bool = False) -> None:
+    def lookup(self, indices: torch.Tensor, out: torch.Tensor, background: bool = False, *, cpu_ids=None) -> None:
         """Look up this shard's heads into ``[tokens, padded_heads, dim]`` bf16.
 
         All local head columns are written, including zeroes for invalid IDs.
         """
         tokens = indices.shape[0]
         if tokens == 0 or self.part_n_hash_cols == 0:
+            return
+        reader = getattr(self, "_remote_reader", None)
+        if reader is not None:
+            reader.lookup(self, indices, out, cpu_ids=cpu_ids)
             return
         launch = dict(
             head_start=self.head_start,

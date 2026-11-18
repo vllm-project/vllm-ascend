@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
 from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, Mock, patch
@@ -8,11 +9,14 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 import torch
 import torch_npu
-from vllm.v1.attention.backend import AttentionCGSupport
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.config import ParallelConfig
+from vllm.v1.attention.backend import AttentionCGSupport, MultipleOf
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, SparseCacheRole
 
+from vllm_ascend.attention import indexer as indexer_module
 from vllm_ascend.attention.indexer import (
     AscendSFAIndexerBackend,
+    AscendSFAIndexerCache,
     AscendSFAIndexerMetadata,
     AscendSFAIndexerMetadataBuilder,
 )
@@ -42,7 +46,7 @@ def _make_builder(
         # DCP fixtures below provide two 128-token columns per rank.
         max_model_len=512,
     )
-    vllm_config.parallel_config = SimpleNamespace(
+    vllm_config.parallel_config = ParallelConfig(
         prefill_context_parallel_size=pcp_size,
         decode_context_parallel_size=dcp_size,
         tensor_parallel_size=max(4, dcp_size),
@@ -82,7 +86,6 @@ def _make_common_metadata() -> SimpleNamespace:
         seq_lens=torch.tensor([5, 6, 7]),
         max_query_len=2,
         is_prefilling=torch.tensor([True, True]),
-        context_parallel_metadata=None,
         block_table_tensor=torch.arange(6).view(3, 2),
     )
 
@@ -600,3 +603,85 @@ def test_replicated_pcp_draft_invalidates_captured_padding_when_live_prefix_shri
     assert captured.data_ptr() == runtime.data_ptr()
     assert runtime.shape == (1, 2)
     torch.testing.assert_close(captured, torch.tensor([[3, 127], [-1, 127], [-1, 127], [-1, 127]]))
+
+
+@pytest.mark.parametrize("c4", [False, True])
+@pytest.mark.parametrize("c8", [False, True])
+@pytest.mark.parametrize("replicas", [1, 4])
+def test_indexer_owner_reports_data_scale_and_replication(monkeypatch, c4, c8, replicas):
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=replicas),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    monkeypatch.setattr(indexer_module, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(indexer_module, "enable_sfa_dcp_replicated_indexer", lambda _: replicas > 1)
+    monkeypatch.setattr(indexer_module, "enable_sfa_dcp_sharded_indexer", lambda _: False)
+    backend = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
+    torch.nn.Module.__init__(backend)
+    backend.head_dim = 128
+    backend.enable_sparse_li_c4, backend.enable_sparse_li_c8 = c4, c8
+    backend.c4_k_cache_dtype, backend.c4_k_scale_cache_dtype = torch.uint8, torch.float8_e8m0fnu
+    backend.c8_k_cache_dtype, backend.c8_k_scale_cache_dtype = torch.int8, torch.float16
+    source = MLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=132,
+        dtype=torch.uint8,
+        cache_role=SparseCacheRole.INDEXER,
+        is_draft=True,
+    )
+    spec = backend._build_cache_spec(source, config)
+    assert backend.customize_spec(spec) is spec
+    assert isinstance(spec, AscendSFAIndexerCacheSpec)
+    assert spec.cache_role is source.cache_role and spec.is_draft
+    assert spec.sfa_dcp_replicated_indexer_size == replicas
+    assert spec.scale_dim == (4 if c4 else 1 if c8 else 0)
+    assert spec.head_size == (64 if c4 else 128)
+    assert spec.page_size_bytes == replicas * 128 * (68 if c4 else 130 if c8 else 256)
+
+    prefix = "model.layers.0.self_attn.indexer.k_cache"
+    old_owner = SimpleNamespace(head_dim=132, prefix=prefix, kv_cache=torch.empty(0), cache_config=config.cache_config)
+    config.compilation_config.static_forward_context[prefix] = old_owner
+    owner = AscendSFAIndexerCache(old_owner, spec, backend_cls=AscendSFAIndexerBackend)
+    assert config.compilation_config.static_forward_context[prefix] is owner
+    assert owner.get_kv_cache_spec(config) == spec
+    owner.cache_enabled = False
+    assert owner.get_kv_cache_spec(config) is None
+    owner.cache_enabled = True
+    assert owner.get_kv_cache_spec(config) == spec
+    assert owner.get_attn_backend() is AscendSFAIndexerBackend
+
+
+@pytest.mark.parametrize("mtp", [False, True])
+def test_indexer_owner_tracks_runtime_cache_requirement(monkeypatch, mtp):
+    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+    from vllm_ascend.worker.v2 import attn_utils
+
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
+        cache_config=SimpleNamespace(block_size=128),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    monkeypatch.setattr(indexer_module, "get_current_vllm_config", lambda: config)
+    spec = AscendSFAIndexerCacheSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    # Deliberately use a name that cannot be mapped to an attention layer.
+    source = SimpleNamespace(
+        prefix="cache_owner", head_dim=128, kv_cache=torch.empty(0), cache_config=config.cache_config
+    )
+    owner = AscendSFAIndexerCache(source, spec, backend_cls=AscendSFAIndexerBackend)
+    impl = AscendSFAImpl.__new__(AscendSFAImpl)
+    impl.indexer = SimpleNamespace(k_cache=owner)
+    impl.has_indexer = True
+    impl._is_mtp_layer = mtp
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: {"cache_owner": owner})
+    for skip_topk in (False, True, False):
+        impl.skip_topk = skip_topk
+        enabled = not skip_topk or mtp
+        assert owner.cache_enabled is enabled
+        specs = attn_utils.get_kv_cache_spec(config)
+        assert ("cache_owner" in specs) is enabled
+        if enabled:
+            assert specs["cache_owner"] == replace(spec, block_stride_alignment=MultipleOf(_KERNEL_BLOCK_SIZE))
+            assert owner.cache_spec == spec

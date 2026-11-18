@@ -518,7 +518,6 @@ def test_build_classifies_short_speculative_extends_as_decodes(
         num_actual_tokens=14,
         num_input_tokens=14,
         max_query_len=7,
-        context_parallel_metadata=None,
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc,
         positions=torch.arange(14, dtype=torch.int64),
@@ -596,7 +595,6 @@ def test_build_matches_rope_positions_to_graph_mode(full_graph_mode: bool, expec
         num_actual_tokens=14,
         num_input_tokens=16,
         max_query_len=7,
-        context_parallel_metadata=None,
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc,
         positions=torch.arange(16, dtype=torch.int64),
@@ -971,7 +969,11 @@ def _make_impl(
             compress_ratio=1,
             vllm_config=SimpleNamespace(
                 cache_config=SimpleNamespace(cache_dtype="auto"),
-                parallel_config=SimpleNamespace(prefill_context_parallel_size=2, decode_context_parallel_size=1),
+                parallel_config=SimpleNamespace(
+                    prefill_context_parallel_size=2,
+                    decode_context_parallel_size=1,
+                    pcp_shard_decode_requests=True,
+                ),
             ),
             wq_a=linear,
             wq_b=linear,

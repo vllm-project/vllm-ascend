@@ -11,6 +11,7 @@ import pytest
 import torch
 from vllm import envs
 from vllm.config import CompilationMode, CUDAGraphMode
+from vllm.config.attention import AttentionConfig
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.offloader.base import NoopOffloader
@@ -29,16 +30,17 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.utils import C8KVBlockZeroer
 
 
-def _make_runner(need_timing: bool = True):
+def _make_runner(*args, **kwargs):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.ascend_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing)),
+        scheduler_config=SimpleNamespace(),
         sparse_kv_offload_config=SimpleNamespace(enabled=False),
         kvpp_config=SimpleNamespace(size=1),
     )
@@ -384,70 +386,6 @@ def test_pd_recompute_preserves_decode_graph_eligible_prefill(prefill_runs_as_de
     assert gathered.has_prefill is True
     assert gathered.decode_graph_eligible is prefill_runs_as_decode
     assert uniform == expected_uniform
-
-
-def test_execute_model_records_profiling_time():
-    runner = _make_runner()
-    scheduler_output = SimpleNamespace(disable_profiling_timing=False, total_num_scheduled_tokens=0)
-
-    with (
-        patch.object(
-            GPUModelRunner,
-            "execute_model",
-            return_value=None,
-        ) as mock_execute_model,
-        patch(
-            "vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group",
-            return_value=False,
-        ),
-        patch("vllm_ascend.core.profiling_chunk_predictor.torch.npu.synchronize") as mock_synchronize,
-        patch(
-            "vllm_ascend.core.profiling_chunk_predictor.time.perf_counter",
-            side_effect=[10.0, 10.125],
-        ),
-    ):
-        output = runner.execute_model(scheduler_output)
-
-    assert output is None
-    assert runner._cpp_execution_time_ms == pytest.approx(125.0)
-    assert mock_synchronize.call_count == 2
-    expected_kwargs: dict[str, object] = {
-        "intermediate_tensors": None,
-        "dummy_run": False,
-        "skip_attn_for_dummy_run": False,
-        "is_profile": False,
-        "context_len": 0,
-        "valid_dummy_state_slots": False,
-        "randomize_inputs": False,
-    }
-    mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
-
-
-def test_execute_model_disables_profiling_timer_and_clears_stale_time():
-    runner = _make_runner()
-    runner._cpp_execution_time_ms = 123.0
-    scheduler_output = SimpleNamespace(disable_profiling_timing=True, total_num_scheduled_tokens=0)
-
-    with (
-        patch.object(
-            GPUModelRunner,
-            "execute_model",
-            return_value=None,
-        ),
-        patch(
-            "vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group",
-            return_value=False,
-        ),
-        patch("vllm_ascend.core.profiling_chunk_predictor.torch.npu.synchronize") as mock_synchronize,
-        patch("vllm_ascend.core.profiling_chunk_predictor.time.perf_counter") as mock_perf_counter,
-    ):
-        runner.execute_model(scheduler_output)
-
-    profiling_config = runner.ascend_config.scheduler_config.profiling_chunk_config
-    assert not profiling_config.need_timing
-    assert runner._cpp_execution_time_ms is None
-    mock_synchronize.assert_not_called()
-    mock_perf_counter.assert_not_called()
 
 
 def test_execute_model_skips_dp_coordination_when_safe():
@@ -1376,6 +1314,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     runner.input_buffers = object()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
     runner.vllm_config = SimpleNamespace(
+        attention_config=AttentionConfig(),
         compilation_config=runner.compilation_config,
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         kv_transfer_config=None,
@@ -1384,7 +1323,8 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     runner.pcp_manager = MagicMock(spec=AscendPCPManager)
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = SimpleNamespace()
-    runner.model_config = SimpleNamespace(architecture=architecture)
+    runner.model_config = SimpleNamespace(architecture=architecture, hf_config=SimpleNamespace())
+    runner.vllm_config.model_config = runner.model_config
     kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     original = vllm_model_runner.ModelCudaGraphManager
     seen = {}
@@ -1419,7 +1359,10 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
         ) as create_kvpp,
     ):
         runner.initialize_kv_cache(kv_cache_config)
-        seen["factory"](runner.vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, 1)
+        query_kwargs: dict[str, Any] = (
+            {"decode_query_len": 1} if vllm_version_is("0.33.0") else {"decode_query_lens": {1: 8}}
+        )
+        seen["factory"](runner.vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, **query_kwargs)
 
     prepare_kda.assert_called_once_with(runner.compilation_config.static_forward_context, 8)
     assert runner.model_state.device_metadata == (
@@ -1443,6 +1386,7 @@ def test_initialize_kv_cache_forwards_allocation_context():
     runner = _make_runner()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
     runner.vllm_config = SimpleNamespace(
+        attention_config=AttentionConfig(),
         compilation_config=runner.compilation_config,
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         kv_transfer_config=None,
@@ -1451,7 +1395,8 @@ def test_initialize_kv_cache_forwards_allocation_context():
     runner.pcp_manager = None
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = None
-    runner.model_config = SimpleNamespace(architecture="OtherModel")
+    runner.model_config = SimpleNamespace(architecture="OtherModel", hf_config=SimpleNamespace())
+    runner.vllm_config.model_config = runner.model_config
     called = False
     captured_kwargs: dict[str, object] = {}
     allocation_context = object()
@@ -2631,3 +2576,54 @@ def test_sample_tokens_refreshes_lmhead_padding_each_step(monkeypatch, lmhead_tp
             assert runner._lmhead_pad_size is None
 
     assert observed == ([4, 8, None] if lmhead_tp else [None, None, None])
+
+
+def test_shutdown_releases_uva_owner_without_shared_pool_client():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    embedding = torch.nn.Module()
+    calls = []
+    embedding.close_host_offload = lambda: calls.append("release")
+    runner.model = embedding
+    with patch.object(GPUModelRunner, "shutdown", side_effect=lambda: calls.append("parent")):
+        runner.shutdown()
+    assert calls == ["parent", "release"]
+
+
+@pytest.mark.parametrize("published_model,cleanup_fails", [(False, False), (False, True), (True, True)])
+def test_load_failure_closes_unpublished_host_owners(published_model, cleanup_fails):
+    from vllm_ascend.model_executor.warmup import nz_warmup
+    from vllm_ascend.models.host_offload import register_host_offload_owner
+
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.vllm_config = MagicMock()
+    first, second = MagicMock(), MagicMock()
+    if cleanup_fails:
+        first.close_host_offload.side_effect = [RuntimeError("unregister failed"), None]
+    load_error = ValueError("later layer or checkpoint failed")
+
+    def fail_load(*args, **kwargs):
+        register_host_offload_owner(first)
+        register_host_offload_owner(second)
+        if published_model:
+            runner.model = MagicMock()
+            runner.model.modules.return_value = [first, second]
+        raise load_error
+
+    with (
+        patch.object(nz_warmup, "start_nz_warm_thread"),
+        patch.object(nz_warmup, "join_nz_warm_thread") as join,
+        patch("vllm_ascend.worker.v2.model_runner.get_pd_dspark_aux_layer_ids"),
+        patch.object(GPUModelRunner, "load_model", side_effect=fail_load),
+        pytest.raises(ValueError) as caught,
+    ):
+        runner.load_model()
+    assert caught.value is load_error
+    join.assert_called_once()
+    first.close_host_offload.assert_called_once()
+    second.close_host_offload.assert_called_once()
+    assert runner._shared_engram_shutdown_pending == ([first] if cleanup_fails else [])
+    if cleanup_fails:
+        with patch.object(GPUModelRunner, "shutdown"):
+            runner.shutdown()
+        assert first.close_host_offload.call_count == 2
+        assert runner._shared_engram_shutdown_pending == []

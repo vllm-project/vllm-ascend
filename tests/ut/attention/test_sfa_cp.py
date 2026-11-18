@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 import torch
 import vllm.distributed as vllm_distributed
+from vllm.config import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs
 
@@ -504,7 +505,10 @@ def test_sfa_dcp_extends_v1_backend() -> None:
 
 @pytest.mark.parametrize("pcp_size,dcp_enabled", [(1, False), (2, False), (1, True), (2, True)])
 def test_sfa_backend_selects_dcp_subclass_and_layout_specific_builder(pcp_size, dcp_enabled):
-    config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size))
+    config = SimpleNamespace(
+        attention_config=AttentionConfig(),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size),
+    )
     with (
         patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config", return_value=config),
         patch("vllm_ascend.attention.sfa_v1.get_ascend_config") as ascend_config,
@@ -1642,7 +1646,6 @@ def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, 
     slots = torch.arange(sum(query_lens), dtype=torch.int64)
     blocks = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
     common = SimpleNamespace(
-        context_parallel_metadata=None,
         max_query_len=max(query_lens),
         num_reqs=2,
         num_actual_tokens=sum(query_lens),
@@ -1894,7 +1897,6 @@ def _make_sfa_split_common(query_lens, flags, actual, threshold, capture=False, 
     slots = torch.arange(num_tokens)
     slots[actual:] = -1
     return SimpleNamespace(
-        context_parallel_metadata=None,
         pcp_context=None,
         pcp_cache_group_idx=None,
         num_reqs=num_reqs,
@@ -2221,6 +2223,7 @@ def _make_initialized_sfa_impl(pcp_size, dcp_size, physical_pcp_size=None):
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=pcp_size,
             decode_context_parallel_size=dcp_size,
+            pcp_shard_decode_requests=pcp_size > 1 and dcp_size == 1,
             cp_kv_cache_interleave_size=128,
         ),
         model_config=SimpleNamespace(
@@ -2229,6 +2232,7 @@ def _make_initialized_sfa_impl(pcp_size, dcp_size, physical_pcp_size=None):
             hf_text_config=SimpleNamespace(index_topk=4),
         ),
         kv_transfer_config=None,
+        cache_config=SimpleNamespace(cache_dtype="auto"),
         num_speculative_tokens=0,
         scheduler_config=SimpleNamespace(max_num_seqs=4),
         compilation_config=SimpleNamespace(
@@ -2250,7 +2254,10 @@ def _make_initialized_sfa_impl(pcp_size, dcp_size, physical_pcp_size=None):
         patch(
             "vllm_ascend.attention.sfa_v1.get_ascend_config",
             return_value=SimpleNamespace(
-                enable_sparse_sfa_c8=False, enable_sparse_sfa_turboquant=False, enable_mlapo=False
+                enable_sparse_sfa_c8=False,
+                enable_sparse_sfa_turboquant=False,
+                enable_mlapo=False,
+                sparse_kv_offload_config=SimpleNamespace(enabled=False),
             ),
         ),
         patch("vllm_ascend.attention.sfa_v1.is_rl_weight_update_enabled", return_value=False),
