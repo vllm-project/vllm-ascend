@@ -198,6 +198,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "add_rms_norm_bias"
         "moe_gating_top_k_hash"
         "inplace_partial_rotary_mul"
+        "indexer_region_score"
         "kv_compress_epilog_v2"
         "compressor"
         "compressor_metadata"

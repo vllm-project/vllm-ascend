@@ -408,13 +408,15 @@ def test_speculator_init_validates(draft_method, bypass, argmax, adaptive, match
 
 
 def test_production_speculators_carry_lmhead_sampling_mixin():
-    """Every family must keep the mixin (a re-parent silently drops the row
-    alignment and hangs the collectives); bypassing families must keep their
-    opt-out flag (upstream keeps adding them: DSpark, DFlash2)."""
+    """Keep row-alignment support on each family and LiLiCorr opted out.
+
+    DFlash2 aligns candidates itself; LiLiCorr still bypasses that path.
+    """
     from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
     from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import AscendDFlash2Speculator
     from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
     from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
+    from vllm_ascend.worker.v2.spec_decode.lilicorr.speculator import AscendLiLiCorrSpeculator
     from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
 
     for cls in (
@@ -423,7 +425,9 @@ def test_production_speculators_carry_lmhead_sampling_mixin():
         AscendDFlashSpeculator,
         AscendDSparkSpeculator,
         AscendDFlash2Speculator,
+        AscendLiLiCorrSpeculator,
     ):
         assert issubclass(cls, LmheadTPDraftSamplingMixin)
     assert AscendDSparkSpeculator._lmhead_tp_sample_draft_supported is True
-    assert AscendDFlash2Speculator._lmhead_tp_sample_draft_supported is False
+    assert AscendDFlash2Speculator._lmhead_tp_sample_draft_supported is True
+    assert AscendLiLiCorrSpeculator._lmhead_tp_sample_draft_supported is False
