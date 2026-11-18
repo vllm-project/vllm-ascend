@@ -20,7 +20,6 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ops.triton.linearnorm.qsa_rmsnorm_mrope import validate_qsa_rope_positions
 from vllm_ascend.ops.triton.triton_utils import extract_slice, get_vectorcore_num, insert_slice
 
 
@@ -353,7 +352,7 @@ def triton_split_qkv_rmsnorm_mrope(
     if rope_dim is None:
         rope_dim = head_size
     if positions is not None:
-        validate_qsa_rope_positions(positions, cos_sin, qkv, rope_dim)
+        _validate_rope_positions(positions, cos_sin, qkv, rope_dim)
         if not qkv.is_contiguous() or qkv.shape[1] != q_size + gate_size + 2 * kv_size:
             raise ValueError("QSA QKV projection must be packed and contiguous")
         if any(
