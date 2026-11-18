@@ -139,7 +139,7 @@ _SELECTIVE_NATIVE_TP_QUARANTINE = []
 
 
 class SelectiveNativeTPCoordinator:
-    """Pinned shared plan and two alternating K/V stages for the TP experiment."""
+    """Pinned shared plan and one independent K/V stage per shared layer."""
 
     def __init__(
         self,
@@ -155,18 +155,22 @@ class SelectiveNativeTPCoordinator:
         layer_ids,
         shared_exchange=False,
         capacity=None,
+        transfer_width=None,
+        statistics=False,
     ):
-        plan_width = 3 * width + (width if capacity is None else capacity) // block + 2
-        banks = min(layers, 2)
+        transfer_width = width if transfer_width is None else transfer_width
+        plan_width = width + 2 * transfer_width + (width if capacity is None else capacity) // block + 2
+        plan_width += 2 if statistics else 0
+        banks = layers
         sizes = [
-            (32 + 2 * world) * 8,
+            (28 + 2 * world + layers) * 8,
             rows * plan_width * 4,
             rows * 12 * 8,
             rows * width * 4,
             layers * rows * width * 4,
             (layers + 1) * 8,
-            banks * rows * width * k_bytes,
-            banks * rows * width * v_bytes,
+            banks * rows * transfer_width * k_bytes,
+            banks * rows * transfer_width * v_bytes,
         ]
         if shared_exchange:
             sizes.append((1 + 3 * world) * 8 + world * ((1 << 20) + 8))
@@ -212,11 +216,11 @@ class SelectiveNativeTPCoordinator:
             def view(index, dtype, shape):
                 return self.owner[offsets[index] : offsets[index] + sizes[index]].view(dtype).view(shape)
 
-            self.stage_k = view(6, torch.uint8, (banks, rows, width, k_bytes))
-            self.stage_v = view(7, torch.uint8, (banks, rows, width, v_bytes))
+            self.stage_k = view(6, torch.uint8, (banks, rows, transfer_width, k_bytes))
+            self.stage_v = view(7, torch.uint8, (banks, rows, transfer_width, v_bytes))
             self.exchange = view(8, torch.uint8, (sizes[8],)) if shared_exchange else None
             self.buffers = [
-                view(0, torch.int64, (32 + 2 * world,)),
+                view(0, torch.int64, (28 + 2 * world + layers,)),
                 view(1, torch.int32, (rows, plan_width)),
                 view(2, torch.int64, (rows, 12)),
                 view(3, torch.int32, (rows, width)),
@@ -1712,6 +1716,7 @@ class SparseKVOffloadManager:
         self._selective_native_inflight = False
         self._selective_native_stopping = False
         self._selective_native_tp_groups = {}
+        self._selective_native_counts = {}
         if self.tp_size > 1:
             try:
                 signature_error = None
@@ -1726,7 +1731,12 @@ class SparseKVOffloadManager:
                 except Exception as error:
                     signature_error = str(error)
                 use_shared_exchange = getattr(self, "_selective_native_shared_exchange_requested", False)
-                signature = (signature, use_shared_exchange)
+                signature = (
+                    signature,
+                    use_shared_exchange,
+                    getattr(self, "_selective_score_table", None) is not None,
+                    getattr(self, "_selective_count_misses", False),
+                )
                 gathered = [None] * self.tp_size
                 torch.distributed.all_gather_object(
                     gathered, (signature_error, signature), group=self.tp_group.cpu_group
@@ -1751,6 +1761,10 @@ class SparseKVOffloadManager:
                         stable_ids,
                         shared_exchange=use_shared_exchange and not self._selective_native_tp_groups,
                         capacity=self.topk_buffer_size,
+                        transfer_width=self.topk
+                        + (160 if getattr(self, "_selective_score_table", None) is not None else 0),
+                        statistics=getattr(self, "_selective_count_misses", False)
+                        or getattr(self, "_selective_score_table", None) is not None,
                     )
                     self._selective_native_tp_groups[layer_ids] = coordinator
                     logger.info(
@@ -1809,6 +1823,9 @@ class SparseKVOffloadManager:
         def pair(shape, dtype):
             return torch.empty(shape, dtype=dtype, device=device), torch.empty(shape, dtype=dtype, pin_memory=True)
 
+        score_table = getattr(self, "_selective_score_table", None)
+        transfer_width = width + (160 if score_table is not None else 0)
+        want_statistics = score_table is not None or getattr(self, "_selective_count_misses", False)
         topk_d = topk.contiguous()
         topk_h = torch.empty(topk_d.shape, dtype=topk_d.dtype, pin_memory=True)
         meta_d, meta_h = pair((rows, 12), torch.int64)
@@ -1829,6 +1846,13 @@ class SparseKVOffloadManager:
         physical_d, physical_h = pair((rows, width), torch.int32)
         block_d, block_h = pair((rows, self.topk_buffer_size // self.block_size + 1), torch.int32)
         shared = [topk_d, topk_h, meta_d, meta_h, physical_d, physical_h, block_d, block_h, *state, *inputs]
+        if score_table is not None or want_statistics:
+            shared.append(score_table if score_table is not None else torch.empty(0, dtype=torch.float32))
+        if want_statistics:
+            counts = self._selective_native_counts.setdefault(
+                layer_ids, torch.zeros((self.max_num_topk_rows, 2), dtype=torch.int32)
+            )
+            shared.append(counts)
         layer_buffers = []
         scatter = []
         coordinator = self._selective_native_tp_groups.get(layer_ids) if self.tp_size > 1 else None
@@ -1846,15 +1870,19 @@ class SparseKVOffloadManager:
                 host_v = torch.empty(0, dtype=torch.bfloat16)
             hot_k, hot_v = self.topk_buffers_k[layer_id], self.topk_buffers_v[layer_id]
             if coordinator is None:
-                stage_k_d, stage_k_h = pair((rows, width, self.token_size_bytes_k), torch.uint8)
-                stage_v_d, stage_v_h = pair((rows, width, self.token_size_bytes_v), torch.uint8)
+                stage_k_d, stage_k_h = pair((rows, transfer_width, self.token_size_bytes_k), torch.uint8)
+                stage_v_d, stage_v_h = pair((rows, transfer_width, self.token_size_bytes_v), torch.uint8)
             else:
-                stage_k_d = torch.empty((rows, width, self.token_size_bytes_k), dtype=torch.uint8, device=device)
-                stage_v_d = torch.empty((rows, width, self.token_size_bytes_v), dtype=torch.uint8, device=device)
-                bank = len(scatter) % 2
+                stage_k_d = torch.empty(
+                    (rows, transfer_width, self.token_size_bytes_k), dtype=torch.uint8, device=device
+                )
+                stage_v_d = torch.empty(
+                    (rows, transfer_width, self.token_size_bytes_v), dtype=torch.uint8, device=device
+                )
+                bank = len(scatter)
                 stage_k_h, stage_v_h = coordinator.stage_k[bank, :rows], coordinator.stage_v[bank, :rows]
-            dest_d, dest_h = pair((2, rows, width), torch.int64)
-            length_d, length_h = pair((2, rows, width), torch.int32)
+            dest_d, dest_h = pair((2, rows, transfer_width), torch.int64)
+            length_d, length_h = pair((2, rows, transfer_width), torch.int32)
             layer_buffers.extend(
                 [
                     pages_d,

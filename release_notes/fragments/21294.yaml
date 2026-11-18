@@ -4,5 +4,5 @@ entries:
     text: Added shared-layer KV offload for full/shared sparse attention models with native CPU-worker Decode graph replay, independent TopK and hot-cache capacity, and shared pinned Host staging for dynamic SDMA transfers.
     hardware: [A3, A5]
   - category: performance
-    text: Reduced selective KV Decode overhead with persistent free slots and timestamp LRU, lazy selected-page validation, stable request metadata, and CPU-precomputed tail slots.
+    text: Reduced selective KV Decode overhead with persistent free slots and timestamp LRU, lazy selected-page validation, reuse of validated hot slots and per-request token markers, stable request metadata, CPU-precomputed tail slots, and independent Host staging per shared layer to avoid intra-step TP buffer-reuse waits.
     hardware: [A3]

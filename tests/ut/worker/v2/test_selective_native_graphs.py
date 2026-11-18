@@ -96,7 +96,8 @@ def test_activation_precedes_requests_and_sets_model_state():
 
 
 @pytest.mark.parametrize("capacity", [4, 12])
-def test_tp_coordinator_shares_plan_and_stage_within_one_group(capacity):
+@pytest.mark.parametrize("layers", [1, 3, 4])
+def test_tp_coordinator_shares_plan_and_independent_layer_stages(capacity, layers):
     barrier = threading.Barrier(2)
     published = threading.Event()
     names = []
@@ -122,7 +123,7 @@ def test_tp_coordinator_shares_plan_and_stage_within_one_group(capacity):
         thread_state.rank = rank
         try:
             coordinators[rank] = SelectiveNativeTPCoordinator(
-                Group(), rank, 2, 2, 4, 2, 4, 128, 128, [0, 1, 2], capacity=capacity
+                Group(), rank, 2, 2, 4, layers, 4, 128, 128, list(range(layers + 1)), capacity=capacity
             )
         except BaseException as error:
             errors.append(error)
@@ -147,13 +148,20 @@ def test_tp_coordinator_shares_plan_and_stage_within_one_group(capacity):
         assert all(not thread.is_alive() for thread in threads)
         assert all(item is not None for item in coordinators)
         coordinators[0].buffers[0][0] = 17
-        assert coordinators[0].stage_k.shape == (2, 2, 4, 128)
+        assert coordinators[0].stage_k.shape == (layers, 2, 4, 128)
+        assert coordinators[0].buffers[0].numel() == 28 + 2 * 2 + layers
         assert coordinators[0].buffers[1].shape == (2, 3 * 4 + capacity // 4 + 2)
-        coordinators[0].stage_k[0, 0, 0, 0] = 31
-        coordinators[0].stage_k[1, 0, 0, 0] = 47
+        for layer in range(layers):
+            coordinators[0].stage_k[layer].fill_(31 + layer)
+            coordinators[0].stage_v[layer].fill_(47 + layer)
         assert int(coordinators[1].buffers[0][0]) == 17
-        assert int(coordinators[1].stage_k[0, 0, 0, 0]) == 31
-        assert int(coordinators[1].stage_k[1, 0, 0, 0]) == 47
+        for layer in range(layers):
+            assert torch.all(coordinators[1].stage_k[layer] == 31 + layer)
+            assert torch.all(coordinators[1].stage_v[layer] == 47 + layer)
+        # Reusing another layer must not overwrite a slow reader's first layer.
+        coordinators[0].stage_k[-1].fill_(99)
+        if layers > 1:
+            assert torch.all(coordinators[1].stage_k[0] == 31)
         for item in coordinators:
             item.close()
 
