@@ -426,6 +426,35 @@ def test_hisparse_requires_async_store_load(extra_config):
         AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
 
 
+@pytest.mark.parametrize(("save_decode", "eager"), [(True, False), (False, False), (True, True)])
+def test_decode_put_requires_current_host_rows(save_decode, eager):
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(),
+        attention_config=SimpleNamespace(hisparse_config=SimpleNamespace(eager_host_mirror=eager)),
+        kv_transfer_config=SimpleNamespace(
+            kv_role="kv_both",
+            kv_connector="AscendStoreConnector",
+            kv_connector_extra_config={"backend": "memcache", "load_async": True, "save_decode_cache": save_decode},
+        ),
+    )
+    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role="hisparse_source", layer_names=[])])
+    with (
+        patch.object(MemcacheBackend, "validate_mixed_bulk_config"),
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.create_kv_pool_scheduler"
+        ) as scheduler,
+    ):
+        if save_decode and not eager:
+            with pytest.raises(ValueError, match="save_decode_cache=true requires eager_host_mirror=true"):
+                AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
+            scheduler.assert_not_called()
+        else:
+            assert (
+                AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache).connector_scheduler
+                is scheduler.return_value
+            )
+
+
 def test_hisparse_reports_all_incompatible_bulk_store_options(monkeypatch, tmp_path):
     path = tmp_path / "mmc-local.conf"
     path.write_text("ock.mmc.local_service.protocol=device_sdma\n", encoding="utf-8")

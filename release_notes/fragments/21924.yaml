@@ -5,7 +5,8 @@ entries:
       Added experimental bulk AscendStore prefix reuse with colocated HiSparse
       on A5 using MemCache host_tcp or Mooncake Ascend Direct with a Store-owned
       transfer engine and a DDR pool. Both require asynchronous loading
-      (load_async=true). Mooncake uses independent 64 MiB send and receive DDR staging buffers
+      (load_async=true). Saving Decode blocks (save_decode_cache=true) also
+      requires eager_host_mirror=true. Mooncake uses independent 64 MiB send and receive DDR staging buffers
       per worker for Host Source pages; Indexer pages transfer directly.
       The combination supports single-node colocated Prefill and Decode with
       kv_role=kv_both on MultiConnector and its children. Startup rejects PD

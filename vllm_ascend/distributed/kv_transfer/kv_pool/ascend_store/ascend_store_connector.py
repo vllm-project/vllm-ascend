@@ -148,6 +148,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.use_layerwise = extra_config.get("use_layerwise", False)
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
+        self.save_decode_cache = extra_config.get("save_decode_cache", False)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
         if has_hisparse_layout(kv_cache_config):
             incompatibilities = []
@@ -156,6 +157,12 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             if not extra_config.get("load_async", False):
                 # HiSparse publishes imported Host Source pages on receive completion.
                 incompatibilities.append("requires load_async=true")
+            if self.save_decode_cache:
+                # Without eager mirroring, a newly decoded row can still be
+                # Resident-only when the Store publishes the completed block.
+                mirror = vllm_config.attention_config.hisparse_config
+                if mirror is None or not mirror.eager_host_mirror:
+                    incompatibilities.append("save_decode_cache=true requires eager_host_mirror=true")
             try:
                 mixed_backend = get_backend_class(self.backend_name)
                 if mixed_backend is None:
@@ -174,9 +181,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             self.use_layerwise and self.layerwise_data_plane == "gva" and has_shared_kv_sources(vllm_config)
         )
         self.supports_composite_kv_saves = self.supports_composite_kv_loads
-        self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "save_decode_cache", False
-        )
         self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.consumer_is_to_put or self.save_decode_cache
         if (
             self.kv_role == "kv_consumer"
