@@ -111,6 +111,56 @@ class _ReplicatedCacheImpl(AscendDSAV41Impl):
         return self._get_layer_metadata(global_by_prefix)
 
 
+class V41PCPRowWorkspace:
+    """Batch-independent scratch shared by serial layers on the main stream.
+
+    Allocate during metadata preparation, before capture. Returned
+    views are borrowed until the next use of the same workspace; consumers
+    must finish on the main stream before it is reused. Concurrent forwards
+    (including concurrently replayed graphs) require separate workspaces.
+    """
+
+    def __init__(self, capacity, width, world, device, row_dtype):
+        self.capacity, self.width, self.world = capacity, width, world
+        self.rows = {}
+        for dtype in {row_dtype, torch.bfloat16}:
+            self.rows[dtype] = (
+                torch.empty((capacity, width), dtype=dtype, device=device),
+                torch.empty((world * capacity, width), dtype=dtype, device=device),
+                torch.empty((capacity, width), dtype=dtype, device=device),
+            )
+        self.c2_send = torch.empty((capacity, 2 * width), dtype=torch.float32, device=device)
+        self.c2_gather = torch.empty((world * capacity, 2 * width), dtype=torch.float32, device=device)
+
+    def cache_views(self, rows, local_rows, restore_rows):
+        if rows.ndim != 2 or rows.shape[1] != self.width:
+            raise ValueError("Expected [tokens, head_dim] PCP cache rows")
+        if not 0 <= rows.shape[0] <= local_rows <= self.capacity or not 0 <= restore_rows <= self.capacity:
+            raise ValueError("PCP cache rows exceed the preallocated workspace")
+        if rows.dtype not in self.rows:
+            raise ValueError("PCP cache dtype was not prepared before capture")
+        send, gather, restore = self.rows[rows.dtype]
+        if rows.device != send.device:
+            raise ValueError("PCP rows and workspace must share one device")
+        return send[:local_rows], gather[: self.world * local_rows], restore[:restore_rows]
+
+    def c2_views(self, send_rows):
+        if not 0 <= send_rows <= self.capacity:
+            raise ValueError("C2 send rows exceed the preallocated workspace")
+        return self.c2_send[:send_rows], self.c2_gather[: self.world * send_rows]
+
+
+def _all_gather_rows_into(output, source, world):
+    """Preserve rank-major dim=0 layout without an allocating collective."""
+    group = get_pcp_group()
+    if group.world_size != world:
+        raise ValueError("PCP workspace and communicator world sizes differ")
+    if world == 1:
+        output.copy_(source)
+    else:
+        torch.distributed.all_gather_into_tensor(output, source, group=group.device_group)
+
+
 @dataclass(frozen=True)
 class V41PCPC2Metadata:
     """Rows exchanged for C2 pairing and per-request ring updates."""
@@ -228,6 +278,7 @@ class AscendDSAV41PCPMetadata(AscendDSAV41Metadata):
     # Maps scheduler token order to the rank-major gathered layout.
     hidden_restore_idx: torch.Tensor
     c2_metadata: V41PCPC2Metadata
+    row_workspace: V41PCPRowWorkspace
 
     @classmethod
     def from_local_metadata(
@@ -237,6 +288,7 @@ class AscendDSAV41PCPMetadata(AscendDSAV41Metadata):
         local_num_tokens_after_padding: int,
         hidden_restore_idx: torch.Tensor,
         c2_metadata: V41PCPC2Metadata,
+        row_workspace: V41PCPRowWorkspace,
     ) -> "AscendDSAV41PCPMetadata":
         values = {field.name: getattr(local, field.name) for field in fields(AscendDSAV41Metadata)}
         values["global_metadata"] = global_metadata
@@ -245,6 +297,7 @@ class AscendDSAV41PCPMetadata(AscendDSAV41Metadata):
             local_num_tokens_after_padding=local_num_tokens_after_padding,
             hidden_restore_idx=hidden_restore_idx,
             c2_metadata=c2_metadata,
+            row_workspace=row_workspace,
         )
 
 
@@ -274,6 +327,26 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         self._pcp_context_owner = self
         self._pcp_rope_buffers: dict[str, tuple[torch.Tensor, ...]] = {}
         self._c2_metadata_buffers: dict[str, torch.Tensor] = {}
+        self._pcp_row_workspace: V41PCPRowWorkspace | None = None
+
+    def _prepare_row_workspace(self):
+        owner = self._pcp_context_owner
+        if owner._pcp_row_workspace is None:
+            config = owner.vllm_config
+            # Include graph padding and DualChunkSwap/TP alignment. No resize
+            # is permitted once a graph has retained these addresses.
+            capture_sizes = config.compilation_config.cudagraph_capture_sizes or ()
+            alignment = 2 * owner._pcp_world_size * config.parallel_config.tensor_parallel_size
+            capacity = max(owner._max_tokens, max(capture_sizes, default=0))
+            capacity = (capacity + alignment - 1) // alignment * alignment
+            owner._pcp_row_workspace = V41PCPRowWorkspace(
+                capacity,
+                int(v41._config_value(config.model_config.hf_text_config, "head_dim")),
+                owner._pcp_world_size,
+                owner._seq_lens.device,
+                getattr(config.model_config, "dtype", owner.kv_cache_spec.dtype),
+            )
+        return owner._pcp_row_workspace
 
     @staticmethod
     def prepare_shared_buffers(builders) -> None:
@@ -296,6 +369,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
                     # The model config fixes capacity; the source tables fix
                     # the remaining dimensions of these preallocated buffers.
                     builder._pcp_rope_buffers[layer_name] = rope_buffers.setdefault(key, buffers)
+            owner._prepare_row_workspace()
 
     @staticmethod
     def _resize_request_buffers(builder, capacity: int) -> None:
@@ -582,6 +656,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
 
         if not needs_global_metadata:
             return local_metadata
+        row_workspace = self._prepare_row_workspace()
         c2_metadata = shared.get("c2_metadata")
         if c2_metadata is None:
             batch = pcp_context.global_batch
@@ -599,7 +674,12 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
             )
             shared["c2_metadata"] = c2_metadata
         return AscendDSAV41PCPMetadata.from_local_metadata(
-            local_metadata, global_metadata, local_common.num_input_tokens, pcp_context.hidden_restore_idx, c2_metadata
+            local_metadata,
+            global_metadata,
+            local_common.num_input_tokens,
+            pcp_context.hidden_restore_idx,
+            c2_metadata,
+            row_workspace,
         )
 
 
@@ -654,29 +734,30 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
 
     @staticmethod
     def _gather_cache_rows(rows, metadata):
-        padded = rows.new_zeros((metadata.local_num_tokens_after_padding, *rows.shape[1:]))
+        workspace = metadata.row_workspace
+        padded, gathered, restored = workspace.cache_views(
+            rows, metadata.local_num_tokens_after_padding, metadata.hidden_restore_idx.numel()
+        )
         padded[: rows.shape[0]].copy_(rows)
-        gathered = get_pcp_group().all_gather(padded, dim=0)
-        return torch.index_select(gathered, 0, metadata.hidden_restore_idx)
+        # Clear only padding: real rows were overwritten by copy_. In
+        # particular, empty ranks must not send a previous layer's values.
+        padded[rows.shape[0] :].zero_()
+        _all_gather_rows_into(gathered, padded, workspace.world)
+        torch.index_select(gathered, 0, metadata.hidden_restore_idx, out=restored)
+        return restored
 
     def _compress_local_c2(self, attn, hidden_states, local_metadata, global_metadata):
         """Pool each local chunk with its predecessor, then update the persistent request rings."""
-        from vllm_ascend.ops.triton.compressor.compressor_triton import write_pcp_ring_rows
+        from vllm_ascend.ops.triton.compressor.compressor_triton import pack_pcp_c2_rows, write_pcp_ring_rows
 
         c2_metadata = local_metadata.swa.c2_metadata
         compressor = attn.compressor
         hidden_states_fp32 = hidden_states.float()
         kv, scores = compressor.wkv(hidden_states_fp32), compressor.wgate(hidden_states_fp32)
-        send_kv_scores = kv.new_zeros((c2_metadata.send_token_indices.numel(), 2 * compressor.width))
-        if hidden_states.shape[0]:
-            send_kv_scores.copy_(
-                torch.cat((kv, scores), dim=-1).index_select(
-                    0, c2_metadata.send_token_indices.clamp_max(hidden_states.shape[0] - 1)
-                )
-            )
-            valid_send_rows = c2_metadata.send_valid_mask & (c2_metadata.send_token_indices < hidden_states.shape[0])
-            send_kv_scores.masked_fill_(~valid_send_rows[:, None], 0)
-        gathered_kv_scores = get_pcp_group().all_gather(send_kv_scores, dim=0)
+        workspace = local_metadata.swa.row_workspace
+        send_kv_scores, gathered_kv_scores = workspace.c2_views(c2_metadata.send_token_indices.numel())
+        pack_pcp_c2_rows(kv, scores, c2_metadata.send_token_indices, c2_metadata.send_valid_mask, send_kv_scores)
+        _all_gather_rows_into(gathered_kv_scores, send_kv_scores, workspace.world)
         ring_state = compressor.state_cache.kv_cache[0].squeeze(-2)
         if hidden_states.shape[0]:
             local_state_metadata = local_metadata.compressor.state

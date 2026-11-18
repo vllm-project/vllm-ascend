@@ -683,6 +683,86 @@ def compressor_ref(
     return out_full
 
 
+@triton.jit(do_not_specialize=["num_tokens"])
+def _pack_pcp_c2_rows_kernel(
+    kv_ptr,
+    scores_ptr,
+    send_indices_ptr,
+    valid_mask_ptr,
+    packed_output_ptr,
+    num_tokens,
+    KV_ROW_STRIDE: tl.constexpr,
+    KV_COL_STRIDE: tl.constexpr,
+    SCORE_ROW_STRIDE: tl.constexpr,
+    SCORE_COL_STRIDE: tl.constexpr,
+    WIDTH: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    columns = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    source_row = tl.load(send_indices_ptr + row)
+    valid = tl.load(valid_mask_ptr + row) & (source_row >= 0) & (source_row < num_tokens)
+    # Mask loads as well as the output values. Empty ranks and padded invalid
+    # indices must never dereference an out-of-bounds projection row.
+    source_row = tl.where(valid, source_row, 0)
+    kv = tl.load(
+        kv_ptr + source_row * KV_ROW_STRIDE + columns * KV_COL_STRIDE,
+        mask=valid & (columns < WIDTH),
+        other=0.0,
+    )
+    scores = tl.load(
+        scores_ptr + source_row * SCORE_ROW_STRIDE + columns * SCORE_COL_STRIDE,
+        mask=valid & (columns < WIDTH),
+        other=0.0,
+    )
+    output = packed_output_ptr + row * (2 * WIDTH) + columns
+    tl.store(output, kv, mask=columns < WIDTH)
+    tl.store(output + WIDTH, scores, mask=columns < WIDTH)
+
+
+def pack_pcp_c2_rows(kv, scores, send_indices, valid_mask, packed_output):
+    """Pack selected FP32 projections directly into caller-owned [S, 2*D].
+
+    Each row is [kv[index, :], scores[index, :]]. Invalid rows are entirely
+    zeroed, including on ranks with no tokens. No intermediate tensors or
+    host reads of device controls are needed. Output must not alias inputs.
+    """
+    if kv.ndim != 2 or scores.shape != kv.shape or kv.shape[1] < 1:
+        raise ValueError("Expected matching [tokens, width] projections")
+    if kv.dtype != torch.float32 or scores.dtype != torch.float32 or packed_output.dtype != torch.float32:
+        raise ValueError("C2 packing requires FP32 projections and output")
+    if send_indices.ndim != 1 or send_indices.dtype != torch.int64:
+        raise ValueError("Expected INT64 [send_rows] indices")
+    if valid_mask.shape != send_indices.shape or valid_mask.dtype != torch.bool:
+        raise ValueError("Expected BOOL [send_rows] valid mask")
+    send_rows, width = send_indices.numel(), kv.shape[1]
+    if packed_output.shape != (send_rows, 2 * width):
+        raise ValueError("Expected [send_rows, 2*width] packed output")
+    if not all(t.is_contiguous() for t in (send_indices, valid_mask, packed_output)):
+        raise ValueError("C2 output and controls must be contiguous")
+    if not all(t.device == kv.device for t in (scores, send_indices, valid_mask, packed_output)):
+        raise ValueError("C2 tensors must share one device")
+    if kv.device.type != "npu":
+        raise ValueError("C2 packing requires an NPU")
+    if send_rows:
+        block = 128
+        _pack_pcp_c2_rows_kernel[(send_rows, triton.cdiv(width, block))](
+            kv,
+            scores,
+            send_indices,
+            valid_mask,
+            packed_output,
+            kv.shape[0],
+            KV_ROW_STRIDE=kv.stride(0),
+            KV_COL_STRIDE=kv.stride(1),
+            SCORE_ROW_STRIDE=scores.stride(0),
+            SCORE_COL_STRIDE=scores.stride(1),
+            WIDTH=width,
+            BLOCK=block,
+        )
+    return packed_output
+
+
 @triton.jit(do_not_specialize=["num_writes", "num_requests"])
 def _write_pcp_ring_rows_kernel(
     kv_score_rows_ptr,

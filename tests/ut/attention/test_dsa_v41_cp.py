@@ -64,6 +64,67 @@ PREFIXES = {
 }
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@torch.inference_mode()
+def test_cache_row_workspace_reuses_addresses_and_clears_padding(monkeypatch, dtype):
+    workspace = dsa_v41_cp.V41PCPRowWorkspace(8, 4, 2, torch.device("cpu"), dtype)
+    group = SimpleNamespace(world_size=2, device_group=object())
+    monkeypatch.setattr(dsa_v41_cp, "get_pcp_group", lambda: group)
+    pointers = []
+
+    def exchange(output, source, *, group):
+        assert group is group_handle
+        pointers.append((source.data_ptr(), output.data_ptr()))
+        # Distinct peers expose rank-major restore ordering.
+        output[: source.shape[0]].copy_(source)
+        output[source.shape[0] :].copy_(source + 100)
+
+    group_handle = group.device_group
+    monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", exchange)
+    index_select = torch.index_select
+    restore_ptrs = []
+
+    def restore(input, dim, index, *, out):
+        restore_ptrs.append(out.data_ptr())
+        return index_select(input, dim, index, out=out)
+
+    monkeypatch.setattr(torch, "index_select", restore)
+    # Catch explicit allocations in the steady-state path after preparation.
+    def unexpected_allocation(*args, **kwargs):
+        raise AssertionError("PCP workspace allocated during execution")
+
+    monkeypatch.setattr(torch, "empty", unexpected_allocation)
+    for padded_rows, actual_rows in ((4, 4), (2, 1), (4, 0), (4, 3)):
+        rows = torch.arange(actual_rows * 4, dtype=dtype).reshape(actual_rows, 4)
+        indices = torch.tensor([padded_rows, 0, 2 * padded_rows - 1, 0])
+        metadata = SimpleNamespace(
+            row_workspace=workspace, local_num_tokens_after_padding=padded_rows, hidden_restore_idx=indices
+        )
+        expected_send = torch.zeros(padded_rows, 4, dtype=dtype)
+        expected_send[:actual_rows].copy_(rows)
+        expected = index_select(torch.cat((expected_send, expected_send + 100)), 0, indices)
+        actual = dsa_v41_cp.AscendDSAV41PCPImpl._gather_cache_rows(rows, metadata)
+        torch.testing.assert_close(actual, expected)
+    assert len(set(pointers)) == len(set(restore_ptrs)) == 1
+
+
+def test_cache_row_workspace_rejects_resize():
+    workspace = dsa_v41_cp.V41PCPRowWorkspace(4, 2, 2, torch.device("cpu"), torch.float32)
+    rows = torch.zeros(2, 2)
+    with pytest.raises(ValueError, match="preallocated"):
+        workspace.cache_views(rows, 5, 2)
+    with pytest.raises(ValueError, match="preallocated"):
+        workspace.cache_views(rows, 2, 5)
+    with pytest.raises(ValueError, match="preallocated"):
+        workspace.c2_views(5)
+
+
+def test_row_workspace_is_shared_before_capture(builders):
+    owners = builders(specialized=True)
+    workspaces = [builder._prepare_row_workspace() for builder in owners.values()]
+    assert all(workspace is workspaces[0] for workspace in workspaces)
+
+
 @pytest.mark.parametrize("world", [2, 4, 8, 16])
 @pytest.mark.parametrize(
     "lengths,positions,drop_tail",
@@ -889,7 +950,14 @@ def runtime(builders, monkeypatch):
                     rank_send_rows.append(send_rows)
                 return torch.cat(rank_send_rows, dim=dim)
 
-            monkeypatch.setattr(dsa_v41_cp, "get_pcp_group", lambda: SimpleNamespace(all_gather=gather))
+            cache_group = SimpleNamespace(world_size=2, device_group=object())
+            monkeypatch.setattr(dsa_v41_cp, "get_pcp_group", lambda: cache_group)
+
+            def gather_into(destination, source, *, group):
+                assert group is cache_group.device_group
+                destination.copy_(gather(source, dim=0))
+
+            monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", gather_into)
             projector.reference_input = torch.zeros_like(peers[rank])
             projector.reference_input[: len(batch.local_ids)] = canonical[batch.local_ids]
             projector.peer_inputs = [peer.masked_fill((peer == 9999.0), 0) for peer in peers]
@@ -964,6 +1032,7 @@ class TestPCPBatchLifecycle:
         local_swa = dsa_v41_cp.AscendDSAV41PCPMetadata.__new__(dsa_v41_cp.AscendDSAV41PCPMetadata)
         local_swa.local_num_tokens_after_padding = 2
         local_swa.hidden_restore_idx = torch.tensor([0, 2, 3, 0] if full_graph else [0, 2, 3])
+        local_swa.row_workspace = dsa_v41_cp.V41PCPRowWorkspace(4, 8, 2, torch.device("cpu"), torch.float32)
         local_metadata = SimpleNamespace(swa=local_swa)
         cache = SimpleNamespace(slot_mapping=torch.tensor([[1, 0], [1, 1], [1, 2], [-1, -1]]))
         global_metadata = SimpleNamespace(
@@ -975,8 +1044,11 @@ class TestPCPBatchLifecycle:
         num_rows = local_swa.hidden_restore_idx.numel()
         hidden_states = torch.arange(8).reshape(1, 8).float()
         gathered = torch.arange(32).reshape(4, 8).float()
-        group = SimpleNamespace(all_gather=Mock(return_value=gathered))
+        group = SimpleNamespace(world_size=2, device_group=object())
         monkeypatch.setattr(dsa_v41_cp, "get_pcp_group", lambda: group)
+        monkeypatch.setattr(
+            torch.distributed, "all_gather_into_tensor", lambda output, source, **kwargs: output.copy_(gathered)
+        )
         seen = []
 
         def check_rope(value, actual_cos, actual_sin):
@@ -1134,6 +1206,12 @@ class TestPCPBatchLifecycle:
             output.copy_(kv)
             return output
 
+        def pack(kv, scores, indices, valid_mask, output):
+            output.zero_()
+            valid = valid_mask & (indices >= 0) & (indices < kv.shape[0])
+            output[valid] = torch.cat((kv[indices[valid]], scores[indices[valid]]), dim=-1)
+            return output
+
         def write_ring_rows(
             gathered_kv_scores, ring_state, ring_metadata, source_row_indices, request_indices, token_offsets
         ):
@@ -1175,6 +1253,7 @@ class TestPCPBatchLifecycle:
             attn.window_size = 4
 
         monkeypatch.setattr("vllm_ascend.ops.triton.compressor.compressor_triton.compressor_from_projected", pool)
+        monkeypatch.setattr("vllm_ascend.ops.triton.compressor.compressor_triton.pack_pcp_c2_rows", pack)
         monkeypatch.setattr("vllm_ascend.ops.triton.compressor.compressor_triton.write_pcp_ring_rows", write_ring_rows)
         monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", scatter)
         monkeypatch.setattr(
