@@ -235,13 +235,15 @@ ge::graphStatus HcPreTiling::CalcMKSplitCoreMembasePart2Tiling()
     int64_t squareSumSize = kBlockNum * RoundUp(rowOnceLoop * 16, 16) * sizeof(float) * DOUBLE_BUFFER;
     int64_t squareReduceSize = rowOnceLoop * SQUARE_SUM_SIZE * sizeof(float);
     int64_t rsqrtSize = RoundUp(rowOnceLoop, BLOCK_SIZE / sizeof(float)) * sizeof(float);
-    int64_t xSize = rowOnceLoop * hcMult_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER; // x是bfloat16_t 类型
-    int64_t ySize = rowOnceLoop * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER;
+    auto calcXYBufferSize = [&](int64_t rows, int64_t dFactor) -> int64_t {
+        // Both the BF16 queues and their FP32 cast buffers use the BF16 row stride.
+        int64_t rowStride = RoundUp(dFactor, BLOCK_SIZE / sizeof(uint16_t));
+        int64_t elements = rows * (hcMult_ + 1) * rowStride;
+        return elements * (DOUBLE_BUFFER * sizeof(uint16_t) + sizeof(float));
+    };
     int64_t postSize = rowOnceLoop * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
     int64_t base0Size = hcMultAlign_ * sizeof(float);
     int64_t base1Size = hcMultAlign_ * sizeof(float);
-    int64_t xCastSize = rowOnceLoop * hcMult_ * RoundUp(d_, 8) * sizeof(float);
-    int64_t yCastSize = rowOnceLoop * RoundUp(d_, 8) * sizeof(float);
     int64_t rowBrcb0Size = RoundUp(rowOnceLoop, 8) * BLOCK_SIZE;
     int64_t hcBrcb1Size = RoundUp(rowOnceLoop * hcMultAlign_, 8) * BLOCK_SIZE;
     int64_t maskPatternSize = (rowOnceLoop + MASK_PATTERN_DIM_SIZE - 1) * BLOCK_SIZE;
@@ -265,8 +267,8 @@ ge::graphStatus HcPreTiling::CalcMKSplitCoreMembasePart2Tiling()
     int64_t originalExtraSize = calcOriginalExtraSize(rowOnceLoop) + calcPreMixSize(rowOnceLoop);
 
     int64_t totalSize = mix0OriginSize + mix1OriginSize + mix0Size + mix1Size +
-                     squareSumSize + squareReduceSize + rsqrtSize + xSize + ySize + postSize + base0Size + base1Size +
-                     xCastSize + yCastSize +
+                     squareSumSize + squareReduceSize + rsqrtSize + calcXYBufferSize(rowOnceLoop, d_) +
+                     postSize + base0Size + base1Size +
                      rowBrcb0Size + hcBrcb1Size + maskPatternSize + originalExtraSize;
     rowFactor_ = rowOnceLoop;
     if (totalSize <= ubSize_) {
@@ -284,12 +286,7 @@ ge::graphStatus HcPreTiling::CalcMKSplitCoreMembasePart2Tiling()
         int64_t base = 2;
         while (1) {
             dFactor_ = CeilDiv(d_, base);
-            xSize = rowOnceLoop * hcMult_ * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER; // x是bfloat16_t 类型
-            ySize = rowOnceLoop * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER;
-            xCastSize = rowOnceLoop * hcMult_ * RoundUp(dFactor_, 8) * sizeof(float);
-            yCastSize = rowOnceLoop * RoundUp(dFactor_, 8) * sizeof(float);
-            int64_t targetSize = xSize + ySize + xCastSize + yCastSize;
-            if (targetSize <= ubRemain) {
+            if (calcXYBufferSize(rowOnceLoop, dFactor_) <= ubRemain) {
                 break;
             }
             base++;
@@ -311,18 +308,14 @@ ge::graphStatus HcPreTiling::CalcMKSplitCoreMembasePart2Tiling()
             squareSumSize = kBlockNum * RoundUp(rowFactor_ * 16, 16) * sizeof(float) * DOUBLE_BUFFER;
             squareReduceSize = rowFactor_ * SQUARE_SUM_SIZE * sizeof(float);
             rsqrtSize = RoundUp(rowFactor_, BLOCK_SIZE / sizeof(float)) * sizeof(float);
-            xSize = rowFactor_ * hcMult_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER; // x是bfloat16_t 类型
-            ySize = rowFactor_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER;
             postSize = rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-            xCastSize = rowFactor_ * hcMult_ * RoundUp(d_, 8) * sizeof(float);
-            yCastSize = rowFactor_ * RoundUp(d_, 8) * sizeof(float);
             rowBrcb0Size = RoundUp(rowFactor_, 8) * BLOCK_SIZE;
             hcBrcb1Size = RoundUp(rowFactor_ * hcMultAlign_, 8) * BLOCK_SIZE;
             maskPatternSize = (rowFactor_ + MASK_PATTERN_DIM_SIZE - 1) * BLOCK_SIZE;
             originalExtraSize = calcOriginalExtraSize(rowFactor_) + calcPreMixSize(rowFactor_);
             totalSize = mix0OriginSize + mix1OriginSize + mix0Size + mix1Size +
             squareSumSize + squareReduceSize + rsqrtSize +
-            xSize + ySize + postSize + base0Size + base1Size + xCastSize + yCastSize +
+            calcXYBufferSize(rowFactor_, d_) + postSize + base0Size + base1Size +
             rowBrcb0Size + hcBrcb1Size + maskPatternSize + originalExtraSize;
             if (totalSize > ubSize_) {
                 rowFactor_ = rowFactor_ - 1;
@@ -348,12 +341,8 @@ ge::graphStatus HcPreTiling::CalcMKSplitCoreMembasePart2Tiling()
             int64_t rowBrcb = RoundUp(candidateRow, BLOCK_SIZE / sizeof(float)) * BLOCK_SIZE;
             int64_t hcBrcb = RoundUp(candidateRow * hcMultAlign_, BLOCK_SIZE / sizeof(float)) * BLOCK_SIZE;
             int64_t mask = (candidateRow + MASK_PATTERN_DIM_SIZE - 1) * BLOCK_SIZE;
-            int64_t yX = rowFactor_ * hcMult_ * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER;
-            int64_t yY = rowFactor_ * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER;
-            int64_t yXCast = rowFactor_ * hcMult_ * RoundUp(dFactor_, 8) * sizeof(float);
-            int64_t yYCast = rowFactor_ * RoundUp(dFactor_, 8) * sizeof(float);
             return originSize * 2 + reduceSize * 2 + squareSize + squareReduce + rsqrt +
-                post + base0Size + base1Size + yX + yY + yXCast + yYCast + rowBrcb + hcBrcb + mask +
+                post + base0Size + base1Size + calcXYBufferSize(rowFactor_, dFactor_) + rowBrcb + hcBrcb + mask +
                 calcPreMixSize(candidateRow);
         };
         prePostRowFactor = 1;
