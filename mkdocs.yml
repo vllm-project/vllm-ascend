@@ -176,7 +176,8 @@ extra:
   # The supported Python range and the Python version inside release images differ.
   release_python_version: ">= 3.10, < 3.13"
   release_image_python_version: "3.12"
-  release_hdk_version: "26.1.1"
+  release_hdk_version_a2_a3_300i_200i: "26.2.RC1"
+  release_hdk_version_a5: "25.6.RC3.1"
   release_cann_version: "9.2.1"
   release_pytorch_version: "2.10.0"
   release_torch_npu_version: "2.10.0.post7"
