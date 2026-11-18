@@ -135,8 +135,8 @@ def _patch_structured_output_manager() -> None:
 def _patch_xgrammar_disable_any_whitespace() -> None:
     """Ignore xgrammar's ``separators`` argument on both supported vLLM lanes.
 
-    vLLM #58067 (present in v0.33.0 and verified main) passes
-    ``separators=(",", ":")`` to ``GrammarCompiler.compile_json_schema`` when
+    vLLM #58067 passes ``separators=(",", ":")`` to
+    ``GrammarCompiler.compile_json_schema`` when
     ``disable_any_whitespace`` is set. The xgrammar releases shipped with
     Ascend (0.2.7/0.2.8) mishandle it: the resulting grammar lets small models
     loop on ``","`` until ``max_tokens`` and emit truncated, invalid JSON
@@ -169,5 +169,5 @@ def _patch_xgrammar_disable_any_whitespace() -> None:
 
 _patch_sampling_params_validation()
 _patch_structured_output_manager()
-# vLLM #58067 is present in both v0.33.0 and verified main.
+# vLLM #58067 is present in all supported vLLM versions.
 _patch_xgrammar_disable_any_whitespace()

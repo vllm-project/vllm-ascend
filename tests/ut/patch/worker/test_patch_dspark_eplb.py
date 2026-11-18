@@ -13,7 +13,6 @@ from vllm_ascend import ascend_config
 from vllm_ascend import logger as ascend_logger
 from vllm_ascend.patch.worker import patch_dspark
 from vllm_ascend.platform import _validate_eplb_config
-from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("phase", ["prefill", "decode"])
@@ -40,19 +39,14 @@ def test_draft_marker_restored_after_nested_failure():
 
 @pytest.fixture
 def dspark_config(tmp_path, monkeypatch, phase, draft_supports_eplb):
-    from vllm.v1.worker.gpu.spec_decode import utils as spec_decode_utils
-
     # Scope platform initialization state and suppress log-file creation only.
     monkeypatch.setattr(ascend_config, "_ASCEND_CONFIG", None)
     monkeypatch.setattr(ascend_config, "_INIT_VLLM_CONFIG", None)
     monkeypatch.setattr(VllmConfig, "use_v2_model_runner", VllmConfig.use_v2_model_runner)
-    validator = "_validate_v2_model_runner" if vllm_version_is("0.33.0") else "_validate_model_runner"
+    validator = "_validate_model_runner"
     monkeypatch.setattr(VllmConfig, validator, getattr(VllmConfig, validator))
     monkeypatch.setattr(ascend_logger, "configure_ascend_file_logging", lambda: None)
     monkeypatch.setenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
-    # Config reconstruction runs before distributed worker initialization.
-    if vllm_version_is("0.33.0"):
-        monkeypatch.setattr(spec_decode_utils, "get_pp_group", lambda: SimpleNamespace(world_size=1))
     # A local config is sufficient: no checkpoint/tokenizer download or weights.
     Qwen3MoeConfig(
         architectures=["Qwen3MoeForCausalLM"],
