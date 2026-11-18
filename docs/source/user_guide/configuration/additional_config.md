@@ -383,6 +383,10 @@ Enable with `--additional-config '{"gdn_internal_prefill_checkpoints": true}'`.
 `gdn_checkpoint_policy` is a string, default `"all"`. Set it to `"prefix_only"`
 to prioritize repeated public prefixes independently of the internal export path:
 
+| Option | Type | Default | Behavior |
+|---|---|---|---|
+| `gdn_checkpoint_policy` | string: `all` / `prefix_only` | `all` | `prefix_only` reuses existing cached input states and does not publish newly computed recurrent states for cache-hit requests. |
+
 ```bash
 --additional-config '{"gdn_checkpoint_policy": "prefix_only"}'
 ```
@@ -395,7 +399,7 @@ during decode. Their existing prefix remains reusable; an identical full-prompt
 replay may therefore hit only that original prefix. Prewarm public prefixes on
 an empty cache when a particular fine-grained boundary is required. Cold chunked
 prefills keep their normal checkpoint behavior. This mode requires Model Runner
-V2, speculative decoding disabled, and a paired core supporting the policy.
+V2, speculative decoding and KV transfer disabled, and a paired core supporting the policy.
 
 The new policy uses additional config because it controls Ascend's GDN backend
 and changes the cache-retention/performance tradeoff. It is independent of the
