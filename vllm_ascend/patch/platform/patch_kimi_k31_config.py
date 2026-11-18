@@ -63,10 +63,10 @@ class KimiK31TextConfig(KimiLinearConfig):
             if dsa_layers.intersection(self.linear_attn_config["kda_layers"]):
                 raise ValueError("Kimi K3.1 KDA and DSA layers must be disjoint")
 
-    def is_dsa_layer(self, layer_idx: int) -> bool:
-        if not vllm_version_is("0.33.0"):
-            return super().is_dsa_layer(layer_idx)
-        return self.dsa_config is not None and layer_idx + 1 in self.dsa_config["dsa_layers"]
+    if vllm_version_is("0.33.0"):
+
+        def is_dsa_layer(self, layer_idx: int) -> bool:
+            return self.dsa_config is not None and layer_idx + 1 in self.dsa_config["dsa_layers"]
 
 
 class KimiK31Config(KimiK3Config):
