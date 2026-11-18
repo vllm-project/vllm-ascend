@@ -31,15 +31,8 @@ _GBSA_FP8_SOFTMAX_PRECISION = 1
 _MSA_SCORE_BLOCK_ALIGNMENT = 16
 _FP8_E4M3_MAX = 448.0
 
-# 1 selects the fused ``sparse_indices`` output; 0 keeps the plain score.
-_INDEX_SCORE_RETURN_INDICES = 1
 # CANN restricts ``topk`` to this range.
 _INDEX_SCORE_TOPK_MAX = 128
-_MSA_INDEX_KEY_LAYOUT = "BBND"
-# ``sparse_mode`` the index score accepts: 3 requires an ``atten_mask`` and 0
-# forbids it, so both must be derived from the same "causal" decision.
-_MSA_SPARSE_MODE_DENSE = 0
-_MSA_SPARSE_MODE_CAUSAL = 3
 # The operator produces incorrect results when topk is not a multiple of 8.
 _INDEX_SCORE_TOPK_WRITE_ALIGNMENT = 8
 
@@ -477,11 +470,6 @@ def _minimax_m3_index_score_topk(
 ) -> torch.Tensor:
     """Run the CANN MsaIndexScore TopK fusion and return its block indices.
 
-    The operator applies ``init_blocks`` / ``local_blocks`` inside its epilogue
-    (``ApplyLocalMaskUb``) before selecting, so the forced columns take part in
-    the TopK exactly like the separate path's ``1e30`` / ``1e29`` overwrite.
-    ``start_loc`` is one block index per request.
-
     Returns ``[num_index_heads, total_q, topk]`` int32 logical block IDs, already
     ordered by the operator.
     """
@@ -494,14 +482,14 @@ def _minimax_m3_index_score_topk(
         idx_q,
         index_kv_cache,
         start_loc,
-        return_choice=_INDEX_SCORE_RETURN_INDICES,
+        return_choice=1,
         topk=topk,
         block_table=block_table,
         atten_mask=causal_mask,
         actual_seq_qlen=cu_seqlens_q,
         actual_seq_klen=seq_lens,
-        layout_key=_MSA_INDEX_KEY_LAYOUT,
-        sparse_mode=_MSA_SPARSE_MODE_CAUSAL if causal_mask is not None else _MSA_SPARSE_MODE_DENSE,
+        layout_key="BBND",
+        sparse_mode=3 if causal_mask is not None else 0,
         init_blocks=init_blocks,
         local_blocks=local_blocks,
     )
