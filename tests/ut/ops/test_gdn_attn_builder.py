@@ -587,7 +587,7 @@ def test_private_checkpoint_host_fast_path_matches_generic_metadata(monkeypatch,
     builder._ascend_gdn_checkpoints = True
     builder._use_fused_checkpoint_metadata = True
     builder.compilation_config.static_forward_context = {
-        "layer0": SimpleNamespace(use_contiguous_conv_indices=True),
+        "layer0": SimpleNamespace(use_contiguous_conv_indices=False),
     }
     checkpoint = (
         MambaPrefillCheckpointMetadata(

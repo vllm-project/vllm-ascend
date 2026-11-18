@@ -1021,7 +1021,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     self,
                     prefill_query_start_loc_cpu,
                     query_start_loc.device,
-                    build_device_metadata=self.build_device_chunk_metadata or self._ascend_gdn_checkpoints,
+                    build_device_metadata=self.build_device_chunk_metadata
+                    or (self._ascend_gdn_checkpoints and not getattr(self, "_use_fused_checkpoint_metadata", False)),
                 )
                 if checkpoint is not None:
                     assert checkpoint.offsets is not None
@@ -1191,7 +1192,9 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         # Resolve the group's representative layer when building metadata.
         # Only opted-in models allocate the additional convolution buffers.
         layers = getattr(self.compilation_config, "static_forward_context", {})
-        if not getattr(layers.get(self._conv_layer_name), "use_contiguous_conv_indices", False):
+        if not self._use_fused_checkpoint_metadata and not getattr(
+            layers.get(self._conv_layer_name), "use_contiguous_conv_indices", False
+        ):
             return
         # Each group owns its buffers, with fixed addresses for graph replay.
         device = self.spec_sequence_masks.device
