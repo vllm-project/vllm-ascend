@@ -1458,9 +1458,6 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     this is cheap and avoids id-reuse / stale-cache / init-ordering hazards.
     """
     ascend_config = get_ascend_config()
-    if ascend_config.finegrained_tp_config.qkv_iproj_tensor_parallel_size > 1:
-        # QKV input projection exchanges require the same padded capacity on every DP rank.
-        return False
     # 1. When mc2_comm_alg == "hierarchy", dispatch/combine op don't support dynamic bs;
     # 2. When use mega_moe, op don't support dynamic global_bs;
     # we need to do allreduce and pad token across dp every step.
@@ -1473,6 +1470,10 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     is_context_moe_model = is_drafter_moe_model(vllm_config) if is_draft_model else is_moe_model(vllm_config)
     if not is_context_moe_model:
         return True
+    if getattr(ascend_config.finegrained_tp_config, "qkv_iproj_tensor_parallel_size", 1) > 1:
+        # MoE target/draft QKV exchanges need a uniform capacity. Dense
+        # drafters returned above and do not execute these projections.
+        return False
     # Projection collectives belong to the target's execution plan. A dense
     # drafter does not run them and must retain its rank-local K=0 fast path.
     if not is_draft_model and any(
@@ -1480,7 +1481,6 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
         for name in (
             "oproj_tensor_parallel_size",
             "mlp_tensor_parallel_size",
-            "qkv_iproj_tensor_parallel_size",
             "gproj_tensor_parallel_size",
             "shared_expert_tensor_parallel_size",
         )

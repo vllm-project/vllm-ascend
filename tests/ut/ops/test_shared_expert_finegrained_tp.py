@@ -227,6 +227,20 @@ def test_projection_config_has_no_model_schema_dependency(knob, model_type):
 @pytest.mark.parametrize("knob", ["qkv_iproj_tensor_parallel_size", "gproj_tensor_parallel_size"])
 def test_projection_config_requires_runtime_graph_guard(knob):
     vc = valid_config()
+    vc.model_config.hf_text_config = SimpleNamespace(model_type="kimi_linear", linear_attn_config={"num_heads": 4})
     vc.use_v2_model_runner = False
     with pytest.raises(ValueError, match="V2 model runner"):
         FinegrainedTPConfig(**{knob: 2})._validate_preconditions(vc)
+
+
+@pytest.mark.parametrize("runner_v2", [False, True])
+@pytest.mark.parametrize("dcp", [1, 2])
+def test_glm_qkv_keeps_eager_execution_contract(runner_v2, dcp):
+    vc = valid_config()
+    vc.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next")
+    vc.use_v2_model_runner = runner_v2
+    vc.parallel_config.decode_context_parallel_size = dcp
+    vc.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    config = FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)
+    config._validate_preconditions(vc)
+    assert not config.requires_graph(vc)

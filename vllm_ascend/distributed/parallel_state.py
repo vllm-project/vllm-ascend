@@ -207,8 +207,6 @@ def init_ascend_model_parallel(
     # 2. O Proj: attention output projection (`oproj_tensor_parallel_size`)
     # 3. Embedding: The token embedding table at the input of the model (`embedding_tensor_parallel_size`)
     # 4. MLP: feed-forward network in transformer blocks (`mlp_tensor_parallel_size`)
-    # 5. QKV input projections: request-local recurrent state
-    #    (`qkv_iproj_tensor_parallel_size`)
     # 5. Shared experts: independent DP-axis MLP weight sharding.
     _group_cache = {}
 
@@ -234,7 +232,6 @@ def init_ascend_model_parallel(
     lmhead_tp_size = get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size
     embedding_tp_size = get_ascend_config().finegrained_tp_config.embedding_tensor_parallel_size
     mlp_tp_size = get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size
-    qkv_iproj_tp_size = get_ascend_config().finegrained_tp_config.qkv_iproj_tensor_parallel_size
 
     global _OTP, _LMTP, _EMBED_TP, _MLP_TP, _QKV_IPROJ_TP, _GPROJ_TP, _SHARED_EXPERT_TP
 
@@ -246,12 +243,12 @@ def init_ascend_model_parallel(
         _EMBED_TP = _create_or_get_group(embedding_tp_size, "emtp")
     if mlp_tp_size > 1:
         _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
-    if qkv_iproj_tp_size > 1:
-        _QKV_IPROJ_TP = _create_or_get_group(qkv_iproj_tp_size, "qkv_iproj_tp")
     shared_tp_size = get_ascend_config().finegrained_tp_config.shared_expert_tensor_parallel_size
     if shared_tp_size > 1:
         _SHARED_EXPERT_TP = _create_or_get_group(shared_tp_size, "shared_expert_tp")
     config = get_ascend_config().finegrained_tp_config
+    if config.qkv_iproj_tensor_parallel_size > 1:
+        _QKV_IPROJ_TP = _create_or_get_group(config.qkv_iproj_tensor_parallel_size, "qkv_iproj_tp")
     if config.gproj_tensor_parallel_size > 1:
         _GPROJ_TP = _create_or_get_group(config.gproj_tensor_parallel_size, "gproj_tp")
 
@@ -320,11 +317,6 @@ def get_kvpp_group() -> GroupCoordinator:
 
 
 def destroy_ascend_model_parallel():
-    global _QKV_IPROJ_TP
-    if _QKV_IPROJ_TP:
-        _QKV_IPROJ_TP.destroy()
-    _QKV_IPROJ_TP = None
-
     global _KVPP
     if _KVPP:
         _KVPP.destroy()

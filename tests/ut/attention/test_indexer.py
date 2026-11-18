@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import replace
-from contextlib import nullcontext
 from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, Mock, patch

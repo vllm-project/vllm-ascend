@@ -357,6 +357,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.projection_tp: KDAInputProjectionTP | None = None
         qkv_iproj_tp_size = get_ascend_config().finegrained_tp_config.qkv_iproj_tensor_parallel_size
         if qkv_iproj_tp_size > 1:
+            if self.num_heads % qkv_iproj_tp_size:
+                raise ValueError("qkv_iproj_tensor_parallel_size must divide the KDA head count.")
             group = get_qkv_iproj_tp_group()
             projection_tp_size = group.world_size
             self.projection_tp = KDAInputProjectionTP(group, self.num_heads, self.head_dim)

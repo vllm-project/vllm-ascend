@@ -930,13 +930,7 @@ class AscendConfig:
                     str(vc.scheduler_config.max_num_batched_tokens),
                 )
 
-        finegrained_tp_enabled = (
-            self.finegrained_tp_config.oproj_tensor_parallel_size > 1
-            or self.finegrained_tp_config.mlp_tensor_parallel_size > 1
-            or self.finegrained_tp_config.qkv_iproj_tensor_parallel_size > 1
-            or self.finegrained_tp_config.gproj_tensor_parallel_size > 1
-            or self.finegrained_tp_config.shared_expert_tensor_parallel_size > 1
-        )
+        finegrained_tp_enabled = self.finegrained_tp_config.requires_graph(vc)
         if finegrained_tp_enabled and not self.scheduler_config.recompute_scheduler_enable:
             raise AssertionError(
                 "oproj_tensor_parallel_size / mlp_tensor_parallel_size require "
@@ -1485,6 +1479,19 @@ class FinegrainedTPConfig:
     qkv_iproj_tensor_parallel_size: int = 1
     gproj_tensor_parallel_size: int = 1
 
+    def requires_graph(self, vllm_config: Any) -> bool:
+        # Kimi's projection pipeline uses graph-aligned owner capacities.
+        # GLM QKV TP pads explicitly and also supports eager execution.
+        from vllm_ascend.utils import model_uses_kimi_kda
+
+        return (
+            self.oproj_tensor_parallel_size > 1
+            or self.mlp_tensor_parallel_size > 1
+            or self.shared_expert_tensor_parallel_size > 1
+            or self.gproj_tensor_parallel_size > 1
+            or (self.qkv_iproj_tensor_parallel_size > 1 and model_uses_kimi_kda(vllm_config.model_config))
+        )
+
     @model_validator(mode="after")
     def _validate_sizes(self):
         size_fields = (
@@ -1508,8 +1515,23 @@ class FinegrainedTPConfig:
 
         vc = vllm_config
         enabled_configs = []
-        projection_tp = self.qkv_iproj_tensor_parallel_size > 1 or self.gproj_tensor_parallel_size > 1
+        from vllm_ascend.utils import model_uses_kimi_kda
+
+        projection_tp = self.gproj_tensor_parallel_size > 1 or (
+            self.qkv_iproj_tensor_parallel_size > 1 and model_uses_kimi_kda(vc.model_config)
+        )
         shared_tp = self.shared_expert_tensor_parallel_size > 1
+        if self.qkv_iproj_tensor_parallel_size > 1:
+            parallel = vc.parallel_config
+            if (
+                parallel.tensor_parallel_size != 1
+                or parallel.prefill_context_parallel_size != 1
+                or parallel.pipeline_parallel_size != 1
+            ):
+                raise ValueError("QKV input projection TP requires TP=1, PCP=1 and PP=1.")
+            if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
+                raise ValueError("QKV input projection TP is supported only on a PD decode node.")
+            enabled_configs.append(f"qkv_iproj_tensor_parallel_size={self.qkv_iproj_tensor_parallel_size}")
         if projection_tp or shared_tp:
             parallel = vc.parallel_config
             if (
@@ -1529,12 +1551,8 @@ class FinegrainedTPConfig:
             if vc.lora_config is not None:
                 raise ValueError("Shared-expert fine-grained TP does not support LoRA.")
             enabled_configs.append(f"shared_expert_tensor_parallel_size={self.shared_expert_tensor_parallel_size}")
-        if projection_tp:
-            # Model constructors own projection/head/checkpoint contracts.
-            # Shared configuration must not depend on a Kimi config schema.
-            for name in ("qkv_iproj_tensor_parallel_size", "gproj_tensor_parallel_size"):
-                if getattr(self, name) > 1:
-                    enabled_configs.append(f"{name}={getattr(self, name)}")
+        if self.gproj_tensor_parallel_size > 1:
+            enabled_configs.append(f"gproj_tensor_parallel_size={self.gproj_tensor_parallel_size}")
         if self.oproj_tensor_parallel_size > 1 or self.mlp_tensor_parallel_size > 1 or projection_tp or shared_tp:
             # o_proj's _forward_o_proj reshape misaligns under tp > 1; mlp is untested there.
             if not (projection_tp or shared_tp) and vc.parallel_config.tensor_parallel_size > 1:

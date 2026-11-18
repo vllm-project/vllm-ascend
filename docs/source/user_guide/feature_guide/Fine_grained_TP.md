@@ -33,8 +33,11 @@ Fine-grained TP is designed for the **decode instance** of PD separation, where 
 | **mlp**       | ❌     | ✅     | ❌       | ✅      |
 | **LM head**   | ✅     | ✅     | ✅       | ✅      |
 | **QKV IProj** | ✅     | ✅     | ❌       | ✅      |
+| **G Proj**    | ❌     | ✅     | ❌       | ✅      |
+| **shared expert** | ❌ | ✅     | ❌       | ✅      |
 
 ```{note}
+- QKV IProj eager support applies to GLM; Kimi requires graph decode as described in [projection preconditions](#preconditions-for-qkv-iproj-tp).
 - o_proj / MLP TP cannot be combined with standard TP and require `tensor_parallel_size == 1`; embedding / LM head TP can — see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement).
 - LM head TP can be combined with speculative decoding (EAGLE, DFlash, DFlash2, and DSpark draft models); see [LM Head TP and Speculative Decoding](#lm-head-tp-and-speculative-decoding).
 ```
@@ -76,7 +79,7 @@ If the largest cudagraph capture size does not cover the largest decode-shaped s
 
 Set `qkv_iproj_tensor_parallel_size` above `1` when the deployment meets these conditions.
 
-- GLM-5.3-Flash on a P/D-disaggregated decode node (`kv_role = kv_consumer`).
+- GLM-5.3-Flash or Kimi-K3.1 on a P/D-disaggregated decode node (`kv_role = kv_consumer`).
 - `tensor_parallel_size == 1`, `prefill_context_parallel_size == 1` and `pipeline_parallel_size == 1`.
 - A QKV IProj TP size that evenly divides both `data_parallel_size` and the KDA head count.
 
@@ -267,8 +270,9 @@ All knobs live under `finegrained_tp_config` inside `--additional-config`. The d
 | `mlp_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the MLP (feed-forward) blocks. Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
 | `lmhead_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the LM head. |
 | `embedding_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the token embedding table. |
-| `qkv_iproj_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` and the KDA head count | TP size of the QKV input projection. Values > 1 require the [QKV IProj preconditions](#preconditions-for-qkv-iproj-tp). |
 | `shared_expert_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | Independent shared-expert TP; see [shared-expert requirements](#shared-expert-fine-grained-tp). |
+| `qkv_iproj_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` and the KDA head count | TP size of the QKV input projection. Values > 1 require the [QKV IProj preconditions](#preconditions-for-qkv-iproj-tp). |
+| `gproj_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` and the applicable head counts | TP size of Kimi full-rank output-gate projections; see [projection preconditions](#preconditions-for-qkv-iproj-tp). |
 
 ## Shared-expert fine-grained TP
 

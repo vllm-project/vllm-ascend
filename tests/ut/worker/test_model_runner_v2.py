@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 
+from vllm_ascend.ascend_config import FinegrainedTPConfig
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.attention.attention_c8_mxfp import (
     AscendC8MXFPAttentionBackendImpl,
@@ -1245,7 +1246,7 @@ def test_init_without_speculation(monkeypatch, use_pp, backend_name, env_buffer_
     ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="all"), dump_config_path=None)
 
     # Complete the fake with the fields NPUModelRunner reads (mirrors FinegrainedTPConfig).
-    ascend_config.finegrained_tp_config = SimpleNamespace(
+    ascend_config.finegrained_tp_config = FinegrainedTPConfig(
         oproj_tensor_parallel_size=0,
         lmhead_tensor_parallel_size=0,
         embedding_tensor_parallel_size=0,
@@ -1344,7 +1345,7 @@ def test_init_spec_pp_full_graph_and_speculator(method):
     ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="decode"), dump_config_path=None)
 
     # Complete the fake with the fields NPUModelRunner reads (mirrors FinegrainedTPConfig).
-    ascend_config.finegrained_tp_config = SimpleNamespace(
+    ascend_config.finegrained_tp_config = FinegrainedTPConfig(
         oproj_tensor_parallel_size=0,
         lmhead_tensor_parallel_size=0,
         embedding_tensor_parallel_size=0,

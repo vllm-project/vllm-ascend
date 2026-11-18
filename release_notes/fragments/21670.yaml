@@ -1,4 +1,0 @@
-pr: 21670
-entries:
-  - category: feature
-    text: Added independent shared-expert fine-grained TP for graph-dispatched pure-DP decode, with Kimi latent-projection overlap and a generic path for models without latent projections.

@@ -264,8 +264,8 @@ def test_mixed_forward_marks_auxiliary_beta_as_preprocessed(recover):
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
     attention.uses_mixed_projection = True
-    attention.use_recoverssm = recover
     attention.projection_tp = None
+    attention.use_recoverssm = recover
     attention.pcp_size = 1
     attention.local_num_heads = 2
     attention.head_dim = 3
@@ -718,6 +718,7 @@ def test_recoverssm_dispatches_without_spec_mask_and_sigmoids_beta_once(mixed):
         ),
         patch("vllm_ascend.ops.kimi_kda.kda_recoverssm_verify", side_effect=verify) as recover,
     ):
+        attention._forward_core = AscendKimiK3DeltaAttention._forward_core.__get__(attention)
         AscendKimiK3DeltaAttention._forward(
             attention, qkv, torch.zeros(1, num_tokens, 1, dim), torch.zeros(num_tokens, 1, dim), raw_beta, output
         )
@@ -780,6 +781,7 @@ def test_kda_prefill_direct_norm_and_idle_output(mode, recover):
             return_value=SimpleNamespace(attn_metadata={"kda": metadata}),
         ),
     ):
+        attention._forward_core = AscendKimiK3DeltaAttention._forward_core.__get__(attention)
         raw_beta = torch.linspace(-2, 2, tokens).reshape(1, tokens, 1).expand(-1, -1, heads)
         attention._forward_core = AscendKimiK3DeltaAttention._forward_core.__get__(attention)
         AscendKimiK3DeltaAttention._forward(

@@ -943,7 +943,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         num_actual_tokens = attn_metadata.num_actual_tokens
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
-        g2 = g2[:num_actual_tokens]
         use_recoverssm = self.use_recoverssm
         if use_recoverssm:
             beta = beta[:, :num_actual_tokens]
