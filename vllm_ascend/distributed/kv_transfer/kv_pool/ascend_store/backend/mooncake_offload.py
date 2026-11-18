@@ -35,6 +35,11 @@ def snapshot_key(worker: LayerwiseKVPoolWorker, request: ReqMeta, group: int, in
     return worker._make_layerwise_full_key(group, f"offload_v1:{incarnation}:{endpoint}:{index}")
 
 
+def _continuation_window_start(worker, group, endpoint, page_tokens):
+    window = getattr(getattr(worker, "kv_cache_config", None), "dsv4_continuation_windows", {}).get(group)
+    return None if window is None else max(0, endpoint - window + 1) // page_tokens
+
+
 def _load_entries(worker, request, group, hashes, mask):
     spec = request.load_spec
     if spec is None or not spec.can_load:
@@ -85,7 +90,8 @@ def _load_entries(worker, request, group, hashes, mask):
         )
     snapshot_start = worker._layerwise_load_snapshot_start(request, group, tokens)
     entries = []
-    for index in range(end):
+    first = _continuation_window_start(worker, group, tokens, size) if live_window else None
+    for index in range(first or 0, end):
         if not live_window and mask is not None and index < len(mask) and not mask[index]:
             continue
         if recurrent and ids[index] == 0:
@@ -159,12 +165,20 @@ def _save_entries(worker, request, view, group, hashes):
         if request.target_token_len % transfer_size or full_transfer_blocks > hashed_transfer_blocks:
             snapshot_start = min(full_transfer_blocks, hashed_transfer_blocks) * transfer_size // size
     entries = []
+    window_start = _continuation_window_start(worker, group, request.target_token_len, size)
     for index in range(start, end):
         if ids[index] == 0:
             continue
-        if mask is not None and index < len(mask) and not mask[index]:
+        public_page = mask is None or (index < len(mask) and mask[index])
+        private_window_page = window_start is not None and index >= window_start
+        if window_start is None:
+            if mask is not None and index < len(mask) and not mask[index]:
+                continue
+        elif not public_page and not private_window_page:
             continue
-        use_private_snapshot = snapshot_start is not None and index >= snapshot_start
+        use_private_snapshot = (snapshot_start is not None and index >= snapshot_start) or (
+            private_window_page and not public_page
+        )
         key = (
             snapshot_key(worker, request, group, index, request.target_token_len)
             if use_private_snapshot or index >= len(hashes)
@@ -307,7 +321,13 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
                     index = view.partial_block_index if slot is None else view.save_key_block_offset + slot
                     pages[index] = key
                 live_ids = request.block_ids_by_group[group]
-                pages = {index: key for index, key in pages.items() if index < len(live_ids) and live_ids[index]}
+                first = _continuation_window_start(
+                    worker, group, request.target_token_len, worker.grouped_block_size[group]
+                )
+                pages = {
+                    index: key for index, key in pages.items()
+                    if (first or 0) <= index < len(live_ids) and live_ids[index]
+                }
                 pending[(request.req_id, request.layerwise_request_id, group)] = request.target_token_len, pages
             groups[group].append(view)
     try:

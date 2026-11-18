@@ -47,6 +47,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.offload_diagnostics import offload_event
 from vllm_ascend.models.deepseek_v4.cache_config import is_deepseek_v4_cache, validate_dsv4_transfer_speculation
+from vllm_ascend.models.deepseek_v4.cache_transfer import transfer_cache_views
 
 # Rank tuples are (PP, PCP, TP), matching scheduler handshake keys.
 WorkerRank = tuple[int, int, int]
@@ -254,6 +255,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         self._zmq_context: Context | None = None
 
     def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor | list[torch.Tensor]"]) -> None:
+        if self._preserve_component_pages:
+            kv_caches = transfer_cache_views(kv_caches)
         super().register_kv_caches(kv_caches)
         if self.kv_transfer_config.is_kv_producer:
             # KVPP is outside the Push support plan.

@@ -95,6 +95,8 @@ def ns():
         _DEFAULT_MAX_PREFETCH_LAYERS=8,
         _INDEXER_CACHE_SUFFIX=".indexer.k_cache",
         AttentionSpec=Spec,
+        AscendMLAAttentionSpec=Spec,
+        AscendSlidingWindowMLASpec=type("SlidingWindowSpec", (), {}),
         MambaSpec=type("Mamba", (), {}),
         is_prefix_cacheable=lambda spec: True,
     )
@@ -127,7 +129,12 @@ def ns():
     definitions("vllm_ascend/models/deepseek_v4/cache_config.py", n)
     definitions(STORE + "layerwise/metadata.py", n, {"SharedBlockData", "LayerRangeReqMeta", "get_partial_block_index"})
     definitions(STORE + "layerwise/kv_transfer.py", n, {"LayerBatchBuilder"})
-    definitions(STORE + "backend/mooncake_offload.py", n, {"snapshot_key", "_load_entries", "_save_entries"})
+    definitions(
+        STORE + "backend/mooncake_offload.py",
+        n,
+        {"snapshot_key", "_load_entries", "_save_entries", "_continuation_window_start"},
+    )
+    definitions("vllm_ascend/models/deepseek_v4/cache_transfer.py", n)
     n["block_hash_to_str"] = lambda value: value.hex()
     return n
 
@@ -447,6 +454,33 @@ def test_dsv4_window_continuation_restores_live_pages_only(ns):
     worker._offload_active_pages[("request", "incarnation", 0)] = (128, {1: "stale"})
     with pytest.raises(ValueError, match="no committed version"):
         ns["_load_entries"](worker, request, 0, [], None)
+
+
+def test_window_save_keeps_public_checkpoint_and_private_tail(ns):
+    worker = NS(
+        grouped_block_size=[128],
+        group_uses_align_state=[False],
+        kv_cache_config=NS(dsv4_continuation_windows={0: 129}),
+        _is_layerwise_save_owner=lambda group: True,
+        _layerwise_save_full_end=lambda *args: 4,
+        _make_layerwise_full_key=lambda group, key: key,
+    )
+    request = NS(
+        target_token_len=512, save_start_token=0, can_save=True,
+        block_ids_by_group=[[1, 2, 3, 4]], store_masks=[[True, False, False, False]],
+        layerwise_request_id="incarnation",
+    )
+    entries = ns["_save_entries"](worker, request, NS(), 0, [b"a", b"b", b"c", b"d"])
+    assert entries == [(b"a".hex(), 0), ("offload_v1:incarnation:512:3", 3)]
+
+
+def test_indexer_transport_drops_only_overlapping_view(ns):
+    views = [object(), object(), object()]
+    caches = {"layer.indexer.k_cache": views, "other": views}
+    selected = ns["transfer_cache_views"](caches)
+    assert selected["layer.indexer.k_cache"] == views[:2]
+    assert selected["other"] is views
+    assert len(caches["layer.indexer.k_cache"]) == 3
 
 
 def isolated_method(path, cls_name, method_name, ns):

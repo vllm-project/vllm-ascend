@@ -12,6 +12,7 @@ from dataclasses import asdict, replace
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, UniformTypeKVCacheSpecs
 
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import LayerwiseCachePlanner
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     get_layerwise_reuse_config,
@@ -43,7 +44,8 @@ def component_layout_identity(groups) -> str:
         for name in sorted(group.layer_names):
             spec = group.kv_cache_spec.kv_cache_specs[name]
             components.append((group_id, name, type(spec).__name__, asdict(spec), spec.page_size_bytes))
-    return hashlib.sha256(json.dumps(components, sort_keys=True, default=str).encode()).hexdigest()
+    payload = json.dumps(("dsv4-components-v2", components), sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def validate_dsv4_transfer_speculation(config) -> None:
@@ -86,7 +88,10 @@ def build_deepseek_v4_reuse_config(config, groups, num_blocks):
     plan.prefix_cache_retention_interval = getattr(config.cache_config, "prefix_cache_retention_interval", None)
     # DSV4 groups contain only attention history, window pages and compressor
     # state. The common planner excludes draft and independently resident layers.
-    rules = dict.fromkeys(map(type, specs.values()), True)
+    rules = {
+        AscendMLAAttentionSpec: lambda spec: spec.model_version == "deepseek_v4",
+        AscendSlidingWindowMLASpec: True,
+    }
     planner = LayerwiseCachePlanner(plan, config, extra, spec_reuse_rules=rules)
     layout = planner.build()
     if layout.has_layer_reuse:
@@ -115,6 +120,14 @@ def build_deepseek_v4_reuse_config(config, groups, num_blocks):
         for group_id, group in enumerate(groups)
         if all(getattr(specs[name], "sliding_window", None) is not None for name in group.layer_names)
     )
+    if getattr(config, "speculative_config", None) is None:
+        plan.dsv4_continuation_windows = {
+            group_id: max(
+                specs[name].sliding_window + (getattr(specs[name], "extra_retained_tokens", 0) or 0)
+                for name in groups[group_id].layer_names
+            )
+            for group_id in plan.dsv4_window_group_ids
+        }
     plan.dsv4_component_identity = component_layout_identity(groups)
     plan.kv_cache_allocation_alignment = 2 * 1024 * 1024
     plan.kv_transfer_config = config.kv_transfer_config
