@@ -229,13 +229,27 @@ def test_real_npu_worker_constructor_initializes_parent_and_npu_state(worker_con
     assert worker.cache_dtype == (torch.float16 if cache_dtype == "auto" else torch.float32)
 
 
-def test_parent_constructor_accepts_model_runner_v2_without_triton(worker_constructor, monkeypatch):
+def test_310p_parent_constructor_restores_triton_availability(worker_constructor, monkeypatch):
     """The 310P lanes run Model Runner V2 with Triton uninstalled."""
     from vllm.v1.worker import gpu_worker
 
+    from vllm_ascend._310p.worker_310p import NPUWorker310
+
     monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
-    construct_worker(worker_constructor)
-    assert gpu_worker.HAS_TRITON is True
+    construct_worker(worker_constructor, NPUWorker310)
+    assert gpu_worker.HAS_TRITON is False
+
+
+def test_parent_constructor_failure_restores_triton_availability(worker_constructor, monkeypatch):
+    from vllm.v1.worker import gpu_worker
+
+    monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
+    gpu_worker.validate_worker_profiler_config.side_effect = RuntimeError("parent initialization failed")
+
+    with pytest.raises(RuntimeError, match="parent initialization failed"):
+        construct_worker(worker_constructor)
+
+    assert gpu_worker.HAS_TRITON is False
 
 
 def test_310p_constructor_device_runner_and_export(worker_constructor, monkeypatch):

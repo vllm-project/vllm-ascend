@@ -18,12 +18,17 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from threading import RLock
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:
     VllmConfig = None
+
+_GPU_WORKER_TRITON_LOCK = RLock()
 
 
 def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
@@ -66,21 +71,23 @@ def _validate_v2_model_runner(self) -> None:
         raise ValueError(f"Model Runner V2 does not yet support: {', '.join(unsupported)}")
 
 
-def allow_v2_model_runner_without_triton() -> None:
-    """Drop the Triton precondition that ``GPUWorker.__init__`` repeats.
-
-    ``_validate_v2_model_runner`` covers the config layer, but the upstream
-    worker constructor checks its own import of ``HAS_TRITON`` and raises before
-    the Ascend runner is selected. Ascend has no V1 runner to fall back to, and
-    the 310P lanes run Model Runner V2 with Triton uninstalled, so the
-    worker-level copy of the flag is relaxed here. Only
-    ``vllm.v1.worker.gpu_worker`` is affected; every other module keeps the real
-    detection, and the guard keeps this working once upstream drops the flag.
-    """
+@contextmanager
+def allow_v2_model_runner_without_triton() -> Iterator[None]:
+    """Relax the GPU worker's Triton check during Ascend construction."""
     from vllm.v1.worker import gpu_worker
 
-    if hasattr(gpu_worker, "HAS_TRITON") and not gpu_worker.HAS_TRITON:
+    # Serialize callers so overlapping constructors cannot restore the flag
+    # while another constructor using this context is still running.
+    with _GPU_WORKER_TRITON_LOCK:
+        has_triton = getattr(gpu_worker, "HAS_TRITON", True)
+        if has_triton:
+            yield
+            return
         gpu_worker.HAS_TRITON = True
+        try:
+            yield
+        finally:
+            gpu_worker.HAS_TRITON = has_triton
 
 
 def apply_v2_model_runner_config_patch() -> None:

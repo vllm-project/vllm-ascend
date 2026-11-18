@@ -205,19 +205,16 @@ class NPUWorker(GPUWorker):
         if getattr(vllm_config.parallel_config, "enable_fault_tolerance", False):
             raise NotImplementedError("Ascend does not support the GPU fault-tolerance sentinel.")
 
-        # GPUWorker.__init__ repeats Model Runner V2's Triton precondition, which
-        # apply_v2_model_runner_config_patch() already drops for the config layer.
-        # Ascend keeps the runner available without Triton: the 310P lanes run it
-        # with Triton uninstalled and there is no V1 runner to fall back to.
-        allow_v2_model_runner_without_triton()
-
-        super().__init__(
-            vllm_config=vllm_config,
-            local_rank=local_rank,
-            rank=rank,
-            distributed_init_method=distributed_init_method,
-            is_driver_worker=is_driver_worker,
-        )
+        # 310P runs Model Runner V2 without Triton. Remove this workaround once
+        # supported vLLM versions let workers override the Triton check.
+        with allow_v2_model_runner_without_triton():
+            super().__init__(
+                vllm_config=vllm_config,
+                local_rank=local_rank,
+                rank=rank,
+                distributed_init_method=distributed_init_method,
+                is_driver_worker=is_driver_worker,
+            )
 
         # Shared worker state is initialized and owned by GPUWorker.__init__.
         # These are annotation-only declarations (no runtime assignment) so that
