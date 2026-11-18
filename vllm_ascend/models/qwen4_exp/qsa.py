@@ -168,11 +168,10 @@ def apply_qsa_rope(
     """Apply RoPE using the QSA head width rather than the main Q/K width."""
     rotary_dim = int(rotary_emb.rotary_dim)
     cache = rotary_emb._match_cos_sin_cache_dtype(tensor)  # noqa: SLF001
-    sections = list(getattr(rotary_emb, "mrope_section", []))
+    sections = list(getattr(rotary_emb, "mrope_section", None) or ())
     # Keep the materialized normalization/RoPE boundary portable on Ascend.
     # The CUDA/ROCm variants use a Triton MRoPE gather here; advanced indexing
     # has identical semantics and is graph-capturable by the NPU backend.
-    use_merged_cache = False
     # Compression emits rows for every scheduled token, including rows whose
     # compressed slot is invalid.  Never let such dead-row metadata reach the
     # NPU Index kernel as an out-of-range address.  This materializes only the
@@ -181,7 +180,7 @@ def apply_qsa_rope(
     cos_sin = cache[safe_positions]
     cos, sin = cos_sin.chunk(2, dim=-1)
 
-    if positions.ndim == 2 and not use_merged_cache:
+    if positions.ndim == 2:
         if getattr(rotary_emb, "mrope_interleaved", False):
             merged_cos = cos[0].clone()
             merged_sin = sin[0].clone()
@@ -288,13 +287,14 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
     def _fused_norm_rope_eligible(
         self,
         tensor: torch.Tensor,
+        norm: torch.nn.Module,
         positions: torch.Tensor,
     ) -> bool:
         return bool(
             tensor.dtype == torch.bfloat16
             and tensor.ndim == 3
             and tensor.shape[-1] == self.index_head_dim == 128
-            and self.k_layernorm.weight.dtype == tensor.dtype
+            and norm.weight.dtype == tensor.dtype
             and getattr(self.rotary_emb, "rotary_dim", None) == 64
             and getattr(self.rotary_emb, "is_neox_style", False)
             and (
@@ -327,6 +327,22 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             rope_dim=self.rotary_emb.rotary_dim,
         )
 
+    def _norm_rope(
+        self,
+        tensor: torch.Tensor,
+        norm: torch.nn.Module,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        # Preserve ordinary RoPE's BF16 rounding before C8 quantization.
+        # Interleaved MRoPE can use the fused path for either position layout.
+        if positions.ndim == 2 and positions.shape[0] == 1:
+            positions = positions[0]
+        if getattr(self.rotary_emb, "mrope_section", None) and self._fused_norm_rope_eligible(tensor, norm, positions):
+            return self._fused_norm_rope(tensor, norm, positions)
+        logger.info_once("QSA indexer is using separate RMSNorm and RoPE.")
+        normalized = norm.forward_native(tensor)
+        return apply_qsa_rope(self.rotary_emb, positions, normalized)
+
     def normalize_compressed_keys(
         self,
         pooled: torch.Tensor,
@@ -340,11 +356,10 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         else:
             first_positions = first_positions[:, 0]
         pooled = pooled.reshape(-1, 1, self.index_head_dim)
-        if not self._fused_norm_rope_eligible(pooled, first_positions):
-            return super().normalize_compressed_keys(
-                original_pooled,
-                original_positions,
-            )
+        if self.c8_enabled:
+            return self._norm_rope(pooled, self.k_layernorm, first_positions)
+        if not self._fused_norm_rope_eligible(pooled, self.k_layernorm, first_positions):
+            return super().normalize_compressed_keys(original_pooled, original_positions)
         return self._fused_norm_rope(
             pooled,
             self.k_layernorm,
@@ -465,9 +480,12 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             dim=-1,
         )
         q = q_raw.reshape(-1, self.index_n_heads, self.index_head_dim)
-        if not self._fused_norm_rope_eligible(q, positions):
+        if self.c8_enabled:
+            q = self._norm_rope(q, self.q_layernorm, positions).to(self.indexer_dtype)
+        elif self._fused_norm_rope_eligible(q, self.q_layernorm, positions):
+            q = self._fused_norm_rope(q, self.q_layernorm, positions)
+        else:
             return super().project_qk(hidden_states, positions)
-        q = self._fused_norm_rope(q, self.q_layernorm, positions)
         return q, token_k.reshape(-1, 1, self.index_head_dim)
 
     def _update_and_compress(
@@ -976,9 +994,7 @@ class AscendPCPQSACompressedKeyCache(qsa_indexer.QSACompressedKeyCache):
 class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
     """Qwen4Exp QSA owner bound to the Ascend implementation."""
 
-    def __init__(
-        self, *, vllm_config: VllmConfig, quant_config: Any = None, prefix: str = "", **kwargs: Any
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, quant_config: Any = None, prefix: str = "", **kwargs: Any) -> None:
         self.c8_enabled = uses_qsa_c8_quantization(quant_config, prefix)
         use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
         if use_pcp:
