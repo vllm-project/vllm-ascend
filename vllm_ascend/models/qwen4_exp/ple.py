@@ -31,6 +31,7 @@ from vllm_ascend.ops.triton_ple import (
     ple_conv_decode,
     ple_conv_prefill,
     ple_conv_spec,
+    ple_gate,
 )
 
 
@@ -340,6 +341,7 @@ def patch_upstream_ple_short_conv() -> None:
     # The AMD PLE class binds this function at module import time.  Replace
     # only that model-local binding; other platforms keep the upstream kernel.
     upstream_ple_layer.ple_conv = _ple_conv_ascend
+    upstream_ple_layer.ple_gate = ple_gate
 
     original_attr = "_ascend_original_short_conv"
     if not hasattr(Qwen4ExpPLELayer, original_attr):
