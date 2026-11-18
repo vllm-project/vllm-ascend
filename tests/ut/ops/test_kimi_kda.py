@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import nullcontext
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -264,7 +264,7 @@ def test_mixed_forward_marks_auxiliary_beta_as_preprocessed(recover):
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
     attention.uses_mixed_projection = True
-    attention.projection_tp = None
+    attention.qkv_layout = None
     attention.use_recoverssm = recover
     attention.pcp_size = 1
     attention.local_num_heads = 2
@@ -804,110 +804,187 @@ def test_kda_prefill_direct_norm_and_idle_output(mode, recover):
         torch.testing.assert_close(core, before)
 
 
-@pytest.mark.parametrize("local_tokens,dp_tokens", [(2, None), (0, 2)])
-def test_kda_launches_gate_exchange_early_and_waits_at_consumers(monkeypatch, local_tokens, dp_tokens):
-    trace: list[str] = []
-    main = _RecordingStream("main", ["owner_ready", "input_ready"], trace)
-    aux = _RecordingStream("aux", ["forget_ready", "beta_ready"], trace)
-    group = SimpleNamespace(world_size=2)
-    monkeypatch.setattr(common_projection, "_EXTRA_CTX", SimpleNamespace(max_tokens_across_dp=dp_tokens))
+@pytest.mark.parametrize("groups", ["shared", "distinct", "qkv_only", "gate_only"])
+@pytest.mark.parametrize("mode", ["decode", "verify", "mixed", "idle", "no_metadata"])
+def test_local_tp_gate_runs_on_aux_at_recurrence(monkeypatch, groups, mode):
+    """Trace stream submissions through the real KDA dispatch, including owners with no recurrent work."""
+    trace = []
+    main, aux = MagicMock(), MagicMock()
+    active = main
+
+    def mark(name):
+        trace.append((name, "main" if active is main else "aux"))
+
+    @contextmanager
+    def switch(stream):
+        nonlocal active
+        previous, active = active, stream
+        try:
+            yield
+        finally:
+            active = previous
+
+    main.wait_stream.side_effect = lambda stream: mark("join")
+    aux.wait_stream.side_effect = lambda stream: mark("fork")
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: active)
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda *args: None)
     monkeypatch.setattr(projection_module, "_kda_bfg_stream", lambda: aux)
-    monkeypatch.setattr(projection_module.torch.npu, "current_stream", lambda: main)
-    monkeypatch.setattr(projection_module, "npu_stream_switch", lambda stream: nullcontext())
-    monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: None)
+    monkeypatch.setattr(projection_module, "npu_stream_switch", switch)
+    monkeypatch.setattr(common_projection, "_EXTRA_CTX", SimpleNamespace(max_tokens_across_dp=2))
 
-    class Communication:
-        def gather(self, hidden, group):
-            def wait():
-                trace.append("wait-input-AG")
-                return torch.cat([hidden, hidden])
+    def gather(hidden, dim):
+        mark("AG")
+        return torch.cat([hidden, hidden], dim=dim)
 
-            return SimpleNamespace(wait=wait)
+    def exchange(out, src, group):
+        mark("A2A")
+        out.copy_(src)
 
-        def exchange(self, source, group):
-            name = "G" if source.shape[-1] == 2 else "QKV"
-            trace.append(f"exchange-{name}")
-            work = MagicMock()
-            work.wait.side_effect = lambda: trace.append(f"wait-{name}")
-            return projection_module.PendingTensor(source.clone(), work, source)
+    monkeypatch.setattr(common_projection.dist, "all_to_all_single", exchange)
+    group = SimpleNamespace(world_size=2, device_group=object(), all_gather=gather)
+    q_group = None if groups == "gate_only" else group
+    g_group = None if groups == "qkv_only" else group
+    if groups == "distinct":
+        g_group = SimpleNamespace(world_size=2, device_group=object(), all_gather=gather)
+    layout = common_projection.KDAInputProjectionTPLayout
+    q_layout, g_layout = layout(q_group, 2, 2), layout(g_group, 2, 2)
 
     def linear(name, width):
-        def apply(hidden):
-            trace.append(name)
-            return hidden.new_zeros((hidden.shape[0], width)), None
+        def apply(x):
+            mark(name)
+            return x.new_ones((len(x), width)), None
 
         return apply
 
     def quantize(hidden):
-        trace.append("quant-vector")
+        mark("quant")
         return hidden
 
+    def conv(x, *args, **kwargs):
+        mark("conv")
+        return x
+
+    def recurrent(q, k, v, *args, **kwargs):
+        mark("recurrent")
+        return v.contiguous()
+
+    def verify(q, k, v, *args):
+        mark("verify")
+        return v.contiguous()
+
+    def norm(x, gate, *, out):
+        mark("norm")
+        assert gate.shape == x.shape[1:] == (2, 2, 2)
+        out.copy_(x * gate)
+
+    speculative = mode in ("verify", "mixed")
+    conv_meta = SimpleNamespace(
+        query_start_loc=torch.tensor([0, 2]), cache_indices=torch.tensor([0]), num_accepted_tokens=None
+    )
+    ids = torch.tensor([0]) if mode == "mixed" else torch.tensor([0, 1])
+    metadata = SimpleNamespace(
+        num_actual_tokens=0 if mode == "idle" else 2,
+        num_prefills=0,
+        num_decodes=int(mode in ("decode", "mixed")),
+        num_decode_tokens=int(mode == "mixed") or 2,
+        num_spec_decodes=int(speculative),
+        spec_sequence_masks=None,
+        spec_token_indx=ids,
+        non_spec_token_indx=torch.tensor([1]),
+        spec_query_start_loc=conv_meta.query_start_loc,
+        non_spec_query_start_loc=conv_meta.query_start_loc,
+        spec_state_indices_tensor=torch.tensor([[0]]),
+        non_spec_state_indices_tensor=torch.tensor([0]),
+        spec_decode_metadata=SimpleNamespace(spec_causal_conv1d=conv_meta),
+        non_spec_decode_metadata=SimpleNamespace(causal_conv1d=conv_meta),
+    )
+    monkeypatch.setattr(projection_module, "GDNAttentionMetadata", SimpleNamespace)
+    monkeypatch.setattr(
+        projection_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata=None if mode == "no_metadata" else {"layer": metadata}),
+    )
+    monkeypatch.setattr(projection_module, "kda_recoverssm_verify", verify)
+    for name in (
+        "maybe_save_kv_layer_to_connector",
+        "wait_for_kv_layer_from_connector",
+        "record_attention_compute_start",
+    ):
+        monkeypatch.setattr(projection_module, name, MagicMock())
     layer = SimpleNamespace(
+        qkv_layout=q_layout,
+        gate_layout=g_layout,
+        num_heads=2,
+        local_num_heads=2,
+        head_dim=2,
+        prefix="layer",
+        use_recoverssm=speculative,
+        num_spec=1,
+        kv_cache=(None, None),
+        A_log=torch.zeros(2),
+        dt_bias=None,
+        gate_lower_bound=-5.0,
+        recoverssm_records=SimpleNamespace(correction=None, key_gate=None),
+        get_parameter=lambda name: None,
+        _run_causal_conv1d=conv,
+        _run_recurrent=recurrent,
         f_a_proj=linear("F_a", 2),
         f_b_proj=linear("F_b", 4),
-        g_proj=linear("G-cube", 2),
-        b_proj=linear("beta-cube", 1),
+        b_proj=linear("beta", q_layout.heads),
+        g_proj=linear("G", g_layout.width),
         _quantize_fused_qkv=quantize,
-        _matmul_fused_qkv=lambda hidden: linear("QKV-cube", 6)(hidden)[0],
+        _matmul_fused_qkv=lambda x: linear("QKV", 3 * q_layout.width)(x)[0],
+        o_norm=SimpleNamespace(forward_oot=norm),
+        o_proj=lambda x: (x, None),
     )
-    executor = projection_module.KDAProjectionTP(group, group, 2, 2)
-    executor.communication = Communication()
-    pending = executor.project(layer, torch.ones(local_tokens, 3))
-    assert pending is not None
-    trace.append("zeros-vector")
-    qkv, forget, beta, gate = pending.wait()
-    trace.append("core-vector")
-    gate.wait()
-    assert trace.index("F_b") < trace.index("aux.record:forget_ready") < trace.index("main.wait:forget_ready")
-    assert trace.index("wait-input-AG") < trace.index("main.wait:forget_ready") < trace.index("G-cube")
-    assert trace.index("G-cube") < trace.index("main.record:input_ready") < trace.index("aux.wait:input_ready")
-    assert trace.index("aux.wait:input_ready") < trace.index("beta-cube") < trace.index("aux.record:beta_ready")
-    assert trace.index("G-cube") < trace.index("beta-cube")
-    assert trace.index("G-cube") < trace.index("quant-vector")
-    assert trace.index("G-cube") < trace.index("exchange-G") < trace.index("beta-cube")
-    assert trace.index("exchange-G") < trace.index("quant-vector")
-    assert trace.index("exchange-QKV") < trace.index("zeros-vector") < trace.index("wait-QKV")
-    assert trace.index("core-vector") < trace.index("wait-G")
-    assert trace.count("wait-G") == trace.count("wait-QKV") == 1
-    assert qkv.shape == (2, 12) and beta.shape == (1, 2, 2) and forget.shape == (1, 2, 2, 2)
+    layer._forward_core = AscendKimiK3DeltaAttention._forward_core.__get__(layer)
+    hidden = torch.ones((0 if mode == "idle" else 2, 4))
+    layer._forward_local_tp = AscendKimiK3DeltaAttention._forward_local_tp.__get__(layer)
+    output = AscendKimiK3DeltaAttention.forward(layer, hidden, torch.arange(len(hidden)))
+    assert trace.count(("AG", "main")) == int(q_group is not None)
+    assert trace.count(("AG", "aux")) == int(g_group is not None and g_group is not q_group)
+    assert trace.count(("A2A", "main")) == int(q_group is not None)
+    assert trace.count(("A2A", "aux")) == int(g_group is not None)
+    assert (
+        trace.index(("beta", "aux"))
+        < trace.index(("quant", "main"))
+        < trace.index(("join", "main"))
+        < trace.index(("QKV", "main"))
+    )
+    assert trace.count(("G", "aux")) == 1
+    gate_index = trace.index(("G", "aux"))
+    if g_group is not None:
+        assert gate_index < trace.index(("A2A", "aux"))
+    if mode in ("idle", "no_metadata"):
+        assert ("norm", "main") not in trace
+        torch.testing.assert_close(output, torch.zeros_like(hidden))
+    else:
+        first_kernel = "verify" if speculative else "recurrent"
+        assert trace.index(("conv", "main")) < gate_index < trace.index((first_kernel, "main"))
+        assert trace[-2:] == [("join", "main"), ("norm", "main")]
+        torch.testing.assert_close(output, torch.ones_like(hidden))
 
 
 @pytest.mark.parametrize("dp_tokens", [None, 0])
-def test_kda_projection_skips_streams_and_collectives_when_capacity_is_zero(monkeypatch, dp_tokens):
+def test_local_tp_empty_capacity_skips_both_streams(monkeypatch, dp_tokens):
     monkeypatch.setattr(common_projection, "_EXTRA_CTX", SimpleNamespace(max_tokens_across_dp=dp_tokens))
     stream = MagicMock()
     monkeypatch.setattr(projection_module, "_kda_bfg_stream", stream)
-    executor = projection_module.KDAProjectionTP(None, None, 2, 2)
-    executor.communication = MagicMock()
-
-    assert executor.project(None, torch.empty(0, 3)) is None
+    layer = SimpleNamespace(qkv_layout=common_projection.KDAInputProjectionTPLayout(None, 2, 2))
+    hidden = torch.empty(0, 3)
+    assert AscendKimiK3DeltaAttention._forward_local_tp(layer, hidden).shape == hidden.shape
     stream.assert_not_called()
-    assert not executor.communication.mock_calls
 
 
-def test_pending_kda_projection_restores_owner_heads_once(monkeypatch):
-    monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: None)
-    monkeypatch.setattr(torch.npu, "current_stream", lambda: None)
+def test_local_tp_restores_head_order():
     receive = torch.tensor(
         [
             [[10, 11, 20, 21, 30, 31, 40], [110, 111, 120, 121, 130, 131, 140]],
             [[12, 13, 22, 23, 32, 33, 41], [112, 113, 122, 123, 132, 133, 141]],
         ]
     )
-    work = MagicMock()
-    gate = projection_module.PendingGate(
-        None, torch.zeros(2, 4), common_projection.KDAInputProjectionTPLayout(None, 2, 2), 2
-    )
-    pending = projection_module.PendingKDAProjection(
-        torch.empty(0),
-        torch.empty(0),
-        torch.zeros(2, 4),
-        gate,
-        projection_module.PendingTensor(receive, work, receive),
-        common_projection.KDAInputProjectionTPLayout(SimpleNamespace(world_size=2), 2, 2),
-        2,
-    )
-    qkv, _, beta, _ = pending.wait()
+    layout = common_projection.KDAInputProjectionTPLayout(SimpleNamespace(world_size=2), 2, 2)
+    qkv, beta = layout.restore_qkv_beta(receive, 2)
     torch.testing.assert_close(
         qkv,
         torch.tensor(
@@ -918,8 +995,7 @@ def test_pending_kda_projection_restores_owner_heads_once(monkeypatch):
         ),
     )
     torch.testing.assert_close(beta, torch.tensor([[[40, 41], [140, 141]]]))
-    assert pending.wait()[0].data_ptr() == qkv.data_ptr()
-    work.wait.assert_called_once()
+    torch.testing.assert_close(layout.restore_gate(receive[..., :2], 2), qkv[:, :4].view(2, 2, 2))
 
 
 @pytest.mark.parametrize(

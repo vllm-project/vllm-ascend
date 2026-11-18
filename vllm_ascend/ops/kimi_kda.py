@@ -26,7 +26,6 @@ from vllm.models.kimi_k3.nvidia.kda import (
     KimiK3DeltaAttention,
     _make_decode_conv1d_weight_loader,
 )
-from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -123,12 +122,7 @@ class PendingGate:
             assert self.owner_gate is not None
             return self.owner_gate.view(self.capacity, self.layout.num_heads, self.layout.head_dim)
         layout = self.layout
-        self.owner_gate = (
-            self.pending.wait()
-            .view(layout.size, self.capacity, layout.heads, layout.head_dim)
-            .permute(1, 0, 2, 3)
-            .reshape(self.capacity, layout.num_heads, layout.head_dim)
-        )
+        self.owner_gate = layout.restore_gate(self.pending.wait(), self.capacity)
         self.pending = None
         return self.owner_gate
 
@@ -148,97 +142,6 @@ class FullRankGateTP:
         gate = layer(hidden)[0]
         return PendingGate(
             self.communication.exchange(gate, self.group), None, self.layout, hidden.shape[0] // self.layout.size
-        )
-
-
-@dataclass
-class PendingKDAProjection:
-    qkv: torch.Tensor
-    beta: torch.Tensor
-    forget: torch.Tensor
-    gate: PendingGate
-    pending_qkv: PendingTensor | None
-    layout: KDAInputProjectionTPLayout
-    capacity: int
-
-    def wait(self):
-        if self.pending_qkv is not None:
-            self.qkv, self.beta = self.layout.restore_qkv_beta(self.pending_qkv.wait(), self.capacity)
-            self.pending_qkv = None
-        return (
-            self.qkv,
-            self.forget.view(1, self.capacity, self.layout.num_heads, self.layout.head_dim),
-            self.beta,
-            self.gate,
-        )
-
-
-class KDAProjectionTP:
-    def __init__(self, qkv_group, gate_group, heads: int, head_dim: int):
-        self.qkv_group, self.gate_group = qkv_group, gate_group
-        self.qkv_layout = KDAInputProjectionTPLayout(qkv_group, heads, head_dim)
-        self.gate_layout = KDAInputProjectionTPLayout(gate_group, heads, head_dim)
-        self.communication = TPCommunication()
-
-    def project(self, layer, hidden) -> PendingKDAProjection | None:
-        owner, capacity = self.qkv_layout.prepare_input(hidden)
-        if capacity == 0:
-            return None
-        aux_stream = _kda_bfg_stream()
-        q_input = self.communication.gather(owner, self.qkv_group) if self.qkv_group is not None else None
-        if self.gate_group is self.qkv_group:
-            g_input = q_input
-        else:
-            g_input = self.communication.gather(owner, self.gate_group) if self.gate_group is not None else None
-
-        main = torch.npu.current_stream()
-        owner_ready = main.record_event()
-        owner.record_stream(aux_stream)
-        # C1: owner F needs no gathered input and runs during input AG.
-        with npu_stream_switch(aux_stream):
-            aux_stream.wait_event(owner_ready)
-            forget = layer.f_b_proj(layer.f_a_proj(owner)[0])[0]
-            forget_ready = aux_stream.record_event()
-        # G waits for input AG and owner F_b, avoiding concurrent Cube work.
-        g_hidden = g_input.wait() if g_input is not None else owner
-        main.wait_event(forget_ready)
-        gate = layer.g_proj(g_hidden)[0]
-        pending_gate = self.exchange_gate(gate)
-        q_hidden = g_hidden if q_input is g_input else q_input.wait() if q_input is not None else owner
-        input_ready = main.record_event()
-        q_hidden.record_stream(aux_stream)
-        # C2: raw BF16 beta Cube and MX input quant Vector have the same input.
-        with npu_stream_switch(aux_stream):
-            aux_stream.wait_event(input_ready)
-            beta = layer.b_proj(q_hidden)[0]
-            beta_ready = aux_stream.record_event()
-        quantized = layer._quantize_fused_qkv(q_hidden)
-        main.wait_event(beta_ready)
-        beta.record_stream(main)
-        forget.record_stream(main)
-        qkv = layer._matmul_fused_qkv(quantized)
-        q_pending = None
-        if self.qkv_group is not None:
-            if qkv.dtype != beta.dtype:
-                raise RuntimeError("Kimi QKV/beta exchange requires equal raw projection dtypes.")
-            q_pending = self.communication.exchange(torch.cat((qkv, beta), dim=-1), self.qkv_group)
-        return PendingKDAProjection(
-            qkv,
-            beta.unsqueeze(0),
-            forget,
-            pending_gate,
-            q_pending,
-            self.qkv_layout,
-            capacity,
-        )
-
-    def exchange_gate(self, gate: torch.Tensor) -> PendingGate:
-        size = self.gate_group.world_size if self.gate_group is not None else 1
-        return PendingGate(
-            self.communication.exchange(gate, self.gate_group) if self.gate_group is not None else None,
-            gate if self.gate_group is None else None,
-            self.gate_layout,
-            gate.shape[0] // size,
         )
 
 
@@ -413,7 +316,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             self._init_pcp_projections(vllm_config, prefix)
         self.uses_mixed_projection = uses_mixed_projection
         self._ascend_kda_state_copy = None
-        self.projection_tp = None
+        self.qkv_layout: KDAInputProjectionTPLayout | None = None
         fine_tp = getattr(vllm_config, "additional_config", {}).get("finegrained_tp_config", {})
         qkv_size = int(fine_tp.get("qkv_iproj_tensor_parallel_size", 1))
         gate_size = int(fine_tp.get("gproj_tensor_parallel_size", 1))
@@ -473,7 +376,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 quant_config=None,
                 prefix=f"{prefix}.g_proj",
             )
-            self.projection_tp = KDAProjectionTP(qkv_group, gate_group, self.num_heads, self.head_dim)
+            self.qkv_layout = KDAInputProjectionTPLayout(qkv_group, self.num_heads, self.head_dim)
+            self.gate_layout = KDAInputProjectionTPLayout(gate_group, self.num_heads, self.head_dim)
         elif uses_mixed_projection:
             # vLLM 0.27 packs all KDA input projections into one linear.  A
             # QuaRot checkpoint instead stores q/k/v as W8A8 and keeps B/F/G
@@ -607,16 +511,79 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        if self.projection_tp is not None:
-            output = torch.empty_like(hidden_states)
-            torch.ops.vllm.kimi_kda_finegrained_forward(hidden_states, output, self.prefix)
-            return output
+        if self.qkv_layout is not None:
+            return self._forward_local_tp(hidden_states)
         if self.pcp_size > 1:
             hidden_states = torch.ops.vllm.kda_pcp_gather(hidden_states, self.pcp_size, self.prefix)
         output = self._forward_projections(hidden_states, positions)
         if self.pcp_size > 1:
             output = torch.ops.vllm.kda_pcp_scatter(output, self.pcp_size, self.prefix)
         return output
+
+    def _forward_local_tp(self, hidden: torch.Tensor) -> torch.Tensor:
+        layout = self.qkv_layout
+        assert layout is not None
+        owner, capacity = layout.prepare_input(hidden)
+        if capacity == 0:
+            return torch.empty_like(hidden)
+
+        main = torch.npu.current_stream()
+        aux = _kda_bfg_stream()
+        with npu_stream_switch(aux):
+            aux.wait_stream(main)
+            owner.record_stream(aux)
+            forget = self.f_b_proj(self.f_a_proj(owner)[0])[0]
+
+        q_hidden = layout.group.all_gather(owner, dim=0) if layout.group is not None else owner
+        with npu_stream_switch(aux):
+            aux.wait_stream(main)
+            q_hidden.record_stream(aux)
+            beta = self.b_proj(q_hidden)[0]
+        quantized = self._quantize_fused_qkv(q_hidden)
+        main.wait_stream(aux)
+        beta.record_stream(main)
+        forget.record_stream(main)
+        qkv = self._matmul_fused_qkv(quantized)
+        core_out = hidden.new_zeros((1, capacity, self.local_num_heads, self.head_dim))
+        if layout.group is not None:
+            if qkv.dtype != beta.dtype:
+                raise RuntimeError("Kimi QKV/beta exchange requires equal raw projection dtypes.")
+            received = layout.all_to_all(torch.cat((qkv, beta), dim=-1))
+            qkv, beta = layout.restore_qkv_beta(received, capacity)
+        else:
+            beta = beta.unsqueeze(0)
+        forget = forget.view(1, capacity, self.num_heads, self.head_dim)
+
+        owner_gate = None
+
+        def launch_gate():
+            nonlocal owner_gate
+            gate_layout = self.gate_layout
+            with npu_stream_switch(aux):
+                # Fork after the first convolution. G and its exchange can run alongside the recurrent kernel.
+                aux.wait_stream(main)
+                gate_hidden = owner
+                if gate_layout.group is layout.group:
+                    gate_hidden = q_hidden
+                elif gate_layout.group is not None:
+                    gate_hidden = gate_layout.group.all_gather(owner, dim=0)
+                gate = self.g_proj(gate_hidden)[0]
+                if gate_layout.group is not None:
+                    gate = gate_layout.all_to_all(gate.contiguous())
+                owner_gate = gate_layout.restore_gate(gate, capacity)
+
+        norm_input = self._forward_core(qkv, forget, beta, core_out, launch_gate=launch_gate)
+        if owner_gate is None:
+            # An idle owner still owes its peers their gate shards.
+            launch_gate()
+        main.wait_stream(aux)
+        assert owner_gate is not None
+        owner_gate.record_stream(main)
+        if norm_input is not None:
+            self.o_norm.forward_oot(norm_input, owner_gate[: norm_input.shape[1]], out=core_out)
+            maybe_save_kv_layer_to_connector("", [])
+        projected = self.o_proj(core_out.reshape(capacity, -1))[0]
+        return projected[: hidden.shape[0]]
 
     def _forward_projections(self, hidden_states: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         if self.uses_mixed_projection:
@@ -917,7 +884,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             self.o_norm.forward_oot(norm_input, g2[: norm_input.shape[1]], out=core_attn_out)
             maybe_save_kv_layer_to_connector("", [])
 
-    def _forward_core(self, mixed_qkv, g1, beta, core_attn_out, *, beta_is_preprocessed=False):
+    def _forward_core(self, mixed_qkv, g1, beta, core_attn_out, *, beta_is_preprocessed=False, launch_gate=None):
         """Original conv/spec/recurrent dispatch, with no dependency on output G."""
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
@@ -1004,6 +971,9 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             assert raw_gate_spec is not None and beta_spec is not None
             assert attn_metadata.spec_query_start_loc is not None
             assert attn_metadata.spec_state_indices_tensor is not None
+            if launch_gate is not None:
+                launch_gate()
+                launch_gate = None  # A mixed batch shares the same gate for both token subsets.
             if use_recoverssm:
                 records = self.recoverssm_records
                 if records is None:
@@ -1072,6 +1042,9 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             assert beta_non_spec is not None
             if use_recoverssm:
                 beta_non_spec = beta_non_spec.float().sigmoid()
+
+            if launch_gate is not None:
+                launch_gate()
 
             split_non_spec = not use_spec and attn_metadata.num_prefills > 0 and attn_metadata.num_decodes > 0
             num_decode_tokens = attn_metadata.num_decode_tokens
@@ -1166,35 +1139,3 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             norm_input = norm_out
 
         return norm_input
-
-
-@eager_break_during_capture
-def kimi_kda_finegrained_forward(hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str) -> None:
-    layer = get_forward_context().no_compile_layers[layer_name]
-    pending = layer.projection_tp.project(layer, hidden_states)
-    if pending is None:
-        output.zero_()
-        return
-    capacity = pending.capacity
-    # Initialize the output buffer while the QKV/beta exchange is in flight.
-    core_out = hidden_states.new_zeros((1, capacity, layer.local_num_heads, layer.head_dim))
-    qkv, forget, beta, gate = pending.wait()
-    norm_input = layer._forward_core(qkv, forget, beta, core_out)
-    owner_gate = gate.wait()
-    if norm_input is not None:
-        layer.o_norm.forward_oot(norm_input, owner_gate[: norm_input.shape[1]], out=core_out)
-        maybe_save_kv_layer_to_connector("", [])
-    projected = layer.o_proj(core_out.reshape(capacity, -1))[0]
-    output.copy_(projected[: hidden_states.shape[0]])
-
-
-def kimi_kda_finegrained_forward_fake(hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="kimi_kda_finegrained_forward",
-    op_func=kimi_kda_finegrained_forward,
-    mutates_args=["output"],
-    fake_impl=kimi_kda_finegrained_forward_fake,
-)

@@ -84,7 +84,7 @@ Set `qkv_iproj_tensor_parallel_size` above `1` when the deployment meets these c
 - A QKV IProj TP size that evenly divides both `data_parallel_size` and the KDA head count.
 
 GLM QKV TP pads to a DP-agreed capacity and supports eager execution with either
-model runner. Kimi's mixed QKV/BF16-gate pipeline requires V2 graph execution,
+model runner. Kimi's mixed QKV/BF16-gate pipeline targets V2 full-graph decode,
 `decode_context_parallel_size == 1`, full-rank output gates, capture capacity
 covering every decode step including speculative slots, the recompute scheduler,
 and `PreemptOffloadConnector` in the connector chain. Kimi validates its checkpoint
@@ -93,10 +93,12 @@ and head layout in the model constructor; these conditions do not restrict GLM Q
 `gproj_tensor_parallel_size` independently shards Kimi's full-rank KDA and DSA
 output-gate projections. It uses the same Kimi graph-decode conditions, and its
 size must divide the corresponding KDA and DSA head counts. Both projection
-sizes default to `1`; `0` also disables a split. Kimi uses the A5 multistream
-schedule for these projections. The gate exchange starts after its local GEMM;
-KDA waits after the recurrent core and DSA waits after attention, immediately
-before applying the gate.
+sizes default to `1`. A value of `0` also disables a split. On A5, KDA schedules
+the BF16 beta projection alongside QKV input quantization. After the first
+causal convolution, the auxiliary stream computes the output gate and exchanges
+its head shards while the main stream can run recurrent KDA or RecoverSSM.
+The main stream joins the auxiliary stream before gated normalization. DSA
+waits for its gate after attention.
 
 #### LM Head TP and Speculative Decoding
 

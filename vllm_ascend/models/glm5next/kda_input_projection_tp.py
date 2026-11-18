@@ -38,7 +38,11 @@ class KDAInputProjectionTPLayout:
         beta = beta.permute(1, 0, 2).reshape(1, capacity, self.num_heads)
         return qkv, beta
 
-    def _all_to_all(self, tensor: torch.Tensor) -> torch.Tensor:
+    def restore_gate(self, gate: torch.Tensor, capacity: int) -> torch.Tensor:
+        gate = gate.view(self.size, capacity, self.heads, self.head_dim)
+        return gate.transpose(0, 1).reshape(capacity, self.num_heads, self.head_dim)
+
+    def all_to_all(self, tensor: torch.Tensor) -> torch.Tensor:
         assert self.group is not None
         output = torch.empty_like(tensor)
         dist.all_to_all_single(output, tensor, group=self.group.device_group)
