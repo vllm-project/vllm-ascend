@@ -3,7 +3,7 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 #
-"""BF16 LightningIndexer adapter for Qwen3.8 QSA."""
+"""BF16 and dynamic INT8 LightningIndexer adapters for Qwen3.8 QSA."""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ import math
 import torch
 
 from vllm_ascend.ops.triton.qwen4_exp.qsa import pack_qsa_group_indices_npu
+
+from .quantization import qsa_c8_cache_views, quantize_qsa_rows
 
 _HEAD_DIM = 128
 _COMPRESS_RATIO = 4
@@ -167,5 +169,100 @@ def qsa_select_paged_tokens_lightning(
         compress_ratio,
         token_topk,
         out[:, :packed_width],
+    )
+    return out
+
+
+def qsa_select_paged_tokens_quantized(
+    query: torch.Tensor,
+    compressed_key_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    query_positions: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    token_topk: int,
+    compress_ratio: int,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """INT8 QLI-v2 with explicit per-row visibility in compressed-key units."""
+    _validate_request_boundaries(query, query_start_loc, token_to_req, sequence_lengths)
+    if query.ndim != 3 or query.dtype != torch.bfloat16 or query.shape[-1] != _HEAD_DIM:
+        raise ValueError("QSA INT8 indexer requires BF16 queries with width 128")
+    if not 0 < query.shape[1] <= 64 or token_topk != _TOKEN_TOPK or compress_ratio != _COMPRESS_RATIO:
+        raise ValueError("QSA INT8 indexer requires 1..64 heads, topk=2048 and ratio=4")
+    if block_table.ndim != 2 or not block_table.shape[1] or sequence_lengths.shape != (block_table.shape[0],):
+        raise ValueError("QSA INT8 indexer requires request page tables and sequence lengths")
+    if query_positions.shape != (query.shape[0],):
+        raise ValueError("QSA INT8 indexer positions must match query rows")
+    key, key_scales = qsa_c8_cache_views(compressed_key_cache, indexer=True)
+    if key.shape[2:] != (1, _HEAD_DIM):
+        raise ValueError("QSA INT8 indexer requires one KV head of width 128")
+    rows, original_heads = query.shape[:2]
+    output_width = token_topk + compress_ratio - 1
+    if out is None:
+        out = torch.empty((rows, output_width), dtype=torch.int32, device=query.device)
+    if out.shape != (rows, output_width) or out.dtype != torch.int32:
+        raise ValueError("QSA INT8 indexer output must match the packed INT32 ABI")
+    out.fill_(-1)
+    if not rows:
+        return out
+    query_codes, query_scales = quantize_qsa_rows(query)
+    # A2/A3 QLI-v2 requires 64 query heads and FP16 scales/weights. All
+    # additional heads have zero weight, preserving the unpadded score sum.
+    padded_query = torch.zeros((rows, 64, _HEAD_DIM), dtype=torch.int8, device=query.device)
+    padded_query[:, :original_heads].copy_(query_codes)
+    padded_scales = torch.ones((rows, 64), dtype=torch.float16, device=query.device)
+    padded_scales[:, :original_heads].copy_(query_scales)
+    weights = torch.zeros((rows, 64), dtype=torch.float16, device=query.device)
+    weights[:, :original_heads] = 1.0 / math.sqrt(_HEAD_DIM)
+    requests = token_to_req.long()
+    visible_groups = torch.minimum(
+        (query_positions + 1).clamp_min(0).floor_divide(compress_ratio),
+        sequence_lengths[requests].floor_divide(compress_ratio),
+    ).to(torch.int32)
+    cu_query = torch.arange(rows + 1, dtype=torch.int32, device=query.device)
+    common = dict(
+        quant_mode=2,
+        cu_seqlens_q=cu_query,
+        seqused_k=visible_groups,
+        layout_q="TND",
+        layout_k="PA_BBND",
+        mask_mode=0,
+        cmp_ratio=1,
+    )
+    # Causality is fully expressed by visible_groups for each one-token
+    # sequence. Applying compression again here would truncate valid keys.
+    group_topk = token_topk // compress_ratio
+    metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+        num_heads_q=64,
+        num_heads_k=1,
+        head_dim=_HEAD_DIM,
+        topk=group_topk,
+        batch_size=rows,
+        max_seqlen_q=1,
+        max_seqlen_k=block_table.shape[1] * key.shape[1],
+        **common,
+    )
+    groups, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
+        query=padded_query,
+        key=key,
+        weights=weights,
+        query_dequant_scale=padded_scales,
+        key_dequant_scale=key_scales,
+        topk=group_topk,
+        block_table=block_table[requests].contiguous(),
+        metadata=metadata,
+        return_value=0,
+        **common,
+    )
+    pack_qsa_group_indices_npu(
+        groups.squeeze(1),
+        query_positions,
+        sequence_lengths,
+        token_to_req,
+        compress_ratio,
+        token_topk,
+        out[:, : group_topk + compress_ratio - 1],
     )
     return out

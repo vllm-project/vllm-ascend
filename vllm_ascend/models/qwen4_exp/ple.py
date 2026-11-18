@@ -27,6 +27,7 @@ from vllm.logger import logger
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from vllm_ascend.attention.utils import wait_for_kv_layer_from_connector
+from vllm_ascend.models.common.ops.sequence_parallel import sp_reduce_scatter, sp_shard
 from vllm_ascend.ops.triton_ple import (
     ple_conv_decode,
     ple_conv_prefill,
@@ -333,13 +334,29 @@ def patch_upstream_ple_short_conv() -> None:
         Qwen4ExpPLEUnquantizedEmbeddingMethod,
     )
 
+    from vllm_ascend.models.qwen4_exp.ple_quantization import load_modelslim_ple_weights
     from vllm_ascend.quantization.configs.modelslim_config import (
         AscendModelSlimConfig,
     )
 
+    # The paired upstream loader only understands BF16 split tables. Remove
+    # this model-local adapter once upstream accepts ModelSlim INT8_SYM PLE.
+    ngram_cls = upstream_ple_layer.Qwen4ExpNGramEmbedding
+    load_attr = "_ascend_original_load_weights"
+    if not hasattr(ngram_cls, load_attr):
+        original_load = ngram_cls.load_weights
+        setattr(ngram_cls, load_attr, original_load)
+
+        def load_weights(self: Any, weights: Any) -> set[str]:
+            return load_modelslim_ple_weights(self, weights, original_load)
+
+        ngram_cls.load_weights = load_weights
+
     # The AMD PLE class binds this function at module import time.  Replace
     # only that model-local binding; other platforms keep the upstream kernel.
     upstream_ple_layer.ple_conv = _ple_conv_ascend
+    upstream_ple_layer.sp_reduce_scatter = sp_reduce_scatter
+    upstream_ple_layer.sp_shard = sp_shard
 
     original_attr = "_ascend_original_short_conv"
     if not hasattr(Qwen4ExpPLELayer, original_attr):

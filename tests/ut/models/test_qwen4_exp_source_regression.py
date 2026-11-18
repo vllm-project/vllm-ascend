@@ -82,7 +82,9 @@ def test_qsa_metadata_ignores_full_graph_dummy_request_boundaries() -> None:
 
 def test_qsa_uses_fused_sparse_backends_and_upstream_qkv_projection() -> None:
     qsa = _source("vllm_ascend/models/qwen4_exp/qsa.py")
-    assert "return qsa_select_paged_tokens_lightning(" in qsa
+    selection_source = " ".join(qsa.split())
+    assert "else qsa_select_paged_tokens_lightning" in selection_source
+    assert "qsa_select_paged_tokens_quantized if" in selection_source
     assert "return dispatch_qsa_attention(" in qsa
     assert "torch.ops.vllm.triton_qsa_rmsnorm_mrope(" in qsa
     assert "torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(" not in qsa

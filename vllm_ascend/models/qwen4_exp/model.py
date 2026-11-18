@@ -21,6 +21,7 @@ from vllm.models.qwen4_exp.amd import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
+from vllm_ascend.models.common.ops.sequence_parallel import sp_reduce_scatter, sp_shard
 from vllm_ascend.models.qwen3_5_vl import (
     AscendQwen3_5VLProcessor,
     _AscendProcessorMixin,
@@ -56,6 +57,10 @@ from vllm.models.qwen4_exp.amd import model as upstream_model  # noqa: E402
 from .qsa import AscendQwen4ExpQSAAttention  # noqa: E402
 
 upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention
+# Keep TP padding inside Ascend's opaque custom ops for dynamic decode batches.
+# The upstream common helpers specialize padding at compile time on this backend.
+upstream_model.sp_reduce_scatter = sp_reduce_scatter
+upstream_model.sp_shard = sp_shard
 
 
 class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):

@@ -66,6 +66,7 @@ _MOE_WEIGHT_LOADER_NAME_MAP = {
 _MXFP_C8_KV_CACHE_TYPE = "K_DYNAMIC_V_STATIC_MXFP8_PER_CHANNEL"
 _MXFP_C8_LAYER_QUANT_TYPE_SUFFIX = ".self_attn.quant_type"
 _MXFP_C8_LAYER_QUANT_TYPES = ("QK_MXFP8_DYNAMIC_V_MXFP8_PER_CHANNEL",)
+_QSA_INT8_FA_QUANT_TYPE = "QK_INT8_DYNAMIC_V_INT8_PER_CHANNEL"
 # FAKQuant parameters that MXFP8 has no home for: K and Q are quantized
 # dynamically at runtime, so their checkpoint scales have no parameter to land
 # on. Without these AutoWeightsLoader rejects the checkpoint outright.
@@ -1202,7 +1203,13 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     def _add_kvcache_quant_metadata(self):
         fa_quant_type = self.quant_description.get("fa_quant_type", "")
-        self.enable_fa_quant = fa_quant_type != ""
+        # QSA owns its static V parameters directly. Legacy FAKQuant targets
+        # MLA and would rename fa_v.scale/offset into a nonexistent submodule.
+        qsa_native_int8 = any(
+            key.endswith(".self_attn.quant_type") and value == _QSA_INT8_FA_QUANT_TYPE
+            for key, value in self.quant_description.items()
+        )
+        self.enable_fa_quant = fa_quant_type != "" and not qsa_native_int8
         self.kvcache_quant_layers = []
         indexer_quant_type = self.quant_description.get("indexer_quant_type", "")
         self.enable_indexer_quant = indexer_quant_type != ""

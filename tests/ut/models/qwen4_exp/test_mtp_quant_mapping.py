@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
 from types import SimpleNamespace
 
 from vllm_ascend.models.qwen4_exp import mtp
@@ -56,15 +57,29 @@ def test_draft_config_remaps_modelslim_description(monkeypatch) -> None:
             hf_text_config=SimpleNamespace(mtp_num_hidden_layers=1),
         )
     )
+    calls = []
+
+    def make_draft(config, start, layers):
+        calls.append((config, start, layers))
+        return draft_config
+
     monkeypatch.setattr(
         mtp,
         "_upstream_make_draft_vllm_config",
-        lambda _config, _start: draft_config,
+        make_draft,
     )
 
-    actual = mtp._make_draft_vllm_config(target_config, mtp_start_layer_idx=48)
+    actual = mtp._make_draft_vllm_config(target_config, mtp_start_layer_idx=48, num_mtp_layers=1)
 
     assert actual is draft_config
+    assert calls == [(target_config, 48, 1)]
     assert draft_config.quant_config.quant_description == {
         "mtp.layers.48.self_attn.q_proj.weight": "W8A8_DYNAMIC",
     }
+
+
+def test_draft_config_wrapper_accepts_paired_upstream_signature() -> None:
+    upstream = inspect.signature(mtp._upstream_make_draft_vllm_config)
+    wrapper = inspect.signature(mtp._make_draft_vllm_config)
+    assert tuple(wrapper.parameters) == tuple(upstream.parameters)
+    wrapper.bind(object(), 48, 1)

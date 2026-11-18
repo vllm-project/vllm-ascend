@@ -1,0 +1,10 @@
+# Rename this fragment to the assigned PR number before submission.
+pr: null
+entries:
+  - category: feature
+    text: >-
+      Added native C8 support for Qwen3.8-Flash-Next ModelSlim W4A8 checkpoints
+      with dynamic INT8 Q/K and calibrated static per-channel INT8 V. Use
+      --quantization ascend --kv-cache-dtype auto with Model Runner V2 on
+      Ascend 910B/A3 and CANN 9.3.0. Main attention uses native INT8 GBSA and
+      the indexer uses INT8 QLI-v2. Dynamic-V checkpoints need re-quantization.

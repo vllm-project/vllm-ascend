@@ -106,9 +106,11 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     QSA_MAIN,
     QSA_RAW,
     build_qwen4_kv_cache_layout,
+    make_qsa_c8_kernel_page_cache,
     make_qsa_kernel_page_cache,
     make_slab_view,
 )
+from vllm_ascend.models.qwen4_exp.quantization import QSAC8Spec
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant.cache import uses_turboquant_groups
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -1773,6 +1775,15 @@ def _reshape_kv_cache_v2(
                 if owner.role == QSA_MAIN:
                     assert isinstance(kv_cache_spec, FullAttentionSpec)
                     region = qwen4_cache_layout.region("r0")
+                    if isinstance(kv_cache_spec, QSAC8Spec):
+                        kv_caches[layer_name] = make_qsa_c8_kernel_page_cache(
+                            raw_slab,
+                            spec=kv_cache_spec,
+                            num_blocks=kv_cache_config.num_blocks,
+                            storage_offset=slot_offset + region.offset,
+                            block_stride=region.block_stride,
+                        )
+                        continue
                     kv_caches[layer_name] = make_qsa_kernel_page_cache(
                         raw_slab,
                         dtype=kv_cache_spec.dtype,
@@ -1800,19 +1811,23 @@ def _reshape_kv_cache_v2(
                         * kv_cache_spec.head_size
                         * get_dtype_size(kv_cache_spec.dtype)
                     )
-                    if expected_page_bytes != region.page_size_bytes:
+                    if expected_page_bytes > region.page_size_bytes:
                         raise ValueError(
                             f"{layer_name} Qwen4 hybrid page mismatch: "
                             f"view={expected_page_bytes}, "
                             f"region={region.page_size_bytes}."
                         )
                     num_view_blocks = kv_cache_config.num_blocks
+                    view_block_stride = region.block_stride
                     if owner.role == QSA_COMPRESSED:
                         # Match MRV2's virtual block table and builder spec:
                         # each kernel page owns kernel_block_size / ratio keys.
                         kernel_pages = kv_cache_spec.block_size // kernel_block_size
                         num_view_blocks *= kernel_pages
                         storage_block_size = kv_cache_spec.get_num_kernel_states(kernel_block_size)
+                        if region.block_stride % kernel_pages:
+                            raise ValueError(f"{layer_name} compressed page stride does not split into kernel pages")
+                        view_block_stride //= kernel_pages
                     kv_caches[layer_name] = make_slab_view(
                         raw_slab,
                         dtype=kv_cache_spec.dtype,
@@ -1823,6 +1838,7 @@ def _reshape_kv_cache_v2(
                             kv_cache_spec.head_size,
                         ),
                         storage_offset=slot_offset + region.offset,
+                        block_stride=view_block_stride,
                     ).transpose(1, 2)
                     continue
                 if owner.role == PLE:
