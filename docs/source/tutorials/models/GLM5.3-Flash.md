@@ -603,14 +603,11 @@ For DP>1, the launcher executes the role script without filtering.
             export TP_SOCKET_IFNAME=$nic_name
             export HCCL_SOCKET_IFNAME=$nic_name
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-            export HCCL_BUFFSIZE=2048
+            export HCCL_BUFFSIZE=3072
             export HCCL_OP_EXPANSION_MODE="AIV"
             export ASCEND_RT_VISIBLE_DEVICES="$1"
-            export PYTHONHASHSEED=0
-            export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
             vllm serve "$MODEL_PATH" \
-              --allowed-local-media-path / \
               --host 0.0.0.0 \
               --port $2 \
               --data-parallel-size $3 \
@@ -625,7 +622,7 @@ For DP>1, the launcher executes the role script without filtering.
               --safetensors-load-strategy prefetch \
               --kv-cache-dtype fp8 \
               --attention-config.indexer_kv_dtype fp8 \
-              --max-num-seqs 128 \
+              --max-num-seqs 32 \
               --max-model-len 1048576 \
               --max-num-batched-tokens 32768 \
               --trust-remote-code \
@@ -634,22 +631,23 @@ For DP>1, the launcher executes the role script without filtering.
               --enable-auto-tool-choice \
               --reasoning-parser glm47 \
               --enable-prefix-caching \
-              --limit-mm-per-prompt '{"video": 0}' \
+              --limit-mm-per-prompt '{"image": 7, "video": 0}' \
               --gpu-memory-utilization 0.95 \
               --enforce-eager \
+              --use-replayssm \
               --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}' \
               --additional-config '{
                 "enable_cpu_binding": true,
-                "enable_flashcomm1": false,
-                "enable_fused_mc2": 0,
-                "enable_shared_expert_dp": false,
-                "multistream_overlap_shared_expert": false
+                "enable_flashcomm1": true,
+                "enable_fused_mc2": 2,
+                "enable_shared_expert_dp": true,
+                "multistream_overlap_shared_expert": true
               }' \
               --kv-transfer-config '{
                 "kv_connector": "MooncakeConnectorV2",
                 "kv_role": "kv_producer",
                 "engine_id": "0",
-                "kv_port": "30000",
+                "kv_port": "30100",
                 "kv_connector_extra_config": {
                   "prefill": {"dp_size": 1, "tp_size": 1, "pcp_size": 8},
                   "decode": {"dp_size": 8, "tp_size": 1, "pcp_size": 1}
@@ -673,14 +671,11 @@ For DP>1, the launcher executes the role script without filtering.
             export TP_SOCKET_IFNAME=$nic_name
             export HCCL_SOCKET_IFNAME=$nic_name
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-            export HCCL_BUFFSIZE=1024
+            export HCCL_BUFFSIZE=2048
             export HCCL_OP_EXPANSION_MODE="AIV"
             export ASCEND_RT_VISIBLE_DEVICES="$1"
-            export PYTHONHASHSEED=0
-            export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
             vllm serve "$MODEL_PATH" \
-              --allowed-local-media-path / \
               --host 0.0.0.0 \
               --port $2 \
               --data-parallel-size $3 \
@@ -704,12 +699,13 @@ For DP>1, the launcher executes the role script without filtering.
               --enable-auto-tool-choice \
               --reasoning-parser glm47 \
               --enable-prefix-caching \
-              --limit-mm-per-prompt '{"video": 0}' \
+              --limit-mm-per-prompt '{"image": 7, "video": 0}' \
               --gpu-memory-utilization 0.95 \
               --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+              --use-replayssm \
               --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}' \
               --additional-config '{
-                "enable_fused_mc2": 2,
+                "enable_fused_mc2": 0,
                 "multistream_overlap_shared_expert": true,
                 "scheduler_config": {"recompute_scheduler_enable": true},
                 "ascend_compilation_config": {
@@ -725,8 +721,7 @@ For DP>1, the launcher executes the role script without filtering.
                 "kv_port": "30800",
                 "kv_connector_extra_config": {
                   "prefill": {"dp_size": 1, "tp_size": 1, "pcp_size": 8},
-                  "decode": {"dp_size": 8, "tp_size": 1, "pcp_size": 1},
-                  "use_ascend_direct": true
+                  "decode": {"dp_size": 8, "tp_size": 1, "pcp_size": 1}
                 }
               }'
             ```
@@ -784,13 +779,13 @@ For DP>1, the launcher executes the role script without filtering.
       API ports `8000-8007`. Register all eight Decode endpoints with the
       proxy.
     - Both roles use `--max-model-len 1048576`, `--kv-cache-dtype fp8`, and
-      `deepseek_mtp` with five speculative tokens.
-    - Prefill sets `--max-num-seqs 128` and
+      `deepseek_mtp` with five speculative tokens and `--use-replayssm`.
+    - Prefill sets `--max-num-seqs 32` and
       `--max-num-batched-tokens 32768`; Decode sets `60` and `360`,
       respectively. Tune these per-engine scheduler limits for the workload.
-    - Prefill enables CPU binding and disables FlashComm1, fused MC2,
+    - Prefill sets CPU binding, FlashComm1, fused MC2 (`2`),
       shared-expert DP and multistream overlap. Its target and MTP draft
-      run eagerly. Decode uses `enable_fused_mc2: 2`, shared-expert
+      run eagerly. Decode disables fused MC2 (`0`) and enables shared-expert
       multistream overlap and recomputation scheduling through `scheduler_config`.
       Decode uses `FULL_DECODE_ONLY` with `enable_npugraph_ex: true`,
       while static and super kernels are disabled.
@@ -798,15 +793,14 @@ For DP>1, the launcher executes the role script without filtering.
       keep the default DCP1. For PCP configuration, refer to
       [Context Parallel](../../user_guide/feature_guide/context_parallel.md).
     - Both roles enable prefix caching and disable video input through
-      `--limit-mm-per-prompt`. Images retain the runtime default limit.
-      `--allowed-local-media-path /` permits local media under the container root.
+      `--limit-mm-per-prompt`, with at most seven images per prompt.
     - `MooncakeConnectorV2` transfers KV cache directly between the roles. It uses
       `kv_producer` on Prefill and `kv_consumer` on Decode, with base KV ports
-      `30000` and `30800`. Both roles declare Prefill TP1/PCP8/DP1 and
-      Decode TP1/PCP1/DP8; Decode enables `use_ascend_direct`.
+      `30100` and `30800`. Both roles declare Prefill TP1/PCP8/DP1 and
+      Decode TP1/PCP1/DP8.
     - `HCCL_IF_IP` and the socket interface variables select each node's
-      communication network. `HCCL_BUFFSIZE` is `2048` on Prefill and
-      `1024` on Decode. The DP RPC, API, Mooncake and proxy ports must be
+      communication network. `HCCL_BUFFSIZE` is `3072` on Prefill and
+      `2048` on Decode. The DP RPC, API, Mooncake and proxy ports must be
       reachable between the corresponding hosts.
 
 === "A3 series"
@@ -1472,7 +1466,11 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     `--enable-chunked-prefill` on both roles. Prefill uses
     `HCCL_BUFFSIZE=3072`, `--max-num-seqs 256`,
     `--max-num-batched-tokens 24576`, `--gpu-memory-utilization 0.9` and
-    `multistream_overlap_shared_expert: true`. Decode uses
+    `multistream_overlap_shared_expert: true`; keep `enable_flashcomm1: false`,
+    `enable_fused_mc2: 0` and `enable_shared_expert_dp: false` on Prefill.
+    Retain `PYTHONHASHSEED=0`, `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'`
+    and `--allowed-local-media-path /` on both roles. Decode uses
+    `HCCL_BUFFSIZE=1024`,
     `--max-num-seqs 30`, `--max-num-batched-tokens 120`,
     `enable_fused_mc2: 0` and `enable_npugraph_ex: false`.
 
@@ -1482,6 +1480,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     Keep prefix caching, chunked prefill and the hybrid KV cache manager
     enabled. With prefix caching enabled, the model configuration selects
     `mamba_cache_mode=align`, which is required by `AscendStoreConnector`.
+    Remove `--use-replayssm` from both role scripts for this pooling scenario.
     Keep `use_layerwise=false` and PP=DCP=1. Do not enable
     [RecoverSSM](../../user_guide/feature_guide/speculative_decoding.md)
     for this deployment: its KV-transfer path does not accept `MultiConnector`.
