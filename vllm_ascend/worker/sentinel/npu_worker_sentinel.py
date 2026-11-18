@@ -83,9 +83,9 @@ def fault_barrier_wrapper(func: Callable):
                     "[FT] self device reset failed on %s.",
                     getattr(self, "rank", "worker"),
                 )
-        # Raise outside the handler so the original traceback (which may pin
-        # device tensors of the broken stream) is released first.
-        raise RuntimeError(f"[FT] worker quarantined after fault: {sentinel.fault_info}")
+            # Drop the frames that pin device tensors of the broken stream.
+            exc.__traceback__ = None
+            raise RuntimeError(f"[FT] worker quarantined after fault: {sentinel.fault_info}")
 
     return wrapped
 
