@@ -141,18 +141,6 @@ from vllm_ascend.worker.v2.utils import (
 )
 
 
-def _kimi_dspark_target_metadata_exclusions(model_config, speculative_config, speculator) -> set[str]:
-    if (
-        model_config.architecture != "KimiK31ForConditionalGeneration"
-        or speculative_config is None
-        or speculative_config.method != "dspark"
-        or speculative_config.draft_model_config is None
-        or "K3DSparkModel" not in (speculative_config.draft_model_config.architectures or ())
-    ):
-        return set()
-    return set(getattr(speculator, "draft_attn_layer_names", ()))
-
-
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
@@ -483,11 +471,6 @@ class NPUModelRunner(GPUModelRunner):
         # Match V1's physical buffer plan without mutating the scheduler's
         # logical cache configuration. Allocation must honor zero-stride aliases.
         kv_cache_config = deepcopy(kv_cache_config)
-        # K3 DSpark builds its own MLA metadata using draft inputs. The target
-        # hybrid model must not rebuild draft-only groups with target lengths.
-        self.model_state._target_metadata_excluded_layers = _kimi_dspark_target_metadata_exclusions(
-            self.model_config, self.vllm_config.speculative_config, self.speculator
-        )
         sparse_cfg = self.ascend_config.sparse_kv_offload_config
         configure_dspark_kv_transfer(
             self.vllm_config, self.speculator, kv_cache_config, is_last_pp_rank=self.is_last_pp_rank

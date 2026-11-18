@@ -1556,52 +1556,6 @@ def test_draft_metadata_uses_per_request_cpu_upper_bounds():
 
 
 @pytest.mark.parametrize("for_capture", [False, True])
-def test_target_metadata_skips_only_draft_only_groups(for_capture):
-    class RecordingBuilder:
-        def __init__(self):
-            self.calls = 0
-
-        def build(self, common_prefix_len, common_attn_metadata, **kwargs):
-            self.calls += 1
-            return common_attn_metadata
-
-        def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
-            return self.build(0, common_attn_metadata, **kwargs)
-
-    target, draft, mixed = RecordingBuilder(), RecordingBuilder(), RecordingBuilder()
-    groups = [
-        [SimpleNamespace(layer_names=["target"], get_metadata_builder=lambda _: target)],
-        [SimpleNamespace(layer_names=["draft"], get_metadata_builder=lambda _: draft)],
-        [SimpleNamespace(layer_names=["target.shared", "draft.shared"], get_metadata_builder=lambda _: mixed)],
-    ]
-    kv_spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float16)
-    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=kv_spec) for _ in groups])
-    kwargs = dict(
-        attn_groups=groups,
-        num_reqs=1,
-        num_tokens=1,
-        query_start_loc_gpu=torch.tensor([0, 1], dtype=torch.int32),
-        query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
-        max_query_len=1,
-        seq_lens=torch.tensor([10], dtype=torch.int32),
-        max_seq_len=32,
-        block_tables=tuple(torch.full((1, 1), i, dtype=torch.int32) for i in range(3)),
-        slot_mappings=tuple(torch.zeros(1, dtype=torch.int32) for _ in groups),
-        kv_cache_config=config,
-        for_cudagraph_capture=for_capture,
-    )
-    metadata = attn_utils.build_attn_metadata(**kwargs, excluded_metadata_layer_names={"draft", "draft.shared"})
-    assert (target.calls, draft.calls, mixed.calls) == (1, 0, 1)
-    assert set(metadata) == {"target", "target.shared", "draft.shared"}
-    assert metadata["target.shared"].block_table_tensor.item() == 2
-
-    # The independent draft path does not supply exclusions.
-    metadata = attn_utils.build_attn_metadata(**kwargs)
-    assert (target.calls, draft.calls, mixed.calls) == (2, 1, 2)
-    assert "draft" in metadata
-
-
-@pytest.mark.parametrize("for_capture", [False, True])
 def test_v2_fused_offload_splits_target_and_draft_metadata_in_one_sfa_group(for_capture):
     class RecordingSFABuilder(AscendSFAMetadataBuilder):
         def __init__(self):

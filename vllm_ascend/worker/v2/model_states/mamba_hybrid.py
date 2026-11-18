@@ -94,6 +94,22 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         self._layerwise_mamba_copy: _LayerwiseMambaCopyState | None = None
         self._layer_state_ranges: dict[str, tuple[int, int]] | None = None
         self._pending_bulk_copy: tuple[MambaSpecDecodeGPUContext, int, torch.Tensor] | None = None
+        self._target_draft_only_groups: tuple[AttentionGroup, ...] = ()
+
+    def set_target_draft_metadata_layers(
+        self, target_attn_groups: list[list[AttentionGroup]], draft_layer_names: set[str]
+    ) -> None:
+        """Skip target-owned groups whose metadata the drafter builds itself.
+
+        Keep group identities so a separate draft group with the same layer names
+        remains usable, and retain mixed groups required by the target model.
+        """
+        self._target_draft_only_groups = tuple(
+            group
+            for groups in target_attn_groups
+            for group in groups
+            if group.layer_names and all(name in draft_layer_names for name in group.layer_names)
+        )
 
     def _get_layer_state_ranges(self, kv_cache_config: KVCacheConfig) -> dict[str, tuple[int, int]]:
         """Map every mamba layer name to its (start, end) range in the
@@ -512,6 +528,13 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         max_query_len = getattr(input_batch, "max_query_len", None)
         if max_query_len is None:
             max_query_len = input_batch.num_scheduled_tokens.max().item()
+        skipped_groups = getattr(self, "_target_draft_only_groups", ())
+        if skipped_groups:
+            # Preserve the outer KV-group indices and any shared target group.
+            attn_groups = [
+                [group for group in groups if all(group is not skip for skip in skipped_groups)]
+                for groups in attn_groups
+            ]
         return build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -536,5 +559,4 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             pcp_context=pcp_context,
             full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
             for_cudagraph_capture=for_capture,
-            excluded_metadata_layer_names=getattr(self, "_target_metadata_excluded_layers", None),
         )

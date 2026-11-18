@@ -21,6 +21,7 @@ from vllm_ascend.models.kimi_k3 import kimi_k3_dspark
 from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiLinearModel
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
+from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.dflash import aclgraph as graph
 from vllm_ascend.worker.v2.spec_decode.dspark import speculator as shared
@@ -138,7 +139,19 @@ def test_dspark_flashmla_selection_requires_all_mla_groups(monkeypatch, choices,
     assert spec.use_flashmla is expected
 
 
-def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABackend, flashmla_choices=(False,)):
+@pytest.mark.parametrize("choices,expected_count", [((False,), 0), ((True,), 1), ((True, False), 0)])
+def test_dspark_registers_only_independently_built_metadata(monkeypatch, choices, expected_count):
+    monkeypatch.setattr(shared, "_get_graph_update_backend", lambda _: AscendMLABackend)
+    model_state = AscendMambaHybridModelState.__new__(AscendMambaHybridModelState)
+    spec = initialize_attention(monkeypatch, AscendMLABackend, flashmla_choices=choices, model_state=model_state)
+    assert len(model_state._target_draft_only_groups) == expected_count
+    if expected_count:
+        assert model_state._target_draft_only_groups[0] is spec.target_attn_groups[0][1]
+
+
+def initialize_attention(
+    monkeypatch, draft_backend, target_backend=AscendMLABackend, flashmla_choices=(False,), model_state=None
+):
     monkeypatch.setattr(draft_backend, "get_impl_cls", staticmethod(lambda: object))
     monkeypatch.setattr(DSparkSpeculator, "__init__", lambda self, config, device: setattr(self, "vllm_config", config))
     monkeypatch.setattr(shared, "build_dspark_draft_config", lambda config: config)
@@ -155,12 +168,19 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
     spec.vllm_config = config
     spec.draft_attn_layer_names = {"draft"}
     spec._context_slot_mappings = torch.zeros(1, dtype=torch.int64)
-    target_groups = [[SimpleNamespace(backend=target_backend)]]
+    target_groups = [
+        [
+            SimpleNamespace(backend=target_backend, layer_names=["target"]),
+            SimpleNamespace(backend=target_backend, layer_names=["draft"]),
+            SimpleNamespace(backend=target_backend, layer_names=["target", "draft"]),
+        ]
+    ]
     draft_groups = [
         [],
         [
             SimpleNamespace(
                 backend=draft_backend,
+                layer_names=["draft"],
                 get_metadata_builder=lambda _, enabled=enabled: SimpleNamespace(
                     flashmla_state=object() if enabled else None
                 ),
@@ -171,6 +191,7 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
 
     def set_attn(self, model_state, kv_cache_config, block_tables, input_buffers, target_attn_groups):
         assert target_attn_groups is target_groups
+        self.target_attn_groups = target_attn_groups
         self.attn_groups = draft_groups
 
     monkeypatch.setattr(DSparkSpeculator, "set_attn", set_attn)
@@ -182,7 +203,7 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
 
     monkeypatch.setattr(shared, "get_layers_from_vllm_config", get_layers)
     cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["target", "draft"])])
-    spec.set_attn(None, cache_config, None, None, target_groups)
+    spec.set_attn(model_state, cache_config, None, None, target_groups)
     assert spec._context_slot_mappings.dtype == torch.int32
     return spec
 

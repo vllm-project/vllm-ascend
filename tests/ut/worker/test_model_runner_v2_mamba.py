@@ -390,8 +390,9 @@ def test_prepare_inputs_propagates_padded_request_count():
 @pytest.mark.parametrize("num_spec", [0, 3])
 @pytest.mark.parametrize("graph_mode", [CUDAGraphMode.FULL, CUDAGraphMode.NONE])
 @pytest.mark.parametrize("recover", [False, True])
+@pytest.mark.parametrize("for_capture", [False, True])
 def test_prepare_attn_keeps_actual_counts_separate_from_padding(
-    mock_build_attn_metadata, num_spec, graph_mode, recover
+    mock_build_attn_metadata, num_spec, graph_mode, recover, for_capture
 ):
     expected_metadata = {"gdn": object()}
     mock_build_attn_metadata.return_value = expected_metadata
@@ -403,9 +404,13 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(
         device_metadata=None,
         num_accepted_tokens_gpu=torch.tensor([2, 3], dtype=torch.int32),
         max_model_len=1024,
-        _target_metadata_excluded_layers={"draft.layer"},
         recoverssm=SimpleNamespace(record_step=MagicMock()) if recover else None,
     )
+    target_group = SimpleNamespace(layer_names=["target.layer"])
+    draft_group = SimpleNamespace(layer_names=["draft.layer"])
+    mixed_group = SimpleNamespace(layer_names=["target.shared", "draft.layer"])
+    target_groups = [[target_group, draft_group], [], [mixed_group]]
+    AscendMambaHybridModelState.set_target_draft_metadata_layers(state, target_groups, {"draft.layer"})
     input_batch = SimpleNamespace(
         num_reqs=2,
         num_reqs_after_padding=4,
@@ -431,27 +436,45 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(
         cudagraph_mode=graph_mode,
         block_tables=(),
         slot_mappings=torch.empty(0, dtype=torch.int64),
-        attn_groups=[],
+        attn_groups=target_groups,
         kv_cache_config=MagicMock(),
+        for_capture=for_capture,
     )
 
     assert metadata is expected_metadata
     if recover:
-        state.recoverssm.record_step.assert_called_once_with(expected_metadata, [], for_capture=False)
+        state.recoverssm.record_step.assert_called_once_with(expected_metadata, target_groups, for_capture=for_capture)
     kwargs = mock_build_attn_metadata.call_args.kwargs
-    assert kwargs["excluded_metadata_layer_names"] == {"draft.layer"}
+    assert kwargs["attn_groups"] == [[target_group], [], [mixed_group]]
     assert kwargs["num_actual_reqs"] == 2
     assert kwargs["num_actual_tokens"] == 2 * (num_spec + 1)
     graph_requests = 4 if graph_mode == CUDAGraphMode.FULL else 2
     assert kwargs["num_reqs"] == graph_requests
     assert kwargs["num_tokens"] == graph_requests * (num_spec + 1)
     model_metadata = kwargs["model_specific_attn_metadata"]
-    if num_spec:
+    if num_spec and not for_capture:
         assert model_metadata.num_decode_draft_tokens_cpu.tolist() == [num_spec] * graph_requests
         assert model_metadata.num_accepted_tokens.tolist() == [2, 3] + [1] * (graph_requests - 2)
     else:
         assert model_metadata.num_decode_draft_tokens_cpu is None
         assert model_metadata.num_accepted_tokens is None
+
+    # A separately initialized draft group can have the same layer names.
+    independent_draft_group = SimpleNamespace(layer_names=["draft.layer"])
+    AscendMambaHybridModelState.prepare_attn(
+        state,
+        input_batch=input_batch,
+        cudagraph_mode=graph_mode,
+        block_tables=(),
+        slot_mappings=torch.empty(0, dtype=torch.int64),
+        attn_groups=[[independent_draft_group]],
+        kv_cache_config=MagicMock(),
+        for_capture=for_capture,
+    )
+    assert mock_build_attn_metadata.call_args.kwargs["attn_groups"][0][0] is independent_draft_group
+
+    AscendMambaHybridModelState.set_target_draft_metadata_layers(state, target_groups, set())
+    assert state._target_draft_only_groups == ()
 
 
 @patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")

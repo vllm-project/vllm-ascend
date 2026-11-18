@@ -252,6 +252,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
 
             self.attn_backends = attn_backends
             backend = _get_graph_update_backend(self.attn_groups)
+            mla_groups = []
+            self.use_flashmla = False
             if issubclass(backend, AscendMLABackend):
                 self.attn_architecture = "MLA"
                 # Check whether all MLA groups use FlashMLA.
@@ -268,6 +270,13 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 self.attn_architecture = "GQA"
             else:
                 self.attn_architecture = None
+
+            # DSpark builds FlashMLA metadata with its own query buffers; the
+            # target model does not need to build draft-only groups again.
+            set_target_draft_layers = getattr(model_state, "set_target_draft_metadata_layers", None)
+            if set_target_draft_layers is not None:
+                names = {name for group in mla_groups for name in group.layer_names} if self.use_flashmla else set()
+                set_target_draft_layers(target_attn_groups, names)
             dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(  # type: ignore[call-arg]
                 self.vllm_config.cache_config.block_size,
                 block_tables,
