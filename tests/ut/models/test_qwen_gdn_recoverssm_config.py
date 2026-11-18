@@ -58,6 +58,31 @@ def test_qwen4_exp_selects_recoverssm_for_pd(prefix, mode):
     helpers["validate_qwen_gdn_recoverssm"](config)
 
 
+@pytest.mark.parametrize("mode", ["none", "align"])
+def test_qwen_ple_builder_isolates_mamba_replay_flag(monkeypatch, mode):
+    from vllm_ascend.models.qwen4_exp import recoverssm_ple as ple
+
+    config = make_config()
+    config.model_config.hf_text_config.model_type = "qwen4_exp_text"
+    config.model_config.hf_config = NS(architectures=["Qwen4ExpForConditionalGeneration"])
+    config.cache_config.mamba_cache_mode = mode
+    config.scheduler_config = NS(max_num_seqs=2)
+    monkeypatch.setattr(ple, "get_current_vllm_config", lambda: config)
+    parent_inputs = []
+
+    def capture_config(self, kv_cache_spec, layer_names, ple_config, device):
+        parent_inputs.append(ple_config.cache_config)
+
+    monkeypatch.setattr(ple.PleShortConvAttentionMetadataBuilder, "__init__", capture_config)
+    builder = ple.QwenPLERecoverSSMBackend.get_builder_cls()(None, [], config, "cpu")
+
+    assert isinstance(builder, ple.QwenPLERecoverSSMMetadataBuilder) == (mode == "align")
+    assert len(parent_inputs) == 1
+    assert parent_inputs[0].use_replayssm is False
+    assert parent_inputs[0].mamba_cache_mode == mode
+    assert config.cache_config.use_replayssm is True
+
+
 def base_shapes(config):
     from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Keep PLE history consistent with RecoverSSM's neutral align copy bias."""
 
+from copy import copy
 from dataclasses import dataclass, fields
 from typing import Any
 
@@ -132,7 +133,17 @@ class QwenPLERecoverSSMMetadata(PleShortConvAttentionMetadata, RecoverSSMMetadat
         return align
 
 
-class QwenPLERecoverSSMMetadataBuilder(PleShortConvAttentionMetadataBuilder):
+class _QwenPLEMetadataBuilder(PleShortConvAttentionMetadataBuilder):
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        # The parent Mamba builder reads the global flag to allocate scratch
+        # for a five-tensor Mamba2 cache. PLE has a single convolution tensor.
+        ple_config = copy(vllm_config)
+        ple_config.cache_config = copy(vllm_config.cache_config)
+        ple_config.cache_config.use_replayssm = False
+        super().__init__(kv_cache_spec, layer_names, ple_config, device)
+
+
+class QwenPLERecoverSSMMetadataBuilder(_QwenPLEMetadataBuilder):
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self._commit_context = None
@@ -193,6 +204,8 @@ class QwenPLERecoverSSMBackend(PleShortConvAttentionBackend):
     @staticmethod
     def get_builder_cls():
         config = get_current_vllm_config()
-        if _uses_gdn_recoverssm(config) and config.cache_config.mamba_cache_mode == "align":
-            return QwenPLERecoverSSMMetadataBuilder
+        if config.cache_config.use_replayssm:
+            if _uses_gdn_recoverssm(config) and config.cache_config.mamba_cache_mode == "align":
+                return QwenPLERecoverSSMMetadataBuilder
+            return _QwenPLEMetadataBuilder
         return PleShortConvAttentionMetadataBuilder
