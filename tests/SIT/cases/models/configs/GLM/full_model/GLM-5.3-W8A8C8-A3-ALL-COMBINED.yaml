@@ -1,6 +1,6 @@
 # Full checkpoint: no layer overrides or dummy weights.
 # See README.md for resource assumptions and calibration requirements.
-# Throughput is collected without a regression gate until hardware calibration.
+# Calibration candidate: do not reuse the previous concurrency16 baselines.
 # Scheduler/capture budgets follow the peak client load; see README.md.
 test_name: "GLM-5.3-W8A8C8-A3-ALL-COMBINED"
 model: "Eco-Tech/GLM-5.3-w8a8c8"
@@ -121,10 +121,10 @@ templates:
       - "--max-model-len"
       - "131072"
       - "--max-num-batched-tokens"
-      - "6"
+      - "192"
       - "--trust-remote-code"
       - "--max-num-seqs"
-      - "1"
+      - "32"
       - "--gpu-memory-utilization"
       - "0.92"
       - "--async-scheduling"
@@ -146,7 +146,7 @@ templates:
       - "--speculative-config"
       - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
       - "--compilation-config"
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6], "max_cudagraph_capture_size": 6}'
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12, 18, 24, 30, 36, 48, 72, 96, 132, 192], "max_cudagraph_capture_size": 192}'
       - "--kv-transfer-config"
       - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pp_layer_partition": "42,36"}, "decode": {"dp_size": 16, "tp_size": 2}}}'
 
@@ -176,10 +176,10 @@ templates:
       - "--max-model-len"
       - "131072"
       - "--max-num-batched-tokens"
-      - "6"
+      - "192"
       - "--trust-remote-code"
       - "--max-num-seqs"
-      - "1"
+      - "32"
       - "--gpu-memory-utilization"
       - "0.92"
       - "--async-scheduling"
@@ -201,7 +201,7 @@ templates:
       - "--speculative-config"
       - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
       - "--compilation-config"
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6], "max_cudagraph_capture_size": 6}'
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12, 18, 24, 30, 36, 48, 72, 96, 132, 192], "max_cudagraph_capture_size": 192}'
       - "--kv-transfer-config"
       - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pp_layer_partition": "42,36"}, "decode": {"dp_size": 16, "tp_size": 2}}}'
 
@@ -241,7 +241,7 @@ templates:
       - "16384"
       - "--trust-remote-code"
       - "--max-num-seqs"
-      - "16"
+      - "64"
       - "--gpu-memory-utilization"
       - "0.92"
       - "--quantization"
@@ -302,7 +302,7 @@ templates:
       - "16384"
       - "--trust-remote-code"
       - "--max-num-seqs"
-      - "16"
+      - "64"
       - "--gpu-memory-utilization"
       - "0.92"
       - "--quantization"
@@ -326,22 +326,23 @@ templates:
       - "--kv-transfer-config"
       - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pp_layer_partition": "42,36"}, "decode": {"dp_size": 16, "tp_size": 2}}}'
 
-# Performance baselines calibrated from successful combined run 43574755884.
+# Throughput gates are intentionally absent until two valid calibration runs.
+# Then use the lower measured throughput and threshold 0.95 (see README).
 benchmarks:
   prefill_perf_16k_warmup:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 32
+    num_prompts: 14
     max_out_len: 1
-    batch_size: 16
+    batch_size: 7
     request_rate: 0
   reset_before_prefill_perf_16k:
     case_type: curl_cmd
     cmds:
-    - curl --fail --show-error --silent --max-time 120 -X POST http://${NODE_2_IP}:7100/reset_prefix_cache | python3 -c "import json,sys; assert
-      json.load(sys.stdin).get('success') is True, 'prefix cache reset failed'"
+    - curl --fail --show-error --silent --max-time 120 -X POST http://${NODE_2_IP}:7100/reset_prefix_cache | python3
+      -c "import json,sys; assert json.load(sys.stdin).get('success') is True, 'prefix cache reset failed'"
   prefill_perf_16k:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
@@ -349,10 +350,8 @@ benchmarks:
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 28
     max_out_len: 1
-    batch_size: 16
+    batch_size: 7
     request_rate: 0
-    baseline: 2.4064
-    threshold: 0.95
   pd_perf_16k_warmup:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
@@ -360,13 +359,13 @@ benchmarks:
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 80
     max_out_len: 1024
-    batch_size: 16
+    batch_size: 40
     request_rate: 1.8
   reset_before_pd_perf_16k:
     case_type: curl_cmd
     cmds:
-    - curl --fail --show-error --silent --max-time 120 -X POST http://${NODE_2_IP}:7100/reset_prefix_cache | python3 -c "import json,sys; assert
-      json.load(sys.stdin).get('success') is True, 'prefix cache reset failed'"
+    - curl --fail --show-error --silent --max-time 120 -X POST http://${NODE_2_IP}:7100/reset_prefix_cache | python3
+      -c "import json,sys; assert json.load(sys.stdin).get('success') is True, 'prefix cache reset failed'"
   pd_perf_16k:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
@@ -374,42 +373,69 @@ benchmarks:
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 160
     max_out_len: 1024
-    batch_size: 16
+    batch_size: 40
     request_rate: 1.8
     tpot_threshold: 20
-    baseline: 936.7987
-    threshold: 0.95
-  reset_before_decode_perf_16k:
+  prepare_shared_prefix:
     case_type: curl_cmd
     cmds:
-    - curl --fail --show-error --silent --max-time 120 -X POST http://${NODE_2_IP}:7100/reset_prefix_cache | python3 -c "import json,sys; assert
-      json.load(sys.stdin).get('success') is True, 'prefix cache reset failed'"
-  decode_perf_16k_warmup:
+    - python -c 'from pathlib import Path; from tools.aisbench import maybe_download_from_modelscope; src=Path(maybe_download_from_modelscope('"'"'vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8'"'"',
+      repo_type='"'"'dataset'"'"')); dst=Path('"'"'/tmp/glm53_decode_prefix100'"'"'); dst.mkdir(parents=True, exist_ok=True);
+      f=(src/'"'"'test.jsonl'"'"').open(encoding='"'"'utf-8'"'"'); line=next(f); f.close(); (dst/'"'"'test.jsonl'"'"').write_text((line.rstrip('"'"'\n'"'"')+'"'"'\n'"'"')*1360,
+      encoding='"'"'utf-8'"'"'); (dst/'"'"'train.jsonl'"'"').write_text('"'"''"'"', encoding='"'"'utf-8'"'"')'
+  reset_before_decode_perf_16k_20ms:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://${NODE_2_IP}:7100/reset_prefix_cache | python3
+      -c "import json,sys; assert json.load(sys.stdin).get('success') is True, 'prefix cache reset failed'"
+  decode_perf_16k_20ms_warmup:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 64
+    max_out_len: 1024
+    batch_size: 32
+    request_rate: 0
+    dataset_path_local: /tmp/glm53_decode_prefix100
+  decode_perf_16k_20ms:
+    case_type: performance
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 320
     max_out_len: 1024
-    batch_size: 16
+    batch_size: 80
     request_rate: 0
-  decode_perf_16k:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 320
-    max_out_len: 1024
-    batch_size: 16
-    request_rate: 0
+    dataset_path_local: /tmp/glm53_decode_prefix100
     tpot_threshold: 20
-    baseline: 1001.9522
-    threshold: 0.95
+  reset_before_decode_perf_16k_50ms:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://${NODE_2_IP}:7100/reset_prefix_cache | python3
+      -c "import json,sys; assert json.load(sys.stdin).get('success') is True, 'prefix cache reset failed'"
+  decode_perf_16k_50ms_warmup:
+    case_type: performance
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 64
+    max_out_len: 1024
+    batch_size: 32
+    request_rate: 0
+    dataset_path_local: /tmp/glm53_decode_prefix100
+  decode_perf_16k_50ms:
+    case_type: performance
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 1360
+    max_out_len: 1024
+    batch_size: 340
+    request_rate: 0
+    dataset_path_local: /tmp/glm53_decode_prefix100
+    tpot_threshold: 50
   reset_before_gpqa:
     case_type: curl_cmd
     cmds:
-    - curl --fail --show-error --silent --max-time 120 -X POST http://${NODE_2_IP}:7100/reset_prefix_cache | python3 -c "import json,sys; assert
-      json.load(sys.stdin).get('success') is True, 'prefix cache reset failed'"
+    - curl --fail --show-error --silent --max-time 120 -X POST http://${NODE_2_IP}:7100/reset_prefix_cache | python3
+      -c "import json,sys; assert json.load(sys.stdin).get('success') is True, 'prefix cache reset failed'"
   acc_gpqa:
     case_type: accuracy
     dataset_path: vllm-ascend/gpqa
@@ -418,6 +444,6 @@ benchmarks:
     max_out_len: 65536
     temperature: 1.0
     top_p: 0.95
-    batch_size: 16
+    batch_size: 32
     baseline: 86.92
     verify_mode: ge
