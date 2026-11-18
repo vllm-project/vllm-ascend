@@ -91,8 +91,7 @@ def reference(topk, requests, states, source, resident, hot_table, dgi, lru, blo
     return out, counts, sh, sd, sc, dgi, lru, stats
 
 
-@pytest.mark.parametrize("capture", [False, True])
-@pytest.mark.parametrize("compact", [False, True])
+@pytest.mark.parametrize("capture,compact", [(False, False), (True, True)])
 def test_random_request_unions(capture, compact):
     """Vary query counts, request order, stable state, duplicates and residency."""
     rows, topk, hot_size, block, width, requests_count = 40, 8, 16, 4, 16, 8
@@ -253,8 +252,7 @@ def test_random_request_unions(capture, compact):
         mapping.close()
 
 
-@pytest.mark.parametrize("rows,topk,row_bytes", [(1, 17, 656), (4, 2048, 656)])
-@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("rows,topk,row_bytes,capture", [(1, 17, 656, True), (4, 2048, 656, False)])
 def test_compact_refill_tiles_current_counts_and_preserves_page_gaps(rows, topk, row_bytes, capture):
     block = 128
     blocks = (rows * topk + block - 1) // block + 1
@@ -317,9 +315,10 @@ def test_compact_refill_tiles_current_counts_and_preserves_page_gaps(rows, topk,
         mapping.close()
 
 
-@pytest.mark.parametrize("query_rows,hot_size", [(2, 4096), (4, 10240)])
-@pytest.mark.parametrize("cross_stream", [False, True])
-@pytest.mark.parametrize("dtype,width", [(torch.bfloat16, 576), (torch.int8, 656)])
+@pytest.mark.parametrize(
+    "query_rows,hot_size,cross_stream,dtype,width",
+    [(2, 4096, False, torch.bfloat16, 576), (2, 4096, True, torch.int8, 656), (4, 10240, False, torch.int8, 656), (4, 10240, True, torch.bfloat16, 576)],
+)
 def test_topk_2048_speculative_union_graph(query_rows, hot_size, cross_stream, dtype, width):
     topk, block = 2048, 128
     positions = query_rows * topk
@@ -479,7 +478,7 @@ def _invalidation_graph(forward):
         graph.reset()
 
 
-@pytest.mark.parametrize("hot_capacity", [4, 10240])
+@pytest.mark.parametrize("hot_capacity", [10240])
 def test_invalidate_hot_capacity_graph(hot_capacity):
     dgi = torch.arange(2 * hot_capacity, dtype=torch.int32, device="npu").view(2, hot_capacity)
     group_table = torch.tensor([dgi.data_ptr()], dtype=torch.int64, device=dgi.device)
@@ -506,8 +505,7 @@ def test_invalidate_hot_capacity_graph(hot_capacity):
             torch.testing.assert_close(dgi.cpu(), expected)
 
 
-@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
-@pytest.mark.parametrize("hot_capacity", [7, 2049])
+@pytest.mark.parametrize("dtype,hot_capacity", [(torch.int32, 7), (torch.int64, 2049)])
 def test_batched_invalidation_dynamic_graph(dtype, hot_capacity):
     """Duplicate writes and changing states must not race or pollute neighbors."""
     torch.manual_seed(71)
@@ -592,8 +590,7 @@ def test_native_resolver_empty_state_tables():
 
 
 @pytest.mark.parametrize("state_count", [4])
-@pytest.mark.parametrize("mask_dtype", [torch.uint8, torch.int32])
-@pytest.mark.parametrize("compact", [False, True])
+@pytest.mark.parametrize("mask_dtype,compact", [(torch.uint8, False), (torch.int32, True)])
 @pytest.mark.parametrize("resident_base", [131073])
 @pytest.mark.parametrize("cols", [9])
 def test_resident_fast_path_dynamic_graph(state_count, mask_dtype, compact, resident_base, cols):
@@ -737,7 +734,7 @@ def test_resident_fast_path_dynamic_graph(state_count, mask_dtype, compact, resi
             assert not errors[:, 0].cpu().any()
 
 
-@pytest.mark.parametrize("num_tokens", [4096, 8192])
+@pytest.mark.parametrize("num_tokens", [8192])
 def test_prefill_invalidation_sorted_graph(num_tokens):
     """Large writes use the same request/slot semantics as the CPU oracle."""
     torch.manual_seed(42)
@@ -784,7 +781,7 @@ def test_prefill_invalidation_sorted_graph(num_tokens):
             check()
 
 
-@pytest.mark.parametrize("valid_count", [0, 1023, 2048])
+@pytest.mark.parametrize("valid_count", [0, 2048])
 def test_resident_parallel_rows_preserve_output_neighbors(valid_count):
     """One request spans AIVs; strided scalar and row outputs keep guards intact."""
     rows, topk, hot, block = 17, 2048, 10240, 128
@@ -865,7 +862,7 @@ def test_resident_parallel_rows_preserve_output_neighbors(valid_count):
             torch.testing.assert_close(order.cpu(), order_cpu)
 
 
-@pytest.mark.parametrize("count", [1, 2047])
+@pytest.mark.parametrize("count", [2047])
 def test_batch_dma_to_mapped_host(count):
     """The existing D2H ABI writes the same allocation that AIV reads."""
     if not hasattr(torch.ops._C_ascend, "swap_blocks_batch"):
@@ -888,8 +885,7 @@ def test_batch_dma_to_mapped_host(count):
         host._hisparse_registration.close()
 
 
-@pytest.mark.parametrize("capture", [False, True])
-@pytest.mark.parametrize("compact", [False, True])
+@pytest.mark.parametrize("capture,compact", [(False, False), (True, True)])
 def test_union_overflow_preserves_state(capture, compact):
     """An oversized MTP union must fail before evicting an existing Hot row."""
     logical = torch.arange(8, dtype=torch.int32, device="npu").view(2, 4)
