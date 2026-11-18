@@ -1,0 +1,6 @@
+pr: 22317
+entries:
+  - category: bugfix
+    text: >-
+      Fixed a startup ValueError when using a non-MLA DFlash or DFlash2 draft
+      with --decode-context-parallel-size greater than 1 on ModelRunner V2.
