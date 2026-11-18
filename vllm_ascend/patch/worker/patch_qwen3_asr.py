@@ -42,11 +42,10 @@
 # equal ws_real (no extra padding, only tail windows <104 are masked within the
 # row) or be larger (e.g. 128) to pad every window up to an Ascend-aligned width
 # (the padding frames per row are masked, FIA still computes the full
-# ws_grid^2 attention matrix). Set VLLM_QWEN3_ASR_WS_GRID=104 for no pad.
+# ws_grid^2 attention matrix).
 #
 # Conv stays host-eager; layers+head graphed. Installing this patch = graph
-# capture always on (no toggle). Configurable via VLLM_QWEN3_ASR_BINS /
-# VLLM_QWEN3_ASR_WS_GRID.
+# capture always on (no toggle).
 #
 # The prelude around the captured graph keeps every length, window and index
 # computation on the host. Reading any of them back from the NPU (`.item()`,
@@ -54,8 +53,6 @@
 # known on device) drains the queue, and the audio tower runs while other
 # requests are decoding on the same engine, so each read stalls them too.
 # Indices are built on the host and copied up with `async_tensor_h2d`.
-import os
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -69,16 +66,12 @@ from vllm.utils.torch_utils import async_tensor_h2d
 # batch (sum over audios of ceil(aftercnn_i / ws_real)). One graph per bin;
 # runtime picks the next-larger bin and pads (supports any concurrency: 1,2,4,
 # 8,16,32,64,...). ~4 windows/audio => C=64 -> ~256. Keep <=~68 graphs.
-_BINS = [
-    int(x)
-    for x in os.environ.get("VLLM_QWEN3_ASR_BINS", "1,2,4,8,12,16,24,32,48,64,96,128,192,256").split(",")
-    if x.strip()
-]
+_BINS = [1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256]
 # Grid window width for FIA (seq_len). ws_real = semantic window_aftercnn (104);
-# ws_grid is the (fixed) grid width each window is placed into. Default 128
-# pads every window up to an Ascend-aligned width (24 masked padding frames);
-# set to 104 for no extra padding.
-_WS_GRID = int(os.environ.get("VLLM_QWEN3_ASR_WS_GRID", "128"))
+# ws_grid is the (fixed) grid width each window is placed into. 128 pads every
+# window up to an Ascend-aligned width (24 masked padding frames); 104 would be
+# no extra padding.
+_WS_GRID = 128
 
 
 _orig_forward = Qwen3OmniMoeAudioEncoder.forward
