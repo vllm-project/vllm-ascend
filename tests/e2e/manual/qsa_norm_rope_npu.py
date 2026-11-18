@@ -171,12 +171,21 @@ def projection_case(tokens, mrope, gate, role, dims):
         try:
             upstream = qsa.upstream_qsa.Qwen4ExpQSAAttention._project_qkv_gate(layer, packed, pos)
             torch.npu.synchronize()
-            result["upstream"] = [
-                check(a, b) if a is not None else {"both_none": b is None} for a, b in zip(output, upstream)
-            ]
-        except Exception as error:
-            # Unsupported upstream input is a recorded comparison outcome.
+        except RuntimeError as error:
+            # Plain RoPE with three-axis positions is unsupported upstream.
+            # Numerical assertion failures and every other exception must fail.
+            if mrope or dims != 2 or "shape" not in str(error):
+                raise
             result["upstream_exception"] = type(error).__name__ + ": " + str(error)
+        else:
+            comparisons = []
+            for actual, reference in zip(output, upstream):
+                if actual is None or reference is None:
+                    assert actual is reference
+                    comparisons.append({"both_none": True})
+                else:
+                    comparisons.append(check(actual, reference))
+            result["upstream"] = comparisons
     return result
 
 
