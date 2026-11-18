@@ -3,10 +3,9 @@
 
 """Greedy verification of draft tokens, as plain PyTorch.
 
-Hardware- and runner-neutral: the Triton variant used on standard hardware lives
-in ``vllm_ascend.ops.triton.v1.reject_sample``, while these PyTorch ones are the
-fallback for 310P MRv2 and for the MRv1 rejection sampler. They live under the
-MRv2 worker because MRv1 is scheduled for removal and must not own shared code.
+Hardware- and runner-neutral: these are the PyTorch fallbacks for 310P Model
+Runner V2. They live under the V2 worker so that shared code does not depend on a
+runner implementation.
 """
 
 import torch
@@ -17,24 +16,12 @@ def rejection_greedy_sample_spec_len_1_pytorch(
     draft_token_ids,  # [num_tokens]
     target_argmax,  # [num_tokens]
     bonus_token_ids,  # [batch_size]
-    uniform_probs=None,
-    synthetic_conditional_rates=None,
-    synthetic_mode=False,
 ):
     batch_size = output_token_ids.size(0)
     num_tokens = draft_token_ids.size(0)
     assert batch_size == num_tokens
-    if synthetic_mode:
-        assert uniform_probs is not None and synthetic_conditional_rates is not None
-        # spec_len == 1 => only position 0. Accept the draft token with prob
-        # rate[0]; on accept emit the draft token (pos 0) + bonus (pos 1),
-        # otherwise emit target_argmax (pos 0).
-        rate = synthetic_conditional_rates[0]
-        accept_req_mask = (uniform_probs < rate) & (draft_token_ids >= 0)
-        output_token_ids[:, 0] = torch.where(accept_req_mask, draft_token_ids, target_argmax)
-    else:
-        accept_req_mask = draft_token_ids == target_argmax
-        output_token_ids[:, 0] = target_argmax
+    accept_req_mask = draft_token_ids == target_argmax
+    output_token_ids[:, 0] = target_argmax
     bonus_token_ids = bonus_token_ids.squeeze(1)
     output_token_ids[:, 1] = torch.where(accept_req_mask, bonus_token_ids, output_token_ids[:, 1])
 
@@ -48,9 +35,6 @@ def rejection_greedy_sample_pytorch(
     draft_tokens_per_req,  # [batch_size], list
     max_spec_len,
     is_greedy=None,  # [batch_size] or None
-    uniform_probs=None,
-    synthetic_conditional_rates=None,
-    synthetic_mode=False,
 ):
     batch_size = output_token_ids.size(0)
     num_tokens = draft_token_ids.size(0)
@@ -65,16 +49,7 @@ def rejection_greedy_sample_pytorch(
     token_positions = torch.arange(num_tokens, device=device) - start_indices[token_req_ids]
 
     # Find the first mismatch position of each request.
-    if synthetic_mode:
-        assert uniform_probs is not None and synthetic_conditional_rates is not None
-        # Synthetic: accept draft token i with prob conditional_rates[i],
-        # regardless of target match. First rejection (= first mismatch) is the
-        # first position not accepted.
-        rates_per_token = synthetic_conditional_rates[token_positions]
-        accept_per_token = (uniform_probs < rates_per_token) & (draft_token_ids >= 0)
-        mismatch_global = ~accept_per_token
-    else:
-        mismatch_global = draft_token_ids != target_argmax
+    mismatch_global = draft_token_ids != target_argmax
     if max_spec_len == 0:
         first_mismatch_pos_per_req = torch.zeros(batch_size, dtype=torch.long, device=device)
     else:
@@ -95,12 +70,7 @@ def rejection_greedy_sample_pytorch(
     greedy_mask = is_greedy.unsqueeze(1)
     final_copy_mask = copy_mask & greedy_mask
     global_idx = start_indices.unsqueeze(1) + copy_indices
-    if synthetic_mode:
-        # Accepted positions emit the draft token; the first rejected position
-        # emits target_argmax (greedy recovery).
-        copy_tokens = torch.where(accept_per_token, draft_token_ids, target_argmax)
-    else:
-        copy_tokens = target_argmax
+    copy_tokens = target_argmax
     output_token_ids[final_copy_mask] = copy_tokens[global_idx[final_copy_mask]].to(output_token_ids.dtype)
     # Fill bonus token.
     needs_bonus = is_greedy & (first_mismatch_pos_per_req >= draft_tokens_per_req)

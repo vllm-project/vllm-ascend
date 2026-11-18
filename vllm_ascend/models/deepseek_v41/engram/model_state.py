@@ -119,7 +119,9 @@ class EngramModelState(AscendModelState):
         self._replay_start_np[req_index] = int(getattr(new_req_data, "replay_start", 0))
         if self.decoder_replay_state is not None:
             params = new_req_data.sampling_params
-            self.decoder_replay_state.keeps_rows[req_index] = params is not None and params.prompt_logprobs is not None
+            self.decoder_replay_state.keeps_rows[req_index] = params is not None and (
+                params.prompt_logprobs is not None or params.prompt_logprob_token_ids is not None
+            )
 
     def finish_execution(self, *, failed: bool) -> None:
         # Engram owns its lookup buffers and events. Keep their retirement

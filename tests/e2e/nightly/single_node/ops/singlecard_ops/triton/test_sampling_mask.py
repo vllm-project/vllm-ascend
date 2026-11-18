@@ -237,7 +237,7 @@ def test_sampling_mask_matches_processed_top_k_top_p_support():
                 [[6.0, 5.0, 4.0, 4.0, 4.0, 2.0, 1.0, 0.0]],
                 device="npu",
             ),
-            k=torch.tensor([3], device="npu"),
+            k=torch.tensor([3], dtype=torch.int32, device="npu"),
             p=torch.tensor([0.9], device="npu"),
         )
         expected_ids = torch.isfinite(processed_logits[0]).nonzero().flatten().tolist()

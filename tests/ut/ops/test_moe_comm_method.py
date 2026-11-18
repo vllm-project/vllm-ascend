@@ -116,6 +116,9 @@ class TestMoECommMethod(TestBase):
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.logger.warning_once")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group")
     def test_mega_moe_symm_buffer_uses_safe_capacity_for_d_node(self, mock_get_mc2_group, mock_warning_once):
+        # Node roles no longer gate the capacity: a configured mega_moe_max_tokens
+        # (32768) is clamped to the absolute safe upper bound (1024) on every
+        # node, decode-only included, with a warning explaining the clamp.
         self.mock_ascend_config.mega_moe_max_tokens = 32768
         mock_mc2_group = MagicMock()
         mock_mc2_group.device_group = "mc2_group"
@@ -126,7 +129,8 @@ class TestMoECommMethod(TestBase):
 
         call_args = comm_impl.get_symm_buffer_for_mega_moe.call_args
         self.assertEqual(call_args.kwargs["max_recv_token_num"], 1024)
-        mock_warning_once.assert_not_called()
+        mock_warning_once.assert_called_once()
+        self.assertIn("mega_moe_max_tokens", mock_warning_once.call_args.args[0])
 
     def test_apply_cann_mega_moe_passes_oai_kwargs_when_supported(self):
         captured = {}

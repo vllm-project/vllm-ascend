@@ -216,14 +216,6 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         torch.Tensor.pin_memory = lambda x: x  # noqa
         self.builder = AscendAttentionMetadataBuilder(None, None, self.mock_vllm_config, self.mock_device)
 
-    def test_reorder_batch(self):
-        mock_input_batch = MagicMock()
-        mock_scheduler_output = MagicMock()
-
-        result = self.builder.reorder_batch(mock_input_batch, mock_scheduler_output)
-
-        self.assertFalse(result)
-
     def test_pcp_mode_is_initialized_from_config(self):
         self.assertFalse(self.builder.use_pcp)
         self.assertIs(self.builder.metadata_cls, AscendMetadata)
@@ -381,7 +373,6 @@ def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
     builder.decode_threshold = 1
     builder.use_pcp = True
     common_metadata = SimpleNamespace(
-        context_parallel_metadata=None,
         max_query_len=4,
         num_reqs=2,
         num_actual_tokens=5,
@@ -1053,6 +1044,22 @@ class TestAscendAttentionBackendImpl(TestBase):
         output = self.impl.forward(layer, query, key, value, kv_cache, None, output)
 
         assert output.shape == (10, 8 * 64)
+
+    def test_forward_pooling_encoder_only_is_bidirectional_despite_causal_metadata(self):
+        self.impl.attn_type = attn_module.AttentionType.ENCODER_ONLY
+        query = torch.zeros(2, self.impl.num_heads, self.impl.head_size)
+        output = torch.zeros_like(query)
+        encoder_output = torch.ones_like(query)
+        metadata = AscendMetadata(model_runner_type="pooling", causal=True, actual_seq_lengths_q=[query.shape[0]])
+
+        with (
+            patch("torch_npu.npu_fusion_attention", return_value=(encoder_output,)) as encoder_attention,
+            patch.object(self.impl, "forward_impl", return_value=output),
+        ):
+            result = self.impl.forward(self.layer_no_quant, query, query, query, (), metadata, output)
+
+        encoder_attention.assert_called_once()
+        torch.testing.assert_close(result, encoder_output)
 
     @patch("torch_npu.npu_scatter_pa_kv_cache")
     @patch("torch_npu.npu_fused_infer_attention_score")

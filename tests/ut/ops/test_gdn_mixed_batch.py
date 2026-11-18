@@ -280,8 +280,8 @@ def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
     )
 
 
-@pytest.mark.parametrize("speculative", [False, True])
-def test_decode_forward_does_not_reconcat_qkv(speculative):
+@pytest.mark.parametrize("speculative,adaptive", [(False, False), (True, False), (True, True)])
+def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive):
     layer = _make_layer()
     packed = torch.arange(24, dtype=torch.float32).reshape(4, 6)
     metadata = _make_mixed_metadata()
@@ -302,7 +302,15 @@ def test_decode_forward_does_not_reconcat_qkv(speculative):
             num_accepted_tokens=torch.tensor([1, 2], dtype=torch.int32),
         ),
         actual_seq_lengths=torch.tensor([0, 2, 2], dtype=torch.int32),
+        use_upstream_recurrent=adaptive,
+        use_upstream_conv=adaptive,
     )
+    if adaptive:
+        metadata.spec_state_indices_tensor = torch.arange(1, 9, dtype=torch.int32).reshape(2, 4)
+        conv_metadata = metadata.spec_decode_metadata.spec_causal_conv1d
+        conv_metadata.query_start_loc = torch.tensor([0, 1, 4], dtype=torch.int32)
+        conv_metadata.num_accepted_tokens = torch.tensor([3, 2], dtype=torch.int32)
+        metadata.spec_decode_metadata.actual_seq_lengths = torch.tensor([0, 1, 3], dtype=torch.int32)
     output = torch.empty(4, 1, 2)
     context = ForwardContext(
         no_compile_layers={layer.prefix: layer},
@@ -318,10 +326,19 @@ def test_decode_forward_does_not_reconcat_qkv(speculative):
             torch.testing.assert_close(kwargs["num_accepted_tokens"], torch.tensor([1, 2], dtype=torch.int32))
         return v.clone()
 
+    def upstream_recurrent(q, k, v, **kwargs):
+        torch.testing.assert_close(q[0], packed[:, :2].reshape(4, 1, 2))
+        torch.testing.assert_close(k[0], packed[:, 2:4].reshape(4, 1, 2))
+        torch.testing.assert_close(v[0], packed[:, 4:].reshape(4, 1, 2))
+        assert kwargs["ssm_state_indices"] is metadata.spec_state_indices_tensor
+        assert kwargs["cu_seqlens"] is conv_metadata.query_start_loc
+        assert kwargs["num_accepted_tokens"].tolist() == [3, 2]
+        return v.clone(), kwargs["initial_state"]
+
     # Reject the inherited concat helper for all real decode inputs.
     original = layer.rearrange_mixed_qkv.side_effect
-    layer.rearrange_mixed_qkv.side_effect = (
-        lambda x: original(x) if x is None else pytest.fail("decode used inherited QKV concat")
+    layer.rearrange_mixed_qkv.side_effect = lambda x: (
+        original(x) if x is None else pytest.fail("decode used inherited QKV concat")
     )
     with (
         override_forward_context(context),
@@ -333,16 +350,26 @@ def test_decode_forward_does_not_reconcat_qkv(speculative):
         ),
         patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
         patch("vllm_ascend.ops.gdn.causal_conv1d_update", side_effect=lambda x, *a, **k: x.clone()) as conv,
+        patch(
+            "vllm_ascend.ops.gdn.causal_conv1d_update_varlen", side_effect=lambda x, *a, **k: x.clone()
+        ) as varlen_conv,
         patch("vllm_ascend.ops.gdn.recurrent_gated_delta_rule", side_effect=recurrent),
+        patch("vllm_ascend.ops.gdn.fused_recurrent_gated_delta_rule", side_effect=upstream_recurrent),
         patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
     ):
         AscendGatedDeltaNetAttention._forward_core(layer, packed, torch.zeros(4, 1), torch.zeros(4, 1), output)
     torch.testing.assert_close(output, packed[:, 4:].reshape(4, 1, 2))
     if speculative:
+        selected_conv = varlen_conv if adaptive else conv
         torch.testing.assert_close(
-            conv.call_args.kwargs["num_accepted_tokens"],
-            torch.tensor([1, 2], dtype=torch.int32),
+            selected_conv.call_args.kwargs["num_accepted_tokens"],
+            torch.tensor([3, 2] if adaptive else [1, 2], dtype=torch.int32),
         )
+    if adaptive:
+        conv.assert_not_called()
+        varlen_conv.assert_called_once()
+    else:
+        varlen_conv.assert_not_called()
 
 
 @pytest.mark.parametrize("mixed,head_dim", [(False, 16), (True, 16), (False, 2)])

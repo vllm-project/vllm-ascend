@@ -425,7 +425,7 @@ def _categorical_sample_main(
     logits_cache_source: torch.Tensor | None = None,
     logits_cache_row_mapping: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    # 0.32.0 has `logits_cache_source` (only watermarking supplies a separate
+    # 0.33.0 has `logits_cache_source` (only watermarking supplies a separate
     # source); main adds the per-row mapping for batch-sharded caches. The NPU
     # kernels support neither.
     if logits_cache_row_mapping is not None:

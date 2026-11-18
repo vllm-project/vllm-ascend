@@ -35,7 +35,6 @@ class AscendEagleSpeculator(AscendTargetDependentARSpeculator, EagleSpeculator):
         draft_vllm_config = super()._create_draft_vllm_config()
         draft_vllm_config.parallel_config = replace(
             draft_vllm_config.parallel_config,
-            prefill_context_parallel_size=1,
             enable_expert_parallel=False,
             enable_eplb=False,
         )

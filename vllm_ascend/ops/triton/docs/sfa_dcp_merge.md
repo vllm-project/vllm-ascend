@@ -21,7 +21,7 @@
 - The rank dimension is positive and a power of two, as required by the static reduction vector. Shapes and source strides must describe the exchange payload; the caller owns these layout preconditions.
 - Feature tails are masked. A single program keeps at most512 FP32 feature elements plus the rank vector, rather than materializing an `R x D` working tile.
 - Finite-LSE filtering, finite `safe_max`, zero-denominator handling and invalid-output masking are part of numerical semantics, not optional defensive checks.
-- Runtime head counts, work counts and ordinary strides are not exact-value constexpr keys. `LSE_RANK_STRIDE` remains a measured specialization exception; previously unseen layouts can therefore compile new variants.
+- Runtime head counts, work counts and strides are not exact-value constexpr keys. The LSE rank stride is a `do_not_specialize` runtime scalar, so changing token count does not create an exact-stride variant. See [DCP JIT warmup](dcp_a2a_fused.md#jit-warmup) for owner registration and remaining hardware validation.
 - This is an internal NPU kernel API, not a Torch CPU fallback implementation. The public DCP operator retains upstream routing for modes not using this payload.
 
 ## Origin and Differences

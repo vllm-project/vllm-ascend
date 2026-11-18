@@ -85,6 +85,62 @@ class TestAscendCompressedTensorsQuanType(TestBase):
         result = self.config._detect_quant_type(weight, input_q, "mxfp4-pack-quantized")
         self.assertEqual(result, "W4A4_MXFP4")
 
+    def test_detect_mxfp4_mxfp8_dynamic(self):
+        weight = self._make_mx_quant(num_bits=4, dynamic=False)
+        input_q = self._make_mx_quant(num_bits=8, dynamic=True)
+        result = self.config._detect_quant_type(weight, input_q, "mxfp4-pack-quantized")
+        self.assertEqual(result, "W4A8_MXFP")
+        self.assertEqual(self.config.quant_description["group_size"], 32)
+
+    def test_mxfp4_mxfp8_dynamic_from_runtime_override(self):
+        config = {
+            "format": "mixed-precision",
+            "quant_method": "compressed-tensors",
+            "config_groups": {
+                "group_0": {
+                    "format": "mxfp4-pack-quantized",
+                    "targets": ["Linear"],
+                    "input_activations": {
+                        "num_bits": 8,
+                        "type": "float",
+                        "strategy": "group",
+                        "group_size": 32,
+                        "dynamic": True,
+                        "symmetric": True,
+                    },
+                    "weights": {
+                        "num_bits": 4,
+                        "type": "float",
+                        "strategy": "group",
+                        "group_size": 32,
+                        "dynamic": False,
+                        "symmetric": True,
+                    },
+                }
+            },
+        }
+        parsed = AscendCompressedTensorsConfig.from_config(config)
+        scheme = parsed.target_scheme_map["Linear"]
+        self.assertEqual(scheme["input_activations"].num_bits, 8)
+        result = parsed._detect_quant_type(scheme["weights"], scheme["input_activations"], scheme["format"])
+        self.assertEqual(result, "W4A8_MXFP")
+
+    def test_mxfp4_mxfp8_dynamic_rejects_incompatible_formats(self):
+        for quant_format in ("int-quantized", "mxfp8-quantized"):
+            with self.subTest(format=quant_format), self.assertRaises(NotImplementedError):
+                self.config._detect_quant_type(self._make_mx_quant(), self._make_mx_quant(8, True), quant_format)
+
+    def test_mxfp4_mxfp8_dynamic_rejects_invalid_weight_geometry(self):
+        for attribute, value in (("num_bits", 8), ("group_size", 16), ("dynamic", True), ("symmetric", False)):
+            weight = self._make_mx_quant()
+            setattr(weight, attribute, value)
+            with self.subTest(attribute=attribute), self.assertRaises(NotImplementedError):
+                self.config._detect_quant_type(weight, self._make_mx_quant(8, True), "mxfp4-pack-quantized")
+
+    def test_mxfp4_weight_only_does_not_implicitly_select_dynamic_w4a8(self):
+        with self.assertRaises(NotImplementedError):
+            self.config._detect_quant_type(self._make_mx_quant(), None, "mxfp4-pack-quantized")
+
     def test_detect_mxfp8_dynamic(self):
         weight = self._make_mx_quant(num_bits=8, dynamic=False)
         input_q = self._make_mx_quant(num_bits=8, dynamic=True)
@@ -170,7 +226,7 @@ class TestAscendCompressedTensorsConfigGetQuantMethod(TestBase):
 
         self.assertIs(result, mock_method.return_value)
         self.assertIs(layer.scheme, moe_scheme)
-        mock_method.assert_called_once_with(moe_scheme, layer.moe_config, None)
+        mock_method.assert_called_once_with(moe_scheme, layer.moe_config)
 
     def test_no_quant_method(self):
         layer = MagicMock(spec=Attention)

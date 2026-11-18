@@ -203,6 +203,65 @@ def test_a5_common_table_refreshes_in_place_and_invalidates_only_changed_layout(
     assert model_state._load_mapping_generation == 1
 
 
+@pytest.mark.parametrize("device", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+def test_add_model_snapshots_the_placement_on_every_profile(monkeypatch, device):
+    """Every profile needs the snapshot, not only the AllGather one.
+
+    `refresh_model_routing_tables` compares against it to notice a committed
+    rearrangement, and the first refresh already runs after the first commit, so
+    seeding it there instead would leave that commit's stale load in place.
+    """
+    monkeypatch.setattr(eplb_state, "get_current_hardware_profile", lambda: get_hardware_profile(device))
+    monkeypatch.setattr(eplb_state, "get_ep_group", lambda: SimpleNamespace(world_size=2))
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "add_model", lambda *_, **__: None)
+    model_config = MagicMock()
+    model_config.compute_hash.return_value = "target"
+    physical = torch.tensor([[0, 1, 0, 1]])
+
+    state = AscendEplbState.__new__(AscendEplbState)
+    state._hixl_session = None
+    state._configured_policy = None
+    state.parallel_config = SimpleNamespace(eplb_config=SimpleNamespace(policy="default"))
+    state.model_states = {"target": SimpleNamespace(physical_to_logical_map=physical)}
+    monkeypatch.setattr(AscendEplbState, "uses_custom_load_stats", property(lambda _: False))
+
+    state.add_model(object(), model_config)
+
+    snapshot = state.model_states["target"]._allgather_physical_map
+    torch.testing.assert_close(snapshot, physical)
+    assert snapshot is not physical
+
+
+def test_first_commit_discards_load_history_on_a_non_allgather_profile():
+    """The first commit must clear the history too, with no earlier refresh.
+
+    On a profile that does not use AllGather the tables are refreshed for the
+    first time only after a rearrangement has already been committed, so the
+    snapshot has to predate it.
+    """
+    physical = torch.tensor([[1, 0, 0, 1]])
+    model_state = SimpleNamespace(
+        model=SimpleNamespace(moe_layers=[]),
+        physical_to_logical_map=physical,
+        # What add_model left behind: the placement before the commit.
+        _allgather_physical_map=torch.tensor([[0, 1, 0, 1]]),
+        expert_load_pass=torch.ones(1, 4),
+        expert_load_window=torch.ones(2, 1, 4),
+        _load_mapping_generation=0,
+    )
+
+    eplb_state.refresh_model_routing_tables(model_state)
+
+    assert model_state.expert_load_pass.sum() == model_state.expert_load_window.sum() == 0
+    assert model_state._load_mapping_generation == 1
+
+    # An unchanged placement must not throw the window away again.
+    model_state.expert_load_window.fill_(1)
+    eplb_state.refresh_model_routing_tables(model_state)
+    assert model_state.expert_load_window.sum() == 8
+    assert model_state._load_mapping_generation == 1
+
+
 @pytest.mark.parametrize("old_width,new_width", [(4, 6), (6, 4)])
 def test_allgather_history_snapshot_tracks_elastic_active_width(old_width, new_width):
     model_state = SimpleNamespace(
@@ -218,6 +277,33 @@ def test_allgather_history_snapshot_tracks_elastic_active_width(old_width, new_w
     assert not model_state.expert_load_pass.any() and not model_state.expert_load_window.any()
     assert model_state._load_mapping_generation == 1
     eplb_state.refresh_model_routing_tables(model_state)
+    assert model_state._load_mapping_generation == 1
+
+
+def test_async_allgather_refresh_invalidates_history_without_comparing_device_maps(monkeypatch):
+    physical = torch.tensor([[1, 0], [0, 1]])
+    snapshot = torch.tensor([[0, 1], [0, 1]])
+    layer_states = [AscendEplbLayerState(), AscendEplbLayerState()]
+    refreshes = [MagicMock(), MagicMock()]
+    for layer_state, refresh in zip(layer_states, refreshes):
+        monkeypatch.setattr(layer_state, "refresh_expert_replica_routing_table", refresh)
+    model_state = SimpleNamespace(
+        model=SimpleNamespace(moe_layers=[SimpleNamespace(eplb_state=layer) for layer in layer_states]),
+        physical_to_logical_map=physical,
+        _allgather_physical_map=snapshot,
+        expert_load_pass=torch.ones(2, 2),
+        expert_load_window=torch.ones(2, 2, 2),
+        _load_mapping_generation=0,
+    )
+    with patch.object(torch, "equal", side_effect=AssertionError("device map comparison synchronizes")):
+        eplb_state.refresh_model_routing_tables(model_state, layer_idx=0)
+
+    refreshes[0].assert_called_once_with()
+    refreshes[1].assert_not_called()
+    assert model_state._allgather_physical_map is snapshot
+    torch.testing.assert_close(snapshot, physical)
+    assert not model_state.expert_load_pass.any()
+    assert not model_state.expert_load_window.any()
     assert model_state._load_mapping_generation == 1
 
 
@@ -271,7 +357,8 @@ def test_async_rearrange_defers_routing_refresh_to_workspace_hook(monkeypatch):
 
 
 def test_from_mapping_refreshes_final_mapping(monkeypatch):
-    model_state = object()
+    # from_mapping also snapshots the placement, so the stand-in needs the map.
+    model_state = SimpleNamespace(physical_to_logical_map=torch.zeros(1, 4, dtype=torch.int32))
 
     def upstream_from_mapping(cls, **kwargs):
         state = cls.__new__(cls)

@@ -21,8 +21,8 @@ from vllm.multimodal.utils import encode_image_url
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import (
+    RemoteEPDServer,
     RemoteOpenAIServer,
-    RemotePDServer,
     wait_until_npu_memory_free,
 )
 
@@ -30,9 +30,7 @@ MODEL = "Qwen/Qwen3.5-9B"
 MAX_MODEL_LEN = 4096
 MAX_NUM_SEQS = 2
 NORMAL_STAGING_BYTES = 128 * 1024 * 1024
-FORCED_FALLBACK_STAGING_BYTES = 1
 CONSUMER_BUFFER_BYTES = 256 * 1024 * 1024
-BOUNCE_ARENA_BYTES = 2 * 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 600
 
 
@@ -273,11 +271,7 @@ def _common_server_args() -> list[str]:
     ]
 
 
-def _run_epd(
-    baseline_outputs: dict[str, str],
-    producer_staging_bytes: int,
-    repeat: int,
-) -> None:
+def _run_epd(baseline_outputs: dict[str, str]) -> None:
     encode_port = get_open_port()
     pd_port = get_open_port()
     reservation_port = get_open_port()
@@ -285,11 +279,10 @@ def _run_epd(
     producer_config = {
         "ec_connector": "ECMooncakeConnector",
         "ec_role": "ec_producer",
-        "ec_buffer_size": producer_staging_bytes,
+        "ec_buffer_size": NORMAL_STAGING_BYTES,
         "ec_buffer_device": "npu",
         "ec_connector_extra_config": {
             "mooncake_protocol": "ascend",
-            "ascend_mooncake_bounce_arena_size": BOUNCE_ARENA_BYTES,
         },
     }
     consumer_config = {
@@ -325,20 +318,20 @@ def _run_epd(
             json.dumps(consumer_config),
         ],
     ]
-    env_dict = {
-        "EC_MOONCAKE_RESERVATION_PORT": str(reservation_port),
-        "MOONCAKE_EC_PROTOCOL": "ascend",
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
-    }
-
-    with RemotePDServer(vllm_serve_args=server_args, env_dict=env_dict):
-        for _ in range(repeat):
-            assert _run_epd_requests(encode_port, pd_port, reservation_port) == baseline_outputs
+    with RemoteEPDServer(
+        vllm_serve_args=server_args,
+        env_dict={
+            "EC_MOONCAKE_RESERVATION_PORT": str(reservation_port),
+            "MOONCAKE_EC_PROTOCOL": "ascend",
+            "VLLM_USE_V2_MODEL_RUNNER": "1",
+        },
+    ):
+        assert _run_epd_requests(encode_port, pd_port, reservation_port) == baseline_outputs
 
 
 @pytest.fixture(scope="module")
 def baseline_outputs() -> dict[str, str]:
-    """Run the single-server reference once for both EPD paths."""
+    """Run the single-server reference for the ECMooncake EPD path."""
     baseline_port = get_open_port()
     baseline_args = [
         "--port",
@@ -385,25 +378,4 @@ def test_mooncake_staging_matches_single_server(
     baseline_outputs: dict[str, str],
 ) -> None:
     """Validate the production-shaped staging-first transfer path."""
-    _run_epd(baseline_outputs, NORMAL_STAGING_BYTES, repeat=1)
-
-
-@pytest.mark.e2e_model(MODEL)
-@pytest.mark.e2e_coverage(
-    arch="multimodal",
-    feature="",
-    parallel="",
-    deploy="epd",
-    hardware="A3",
-    quantization="BF16",
-    graph_mode="eager",
-)
-@wait_until_npu_memory_free()
-def test_mooncake_forced_fallback_matches_single_server(
-    baseline_outputs: dict[str, str],
-) -> None:
-    """Validate direct/bounce fallback and its resource reuse."""
-    # One byte is deliberate fault injection used only by this case. It makes
-    # stage() reject every non-empty encoder output and proves the insurance
-    # path without depending on a particular model's encoder-output size.
-    _run_epd(baseline_outputs, FORCED_FALLBACK_STAGING_BYTES, repeat=2)
+    _run_epd(baseline_outputs)

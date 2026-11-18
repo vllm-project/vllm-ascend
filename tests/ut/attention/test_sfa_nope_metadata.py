@@ -25,7 +25,9 @@ def _builder(
             get_head_size=lambda: 512,
             hf_text_config=SimpleNamespace(num_attention_heads=4, kv_lora_rank=512),
         ),
-        parallel_config=SimpleNamespace(tensor_parallel_size=tp_size, prefill_context_parallel_size=1),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=tp_size, prefill_context_parallel_size=1, pcp_shard_decode_requests=False
+        ),
         scheduler_config=SimpleNamespace(max_num_seqs=2, max_num_batched_tokens=32 if speculative else 4),
         speculative_config=SimpleNamespace(num_speculative_tokens=5) if speculative else None,
         compilation_config=SimpleNamespace(
@@ -62,7 +64,6 @@ def _common(block_size):
     expanded = (pages.unsqueeze(-1) * split + torch.arange(split, dtype=torch.int32)).reshape(2, -1)
     expanded[1, split:] = -1
     return SimpleNamespace(
-        context_parallel_metadata=None,
         pcp_context=None,
         pcp_cache_group_idx=None,
         num_reqs=2,
@@ -263,7 +264,7 @@ def test_rope_sfa_keeps_rotary_tables_and_kernel_pages(monkeypatch):
         metadata = builder.build(0, common)
     rotary.assert_called_once()
     torch.testing.assert_close(rotary.call_args.args[0], common.positions)
-    assert rotary.call_args.kwargs == {"use_cache": True}
+    assert rotary.call_args.kwargs == {"use_cache": True, "use_rope": True}
     assert metadata.cos.data_ptr() == cos.data_ptr()
     assert metadata.sin.data_ptr() == sin.data_ptr()
     assert metadata.block_table.data_ptr() == common.block_table_tensor.data_ptr()

@@ -493,3 +493,57 @@ def test_atexit_callback_requests_final_shutdown(runtime, monkeypatch):
     assert session._atexit_callback() is True
 
     assert calls == [{"final": True}]
+
+
+def test_shutdown_releases_legacy_lease_without_ttl(runtime):
+    session = make_session(runtime)
+    legacy_lease = replace(runtime.lease, lease_ttl_sec=None)
+    session.seed_lease = legacy_lease
+    session.planner.release_seed_once.return_value = runtime.types.LeaseReleaseResult.RELEASED
+
+    assert session.shutdown()
+
+    session.planner.release_seed_once.assert_called_once_with(legacy_lease)
+    assert session.seed_lease is None
+    assert session.state is runtime.types.RForkLifecycleState.FINALIZED
+    session.transfer_backend.finalize_transfer_engine.assert_called_once_with()
+
+
+def test_failed_deferred_promotion_cleans_up_seed_start(runtime, monkeypatch):
+    session = make_session(runtime)
+    session.state = runtime.types.RForkLifecycleState.READY
+    session.planner.release_seed_once.side_effect = [
+        runtime.types.LeaseReleaseResult.RETRYABLE,
+        runtime.types.LeaseReleaseResult.RELEASED,
+    ]
+    monkeypatch.setattr(session, "_start_seed_service", Mock(return_value=False))
+    cleanup = Mock()
+    monkeypatch.setattr(session, "_cleanup_failed_seed_start", cleanup)
+
+    assert session.start_seed_service(dummy_model(), True) is runtime.types.RForkSeedServiceStartResult.DEFERRED
+    session.lease_release_thread.join(2)
+
+    assert session.seed_lease is None
+    cleanup.assert_called_once_with()
+
+
+def test_seed_service_uses_dynamic_port_when_resolved_port_overflows(runtime, monkeypatch):
+    session = make_session(runtime)
+    session.seed_lease = None
+    session.state = runtime.types.RForkLifecycleState.READY
+    session.config = replace(session.config, seed_port_base=20000)
+    session.identity = replace(runtime.identity, global_rank=30000)
+    session.transfer_backend.transfer_session_id = "native-session"
+    session.transfer_backend.weight_manifest = {"weight": [1, 1, 4, [1], "float32"]}
+    session.transfer_backend.weight_formats = {"weight": 0}
+    start_server = Mock(return_value=Mock(is_alive=True, port=1234))
+    monkeypatch.setattr(runtime.session, "start_rfork_server", start_server)
+    monkeypatch.setattr(session, "_run_seed_heartbeat", lambda *args: None)
+    session.planner.report_seed_once.return_value = True
+
+    assert session.start_seed_service(dummy_model(), True) is runtime.types.RForkSeedServiceStartResult.STARTED
+
+    assert start_server.call_args.kwargs["port"] == 0
+    assert start_server.call_args.kwargs["fallback_to_dynamic_port"] is False
+    assert session.state is runtime.types.RForkLifecycleState.SERVING
+    session.lease_renew_stop_event.set()

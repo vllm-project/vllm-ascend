@@ -1,0 +1,4 @@
+pr: 21317
+entries:
+  - category: breaking
+    text: Deprecated dynamic chunk size Chunked Pipeline Parallelism (CPP, RFC #21304) and Decode Context Parallelism (DCP) for GQA models (RFC #21305), adding runtime deprecation warnings and documentation notes.
