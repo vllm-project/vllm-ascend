@@ -1653,13 +1653,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             load_start_block = request.load_spec.vllm_cached_tokens // block_size if not reuses_buffer else 0
             cached_full_blocks = cached_tokens // block_size
             full_blocks = min(cached_full_blocks, len(group_block_hashes))
+            partial_block_index = None
             if self.layerwise_offload and request.load_spec.layerwise_previous_step:
                 if not reuses_buffer:
                     continue
                 full_blocks = cached_full_blocks
-            partial_block_index = self._resolve_layerwise_load_partial(cached_tokens, block_size)
-            if not reuses_buffer:
-                partial_block_index = None
+                partial_block_index = self._resolve_layerwise_load_partial(cached_tokens, block_size)
             partial_gva = (
                 request.partial_load_gva_per_group[group_id]
                 if group_id < len(request.partial_load_gva_per_group)
@@ -1727,13 +1726,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 )
             )
 
-    def _resolve_layerwise_load_partial(
-        self,
-        cached_tokens: int,
-        block_size: int,
-    ) -> int | None:
-        """Return the trailing incomplete block for offload restores."""
-        if self.layerwise_offload and cached_tokens % block_size:
+    @staticmethod
+    def _resolve_layerwise_load_partial(cached_tokens: int, block_size: int) -> int | None:
+        """Return the incomplete block at the end of the previous step."""
+        if cached_tokens % block_size:
             return cached_tokens // block_size
         return None
 
@@ -1795,12 +1791,14 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 cached_full_blocks = cached_tokens // effective_block_size
                 full_blocks = min(cached_full_blocks, len(group_block_hashes))
                 get_saved_key = None
+                partial_block_index = None
                 if restore_previous_step:
                     snapshot = self._get_layerwise_load_snapshot(request, group_id, cached_tokens, group_block_hashes)
                     if snapshot is None:
                         all_group_load_gvas.append(np.zeros(0, dtype=np.int64))
                         continue
                     full_blocks, get_saved_key = snapshot
+                    partial_block_index = self._resolve_layerwise_load_partial(cached_tokens, effective_block_size)
 
                 block_ids_by_group = (
                     request.block_ids_by_group_np[group_id]
@@ -1814,13 +1812,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     continue
                 full_len = len(block_ids_by_group)
 
-                partial_block_index = self._resolve_layerwise_load_partial(cached_tokens, effective_block_size)
                 if partial_block_index is not None and (
                     partial_block_index < load_start_block or partial_block_index >= full_len
                 ):
-                    if get_saved_key is not None:
-                        return False
-                    partial_block_index = None
+                    return False
 
                 if load_start_block >= full_blocks and partial_block_index is None:
                     all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
@@ -1859,9 +1854,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         if saved_key is None:
                             return False
                         key, is_public = saved_key
-                    elif block_idx == partial_block_index:
-                        key = self._make_layerwise_partial_key(request, group_id, block_idx, cached_tokens)
-                        is_public = False
                     else:
                         block_hash = block_hash_to_str(group_block_hashes[block_idx])
                         key = self._make_layerwise_full_key(group_id, block_hash)
