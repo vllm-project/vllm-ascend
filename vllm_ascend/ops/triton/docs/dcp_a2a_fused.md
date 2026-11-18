@@ -70,7 +70,7 @@ grid_size = min(num_tokens * num_heads, get_vectorcore_num())
 grid = (grid_size,)
 ```
 
-Each program processes additional rows with a grid-stride loop. This limits
+The scalar combine kernel processes additional rows with a grid-stride loop. This limits
 the program count to the physical vector-core count while still covering large
 prefill and decode shapes. Each row uses one `BLOCK_D` vector, where
 `BLOCK_D = next_power_of_2(head_dim)`.
@@ -79,8 +79,10 @@ The scalar combine kernel keeps one FP32 output accumulator and scalar LSE state
 It first finds the maximum valid LSE, then accumulates
 `exp(lse - lse_max) * partial_output`. Invalid LSE rows contribute zero; when
 all ranks are invalid, the output row is zero.
-The eligible BF16 path batches eight rows per program and masks partial
-tiles; other valid shapes use the scalar-row kernels.
+For BF16 head scatter with `D <= 512`, unit local feature stride (if supplied),
+and no returned LSE, each program owns a balanced contiguous interval of rows.
+For each row it decodes the LSE fields once, computes the rank weights, and
+streams the received and optional local outputs into one FP32 accumulator.
 
 ## Custom-op registration and graph tracing
 

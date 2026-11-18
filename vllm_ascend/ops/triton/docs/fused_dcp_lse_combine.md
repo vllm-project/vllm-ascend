@@ -39,7 +39,7 @@
 
 ## Test Cases
 
-The single-card nightly test compares the result against an independent FP32 softmax-weighted reference and the scalar kernel. It covers DCP sizes 1/2/8 and wider values for pack-only fallback, head dimensions 96/256/512, both scatter axes, strided local tensors, invalid LSE and dispatch boundaries. The combine comparison uses `assert_dcp_close`: at least 99% of elements meet the dtype's mixed tolerance, and the maximum absolute error also meets its limit. Defined nonfinite LSE sentinels are checked separately for exact equality. The multi-card test runs the registered operator with a real HCCL exchange.
+The single-card nightly test compares the result against an independent FP32 softmax-weighted reference. It covers DCP sizes 1/2/8 and wider values for pack-only fallback, head dimensions 96/256/512, both scatter axes, strided local tensors, invalid LSE and dispatch boundaries. The combine comparison uses `assert_dcp_close`: at least 99% of elements meet the dtype's mixed tolerance, and the maximum absolute error also meets its limit. Defined nonfinite LSE sentinels are checked separately for exact equality. The multi-card test runs the registered operator with a real HCCL exchange.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py
@@ -77,7 +77,7 @@ compilation counts remain unmeasured.
 
 ### Row-weighted validation
 
-`test_dcp_combine_row_weights.py` compares public output with independently
+`test_head_scatter_combine` in `test_dcp_a2a.py` compares public output with independently
 encoded inputs and CPU FP64 weighted reduction. Four cases cover a single rank and feature, received-only reduction, and
 token-major and head-major local contributions. The head-major case also
 exercises masked rank and feature lanes. Both received-only and local modes
@@ -89,7 +89,6 @@ reconstructed inputs, not model payload replay. A5, distributed HCCL and
 model-level validation remain outstanding.
 
 ```bash
-pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_combine_row_weights.py
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py
 pytest -q tests/ut/model_executor/warmup/test_kernel_warmup.py
 ```
