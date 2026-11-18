@@ -116,8 +116,13 @@ RUN echo '#!/bin/bash' > /usr/local/bin/entrypoint.sh && \
 RUN echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib' >> ~/.bashrc
 
 # Empty directories left after uninstall can still expose a Triton namespace.
-RUN triton_dir="$(python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')/triton" && \
-    if [ -d "$triton_dir" ]; then find "$triton_dir" -depth -type d -empty -delete; fi
+RUN set -e; \
+    for path_name in purelib platlib; do \
+        triton_dir="$(python3 -c 'import sys, sysconfig; print(sysconfig.get_path(sys.argv[1]))' "$path_name")/triton"; \
+        if [ -d "$triton_dir" ]; then \
+            find "$triton_dir" -depth -type d -empty -delete; \
+        fi; \
+    done
 
 # Set entrypoint and default command
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
