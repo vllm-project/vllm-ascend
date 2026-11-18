@@ -10,6 +10,8 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
+from vllm_ascend.a2_mega_moe import a2_prefill_enabled
+from vllm_ascend.a2_mega_moe import is_draft_model as is_a2_draft_model
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
@@ -100,11 +102,15 @@ def get_mrv2_in_profile_run() -> bool:
 
 
 def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
+    a2_enabled = a2_prefill_enabled(get_ascend_config())
+    if get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY:
+        if not a2_enabled or is_a2_draft_model(vllm_config):
+            return False
     # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
     return (
         is_mega_moe_supported()
         and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE)
-        and get_ascend_config().enable_fused_mc2 == 1
+        and (get_ascend_config().enable_fused_mc2 == 1 or a2_enabled)
         and is_moe_model(vllm_config)
         and vllm_config.parallel_config.enable_expert_parallel
         and 1 < get_ep_group().world_size <= 64
@@ -306,7 +312,8 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     # keep the num_tokens_per_tp_rank less than fused_mc2 (mega_moe) tokens per rank limit
     if ascend_config.enable_fused_mc2:
         if use_mega_moe:
-            num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _MEGA_MOE_TOKENS_PER_RANK_LIMIT)
+            if not a2_prefill_enabled(ascend_config):
+                num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _MEGA_MOE_TOKENS_PER_RANK_LIMIT)
         else:
             num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT)
 
@@ -438,7 +445,27 @@ def select_moe_comm_method(
     if not is_moe_model(vllm_config):
         return None
 
+    a2_enabled = a2_prefill_enabled(get_ascend_config())
+    if a2_enabled and not is_draft_model and not is_a2_draft_model(vllm_config):
+        # Startup validates the P-only W4A8 topology and eager execution.
+        # Every target forward, including idle DP dummy peers, uses MegaMoE.
+        # Selecting here performs no collective in KV-only forward contexts.
+        parallel = vllm_config.parallel_config
+        logger.info_once(
+            "A2_MEGA_MOE policy target=FUSED_MC2 draft=ordinary phase_vote=False dp=%s tp=%s pcp=%s",
+            parallel.data_parallel_size,
+            parallel.tensor_parallel_size,
+            parallel.prefill_context_parallel_size,
+            scope="process",
+        )
+        return MoECommType.FUSED_MC2
+
     mc2_tokens_capacity = get_mc2_tokens_capacity()
+    if a2_enabled:
+        # Drafts retain their ordinary backend and its selection capacity.
+        mc2_tokens_capacity = min(
+            mc2_tokens_capacity, _MC2_TOKENS_PER_RANK_LIMIT * vllm_config.parallel_config.tensor_parallel_size
+        )
     moe_comm_policy = get_current_hardware_profile().moe_comm_policy
     lora_config = getattr(vllm_config, "lora_config", None)
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
@@ -458,6 +485,14 @@ def select_moe_comm_method(
             mc2_tokens_capacity,
             is_draft_model,
             draft_moe_quant_type,
+        )
+    if a2_enabled:
+        logger.info_once(
+            "A2_MEGA_MOE draft_route method=%s quant=%s capacity=%s",
+            moe_comm_type,
+            draft_moe_quant_type,
+            mc2_tokens_capacity,
+            scope="process",
         )
     logger.debug(
         "MoE comm method selected: policy=%s, method=%s, num_tokens=%d, mc2_capacity=%s, "
@@ -486,6 +521,7 @@ class _ExtraForwardContextProxy:
         "padded_length",
         "num_tokens_across_dp",
         "mc2_mask",
+        "a2_mega_moe_prefill",
         "is_draft_model",
         "is_draft_model_prefill",
         "draft_moe_quant_type",

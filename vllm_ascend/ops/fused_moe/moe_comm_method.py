@@ -20,9 +20,11 @@ from dataclasses import dataclass
 from typing import cast
 
 import torch
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
+from vllm_ascend.a2_mega_moe import a2_prefill_enabled
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -54,7 +56,13 @@ def _moe_config_key(
     moe_comm_type: MoECommType | None, moe_config: FusedMoEConfig | None
 ) -> tuple[MoECommType | None, tuple[int, ...]]:
     """Return the execution shape that owns mutable MoE comm state."""
-    _CONFIG_KEY_FIELDS = ("num_experts", "num_local_experts")
+    _CONFIG_KEY_FIELDS = (
+        "num_experts",
+        "num_local_experts",
+        "hidden_dim",
+        "intermediate_size_per_partition",
+        "experts_per_token",
+    )
     return (moe_comm_type, tuple(int(getattr(moe_config, field, 0) or 0) for field in _CONFIG_KEY_FIELDS))
 
 
@@ -286,7 +294,7 @@ class FusedMC2CommImpl(MoECommMethod):
         super().__init__(moe_config)
         self._mega_moe_hccl_state_stale = False
         self.enable_fused_mc2 = get_ascend_config().enable_fused_mc2
-        if self.enable_fused_mc2 == 1 and is_mega_moe_supported():
+        if (self.enable_fused_mc2 == 1 or a2_prefill_enabled(get_ascend_config())) and is_mega_moe_supported():
             self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
             # TODO(ZT-AIA): Different CANN versions accept a different set of
@@ -515,6 +523,8 @@ class FusedMC2CommImpl(MoECommMethod):
         )
 
         if self.mega_moe_symm_buffer is None:
+            if a2_prefill_enabled(get_ascend_config()) and torch.npu.is_current_stream_capturing():
+                raise RuntimeError("A2 prefill MegaMoE requires eager buffer initialization")
             self.mega_moe_symm_buffer = self._init_mega_moe_symm_buffer(
                 dispatch_quant_mode,
                 dispatch_quant_out_dtype,
@@ -611,6 +621,25 @@ class FusedMC2CommImpl(MoECommMethod):
                 routed_scaling_factor = getattr(layer, "routed_scaling_factor", None)
             if routed_scaling_factor is not None and routed_scaling_factor != 1.0:
                 topk_weights = topk_weights * routed_scaling_factor
+        log_call = False
+        if a2_prefill_enabled(get_ascend_config()):
+            # Keep only the first MoE call per context. A context is fresh for
+            # each main/replay forward; direct operator tests may have none.
+            extras = get_forward_context().additional_kwargs if is_forward_context_available() else {}
+            log_call = not extras.get("_a2_mega_moe_call_logged", False)
+            if log_call:
+                extras["_a2_mega_moe_call_logged"] = True
+                logger.info(
+                    "A2_MEGA_MOE op_enter op=cann_mega_moe ep_rank=%s profile=%s x_shape=%s "
+                    "sender_capacity=%s quant_mode=%s mask_shape=%s mask_dtype=%s",
+                    self.token_dispatcher.ep_rank_id,
+                    extras.get("in_profile_run", False),
+                    tuple(fused_experts_input.hidden_states.shape),
+                    getattr(self.token_dispatcher, "global_bs", None),
+                    dispatch_quant_mode,
+                    tuple(x_active_mask.shape) if x_active_mask is not None else None,
+                    x_active_mask.dtype if x_active_mask is not None else None,
+                )
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
             fused_experts_input.topk_ids.to(torch.int32),
@@ -628,6 +657,12 @@ class FusedMC2CommImpl(MoECommMethod):
             **shared_kwargs,
             **activation_kwargs,
         )
+        if log_call:
+            logger.info(
+                "A2_MEGA_MOE op_return op=cann_mega_moe ep_rank=%s x_shape=%s",
+                self.token_dispatcher.ep_rank_id,
+                tuple(out.shape),
+            )
         # NOTE: self.expert_token_nums is only used by the
         # mega_moe path (enable_fused_mc2 == 1) as a
         # pre-allocated in/out buffer. The MegaMoe op returns a fresh
@@ -652,7 +687,7 @@ class FusedMC2CommImpl(MoECommMethod):
         )
 
         expert_tokens = None
-        if self.enable_fused_mc2 == 1:
+        if self.enable_fused_mc2 == 1 or a2_prefill_enabled(get_ascend_config()):
             if _EXTRA_CTX.use_mega_moe:
                 out, expert_tokens = self._apply_cann_mega_moe(
                     fused_experts_input, weights, is_decode_only_node=_EXTRA_CTX.is_decode_only_node

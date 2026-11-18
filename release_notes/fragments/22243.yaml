@@ -1,0 +1,6 @@
+pr: 22243
+entries:
+  - category: feature
+    text: Added an opt-in A2 (910B3) MegaMoE prefill backend for DeepSeek-V4.1-Flash W4A8. Enable it with the `a2_mega_moe_prefill` additional config on a DP1/TP1/PCP8/EP8 prefill deployment with `enable_fused_mc2=2`; the target model routes routed experts through the fused CANN MegaMoe operator while DSpark draft layers keep their ordinary MoE path.
+    model: deepseek-v4.1-flash
+    hardware: [A2]

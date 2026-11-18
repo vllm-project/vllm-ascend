@@ -391,6 +391,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             capabilities=_STANDARD_CAPABILITIES
             | {
                 HardwareCapability.RMS_NORM_CAST,
+                HardwareCapability.CANN_MEGAMOE,
                 HardwareCapability.NPU_TOP_K_TOP_P,
                 HardwareCapability.FLASH_ATTN_NPU_3,
             },
