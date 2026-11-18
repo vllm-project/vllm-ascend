@@ -1,11 +1,5 @@
 pr: 22215
 entries:
-  - category: breaking
-    text: >-
-      SFA LightningIndexer now shards its K/scale cache with the attention KV
-      cache under DCP and uses distributed TopK for all LightningIndexer models.
-      DCP requires a compatible C8 indexer configuration; PD endpoints must both
-      use the updated sharded layout and transfer metadata. GLM KPool is unchanged.
   - category: bugfix
     text: >-
       Fixed missing SFA indexer cache transfers in MooncakeConnector when only
