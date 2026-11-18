@@ -191,7 +191,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._global_to_local_layer: dict[int, int] = {}
         self._layerwise_reuse_layout: LayerwiseReuseLayout | None = None
         self._recurrent_layers: set[int] = set()
-        dflash_draft_names = getattr(self, "dflash_draft_layer_names", frozenset())
+        dflash_draft_names: frozenset[str] = getattr(self, "dflash_draft_layer_names", frozenset())
         self._dflash_draft_start_layer: int | None = None
         # Defaults for partial initialization (unit tests construct the worker
         # without the full _init_parallelism_info path).
