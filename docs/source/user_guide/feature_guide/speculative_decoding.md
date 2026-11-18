@@ -900,8 +900,9 @@ and devices:
 ```
 
 RecoverSSM requires speculative decoding, PP=1 and DCP=1. PCP is limited to
-Prefill producers with TP=1;
-PCP Decode consumers and colocated PCP execution are not supported.
+Prefill producers and supports joint TP × PCP head sharding. The KDA head count
+must be divisible by TP × PCP. PCP Decode consumers and colocated PCP execution
+are not supported.
 Stochastic rounding must be disabled.
 
 For direct prefill-to-decode transfer, use `MooncakeConnectorV2` or
