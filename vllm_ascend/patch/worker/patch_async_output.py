@@ -3,7 +3,10 @@
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu.async_utils import AsyncOutput
 
-from vllm_ascend.worker.sentinel.npu_worker_sentinel import fault_barrier_wrapper
+from vllm_ascend.worker.sentinel.npu_worker_sentinel import (
+    fault_barrier_wrapper,
+    retain_completed_async_output,
+)
 
 
 class AscendAsyncOutput(AsyncOutput):
@@ -11,10 +14,12 @@ class AscendAsyncOutput(AsyncOutput):
 
     HCCL faults (e.g. after a peer faults) escaping ``get_output`` can make
     the destructor/teardown that follows abort at the C level and kill the
-    process; with FT the worker must survive to recover, so the barrier
-    quarantines it (stop_device) before any teardown executes.
+    process; with FT the barrier retains faulted objects and quarantines
+    execution. Device stop/restart is deferred until the coordinated retry.
     """
 
     @fault_barrier_wrapper
     def get_output(self) -> ModelRunnerOutput:
-        return super().get_output()
+        result = super().get_output()
+        retain_completed_async_output(self)
+        return result
