@@ -801,7 +801,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             return None
 
         block_size = self.grouped_block_size[group_id]
-        uses_align_state = self.group_uses_align_state[group_id]
         snapshot = self._snapshot_keys.get(request.req_id, {}).get(group_id, {})
 
         def get_saved_key(block_idx: int) -> tuple[str, bool] | None:
@@ -811,9 +810,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             saved = snapshot.get(block_idx)
             if saved is not None:
                 block_saved_end_token, pool_key, is_public = saved
-                if block_saved_end_token == restore_token_limit or (
-                    not uses_align_state and block_saved_end_token > restore_token_limit
-                ):
+                if block_saved_end_token == restore_token_limit:
                     # A hash can become available after the preceding save.
                     return pool_key, is_public
             if restore_token_limit == block_end and block_idx < len(block_hashes):
