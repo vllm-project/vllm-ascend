@@ -15,7 +15,7 @@ from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 
 from vllm_ascend.ops.triton.qwen4_exp.qsa import pack_qsa_group_indices_npu
 
-from .quantization import qsa_c8_cache_views, quantize_qsa_rows
+from .quantization import qsa_c8_indexer_cache_views, quantize_qsa_rows
 
 _HEAD_DIM = 128
 _COMPRESS_RATIO = 4
@@ -182,7 +182,7 @@ def qsa_select_paged_tokens_quantized(
         raise ValueError("QSA INT8 indexer requires request page tables and sequence lengths")
     if query_positions.shape != (query.shape[0],):
         raise ValueError("QSA INT8 indexer positions must match query rows")
-    key, key_scales = qsa_c8_cache_views(compressed_key_cache, indexer=True)
+    key, key_scales = qsa_c8_indexer_cache_views(compressed_key_cache)
     if key.shape[2:] != (1, _HEAD_DIM):
         raise ValueError("QSA INT8 indexer requires one KV head of width 128")
     rows, original_heads = query.shape[:2]

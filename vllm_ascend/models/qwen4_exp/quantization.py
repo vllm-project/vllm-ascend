@@ -15,7 +15,7 @@ C8_QSA_QUANT_TYPE = "QK_INT8_DYNAMIC_V_INT8_PER_CHANNEL"
 
 @dataclass(frozen=True, kw_only=True)
 class QSAC8Spec(FullAttentionSpec):
-    """Keep logical head dimensions while charging for inline FP32 scales."""
+    """Keep logical head dimensions while accounting for FP32 scales."""
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -111,14 +111,11 @@ def quantize_qsa_rows(rows: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return codes, scales
 
 
-def qsa_c8_cache_views(cache: torch.Tensor, *, indexer: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
-    """Expose codes and scales without copying the paged allocation.
+def qsa_c8_indexer_cache_views(cache: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Expose the dense INT8 codes and FP16 scales within each indexer page.
 
-    Main K uses [INT8 D, FP32 scale] per token/head; V reserves the same
-    padding but uses checkpoint channel scales. QLI requires dense
-    inner dimensions, so each indexer page instead contains all codes followed
-    by FP16 scales. Both live in the same budgeted page and share its lifetime.
-    The spare indexer bytes keep page alignment compatible with FP32 records.
+    QLI requires dense inner dimensions. Codes and scales share the scheduler
+    page lifetime, with spare bytes for FP32 alignment of strided pages.
     """
     if cache.ndim != 4 or cache.dtype != torch.int8 or min(cache.shape) <= 0:
         raise ValueError("QSA C8 cache must be a nonempty 4-D INT8 tensor")
@@ -127,18 +124,14 @@ def qsa_c8_cache_views(cache: torch.Tensor, *, indexer: bool = False) -> tuple[t
         raise ValueError("QSA C8 head width must be positive and FP32 aligned")
     if any(stride % C8_SCALE_BYTES for stride in cache.stride()[:-1]) or cache.storage_offset() % C8_SCALE_BYTES:
         raise ValueError("QSA C8 page and record offsets must be FP32 aligned")
-    if indexer:
-        if cache.shape[2] != 1:
-            raise ValueError("QSA C8 indexer requires one KV head")
-        pages, states = cache.shape[:2]
-        codes = cache.as_strided((pages, states, 1, width), (cache.stride(0), width, width, 1))
-        scale_storage = cache.view(torch.float16)
-        scales = scale_storage.as_strided(
-            (pages, states, 1),
-            (cache.stride(0) // 2, 1, 1),
-            storage_offset=cache.storage_offset() // 2 + states * width // 2,
-        )
-        return codes, scales
-    codes = cache[..., :width]
-    scales = cache[..., width:].view(torch.float32).squeeze(-1)
+    if cache.shape[2] != 1:
+        raise ValueError("QSA C8 indexer requires one KV head")
+    pages, states = cache.shape[:2]
+    codes = cache.as_strided((pages, states, 1, width), (cache.stride(0), width, width, 1))
+    scale_storage = cache.view(torch.float16)
+    scales = scale_storage.as_strided(
+        (pages, states, 1),
+        (cache.stride(0) // 2, 1, 1),
+        storage_offset=cache.storage_offset() // 2 + states * width // 2,
+    )
     return codes, scales
