@@ -736,21 +736,29 @@ class NPUWorker(GPUWorker):
         num_ubatches = 1
         init_workspace_manager(self.device, num_ubatches)
         # Init ModelRunner here, so that we have access to self.device.
+        self.model_runner = self._make_model_runner()
+
+        if self.rank == 0:
+            # If usage stat is enabled, collect relevant info.
+            report_usage_stats(self.vllm_config)
+
+    def _make_model_runner(self):
+        """Construct the Ascend model runner.
+
+        Overrides ``GPUWorker._make_model_runner``, which picks between the V1
+        and V2 runners. vllm-ascend only ships Model Runner V2, so the choice
+        reduces to the multimodal-encoder-only case.
+        """
         if self.vllm_config.is_mm_encoder_only:
             from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
 
             from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
             with torch_cuda_wrapper():
-                self.model_runner = MMEncoderModelRunner(self.vllm_config, self.device)
-        else:
-            from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+                return MMEncoderModelRunner(self.vllm_config, self.device)
+        from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
-            self.model_runner = NPUModelRunner(self.vllm_config, self.device)
-
-        if self.rank == 0:
-            # If usage stat is enabled, collect relevant info.
-            report_usage_stats(self.vllm_config)
+        return NPUModelRunner(self.vllm_config, self.device)
 
     def _apply_kv_offload_decode_memory_constraints(
         self,
