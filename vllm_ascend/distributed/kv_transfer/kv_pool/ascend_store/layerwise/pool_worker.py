@@ -2071,10 +2071,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             except AssertionError:
                 if getattr(self, "block_key_hybrid", False):
                     raise
+        if not self.layerwise_offload or request.load_spec is None or not request.load_spec.layerwise_previous_step:
+            return masks
         reused_state_groups = [
             group_id
             for group_id, uses_align in enumerate(self.group_uses_align_state)
-            if self.layerwise_offload and uses_align and group_id in self._reused_layers_by_group
+            if uses_align and group_id in self._reused_layers_by_group
         ]
         if not reused_state_groups:
             return masks
