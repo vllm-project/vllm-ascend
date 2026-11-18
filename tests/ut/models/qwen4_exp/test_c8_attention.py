@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
+from vllm.forward_context import override_forward_context
 
 from tests.ut.models.qwen4_exp.test_gbsa_preparation import load_cpu_preparation
 from vllm_ascend.models.qwen4_exp import c8_attention, lightning_indexer
@@ -108,6 +111,52 @@ def test_c8_sparse_attention_matches_dense_quantized_reference(monkeypatch, tail
         )
     torch.testing.assert_close(output, expected)
     assert calls == [row_count]
+
+
+@pytest.mark.parametrize(
+    "mode, reuse",
+    [(None, False), (CUDAGraphMode.PIECEWISE, False), (CUDAGraphMode.NONE, True), (CUDAGraphMode.FULL, True)],
+)
+def test_quantized_indexer_metadata_lifetime(monkeypatch, mode, reuse):
+    calls = []
+
+    def build_metadata(**kwargs):
+        calls.append(kwargs["seqused_k"].tolist())
+        return torch.empty(0)
+
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2_metadata", build_metadata, raising=False)
+    table = torch.tensor([[7, 9]], dtype=torch.int32)
+    positions = torch.tensor([3, 7])
+    requests = torch.tensor([0, 0])
+    lengths = torch.tensor([8])
+
+    def prepare(page_table=table):
+        return lightning_indexer._prepare_quantized_indexer_metadata(
+            page_table, requests, positions, lengths, 512, 4, 256
+        )
+
+    def new_context():
+        if mode is None:
+            return override_forward_context(None)
+        return override_forward_context(SimpleNamespace(cudagraph_runtime_mode=mode, additional_kwargs={}))
+
+    with new_context():
+        first = prepare()
+        assert (prepare() is first) == reuse
+        other_table = torch.tensor([[2, 3]], dtype=torch.int32)
+        other = prepare(other_table)
+        assert other is not first
+        torch.testing.assert_close(other[2], other_table.expand(2, -1))
+        assert (prepare(other_table) is other) == reuse
+    positions.copy_(torch.tensor([0, 3]))
+    table.copy_(torch.tensor([[4, 5]]))
+    with new_context():
+        second = prepare()
+        assert (prepare() is second) == reuse
+    assert first is not second
+    torch.testing.assert_close(second[2], table.expand(2, -1))
+    calls_per_input = 1 if reuse else 2
+    assert calls == [[1, 2]] * 2 * calls_per_input + [[0, 1]] * calls_per_input
 
 
 def test_quantized_indexer_native_abi_and_visibility(monkeypatch):
