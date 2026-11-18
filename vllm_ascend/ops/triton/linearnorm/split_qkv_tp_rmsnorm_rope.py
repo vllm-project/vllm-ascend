@@ -25,12 +25,6 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm_ascend.ops.triton.triton_utils import extract_slice, get_vectorcore_num, insert_slice
 
 
-def _do_bench(kernel_call, quantiles):
-    # Autotuner otherwise resolves the active driver during module import,
-    # initializing the NPU before the worker selects its device.
-    return triton.runtime.driver.active.get_benchmarker()(kernel_call, quantiles=quantiles)
-
-
 # TODO: UB size differs across chips; consider whether BLOCK_SIZE can
 # be dynamically computed with a formula instead of autotuning {1,2,4}.
 @triton.autotune(
@@ -40,7 +34,6 @@ def _do_bench(kernel_call, quantiles):
         triton.Config({"BLOCK_SIZE": 4}),
     ],
     key=["q_cols", "k_cols"],
-    do_bench=_do_bench,
 )
 @triton.jit
 def _split_qkv_and_compute_local_qk_var_kernel(

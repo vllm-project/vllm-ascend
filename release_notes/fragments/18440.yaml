@@ -6,7 +6,3 @@ entries:
       metadata ACLNN APIs and headers now use the Vllm suffix to avoid CANN naming
       conflicts. Rebuild custom operators and update direct ACLNN consumers;
       public torch.ops._C_ascend names and signatures are unchanged.
-  - category: bugfix
-    text: >-
-      Defer QKV autotuner benchmarker initialization until execution so importing
-      Ascend operators does not select an NPU before worker device selection.
