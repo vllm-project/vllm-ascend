@@ -68,10 +68,12 @@ ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi \
     https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly \
     https://ascend.devcloud.huaweicloud.com/pypi/simple"
 # memfabric/memcache 1.5.0+b013 is published on the Ascend DevCloud index,
-# whose certificate is not trusted by the base image.
-ENV PIP_TRUSTED_HOST="ascend.devcloud.huaweicloud.com"
+# whose certificate is not trusted by the base image. Keep this as a build-only
+# ARG so the trusted host is not persisted in the final image.
+ARG PIP_TRUSTED_HOST="ascend.devcloud.huaweicloud.com"
 ARG COMPILE_CUSTOM_KERNELS=1
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
+    export PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST}" && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \

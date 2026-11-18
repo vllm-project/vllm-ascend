@@ -79,10 +79,12 @@ ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi \
     https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly \
     https://ascend.devcloud.huaweicloud.com/pypi/simple"
 # memfabric/memcache 1.5.0+b013 is published on the Ascend DevCloud index,
-# whose certificate is not trusted by the base image.
-ENV PIP_TRUSTED_HOST="ascend.devcloud.huaweicloud.com"
+# whose certificate is not trusted by the base image. Keep this as a build-only
+# ARG so the trusted host is not persisted in the final image.
+ARG PIP_TRUSTED_HOST="ascend.devcloud.huaweicloud.com"
 ARG COMPILE_CUSTOM_KERNELS=1
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
+    export PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST}" && \
     export VLLM_BATCH_INVARIANT=1 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
@@ -94,6 +96,7 @@ ARG TARGETPLATFORM
 RUN case "$TARGETPLATFORM" in \
   linux/arm64) \
     PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" \
+    PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST}" \
     python3 -m pip install "cannbotdsl===0.6.0+g91e7c8f" "cannbot-arena-net-ops===0.1.0" && \
     python3 -m pip cache purge ;; \
   linux/amd64) \
@@ -109,10 +112,12 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A5 --install-for-all && \
     # Install flash-linear-attention-npu from the Ascend mirror
     PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" \
+    PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST}" \
     python3 -m pip install --force-reinstall --no-deps \
         "${FLA_PACKAGE}===${FLA_VERSION}" && \
     # Install mooncake-transfer-engine-npu from the Ascend nightly mirror
     PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" \
+    PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST}" \
     python3 -m pip install "mooncake-transfer-engine-npu===0.3.14rc3" && \
     python3 -m pip cache purge
 
