@@ -12,7 +12,7 @@
 - **Algorithm flow**: The common HiSparse runtime supplies the page tables and
   plans. `HiSparseNPUOps` validates them and launches the kernels below on the
   current stream. Completion dependencies remain owned by the runtime/connector.
-- **Supported modes**: Ascend 950PR/950DT with the qualified CANN 9.2 stack.
+- **Supported modes**: 950PR&950DT Products with the qualified CANN 9.2 stack.
   Atlas A2/A3 are not qualified by this adapter. Refill, layout and written-slot
   invalidation have eager and ACLGraph test cases. Recycled-block invalidation
   runs outside capture and uses an initialization-time sentinel warmup.
@@ -134,7 +134,7 @@ the maximum INT64 sentinel. Sorting is performed by the Python wrapper.
 - Resident gather follows Core's negative-ID-to-row-zero convention; it is not
   a skip convention. IDs above the source capacity leave staging unchanged.
   Source and destination must have matching row byte widths and separate storage.
-- Recycled invalidation supports the bound A5 tables and stream only. Its
+- Recycled invalidation supports the bound tables and stream on 950PR&950DT Products only. Its
   initialization launch uses state `-1`, so no payload/tag memory is modified.
   Unsupported geometry, changed owners/stream, capture or disabled warmup retain
   the upstream worker path. Recycled block lists are deduplicated and split into
