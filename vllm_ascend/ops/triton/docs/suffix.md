@@ -18,10 +18,10 @@
   `launch_suffix_ingest` appends completed documents before their request
   slots are released. Finalize selects one draft per request; ingest and
   observe also update shared state.
-- **Supported modes**: Ascend A3 eager and full decode graphs have been
-  exercised. Adaptive verification requires full decode graphs and an
-  attention backend that supports variable query lengths. The A3 results
-  do not establish A2 or A5/950 compatibility.
+- **Supported modes**: Kernel compilation and execution have been validated
+  on Ascend A3 and A5/950. Eager mode and full decode graphs have been
+  exercised on A3. Adaptive verification requires full decode graphs and an
+  attention backend that supports variable query lengths.
 
 ## Parameters
 

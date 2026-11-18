@@ -2,7 +2,7 @@ pr: 20854
 entries:
   - category: feature
     text: >-
-      Added an experimental NPU suffix drafter for Model Runner V2 with
+      Added an NPU suffix drafter for Model Runner V2 with
       request-history matching, shared completed-response reuse and optional
       adaptive verification, including non-power-of-two draft lengths.
       Suffix requires upstream vLLM #60339, including its request lifecycle
