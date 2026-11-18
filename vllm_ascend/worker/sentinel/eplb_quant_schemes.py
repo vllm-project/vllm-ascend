@@ -30,7 +30,7 @@ from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     ASCEND_QUANTIZATION_METHOD,
     maybe_trans_nz,
-    transpose_weight_to_runtime,
+    transpose_expert_dims,
 )
 
 # Checkpoint suffixes (relative to "<layer_name>.<expert_id>.") the reload may
@@ -118,8 +118,8 @@ def _single_expert(transform: Callable[[torch.Tensor], torch.Tensor]) -> Callabl
 # The weight pipelines every scheme reloads; their runtime attributes are the
 # ones that take the layout cast.
 _WEIGHT_PIPELINES: dict[str, _WeightPipeline] = {
-    "w13_weight": _WeightPipeline(_gate_up("weight"), transpose_weight_to_runtime),
-    "w2_weight": _WeightPipeline(_down_proj("weight", shard=True), transpose_weight_to_runtime),
+    "w13_weight": _WeightPipeline(_gate_up("weight"), transpose_expert_dims),
+    "w2_weight": _WeightPipeline(_down_proj("weight", shard=True), transpose_expert_dims),
 }
 _WEIGHT_ATTRS = tuple(_WEIGHT_PIPELINES)
 

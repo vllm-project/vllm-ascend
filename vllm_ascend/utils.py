@@ -416,7 +416,7 @@ def is_internal_npu_format(tensor: torch.Tensor) -> bool:
     return int(torch_npu.get_npu_format(tensor)) not in (0, ACL_FORMAT_FRACTAL_ND)
 
 
-def transpose_weight_to_runtime(weight: torch.Tensor) -> torch.Tensor:
+def transpose_expert_dims(weight: torch.Tensor) -> torch.Tensor:
     """Swap the last two dims into the NPU runtime layout."""
     return weight.transpose(-2, -1).contiguous()
 

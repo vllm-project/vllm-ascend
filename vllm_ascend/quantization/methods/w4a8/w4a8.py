@@ -36,7 +36,7 @@ from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
     dispose_tensor,
     maybe_trans_nz,
-    transpose_weight_to_runtime,
+    transpose_expert_dims,
 )
 
 from ..base import AscendLinearScheme, AscendMoEScheme, PreparedLinearInput, QuantType
@@ -361,8 +361,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.w2_weight.data = self._pack_to_int32(layer.w2_weight.data)
 
     def process_weights_after_loading_compressed_tensors(self, layer):
-        layer.w13_weight.data = transpose_weight_to_runtime(layer.w13_weight.data)
-        layer.w2_weight.data = transpose_weight_to_runtime(layer.w2_weight.data)
+        layer.w13_weight.data = transpose_expert_dims(layer.w13_weight.data)
+        layer.w2_weight.data = transpose_expert_dims(layer.w2_weight.data)
 
         def update_bias_compressed_tensors(weight: torch.Tensor, scale: torch.Tensor):
             group_num, k, n = weight.shape
@@ -576,8 +576,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         )[0]
 
     def process_weights_after_loading_modelslim(self, layer):
-        layer.w13_weight.data = transpose_weight_to_runtime(layer.w13_weight.data)
-        layer.w2_weight.data = transpose_weight_to_runtime(layer.w2_weight.data)
+        layer.w13_weight.data = transpose_expert_dims(layer.w13_weight.data)
+        layer.w2_weight.data = transpose_expert_dims(layer.w2_weight.data)
 
         # Keep w2's scale unsqueezed for npu_grouped_matmul.
         layer.w13_weight_scale.data = w13_scale_to_runtime(layer.w13_weight_scale.data).npu()
