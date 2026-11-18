@@ -80,6 +80,21 @@ Set `qkv_iproj_tensor_parallel_size` above `1` when the deployment meets these c
 - `tensor_parallel_size == 1`, `prefill_context_parallel_size == 1` and `pipeline_parallel_size == 1`.
 - A QKV IProj TP size that evenly divides both `data_parallel_size` and the KDA head count.
 
+GLM QKV TP pads to a DP-agreed capacity and supports eager execution with either
+model runner. Kimi's mixed QKV/BF16-gate pipeline requires V2 graph execution,
+`decode_context_parallel_size == 1`, full-rank output gates, capture capacity
+covering every decode step including speculative slots, the recompute scheduler,
+and `PreemptOffloadConnector` in the connector chain. Kimi validates its checkpoint
+and head layout in the model constructor; these conditions do not restrict GLM QKV TP.
+
+`gproj_tensor_parallel_size` independently shards Kimi's full-rank KDA and DSA
+output-gate projections. It uses the same Kimi graph-decode conditions, and its
+size must divide the corresponding KDA and DSA head counts. Both projection
+sizes default to `1`; `0` also disables a split. Kimi uses the A5 multistream
+schedule for these projections. The gate exchange starts after its local GEMM;
+KDA waits after the recurrent core and DSA waits after attention, immediately
+before applying the gate.
+
 #### LM Head TP and Speculative Decoding
 
 LM head TP works with EAGLE, DFlash, DFlash2, and DSpark draft models. DFlash2 aligns hidden-state rows across the LM-head group before scoring vocabulary shards, then exchanges only TopK candidates back to each request's DP rank. This also handles idle ranks and unequal request counts. For QuaRot targets, DFlash2 and Qwen3/K3 DSpark retain configured fine-grained LM-head sharding when rebuilding unrotated weights. Draft-owned LM heads are preserved, and unrotated targets keep the existing LM-head sharing behavior. The draft embedding is unchanged.

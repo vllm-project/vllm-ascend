@@ -511,13 +511,13 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
 
 @pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
 @pytest.mark.parametrize("actual_tokens", [0, 1, 3])
-@pytest.mark.parametrize("gate_aiv,has_indexer", [(None, True), (False, True), (True, True), (True, False)])
+@pytest.mark.parametrize("gate_tp_enabled,has_indexer", [(False, True), (True, True), (True, False)])
 @pytest.mark.parametrize(
     "dcp_enabled,sharded_decode,global_prefill",
     [(False, False, True), (False, True, False), (True, False, True)],
 )
 def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
-    dcp_enabled, sharded_decode, global_prefill, actual_tokens, graph_mode, gate_aiv, has_indexer
+    dcp_enabled, sharded_decode, global_prefill, actual_tokens, graph_mode, gate_tp_enabled, has_indexer
 ):
     """Run the real forward entry; PCP peers need the same padded row count."""
     impl_cls = AscendSFADCPImpl if dcp_enabled else AscendSFAImpl
@@ -569,9 +569,7 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     trace = []
     indices = torch.zeros(4, 1, 1, dtype=torch.int32)
 
-    def indexer(*args, before_vector=None, **kwargs):
-        if before_vector is not None:
-            before_vector()
+    def indexer(*args, **kwargs):
         trace.append("indexer-vector")
         return indices
 
@@ -585,14 +583,13 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     impl._execute_sparse_flash_attention_process = MagicMock(side_effect=sparse_attention)
     gate_work = MagicMock()
     gate_work.wait.side_effect = lambda: trace.append("join-G")
-    if gate_aiv is not None:
+    if gate_tp_enabled:
         gate = torch.zeros(4, 2)
         pending_gate = PendingGate(
             PendingTensor(gate, gate_work, gate), None, KDAInputProjectionTPLayout(None, 1, 2), 4
         )
         impl.g_proj = MagicMock()
         impl.gproj_tp = SimpleNamespace(
-            uses_aiv=gate_aiv,
             gather=MagicMock(return_value=object()),
             project=MagicMock(return_value=pending_gate),
         )
@@ -620,15 +617,14 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     assert impl._finalize_o_proj.call_args.args[0].shape[0] == 4
     if has_indexer:
         assert impl.indexer.call_args.kwargs["compute_topk"] == (actual_tokens > 0)
-        assert ("before_vector" in impl.indexer.call_args.kwargs) == (gate_aiv is True)
     else:
         impl.indexer.assert_not_called()
-    if gate_aiv is not None:
+    if gate_tp_enabled:
         gate_work.wait.assert_called_once()
         if has_indexer:
-            assert (trace.index("join-G") < trace.index("indexer-vector")) == gate_aiv
+            assert trace.index("indexer-vector") < trace.index("join-G")
         if actual_tokens > 0:
-            assert (trace.index("join-G") < trace.index("SFA")) == gate_aiv
+            assert trace.index("SFA") < trace.index("join-G")
     assert impl._execute_sparse_flash_attention_process.call_count == int(actual_tokens > 0)
     assert impl._record_dcp_kv_gather_context.call_count == int(dcp_enabled)
     torch.testing.assert_close(output, torch.full_like(output, float(actual_tokens > 0)))

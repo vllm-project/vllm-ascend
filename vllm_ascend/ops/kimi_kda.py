@@ -31,7 +31,6 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend import envs
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -69,19 +68,6 @@ from vllm_ascend.utils import npu_stream_switch, vllm_version_is
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 _F_PROJ_SHARD_ID = 1
 _KDA_BFG_STREAM: torch.npu.Stream | None = None
-
-
-def uses_aiv_communication(group: GroupCoordinator | None) -> bool:
-    """Resolve the configured communication mode once, without a device probe."""
-    if group is None:
-        return False
-    backend = group.device_group._get_backend(torch.device("npu"))
-    mode = backend.options.hccl_config.get("hccl_op_expansion_mode", 0)
-    if mode:
-        # HcclCommConfig: 3=AIV, 4=AIV_ONLY. All other explicit modes use
-        # separate communication engines; a PG setting overrides the env.
-        return mode in (3, 4)
-    return envs.HCCL_OP_EXPANSION_MODE in ("AIV", "AIV_ONLY")
 
 
 @dataclass
@@ -122,15 +108,10 @@ class TPCommunication:
         output = hidden.new_empty(shape)
         return self._launch(hidden.contiguous(), output, group, dist.all_gather_into_tensor)
 
-    def exchange(self, source, group, *, overlap=True):
+    def exchange(self, source, group):
         source = source.contiguous()
         output = torch.empty_like(source)
-        if overlap:
-            return self._launch(source, output, group, dist.all_to_all_single)
-        # Submit on the caller's stream. The KDA caller joins immediately,
-        # before it can enqueue Vector state recovery or output preparation.
-        work = dist.all_to_all_single(output, source, group=group.device_group, async_op=True)
-        return PendingTensor(output, work, source)
+        return self._launch(source, output, group, dist.all_to_all_single)
 
 
 @dataclass
@@ -160,7 +141,6 @@ class FullRankGateTP:
         self.layout = KDAInputProjectionTPLayout(group, heads, head_dim)
         self.group = group
         self.communication = TPCommunication()
-        self.uses_aiv = uses_aiv_communication(group)
 
     def gather(self, hidden: torch.Tensor) -> PendingTensor:
         owner, _ = self.layout.prepare_input(hidden)
@@ -202,8 +182,6 @@ class KDAProjectionTP:
         self.qkv_layout = KDAInputProjectionTP(qkv_group, heads, head_dim)
         self.gate_layout = KDAInputProjectionTPLayout(gate_group, heads, head_dim)
         self.communication = TPCommunication()
-        self.qkv_uses_aiv = uses_aiv_communication(qkv_group)
-        self.gate_uses_aiv = uses_aiv_communication(gate_group)
 
     def project(self, layer, hidden) -> PendingKDAProjection | None:
         owner, capacity = self.qkv_layout.prepare_input(hidden)
@@ -228,9 +206,7 @@ class KDAProjectionTP:
         g_hidden = g_input.wait() if g_input is not None else owner
         main.wait_event(forget_ready)
         gate = layer.g_proj(g_hidden)[0]
-        # CCU does not consume AIVs: start the return before beta Cube and
-        # input-quant Vector. AIV keeps the existing post-quant launch below.
-        pending_gate = self.exchange_gate(gate) if not self.gate_uses_aiv else None
+        pending_gate = self.exchange_gate(gate)
         q_hidden = g_hidden if q_input is g_input else q_input.wait() if q_input is not None else owner
         input_ready = main.record_event()
         q_hidden.record_stream(aux_stream)
@@ -239,26 +215,17 @@ class KDAProjectionTP:
             aux_stream.wait_event(input_ready)
             beta = layer.b_proj(q_hidden)[0]
             beta_ready = aux_stream.record_event()
-        quantized = layer._quantize_fused_qkv(q_hidden, for_finegrained_tp=True)
-        if pending_gate is None:
-            # The producer event follows DynamicQuant in AIV mode.
-            pending_gate = self.exchange_gate(gate)
+        quantized = layer._quantize_fused_qkv(q_hidden)
         main.wait_event(beta_ready)
         beta.record_stream(main)
         forget.record_stream(main)
         qkv = layer._matmul_fused_qkv(quantized)
-        if self.gate_uses_aiv:
-            # Hide AIV communication only behind QKV Cube, then join before
-            # cat/reorder/zeros/cast/sigmoid/conv/recurrent Vector work.
-            pending_gate.wait()
         q_pending = None
         if self.qkv_group is not None:
             if qkv.dtype != beta.dtype:
                 raise RuntimeError("Kimi QKV/beta exchange requires equal raw projection dtypes.")
-            q_pending = self.communication.exchange(
-                torch.cat((qkv, beta), dim=-1), self.qkv_group, overlap=not self.qkv_uses_aiv
-            )
-        result = PendingKDAProjection(
+            q_pending = self.communication.exchange(torch.cat((qkv, beta), dim=-1), self.qkv_group)
+        return PendingKDAProjection(
             qkv,
             beta.unsqueeze(0),
             forget,
@@ -267,11 +234,6 @@ class KDAProjectionTP:
             self.qkv_layout,
             capacity,
         )
-        if self.qkv_uses_aiv:
-            result.wait()
-        # Non-AIV QKV communication can overlap independent output-buffer
-        # initialization. Its consumers still wait before reading QKV/beta.
-        return result
 
     def exchange_gate(self, gate: torch.Tensor) -> PendingGate:
         size = self.gate_group.world_size if self.gate_group is not None else 1
@@ -746,8 +708,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     def _quantize_fused_qkv(
         self,
         hidden_states: torch.Tensor,
-        *,
-        for_finegrained_tp: bool = False,
     ) -> torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor]:
         quant_method = self.in_proj_qkvgfab.quant_method
         inner_quant_method = getattr(quant_method, "quant_method", quant_method)
@@ -755,9 +715,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             type(inner_quant_method) is AscendW8A8DynamicLinearMethod
             and hidden_states.dtype in (torch.float16, torch.bfloat16)
             and hidden_states.ndim == 2
-            and (
-                for_finegrained_tp or get_current_hardware_profile().supports(HardwareCapability.KDA_INT8_QUANT_OVERLAP)
-            )
+            and get_current_hardware_profile().supports(HardwareCapability.KDA_INT8_QUANT_OVERLAP)
         ):
             # Prepare on main before the BFG completion wait. apply() consumes
             # the INT8 tensor and per-token scales without quantizing again.
@@ -1223,8 +1181,7 @@ def kimi_kda_finegrained_forward(hidden_states: torch.Tensor, output: torch.Tens
         output.zero_()
         return
     capacity = pending.capacity
-    # Non-AIV exchanges may overlap this independent Vector initialization.
-    # In AIV mode project() has already joined both communication operations.
+    # Initialize the output buffer while the QKV/beta exchange is in flight.
     core_out = hidden_states.new_zeros((1, capacity, layer.local_num_heads, layer.head_dim))
     qkv, forget, beta, gate = pending.wait()
     norm_input = layer._forward_core(qkv, forget, beta, core_out)
