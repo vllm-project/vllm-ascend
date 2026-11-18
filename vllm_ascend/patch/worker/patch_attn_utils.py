@@ -1,4 +1,4 @@
-from functools import cache
+from functools import cache, wraps
 
 import torch
 import vllm
@@ -18,6 +18,35 @@ from vllm_ascend.worker.v2.attn_utils import (
     allocate_kv_cache_main,
     get_kv_cache_spec,
 )
+
+
+class RunnerKVCacheView:
+    """A runner-only view; connectors must receive the original layer mapping."""
+
+    def __init__(self, layers):
+        self.layers = layers
+
+    def values(self):
+        for layer_cache in self.layers.values():
+            yield from layer_cache if isinstance(layer_cache, (tuple, list)) else (layer_cache,)
+
+
+def with_runner_cache_view(init_kv_cache):
+    @wraps(init_kv_cache)
+    def initialize(*args, **kwargs):
+        return RunnerKVCacheView(init_kv_cache(*args, **kwargs))
+
+    return initialize
+
+
+def with_layer_cache_mapping(get_kv_connector):
+    @wraps(get_kv_connector)
+    def connect(vllm_config, kv_caches):
+        if isinstance(kv_caches, RunnerKVCacheView):
+            kv_caches = kv_caches.layers
+        return get_kv_connector(vllm_config, kv_caches)
+
+    return connect
 
 
 def _get_ascend_sfa_indexer_backend(self):
@@ -108,3 +137,9 @@ v1_worker_utils.bind_kv_cache = bind_kv_cache
 v1_worker_utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers
 
 vllm.v1.worker.gpu.model_runner.get_kv_cache_spec = get_kv_cache_spec
+
+# Preserve Ascend tuple caches for connectors while upstream flattens runner caches.
+vllm.v1.worker.gpu.model_runner.init_kv_cache = with_runner_cache_view(vllm.v1.worker.gpu.model_runner.init_kv_cache)
+vllm.v1.worker.gpu.model_runner.get_kv_connector = with_layer_cache_mapping(
+    vllm.v1.worker.gpu.model_runner.get_kv_connector
+)

@@ -119,6 +119,7 @@ from vllm_ascend.utils import (
     register_device_print,
     setup_ascend_local_comm_res,
 )
+from vllm_ascend.worker.sentinel.kv_cache_region_registry import KvCacheRegionRegistry
 from vllm_ascend.worker.sentinel.npu_worker_sentinel import WorkerSentinel, fault_barrier_wrapper
 
 
@@ -253,6 +254,12 @@ class NPUWorker(WorkerBase):
     def handle_ft_command(self, ft_request):
         assert self.worker_sentinel is not None
         return self.worker_sentinel.handle_command(ft_request)
+
+    def get_kv_cache_recovery_plan(self):
+        """Return the completed plan for this retry round to EngineCore."""
+        if self.worker_sentinel is None or self.worker_sentinel.retry_cache_plan is None:
+            raise RuntimeError("Missing completed HBM retry cache plan")
+        return self.worker_sentinel.retry_cache_plan
 
     def uninstall_static_kernel(self):
         import fcntl
@@ -1369,6 +1376,11 @@ class NPUWorker(WorkerBase):
             kv_cache_allocation_context=self._maybe_get_memory_pool_context(tag="kv_cache"),
         )
 
+        if self.parallel_config.enable_fault_tolerance:
+            registry = KvCacheRegionRegistry()
+            registry.register(self.model_runner.kv_caches, rank=self.rank, device_id=self.device.index)
+            self.model_runner.kv_cache_region_registry = registry
+
         # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
         # set, so its worker-side consumer must use the same condition.
         should_init_kv_zeroer = kv_cache_config.needs_kv_cache_zeroing
@@ -1458,6 +1470,7 @@ class NPUWorker(WorkerBase):
     # Lockstep wave sync for idle DP ranks (never burns manual_dump);
     # lives in the runtime_guard hook, see runtime_guard_idle_step.
     @runtime_guard_idle_step
+    @fault_barrier_wrapper
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)

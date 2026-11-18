@@ -154,6 +154,13 @@ class DeviceMetadataExecutor:
         self._submission_in_flight = False
         self._batch_descriptor = None
 
+    def reset_after_recovery(self) -> None:
+        """Retire failed fences after coordinated device restart and sync."""
+        self._submission_in_flight = False
+        self._has_reuse_fence = False
+        self._batch_descriptor = None
+        self._waited_stages.clear()
+
 
 def wait_for_device_metadata(stage: DeviceMetadataStage, group_id: int) -> None:
     if not is_forward_context_available():
@@ -250,3 +257,9 @@ class TargetDeviceMetadata:
         if self.executor.submission_in_flight:
             raise RuntimeError("Graph-side metadata was unexpectedly submitted outside capture")
         self._tasks = ()
+
+    def reset_after_recovery(self) -> None:
+        """Retain persistent buffers/events while retiring failed submissions."""
+        self.executor.reset_after_recovery()
+        self._tasks = ()
+        self._failed = False

@@ -109,6 +109,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         self.model_runner = model_runner
         self.update_stream = self.model_runner.update_stream
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
+        self.recovery_replayed_graphs: set[BatchExecutionDescriptor] | None = None
         if super().needs_capture():
             set_graph_params(self.capture_sizes)
 
@@ -143,10 +144,13 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 ):
                     prepare_engram()
             if use_updatable_graph(attn_backend):
-                return self._updatable_graph_replay(desc, attn_metadata)
+                result = self._updatable_graph_replay(desc, attn_metadata)
             else:
                 # This will be removed once the refactoring is fully complete.
-                return self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+                result = self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+            if self.recovery_replayed_graphs is not None:
+                self.recovery_replayed_graphs.add(desc)
+            return result
         finally:
             if metadata is not None:
                 metadata.finish_replay()
