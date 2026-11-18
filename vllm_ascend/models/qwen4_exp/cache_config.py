@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
+from itertools import groupby
 from typing import Final
 
 import regex as re
@@ -41,6 +42,11 @@ QSA_COMPRESSED: Final = "qsa_compressed"
 GDN: Final = "gdn"
 PLE: Final = "ple"
 HIDDEN: Final = "hidden"
+
+
+@dataclass(frozen=True)
+class QSAMXFP8Spec(FullAttentionSpec):
+    """QSA FP8 payload with separately budgeted contiguous E8M0 scales."""
 
 
 @dataclass(frozen=True)
@@ -96,12 +102,15 @@ class Qwen4KVCacheLayout:
         return [owner.layer_name for owner in self.owners if owner.role not in (HIDDEN, PLE) and owner.slot == slot]
 
     def region_name_for_owner(self, layer_name: str) -> str:
+        owner = self.owner(layer_name)
+        if isinstance(owner.spec, QSAMXFP8Spec):
+            return "qsa_key"
         return {
             QSA_MAIN: "r0",
             QSA_RAW: "r4",
             QSA_COMPRESSED: "r5",
             GDN: "r1",
-        }[self.owner(layer_name).role]
+        }[owner.role]
 
 
 def _group_member_specs(group: KVCacheGroupSpec) -> dict[str, KVCacheSpec]:
@@ -287,6 +296,30 @@ def build_qwen4_kv_cache_layout(
         SlabRegion("r2", conv_bytes, max_ssm_bytes, num_blocks, state_stride),
     ]
     cursor = state_stride * num_blocks
+    mx_specs = [spec for _, spec in role_members[QSA_MAIN] if isinstance(spec, QSAMXFP8Spec)]
+    mx_pages = [_qsa_main_page_bytes(spec) for spec in mx_specs]
+    shared_dense = len(mx_pages) == len(main_pages) and len(set(mx_pages)) == 1
+    if mx_specs:
+        # Aliasing by manager block ID is safe only with matching pitches in
+        # every slot. Mixed layouts retain the original GDN/BF16 page bank.
+        if shared_dense:
+            regions = []
+            cursor = 0
+        for index, (pool, state, state_bytes) in enumerate(
+            (("qsa_key", "r1", conv_bytes), ("qsa_value", "r2", max_ssm_bytes))
+        ):
+            page_bytes = max(pair[index] for pair in mx_pages)
+            cursor = round_up(cursor, alignment)
+            regions.append(SlabRegion(pool, cursor, page_bytes, num_blocks))
+            pool_offset = cursor
+            cursor += page_bytes * num_blocks
+            if shared_dense:
+                if state_bytes <= page_bytes:
+                    regions.append(SlabRegion(state, pool_offset, state_bytes, num_blocks, page_bytes))
+                else:
+                    cursor = round_up(cursor, alignment)
+                    regions.append(SlabRegion(state, cursor, state_bytes, num_blocks))
+                    cursor += state_bytes * num_blocks
     for name, page_size in {
         "r4": max(_real_page_size_bytes(spec) for _, spec in role_members[QSA_RAW]),
         "r5": max(_real_page_size_bytes(spec) for _, spec in role_members[QSA_COMPRESSED]),
@@ -294,6 +327,12 @@ def build_qwen4_kv_cache_layout(
         cursor = round_up(cursor, alignment)
         regions.append(SlabRegion(name, cursor, page_size, num_blocks))
         cursor += page_size * num_blocks
+    if mx_specs:
+        scale_page_bytes = max(spec.block_size * spec.num_kv_heads * spec.head_size // 32 for spec in mx_specs)
+        for name in ("qsa_k_scale", "qsa_v_scale"):
+            cursor = round_up(cursor, alignment)
+            regions.append(SlabRegion(name, cursor, scale_page_bytes, num_blocks))
+            cursor += scale_page_bytes * num_blocks
     slot_backing_size = round_up(cursor, alignment)
 
     # Each QSA layer needs one slot. State groups reuse those slots with
@@ -322,9 +361,8 @@ def build_qwen4_kv_cache_layout(
         num_blocks=num_blocks,
     )
 
-    assert layout.region("r1").offset + conv_bytes <= layout.region("r2").offset
-    assert layout.region("r2").offset + max_ssm_bytes <= state_stride
-    assert layout.region("r4").offset >= state_stride * num_blocks
+    if not shared_dense:
+        assert layout.region("r2").offset + max_ssm_bytes <= state_stride
     assert layout.region("r5").offset >= layout.region("r4").end
     for region in layout.regions:
         assert region.offset % alignment == 0
@@ -336,6 +374,8 @@ def build_qwen4_kv_cache_layout(
         dtypes = owner.spec.dtypes if isinstance(owner.spec, MambaSpec) else (owner.spec.dtype,)
         assert all(region.offset % get_dtype_size(dtype) == 0 for dtype in dtypes)
     for _, spec in role_members[QSA_MAIN]:
+        if isinstance(spec, QSAMXFP8Spec):
+            continue
         assert isinstance(spec, FullAttentionSpec)
         assert sum(_qsa_main_page_bytes(spec)) <= layout.region("r0").page_size_bytes
     return layout
@@ -391,10 +431,11 @@ def make_qsa_kernel_page_cache(
     if manager_block_size % kernel_block_size or block_stride % pair_bytes or head_size != head_size_v:
         raise ValueError("QSA kernel-page pools require equal K/V widths and whole-page strides")
     kernel_pages = manager_block_size // kernel_block_size
-    # vLLM grows manager blocks to fit the full Mamba page. The resulting
-    # K/V pairs must be contiguous so its block IDs and slots need no remap.
-    if block_stride != kernel_pages * pair_bytes:
-        raise ValueError("QSA manager page must match its aligned kernel K/V pairs")
+    # BF16 and MXFP8 owners can share the same manager-page pitch.
+    # Spread padding uniformly so manager ID i still starts at i * block_stride.
+    kernel_stride, remainder = divmod(block_stride, kernel_pages)
+    if remainder or kernel_stride < pair_bytes or kernel_stride % pair_bytes:
+        raise ValueError("QSA manager page must contain aligned kernel K/V pairs")
     physical_page_count = num_blocks * kernel_pages
     key, value = (
         make_slab_view(
@@ -403,7 +444,7 @@ def make_qsa_kernel_page_cache(
             num_blocks=physical_page_count,
             item_shape=(kernel_block_size, num_kv_heads, width),
             storage_offset=storage_offset + offset,
-            block_stride=pair_bytes,
+            block_stride=kernel_stride,
         )
         for width, offset in ((head_size, 0), (head_size_v, page_bytes))
     )
@@ -686,37 +727,35 @@ def get_qwen4_exp_kv_cache_config(
     assert layout is not None
     backing_size = layout.slot_count * layout.slot_backing_size
     logger.info_once(
-        "Qwen4 cache pool: %d blocks, shared page %d bytes, pool block %d bytes, available %d bytes",
+        "Qwen4 cache pool: %d blocks, slot bytes per block %d, pool block %d bytes, available %d bytes",
         num_blocks,
-        layout.region("r0").page_size_bytes,
+        slab_bytes_per_block,
         bytes_per_block,
         available_memory,
     )
 
-    region_by_role = {
-        QSA_MAIN: "r0",
-        QSA_RAW: "r4",
-        QSA_COMPRESSED: "r5",
-        GDN: "r1",
-    }
     tensors: list[KVCacheTensor] = []
-    for role, region_name in region_by_role.items():
+    for role in (QSA_MAIN, QSA_RAW, QSA_COMPRESSED, GDN):
         owners_by_group: dict[int, list[CacheOwner]] = {}
         for owner in layout.owners:
             if owner.role == role:
                 owners_by_group.setdefault(owner.group_id, []).append(owner)
-        region = layout.region(region_name)
         for group_owners in owners_by_group.values():
             owners = sorted(group_owners, key=lambda owner: owner.slot)
-            tensors.append(
-                KVCacheTensor(
-                    size=backing_size,
-                    layers=[owner.layer_name for owner in owners],
-                    layer_stride=layout.slot_backing_size,
-                    block_stride=region.block_stride,
-                    offset=region.offset + owners[0].slot * layout.slot_backing_size,
+            for region_name, members in groupby(
+                owners, key=lambda owner: layout.region_name_for_owner(owner.layer_name)
+            ):
+                component_owners = list(members)
+                region = layout.region(region_name)
+                tensors.append(
+                    KVCacheTensor(
+                        size=backing_size,
+                        layers=[owner.layer_name for owner in component_owners],
+                        layer_stride=layout.slot_backing_size,
+                        block_stride=region.block_stride,
+                        offset=region.offset + component_owners[0].slot * layout.slot_backing_size,
+                    )
                 )
-            )
     tensors.extend(
         KVCacheTensor(
             size=_private_page_bytes(owner) * num_blocks,

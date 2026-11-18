@@ -599,10 +599,18 @@ class NPUModelRunner(GPUModelRunner):
         for layer in self.compilation_config.static_forward_context.values():
             if isinstance(getattr(layer, "impl", None), AscendC8MXFPAttentionBackendImpl):
                 value_scale_cache = layer.kv_cache[3]
-                assert value_scale_cache.shape[0] % num_blocks == 0
-                kernel_blocks_per_page = value_scale_cache.shape[0] // num_blocks
-                self._c8_mxfp_v_scale_caches.append((layer.v_cache_scale, value_scale_cache, kernel_blocks_per_page))
-                fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
+                scale = layer.v_cache_scale
+                fill_mxfp_v_scale_cache(scale, value_scale_cache)
+            else:
+                # GBSA initializes its static scales in bind_kv_cache.
+                get_entry = getattr(type(layer), "get_mxfp_v_scale_cache_entry", None)
+                entry = get_entry(layer) if get_entry is not None else None
+                if entry is None:
+                    continue
+                scale, value_scale_cache = entry
+            assert value_scale_cache.shape[0] % num_blocks == 0
+            kernel_blocks_per_page = value_scale_cache.shape[0] // num_blocks
+            self._c8_mxfp_v_scale_caches.append((scale, value_scale_cache, kernel_blocks_per_page))
 
     def shutdown(self) -> None:
         from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload

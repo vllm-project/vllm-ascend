@@ -103,6 +103,7 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     QSA_COMPRESSED,
     QSA_MAIN,
     QSA_RAW,
+    QSAMXFP8Spec,
     build_qwen4_kv_cache_layout,
     make_qsa_kernel_page_cache,
     make_slab_view,
@@ -247,7 +248,11 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         if isinstance(spec, AttentionSpec):
             # Match upstream customization, including kernel-block stride alignment.
             spec = customize_attention_spec(attn_module.get_attn_backend(), spec)
-        if type(spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(vllm_config):
+        if (
+            type(spec) is FullAttentionSpec
+            and is_c8_mxfp_kv_quant(vllm_config)
+            and getattr(attn_module, "kv_cache_dtype", "mxfp8") == "mxfp8"
+        ):
             spec = mxfp_cache_spec(spec)
         kv_cache_spec[layer_name] = spec
         if isinstance(spec, AttentionSpec) and getattr(attn_module, "align_kv_cache_with_mamba", True):
@@ -1635,7 +1640,12 @@ def _reshape_kv_cache_v2(
 
             kv_cache_spec = layer_kv_cache_spec[layer_name]
 
-            if type(kv_cache_spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(vllm_config):
+            if (
+                qwen4_cache_layout is None
+                and type(kv_cache_spec) is FullAttentionSpec
+                and kv_cache_spec.dtype == torch.float8_e4m3fn
+                and is_c8_mxfp_kv_quant(vllm_config)
+            ):
                 raw_cache = kv_cache_raw_tensors[layer_name]
                 if not isinstance(raw_cache, torch.Tensor):
                     raise ValueError("C8_MXFP requires one combined raw allocation per layer.")
@@ -1653,19 +1663,54 @@ def _reshape_kv_cache_v2(
                 slot_offset = owner.slot * qwen4_cache_layout.slot_backing_size
                 if owner.role == QSA_MAIN:
                     assert isinstance(kv_cache_spec, FullAttentionSpec)
-                    region = qwen4_cache_layout.region("r0")
-                    kv_caches[layer_name] = make_qsa_kernel_page_cache(
-                        raw_slab,
-                        dtype=kv_cache_spec.dtype,
-                        num_blocks=kv_cache_config.num_blocks,
-                        manager_block_size=kv_cache_spec.block_size,
-                        kernel_block_size=kernel_block_size,
-                        num_kv_heads=kv_cache_spec.num_kv_heads,
-                        head_size=kv_cache_spec.head_size,
-                        head_size_v=kv_cache_spec.head_size_v,
-                        storage_offset=slot_offset + region.offset,
-                        block_stride=region.block_stride,
-                    )
+                    if isinstance(kv_cache_spec, QSAMXFP8Spec):
+                        pages = kv_cache_config.num_blocks * kv_cache_spec.block_size // kernel_block_size
+                        kv_caches[layer_name] = tuple(
+                            make_slab_view(
+                                raw_slab,
+                                dtype=kv_cache_spec.dtype,
+                                num_blocks=pages,
+                                item_shape=(kernel_block_size, kv_cache_spec.num_kv_heads, width),
+                                storage_offset=slot_offset + qwen4_cache_layout.region(name).offset,
+                            )
+                            for name, width in (
+                                ("qsa_key", kv_cache_spec.head_size),
+                                ("qsa_value", kv_cache_spec.head_size_v),
+                            )
+                        )
+                        scale_views = []
+                        for name, shape in (
+                            (
+                                "qsa_k_scale",
+                                (kernel_block_size, kv_cache_spec.num_kv_heads, kv_cache_spec.head_size // 32),
+                            ),
+                            ("qsa_v_scale", (2, kv_cache_spec.num_kv_heads, kv_cache_spec.head_size * 2)),
+                        ):
+                            scale_region = qwen4_cache_layout.region(name)
+                            scale_views.append(
+                                make_slab_view(
+                                    raw_slab,
+                                    dtype=torch.uint8,
+                                    num_blocks=pages,
+                                    item_shape=shape,
+                                    storage_offset=slot_offset + scale_region.offset,
+                                )
+                            )
+                        kv_caches[layer_name] = (*kv_caches[layer_name], *scale_views)
+                    else:
+                        region = qwen4_cache_layout.region("r0")
+                        kv_caches[layer_name] = make_qsa_kernel_page_cache(
+                            raw_slab,
+                            dtype=kv_cache_spec.dtype,
+                            num_blocks=kv_cache_config.num_blocks,
+                            manager_block_size=kv_cache_spec.block_size,
+                            kernel_block_size=kernel_block_size,
+                            num_kv_heads=kv_cache_spec.num_kv_heads,
+                            head_size=kv_cache_spec.head_size,
+                            head_size_v=kv_cache_spec.head_size_v,
+                            storage_offset=slot_offset + region.offset,
+                            block_stride=region.block_stride,
+                        )
                     continue
                 if owner.role in (QSA_RAW, QSA_COMPRESSED):
                     assert isinstance(kv_cache_spec, AttentionSpec)
@@ -1681,17 +1726,21 @@ def _reshape_kv_cache_v2(
                         * kv_cache_spec.head_size
                         * get_dtype_size(kv_cache_spec.dtype)
                     )
-                    if expected_page_bytes != region.page_size_bytes:
+                    if expected_page_bytes > region.page_size_bytes:
                         raise ValueError(
                             f"{layer_name} Qwen4 hybrid page mismatch: "
                             f"view={expected_page_bytes}, "
                             f"region={region.page_size_bytes}."
                         )
+                    view_stride = region.page_size_bytes
                     num_view_blocks = kv_cache_config.num_blocks
                     if owner.role == QSA_COMPRESSED:
                         # Match MRV2's virtual block table and builder spec:
                         # each kernel page owns kernel_block_size / ratio keys.
                         kernel_pages = kv_cache_spec.block_size // kernel_block_size
+                        view_stride, remainder = divmod(view_stride, kernel_pages)
+                        if remainder:
+                            raise ValueError("Indexer region must contain whole kernel pages")
                         num_view_blocks *= kernel_pages
                         storage_block_size = kv_cache_spec.get_num_kernel_states(kernel_block_size)
                     kv_caches[layer_name] = make_slab_view(
@@ -1704,6 +1753,7 @@ def _reshape_kv_cache_v2(
                             kv_cache_spec.head_size,
                         ),
                         storage_offset=slot_offset + region.offset,
+                        block_stride=view_stride,
                     ).transpose(1, 2)
                     continue
                 if owner.role == PLE:
