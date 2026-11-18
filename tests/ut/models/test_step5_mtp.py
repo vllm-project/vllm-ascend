@@ -72,8 +72,6 @@ def test_predictor_layer_wires_ascend_modules(layer_env):
     target_vllm_config = SimpleNamespace(marker="target", quant_config=None)
     layer = AscendStep5MultiTokenPredictorLayer(target_vllm_config, "model.layers.4")
 
-    # the draft block holds python-side per-layer state: it must stay eager
-    assert layer.do_not_compile is True
     assert layer.fp32_residual_connection is False
 
     # enorm/hnorm are AscendStep5RMSNorm with the fp32 norm dtype

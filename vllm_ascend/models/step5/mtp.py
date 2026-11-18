@@ -55,8 +55,6 @@ class AscendStep5MultiTokenPredictorLayer(Step5MultiTokenPredictorLayer):
         # Step5DecoderLayer. Everything else mirrors it verbatim so
         # module/parameter names stay checkpoint-compatible.
         nn.Module.__init__(self)
-        # The DSA modules hold python-side per-layer state; stay eager.
-        self.do_not_compile = True
         mtp_vllm_config = _get_mtp_vllm_config(vllm_config)
         config = mtp_vllm_config.model_config.hf_text_config
         self.fp32_residual_connection = config.fp32_residual_connection
