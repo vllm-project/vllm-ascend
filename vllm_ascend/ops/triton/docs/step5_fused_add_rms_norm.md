@@ -34,7 +34,7 @@
 - The decoder checks eligibility before any sequence parallel all-gather and
   after any reduce-scatter. Unsupported inputs use the existing path.
 - The custom op supplies fake output shape and dtype metadata for graph tracing.
-  A5 graph replay validation is pending.
+  The A5 TP8 Step5 benchmark exercised `FULL_DECODE_ONLY` graph replay with MTP.
 - Row count is a non-specialized runtime argument. The tile, weight-centering and residual
   flags, and pointer dtypes can produce different variants.
 
