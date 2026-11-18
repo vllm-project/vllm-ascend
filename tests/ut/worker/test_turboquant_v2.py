@@ -225,7 +225,7 @@ def test_unified_dsv4_matches_existing_allocation_and_views(monkeypatch, turboqu
             KVCacheTensor(size=pool_size, layers=[alias_name], offset=0, layer_stride=0, block_stride=stride),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(names, UniformTypeKVCacheSpecs.from_specs(dict.fromkeys(names, spec))),
+            KVCacheGroupSpec(names.copy(), UniformTypeKVCacheSpecs.from_specs(dict.fromkeys(names, spec))),
             KVCacheGroupSpec([alias_name], UniformTypeKVCacheSpecs.from_specs({alias_name: spec})),
         ],
     )
@@ -243,8 +243,11 @@ def test_unified_dsv4_matches_existing_allocation_and_views(monkeypatch, turboqu
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: layers)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args: False)
     raw = attn_utils._allocate_kv_cache(config, {}, torch.device("cpu"))
-    groups = attn_utils._get_cache_attention_groups(config, layers, {})
-    expected = attn_utils.create_kv_cache_runtime_views(config, raw, groups, [128, 128], {})
+    expected = {name: _runtime_views(raw[name], spec, blocks, block_stride=stride) for name in raw}
+    consumer_name = "model.layers.3.attn"
+    consumer = Mock(spec=attn_utils.Attention, kv_sharing_target_layer_name=names[1])
+    runtime.compilation_config = SimpleNamespace(static_forward_context={**layers, consumer_name: consumer})
+    config.kv_cache_groups[0].layer_names.append(consumer_name)
     legacy_allocate = Mock(side_effect=AssertionError("Unified route must allocate its own backing"))
     monkeypatch.setattr(attn_utils, "_allocate_kv_cache", legacy_allocate)
     monkeypatch.setattr(
@@ -265,7 +268,8 @@ def test_unified_dsv4_matches_existing_allocation_and_views(monkeypatch, turboqu
     assert len(allocated) == 1 and allocated[0].numel() == pool_size
     if kv_transfer:
         assert allocated[0].data_ptr() % (2 * 1024 * 1024) == 0
-    for name in actual:
+    assert actual[consumer_name] is actual[names[1]]
+    for name in expected:
         raw_tensor = raw[name]
         assert isinstance(raw_tensor, torch.Tensor)
         for before, after in zip(expected[name], actual[name]):

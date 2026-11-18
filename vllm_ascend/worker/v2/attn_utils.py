@@ -55,6 +55,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.gpu.attn_utils import get_shared_kv_cache_layers
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup, customize_attention_spec
 
@@ -1445,27 +1446,33 @@ def create_cache_component_views(
 
 def create_kv_cache_runtime_views(
     kv_cache_config: KVCacheConfig,
-    raw_tensors: Mapping[str, torch.Tensor],
+    backing: torch.Tensor,
     attn_groups: Sequence[AttentionGroup],
     kernel_block_sizes: Sequence[int],
     shared_layers: Mapping[str, str],
     layout: Any = None,
 ) -> dict[str, Any]:
     """Delegate component views to backends using the descriptor block strides."""
-    specs = _get_layer_kv_cache_specs(kv_cache_config)
-    placements = {name: descriptor for descriptor in kv_cache_config.kv_cache_tensors for name in descriptor.layers}
-    caches = {}
+    placements = {
+        name: (descriptor, layer_index)
+        for descriptor in kv_cache_config.kv_cache_tensors
+        for layer_index, name in enumerate(descriptor.layers)
+    }
+    caches: dict[str, Any] = {}
     for group in attn_groups:
         if group.kv_cache_group_id >= len(kernel_block_sizes):
             continue
+        spec = group.kv_cache_spec
         for name in group.layer_names:
-            if name in shared_layers:
-                continue
-            spec = specs[name]
-            descriptor = placements[name]
+            descriptor, layer_index = placements[name]
+            num_blocks = kv_cache_config.num_blocks_of(descriptor)
+            start = descriptor.offset + layer_index * descriptor.layer_stride
+            span = (num_blocks - 1) * descriptor.block_stride + spec.page_size_bytes
+            if start < 0 or descriptor.block_stride < spec.page_size_bytes or start + span > backing.nbytes:
+                raise ValueError(f"KV cache placement for {name} exceeds its backing allocation.")
             shapes = group.backend.get_runtime_shapes(
                 spec,
-                kv_cache_config.num_blocks_of(descriptor),
+                num_blocks,
                 layout,
                 kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
             )
@@ -1479,7 +1486,7 @@ def create_kv_cache_runtime_views(
                 for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes)
             ]
             components = create_cache_component_views(
-                raw_tensors[name],
+                backing[start : start + span],
                 cache_shapes,
                 dtypes,
                 descriptor.block_stride,
@@ -1511,33 +1518,16 @@ def unified_allocate_kv_cache(
         raise ValueError("Unified KV cache descriptors must share one backing allocation.")
     vllm_config = get_current_vllm_config()
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
-    shared_layers = {
-        name: target
-        for name, layer in attn_layers.items()
-        if (target := getattr(layer, "kv_sharing_target_layer_name", None))
-    }
-    specs = _get_layer_kv_cache_specs(kv_cache_config)
+    shared_layers = get_shared_kv_cache_layers(vllm_config)
     backing_size = sizes.pop()
-    regions = []
-    for descriptor in kv_cache_config.kv_cache_tensors:
-        num_blocks = kv_cache_config.num_blocks_of(descriptor)
-        for layer_index, name in enumerate(descriptor.layers):
-            spec = specs[name]
-            start = descriptor.offset + layer_index * descriptor.layer_stride
-            span = (num_blocks - 1) * descriptor.block_stride + spec.page_size_bytes
-            if start < 0 or descriptor.block_stride < spec.page_size_bytes or start + span > backing_size:
-                raise ValueError(f"KV cache placement for {name} exceeds its backing allocation.")
-            regions.append((name, start, span))
 
     # Preserve the existing 2 MiB base-address alignment for KV transfer.
     alignment = 2 * 1024 * 1024
-    logger.info("Allocating unified KV cache: %d bytes, %d layer placements", backing_size, len(regions))
+    logger.info("Allocating unified KV cache: %d bytes", backing_size)
     buf = _allocate_int8_cache_tensor(backing_size, alignment, device)
-    raw_tensors = {name: buf[start : start + span] for name, start, span in regions}
-    raw_tensors.update({name: raw_tensors[target] for name, target in shared_layers.items()})
     return create_kv_cache_runtime_views(
         kv_cache_config,
-        raw_tensors,
+        buf,
         _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers),
         kernel_block_sizes,
         shared_layers,

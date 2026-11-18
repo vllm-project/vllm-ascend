@@ -323,15 +323,9 @@ def allocate_cache_views(config, device="cpu"):
     context = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
     layers = {name: DeepseekV41CacheLayer(context, name, spec) for name, spec in specs.items()}
     raw = torch.zeros(config.kv_cache_tensors[0].size, dtype=torch.int8, device=device)
-    raw_tensors = {}
-    for descriptor in config.kv_cache_tensors:
-        for index, name in enumerate(descriptor.layers):
-            start = descriptor.offset + index * descriptor.layer_stride
-            span = (config.num_blocks - 1) * descriptor.block_stride + specs[name].page_size_bytes
-            raw_tensors[name] = raw[start : start + span]
     caches = create_kv_cache_runtime_views(
         config,
-        raw_tensors,
+        raw,
         _get_cache_attention_groups(config, layers, {}),
         [group.kv_cache_spec.block_size for group in config.kv_cache_groups],
         {},

@@ -329,8 +329,7 @@ class AscendDSABackend(AttentionBackend):
         raw-token kernel block size. The combined indexer view is an alias,
         rather than a third sequential component.
         """
-        tokens = get_storage_block_size(spec)
-        prefix = (num_blocks, spec.num_kv_heads, tokens)
+        prefix = (num_blocks, spec.num_kv_heads, spec.num_states)
         shapes = [(*prefix, spec.head_size * get_dtype_size(spec.dtype))]
         if getattr(spec, "scale_dim", 0):
             shapes.append((*prefix, spec.scale_dim * get_dtype_size(spec.scale_dtype)))

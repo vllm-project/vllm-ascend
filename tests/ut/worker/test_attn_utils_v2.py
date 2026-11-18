@@ -1305,6 +1305,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     cache_layer.cache_config = cache_config
     cache_layer.compress_ratio = 4
     cache_layer.kv_cache = torch.tensor([])
+    vllm_config.compilation_config = SimpleNamespace(static_forward_context={layer_name: cache_layer})
 
     monkeypatch.setattr(
         deepseek_v4_indexer,
@@ -1314,18 +1315,8 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     monkeypatch.setattr(dsa_v1, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
     monkeypatch.setattr(
         attn_utils,
-        "get_layers_from_vllm_config",
-        lambda *_args, **_kwargs: {layer_name: cache_layer},
-    )
-    monkeypatch.setattr(
-        attn_utils,
         "get_current_vllm_config",
         lambda: vllm_config,
-    )
-    monkeypatch.setattr(
-        upstream_attn_utils,
-        "get_shared_kv_cache_layers",
-        lambda _config: {},
     )
 
     discovered_specs = attn_utils.get_kv_cache_spec(vllm_config)
