@@ -633,6 +633,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             dcp_sharded=[self.kv_cache_specs[self.layer_name_to_spec_index[name]].dcp_sharded for name in layer_names],
             local_ip=self.side_channel_host,
             handshake_port=self.handshake_port,
+            dcp_rank=self.dcp_rank,
         )
         self.transfer_metadata = transfer_metadata
         self.xfer_handshake_metadata = transfer_metadata

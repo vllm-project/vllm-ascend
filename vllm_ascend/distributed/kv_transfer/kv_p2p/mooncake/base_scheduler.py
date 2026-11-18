@@ -297,6 +297,7 @@ class MooncakeMetadataThread(threading.Thread):
                         kv_caches_base_addr=aligned_base_addrs,
                         local_ip=worker_metadata.local_ip,
                         handshake_port=worker_metadata.handshake_port,
+                        dcp_rank=worker_metadata.dcp_rank,
                     )
                 metadata_by_pcp_rank[pcp_rank] = MooncakePCPTransferMetadata(metadata_by_tp_rank=metadata_by_tp_rank)
 

@@ -365,6 +365,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             local_dcp_size=local_dcp_size,
             remote_dcp_size=remote_dcp_size,
             total_num_kv_heads=total_num_kv_heads,
+            remote_metadata=remote_metadata,
         )
 
     def _get_attention_dcp_sizes(
@@ -456,6 +457,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         local_dcp_size: int,
         remote_dcp_size: int,
         total_num_kv_heads: int,
+        remote_metadata: MooncakePPTransferMetadata | None = None,
     ) -> list[list[int]]:
         """Build remote TP groups from an already inferred head topology.
 
@@ -483,14 +485,47 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 continue
             members = list(range(remote_rank_start, remote_rank_start + remote_dcp_size))
             if remote_dcp_size > 1:
-                import inspect
+                peer_dcp_ranks: dict[int, int] | None = None
+                metadata_by_pcp_rank = getattr(remote_metadata, "metadata_by_pcp_rank", None)
+                if metadata_by_pcp_rank:
+                    ranks: dict[int, int] = {}
+                    for m in members:
+                        m_tp, m_pcp = divmod(m, remote_pcp_size)
+                        pcp_meta = metadata_by_pcp_rank.get(m_pcp)
+                        tp_meta = pcp_meta.metadata_by_tp_rank.get(m_tp) if pcp_meta is not None else None
+                        if tp_meta is None or tp_meta.dcp_rank is None:
+                            break
+                        ranks[m] = tp_meta.dcp_rank
+                    else:
+                        if sorted(ranks.values()) != list(range(remote_dcp_size)):
+                            raise ValueError(
+                                f"Invalid remote DCP in-group ranks for group starting at {remote_rank_start}: {ranks}"
+                            )
+                        peer_dcp_ranks = ranks
+                if peer_dcp_ranks is not None:
+                    members.sort(key=peer_dcp_ranks.__getitem__)
+                else:
+                    cls = self.__class__
+                    if not hasattr(cls, "_vllm_sorts_dcp_groups"):
+                        sorts = False
+                        try:
+                            import inspect
 
-                import vllm.distributed.parallel_state as parallel_state
+                            import vllm.distributed.parallel_state as parallel_state
 
-                if "group_ranks = [sorted(x.tolist()) for x in group_ranks]" in inspect.getsource(
-                    parallel_state.initialize_model_parallel
-                ):
-                    members.sort(key=lambda m: (m % remote_pcp_size) * remote_tp_size + m // remote_pcp_size)
+                            source = inspect.getsource(parallel_state.initialize_model_parallel)
+                            sorts = "group_ranks = [sorted(x.tolist()) for x in group_ranks]" in source
+                        except Exception:
+                            try:
+                                from vllm import __version__ as vllm_ver
+
+                                ver_parts = [int(x) for x in vllm_ver.split(".")[:3] if x.isdigit()]
+                                sorts = tuple(ver_parts) > (0, 33, 0)
+                            except Exception:
+                                sorts = False
+                        cls._vllm_sorts_dcp_groups = sorts
+                    if cls._vllm_sorts_dcp_groups:
+                        members.sort(key=lambda m: (m % remote_pcp_size) * remote_tp_size + m // remote_pcp_size)
             ranks_by_head_piece.setdefault((head_start, head_end), []).extend(members)
 
         if not ranks_by_head_piece:
