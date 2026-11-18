@@ -6,7 +6,17 @@ import torch
 from vllm.utils.torch_utils import get_dtype_size
 
 from vllm_ascend.attention.utils import combine_cache_components
-from vllm_ascend.worker.v2.attn_utils import create_cache_component_views
+from vllm_ascend.worker.v2.attn_utils import create_cache_component_views, create_kv_cache_page_view
+
+
+def test_manager_page_view_preserves_descriptor_offset_and_stride():
+    backing = torch.zeros(128, dtype=torch.int8)
+    pages = create_kv_cache_page_view(backing[8:], start=8, num_blocks=3, block_stride=32, page_bytes=16)
+    assert pages.shape == (3, 1, 1, 16)
+    pages[1].fill_(7)
+    expected = torch.zeros_like(backing)
+    expected[48:64] = 7
+    torch.testing.assert_close(backing, expected)
 
 
 @pytest.mark.parametrize("scale_dtype", [torch.float16, torch.float32])

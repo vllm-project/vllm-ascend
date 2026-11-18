@@ -1444,6 +1444,20 @@ def create_cache_component_views(
     return views
 
 
+def create_kv_cache_page_view(
+    backing: torch.Tensor, start: int, num_blocks: int, block_stride: int, page_bytes: int
+) -> torch.Tensor:
+    """Expose manager pages as [block, 1, 1, byte], preserving descriptor padding."""
+    span = (num_blocks - 1) * block_stride + page_bytes if num_blocks else 0
+    if start < 0 or block_stride < page_bytes or start + span > backing.nbytes:
+        raise ValueError("KV cache placement exceeds its backing allocation.")
+    return backing.as_strided(
+        (num_blocks, 1, 1, page_bytes),
+        (block_stride, page_bytes, page_bytes, 1),
+        backing.storage_offset() + start,
+    )
+
+
 def create_kv_cache_runtime_views(
     kv_cache_config: KVCacheConfig,
     backing: torch.Tensor,
@@ -1467,9 +1481,9 @@ def create_kv_cache_runtime_views(
             descriptor, layer_index = placements[name]
             num_blocks = kv_cache_config.num_blocks_of(descriptor)
             start = descriptor.offset + layer_index * descriptor.layer_stride
-            span = (num_blocks - 1) * descriptor.block_stride + spec.page_size_bytes
-            if start < 0 or descriptor.block_stride < spec.page_size_bytes or start + span > backing.nbytes:
-                raise ValueError(f"KV cache placement for {name} exceeds its backing allocation.")
+            pages = create_kv_cache_page_view(
+                backing, start, num_blocks, descriptor.block_stride, spec.page_size_bytes
+            )
             shapes = group.backend.get_runtime_shapes(
                 spec,
                 num_blocks,
@@ -1481,16 +1495,17 @@ def create_kv_cache_runtime_views(
                 dtypes += (spec.scale_dtype,)
             # Backend shapes describe bytes in [B,H,N,C]; kernels consume NHD
             # views with the content dimension expressed in dtype elements.
-            cache_shapes = [
-                (blocks, tokens, heads, content_bytes // get_dtype_size(dtype))
-                for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes)
-            ]
-            components = create_cache_component_views(
-                backing[start : start + span],
-                cache_shapes,
-                dtypes,
-                descriptor.block_stride,
-            )
+            components = []
+            page_rows = pages[:, 0, 0, :]
+            offset = 0
+            for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes, strict=True):
+                itemsize = get_dtype_size(dtype)
+                if blocks != num_blocks or content_bytes % itemsize:
+                    raise ValueError("Backend shape is incompatible with the manager page view.")
+                size = heads * tokens * content_bytes
+                component = page_rows.narrow(1, offset, size).view(dtype)
+                components.append(component.unflatten(1, (tokens, heads, content_bytes // itemsize)))
+                offset += size
             if issubclass(group.backend, DeepseekV41CacheBackend):
                 caches[name] = components[0] if len(components) == 1 else tuple(components)
             else:
