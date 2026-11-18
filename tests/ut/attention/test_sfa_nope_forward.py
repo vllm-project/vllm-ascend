@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
+from threading import local
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -10,10 +12,14 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 
 import vllm_ascend.attention.sfa_v1 as sparse_mla
+from tests.ut.models.test_glm5next_kda_input_projection_tp import CollectiveReference
+from vllm_ascend import ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, PreprocessType
 from vllm_ascend.models.glm5next.kda_input_projection_tp import KDAInputProjectionTPLayout, PendingGate, PendingTensor
+from vllm_ascend.ops import linear_op
+from vllm_ascend.ops.linear import AscendRowParallelLinear, AscendUnquantizedLinearMethod
 
 
 @pytest.fixture(autouse=True)
@@ -590,6 +596,7 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
             project=MagicMock(return_value=pending_gate),
         )
     impl._v_up_proj = lambda value: value
+    impl.o_proj = None
     impl._finalize_o_proj = MagicMock(side_effect=lambda value, output: output.copy_(value))
     with (
         patch.object(
@@ -624,3 +631,111 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     assert impl._execute_sparse_flash_attention_process.call_count == int(actual_tokens > 0)
     assert impl._record_dcp_kv_gather_context.call_count == int(dcp_enabled)
     torch.testing.assert_close(output, torch.full_like(output, float(actual_tokens > 0)))
+
+
+@pytest.mark.parametrize(
+    "graph_mode,idle_has_metadata",
+    [(CUDAGraphMode.PIECEWISE, True), (CUDAGraphMode.PIECEWISE, False), (CUDAGraphMode.FULL, True)],
+)
+def test_sfa_oproj_tp_aligns_uneven_and_idle_owners(monkeypatch, graph_mode, idle_has_metadata):
+    token_counts = (12, 3, 0)
+    group_size = len(token_counts)
+    capacity, hidden_size, head_dim = 16, 4, 2
+    width = group_size * head_dim
+    generator = torch.Generator().manual_seed(51)
+    weight = torch.randn(hidden_size, width, generator=generator)
+    values = [torch.randn(count, width, generator=generator) for count in token_counts]
+    collective = CollectiveReference(group_size)
+    thread = local()
+    forward_context = SimpleNamespace(
+        cudagraph_runtime_mode=graph_mode,
+        additional_kwargs={"max_tokens_across_dp": max(token_counts)},
+    )
+    monkeypatch.setattr(sparse_mla, "get_forward_context", lambda: forward_context)
+    monkeypatch.setattr(ascend_forward_context, "get_forward_context", lambda: forward_context)
+    monkeypatch.setattr(ascend_forward_context, "_USE_V2_EXTRA_KWARGS", True)
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_tp_group", lambda: SimpleNamespace(world_size=1, rank_in_group=0)
+    )
+    monkeypatch.setattr(linear_op, "oproj_tp_enable", lambda: True)
+    monkeypatch.setattr(linear_op, "get_otp_group", lambda: thread.group)
+    monkeypatch.setattr(
+        AscendUnquantizedLinearMethod,
+        "apply",
+        lambda self, layer, x, bias=None: torch.nn.functional.linear(x, layer.weight, bias),
+    )
+    for hook in ("wait_for_kv_layer_from_connector", "notify_kv_cache_written", "maybe_save_kv_layer_to_connector"):
+        monkeypatch.setattr(sparse_mla, hook, lambda *args: None)
+    monkeypatch.setattr(sparse_mla, "attention_transfer_window", nullcontext)
+
+    def all_to_all(recv, send, group):
+        assert send.shape == recv.shape == (capacity * width,)
+        thread.calls.append("all_to_all")
+        recv.copy_(collective.exchange(group.rank_in_group, "all_to_all", send))
+
+    monkeypatch.setattr(linear_op.dist, "all_to_all_single", all_to_all)
+
+    @torch.no_grad()
+    def worker(rank):
+        count = token_counts[rank]
+        thread.calls = []
+
+        def reduce_scatter(partial, dim):
+            assert dim == 0 and partial.shape == (capacity * group_size, hidden_size)
+            thread.calls.append("reduce_scatter")
+            return collective.exchange(rank, "scatter", partial)
+
+        thread.group = SimpleNamespace(world_size=group_size, rank_in_group=rank, reduce_scatter=reduce_scatter)
+        thread.group.device_group = thread.group
+        o_proj = AscendRowParallelLinear(width, hidden_size, bias=False, prefix="model.layers.0.self_attn.o_proj")
+        assert isinstance(o_proj.custom_op, linear_op.OProjRowParallelOp)
+        o_proj.weight.copy_(weight.chunk(group_size, dim=1)[rank])
+
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.o_proj = o_proj
+        impl._parallel_o_proj = None
+        impl.pcp_enabled = False
+        impl.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
+        impl.qk_rope_head_dim = 0
+        impl.q_lora_rank = impl.kv_lora_rank = impl.v_head_dim = head_dim
+        impl.local_num_heads = group_size
+        impl.enable_sparse_sfa_c8 = impl.enable_sparse_sfa_turboquant = False
+        impl.preprocess_type = PreprocessType.NATIVE
+        impl.g_proj = impl.layerwise_kv_cache_hook = None
+        impl.has_indexer = False
+        impl.skip_topk = True
+        impl.layer_name = "layer"
+        impl.fused_qkv_a_proj = lambda x: (x,)
+        impl.q_a_layernorm = lambda x: x
+        impl.exec_kv = lambda *args: (None, args[0])
+        impl._q_proj_and_k_up_proj = lambda q: (q, None)
+        impl._get_indexcache_topk_indices = lambda rows: torch.zeros(rows, 1, 1, dtype=torch.int32)
+        padded_values = torch.nn.functional.pad(values[rank], (0, 0, 0, capacity - count))
+        impl._execute_sparse_flash_attention_process = MagicMock(
+            side_effect=lambda q, *args: padded_values[: q.size(0)]
+        )
+        impl._v_up_proj = lambda x: x
+
+        metadata = None
+        if count or idle_has_metadata:
+            metadata = SimpleNamespace(
+                cos=None,
+                sin=None,
+                num_actual_tokens=count,
+                slot_mapping=torch.arange(capacity),
+                cum_query_lens=torch.tensor([count]),
+                seq_lens=torch.tensor([count]),
+            )
+        hidden = torch.zeros(capacity, hidden_size)
+        output = torch.full_like(hidden, 123.0)
+        assert impl.forward("layer", hidden, (torch.empty(1),), metadata, output) is output
+        assert thread.calls == ["all_to_all", "reduce_scatter"]
+        assert impl._execute_sparse_flash_attention_process.call_count == int(count > 0)
+
+        expected = torch.nn.functional.linear(padded_values, weight)
+        if count and graph_mode == CUDAGraphMode.PIECEWISE:
+            expected[count:] = 123.0
+        torch.testing.assert_close(output, expected)
+
+    with ThreadPoolExecutor(max_workers=group_size) as executor:
+        list(executor.map(worker, range(group_size)))

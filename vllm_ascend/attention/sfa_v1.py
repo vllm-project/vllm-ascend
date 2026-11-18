@@ -62,6 +62,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.models.glm5next.kda_input_projection_tp import projection_capacity
+from vllm_ascend.ops.linear_op import OProjRowParallelOp
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate, register_flash_attention_gate_warmup
 from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
@@ -1912,14 +1913,13 @@ class AscendSFAImpl(MLAAttentionImpl):
     def _project_finegrained_o(self, attn_output: torch.Tensor, output: torch.Tensor, capacity: int) -> None:
         # Preserve the pre-trim graph capacity: idle and live owners may have
         # different actual rows, and the graph bucket can exceed DP live rows.
-        padded = nn.functional.pad(attn_output, (0, 0, 0, capacity - attn_output.shape[0]))
-        output.copy_(self.o_proj(padded)[0][: output.shape[0]])
+        if attn_output.shape[0] < capacity:
+            attn_output = nn.functional.pad(attn_output, (0, 0, 0, capacity - attn_output.shape[0]))
+        output.copy_(self.o_proj(attn_output)[0][: output.shape[0]])
 
-    def _forward_finegrained_dummy(self, hidden_states: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
-        if getattr(self, "finegrained_o_tp", False):
-            attn_output = hidden_states.new_zeros((hidden_states.shape[0], self.local_num_heads * self.v_head_dim))
-            self._project_finegrained_o(attn_output, output, projection_capacity(hidden_states))
-        return output.zero_()
+    def _run_dummy_o_proj(self, hidden_states: torch.Tensor, capacity: int) -> None:
+        attn_output = hidden_states.new_zeros((capacity, self.local_num_heads * self.v_head_dim))
+        self.o_proj(attn_output)
 
     def _get_sfa_kv_slot_mapping(
         self,
@@ -2067,13 +2067,15 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert self.turboquant is not None
             # Build the transform tensors outside graph capture.
             self.turboquant._initialize(hidden_states.device)
-        o_capacity = projection_capacity(hidden_states) if getattr(self, "finegrained_o_tp", False) else None
+        o_capacity = None
+        if isinstance(getattr(self.o_proj, "custom_op", None), OProjRowParallelOp):
+            o_capacity = projection_capacity(hidden_states)
         gate_tp = getattr(self, "gproj_tp", None)
         if attn_metadata is None:
             if gate_tp is not None:
                 gate_tp.project(gate_tp.gather(hidden_states), self.g_proj).wait()
             if o_capacity is not None:
-                return self._forward_finegrained_dummy(hidden_states, output)
+                self._run_dummy_o_proj(hidden_states, o_capacity)
             return output.zero_()
 
         if self.qk_rope_head_dim == 0:
@@ -2091,7 +2093,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 if gate_tp is not None:
                     gate_tp.project(gate_tp.gather(hidden_states), self.g_proj).wait()
                 if o_capacity is not None:
-                    return self._forward_finegrained_dummy(hidden_states, output)
+                    self._run_dummy_o_proj(hidden_states, o_capacity)
                 return output.zero_()
 
             hidden_states = hidden_states[:num_tokens]

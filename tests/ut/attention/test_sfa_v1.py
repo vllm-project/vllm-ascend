@@ -1944,9 +1944,11 @@ class TestAscendSFATurboQuantLatentCache(TestBase):
         impl._parallel_o_proj = None
         impl.enable_sparse_sfa_turboquant = True
         impl.turboquant = MagicMock()
+        impl.o_proj = MagicMock()
         hidden_states = torch.randn(2, 4)
 
         result = impl.forward("model.layers.0", hidden_states, (), None, output=torch.empty(2, 4))
 
         impl.turboquant._initialize.assert_called_once_with(hidden_states.device)
+        impl.o_proj.assert_not_called()
         self.assertTrue(torch.equal(result, torch.zeros(2, 4)))
