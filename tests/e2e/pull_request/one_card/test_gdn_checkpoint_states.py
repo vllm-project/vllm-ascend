@@ -138,6 +138,53 @@ def test_ascendc_segments_preserve_checkpoint_and_final_state(offset, length):
     torch.testing.assert_close(actual_final, final, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("offset,length", [(1408, 1464), (1280, 1336), (256, 315)])
+def test_fused_segments_preserve_checkpoint_and_restored_tail(offset, length):
+    from vllm_ascend.device.device_op import DeviceOperator
+    from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+    from vllm_ascend.ops.gdn_ascendc_checkpoint import build_ascendc_checkpoint_plan
+    from vllm_ascend.ops.gdn_fused_checkpoint import fused_gdn_checkpoint_prefill
+
+    if not get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL):
+        pytest.skip("The fused GDN prefill kernel requires A5")
+    chunk_gated_delta_rule_fwd = getattr(pytest.importorskip("fla_npu.ops.ascendc"), "chunk_gated_delta_rule_fwd", None)
+    if chunk_gated_delta_rule_fwd is None:
+        pytest.skip("The installed FLA NPU package lacks fused GDN prefill")
+    torch.manual_seed(41)
+    device = torch.device("npu")
+    q, k, v = [torch.randn(1, length, 4, 128, device=device, dtype=torch.bfloat16) * 0.1 for _ in range(3)]
+    g = -torch.rand(1, length, 4, device=device) * 0.01
+    beta = torch.rand(1, length, 4, device=device, dtype=torch.bfloat16)
+    initial = torch.randn(1, 4, 128, 128, device=device, dtype=torch.float32) * 0.01
+    snapshots = torch.empty_like(initial)
+    plan = build_ascendc_checkpoint_plan((0, length), [offset], device)
+    output, final = fused_gdn_checkpoint_prefill(q, k, v, g, beta, initial, snapshots, plan, chunk_gated_delta_rule_fwd)
+
+    def reference(start, end, state):
+        metadata = SimpleNamespace(
+            cu_seqlens_host=(0, end - start),
+            chunk_indices_chunk64_host=tuple(value for i in range((end - start + 63) // 64) for value in (0, i)),
+            keep_meta=None,
+        )
+        return DeviceOperator.fla_gdn_prefill(
+            q[:, start:end],
+            k[:, start:end],
+            v[:, start:end],
+            g[:, start:end],
+            beta[:, start:end],
+            state,
+            128**-0.5,
+            metadata,
+            chunk_gated_delta_rule_fwd,
+        )
+
+    prefix_output, prefix = reference(0, offset, initial)
+    tail_output, expected_final = reference(offset, length, prefix)
+    torch.testing.assert_close(snapshots, prefix, rtol=0, atol=0)
+    torch.testing.assert_close(final, expected_final, rtol=0, atol=0)
+    torch.testing.assert_close(output, torch.cat((prefix_output, tail_output), dim=1), rtol=0, atol=0)
+
+
 def test_cache_hit_prefill_exports_tail_in_one_model_step(monkeypatch, model_name="Qwen/Qwen3.5-35B-A3B"):
     """Exercise private checkpoint pages through the real two-layer engine."""
     from vllm import LLM, SamplingParams

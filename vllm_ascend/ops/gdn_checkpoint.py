@@ -9,6 +9,8 @@ from vllm import envs
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.ops.gdn_fused_checkpoint import fused_gdn_checkpoint_prefill
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule_checkpoint
 
 GDN_CHECKPOINT_ALIGNMENT = 64
@@ -97,24 +99,51 @@ def ensure_gdn_checkpoint_workspace(layer, tensor):
         layer._ascend_checkpoint_workspace = tensor.new_empty(shape, dtype=torch.float32)
 
 
-def run_gdn_checkpoint_prefill(layer, metadata, raw_qkv, q, k, v, g, beta, initial_state):
+def run_gdn_checkpoint_prefill(layer, metadata, raw_qkv, q, k, v, g, beta, initial_state, fused_fwd=None):
     checkpoint = metadata.checkpoint
     cu_seqlens = metadata.prefill_query_start_loc
     states = None if checkpoint is None else layer._ascend_checkpoint_workspace[: initial_state.shape[0]]
-    output, final_state = chunk_gated_delta_rule_checkpoint(
-        q,
-        k,
-        v,
-        g,
-        beta,
-        initial_state.transpose(-1, -2),
-        cu_seqlens,
-        metadata.non_spec_prefill_metadata.chunk,
-        states,
-        None if checkpoint is None else checkpoint.checkpoint_offsets,
-        checkpoint_state_dtype=layer.kv_cache[1].dtype,
-        use_ascendc=layer.kv_cache[1].dtype == torch.float32,
-    )
+    if fused_fwd is not None and initial_state.dtype == torch.float32:
+        if checkpoint is None:
+            output, final_state = DeviceOperator.fla_gdn_prefill(
+                q,
+                k,
+                v,
+                g,
+                beta,
+                initial_state,
+                k.shape[-1] ** -0.5,
+                metadata.non_spec_prefill_metadata.chunk,
+                fused_fwd,
+            )
+        else:
+            output, final_state = fused_gdn_checkpoint_prefill(
+                q,
+                k,
+                v,
+                g,
+                beta,
+                initial_state,
+                states,
+                metadata.non_spec_prefill_metadata.chunk.ascendc_checkpoint_plan,
+                fused_fwd,
+            )
+    else:
+        output, final_state = chunk_gated_delta_rule_checkpoint(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state.transpose(-1, -2),
+            cu_seqlens,
+            metadata.non_spec_prefill_metadata.chunk,
+            states,
+            None if checkpoint is None else checkpoint.checkpoint_offsets,
+            checkpoint_state_dtype=layer.kv_cache[1].dtype,
+            use_ascendc=layer.kv_cache[1].dtype == torch.float32,
+        )
+        final_state = final_state.transpose(-1, -2).contiguous()
     if checkpoint is not None:
         # Ascend's conv state is [page, history, channel]; the shared exporter
         # accepts [page, channel, history]. Preserve its padded page strides.
@@ -126,4 +155,4 @@ def run_gdn_checkpoint_prefill(layer, metadata, raw_qkv, q, k, v, g, beta, initi
             recurrent_state=layer.kv_cache[1],
             cu_seqlens=cu_seqlens,
         )
-    return output, final_state.transpose(-1, -2).contiguous()
+    return output, final_state

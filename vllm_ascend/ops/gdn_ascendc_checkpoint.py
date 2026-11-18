@@ -16,6 +16,8 @@ class AscendCRecurrenceSegment:
     chunks: torch.Tensor
     cu_seqlens: tuple[int, ...]
     chunk_indices: tuple[int, ...]
+    token_range: tuple[int, int] | None = None
+    row_range: tuple[int, int] | None = None
 
 
 @dataclass
@@ -60,12 +62,19 @@ def build_ascendc_checkpoint_plan(
         chunk_base += count
 
     def segment(rows, tokens, chunks, cu, indices):
+        def contiguous_range(values):
+            if values and values == list(range(values[0], values[-1] + 1)):
+                return values[0], len(values)
+            return None
+
         return AscendCRecurrenceSegment(
             rows=torch.tensor(rows, dtype=torch.int64, device=device),
             tokens=torch.tensor(tokens, dtype=torch.int64, device=device),
             chunks=torch.tensor(chunks, dtype=torch.int64, device=device),
             cu_seqlens=tuple(cu),
             chunk_indices=tuple(indices),
+            token_range=contiguous_range(tokens),
+            row_range=contiguous_range(rows),
         )
 
     return AscendCCheckpointPlan(
