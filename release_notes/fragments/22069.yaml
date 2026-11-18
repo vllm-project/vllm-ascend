@@ -1,4 +1,0 @@
-pr: 22069
-entries:
-  - category: feature
-    text: Enabled PCP decode request sharding with native C8 HiSparse on Ascend Model Runner V2, while keeping later speculative draft steps replicated.
