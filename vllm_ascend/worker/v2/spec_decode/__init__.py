@@ -48,9 +48,9 @@ def init_speculator(
         if vllm_version_is("0.33.0"):
             raise ValueError("Ascend MRV2 suffix decoding requires vLLM with PR #60339.")
 
-        from vllm_ascend.worker.v2.spec_decode.suffix.speculator import AscendSuffixSpeculator
+        from vllm.v1.worker.gpu.spec_decode.suffix.speculator import SuffixSpeculator
 
-        return AscendSuffixSpeculator(vllm_config, device, req_states)
+        return SuffixSpeculator(vllm_config, device, req_states)
     if speculative_config.method in ("ngram", "ngram_gpu"):
         if req_states is None:
             raise ValueError("MRV2 n-gram speculative decoding requires request states")
