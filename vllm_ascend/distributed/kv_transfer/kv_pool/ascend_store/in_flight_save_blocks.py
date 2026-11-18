@@ -31,15 +31,16 @@ class InFlightSaveBlockTracker:
 
         block_ids = [put.block_id for put in req_meta.boundary_puts or []]
         assert all(block_id > 0 for block_id in block_ids), "Null block cannot back a boundary save"
-        groups = (
-            (
+        if retain_all:
+            # Boundary puts above identify exact Mamba sources. Retain ordinary
+            # non-Mamba tables as well for normal partial-hit save jobs.
+            groups = [
                 group_id
                 for group_id in range(len(req_meta.block_ids_by_group))
                 if group_id not in speculative_blocks_by_group
-            )
-            if retain_all
-            else speculative_blocks_by_group
-        )
+            ]
+        else:
+            groups = list(speculative_blocks_by_group)
         for group_id in groups:
             num_speculative_blocks = speculative_blocks_by_group.get(group_id, 0)
             group_block_ids = req_meta.block_ids_by_group[group_id]

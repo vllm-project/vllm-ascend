@@ -295,7 +295,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         partial_tail_offloads: list[tuple[int, int, int]],
     ) -> bool:
         assert self.connector_scheduler is not None
-        if not getattr(self.connector_scheduler, "enable_partial_hash_hits", False):
+        if not self.connector_scheduler.enable_partial_hash_hits:
             return False
         return self.connector_scheduler.register_finished_partial_tail(request, block_ids, partial_tail_offloads)
 

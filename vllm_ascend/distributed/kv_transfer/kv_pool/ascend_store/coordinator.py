@@ -255,7 +255,7 @@ class AscendStoreCoordinator:
     ) -> list[tuple[int, list[bool] | None]]:
         alignment = self.hash_block_size if self.enable_partial_hash_hits else self.lcm_block_size
         assert aligned_token_len % alignment == 0, (
-            f"aligned_token_len ({aligned_token_len}) must be a multiple of lcm_block_size ({self.lcm_block_size})"
+            f"aligned_token_len ({aligned_token_len}) must be a multiple of alignment ({alignment})"
         )
         # Stores retain the request's replay checkpoint. Lookups must probe
         # every possible checkpoint: a shorter request may have published a

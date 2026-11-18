@@ -1116,7 +1116,6 @@ class ReqMeta:
     boundary_puts: list[BoundaryPut] | None = None
     completed_token_len: int | None = None
     publish_partial_tail: bool = False
-    prefill_end_tokens: int | None = None
 
     def __init__(
         self,
@@ -1161,7 +1160,6 @@ class ReqMeta:
         boundary_puts: list[BoundaryPut] | None = None,
         completed_token_len: int | None = None,
         publish_partial_tail: bool = False,
-        prefill_end_tokens: int | None = None,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -1188,7 +1186,6 @@ class ReqMeta:
         self.boundary_puts = boundary_puts
         self.completed_token_len = completed_token_len
         self.publish_partial_tail = publish_partial_tail
-        self.prefill_end_tokens = prefill_end_tokens
         self.last_block_gva = last_block_gva
         self.partial_block_index = partial_block_index
         self.block_ids_np = block_ids_np
@@ -1406,7 +1403,6 @@ class ReqMeta:
             kv_cache_group_ids=list(range(len(tracker.allocated_block_ids_by_group))),
             publish_partial_tail=publish_partial_tail and not skip_save,
             completed_token_len=target_token_len,
-            prefill_end_tokens=prefill_end,
         )
 
 

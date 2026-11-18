@@ -932,7 +932,6 @@ class KVPoolScheduler(BaseKVPoolScheduler):
                     can_save=True,
                     block_hashes=list(request[0].block_hashes),
                     num_prompt_tokens=tracker.num_prompt_tokens,
-                    prefill_end_tokens=tracker.prefill_end_tokens,
                     completed_token_len=tracker.token_len,
                 )
                 meta.add_request(req_meta)
@@ -985,7 +984,6 @@ class KVPoolScheduler(BaseKVPoolScheduler):
             block_ids_by_group=[list(group) for group in block_ids],
             block_hashes=list(request.block_hashes),
             num_prompt_tokens=request.num_prompt_tokens,
-            prefill_end_tokens=tracker.prefill_end_tokens,
             completed_token_len=request.num_computed_tokens,
             boundary_puts=mamba_puts,
         )

@@ -649,11 +649,12 @@ class BaseKVPoolWorker(ABC):
 
     def _align_kv_ptrs(self, registered_regions: dict[int, tuple[int, int]]):
         """
-        In hybrid scenario, where a KVCacheTensor is shared by multiple layers,
-        but sometimes, layers cannot be evenly distributed among multiple groups,
-        the layers sharing the KVCacheTensor may not completely occupy all the space of the KVCacheTensor.
-        This results in the calculated start address not being the previously aligned address.
-        Therefore, we down-align the start address to meet the 2MB alignment requirement.
+        Resolve 2MB-aligned registration regions for KV cache views.
+
+        Partial hits share Mooncake V2's configured regions when present;
+        otherwise, register each storage from its first aligned address and
+        verify that it covers the views. The legacy hybrid path rounds view
+        starts down within their shared, aligned allocation.
         """
         if self.enable_partial_hash_hits:
             transfer = get_engine_transfer_config(self.vllm_config, self.kv_cache_config)
@@ -680,8 +681,6 @@ class BaseKVPoolWorker(ABC):
             alignment = 2 * 1024 * 1024
             for caches in self.kv_caches.values():
                 for view in self._as_cache_tuple(caches):
-                    if not view.numel():
-                        continue
                     storage = view.untyped_storage()
                     raw, size = storage.data_ptr(), storage.nbytes()
                     aligned = cdiv(raw, alignment) * alignment
@@ -1537,6 +1536,7 @@ class KVPoolWorker(BaseKVPoolWorker):
             key_list = []
             block_id_list: list[int] = []
             load_masks = self.token_database.load_mask(request.block_hashes, token_len)
+            tail_boundaries = dict(load_spec.tail_key_boundaries)
             for group_id in load_group_ids:
                 if group_id >= len(request.block_ids_by_group):
                     continue
@@ -1562,7 +1562,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                     kv_cache_group_id=group_id,
                     skip_null_blocks=skip_null,
                     chunk_filter=chunk_filter,
-                    tail_key_boundary=dict(load_spec.tail_key_boundaries).get(group_id),
+                    tail_key_boundary=tail_boundaries.get(group_id),
                 ):
                     addr, size, block_id = self.token_database.prepare_value(
                         start,

@@ -185,9 +185,6 @@ def test_partial_tail_non_mamba_puts_follow_upstream_prompt_checkpoint(completed
         block_ids_by_group=[list(range(1, 20)), [50, 51, 52, 53, 54]],
         block_hashes=[bytes([i]) for i in range(18)],
         num_prompt_tokens=75,
-        # A resumed prefill can extend past the original prompt; this helper
-        # follows upstream and still keys the original prompt checkpoint.
-        prefill_end_tokens=91,
         completed_token_len=completed,
         boundary_puts=[metadata.BoundaryPut(1, 60 + i, n) for i, n in enumerate(mamba_tails)],
         publish_partial_tail=publish,
@@ -256,7 +253,6 @@ def test_finished_partial_tail_pins_exact_sources_through_next_step(finishing_ta
     assert scheduler.register_finished_partial_tail(request, tables, [(1, 50, 44), (1, 50, 44)]) is False
     req_meta = scheduler._finished_partial_tail_metas["tail"]
     assert req_meta.num_prompt_tokens == 49
-    assert req_meta.prefill_end_tokens == 65
     assert req_meta.token_len_chunk == 0 and req_meta.can_save
     assert req_meta.boundary_puts == [(0, 3, 44), (1, 50, 44), (1, 50, 44)]
     scheduler._block_pool.touch.assert_called_once_with([3, 50])
