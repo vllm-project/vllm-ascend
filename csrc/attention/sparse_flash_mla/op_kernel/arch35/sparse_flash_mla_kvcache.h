@@ -360,6 +360,23 @@ __aicore__ inline bool ComputeS2LoopInfo(int64_t bnIndex, int64_t gS1Index, Glob
         runParam.s2OriLineStartIdx = 0;
         runParam.s2OriLineEndIdx = Min(oriSparseRangeLen, runParam.oriSparseBlockCount);
         runParam.s2OriLineEndIdx = Min(runParam.s2OriLineEndIdx, runParam.actualS2OriSize);
+    } else if (constInfo.hasOriTopkLength && constInfo.oriMaskMode == 4) {
+        // SWA bounded replay (vLLM #56227): in band mode the same tensor reports
+        // how many ori KV entries this query token may see, counted back from the
+        // row's right edge. It only narrows (max() keeps the band as the upper
+        // bound), and the row is the token because qSNumInOneBlock is 1.
+        // Narrowing before oriKvLoopEndIdx rather than masking afterwards is what
+        // makes the Cube load the shortened range: on this path the loop count is
+        // the only mask there is.
+        int32_t rowLen = 0;
+        if constexpr (LAYOUT_T == SMLA_LAYOUT::TND) {
+            rowLen = oriTopkLengthGm.GetValue(cuSeqlensQGm.GetValue(runParam.boIdx) + runParam.s1oIdx);
+        } else {
+            rowLen = oriTopkLengthGm.GetValue(runParam.boIdx * constInfo.s1Size + runParam.s1oIdx);
+        }
+        if (rowLen > 0) {
+            runParam.s2OriLineStartIdx = Max(runParam.s2OriLineStartIdx, runParam.s2OriLineEndIdx - rowLen);
+        }
     }
     runParam.oriKvLoopEndIdx = (runParam.s2OriLineEndIdx - runParam.s2OriLineStartIdx + s2BaseSize - 1) / s2BaseSize;
 

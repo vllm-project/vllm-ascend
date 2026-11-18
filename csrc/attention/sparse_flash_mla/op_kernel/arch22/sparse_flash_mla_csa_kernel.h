@@ -147,6 +147,9 @@ private:
     GlobalTensor<int32_t> oriBlockTableGm;
     GlobalTensor<int32_t> cmpBlockTableGm;
     GlobalTensor<int32_t> topKGm;
+    // SWA bounded replay: per-token visible ori KV length in band mode (the SWA
+    // template owns the sparse-index path that also feeds this tensor).
+    GlobalTensor<int32_t> oriTopkLengthGm;
 
     GlobalTensor<int32_t> actualSeqLengthsQGm;
     GlobalTensor<int32_t> actualSeqLengthsKVGm;
@@ -535,6 +538,12 @@ __aicore__ inline void SparseFlashMlaCsa<SMLAT>::Init(
         cmpBlockTableGm.SetGlobalBuffer((__gm__ int32_t *)cmpBlockTable);
     }
     topKGm.SetGlobalBuffer((__gm__ int32_t *)cmpSparseIndices);
+    // SWA bounded replay: the tensor is optional; its presence is what tells the
+    // band's left edge to follow the caller's per-token count (see below).
+    constInfo.hasOriTopkLength = (oriTopkLength != nullptr);
+    if (constInfo.hasOriTopkLength) {
+        oriTopkLengthGm.SetGlobalBuffer((__gm__ int32_t *)oriTopkLength);
+    }
 
     // workspace 内存排布
     // |Q--|mm1ResGm|vec1ResGm|mm2ResGm|vec2ResGm
@@ -825,6 +834,20 @@ __aicore__ inline void SparseFlashMlaCsa<SMLAT>::ProcessBalance()
             tempLoopInfo.oriMaskLeft = Max(tempLoopInfo.actOriS2Size - tempLoopInfo.actS1Size +
                                                static_cast<int32_t>(tempLoopInfo.s1EndIdx) - constInfo.oriWinLeft,
                                            0);
+            // SWA bounded replay: in band mode a supplied ori_topk_length is how
+            // many ori KV entries this query token may see. Keep that many ending
+            // at the same right edge; max() keeps ori_win_left as the upper
+            // bound, so this only ever narrows. The row is the token here, since
+            // this template runs one S1 row per tile (mBaseSize == gSize).
+            if (constInfo.hasOriTopkLength && constInfo.oriMaskMode == 4U) {
+                uint64_t qTokenOffset =
+                    tempLoopInfo.actualSeqQPrefixSum + static_cast<uint64_t>(tempLoopInfo.s1EndIdx);
+                int32_t rowLen =
+                    oriTopkLengthGm.GetValue(qTokenOffset * constInfo.kvHeadNum + tempLoopInfo.n2Idx);
+                if (rowLen > 0) {
+                    tempLoopInfo.oriMaskLeft = Max(tempLoopInfo.oriMaskLeft, tempLoopInfo.oriMaskRight - rowLen + 1);
+                }
+            }
             int32_t cmpMaskS2Size =
                 GetCmpMaskS2Size(tempLoopInfo.bIdx, tempLoopInfo.actOriS2Size, tempLoopInfo.actCmpS2Size);
             tempLoopInfo.cmpMaskRight = cmpMaskS2Size - tempLoopInfo.actS1Size;

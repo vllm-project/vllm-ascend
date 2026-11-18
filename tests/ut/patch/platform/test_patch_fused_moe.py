@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import torch
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
-from vllm_ascend.distributed.eplb.state import AscendEplbLayerState
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.patch.platform import patch_fused_moe
 
@@ -110,27 +110,21 @@ def test_adapted_router_uses_ascend_mapping_operation():
     topk_ids = torch.tensor([[1]], dtype=torch.int32)
     physical_ids = torch.tensor([[0]], dtype=torch.int32)
 
-    with (
-        patch.object(patch_fused_moe, "dbo_current_ubatch_id", return_value=0),
-        patch.object(
-            patch_fused_moe.torch.ops.vllm,
-            "ascend_eplb_map_to_physical_and_record",
-            return_value=physical_ids,
-        ) as mapping_op,
-    ):
+    with patch.object(
+        patch_fused_moe.torch.ops.vllm,
+        "ascend_eplb_map_to_physical",
+        return_value=physical_ids,
+    ) as mapping_op:
         result = router._apply_eplb_mapping(topk_ids)
 
     assert result is physical_ids
     mapping_op.assert_called_once_with(
         topk_ids,
         router.eplb_state.expert_replica_routing_table,
-        router.eplb_state.expert_load_view,
-        router.eplb_state.should_record_tensor,
-        router.eplb_state.num_unpadded_tokens_tensors[0],
     )
 
 
-def test_factory_shares_upstream_hash_table_with_legacy_ascend_routing():
+def test_factory_passes_hash_table_only_through_upstream_path():
     hash_indices_table = torch.tensor([[1, 3]], dtype=torch.int32)
     router = _Router()
     runner = SimpleNamespace(router=router)
@@ -156,7 +150,7 @@ def test_factory_shares_upstream_hash_table_with_legacy_ascend_routing():
 
     kwargs = original_factory.call_args.kwargs
     assert kwargs["hash_indices_table"] is hash_indices_table
-    assert kwargs["routed_experts_args"]["tid2eid"] is hash_indices_table
+    assert "tid2eid" not in kwargs["routed_experts_args"]
 
 
 def test_factory_keeps_vision_bias_in_ascend_router_only():

@@ -25,13 +25,15 @@ import glob
 import json
 import os
 from collections.abc import Callable
+from copy import deepcopy
 from functools import wraps
+from types import MethodType
 from typing import Any, Optional
 
 import regex as re
 import torch
 from transformers import PretrainedConfig
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import LinearBase
@@ -43,6 +45,7 @@ from vllm.model_executor.models.utils import WeightsMapper
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
+    C8_MXFP_KV_CACHE_DTYPE,
     calc_split_factor,
 )
 
@@ -54,14 +57,73 @@ _MOE_WEIGHT_LOADER_NAME_MAP = {
     "w2_scale_bias": "w2_scale",
 }
 
+# Older ModelSlim checkpoints declare the MXFP8 KV cache once, model-wide, as
+# ``kv_cache_type``. Newer ones drop that key and state the recipe per layer
+# instead, which is also how a hybrid model says that only its full-attention
+# layers have a KV cache at all. We still enable the scheme model-wide, since
+# the backend has no per-layer switch, and the linear-attention layers never
+# reach it.
+_MXFP_C8_KV_CACHE_TYPE = "K_DYNAMIC_V_STATIC_MXFP8_PER_CHANNEL"
+_MXFP_C8_LAYER_QUANT_TYPE_SUFFIX = ".self_attn.quant_type"
+_MXFP_C8_LAYER_QUANT_TYPES = ("QK_MXFP8_DYNAMIC_V_MXFP8_PER_CHANNEL",)
+# FAKQuant parameters that MXFP8 has no home for: K and Q are quantized
+# dynamically at runtime, so their checkpoint scales have no parameter to land
+# on. Without these AutoWeightsLoader rejects the checkpoint outright.
+_MXFP_C8_UNUSED_FA_SUFFIXES = (
+    ".fa_q.scale",
+    ".fa_k.scale",
+    ".fa_q.offset",
+    ".fa_k.offset",
+)
+
+
+def _map_modelslim_moe_weight_name(weight_name: str) -> str:
+    """Rewrite a ModelSlim MoE scale-bias name to the upstream scale path."""
+    prefix, separator, param_name = weight_name.rpartition(".")
+    mapped_name = _MOE_WEIGHT_LOADER_NAME_MAP.get(param_name, param_name)
+    return f"{prefix}{separator}{mapped_name}"
+
 
 def _make_modelslim_moe_weight_loader(
     weight_loader: Callable[..., bool | None],
 ) -> Callable[..., bool | None]:
-    """Map ModelSlim MoE scale-bias names to the upstream scale path."""
+    """Map ModelSlim MoE scale-bias names to the upstream scale path.
 
-    @wraps(weight_loader)
+    When ``weight_loader`` is a bound method, the mapped loader is bound to the
+    same owning layer instead of closing over the bound method. vLLM copies
+    parameter attributes into ``LAYERWISE_INFO`` reload metadata while building
+    the meta tensors, and ``sanitize_layer_refs`` only breaks the
+    ``metadata -> tensor -> weight_loader -> layer`` cycle for attributes that
+    are bound methods of that layer. A plain closure keeps the discarded layer
+    (and its real weights) alive through its closure/``__wrapped__`` cell.
+    """
+    if not isinstance(weight_loader, MethodType):
+        # Preserve the existing interface for callables without a bound owner.
+        @wraps(weight_loader)
+        def plain_weight_loader(
+            param: torch.nn.Parameter,
+            loaded_weight: torch.Tensor,
+            weight_name: str,
+            shard_id: str,
+            expert_id: int,
+            return_success: bool = False,
+        ) -> bool | None:
+            return weight_loader(
+                param=param,
+                loaded_weight=loaded_weight,
+                weight_name=_map_modelslim_moe_weight_name(weight_name),
+                shard_id=shard_id,
+                expert_id=expert_id,
+                return_success=return_success,
+            )
+
+        return plain_weight_loader
+
+    owner = weight_loader.__self__
+    unbound_loader = weight_loader.__func__
+
     def modelslim_moe_weight_loader(
+        self: Any,
         param: torch.nn.Parameter,
         loaded_weight: torch.Tensor,
         weight_name: str,
@@ -69,19 +131,32 @@ def _make_modelslim_moe_weight_loader(
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        prefix, separator, param_name = weight_name.rpartition(".")
-        mapped_name = _MOE_WEIGHT_LOADER_NAME_MAP.get(param_name, param_name)
-        mapped_weight_name = f"{prefix}{separator}{mapped_name}"
-        return weight_loader(
+        return unbound_loader(
+            self,
             param=param,
             loaded_weight=loaded_weight,
-            weight_name=mapped_weight_name,
+            weight_name=_map_modelslim_moe_weight_name(weight_name),
             shard_id=shard_id,
             expert_id=expert_id,
             return_success=return_success,
         )
 
-    return modelslim_moe_weight_loader
+    # Copy the metadata by hand: `functools.wraps` would also set
+    # `__wrapped__` to the bound method and reintroduce the layer reference.
+    # Preserve its `__dict__` merge semantics for loader flags such as
+    # `supports_moe_loading` without retaining the bound method.
+    modelslim_moe_weight_loader.__module__ = getattr(
+        unbound_loader, "__module__", modelslim_moe_weight_loader.__module__
+    )
+    modelslim_moe_weight_loader.__name__ = getattr(unbound_loader, "__name__", modelslim_moe_weight_loader.__name__)
+    modelslim_moe_weight_loader.__qualname__ = getattr(
+        unbound_loader, "__qualname__", modelslim_moe_weight_loader.__qualname__
+    )
+    modelslim_moe_weight_loader.__doc__ = getattr(unbound_loader, "__doc__", None)
+    modelslim_moe_weight_loader.__annotations__ = getattr(unbound_loader, "__annotations__", {})
+    modelslim_moe_weight_loader.__dict__.update(getattr(unbound_loader, "__dict__", {}))
+
+    return MethodType(modelslim_moe_weight_loader, owner)
 
 
 # The config filename that ModelSlim generates after quantizing a model.
@@ -242,6 +317,50 @@ def _is_missing_v_shard(shard_key: str, quant_description: dict[str, Any]) -> bo
     return f"{shard_prefix}q_proj.weight" in quant_description and f"{shard_prefix}k_proj.weight" in quant_description
 
 
+def _find_quant_description_key(quant_description: dict[str, Any], prefix: str) -> str | None:
+    """Return the weight or bare ModelSlim entry for ``prefix``."""
+    weight_key = prefix + ".weight"
+    if weight_key in quant_description:
+        return weight_key
+    if prefix in quant_description:
+        return prefix
+    return None
+
+
+def _resolve_fused_packed_shard_keys(
+    quant_description: dict[str, Any],
+    prefix: str,
+    shard_prefixes: list[str],
+) -> list[str] | None:
+    """Resolve descriptions that keep a runtime packed module fused.
+
+    ModelSlim may describe a packed runtime module directly. Routed experts
+    may also keep gate/up fused while vLLM exposes split logical shards. Only
+    use these entries when none of the normal expanded shard entries exists;
+    callers reject partially mixed descriptions.
+    """
+    direct_key = _find_quant_description_key(quant_description, prefix)
+    if direct_key is not None:
+        return [direct_key]
+
+    if prefix.rpartition(".")[-1] != "experts":
+        return None
+
+    expected_suffixes = {
+        shard_prefix.removeprefix(prefix + ".").partition(".")[-1]
+        for shard_prefix in shard_prefixes
+        if shard_prefix.startswith(prefix + ".")
+    }
+    if not {"gate_proj", "up_proj", "down_proj"}.issubset(expected_suffixes):
+        return None
+
+    gate_up_key = _find_quant_description_key(quant_description, f"{prefix}.gate_up_proj")
+    down_key = _find_quant_description_key(quant_description, f"{prefix}.down_proj")
+    if gate_up_key is None or down_key is None:
+        return None
+    return [gate_up_key, down_key]
+
+
 def get_quant_type_for_layer(
     quant_description: dict[str, Any],
     prefix: str,
@@ -271,14 +390,35 @@ def get_quant_type_for_layer(
         shard_prefixes = [
             prefix.removesuffix(proj_name) + shard_proj_name for shard_proj_name in packed_modules_mapping[proj_name]
         ]
-        for shard_prefix in shard_prefixes:
-            if prefix_mapper is not None:
-                shard_prefix = prefix_mapper(shard_prefix)
-            shard_key = shard_prefix + ".weight"
-            # Only Gemma4 k_eq_v is allowed to omit v_proj; other missing
-            # shards fall through to the original dictionary lookup below.
-            if shard_key not in quant_description and _is_missing_v_shard(shard_key, quant_description):
-                continue
+        if prefix_mapper is not None:
+            prefix = prefix_mapper(prefix)
+            shard_prefixes = [prefix_mapper(shard_prefix) for shard_prefix in shard_prefixes]
+        shard_keys = [_find_quant_description_key(quant_description, shard_prefix) for shard_prefix in shard_prefixes]
+        missing_v_shards = [
+            key is None and _is_missing_v_shard(shard_prefix + ".weight", quant_description)
+            for key, shard_prefix in zip(shard_keys, shard_prefixes)
+        ]
+        normal_keys = [key for key in shard_keys if key is not None]
+        missing_normal_shards = [
+            shard_prefix
+            for key, shard_prefix, missing_v in zip(shard_keys, shard_prefixes, missing_v_shards)
+            if key is None and not missing_v
+        ]
+
+        if missing_normal_shards:
+            # Never combine a partial normal description with fused aliases;
+            # that would hide malformed or mixed quantization metadata.
+            if normal_keys:
+                raise KeyError(missing_normal_shards[0] + ".weight")
+            fused_keys = _resolve_fused_packed_shard_keys(quant_description, prefix, shard_prefixes)
+            if fused_keys is None:
+                raise KeyError(missing_normal_shards[0] + ".weight")
+            shard_keys_to_check = fused_keys
+        else:
+            # Only Gemma4 k_eq_v is allowed to omit v_proj.
+            shard_keys_to_check = normal_keys
+
+        for shard_key in shard_keys_to_check:
             shard_quant_type = quant_description[shard_key]
 
             if quant_type is None:
@@ -294,7 +434,8 @@ def get_quant_type_for_layer(
     else:
         if prefix_mapper is not None:
             prefix = prefix_mapper(prefix)
-        quant_type = quant_description.get(prefix + ".weight")
+        quant_key = _find_quant_description_key(quant_description, prefix)
+        quant_type = quant_description.get(quant_key) if quant_key is not None else None
     return quant_type if quant_type != "FLOAT" else None
 
 
@@ -341,6 +482,16 @@ class AscendModelSlimConfig(QuantizationConfig):
     that are supported on Ascend hardware, specifically for models
     quantized using the ModelSlim tool.
     """
+
+    # Assigned in _add_kvcache_quant_metadata; declared here so the types
+    # resolve regardless of method order (get_cache_scale_mapper reads and
+    # conditionally rewrites enable_fa_quant before the assignment site).
+    enable_fa_quant: bool
+    kvcache_quant_layers: list[int]
+    enable_indexer_quant: bool
+    indexer_quant_layers: list[int]
+    enable_c8_quant: bool
+    c8_quant_layers: list[int]
 
     def __init__(self, quant_config: dict[str, Any] | None = None):
         super().__init__()
@@ -429,8 +580,24 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     def get_cache_scale_mapper(self) -> "WeightsMapper":
         """Upstream use staticmethod, but we need to use instance attribute"""
-        suffix_map = {}
+        suffix_map: dict[str, str | None] = {}
         regex_map = {}
+        if self._has_mxfp_c8_recipe and not self.enable_mxfp_c8_quant:
+            logger.warning_once(
+                "[quantization] The checkpoint carries an MXFP8 KV recipe, but "
+                "--kv-cache-dtype is not 'mxfp8'; the recipe is not enabled. "
+                "Pass --kv-cache-dtype mxfp8 to serve with C8-MXFP."
+            )
+        if self.enable_mxfp_c8_quant and self.enable_fa_quant:
+            # A checkpoint can carry fa_quant_type alongside an MXFP8 KV
+            # recipe; FAKQuant would win every shared dispatch and rename
+            # fa_v.scale into an MLA submodule this dense model does not
+            # have, silently dropping the scale. Stand FAKQuant down.
+            logger.warning_once(
+                "[quantization] fa_quant_type=%s is declared alongside an MXFP8 KV cache; ignoring FAKQuant.",
+                self.quant_description.get("fa_quant_type", ""),
+            )
+            self.enable_fa_quant = False
         if self.enable_c8_quant:
             suffix_map.update(
                 {
@@ -440,6 +607,14 @@ class AscendModelSlimConfig(QuantizationConfig):
                     ".v_proj.kv_cache_offset": ".attn.v_cache_offset",
                 }
             )
+        if self.enable_mxfp_c8_quant:
+            # MXFP C8 quantizes K dynamically, but V uses the static E8M0
+            # per-channel scale stored in the ModelSlim checkpoint
+            # (fa_v.scale, reusing FAKQuant's key for a different recipe).
+            suffix_map[".fa_v.scale"] = ".attn.v_cache_scale"
+            # The remaining FAKQuant legacy tensors have no MXFP8 consumer.
+            suffix_map[".fa_v.offset"] = None
+            suffix_map.update(dict.fromkeys(_MXFP_C8_UNUSED_FA_SUFFIXES, None))
         if self.enable_fa_quant:
             # Some models (e.g., Kimi-K2.6) have a nested module and call AutoWeightsLoader twice, to avoid double
             # mapping, we use regex mapping.
@@ -484,14 +659,30 @@ class AscendModelSlimConfig(QuantizationConfig):
         gate_types = {quant_types[name] for name in ("g_proj", "f_a_proj", "b_proj")}
         return len(qkv_types) == 1 and None not in qkv_types and qkv_types != {"FLOAT"} and gate_types == {"FLOAT"}
 
+    def uses_kimi_k3_mixed_mla_projection(self, prefix: str) -> bool:
+        """Keep differently quantized MLA output gates out of the Q/KV pack."""
+        quant_types = []
+        for name in ("q_a_proj", "kv_a_proj_with_mqa", "g_proj"):
+            shard_prefix = self.quant_prefix_mapper("kimi_k3", f"{prefix}.{name}")
+            key = _find_quant_description_key(self.quant_description, shard_prefix)
+            quant_types.append(self.quant_description.get(key) if key is not None else None)
+        # Missing descriptions retain the ordinary packed-layer validation.
+        return None not in quant_types and quant_types[0] == quant_types[1] and quant_types[0] != quant_types[2]
+
     def _has_quant_weight(self, prefix: str) -> bool:
+        if _find_quant_description_key(self.quant_description, prefix) is not None:
+            return True
         proj_name = prefix.split(".")[-1]
         if proj_name in self.packed_modules_mapping:
             return all(
-                f"{prefix.removesuffix(proj_name) + shard_proj_name}.weight" in self.quant_description
+                _find_quant_description_key(
+                    self.quant_description,
+                    prefix.removesuffix(proj_name) + shard_proj_name,
+                )
+                is not None
                 for shard_proj_name in self.packed_modules_mapping[proj_name]
             )
-        return f"{prefix}.weight" in self.quant_description
+        return False
 
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
         self.model_type = model_type
@@ -567,6 +758,10 @@ class AscendModelSlimConfig(QuantizationConfig):
           the consistency verification in get_quant_type_for_layer applies to
           all expert shards (gate/up/down or w1/w2/w3).
         """
+        # Mutating the mapping we were handed by reference would leak these
+        # deltas into the model class's own mapping, which vLLM's LoRA manager
+        # reads to pick its packing branch. Work on a private copy instead.
+        self.packed_modules_mapping = deepcopy(self.packed_modules_mapping)
         # Only update packed_modules_mapping if the upstream model definition not satisfies our scenario.
         mapping_model_type = "glm5_next" if model_type == "glm5_next_text" else model_type
         if mapping_model_type in UPDATED_PACKED_MODULES_MAPPING:
@@ -589,6 +784,9 @@ class AscendModelSlimConfig(QuantizationConfig):
                 }
             )
             self.packed_modules_mapping.update(mapping)
+        elif model_type == "kimi_k3_mtp":
+            # MTP uses the same MLA pair without the target's KDA mappings.
+            self.packed_modules_mapping["fused_qkv_a_proj"] = ["q_a_proj", "kv_a_proj_with_mqa"]
         if "experts" not in self.packed_modules_mapping:
             shard_names: set[str] = set()
             for key in self.quant_description:
@@ -598,7 +796,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             if shard_names:
                 self.packed_modules_mapping["experts"] = [f"experts.0.{name}" for name in sorted(shard_names)]
 
-    def get_quant_method(self, layer: torch.nn.Module, prefix: str, tid2eid=None) -> Optional["QuantizeMethodBase"]:
+    def get_quant_method(self, layer: torch.nn.Module, prefix: str) -> Optional["QuantizeMethodBase"]:
         from ..method_adapters import (
             AscendEmbeddingMethod,
             AscendFusedMoEMethod,
@@ -633,10 +831,23 @@ class AscendModelSlimConfig(QuantizationConfig):
         if model_type in ("kimi_k3", "kimi_linear") and self.uses_kimi_k3_mixed_kda_projection(prefix):
             quant_type = None
         else:
+            packed_modules_mapping = self.packed_modules_mapping
+            if (
+                model_type in ("kimi_k3", "kimi_linear", "kimi_k3_mtp")
+                and runtime_prefix.endswith(".fused_qkv_a_proj")
+                and len(getattr(layer, "output_sizes", ())) == 3
+            ):
+                # AMD Kimi includes a third gate shard under the same name as
+                # the two-shard draft projection. Validate the actual layout
+                # without changing the shared mapping used by ungated layers.
+                packed_modules_mapping = {
+                    **packed_modules_mapping,
+                    "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa", "g_proj"],
+                }
             quant_type = get_quant_type_for_layer(
                 self.quant_description,
                 runtime_prefix,
-                self.packed_modules_mapping,
+                packed_modules_mapping,
                 prefix_mapper=lambda name: self.quant_prefix_mapper(model_type, name),
             )
 
@@ -668,6 +879,20 @@ class AscendModelSlimConfig(QuantizationConfig):
 
                 scheme = AscendC8KVCacheAttentionMethod(self.quant_description, prefix)
                 logger.debug("Select AscendKVCacheMethod(C8) for %s (layer=%s)", prefix, "AttentionLayerBase[C8]")
+            elif self.enable_mxfp_c8_quant and self._is_full_attention_layer(layer):
+                if self._has_mxfp_c8_recipe is False:
+                    logger.warning_once(
+                        "[quantization] --kv-cache-dtype mxfp8 is set but the checkpoint "
+                        "carries no MXFP8 KV recipe; V scales fall back to the neutral default."
+                    )
+                else:
+                    logger.info_once("[quantization] C8 MXFP8 KV cache enabled (--kv-cache-dtype mxfp8).")
+                from ..methods.kv_cache.mxfp_c8 import AscendC8MXFPKVCacheAttentionMethod
+
+                scheme = AscendC8MXFPKVCacheAttentionMethod(self.quant_description, prefix)
+                logger.debug(
+                    "Select AscendKVCacheMethod(C8-MXFP) for %s (layer=%s)", prefix, "AttentionLayerBase[C8-MXFP]"
+                )
             else:
                 # Unquantized attention layer
                 return None
@@ -686,7 +911,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             layer.weight_loader = _make_modelslim_moe_weight_loader(layer.weight_loader)
             scheme = create_scheme_for_layer(quant_type, prefix, "moe")
             logger.debug("Select AscendFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
-            return AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid)
+            return AscendFusedMoEMethod(scheme, layer.moe_config)
         elif isinstance(layer, VocabParallelEmbedding):
             if quant_type is None:
                 logger.debug("Select UnquantizedEmbeddingMethod for %s (layer=%s)", prefix, "VocabParallelEmbedding")
@@ -729,7 +954,58 @@ class AscendModelSlimConfig(QuantizationConfig):
                 return True
         return False
 
+    @staticmethod
+    def _is_full_attention_layer(layer: torch.nn.Module) -> bool:
+        """C8-MXFP only applies to standard full-attention ``Attention``
+        layers. Other AttentionLayerBase subclasses (GDN/Mamba, encoder
+        attention, ...) must not get the MXFP KV-cache method: they have no
+        ``num_kv_heads``/``head_size_v`` and install the QFA backend on the
+        wrong layer type."""
+        from vllm.model_executor.layers.attention import Attention
+
+        return isinstance(layer, Attention)
+
+    @property
+    def enable_mxfp_c8_quant(self) -> bool:
+        """C8-MXFP is enabled with ``--kv-cache-dtype mxfp8``.
+
+        A Model-config-time query: returns False while the engine config is
+        still being assembled or absent (e.g. unit tests without a
+        ``set_current_vllm_config`` context), so no quant-config constructor
+        or mapper may take a C8 decision through this switch.
+        """
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is None:
+            return False
+        return vllm_config.cache_config.cache_dtype == C8_MXFP_KV_CACHE_DTYPE
+
+    @property
+    def _has_mxfp_c8_recipe(self) -> bool:
+        """Whether the checkpoint carries an MXFP8 KV recipe (model-wide
+        ``kv_cache_type`` or a per-layer ``quant_type``). This is NOT the
+        switch -- ``--kv-cache-dtype mxfp8`` is; the recipe only decides
+        whether the fa_v.scale weights are expected."""
+        kv_quant_type = self.quant_description.get("kv_cache_type", "")
+        return kv_quant_type == _MXFP_C8_KV_CACHE_TYPE or any(
+            key.endswith(_MXFP_C8_LAYER_QUANT_TYPE_SUFFIX) and value in _MXFP_C8_LAYER_QUANT_TYPES
+            for key, value in self.quant_description.items()
+        )
+
+    @property
+    def _ignore_unexpected_suffixes(self) -> tuple[str, ...]:
+        base = QuantizationConfig._ignore_unexpected_suffixes
+        if self.enable_mxfp_c8_quant:
+            # FAKQuant parameters that MXFP8 has no home for: K and Q are
+            # quantized dynamically at runtime, so their checkpoint scales
+            # have no parameter to land on. Without these AutoWeightsLoader
+            # rejects the checkpoint outright.
+            return (*base, *_MXFP_C8_UNUSED_FA_SUFFIXES)
+        return base
+
     def get_kv_quant_dtype(self, layer_name, cache_dtype, model_config):
+        # Note: C8-MXFP models never reach this hook — its only caller in
+        # model_runner_v1 is gated by enable_fa_quant(), and the C8-MXFP
+        # cache dtype comes from the rebuilt fp8 spec in get_kv_cache_spec.
         if self.enable_fa_quant and self.is_fa_quant_layer(layer_name):
             ori_dtype = model_config.dtype
             quant_dtype = (
@@ -858,7 +1134,6 @@ class AscendModelSlimConfig(QuantizationConfig):
         weight_packed mappings.
         """
         if "hc_head_fn" in self.quant_description:
-            # TODO
             extra_quant_dict = {}
             for name in self.quant_description:
                 new_name = name

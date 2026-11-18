@@ -18,8 +18,8 @@
 import pytest
 from vllm.utils.network_utils import get_open_port
 
+from tests.e2e.common.single_node.single_node_config import SingleNodeConfig
 from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer
-from tests.e2e.nightly.single_node.models.scripts.single_node_config import SingleNodeConfig
 from tools.send_mm_request import send_image_request
 
 MODELS = [

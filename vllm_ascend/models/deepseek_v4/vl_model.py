@@ -19,9 +19,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.multimodal import MULTIMODAL_REGISTRY
-
-from vllm_ascend.models.deepseek_v4.mm_preprocess import (
+from vllm.models.deepseek_v4.common.mm_preprocess import (
     IMAGE_PLACEHOLDER,
     IMAGE_SENTINEL_BASE_ID,
     DeepseekV4VLDummyInputsBuilder,
@@ -29,11 +27,14 @@ from vllm_ascend.models.deepseek_v4.mm_preprocess import (
     DeepseekV4VLProcessingInfo,
     image_sentinel_mask,
 )
+from vllm.multimodal import MULTIMODAL_REGISTRY
+
 from vllm_ascend.models.deepseek_v4.model import AscendDeepseekV4ForCausalLM
 from vllm_ascend.models.deepseek_v4.vision import (
     DeepseekV4Aligner,
     DeepseekV4ViT,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def _vision_parameter_name(name: str) -> str | None:
@@ -86,6 +87,10 @@ class AscendDeepseekV4ForConditionalGeneration(
             self.image_end: nn.Parameter | None = None
             self.image_newline: nn.Parameter | None = None
             self.image_pad: nn.Parameter | None = None
+            # Cache for the stacked sentinel table in the embedding dtype;
+            # rebuilt lazily on first use (the raw params are float32 while
+            # the embedding output is model dtype).
+            self._sentinel_table: torch.Tensor | None = None
             if image_enabled:
                 self.vision = DeepseekV4ViT(config)
                 self.aligner = DeepseekV4Aligner(config)
@@ -157,6 +162,36 @@ class AscendDeepseekV4ForConditionalGeneration(
             llm_offset += n_llm
         return tuple(embeds)
 
+    def _get_sentinel_table(self, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        """Stacked sentinel vectors in ``dtype``, cached across steps.
+
+        The raw ``image_*`` parameters are float32, so stacking + casting per
+        forward would repeat an avoidable copy in this hot path. The cache is
+        keyed on dtype and device: it is rebuilt if the model is moved (e.g.
+        pipeline-parallel sharding or device placement) after the first
+        forward pass, since a plain attribute does not follow
+        ``nn.Module.to(device)``.
+        """
+        table = self._sentinel_table
+        if table is None or table.dtype != dtype or table.device != device:
+            # Detach: this is an inference-only cache, and a grad-enabled
+            # table would break torch.where(..., out=) below.
+            table = (
+                torch.stack(
+                    [
+                        self.image_start,
+                        self.image_pad,
+                        self.image_pad,
+                        self.image_newline,
+                        self.image_end,
+                    ]
+                )
+                .to(dtype=dtype, device=device)
+                .detach()
+            )
+            self._sentinel_table = table
+        return table
+
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None or self.vision is None:
@@ -182,19 +217,12 @@ class AscendDeepseekV4ForConditionalGeneration(
         inputs_embeds = self.language_model.embed_input_ids(input_ids)
         if self.image_start is not None:
             sentinel_mask = image_sentinel_mask(input_ids)
-            if is_multimodal is not None:
-                sentinel_mask = sentinel_mask & ~is_multimodal.to(input_ids.device)
-            table = torch.stack(
-                [
-                    self.image_start,
-                    self.image_pad,
-                    self.image_pad,
-                    self.image_newline,
-                    self.image_end,
-                ]
-            ).to(inputs_embeds.dtype)
+            table = self._get_sentinel_table(inputs_embeds.dtype, inputs_embeds.device)
             idx = (input_ids - IMAGE_SENTINEL_BASE_ID).clamp(0, 4)
-            inputs_embeds = torch.where(sentinel_mask.unsqueeze(-1), table[idx], inputs_embeds)
+            # In-place write avoids one full-size allocation per step. The
+            # `is_multimodal` exclusion is unnecessary here: those positions
+            # are overwritten by _merge_multimodal_embeddings below anyway.
+            torch.where(sentinel_mask.unsqueeze(-1), table[idx], inputs_embeds, out=inputs_embeds)
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
@@ -224,6 +252,9 @@ class AscendDeepseekV4ForConditionalGeneration(
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
+
+    def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+        return self.language_model.compute_logits_local(hidden_states)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.language_model.get_expert_mapping()
@@ -258,6 +289,9 @@ class AscendDeepseekV4ForConditionalGeneration(
         return loaded_vision | {f"language_model.{name}" for name in loaded_language}
 
     def process_weights_after_loading(self) -> None:
+        # #57678 already finalizes language_model in the children-first walk.
+        if not vllm_version_is("0.33.0"):
+            return
         hook = getattr(
             self.language_model,
             "process_weights_after_loading",

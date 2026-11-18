@@ -33,10 +33,13 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
+from vllm_ascend.ops.fused_moe.moe_mlp import maybe_record_event
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.ops.fused_moe.shared_experts import (
     AscendSharedExperts,
+    PreparedSharedExpertExecution,
     SharedExpertParallelMode,
+    SubmittedSharedExpertGateUp,
 )
 
 
@@ -119,11 +122,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.moe_config.ep_group = get_ep_group()
             self.moe_config.mc2_group = get_mc2_group()
 
-        # Internal-router: precast weight_fp32 at load to avoid hot-path Cast.
-        # Use ctor `gate` (not self.is_internal_router): Module.__getattr__ shadows during init.
-        if gate is not None and not hasattr(gate, "weight_fp32"):
-            gate.precast_fp32_weight = True
-
         self.ascend_shared_experts = None
         if shared_experts is not None:
             routed_experts.return_with_event = True
@@ -133,11 +131,22 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 self.quant_type,
                 self._quant_method,
             )
+            # Weight loading runs after construction, so the shared expert
+            # hands out a live payload that it fills in once both shared
+            # linears are rebuilt. Install it explicitly here: the routed
+            # layer is the only module the quant methods
+            # (``get_fused_mc2_weights``) and the MegaMoe communicator see.
+            self.routed_experts.ascend_megamoe_shared_fusion = self.ascend_shared_experts.megamoe_shared_fusion()
             if self._can_overlap_sp_shared_with(self.routed_input_transform):
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
         setup_moe_comm_method(self.moe_config)
-        alltoall_comm = get_moe_comm_method(MoECommType.ALLTOALL)
+        # Communication objects are shared across MoE layers. Keep the bound
+        # activation with its owning layer when a later layer replaces them.
+        self.routed_experts.mega_moe_activation_kwargs = getattr(
+            get_moe_comm_method(MoECommType.FUSED_MC2, self.moe_config), "mega_moe_activation_kwargs", None
+        )
+        alltoall_comm = get_moe_comm_method(MoECommType.ALLTOALL, self.moe_config)
         if alltoall_comm is not None:
             expert_ids_per_ep_rank = getattr(alltoall_comm.token_dispatcher, "expert_ids_per_ep_rank", None)
             if expert_ids_per_ep_rank is not None:
@@ -178,6 +187,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         if shared_experts_input is None:
             hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
 
+        if self._megamoe_shared_expert_fused:
+            # The runner owns the effective routed_scaling_factor (with
+            # apply_routed_scale_to_output=True the router and the
+            # routed-experts layer both hold 1.0). MegaMoe combines routed +
+            # shared inside the operator, so the factor must be folded into
+            # the topk weights by the comm implementation; plumb it down
+            # through the routed-experts layer, which is the only module the
+            # comm implementation sees.
+            self.routed_experts.ascend_megamoe_fold_scale = self.routed_scaling_factor
+
         # Record before `_maybe_pad_hidden_states` pads activations to match
         # `moe_config.hidden_dim`, e.g. after `align_trtllm_fp4_moe_hidden_dim_for_fi`
         # so routed output can be trimmed before
@@ -208,6 +227,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # Extract outputs from result
         shared_output, fused_output = _unpack(result)
 
+        if self._megamoe_shared_expert_fused:
+            # MegaMoe already combined the shared contribution into
+            # fused_output, and the forward_impl returned shared_out=None.
+            # Force None here too so Dynamo specializes the skip-branch:
+            # the _forward_entry custom op's fake impl declares a tensor
+            # output, so without this the compiled graph bakes in the
+            # combine add, which then receives None at replay time and
+            # fails the aten schema check (List[Tensor]).
+            shared_output = None
+
         if og_hidden_dim_pre_xform is not None:
             fused_output = fused_output[..., :og_hidden_dim_pre_xform]
 
@@ -224,7 +253,14 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # See note above re: the two all-reduce points.
         shared_output = self._maybe_reduce_shared_expert_output(shared_output, fused_output_is_reduced)
 
-        shared_output, fused_output = self._maybe_apply_routed_scale_to_output(shared_output, fused_output)
+        if self._megamoe_shared_expert_fused:
+            # MegaMoe folded routed_scaling_factor into the topk weights for
+            # the fused shared-expert call (see FusedMC2CommImpl), so its
+            # output already is the final MoE result. Scaling here would
+            # wrongly scale the shared-expert contribution too.
+            pass
+        else:
+            shared_output, fused_output = self._maybe_apply_routed_scale_to_output(shared_output, fused_output)
 
         # Apply output transform (e.g. latent -> full dim)
         fused_output = self.apply_routed_output_transform(fused_output)
@@ -285,6 +321,21 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         if shared_experts is None or not hasattr(shared_experts, "parallel_mode"):
             return SharedExpertParallelMode.TENSOR_PARALLEL
         return shared_experts.parallel_mode()
+
+    @property
+    def _megamoe_shared_expert_fused(self) -> bool:
+        """True when this step's routed experts run the shared expert inside MegaMoe."""
+        # Every sub-attribute is read via getattr with a default: an
+        # AttributeError raised inside a property getter is swallowed by
+        # CPython and falls back to nn.Module.__getattr__, which reports a
+        # misleading "no attribute '_megamoe_shared_expert_fused'" error.
+        shared_experts = getattr(self, "ascend_shared_experts", None)
+        return (
+            shared_experts is not None
+            and getattr(shared_experts, "megamoe_shared_weights_ready", False)
+            and not getattr(shared_experts, "_megamoe_shared_fusion_disabled", False)
+            and _EXTRA_CTX.moe_comm_type is MoECommType.FUSED_MC2
+        )
 
     @property
     def local_num_experts(self) -> int:
@@ -379,34 +430,113 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             shared_experts.wait_for_output()
         return fused_output
 
+    def _prepare_router_input(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        """Prepare only the input needed by a pre-cast FP32 router gate."""
+        gate = self.gate
+        assert gate is not None
+        if not hasattr(gate, "weight_fp32"):
+            return hidden_states
+        return router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
+
+    def _apply_router_linear(self, router_input: torch.Tensor) -> torch.Tensor:
+        """Apply the internal router gate to an already prepared input."""
+        gate = self.gate
+        assert gate is not None
+        # Gates without pre-cast FP32 weights keep their registered forward
+        # path and its dtype semantics.
+        if hasattr(gate, "weight_fp32"):
+            return F.linear(router_input, gate.weight_fp32)
+        gate_out = gate(router_input)
+        return gate_out[0] if isinstance(gate_out, tuple) else gate_out
+
     def _compute_router_logits(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
-        # Gate linears are unquantized. Their weight is normally pre-cast by
-        # AscendUnquantizedLinearMethod to avoid a Cast in this hot path.
+        """Compute router logits without extending a fresh FP32 cast's lifetime.
+
+        The FP32 activation stays local to this helper and becomes releasable
+        after the gate linear is enqueued. An existing FP32 ``router_logits``
+        remains caller-owned. Gates without a pre-cast weight keep using their
+        registered forward path and must not allocate an unused FP32 input.
+        """
         gate = self.gate
         assert gate is not None
-        hidden_states_fp32 = router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
-        if hasattr(gate, "weight_fp32"):
-            return F.linear(hidden_states_fp32, gate.weight_fp32)
-        gate_out = gate(hidden_states)
-        return gate_out[0] if isinstance(gate_out, tuple) else gate_out
+        if not hasattr(gate, "weight_fp32"):
+            gate_out = gate(hidden_states)
+            return gate_out[0] if isinstance(gate_out, tuple) else gate_out
+
+        # AscendUnquantizedLinearMethod normally pre-casts the weight so the
+        # hot path only needs to materialize the FP32 activation when required.
+        router_input = router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
+        return F.linear(router_input, gate.weight_fp32)
+
+    def _prepare_shared_for_router_overlap(
+        self,
+        prepared_shared_input: PreparedSharedExpertInput,
+        shared_input_ready: torch.npu.Event,
+    ) -> PreparedSharedExpertExecution | None:
+        shared_experts = self.ascend_shared_experts
+        assert shared_experts is not None
+        if not getattr(shared_experts, "multistream_overlap", False):
+            return None
+        return shared_experts.prepare_for_router_overlap(
+            prepared_shared_input,
+            shared_input_ready,
+        )
 
     def _prepare_router_and_milestones(
         self,
+        prepared_shared_input: PreparedSharedExpertInput,
         shared_hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.npu.Event, torch.npu.Event]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.npu.Event | None,
+        torch.npu.Event | None,
+        SubmittedSharedExpertGateUp | None,
+    ]:
+        # The milestones are consumed only by the shared-expert side stream,
+        # which runs only when multistream overlap is enabled; skip the record
+        # (notably slow host-side) when it is off.
         if self.is_internal_router:
-            shared_input_ready = torch.npu.current_stream().record_event()
-            router_logits = self._compute_router_logits(shared_hidden_states, router_logits)
-            router_output_ready = torch.npu.current_stream().record_event()
+            router_input = self._prepare_router_input(shared_hidden_states, router_logits)
+            # Release shared Vector/AIV preparation only after the router input
+            # Cast. It then overlaps the Cube-heavy gate matmul instead of
+            # competing with another Vector/AIV operation.
+            shared_input_ready = maybe_record_event()
+            prepared_execution = self._prepare_shared_for_router_overlap(
+                prepared_shared_input,
+                shared_input_ready,
+            )
+            router_logits = self._apply_router_linear(router_input)
+            router_output_ready = maybe_record_event()
         else:
-            shared_input_ready = torch.npu.current_stream().record_event()
+            shared_input_ready = maybe_record_event()
+            prepared_execution = self._prepare_shared_for_router_overlap(
+                prepared_shared_input,
+                shared_input_ready,
+            )
             router_output_ready = shared_input_ready
-        return router_logits, shared_input_ready, router_output_ready
+        # Submit Gate-Up now, before routed_experts.forward_impl enqueues TopK
+        # and dispatch. The auxiliary stream waits for router_output_ready, so
+        # Gate-Up starts together with routed TopK and can cover dispatch.
+        shared_experts = self.ascend_shared_experts
+        assert shared_experts is not None
+        submitted_gate_up = (
+            shared_experts.enqueue_gate_up_after_router(
+                prepared_execution,
+                router_output_ready,
+            )
+            if prepared_execution is not None
+            else None
+        )
+        return router_logits, shared_input_ready, router_output_ready, submitted_gate_up
 
     def _forward_impl(
         self,
@@ -432,9 +562,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 if shared_input_is_gathered
                 else self.ascend_shared_experts.prepare_input_before_routed(shared_hidden_states)
             )
-            router_logits, shared_input_ready, router_output_ready = self._prepare_router_and_milestones(
-                shared_hidden_states,
-                router_logits,
+            router_logits, shared_input_ready, router_output_ready, submitted_gate_up = (
+                self._prepare_router_and_milestones(
+                    prepared_shared_input,
+                    shared_hidden_states,
+                    router_logits,
+                )
             )
             routed_out, milestones = self.routed_experts.forward_impl(
                 hidden_states=hidden_states,
@@ -447,9 +580,23 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if prepared_shared_input.is_gathered:
                 milestones.routed_finalize_done = torch.npu.current_stream().record_event()
 
-            shared_out = self.ascend_shared_experts.forward(
-                prepared_shared_input,
-                milestones,
-                defer_output_wait=defer_shared_output_wait,
-            )
+            if self._megamoe_shared_expert_fused:
+                # The shared expert GMM1 + activation + GMM2 runs inside the
+                # MegaMoe operator on the routed stream, so its contribution
+                # is already contained in routed_out. Skip the standalone
+                # forward to avoid computing it twice.
+                shared_out = None
+            elif submitted_gate_up is None:
+                shared_out = self.ascend_shared_experts.forward(
+                    prepared_shared_input,
+                    milestones,
+                    defer_output_wait=defer_shared_output_wait,
+                )
+            else:
+                shared_out = self.ascend_shared_experts.forward(
+                    prepared_shared_input,
+                    milestones,
+                    defer_output_wait=defer_shared_output_wait,
+                    submitted_gate_up=submitted_gate_up,
+                )
             return shared_out, routed_out

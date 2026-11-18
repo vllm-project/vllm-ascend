@@ -17,6 +17,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     get_scheduler_device_id,
     parse_qos_from_extra_config,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_sharded_mamba_group_ids
 
 
 def _is_device_sdma() -> bool:
@@ -35,6 +37,7 @@ def _is_device_sdma() -> bool:
 
 
 MEMCACHE_THREAD_START_WAIT_S = 0.1
+MEMCACHE_SSD_MEDIA_TYPE = 2
 
 
 def _validate_device_ub_qos() -> None:
@@ -67,30 +70,14 @@ class MmcDirect(Enum):
 
 
 # =========================================================================
-# Layerwise transfer protocol
+# Layerwise key helpers
 # =========================================================================
 # The generic layers (worker / scheduler / layout) resolve these functions
-# through backend/__init__.py:get_layerwise_protocol -- a module-convention
-# lookup, they never import this module by name. The key strings are wire
+# through the backend class; the key strings are wire
 # formats shared with deployed clusters: a single character of drift turns
 # hits into misses after an upgrade.
 # tests/ut/distributed/ascend_store/test_backend.py locks the key formats
 # with snapshot assertions.
-
-LAYERWISE_DATA_PLANE = "gva"
-
-
-def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the connector's extra config when it opts into the layerwise
-    transfer, None otherwise.
-
-    Called by the generic layout layer through the backend registry; the
-    protocol itself owns the opt-in check so the layout layer never spells
-    out the gate.
-    """
-    if extra_config.get("use_layerwise", False):
-        return extra_config
-    return None
 
 
 def make_full_key(
@@ -112,39 +99,6 @@ def make_full_key(
     if num_groups > 1:
         return f"{model_name}@{group_id}{pp_tag}@{block_hash_hex}@{head_or_tp_rank}"
     return f"{model_name}{pp_tag}@{block_hash_hex}@{head_or_tp_rank}"
-
-
-def make_partial_key(
-    model_name: str,
-    req_id: str,
-    group_id: int,
-    block_index: int,
-    end_token: int,
-    head_or_tp_rank: int,
-    pp_rank: int = 0,
-    pp_size: int = 1,
-) -> str:
-    pp_tag = f"@pp{pp_rank}" if pp_size > 1 else ""
-    return f"{model_name}@partial@{req_id}@{group_id}@{block_index}@{end_token}{pp_tag}@{head_or_tp_rank}"
-
-
-def make_hit_check_keys(
-    model_name: str,
-    group_id: int,
-    block_hash_hex: str,
-    num_ranks: int,
-    num_groups: int,
-    pp_size: int = 1,
-) -> list[str]:
-    """All-rank keys for scheduler-side hit check.
-
-    Returns one key per PP stage and head_or_tp_rank.
-    """
-    return [
-        make_full_key(model_name, group_id, block_hash_hex, rank, num_groups, pp_rank, pp_size)
-        for pp_rank in range(pp_size)
-        for rank in range(num_ranks)
-    ]
 
 
 def _inject_device_ub_qos(extra_config: dict[str, Any] | None) -> None:
@@ -169,6 +123,29 @@ def _inject_device_ub_qos(extra_config: dict[str, Any] | None) -> None:
 
 
 class MemcacheBackend(Backend):
+    layerwise_data_plane = "gva"
+
+    @classmethod
+    def bind_layerwise_keys(
+        cls,
+        *,
+        vllm_config: Any,
+        kv_cache_config: Any,
+        model_name: str,
+        use_hybrid: bool,
+        grouped_block_size: list[int],
+    ) -> LayerwiseKeyBuilder:
+        num_groups = len(grouped_block_size)
+        parallel = vllm_config.parallel_config
+        pp_size = parallel.pipeline_parallel_size
+        pcp_size = getattr(parallel, "prefill_context_parallel_size", 1)
+        pcp_sharded_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
+
+        def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
+            return make_full_key(model_name, group, block_hash, head, num_groups, stage, pp_size)
+
+        return LayerwiseKeyBuilder(make_key, pp_size, pcp_size, pcp_sharded_group_ids)
+
     def __init__(
         self,
         parallel_config: ParallelConfig,
@@ -191,6 +168,12 @@ class MemcacheBackend(Backend):
         if not self._lazy_init:
             self.store = self._setup_store()
             self._store_initialized = True
+
+    def close(self) -> None:
+        if self.store is not None:
+            self.store.close()
+            self.store = None
+            self._store_initialized = False
 
     def ensure_initialized(self):
         if self._store_initialized:
@@ -257,6 +240,15 @@ class MemcacheBackend(Backend):
         self._pending_buffers = (list(ptrs), list(sizes))
         self._register_buffers_if_needed()
 
+    def unregister_buffer(self, ptrs: list[int], sizes: list[int]):
+        if len(ptrs) != len(sizes):
+            raise ValueError(f"ptrs and sizes must have the same length: {len(ptrs)} != {len(sizes)}")
+        if not self._store_initialized:
+            return
+        assert self.store is not None
+        for ptr, size in zip(ptrs, sizes):
+            self.store.unregister_buffer(ptr, size)
+
     def _register_buffers_if_needed(self):
         if self._pending_buffers is None or not self._store_initialized:
             return
@@ -276,7 +268,7 @@ class MemcacheBackend(Backend):
         assert self.store is not None
         return self.store.batch_is_exist(keys)
 
-    def batch_get_key_info(self, keys: list[str]) -> list[Any]:
+    def batch_get_key_info(self, keys: list[str], *, for_load: bool = False) -> list[Any]:
         if self._lazy_init and not self._store_initialized:
             logger.debug(
                 "MemcacheBackend.batch_get_key_info called before store initialization; "
@@ -285,17 +277,106 @@ class MemcacheBackend(Backend):
             )
             return []
         assert self.store is not None
-        return self.store.batch_get_key_info(keys)
+        infos = self.store.batch_get_key_info(keys)
+        if not for_load:
+            return infos
+        if infos is None or len(infos) != len(keys):
+            logger.error("Memcache key-info response length mismatch")
+            return [None] * len(keys)
+        rewarmed = False
+        for key, info in zip(keys, infos, strict=True):
+            # A missing key yields a None entry: there is no SSD object to
+            # rewarm, and the caller treats it as not loadable.
+            if info is None:
+                continue
+            # MEDIA_SSD=2 has no directly readable GVA. Query and AddLease
+            # do not rewarm in the deployed SDK; only the regular Get path
+            # waits for SSD -> DRAM completion. Its API requires a full-size
+            # destination. UBoE does not enable host swap buffers by default,
+            # so use one registered temporary NPU blob at a time.
+            if (
+                info.size() <= 0
+                or MEMCACHE_SSD_MEDIA_TYPE not in info.type_list()
+                or any(gva > 0 for gva in info.gva_list())
+            ):
+                continue
+            size = info.size()
+            scratch = torch.empty(size, dtype=torch.uint8, device="npu")
+            address = scratch.data_ptr()
+            registered = self.store.register_buffer(address, size)
+            if registered != 0:
+                logger.error("Memcache SSD rewarm buffer registration failed: result=%s", registered)
+                return [None] * len(keys)
+            try:
+                results = self.store.batch_get_into([key], [address], [size], MmcDirect.COPY_G2L.value)
+            finally:
+                self.store.unregister_buffer(address, size)
+            if results != [0]:
+                logger.error("Memcache SSD rewarm failed: key=%s, results=%s", key, results)
+                return [None] * len(keys)
+            rewarmed = True
+            logger.debug("Memcache layerwise SSD rewarm completed key=%s bytes=%d", key, size)
+        return self.store.batch_get_key_info(keys) if rewarmed else infos
+
+    def batch_get_into_buffers(
+        self,
+        keys: list[str],
+        addrs: list[int],
+        sizes: list[int],
+        direction: int = MmcDirect.COPY_G2L.value,
+    ) -> list[int] | None:
+        if self._lazy_init and not self._store_initialized:
+            logger.error(
+                "Failed to get %d keys out of %d. Store is not initialized; "
+                "call put() first to trigger initialization.",
+                len(keys),
+                len(keys),
+            )
+            logger.debug("Failed to get key details. keys=%s", keys)
+            return None
+        assert self.store is not None
+        try:
+            res = self.store.batch_get_into(keys, addrs, sizes, direction)
+            failed_codes = [int(value) for value in res if value != 0]
+            failed_count = len(failed_codes)
+            if failed_count:
+                error_codes = sorted(set(failed_codes))
+                logger.error(
+                    "Failed to get %d keys out of %d. error_codes=%s. Check key existence and memory state.",
+                    failed_count,
+                    len(keys),
+                    error_codes,
+                )
+                logger.debug("Failed to get key details. keys=%s, result=%s", keys, res)
+            return res
+        except Exception as e:
+            logger.error(
+                "Failed to get %d keys out of %d. type=%s, error=%s. Check store state and network.",
+                len(keys),
+                len(keys),
+                type(e).__name__,
+                e,
+            )
+            logger.debug("Failed to get key details. keys=%s", keys)
+            return None
 
     def batch_is_readable(self, keys: list[str]) -> list[bool]:
         """Map valid MemCache GVA metadata to the common readability contract."""
         if self._lazy_init and not self._store_initialized:
             return [False] * len(keys)
         key_infos = self.batch_get_key_info(keys)
-        if len(key_infos) != len(keys):
-            raise BatchResultShapeError(f"batch_get_key_info returned {len(key_infos)} results for {len(keys)} keys")
+        if key_infos is None or len(key_infos) != len(keys):
+            logger.error(
+                "Memcache readability query failed: expected=%d key infos, got=%s; treating as cache misses",
+                len(keys),
+                len(key_infos) if key_infos is not None else None,
+            )
+            return [False] * len(keys)
         readable = []
         for key_info in key_infos:
+            if key_info is None:
+                readable.append(False)
+                continue
             try:
                 size = int(key_info.size())
                 gvas = key_info.gva_list()
@@ -305,6 +386,7 @@ class MemcacheBackend(Backend):
         return readable
 
     def batch_alloc(self, keys: list[str], sizes: list[int], lease_ttl_ms: int = 0) -> list[int]:
+        """Return GVAs, 0 for allocation failures, and UINT64_MAX for SSD hits."""
         self.ensure_initialized()
         assert self.store is not None
         return self.store.batch_alloc(keys, sizes, 1, lease_ttl_ms)
@@ -319,13 +401,14 @@ class MemcacheBackend(Backend):
 
     def batch_write_finish(self, keys: list[str], results: list[int]) -> list[int]:
         assert self.store is not None
-        finish = getattr(self.store, "batch_write_finish", None)
-        if finish is None:
-            # Older MemCache releases publish writes directly in batch_copy.
-            return [0] * len(keys)
-        return finish(keys, results)
+        return self.store.batch_write_finish(keys, results)
 
-    def get(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
+    def get(
+        self,
+        key: list[str],
+        addr: list[list[int]],
+        size: list[list[int]],
+    ):
         if self._lazy_init and not self._store_initialized:
             logger.error(
                 "Failed to get %d keys out of %d. Store is not initialized; "
@@ -361,7 +444,12 @@ class MemcacheBackend(Backend):
             logger.debug("Failed to get key details. keys=%s", key)
             return None
 
-    def put(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
+    def put(
+        self,
+        key: list[str],
+        addr: list[list[int]],
+        size: list[list[int]],
+    ) -> list[bool] | bool:
         self.ensure_initialized()
         assert self.store is not None
         try:
@@ -379,6 +467,7 @@ class MemcacheBackend(Backend):
                 logger.debug("Failed to put key details. keys=%s, result=%s", key, res)
                 if self._lazy_init:
                     logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+            return [int(value) == 0 for value in res]
         except Exception as e:
             logger.error(
                 "Failed to put %d keys out of %d. type=%s, error=%s. Check store state and memory.",
@@ -390,3 +479,31 @@ class MemcacheBackend(Backend):
             logger.debug("Failed to put key details. keys=%s", key)
             if self._lazy_init:
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+            return False
+
+    def put_from(
+        self,
+        key: str,
+        addr: int,
+        size: int,
+        direction: int = MmcDirect.COPY_L2G.value,
+    ) -> int | None:
+        self.ensure_initialized()
+        assert self.store is not None
+        try:
+            res = self.store.put_from(key, addr, size, direction)
+            if res != 0:
+                logger.error(
+                    "Failed to put key %s. error_code=%s. Check memory and store capacity.",
+                    key,
+                    res,
+                )
+            return res
+        except Exception as e:
+            logger.error(
+                "Failed to put key %s. type=%s, error=%s. Check store state and memory.",
+                key,
+                type(e).__name__,
+                e,
+            )
+            return None

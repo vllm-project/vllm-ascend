@@ -16,6 +16,17 @@ from vllm_ascend.ops.triton.layernorm_gated_dispatch import (
 )
 from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes, get_vectorcore_num
 
+_ACTIVATION_SWISH = 0
+_ACTIVATION_SIGMOID = 1
+
+
+def _activation_id(activation: str) -> int:
+    if activation in ("swish", "silu"):
+        return _ACTIVATION_SWISH
+    if activation == "sigmoid":
+        return _ACTIVATION_SIGMOID
+    raise ValueError(f"Unsupported activation: {activation}")
+
 
 @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
 @triton.heuristics({"HAS_Z": lambda args: args["Z"] is not None})
@@ -40,6 +51,7 @@ def _layer_norm_fwd_1pass_kernel_npu(
     HAS_Z: tl.constexpr,
     NORM_BEFORE_GATE: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
+    ACTIVATION: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
     pid_m = tl.program_id(0)
@@ -73,7 +85,10 @@ def _layer_norm_fwd_1pass_kernel_npu(
         z_ptrs = Z + rows[:, None] * stride_z_row + cols[None, :] + group * N
         z = tl.load(z_ptrs, mask=row_mask[:, None] & col_mask[None, :]).to(tl.float32)
         if not NORM_BEFORE_GATE:
-            x *= z * tl.sigmoid(z)
+            if ACTIVATION == 0:
+                x *= z * tl.sigmoid(z)
+            else:
+                x *= tl.sigmoid(z)
 
     # Compute statistics per row
     if not IS_RMS_NORM:
@@ -100,7 +115,10 @@ def _layer_norm_fwd_1pass_kernel_npu(
 
     # Post-gate
     if HAS_Z and NORM_BEFORE_GATE:
-        y *= z * tl.sigmoid(z)
+        if ACTIVATION == 0:
+            y *= z * tl.sigmoid(z)
+        else:
+            y *= tl.sigmoid(z)
 
     # Store output
     y_ptrs = Y + rows[:, None] * stride_y_row + cols[None, :] + group * N
@@ -141,6 +159,7 @@ def _layer_norm_fwd_persistent_hoist_kernel_npu(
     HAS_Z: tl.constexpr,
     NORM_BEFORE_GATE: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
+    ACTIVATION: tl.constexpr,
 ):
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
@@ -159,7 +178,10 @@ def _layer_norm_fwd_persistent_hoist_kernel_npu(
             z_ptrs = Z + rows[:, None] * stride_z_row + cols[None, :]
             z = tl.load(z_ptrs, mask=row_mask[:, None] & col_mask[None, :]).to(tl.float32)
             if not NORM_BEFORE_GATE:
-                x *= z * tl.sigmoid(z)
+                if ACTIVATION == 0:
+                    x *= z * tl.sigmoid(z)
+                else:
+                    x *= tl.sigmoid(z)
 
         if not IS_RMS_NORM:
             mean = tl.sum(x, axis=1) / N
@@ -179,7 +201,10 @@ def _layer_norm_fwd_persistent_hoist_kernel_npu(
         if HAS_BIAS:
             y += b[None, :]
         if HAS_Z and NORM_BEFORE_GATE:
-            y *= z * tl.sigmoid(z)
+            if ACTIVATION == 0:
+                y *= z * tl.sigmoid(z)
+            else:
+                y *= tl.sigmoid(z)
         y_ptrs = Y + rows[:, None] * stride_y_row + cols[None, :]
         tl.store(y_ptrs, y, mask=row_mask[:, None] & col_mask[None, :])
 
@@ -194,6 +219,7 @@ def layer_norm_fwd_npu(
     group_size=None,
     norm_before_gate=True,
     is_rms_norm=False,
+    activation: str = "swish",
 ):
     M, N = x.shape
     if group_size is None:
@@ -262,6 +288,7 @@ def layer_norm_fwd_npu(
             BLOCK_N=block_n,
             NORM_BEFORE_GATE=norm_before_gate,
             IS_RMS_NORM=is_rms_norm,
+            ACTIVATION=_activation_id(activation),
         )
         return out, mean, rstd
 
@@ -291,6 +318,7 @@ def layer_norm_fwd_npu(
             BLOCK_N=block_n,
             NORM_BEFORE_GATE=norm_before_gate,
             IS_RMS_NORM=is_rms_norm,
+            ACTIVATION=_activation_id(activation),
         )
         return out, mean, rstd
 

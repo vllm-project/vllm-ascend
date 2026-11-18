@@ -13,7 +13,6 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 
 from vllm_ascend._310p.worker.v2.states import Ascend310PStagedWriteTensor
-from vllm_ascend.utils import vllm_version_is
 
 
 class Ascend310PRopeState:
@@ -105,11 +104,12 @@ class Ascend310PRopeState:
                     num_new_tokens=query_len,
                 )
 
-        # Keep the extra dummy column in the transfer. Slicing all rows but
-        # only active columns makes a non-contiguous 2D view because storage
-        # width is max_num_tokens + 1. On 310P that copy falls back to costly
-        # strided handling. Copy the complete contiguous buffer.
-        self.positions.copy_(self.positions_cpu, non_blocking=True)
+        # Copy only the active columns: the staging buffer is sized for the full
+        # max_num_tokens, but a decode step stages a handful of tokens. Per-dim
+        # row slices are contiguous, so each copy stays on the fast H2D path.
+        active = num_tokens_after_padding
+        for dim in range(self.num_dims):
+            self.positions[dim, :active].copy_(self.positions_cpu[dim, :active], non_blocking=True)
 
     def get_positions(self, num_tokens: int) -> torch.Tensor:
         return self.positions[:, :num_tokens]
@@ -125,6 +125,6 @@ def get_310p_rope_state(
 ) -> Ascend310PRopeState | None:
     if model_config.uses_mrope:
         assert isinstance(model, SupportsMRoPE)
-        num_dims = 3 if vllm_version_is("0.29.0") else model_config.mrope_num_dims
+        num_dims = model_config.mrope_num_dims
         return Ascend310PRopeState(num_dims, max_num_reqs, max_num_tokens, max_model_len, device)
     return None

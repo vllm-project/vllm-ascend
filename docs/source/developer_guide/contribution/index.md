@@ -73,6 +73,20 @@ git commit -sm "your commit info"
 
 You can refer to [Testing](./testing.md)  to set up a testing environment and running tests locally.
 
+### Local native build cache
+
+When a source build compiles native csrc actions, their reusable local entries are
+stored in the ignored `csrc/build_cache` directory. Set
+`VLLM_ASCEND_BUILD_CACHE_DIR` to an absolute path to use a different directory.
+This is local build state, not a remote OBS snapshot; deleting it while no
+build is running only makes the next relevant source build cold. Builds that
+disable custom-kernel compilation do not exercise the custom-operator action
+cache.
+
+If you change a generated operator input, compiler command, or toolchain
+dependency, review the [cache identity and CMake integration contract](../Design_Documents/persistent_csrc_build_cache.md#cmake-integration-contract)
+in the design document.
+
 ## DCO and Signed-off-by
 
 When contributing changes to this project, you must agree to the DCO. Commits must include a `Signed-off-by:` header which certifies agreement with the terms of the DCO (Developer Certificate of Origin).
@@ -99,6 +113,20 @@ Only specific types of PRs will be reviewed. The PR title is prefixed appropriat
 !!! note
 
     If the PR spans more than one category, please include all relevant prefixes.
+
+## Release Notes
+
+If users can notice your change, include a release note fragment in the same PR:
+`release_notes/fragments/<PR number>.yaml`. This covers new model, hardware, or operator
+support, new features, changes to user-facing APIs, parameters, or configuration, behavior
+or default changes, dependency and toolchain updates, performance improvements, and
+important bug fixes. Internal changes, such as refactors, tests, CI, tooling, and
+documentation edits, do not need a fragment.
+
+The fragment is reviewed together with the code. When unsure whether a fragment is needed,
+add one: extra entries can be dropped by the release manager at release time, while a missing
+entry is hard to recover later. See `release_notes/README.md` in the repository root for the
+principles, the format, and the template.
 
 ## Others
 

@@ -12,11 +12,11 @@ from vllm.model_executor.model_loader.utils import get_model_cls
 from vllm.model_executor.models import ModelRegistry
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
+import vllm_ascend.worker.v2.spec_decode.dspark.speculator as dspark_module
 from vllm_ascend.models import register_model
-from vllm_ascend.models.qwen3_dspark import (
-    AscendQwen3DSparkForCausalLM,
-    process_weight,
-)
+from vllm_ascend.models.quarot_utils import process_weight
+from vllm_ascend.models.qwen3_dspark import AscendQwen3DSparkForCausalLM
+from vllm_ascend.worker.v2.spec_decode import lmhead_tp_utils
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
     AscendDSparkSpeculator,
 )
@@ -57,6 +57,7 @@ def _vllm_config(*, quarot: bool) -> SimpleNamespace:
     return SimpleNamespace(
         quant_config=quant_config,
         model_config=SimpleNamespace(model="/target"),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
     )
 
 
@@ -161,3 +162,191 @@ def test_process_weight_preserves_the_unrotated_projection():
     actual = torch.nn.functional.linear((inputs @ rotation).reshape(3, -1), process_weight(weight, rotation))
 
     torch.testing.assert_close(actual, expected, atol=2e-6, rtol=3e-6)
+
+
+@pytest.mark.parametrize("lmhead_enabled", [False, True])
+@pytest.mark.parametrize("num_rows", [0, 3, 8, 9])
+def test_dspark_lmhead_aligns_collective_rows_and_trims_logits(monkeypatch, num_rows, lmhead_enabled):
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.max_num_reqs, spec.num_speculative_steps = 4, 2
+    inputs_seen = []
+    weight = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+
+    def compute_logits(hidden):
+        inputs_seen.append(hidden.clone())
+        return hidden @ weight
+
+    model = SimpleNamespace(compute_draft_logits=compute_logits)
+    monkeypatch.setattr(dspark_module, "lmhead_tp_enable", lambda: lmhead_enabled)
+    spec._lmhead_tp_wrap_draft_logits(model)
+    hidden = torch.arange(num_rows * 2, dtype=torch.float32).reshape(num_rows, 2)
+
+    if lmhead_enabled and num_rows > 8:
+        with pytest.raises(ValueError, match="exceed the group-agreed capacity"):
+            model.compute_draft_logits(hidden)
+        assert inputs_seen == []
+    else:
+        torch.testing.assert_close(model.compute_draft_logits(hidden), hidden @ weight)
+        assert inputs_seen[0].shape == (8 if lmhead_enabled else num_rows, 2)
+        torch.testing.assert_close(inputs_seen[0][:num_rows], hidden)
+        assert torch.count_nonzero(inputs_seen[0][num_rows:]) == 0
+        if not lmhead_enabled:
+            assert model.compute_draft_logits is compute_logits
+
+
+def test_dspark_adaptive_verification_with_lmhead_tp(monkeypatch):
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.max_num_reqs, spec.num_speculative_steps = 4, 2
+    spec.use_local_argmax_reduction = False
+    spec.enable_adaptive_verification = True
+    weight = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    inputs_seen = []
+
+    def compute_logits(hidden):
+        inputs_seen.append(hidden.clone())
+        return hidden @ weight
+
+    model = SimpleNamespace(compute_draft_logits=compute_logits)
+
+    monkeypatch.setattr(lmhead_tp_utils, "lmhead_tp_enable", lambda: True)
+    monkeypatch.setattr(dspark_module, "lmhead_tp_enable", lambda: True)
+
+    spec._lmhead_tp_validate_draft_sampling()
+    spec._lmhead_tp_wrap_draft_logits(model)
+    hidden = torch.arange(6, dtype=torch.float32).reshape(3, 2)
+    logits = model.compute_draft_logits(hidden)
+
+    assert len(inputs_seen) == 1
+    assert inputs_seen[0].shape == (8, 2)
+    torch.testing.assert_close(inputs_seen[0][:3], hidden)
+    assert torch.count_nonzero(inputs_seen[0][3:]) == 0
+    assert logits.shape == (3, 3)
+    torch.testing.assert_close(logits, hidden @ weight)
+
+
+def _context_speculator(monkeypatch, group_ids=(0, 1), layer_map=(1, 0)):
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.model = SimpleNamespace(get_draft_kv_cache_layer_names=lambda: ("draft.0", "draft.1"))
+    spec.draft_kv_cache_group_ids = group_ids
+    spec._layer_group_idx = layer_map
+    spec.kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=size)) for size in (64, 128)]
+    )
+    spec.attn_architecture, spec.use_dcp = "MLA", False
+    spec.device = torch.device("cpu")
+    spec.speculative_config = object()
+    spec.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(get_hidden_size=lambda: 4, max_model_len=16),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
+    )
+    monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
+    return spec
+
+
+@pytest.mark.parametrize("group_ids,layer_map,expected", [((0,), None, (0, 0)), ((0, 1), (1, 0), (1, 0))])
+def test_dspark_context_layout_uses_loaded_layer_cache_groups(monkeypatch, group_ids, layer_map, expected):
+    spec = _context_speculator(monkeypatch, group_ids, layer_map)
+    groups, layers, sizes = spec.get_draft_context_group_layout()
+    assert groups == group_ids
+    assert layers == expected
+    assert sizes == {group: (64, 128)[group] for group in group_ids}
+
+
+@pytest.mark.parametrize(
+    "group_ids,layer_map,empty_layers,message",
+    [
+        ((0, 1), None, False, "explicit cache-group map"),
+        ((0,), (0,), False, "does not match"),
+        ((), (), True, "requires loaded draft attention layers"),
+        ((0,), None, True, "requires loaded draft attention layers"),
+    ],
+)
+def test_dspark_context_layout_rejects_incomplete_cache_maps(monkeypatch, group_ids, layer_map, empty_layers, message):
+    spec = _context_speculator(monkeypatch, group_ids, layer_map)
+    if empty_layers:
+        spec.model.get_draft_kv_cache_layer_names = lambda: ()
+    with pytest.raises(ValueError, match=message):
+        spec.get_draft_context_group_layout()
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [None, "gqa", "dcp", "pcp", "aux_layers", "hidden_size", "prompt_length", "dtype", "shape"],
+)
+def test_dspark_local_context_validates_before_writing_kv(monkeypatch, invalid):
+    spec = _context_speculator(monkeypatch)
+    descriptor = SimpleNamespace(aux_layer_ids=(1, 3), hidden_size=4, prompt_tokens=8, feature_width=8)
+    chunk = SimpleNamespace(descriptor=descriptor, num_tokens=2)
+    features = torch.ones(2, 8, dtype=torch.bfloat16)
+    monkeypatch.setattr(dspark_module, "get_eagle3_aux_layers_from_config", lambda _: [1, 3])
+    monkeypatch.setattr(dspark_module, "set_current_vllm_config", lambda _: nullcontext())
+    write_kv = MagicMock()
+    monkeypatch.setattr(dspark_module, "initialize_draft_context_chunk", write_kv)
+    if invalid == "gqa":
+        spec.attn_architecture = "GQA"
+    elif invalid == "dcp":
+        spec.use_dcp = True
+    elif invalid == "pcp":
+        spec.vllm_config.parallel_config.prefill_context_parallel_size = 2
+    elif invalid == "aux_layers":
+        descriptor.aux_layer_ids = (3, 1)
+    elif invalid == "hidden_size":
+        descriptor.hidden_size = 8
+    elif invalid == "prompt_length":
+        descriptor.prompt_tokens = 17
+    elif invalid == "dtype":
+        features = features.float()
+    elif invalid == "shape":
+        features = features[:, :4]
+
+    if invalid is not None:
+        with pytest.raises(ValueError):
+            spec.initialize_local_context(chunk, features, {0: [4], 1: [7]})
+        write_kv.assert_not_called()
+    else:
+        spec.initialize_local_context(chunk, features, {0: [4], 1: [7]})
+        args, kwargs = write_kv.call_args
+        assert args[:2] == (spec.model, chunk)
+        assert args[2] is features
+        assert kwargs["draft_block_ids_by_group"] == {0: (4,), 1: (7,)}
+        assert kwargs["layer_group_ids"] == (1, 0)
+        assert kwargs["block_sizes_by_group"] == {0: 64, 1: 128}
+
+
+@pytest.mark.parametrize("architecture,use_flashmla", [("MLA", True), ("GQA", False), (None, False)])
+def test_non_dcp_draft_does_not_copy_lengths_to_host(architecture, use_flashmla):
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.use_dcp = False
+    spec.attn_architecture = architecture
+    spec.use_flashmla = use_flashmla
+    spec.input_buffers = MagicMock()
+    spec.input_buffers.seq_lens.__getitem__.side_effect = AssertionError("unexpected host length access")
+    lengths, prefilling = spec._prepare_draft_dcp_metadata_inputs(2, 3, 7)
+    assert lengths is None
+    assert prefilling.shape == (3,)
+    assert not prefilling.any()
+
+
+def test_non_dcp_fia_mla_copies_exact_lengths_and_zeros_padding():
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.use_dcp = False
+    spec.use_flashmla = False
+    spec.attn_architecture = "MLA"
+    spec.input_buffers = SimpleNamespace(seq_lens=torch.tensor([11, 23, 99], dtype=torch.int32))
+    lengths, prefilling = spec._prepare_draft_dcp_metadata_inputs(2, 3, 7)
+    torch.testing.assert_close(lengths, torch.tensor([11, 23, 0], dtype=torch.int32))
+    assert not prefilling.any()
+
+
+@pytest.mark.parametrize("use_flashmla", [False, True])
+def test_mla_draft_device_lengths_do_not_bypass_dcp_manager(monkeypatch, use_flashmla):
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.use_dcp = True
+    spec.use_flashmla = use_flashmla
+    spec.attn_architecture = "MLA"
+    spec.target_input_buffers = SimpleNamespace(seq_lens_cpu=object())
+    monkeypatch.setattr(AscendDSparkSpeculator, "max_model_len", 1024, raising=False)
+    spec.dcp_manager = MagicMock()
+    result = spec._prepare_draft_dcp_metadata_inputs(2, 3, 7)
+    assert result is spec.dcp_manager.prepare_draft_dcp_metadata_inputs.return_value
+    spec.dcp_manager.prepare_draft_dcp_metadata_inputs.assert_called_once()

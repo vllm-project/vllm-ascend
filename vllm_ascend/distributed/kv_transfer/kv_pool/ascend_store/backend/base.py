@@ -72,6 +72,7 @@ def set_scheduler_device(parallel_config: ParallelConfig) -> None:
 
 class Backend(ABC):
     store: Any | None = None
+    layerwise_data_plane: str | None = None
     # Whether the connector must filter existing keys before calling put().
     requires_exists_before_put: bool = True
 
@@ -82,6 +83,35 @@ class Backend(ABC):
     @classmethod
     def create_scheduler_client(cls, parallel_config: ParallelConfig):
         return cls(parallel_config)
+
+    def close(self) -> None:
+        """Release backend resources after all store operations have stopped."""
+        return None
+
+    def ensure_initialized(self) -> None:
+        """Initialize the store if this backend supports lazy initialization."""
+        return None
+
+    # The connector and scheduler need these capabilities before a store client exists.
+    @classmethod
+    def bind_layerwise_keys(
+        cls,
+        *,
+        vllm_config: Any,
+        kv_cache_config: Any,
+        model_name: str,
+        use_hybrid: bool,
+        grouped_block_size: list[int],
+    ) -> Any:
+        raise NotImplementedError(f"{cls.__name__} does not support layerwise keys")
+
+    @classmethod
+    def fence_drains_recv(cls) -> bool:
+        return False
+
+    @classmethod
+    def send_fence_backlog(cls) -> int:
+        return 0
 
     @abstractmethod
     def set_device(self):
@@ -106,7 +136,7 @@ class Backend(ABC):
         """
         raise NotImplementedError(f"{type(self).__name__} does not support batch_is_readable")
 
-    def batch_get_key_info(self, keys: list[str]):
+    def batch_get_key_info(self, keys: list[str], *, for_load: bool = False):
         raise NotImplementedError(f"{type(self).__name__} does not support batch_get_key_info")
 
     def batch_alloc(self, keys: list[str], sizes: list[int], lease_ttl_ms: int = 0) -> list[int]:
@@ -158,7 +188,12 @@ class Backend(ABC):
         raise NotImplementedError(f"{type(self).__name__} does not support batch_get_end")
 
     @abstractmethod
-    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> bool | list[bool] | None:
+        """Store a batch, returning False for a detected backend failure.
+
+        A per-key boolean list preserves partial-success information. ``None``
+        remains valid for legacy backends that report failures by raising.
+        """
         pass
 
     @abstractmethod

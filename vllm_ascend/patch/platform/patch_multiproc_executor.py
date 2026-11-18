@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import weakref
 from collections import deque
 from collections.abc import Callable
@@ -209,3 +210,6 @@ class AscendWorkerProc(WorkerProc):
 
 
 vllm.v1.executor.multiproc_executor.MultiprocExecutor = AscendMultiprocExecutor
+# The headless CLI may have imported the original executor before this patch.
+if "vllm.entrypoints.cli.serve" in sys.modules:
+    sys.modules["vllm.entrypoints.cli.serve"].__dict__["MultiprocExecutor"] = AscendMultiprocExecutor

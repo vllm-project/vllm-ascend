@@ -56,17 +56,7 @@ ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/*.cpp)
 
 set(VLLM_ASCEND_CUSTOM_OP
     ${KERNEL_FILES}
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
 )
-
-set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
-)
-
-if(SOC_VERSION MATCHES "ascend950")
-    message(STATUS "A5 hardware detected: disabling MLAPO operators")
-    list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950})
-endif()
 
 if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
     message(STATUS "Hardware ${SOC_VERSION} detected: skip vllm_ascend_kernels compile")
@@ -171,6 +161,27 @@ else()
   endif()
 endif()
 
+# ECCPUConnector stores encoder-cache data in a shared mmap. Newer CANN releases
+# expose aclrtHostRegisterV2(..., ACL_HOST_REG_PINNED), which turns those mmap
+# pages into real page-locked host memory. Keep the custom op available on older
+# CANN releases as well, but make it fail with an actionable error at runtime
+# instead of silently claiming that pageable memory is pinned.
+check_cxx_source_compiles("
+  #include <acl/acl_rt.h>
+  int main() {
+    void* ptr = nullptr;
+    (void)aclrtHostRegisterV2(ptr, 0, ACL_HOST_REG_PINNED);
+    (void)aclrtHostUnregister;
+    return 0;
+  }
+" HAVE_ACLRT_HOST_REGISTER_V2_PINNED)
+if(HAVE_ACLRT_HOST_REGISTER_V2_PINNED)
+  message(STATUS "aclrtHostRegisterV2: pinned host registration available")
+  target_compile_definitions(vllm_ascend_C PRIVATE CANN_HOST_REGISTER_V2_PINNED)
+else()
+  message(STATUS "aclrtHostRegisterV2: pinned host registration unavailable; ECCPUConnector will be rejected")
+endif()
+
 if(SOC_VERSION MATCHES "ascend310p.*")
     target_compile_definitions(vllm_ascend_C PRIVATE -DASCEND_PLATFORM_310P)
 endif()
@@ -215,6 +226,18 @@ else()
 endif()
 
 target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/custom_transformer/op_api/lib")
+
+if(EXISTS "${ASCEND_HOME_PATH}/include/hixl/hixl.h")
+  find_library(ENGRAM_HIXL_LIBRARY cann_hixl PATHS ${ASCEND_HOME_PATH}/lib64)
+  if(ENGRAM_HIXL_LIBRARY)
+    add_library(engram_hixl SHARED csrc/engram_hixl/native.cpp)
+    target_include_directories(engram_hixl PRIVATE ${ASCEND_HOME_PATH}/include)
+    target_link_directories(engram_hixl PRIVATE ${ASCEND_HOME_PATH}/lib64)
+    target_link_libraries(engram_hixl PRIVATE ${ENGRAM_HIXL_LIBRARY} ascendcl)
+    add_dependencies(vllm_ascend_C engram_hixl)
+    install(TARGETS engram_hixl DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
+  endif()
+endif()
 
 if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
   install(TARGETS vllm_ascend_C DESTINATION ${VLLM_ASCEND_INSTALL_PATH})

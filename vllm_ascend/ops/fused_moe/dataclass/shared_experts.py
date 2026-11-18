@@ -40,13 +40,16 @@ class RoutedMoEMilestones:
     Shared Gate-Up starts at ``router_output_ready``.  It can consequently
     cover the routed input AllGather, or All2All preprocessing plus its forward
     exchange, without embedding communication-type branches in the shared
-    expert implementation.
+    expert implementation. All staged backends expose routed GMM2 start as
+    ``shared_activation_overlap_start``, after routed GMM1 and its activation/
+    quantization have finished. Shared activation and quantization therefore
+    overlap GMM2 without competing with the earlier routed Vector work.
     """
 
     shared_input_ready: torch.npu.Event | None = None
     router_output_ready: torch.npu.Event | None = None
     routed_dispatch_start: torch.npu.Event | None = None
-    routed_gmm2_start: torch.npu.Event | None = None
+    shared_activation_overlap_start: torch.npu.Event | None = None
     routed_combine_start: torch.npu.Event | None = None
     routed_finalize_done: torch.npu.Event | None = None
 
@@ -61,7 +64,7 @@ class RoutedMoEMilestones:
             event is not None
             for event in (
                 self.routed_dispatch_start,
-                self.routed_gmm2_start,
+                self.shared_activation_overlap_start,
                 self.routed_combine_start,
             )
         )

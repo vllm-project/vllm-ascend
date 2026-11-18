@@ -10,7 +10,7 @@ PROMPTS = [
 ]
 
 
-def server_args():
+def server_args(tp_size: int = 2, gpu_memory_utilization: float = 0.8):
     return [
         "--served-model-name",
         "kvpp-test",
@@ -18,7 +18,7 @@ def server_args():
         "--quantization",
         "ascend",
         "--tensor-parallel-size",
-        "2",
+        str(tp_size),
         "--enable-expert-parallel",
         "--async-scheduling",
         "--enforce-eager",
@@ -33,7 +33,7 @@ def server_args():
         "--num-gpu-blocks-override",
         "64",
         "--gpu-memory-utilization",
-        "0.8",
+        str(gpu_memory_utilization),
         "--enable-prefix-caching",
         "--enable-chunked-prefill",
         "--seed",

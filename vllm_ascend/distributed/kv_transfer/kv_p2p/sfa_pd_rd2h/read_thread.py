@@ -8,7 +8,7 @@ import math
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import msgspec
@@ -17,13 +17,26 @@ import zmq
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
+    DSparkContextDescriptor,
+    DSparkContextReceiver,
+    DSparkContextSubmission,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_kv import (
+    DraftKVCacheMetadata,
+    build_draft_kv_read_batches,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
+    DSPARK_DRAFT_KV,
+    DSPARK_DRAFT_KV_ACK,
     MF_META,
     MF_META_ACK,
     READ_DONE,
     READ_FAILED,
     READ_READY_BATCH,
     SFAPD_PROTOCOL_VERSION,
+    CopySfaTailDest,
+    DSparkDraftKVStatus,
 )
 
 READ_THREAD_POLL_TIMEOUT_MS = 100
@@ -45,6 +58,15 @@ class ConsumerReadState:
     indexer_scale_tensors: list[Any | None]
     dest_blocks_by_req: dict[str, tuple[list[int], list[int]]]
     get_offload_layer_id: Callable[[str], int]
+    copy_sfa_tail_by_req: dict[str, CopySfaTailDest] = field(default_factory=dict)
+    topk_k_bases: list[int] = field(default_factory=list)
+    topk_v_bases: list[int] = field(default_factory=list)
+    topk_row_tokens: int = 0
+    topk_hot_tokens: int = 0
+    block_size: int = 128
+    dspark_context_receiver: DSparkContextReceiver | None = None
+    dspark_draft_kv_metadata: dict[str, DraftKVCacheMetadata] = field(default_factory=dict)
+    dspark_draft_blocks_by_req: dict[str, dict[int, tuple[int, ...]]] = field(default_factory=dict)
 
 
 def _coalesce_desc(
@@ -114,6 +136,9 @@ class MembPullReadThread(threading.Thread):
         self._host = get_ip()
         self._stop_event = threading.Event()
         self.startup_error: BaseException | None = None
+
+    def bind_dspark_context_receiver(self, receiver: DSparkContextReceiver) -> None:
+        self._state.dspark_context_receiver = receiver
 
     def _record_chunk_done(self, done_ext_ids: list[str], group_member_idx: int, ratio: int) -> None:
         """Accumulate a contributor's last-layer arrival."""
@@ -232,6 +257,9 @@ class MembPullReadThread(threading.Thread):
                         else:
                             sock.send_multipart((identity, b"", encoder.encode((MF_META_ACK, SFAPD_PROTOCOL_VERSION))))
 
+                    elif msg_type == DSPARK_DRAFT_KV:
+                        self._handle_dspark_draft_kv(identity, msg, sock, encoder)
+
                     elif msg_type == READ_READY_BATCH:
                         layer_idx = msg[1]
                         layer_name = msg[2]
@@ -325,6 +353,146 @@ class MembPullReadThread(threading.Thread):
             if sock is not None:
                 sock.close(linger=0)
             ctx.destroy(linger=0)
+
+    def _handle_dspark_draft_kv(self, identity, msg, sock, encoder) -> None:
+        """Pull P-computed draft cache pages directly into D's resident pages."""
+        request_id = generation = ""
+        receiver = self._state.dspark_context_receiver
+        descriptor = None
+        reserved = False
+        status = DSparkDraftKVStatus.FAILED
+        try:
+            if len(msg) != 8:
+                raise ValueError(f"DSpark draft-KV message must contain 7 fields, got {len(msg) - 1}")
+            (
+                _,
+                request_id,
+                generation,
+                prompt_tokens,
+                aux_layer_ids,
+                hidden_size,
+                remote_metadata,
+                source_blocks_by_group,
+            ) = msg
+            request_id = str(request_id)
+            generation = str(generation)
+            descriptor = DSparkContextDescriptor(
+                request_id=request_id,
+                generation=generation,
+                prompt_tokens=int(prompt_tokens),
+                aux_layer_ids=tuple(int(layer_id) for layer_id in aux_layer_ids),
+                hidden_size=int(hidden_size),
+            )
+            p_session = self._p_sessions.get(identity)
+            if p_session is None:
+                raise RuntimeError("DSpark draft KV arrived before this P connection completed MF_META")
+            pp_rank, pp_size = self._p_pp_topology[identity]
+            if pp_rank != pp_size - 1:
+                raise RuntimeError("DSpark draft KV must come from the final Prefill PP stage")
+            if receiver is None:
+                status = DSparkDraftKVStatus.BACKPRESSURE
+            else:
+                admission, reserved = receiver.begin_direct_transfer(descriptor)
+                if admission is DSparkContextSubmission.BACKPRESSURE:
+                    status = DSparkDraftKVStatus.BACKPRESSURE
+                elif admission is DSparkContextSubmission.STALE:
+                    status = DSparkDraftKVStatus.STALE
+                elif not reserved:
+                    # A previous acknowledgement may have been lost; the full
+                    # copy already completed, so the retry is safe to accept.
+                    status = DSparkDraftKVStatus.ACCEPTED
+                else:
+                    remote = self._decode_draft_kv_metadata(remote_metadata)
+                    local = self._state.dspark_draft_kv_metadata
+                    if not local or set(remote) != set(local):
+                        raise ValueError("P/D DSpark draft KV layer names do not match")
+                    source_by_group = {
+                        int(group): tuple(map(int, blocks)) for group, blocks in source_blocks_by_group.items()
+                    }
+                    dest_by_group = self._state.dspark_draft_blocks_by_req.get(request_id)
+                    if dest_by_group is None:
+                        raise RuntimeError("D draft block table was missing after DSpark admission")
+                    expected_source_groups = {item.group_id for item in remote.values()}
+                    expected_dest_groups = {item.group_id for item in local.values()}
+                    if set(source_by_group) != expected_source_groups:
+                        raise ValueError("P DSpark draft block tables do not cover its source cache groups")
+                    if set(dest_by_group) != expected_dest_groups:
+                        raise ValueError("D DSpark draft block tables do not cover its destination cache groups")
+                    source_by_layer = {name: source_by_group[item.group_id] for name, item in remote.items()}
+                    for peer_ptrs, local_ptrs, lengths in build_draft_kv_read_batches(
+                        remote,
+                        local,
+                        source_by_layer,
+                        dest_by_group,
+                        descriptor.prompt_tokens,
+                    ):
+                        ret = self.engine.batch_transfer_sync_read(
+                            p_session,
+                            local_ptrs,
+                            peer_ptrs,
+                            lengths,
+                        )
+                        if ret != 0:
+                            raise RuntimeError(f"MemFabric DSpark draft KV read failed, ret={ret}")
+                    receiver.finish_direct_transfer(descriptor, success=True)
+                    reserved = False
+                    status = DSparkDraftKVStatus.ACCEPTED
+        except Exception as error:
+            status = DSparkDraftKVStatus.FAILED
+            if descriptor is not None and reserved and receiver is not None:
+                try:
+                    receiver.finish_direct_transfer(descriptor, success=False)
+                except Exception:
+                    logger.exception("Could not quarantine failed DSpark draft KV allocation")
+            if request_id:
+                with self._lock:
+                    self._failed_requests.add(request_id)
+            logger.error(
+                "MembPull DSpark draft KV read failed: req=%s generation=%s: %s",
+                request_id,
+                generation,
+                error,
+            )
+        if request_id and generation:
+            sock.send_multipart(
+                (
+                    identity,
+                    b"",
+                    encoder.encode((DSPARK_DRAFT_KV_ACK, request_id, generation, status.value)),
+                )
+            )
+
+    @staticmethod
+    def _decode_draft_kv_metadata(raw: Any) -> dict[str, DraftKVCacheMetadata]:
+        if not isinstance(raw, dict) or not raw:
+            raise ValueError("P did not provide DSpark draft KV component metadata")
+        result = {}
+        required = {
+            "group_id",
+            "block_size",
+            "num_blocks",
+            "base_addrs",
+            "block_strides",
+            "block_lens",
+            "block_scales",
+            "shapes",
+            "dtypes",
+        }
+        for name, fields in raw.items():
+            if not isinstance(name, str) or not isinstance(fields, dict) or set(fields) != required:
+                raise ValueError("P DSpark draft KV component metadata has an invalid schema")
+            result[name] = DraftKVCacheMetadata(
+                group_id=int(fields["group_id"]),
+                block_size=int(fields["block_size"]),
+                num_blocks=int(fields["num_blocks"]),
+                base_addrs=tuple(map(int, fields["base_addrs"])),
+                block_strides=tuple(map(int, fields["block_strides"])),
+                block_lens=tuple(map(int, fields["block_lens"])),
+                block_scales=tuple(map(int, fields["block_scales"])),
+                shapes=tuple(tuple(map(int, shape)) for shape in fields["shapes"]),
+                dtypes=tuple(map(str, fields["dtypes"])),
+            )
+        return result
 
     def stop(self, timeout: float = THREAD_SHUTDOWN_TIMEOUT_SECONDS) -> None:
         self._stop_event.set()
@@ -488,6 +656,132 @@ class MembPullReadThread(threading.Thread):
 
         raise RuntimeError(f"MembPull has no destination blocks on D for req {ext_req_id} (layer {layer_name})")
 
+    def _append_copy_sfa_tail_descriptors(
+        self,
+        layer: dict[str, Any],
+        ext_req_id: str,
+        p_main_block_ids: list[int],
+        main_start_block: int,
+        peer_chunks: list[np.ndarray],
+        local_chunks: list[np.ndarray],
+        length_chunks: list[np.ndarray],
+    ) -> None:
+        """D2D the last incomplete main block into this rank's circular tail."""
+        state = self._state
+        tail = state.copy_sfa_tail_by_req.get(ext_req_id)
+        if tail is None or tail.tail_tokens <= 0:
+            return
+        if not state.topk_k_bases or not state.topk_v_bases:
+            return
+        if state.block_size <= 0 or state.topk_row_tokens <= 0:
+            return
+        local_idx = tail.tail_block_index - main_start_block
+        if local_idx < 0 or local_idx >= len(p_main_block_ids):
+            return
+        offload_id = layer["offload_id"]
+        if offload_id >= len(state.topk_k_bases) or offload_id >= len(state.topk_v_bases):
+            raise RuntimeError(f"MembPull fused_copy_sfa tail is missing topk buffer bases for {layer['layer_name']}")
+        p_k_len = int(layer["p_k_len"])
+        p_v_len = int(layer["p_v_len"])
+        if p_k_len % state.block_size or p_v_len % state.block_size:
+            raise RuntimeError(
+                f"MembPull fused_copy_sfa tail requires block-aligned main KV bytes: "
+                f"k={p_k_len}, v={p_v_len}, block_size={state.block_size}"
+            )
+        token_bytes_k = p_k_len // state.block_size
+        token_bytes_v = p_v_len // state.block_size
+        ring_offset = (tail.tail_block_index % 2) * state.block_size
+        dst_token = tail.pool_slot * state.topk_row_tokens + state.topk_hot_tokens + ring_offset
+        p_block_id = int(p_main_block_ids[local_idx])
+        peer = np.array(
+            [
+                int(layer["p_k_base"]) + p_block_id * p_k_len,
+                int(layer["p_v_base"]) + p_block_id * p_v_len,
+            ],
+            dtype=np.int64,
+        )
+        local = np.array(
+            [
+                state.topk_k_bases[offload_id] + dst_token * token_bytes_k,
+                state.topk_v_bases[offload_id] + dst_token * token_bytes_v,
+            ],
+            dtype=np.int64,
+        )
+        length = np.array(
+            [tail.tail_tokens * token_bytes_k, tail.tail_tokens * token_bytes_v],
+            dtype=np.int64,
+        )
+        peer_chunks.append(peer)
+        local_chunks.append(local)
+        length_chunks.append(length)
+
+    def _append_copy_sfa_dense_descriptors(
+        self,
+        layer: dict[str, Any],
+        ext_req_id: str,
+        p_main_block_ids: list[int],
+        main_start_block: int,
+        peer_chunks: list[np.ndarray],
+        local_chunks: list[np.ndarray],
+        length_chunks: list[np.ndarray],
+    ) -> None:
+        """D2D a whole short prompt densely into this rank's topk row (slot p = p)."""
+        state = self._state
+        dest = state.copy_sfa_tail_by_req.get(ext_req_id)
+        if dest is None or not dest.dense or dest.kv_tokens <= 0:
+            return
+        if not state.topk_k_bases or not state.topk_v_bases:
+            return
+        if state.block_size <= 0 or state.topk_row_tokens <= 0:
+            return
+        if dest.kv_tokens > state.topk_row_tokens - 2 * state.block_size:
+            raise RuntimeError(
+                f"MembPull fused_copy_sfa dense prompt exceeds the row hot region: "
+                f"kv_tokens={dest.kv_tokens}, hot={state.topk_row_tokens - 2 * state.block_size}"
+            )
+        offload_id = layer["offload_id"]
+        if offload_id >= len(state.topk_k_bases) or offload_id >= len(state.topk_v_bases):
+            raise RuntimeError(f"MembPull fused_copy_sfa dense is missing topk buffer bases for {layer['layer_name']}")
+        p_k_len = int(layer["p_k_len"])
+        p_v_len = int(layer["p_v_len"])
+        if p_k_len % state.block_size or p_v_len % state.block_size:
+            raise RuntimeError(
+                f"MembPull fused_copy_sfa dense requires block-aligned main KV bytes: "
+                f"k={p_k_len}, v={p_v_len}, block_size={state.block_size}"
+            )
+        token_bytes_k = p_k_len // state.block_size
+        token_bytes_v = p_v_len // state.block_size
+        # Copy every logical block of the prompt into the row's hot region,
+        # block b to row offset b*block_size. P may split large requests into
+        # chunk handshakes; copy only the blocks this chunk carries (the
+        # unsliced list, every-rank replicated, same as the tail path).
+        total_blocks = -(-dest.kv_tokens // state.block_size)
+        start = max(0, main_start_block)
+        end = min(total_blocks, main_start_block + len(p_main_block_ids))
+        if end <= start:
+            return
+        block_ids = np.array(
+            p_main_block_ids[start - main_start_block : end - main_start_block],
+            dtype=np.int64,
+        )
+        dst_blocks = np.arange(start, end, dtype=np.int64)
+        dst_tokens = dest.pool_slot * state.topk_row_tokens + dst_blocks * state.block_size
+        partial = np.minimum(dest.kv_tokens - dst_blocks * state.block_size, state.block_size)
+        for p_base, p_block_len, token_bytes, topk_base in (
+            (int(layer["p_k_base"]), p_k_len, token_bytes_k, state.topk_k_bases[offload_id]),
+            (int(layer["p_v_base"]), p_v_len, token_bytes_v, state.topk_v_bases[offload_id]),
+        ):
+            # P-side blocks are not contiguous; _coalesce_desc merges only the
+            # opportunistically contiguous runs in both address spaces.
+            cp, cl, coalesced_lengths = _coalesce_desc(
+                p_base + block_ids * p_block_len,
+                topk_base + dst_tokens * token_bytes,
+                partial * token_bytes,
+            )
+            peer_chunks.append(cp)
+            local_chunks.append(cl)
+            length_chunks.append(coalesced_lengths)
+
     def _build_req_descriptors(
         self,
         layer: dict[str, Any],
@@ -549,6 +843,9 @@ class MembPullReadThread(threading.Thread):
 
         p_k_base, p_v_base = layer["p_k_base"], layer["p_v_base"]
         p_k_len, p_v_len = layer["p_k_len"], layer["p_v_len"]
+        # Tail D2D uses the unsliced P main list: every D rank needs the last
+        # incomplete block even when it does not own that CPU-pool range.
+        p_main_block_ids_for_tail = p_main_block_ids
 
         peer_chunks: list[np.ndarray] = []
         local_chunks: list[np.ndarray] = []
@@ -653,6 +950,25 @@ class MembPullReadThread(threading.Thread):
                 peer_chunks.append(cp)
                 local_chunks.append(cl)
                 length_chunks.append(coalesced_lengths)
+
+        self._append_copy_sfa_tail_descriptors(
+            layer,
+            ext_req_id,
+            p_main_block_ids_for_tail,
+            main_start_block,
+            peer_chunks,
+            local_chunks,
+            length_chunks,
+        )
+        self._append_copy_sfa_dense_descriptors(
+            layer,
+            ext_req_id,
+            p_main_block_ids_for_tail,
+            main_start_block,
+            peer_chunks,
+            local_chunks,
+            length_chunks,
+        )
 
         if not peer_chunks:
             logger.debug(

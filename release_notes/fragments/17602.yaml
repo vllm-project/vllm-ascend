@@ -1,0 +1,9 @@
+pr: 17602
+entries:
+  - category: performance
+    text: >-
+      Reduced redundant parameter loads for single-group, 128-channel gated
+      normalization in GDN workloads on Ascend A2, and reduced row-tile memory
+      pressure for eligible single-group widths up to 512 channels. Wider or
+      grouped inputs retain their existing route; this does not establish
+      end-to-end model gains or eliminate all UB-capacity failures.

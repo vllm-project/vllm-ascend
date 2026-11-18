@@ -2,14 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
+from vllm.v1.core.sched.request_queue import SchedulingPolicy
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.request import RequestStatus
 
-from tests.ut.core.test_dyntra_lb_scheduler import make_dyntra_test_config
+from tests.ut.core.test_dyntra_lb_scheduler import create_dyntra_lb_scheduler, make_dyntra_test_config
+from tests.ut.core.test_score_encoder_cache_scheduler import _request as make_mm_request
+from tests.ut.kv_offload.utils import create_model_runner_output, create_request
 from vllm_ascend.core.dyntra_lb_scheduler import DyntraLBPolicyMixin
 from vllm_ascend.core.recompute_scheduler import (
     AsyncDyntraLBRecomputeScheduler,
@@ -18,7 +21,20 @@ from vllm_ascend.core.recompute_scheduler import (
     RecomputeReqInfo,
     RecomputeScheduler,
     RecomputeSchedulerConfig,
+    _normalize_encoder_schedule_result,
 )
+from vllm_ascend.ec_manager.score_ec_manager import ScoreEncoderCacheManager
+
+
+@pytest.fixture(autouse=True)
+def _oproj_tp_config(monkeypatch):
+    # _preempt_or_recompute reads the live AscendConfig singleton; default it to off.
+    finegrained_tp_config = SimpleNamespace(oproj_tensor_parallel_size=0, mlp_tensor_parallel_size=0)
+    monkeypatch.setattr(
+        "vllm_ascend.core.recompute_scheduler.get_ascend_config",
+        lambda: SimpleNamespace(finegrained_tp_config=finegrained_tp_config),
+    )
+    return finegrained_tp_config
 
 
 def _make_preempt_scheduler(*, connector=None):
@@ -140,6 +156,38 @@ def test_preempt_offload_failure_sends_request_back_to_p():
     scheduler.finish_requests.assert_called_once()
 
 
+def test_preempt_offload_failure_aborts_under_oproj_tp(_oproj_tp_config):
+    _oproj_tp_config.oproj_tensor_parallel_size = 2
+    connector = MagicMock()
+    connector.update_state_before_preempt.return_value = False
+    scheduler = _make_preempt_scheduler(connector=connector)
+    request = SimpleNamespace(
+        request_id="req-1",
+        client_index=0,
+        num_computed_tokens=17,
+    )
+    scheduler.finish_requests = MagicMock(return_value=[request])
+
+    with (
+        patch.object(Scheduler, "_preempt_request") as upstream_preempt,
+        patch("vllm_ascend.core.recompute_scheduler.logger.error") as error,
+    ):
+        locally_preempted = scheduler._preempt_or_recompute(
+            request,
+            1.5,
+        )
+
+    assert not locally_preempted
+    error.assert_called_once()
+    upstream_preempt.assert_not_called()
+    scheduler.finish_requests.assert_called_once_with(
+        "req-1",
+        RequestStatus.FINISHED_ABORTED,
+    )
+    # Not recorded for recomputation: the request must not be sent back to P.
+    assert scheduler._recomputed_reqs == []
+
+
 def test_reset_preemption_skips_offload():
     connector = MagicMock()
     scheduler = _make_preempt_scheduler(connector=connector)
@@ -240,3 +288,232 @@ def test_recompute_scheduler_variants_keep_offload_preemption():
     assert issubclass(DyntraLBRecomputeScheduler, DyntraLBPolicyMixin)
     assert issubclass(AsyncDyntraLBRecomputeScheduler, AsyncRecomputeScheduler)
     assert issubclass(AsyncDyntraLBRecomputeScheduler, DyntraLBPolicyMixin)
+
+
+def _make_schedule_test_scheduler():
+    config = make_dyntra_test_config()
+    config.kv_transfer_config = None
+    return create_dyntra_lb_scheduler(config, scheduler_cls=RecomputeScheduler)
+
+
+@pytest.mark.parametrize("policy", [SchedulingPolicy.FCFS, SchedulingPolicy.PRIORITY])
+@pytest.mark.parametrize("pending_connector_free", [False, True])
+def test_schedule_does_not_preempt_when_blocks_cannot_be_reused(policy, pending_connector_free):
+    scheduler = _make_schedule_test_scheduler()
+    requests = [create_request(request_id=i) for i in (1, 2)]
+    for request in requests:
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, create_model_runner_output(requests))
+    scheduler.policy = policy
+    scheduler.defer_block_free = True
+    scheduler.processed_step_seq = 0
+    for request in requests:
+        # Test the connector guard and the in-flight-step guard independently.
+        request.last_sched_seq = 0 if pending_connector_free else 1
+    connector = MagicMock()
+    connector.has_pending_block_frees.return_value = pending_connector_free
+    scheduler.connector = connector
+    original_running = list(scheduler.running)
+    original_blocks = [scheduler.kv_cache_manager.get_block_ids(r.request_id) for r in requests]
+
+    with (
+        patch.object(scheduler.kv_cache_manager, "allocate_slots", return_value=None),
+        patch.object(scheduler, "_preempt_or_recompute") as preempt,
+    ):
+        output = scheduler.schedule()
+
+    preempt.assert_not_called()
+    connector.update_state_before_preempt.assert_not_called()
+    assert scheduler.running == original_running
+    assert [scheduler.kv_cache_manager.get_block_ids(r.request_id) for r in requests] == original_blocks
+    assert all(r.status == RequestStatus.RUNNING for r in requests)
+    assert not output.num_scheduled_tokens
+    assert not output.recomputed_reqs
+
+
+@pytest.mark.parametrize("resume_with_retained_kv", [False, True])
+def test_schedule_waits_for_encoder_cache_on_running_and_resumed_requests(resume_with_retained_kv):
+    scheduler = _make_schedule_test_scheduler()
+    request = create_request(request_id=1)
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, create_model_runner_output([request]))
+    if resume_with_retained_kv:
+        scheduler.running.remove(request)
+        request.status = RequestStatus.PREEMPTED
+        scheduler.waiting.add_request(request)
+    else:
+        # Async running requests must exclude output placeholders from the offset.
+        request.num_output_placeholders = 1
+    request.mm_features = [MagicMock()]
+    connector = MagicMock()
+    connector.ensure_cache_available.return_value = False
+    scheduler.ec_connector = connector
+    original_computed = request.num_computed_tokens
+
+    with patch.object(scheduler.kv_cache_manager, "allocate_slots") as allocate:
+        output = scheduler.schedule()
+
+    allocate.assert_not_called()
+    expected_offset = original_computed - request.num_output_placeholders
+    connector.ensure_cache_available.assert_called_once_with(request, expected_offset)
+    assert request.num_computed_tokens == original_computed
+    assert request.request_id not in output.num_scheduled_tokens
+    if resume_with_retained_kv:
+        assert request in scheduler.kv_holding_waiting
+        assert request.status == RequestStatus.PREEMPTED
+    else:
+        assert request in scheduler.running
+        assert request.status == RequestStatus.RUNNING
+
+
+def test_first_request_preserves_ascend_speculative_padding_without_cached_tokens():
+    scheduler = _make_schedule_test_scheduler()
+    scheduler.num_spec_tokens = 2
+    scheduler.num_lookahead_tokens = 2
+    scheduler.dynamic_sd_lookup = None
+    request = create_request(request_id=1, num_tokens=1)
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens[request.request_id] == 3
+    assert output.scheduled_spec_decode_tokens[request.request_id] == [-1, -1]
+
+
+def _make_mm_recompute_scheduler():
+    config = make_dyntra_test_config(block_size=16)
+    config.kv_transfer_config = None
+    config.cache_config.enable_prefix_caching = False
+    scheduler = create_dyntra_lb_scheduler(config, scheduler_cls=RecomputeScheduler)
+    config.model_config.hf_config.vision_config = SimpleNamespace(num_heads=1, hidden_size=1, intermediate_size=1)
+    config.ec_manager_config.manager_config = {"cpu_cache_slots": 8}
+    scheduler.encoder_cache_manager = ScoreEncoderCacheManager(8, config)
+    scheduler.max_num_encoder_input_tokens = 32
+    return scheduler
+
+
+@pytest.mark.skipif(
+    not hasattr(Scheduler, "_allocate_encoder_inputs"), reason="Requires the main duplicate-reference API"
+)
+def test_waiting_multimodal_duplicate_cache_tracking():
+    scheduler = _make_mm_recompute_scheduler()
+    scheduler.max_num_scheduled_tokens = 8
+    request = make_mm_request("mm", [("shared", [True, True]), ("shared", [True, True])])
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert output.scheduled_encoder_inputs[request.request_id] == [0]
+    manager = scheduler.encoder_cache_manager
+    assert manager.request_cached_ids[request.request_id] == {0, 1}
+    assert manager.cpu_num_free_slots == 6
+    assert output.ec_manager_metadata.cpu_get_encoder_mm_hashes == []
+    manager._check_invariant()
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert request.request_id not in manager.request_cached_ids
+    assert not manager.cached["shared"]
+    manager._check_invariant()
+
+
+@pytest.mark.skipif(
+    not hasattr(Scheduler, "_allocate_encoder_inputs"), reason="Requires the main duplicate-reference API"
+)
+def test_running_multimodal_duplicate_cache_tracking():
+    scheduler = _make_mm_recompute_scheduler()
+    scheduler.max_num_scheduled_tokens = 2
+    request = make_mm_request("mm", [("first", [True, True]), ("shared", [True, True]), ("shared", [True, True])])
+    scheduler.add_request(request)
+    first = scheduler.schedule()
+    assert first.scheduled_encoder_inputs[request.request_id] == [0]
+    runner_output = create_model_runner_output([request])
+    runner_output.sampled_token_ids = [[]]
+    scheduler.update_from_output(first, runner_output)
+    assert request in scheduler.running
+    scheduler.max_num_scheduled_tokens = 4
+    with patch.object(scheduler, "_allocate_encoder_inputs", wraps=scheduler._allocate_encoder_inputs) as allocate:
+        output = scheduler.schedule()
+
+    assert output.scheduled_encoder_inputs[request.request_id] == [1]
+    allocate.assert_called_once_with(request, [1], [2])
+    manager = scheduler.encoder_cache_manager
+    assert {1, 2} <= manager.request_cached_ids[request.request_id]
+    manager._check_invariant()
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert request.request_id not in manager.request_cached_ids
+    assert not manager.cached["shared"]
+    manager._check_invariant()
+
+
+@pytest.mark.parametrize("result", [([1], 8, 16, [2]), ([1], 8, 16, [2], [3])])
+def test_normalize_encoder_schedule_result_preserves_contract(result):
+    normalized = _normalize_encoder_schedule_result(result)
+    assert normalized[:4] == result[:4]
+    assert normalized[4] == (result[4] if len(result) == 5 else [])
+    if len(result) == 5:
+        assert normalized is result
+
+
+@pytest.mark.parametrize("with_connector", [False, True])
+def test_release_encoder_allocation_preserves_notifications(monkeypatch, with_connector):
+    monkeypatch.setattr(Scheduler, "_allocate_encoder_inputs", None, raising=False)
+    scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
+    scheduler.encoder_cache_manager = MagicMock()
+    scheduler.ec_connector = MagicMock() if with_connector else None
+    request = SimpleNamespace(request_id="mm")
+
+    scheduler._allocate_encoder_inputs(request, [0, 2], [])
+
+    assert scheduler.encoder_cache_manager.allocate.call_args_list == [call(request, 0), call(request, 2)]
+    if scheduler.ec_connector is not None:
+        assert scheduler.ec_connector.update_state_after_alloc.call_args_list == [call(request, 0), call(request, 2)]
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_release_encoder_contract_in_both_schedule_paths(monkeypatch, running):
+    original_schedule = Scheduler._try_schedule_encoder_inputs
+
+    def release_schedule(*args, **kwargs):
+        result = original_schedule(*args, **kwargs)
+        if len(result) == 5:
+            assert result[4] == []
+        return result[:4]
+
+    monkeypatch.setattr(Scheduler, "_try_schedule_encoder_inputs", release_schedule)
+    monkeypatch.setattr(Scheduler, "_allocate_encoder_inputs", None, raising=False)
+    scheduler = _make_mm_recompute_scheduler()
+    scheduler.max_num_scheduled_tokens = 2 if running else 8
+    request = make_mm_request("mm", [("first", [True, True]), ("second", [True, True])])
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    if running:
+        assert output.scheduled_encoder_inputs[request.request_id] == [0]
+        runner_output = create_model_runner_output([request])
+        runner_output.sampled_token_ids = [[]]
+        scheduler.update_from_output(output, runner_output)
+        assert request in scheduler.running
+        scheduler.max_num_scheduled_tokens = 4
+        output = scheduler.schedule()
+    assert output.scheduled_encoder_inputs[request.request_id] == ([1] if running else [0, 1])
+    manager = scheduler.encoder_cache_manager
+    assert 1 in manager.request_cached_ids[request.request_id]
+    manager._check_invariant()
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert request.request_id not in manager.request_cached_ids
+    manager._check_invariant()
+
+
+def test_main_encoder_allocation_uses_native_helper(monkeypatch):
+    native_allocate = MagicMock()
+    monkeypatch.setattr(Scheduler, "_allocate_encoder_inputs", native_allocate, raising=False)
+    scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
+    scheduler.encoder_cache_manager = MagicMock()
+    scheduler.ec_connector = MagicMock()
+    request = SimpleNamespace(request_id="mm")
+
+    scheduler._allocate_encoder_inputs(request, [1], [2])
+
+    native_allocate.assert_called_once_with(request, [1], [2])
+    scheduler.encoder_cache_manager.allocate.assert_not_called()
+    scheduler.ec_connector.update_state_after_alloc.assert_not_called()

@@ -2,6 +2,7 @@
 
 import ast
 import importlib.util
+import math
 import sys
 import types
 import unittest
@@ -24,6 +25,35 @@ class RouteSourceTests(unittest.TestCase):
         self.assertNotIn("compile_target", layer_source.lower())
         self.assertNotIn("try_get_compile_target", layer_source)
 
+    def test_gate_branches_preserve_both_activations(self):
+        # Execute the actual scalar gate branch AST, without emulating the kernel.
+        tree = ast.parse(LAYER_NORM.read_text())
+        kernels = [node for node in tree.body if isinstance(node, ast.FunctionDef) and "kernel_npu" in node.name]
+        self.assertEqual(len(kernels), 2)
+        for kernel in kernels:
+            branches = [
+                node
+                for node in ast.walk(kernel)
+                if isinstance(node, ast.If) and ast.unparse(node.test) == "ACTIVATION == 0"
+            ]
+            self.assertEqual(len(branches), 2)
+            for branch in branches:
+                code = compile(ast.fix_missing_locations(ast.Module(body=[branch], type_ignores=[])), "gate", "exec")
+                for activation in (0, 1):
+                    for z in (-2.0, 0.0, 1.5):
+                        with self.subTest(kernel=kernel.name, activation=activation, z=z):
+                            state = {
+                                "ACTIVATION": activation,
+                                "x": 2.5,
+                                "y": 2.5,
+                                "z": z,
+                                "tl": types.SimpleNamespace(sigmoid=lambda value: 1 / (1 + math.exp(-value))),
+                            }
+                            exec(code, state)
+                            target = branch.body[0].target.id
+                            gate = 1 / (1 + math.exp(-z))
+                            self.assertAlmostEqual(state[target], 2.5 * gate * (z if activation == 0 else 1))
+
     def test_device_name_and_dtype_allowlists_are_absent(self):
         source = LAYER_NORM.read_text()
         self.assertNotIn("_PR1_QUALIFIED_DEVICE_NAMES", source)
@@ -32,6 +62,89 @@ class RouteSourceTests(unittest.TestCase):
         self.assertIn("get_vectorcore_num", source)
         self.assertIn("get_ub_size_bytes", source)
         self.assertNotIn("qualified=qualified", source)
+
+
+class AccuracyGateTests(unittest.TestCase):
+    def test_dtype_bounds_percentage_maximum_and_nonfinite(self):
+        # Isolate the real e2e helper without importing pytest, torch or NPU code.
+        path = ROOT / "tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_layernorm_gated.py"
+        tree = ast.parse(path.read_text())
+        selected = [
+            node
+            for node in tree.body
+            if (isinstance(node, ast.FunctionDef) and node.name == "assert_reference_accuracy")
+            or (
+                isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "TOLERANCES" for t in node.targets)
+            )
+        ]
+
+        class Values:
+            def __init__(self, values, dtype="float32"):
+                self.values = list(values)
+                self.dtype = dtype
+                self.shape = (len(self.values),)
+
+            def cpu(self):
+                return self
+
+            def float(self):
+                return self
+
+            def abs(self):
+                return Values(abs(value) for value in self.values)
+
+            def __sub__(self, other):
+                return Values(a - b for a, b in zip(self.values, other.values))
+
+            def __rmul__(self, scalar):
+                return Values(scalar * value for value in self.values)
+
+            def __radd__(self, scalar):
+                return Values(scalar + value for value in self.values)
+
+            def __le__(self, other):
+                return Values(a <= b for a, b in zip(self.values, other.values))
+
+            def all(self):
+                return all(self.values)
+
+            def sum(self):
+                return types.SimpleNamespace(item=lambda: sum(self.values))
+
+            def max(self):
+                return types.SimpleNamespace(item=lambda: max(self.values))
+
+            def numel(self):
+                return len(self.values)
+
+        fake_torch = types.SimpleNamespace(
+            float16="float16",
+            bfloat16="bfloat16",
+            float32="float32",
+            isfinite=lambda tensor: Values(math.isfinite(v) for v in tensor.values),
+        )
+        state = {"torch": fake_torch}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "accuracy", "exec"), state)
+        check = state["assert_reference_accuracy"]
+        self.assertEqual(
+            state["TOLERANCES"],
+            {"float16": (2**-9, 2**-9, 0.1), "bfloat16": (2**-6, 2**-6, 1.0), "float32": (2**-10, 2**-16, 0.01)},
+        )
+        # Exactly 99% is allowed only while the global maximum bound also holds.
+        check(Values([0.0] * 99 + [0.005]), Values([0.0] * 100))
+        for actual, expected in (
+            ([0.0] * 98 + [0.005] * 2, [0.0] * 100),
+            ([0.0] * 99 + [0.02], [0.0] * 100),
+            ([float("nan")], [0.0]),
+            ([float("inf")], [float("inf")]),
+        ):
+            with self.subTest(actual=actual[-1], expected=expected[-1]), self.assertRaises(AssertionError):
+                check(Values(actual), Values(expected))
+        # Statistics must use their fp32 dtype even for low-precision inputs.
+        with self.assertRaises(AssertionError):
+            check(Values([0.001]), Values([0.0]))
+        check(Values([0.001], "float16"), Values([0.0], "float16"))
 
 
 class _FakeTensor:
@@ -198,6 +311,49 @@ def _unload_layernorm_fakes(saved):
 
 
 class WrapperRouteTests(unittest.TestCase):
+    def test_activation_ids_reach_all_launch_routes(self):
+        layer, state, launches, saved = _load_layernorm_with_fakes()
+        try:
+            for rows, columns, group_size, kernel, block_m in (
+                (288, 128, None, "_layer_norm_fwd_1pass_kernel_npu", 16),
+                (289, 128, None, "_layer_norm_fwd_persistent_hoist_kernel_npu", 32),
+                (65, 256, 128, "_layer_norm_fwd_1pass_kernel_npu", 64),
+            ):
+                for activation, expected in (("swish", 0), ("silu", 0), ("sigmoid", 1)):
+                    for norm_before_gate in (True, False):
+                        for rms in (True, False):
+                            with self.subTest(rows=rows, activation=activation, before=norm_before_gate, rms=rms):
+                                x = _FakeTensor((rows, columns), "float32")
+                                weight = _FakeTensor((columns,), "float32")
+                                layer.layer_norm_fwd_npu(
+                                    x,
+                                    weight,
+                                    None,
+                                    1e-5,
+                                    z=x,
+                                    group_size=group_size,
+                                    norm_before_gate=norm_before_gate,
+                                    is_rms_norm=rms,
+                                    activation=activation,
+                                )
+                                name, _, _, kwargs = launches[-1]
+                                self.assertEqual(
+                                    (name, kwargs["BLOCK_M"], kwargs["ACTIVATION"]), (kernel, block_m, expected)
+                                )
+            for rows in (288, 289):
+                count = len(launches)
+                with self.assertRaisesRegex(ValueError, "Unsupported activation: relu"):
+                    layer.layer_norm_fwd_npu(
+                        _FakeTensor((rows, 128), "float16"),
+                        _FakeTensor((128,), "float16"),
+                        None,
+                        1e-5,
+                        activation="relu",
+                    )
+                self.assertEqual(len(launches), count)
+        finally:
+            _unload_layernorm_fakes(saved)
+
     def test_grouped_baseline_launch_needs_no_initialized_resource_getters(self):
         layer, state, launches, saved = _load_layernorm_with_fakes()
         state["vector_cores"] = None

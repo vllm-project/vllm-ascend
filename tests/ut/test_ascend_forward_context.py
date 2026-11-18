@@ -11,11 +11,13 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.fixture(autouse=True)
 def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(afc, "_mc2_tokens_capacity", None)
+    monkeypatch.setattr(afc, "_USE_V2_EXTRA_KWARGS", False)
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
@@ -62,6 +64,8 @@ def _make_vllm_config(
         cudagraph_capture_sizes=cudagraph_capture_sizes or [],
         max_cudagraph_capture_size=max_cudagraph_capture_size,
     )
+    if not vllm_version_is("0.33.0"):
+        compilation_config.decode_cudagraph_capture_request_sizes = None
     kv_transfer_config = (
         SimpleNamespace(kv_connector=kv_connector, kv_role=kv_role)
         if kv_connector is not None or kv_role is not None
@@ -104,7 +108,7 @@ def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
 
     from vllm_ascend.models.deepseek_v4 import model as deepseek_v4
 
-    monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", True)
+    monkeypatch.setattr(afc, "_USE_V2_EXTRA_KWARGS", True)
     monkeypatch.setattr(
         deepseek_v4,
         "get_pp_group",
@@ -121,6 +125,7 @@ def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
         start_layer=0,
         end_layer=1,
         aux_hidden_state_layers=set(),
+        _needs_mtp_hidden_states=True,
         _mtp_hidden_buffer=torch.empty(3, 4),
         hc_head=lambda hidden_states, *_: hidden_states.squeeze(1),
         hc_head_fn=None,
@@ -190,6 +195,49 @@ def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeyp
     afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=16, uniform_decode_query_len=1)
 
     assert afc.get_mc2_tokens_capacity() == 520
+
+
+@pytest.mark.parametrize(
+    "prefill_tokens,decode_sizes,query_lens,token_cap,tp_size,expected",
+    [
+        (16, [1, 2, 3, 4], {4: 1024}, None, 2, 16),
+        (16, [1, 2, 3, 4], {4: 256}, None, 2, 16),
+        (8, [1, 4, 16], {4: 16}, None, 2, 64),
+        (8, [1, 4, 16], {4: 16}, 20, 2, 20),
+        (8, [1, 4, 16], {1: 16, 4: 3}, None, 2, 16),
+        (17, [1, 2], {4: 16}, None, 6, 18),
+        (4096, [1, 2], {4: 16}, None, 2, 1024),
+    ],
+)
+def test_mc2_capacity_excludes_independent_draft_capture_grid(
+    monkeypatch, prefill_tokens, decode_sizes, query_lens, token_cap, tp_size, expected
+):
+    if vllm_version_is("0.33.0"):
+        pytest.skip("Separate target/draft graph grids are a main-only API")
+
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: False)
+    vllm_config = _make_vllm_config(
+        tensor_parallel_size=tp_size,
+        cudagraph_capture_sizes=[4, 8, 12, 16, 1024],
+        max_cudagraph_capture_size=1024,
+        max_num_batched_tokens=8192,
+    )
+    compilation_config = vllm_config.compilation_config
+    compilation_config.decode_cudagraph_capture_request_sizes = decode_sizes
+    compilation_config.max_decode_cudagraph_capture_tokens = token_cap
+    compilation_config.max_prefill_cudagraph_capture_tokens = prefill_tokens
+    vllm_config.get_decode_cudagraph_query_lens = lambda _: query_lens
+    original_sizes = compilation_config.cudagraph_capture_sizes.copy()
+
+    afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=1024, uniform_decode_query_len=4)
+
+    assert afc.get_mc2_tokens_capacity() == expected
+    assert compilation_config.cudagraph_capture_sizes == original_sizes
+    assert compilation_config.max_cudagraph_capture_size == 1024
+    assert compilation_config.decode_cudagraph_capture_request_sizes == decode_sizes
+    if expected == 16:
+        assert afc._select_fused_or_capacity_moe_comm_method(16, vllm_config, expected) == MoECommType.MC2
+        assert afc._select_fused_or_capacity_moe_comm_method(1024, vllm_config, expected) == MoECommType.ALLTOALL
 
 
 def test_is_decode_only_node_false_without_kv_transfer():
@@ -535,6 +583,7 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch, model_
     monkeypatch.setattr(afc, "has_layer_idx", lambda _model: False)
     monkeypatch.setattr(afc, "select_moe_comm_method", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(afc, "get_mc2_mask", lambda: None)
+    monkeypatch.setattr(afc, "use_v2_model_runner", lambda _cfg: True)
 
     legacy_method = object()
     target_method = object()
@@ -551,5 +600,114 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch, model_
             assert seen["inside"] is True
             assert seen["config"] is vllm_config
             assert forward_context.moe_comm_method is (expected if model_owned else legacy_method)
+            assert afc._USE_V2_EXTRA_KWARGS is True
 
     assert seen["inside"] is False
+
+
+def test_sync_v2_extra_kwargs_caches_actual_bool(monkeypatch):
+    monkeypatch.setattr(afc, "use_v2_model_runner", lambda _cfg: True)
+    afc.sync_v2_extra_kwargs(SimpleNamespace())
+    assert afc._USE_V2_EXTRA_KWARGS is True
+
+    monkeypatch.setattr(afc, "use_v2_model_runner", lambda _cfg: False)
+    afc.sync_v2_extra_kwargs(SimpleNamespace())
+    assert afc._USE_V2_EXTRA_KWARGS is False
+
+    monkeypatch.setattr(afc, "use_v2_model_runner", lambda _cfg: MagicMock())
+    afc.sync_v2_extra_kwargs(SimpleNamespace())
+    assert afc._USE_V2_EXTRA_KWARGS is False
+
+
+def test_extra_ctx_getattr_does_not_call_use_v2_model_runner(monkeypatch):
+    monkeypatch.setattr(afc, "_USE_V2_EXTRA_KWARGS", True)
+
+    def _boom(_cfg=None):
+        raise AssertionError("compiled extra-ctx must not call use_v2_model_runner")
+
+    monkeypatch.setattr(afc, "use_v2_model_runner", _boom)
+    forward_context = SimpleNamespace(additional_kwargs={}, capturing=True)
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    assert afc._EXTRA_CTX.capturing is None
+    afc._EXTRA_CTX.capturing = False
+    assert forward_context.additional_kwargs["capturing"] is False
+
+
+def test_extra_ctx_default_v2_hides_gpu_capturing_flag(monkeypatch):
+    # GPU V2 ForwardContext has no vllm_config. Isolation follows the
+    # eager-cached _USE_V2_EXTRA_KWARGS flag, not ctx.vllm_config.
+    monkeypatch.setattr(afc, "_USE_V2_EXTRA_KWARGS", True)
+    forward_context = SimpleNamespace(
+        additional_kwargs={},
+        capturing=True,
+    )
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    assert afc._EXTRA_CTX.capturing is None
+    afc._EXTRA_CTX.capturing = False
+    assert afc._EXTRA_CTX.capturing is False
+    assert forward_context.capturing is True
+    assert forward_context.additional_kwargs["capturing"] is False
+
+
+def test_extra_ctx_v1_stores_capturing_on_context(monkeypatch):
+    monkeypatch.setattr(afc, "_USE_V2_EXTRA_KWARGS", False)
+    forward_context = SimpleNamespace(
+        additional_kwargs={},
+        capturing=False,
+    )
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    afc._EXTRA_CTX.capturing = True
+    assert afc._EXTRA_CTX.capturing is True
+    assert forward_context.capturing is True
+    assert "capturing" not in forward_context.additional_kwargs
+
+
+def test_extra_ctx_v1_override_uses_context_capturing_flag(monkeypatch):
+    monkeypatch.setattr(afc, "_USE_V2_EXTRA_KWARGS", False)
+    forward_context = SimpleNamespace(
+        additional_kwargs={},
+        capturing=False,
+    )
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    afc._EXTRA_CTX.capturing = True
+    assert forward_context.capturing is True
+    assert "capturing" not in forward_context.additional_kwargs
+
+
+def test_extra_ctx_magicmock_forward_context_stays_on_v1_attrs(monkeypatch):
+    monkeypatch.setattr(afc, "_USE_V2_EXTRA_KWARGS", False)
+    forward_context = MagicMock(capturing=False)
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    assert afc._EXTRA_CTX.capturing is False
+    afc._EXTRA_CTX.capturing = True
+    assert forward_context.capturing is True
+
+
+def test_extra_ctx_unset_vllm_config_stays_on_v1_attrs(monkeypatch):
+    monkeypatch.setattr(afc, "_USE_V2_EXTRA_KWARGS", False)
+    forward_context = MagicMock(capturing=False)
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    assert afc._EXTRA_CTX.capturing is False
+    afc._EXTRA_CTX.capturing = True
+    assert forward_context.capturing is True
+
+
+def test_extra_ctx_env_true_uses_additional_kwargs(monkeypatch):
+    monkeypatch.setattr(afc, "_USE_V2_EXTRA_KWARGS", True)
+    forward_context = SimpleNamespace(
+        additional_kwargs={},
+        capturing=True,
+    )
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    assert afc._EXTRA_CTX.capturing is None
+    afc._EXTRA_CTX.capturing = False
+    assert afc._EXTRA_CTX.capturing is False
+    assert forward_context.capturing is True
+    assert forward_context.additional_kwargs["capturing"] is False

@@ -1,6 +1,6 @@
 # Installation Guide
 
-This document describes how to install vllm-ascend manually.
+This document describes how to install vLLM Ascend manually.
 
 ## Requirements {: #installation-requirements }
 
@@ -35,6 +35,7 @@ The following hardware and software stack is validated together for this release
     | Framework | PyTorch | `{{ release_pytorch_version }}` | Tensor framework used by vLLM |
     | Framework | TorchNPU | `{{ release_torch_npu_version }}` | Connects PyTorch to the Ascend runtime |
     | Kernel acceleration | Triton Ascend | `{{ release_triton_ascend_version }}` | Used on A2, A3, and 950DT Products; not used on Atlas 300I DUO or Atlas 200I Pro |
+    | Kernel acceleration | FLA NPU | `{{ release_fla_npu_version }}` | Provides convolution and gated delta-rule operators on A2, A3, and 950DT Products; not required on Atlas 300I DUO or Atlas 200I Pro |
     | Inference engine | vLLM | `{{ release_vllm_version }}` | Model inference engine |
     | Hardware plugin | vLLM Ascend | `{{ release_vllm_ascend_version }}` | Connects vLLM to the Ascend software stack |
 
@@ -52,7 +53,26 @@ First, run the following command to confirm that the Ascend NPU firmware and dri
 npu-smi info
 ```
 
-For more information, see the [CANN installation resources](https://www.hiascend.com/cann/download?versionId=735&ids=d806%2Ch0501%2Ch0601%2Ch0702).
+The output should list the expected NPU devices, with `Health` shown as `OK` and no driver initialization errors. Device names, chip counts, and table columns vary by hardware and driver version. A missing device or a health status other than `OK` needs investigation before continuing.
+
+```bash
++------------------------------------------------------------------------------------------------+
+| npu-smi xx.x.x                   Version: xx.x.x                                               |
++---------------------------+---------------+----------------------------------------------------+
+| NPU   Name                | Health        | Power(W)    Temp(C)           Hugepages-Usage(page)|
+| Chip                      | Bus-Id        | AICore(%)   Memory-Usage(MB)  HBM-Usage(MB)        |
++===========================+===============+====================================================+
+| 0     xxxxx               | OK            | 95.6        50                0    / 0             |
+| 0                         | 0000:C1:00.0  | 0           0    / 0          xxxx / xxxxx         |
++===========================+===============+====================================================+
++---------------------------+---------------+----------------------------------------------------+
+| NPU     Chip              | Process id    | Process name             | Process memory(MB)      |
++===========================+===============+====================================================+
+| No running processes found in NPU 0                                                            |
++===========================+===============+====================================================+
+```
+
+The host Linux distribution and kernel must be supported by the selected Ascend hardware and driver/firmware release. For more information, see the [Ascend compatibility query](https://info.support.huawei.com/computing/tools/compatibility-query/enterprise/ascend-computing/system-compatibility) and [CANN installation resources](https://www.hiascend.com/cann/download?versionId=735&ids=d806%2Ch0501%2Ch0601%2Ch0702).
 
 ### Set up the software environment {: #installation-software-environment }
 
@@ -75,9 +95,11 @@ Choose one complete path based on your requirements. Container-based paths requi
     | PyTorch + TorchNPU | ✓ | ○ | ○ |
     | vLLM + vLLM Ascend | ✓ | ○ | ○ |
     | Triton Ascend | ✓ | ○ | ○ |
+    | FLA NPU (A2 / A3 / 950DT Products) | ✓ | ○ | ○ |
 
-    - **PyTorch and TorchNPU:** Installed as dependencies during the **Install vLLM and vLLM Ascend** step; no separate installation step is required.
-    - **Triton Ascend:** Installed only for A2, A3, and 950DT Products; it is not used on Atlas 300I DUO or Atlas 200I Pro.
+    **PyTorch and TorchNPU:** Installed as dependencies during the **Install vLLM and vLLM Ascend** step; no separate installation step is required.
+
+    **FLA NPU:** Installed explicitly in the common follow-up step for pip, uv, and source installations on A2, A3, and 950DT Products.
 
 {% include "getting_started/installation/prebuilt_image.inc.md" %}
 
@@ -93,71 +115,64 @@ Go to [Quick Start > Inference](quick_start.md#quick-start-inference) and run a 
 
 ### CPU-only build verification {: #installation-cpu-build }
 
-CPU-only build verification checks whether the Python package can be built without a visible Ascend device. It does not verify NPU runtime loading, inference examples, custom kernels, or NPU-specific tests. The build process needs access to CANN Toolkit headers and libraries, so CANN Toolkit must still be installed.
+Use this workflow on the **main branch** to check Python package construction and editable installation without an NPU. It skips native extensions and custom kernels, so it does not require CANN, an Ascend driver, PyTorch, TorchNPU, or vLLM. It does not provide CPU inference or an environment for running the unit tests.
 
-First, install the Python build backend and native build tools. Editable installations use setuptools-scm directly. If no compatible wheel is available, `arctic-inference` also requires CMake and Ninja:
-
-```bash
-python -m pip install --upgrade \
-    pip "setuptools>=64" "setuptools-scm>=8" wheel \
-    attrs googleapis-common-protos \
-    "cmake>=3.26" ninja
-```
-
-This workflow verifies only the build and therefore does not install vLLM. To continue testing vLLM and vLLM Ascend together on the main branch, use the exact vLLM commit recorded in `.github/vllm-main-verified.commit` and verify the combined environment as described below.
-
-In an x86 environment, install the CPU version of PyTorch from the PyTorch CPU index before installing the remaining Ascend dependencies:
+Use Linux (`x86_64` or `aarch64`), Git, and Python {{ main_python_version }} with `venv` support. For an isolated check, you can start a disposable Python container without device mappings or driver mounts:
 
 ```bash
-python -m pip install \
-    --index-url https://download.pytorch.org/whl/cpu/ \
-    torch=={{ main_pytorch_version }} torchvision=={{ main_torchvision_version }} torchaudio=={{ main_torchaudio_version }}
-python -m pip install \
-    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
-    torch-npu=={{ main_torch_npu_version }} triton-ascend=={{ main_triton_ascend_version }}
-python -m pip install \
-    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
-    -r requirements.txt
+docker run --rm -it --name vllm-ascend-build-check \
+    python:3.12-slim bash -c \
+    'apt-get update && apt-get install -y --no-install-recommends git && exec bash'
 ```
 
-Before building vLLM Ascend, explicitly set the build target and disable automatic device backend loading:
-
-???+ important "Set the correct SOC_VERSION when no NPU is visible"
-
-    If `npu-smi` is unavailable in the current environment, set `SOC_VERSION` for the target hardware before running `pip install -e .`:
-
-    - A2: `export SOC_VERSION=ascend910b1`
-    - A3: `export SOC_VERSION=ascend910_9391`
-    - Atlas 300I DUO / Atlas 200I Pro: `export SOC_VERSION=ascend310p1`
-    - 950DT Products: `export SOC_VERSION=ascend950dt_9582`
-
-???+ tip "Enable batch invariance"
-
-    Batch invariance requires the `batch_invariant_ops` wheel. Set `VLLM_BATCH_INVARIANT=1` before building vLLM Ascend to build and install the wheel as part of the installation flow. For usage instructions, see [Batch Invariance](../user_guide/feature_guide/batch_invariance.md).
+Run the remaining commands inside the container. Get the source and create a dedicated virtual environment. If you already have a main-branch checkout in your chosen environment, start from that repository's root instead of cloning again:
 
 ```bash
-export ASCEND_TOOLKIT_HOME="${ASCEND_TOOLKIT_HOME:-/usr/local/Ascend/ascend-toolkit/latest}"
-export TORCH_DEVICE_BACKEND_AUTOLOAD=0
-export COMPILE_CUSTOM_KERNELS=0
-export SOC_VERSION=ascend910b1  # A2
-python -m pip install \
-    --no-build-isolation \
-    --no-deps \
-    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
-    -e .
+git clone --depth 1 --branch main https://github.com/vllm-project/vllm-ascend.git
+cd vllm-ascend
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip "setuptools>=64" "setuptools-scm>=8" wheel
 ```
 
-The explicit build dependencies above and `requirements.txt` provide the complete build-system dependencies before the non-isolated editable build starts. `--no-build-isolation` only reuses packages in the current build environment; it cannot make incompatible vLLM, PyTorch, and TorchNPU versions compatible. Before using the environment for actual workloads, run `python -m pip check` and resolve all reported conflicts. If no device is available, skip the inference examples and NPU-specific tests.
+Build and install the Python package:
 
-???+ note
+```bash
+# Skip custom-kernel compilation and record A2 as the package target.
+COMPILE_CUSTOM_KERNELS=0 SOC_VERSION=ascend910b1 \
+    python -m pip install --no-build-isolation --no-deps -e .
+```
 
-    Building custom operators requires gcc/g++ later than version 8 and C++17 or later. If you encounter a TorchNPU version conflict when running `pip install -e .`, use `pip install --no-build-isolation -e .` instead to build in the system environment.
+- `COMPILE_CUSTOM_KERNELS=0` skips building the native extensions and custom operators. These components are enabled by default for a normal NPU installation.
+- `SOC_VERSION` supplies the package's target hardware without querying `npu-smi`. Use `ascend910b1` for A2, `ascend910_9391` for A3, `ascend310p1` for Atlas 300I DUO / Atlas 200I Pro, or `ascend950dt_9582` for 950DT Products. This selects build metadata; it does not emulate an NPU.
+- `--no-build-isolation` uses the packaging tools installed in this virtual environment instead of installing the full `pyproject.toml` build requirements.
+- `--no-deps` skips runtime dependencies from `requirements.txt`. Do not install those dependencies for this packaging-only check.
 
-    If you encounter other compilation issues, an unexpected compiler may be in use. Before compiling, set `CXX_COMPILER` and `C_COMPILER` to the locations of g++ and gcc, respectively.
+The variable assignments apply only to the installation command, so they do not disable custom-kernel compilation in a later shell command.
+
+Verify the installed package metadata without importing the NPU runtime:
+
+```bash
+python - <<'PY'
+from importlib.metadata import distribution
+
+package = distribution("vllm-ascend")
+print(f"{package.metadata['Name']} {package.version}")
+print("CPU-only package build: OK")
+PY
+```
+
+The installation command must finish successfully and the metadata check must print `CPU-only package build: OK`. This verifies packaging only. Runtime dependencies are intentionally absent, so `python -m pip check` will report missing dependencies in this environment; importing runtime modules or running inference is not a success criterion here.
+
+For CPU unit tests, prepare a separate environment using [Testing > Set up a test environment](../developer_guide/contribution/testing.md#set-up-a-test-environment). When developing against main, install the exact vLLM commit recorded in `.github/vllm-main-verified.commit`; [Contributing > Run CI locally](../developer_guide/contribution/index.md#run-ci-locally) provides the checkout and installation commands.
+
+Exit the disposable container when finished; `--rm` removes it and the files created inside it.
 
 ### Multi-node deployment {: #installation-multi-node }
 
 Check the physical links, the status of each node, and inter-node connectivity in order.
+
+The commands below use `hccn_tool` (Huawei Collective Communications Network Tool), the Ascend NPU cluster network management tool installed with the driver. if the command is missing, check the driver installation and executable path.
 
 #### Physical link requirements {: #installation-multi-node-physical }
 
@@ -174,7 +189,11 @@ Check the physical links, the status of each node, and inter-node connectivity i
 
 #### Check each node {: #installation-multi-node-node-check }
 
-Run the following commands on each node in order. The command results should be `success`, and the link status should be `UP`:
+Run the following commands on each node in order:
+
+- `-link -g` should report `link status: UP`.
+- `-net_health -g` should report `net health status: Success`.
+- LLDP, network detection, gateway, and configuration queries print their respective settings. Check these against your cluster's network configuration; they do not all print a `success` message.
 
 === "A2"
 
@@ -212,24 +231,31 @@ Run the following commands on each node in order. The command results should be 
 
 === "950DT Products"
 
+    950DT Products connect NPUs over UB instead of RoCE. The RoCE-oriented `hccn_tool`
+    subcommands used on A2 and A3 (`-lldp`, `-ip`, `-gateway`, `-net_health`, `-ping`)
+    reject the `-i <dev> -<cmd> -g` argument order on this product, and some of them are
+    not supported at all (`Unsupported operation: The command is not supported on this
+    product`). Use the UB-oriented checks below instead.
+
     ```bash
-    # Check the remote switch ports
-    for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done
-    # Get the link status of the Ethernet ports (UP or DOWN)
-    for i in {0..7}; do hccn_tool -i $i -link -g ; done
-    # Check the network health status
-    for i in {0..7}; do hccn_tool -i $i -net_health -g ; done
-    # View the network detected IP configuration
-    for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
-    # View gateway configuration
-    for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
+    # Show the UB port matrix of each NPU (UDie, port, speed, link status)
+    for i in {0..7}; do hccn_tool -g -dev_info -i $i; done
+    # Get the link status of individual UB ports (UP or DOWN)
+    # -u selects the UDie and -p the port; see dev_info above for valid values
+    for i in {0..7}; do for u in 0 1; do for p in {0..7}; do
+        hccn_tool -g -link -i $i -u $u -p $p
+    done; done; done
+    # Check the driver and firmware version of the NPU network
+    hccn_tool -g -version -i 0
+    # List the UB endpoints, their EIDs and link state
+    urma_admin show
     # View NPU network configuration
     cat /etc/hccn.conf
     ```
 
 #### Verify inter-node connectivity {: #installation-multi-node-interconnect }
 
-##### Obtain NPU IP addresses {: #installation-multi-node-npu-ip }
+##### Obtain NPU addresses {: #installation-multi-node-npu-ip }
 
 === "A2"
 
@@ -245,16 +271,61 @@ Run the following commands on each node in order. The command results should be 
 
 === "950DT Products"
 
+    950DT Products address the peer NPUs by UB EID rather than by an IPv4 address. Run this on each node and keep the `ACTIVE` entries:
+
     ```bash
-    for i in {0..7}; do hccn_tool -i $i -ip -g | grep ipaddr; done
+    urma_admin show
     ```
 
 ##### Run a cross-node ping test {: #installation-multi-node-ping }
 
-```bash
-# Execute on the target node (replace with actual IP)
-hccn_tool -i 0 -ping -g address x.x.x.x
+A2 and A3 Products address the peer NPU by IPv4. 950DT Products connect the NPUs over UB and address them by UB EID instead; run `urma_admin show` on the peer node to obtain its EIDs.
+
+=== "A2"
+
+    On the source node, use a local NPU device ID and an NPU IP address obtained from the other node. The destination is the remote NPU's network address, not the host's management IP:
+
+    ```bash
+    # Replace 0 with the source NPU device ID and x.x.x.x with the remote NPU IP.
+    hccn_tool -i 0 -ping -g address x.x.x.x
+    ```
+
+=== "A3"
+
+    On the source node, use a local NPU device ID and an NPU IP address obtained from the other node. The destination is the remote NPU's network address, not the host's management IP:
+
+    ```bash
+    # Replace 0 with the source NPU device ID and x.x.x.x with the remote NPU IP.
+    hccn_tool -i 0 -ping -g address x.x.x.x
+    ```
+
+=== "950DT Products"
+
+    A UB EID is a 128-bit endpoint identifier written as eight hexadecimal groups, and
+    each NPU exposes several of them. The EID after `-I` is a local EID of the source
+    node, and the argument is the EID of the remote node, both taken from the `ACTIVE`
+    rows of `urma_admin show` on the respective node:
+
+    ```bash
+    # Replace the placeholders with a local and a remote UB EID.
+    urma_ping -I <local-eid> <remote-eid>
+    ```
+
+    This requires a working UB stack on both nodes: `urma_admin show topo` must return the
+    fabric topology built from `/etc/hixlep`, `/lib/route.conf` and
+    `/etc/hccl_rootinfo.json`. If it reports `Failed to recv netlink msg, ret=-1` or
+    `Failed to get ubagg topo, ret:-1`, the UB stack is not ready and `urma_ping` cannot
+    send any packet.
+
+Successful output includes received replies and a summary with equal transmitted/received packet counts and zero packet loss. For A2 and A3 Products (`hccn_tool`), for example:
+
+```text
+3 packets transmitted, 3 received, 0.00% packet loss
 ```
+
+`urma_ping` reports the same counters in its own `N packets transmitted, N received, 0% packet loss` summary.
+
+Repeat for the NPU pairs used by your deployment in both directions. Missing replies or packet loss require checking the links, the NPU IP addresses (A2/A3 Products) or EIDs (950DT Products), and the network configuration. This checks basic connectivity; it does not replace a distributed inference test.
 
 #### Start containers on each node {: #installation-multi-node-container }
 

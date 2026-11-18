@@ -28,12 +28,15 @@ def _stub_model(*, mhc: bool) -> Glm5NextModel:
     # stub avoids building the NPU-bound attention / MoE stack.
     model = Glm5NextModel.__new__(Glm5NextModel)
     nn.Module.__init__(model)
+    model.do_not_compile = True
     model.config = SimpleNamespace(
         hidden_size=HIDDEN_SIZE,
         mhc=mhc,
-        mhc_num_residual_streams=N_STREAMS,
+        hc_mult=N_STREAMS,
     )
     model.is_sequence_parallel = False
+    model.end_layer = 1
+    model.aux_hidden_state_layers = ()
     return model
 
 

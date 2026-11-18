@@ -6,6 +6,7 @@ from torch import nn
 from vllm.config import CacheConfig, CompilationConfig, VllmConfig
 from vllm.forward_context import ForwardContext
 from vllm.model_executor.layers.mla import MLAModules
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.indexer import (
@@ -16,8 +17,15 @@ from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention, IndexerWrapper
 
 
 class TestAscendSFAIndexerBackend(TestBase):
+    def setUp(self):
+        super().setUp()
+        sharded = patch("vllm_ascend.attention.indexer.enable_sfa_dcp_sharded_indexer", return_value=False)
+        sharded.start()
+        self.addCleanup(sharded.stop)
+
     def _make_vllm_indexer(self):
         mock_indexer = MagicMock()
+        mock_indexer.config = SimpleNamespace()
         mock_indexer.n_head = 64
         mock_indexer.head_dim = 128
         mock_indexer.topk_tokens = 2048
@@ -29,15 +37,22 @@ class TestAscendSFAIndexerBackend(TestBase):
         mock_indexer.topk_indices_buffer = torch.randn(10)
         mock_indexer.k_cache = MagicMock()
         mock_indexer.k_cache.prefix = "model.layers.0.indexer"
+        mock_indexer.k_cache.head_dim = 132
+        mock_indexer.k_cache.get_kv_cache_spec.return_value = MLAAttentionSpec(
+            block_size=128, num_kv_heads=1, head_size=132, dtype=torch.uint8
+        )
         return mock_indexer
 
-    @patch("vllm_ascend.attention.indexer.enable_dsa_cp", return_value=False)
     @patch("vllm_ascend.attention.indexer.get_current_vllm_config")
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
-    def test_initialization(self, mock_get_ascend_config, mock_get_vllm_config, _mock_enable_dsa_cp):
+    def test_initialization(self, mock_get_ascend_config, mock_get_vllm_config):
         mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = False
+        mock_get_ascend_config.return_value.is_sparse_li_c4_layer.return_value = False
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "deepseek_v32"
         mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
+        mock_get_vllm_config.return_value.parallel_config.decode_context_parallel_size = 1
+        mock_get_vllm_config.return_value.cache_config.cache_dtype = "auto"
+        mock_get_vllm_config.return_value.model_config.dtype = torch.bfloat16
         mock_indexer = self._make_vllm_indexer()
 
         indexer = AscendSFAIndexerBackend(mock_indexer, qk_rope_head_dim=64)
@@ -58,26 +73,32 @@ class TestAscendSFAIndexerBackend(TestBase):
         self.assertTrue(indexer.is_rope_neox_style)
         self.assertFalse(indexer.use_torch_npu_lightning_indexer)
 
-    @patch("vllm_ascend.attention.indexer.enable_dsa_cp", return_value=False)
     @patch("vllm_ascend.attention.indexer.get_current_vllm_config")
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
-    def test_glm_model_type_flags(self, mock_get_ascend_config, mock_get_vllm_config, _mock_enable_dsa_cp):
+    def test_glm_model_type_flags(self, mock_get_ascend_config, mock_get_vllm_config):
         mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = False
+        mock_get_ascend_config.return_value.is_sparse_li_c4_layer.return_value = False
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "glm_moe_dsa"
         mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
+        mock_get_vllm_config.return_value.parallel_config.decode_context_parallel_size = 1
+        mock_get_vllm_config.return_value.cache_config.cache_dtype = "auto"
+        mock_get_vllm_config.return_value.model_config.dtype = torch.bfloat16
 
         indexer = AscendSFAIndexerBackend(self._make_vllm_indexer(), qk_rope_head_dim=64)
 
         self.assertFalse(indexer.is_rope_neox_style)
         self.assertTrue(indexer.use_torch_npu_lightning_indexer)
 
-    @patch("vllm_ascend.attention.indexer.enable_dsa_cp", return_value=False)
     @patch("vllm_ascend.attention.indexer.get_current_vllm_config")
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
-    def test_li_c8_dtypes(self, mock_get_ascend_config, mock_get_vllm_config, _mock_enable_dsa_cp):
+    def test_li_c8_dtypes(self, mock_get_ascend_config, mock_get_vllm_config):
         mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = True
+        mock_get_ascend_config.return_value.is_sparse_li_c4_layer.return_value = False
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "deepseek_v32"
         mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
+        mock_get_vllm_config.return_value.parallel_config.decode_context_parallel_size = 1
+        mock_get_vllm_config.return_value.cache_config.cache_dtype = "auto"
+        mock_get_vllm_config.return_value.model_config.dtype = torch.bfloat16
 
         # The dtype pair is derived from attention_config.indexer_kv_dtype. In UT
         # processes the worker patch (patch_kv_cache_dtype) is not applied, so fp8
@@ -101,9 +122,11 @@ class TestAscendSFAIndexerBackend(TestBase):
         indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
 
         indexer.enable_sparse_li_c8 = False
+        indexer.enable_sparse_li_c4 = False
         self.assertEqual(indexer.num_cache_tensors, 1)
 
         indexer.enable_sparse_li_c8 = True
+        indexer.enable_sparse_li_c4 = False
         self.assertEqual(indexer.num_cache_tensors, 2)
 
     def _make_forward_indexer(self):
@@ -113,11 +136,15 @@ class TestAscendSFAIndexerBackend(TestBase):
         indexer.qk_rope_head_dim = 64
         indexer.is_rope_neox_style = True
         indexer.enable_sparse_li_c8 = False
+        indexer.enable_sparse_li_c4 = False
         indexer.use_torch_npu_lightning_indexer = False
+        indexer._use_fused_cache_store = False
+        indexer._sharded_dcp = False
+        indexer._local_topk = False
         indexer.wk_weights_proj = MagicMock(return_value=(torch.zeros(2, 128 + 4), None))
         indexer.wq_b = MagicMock(return_value=(torch.zeros(2, 2 * 128), None))
-        indexer._pcp_active = False
-        indexer._dsa_cp_active = False
+        indexer.use_pcp = False
+        indexer._is_pcp_decode_sharded = False
         indexer_k_cache = MagicMock(name="indexer_k_cache")
         indexer.k_cache = SimpleNamespace(kv_cache=(indexer_k_cache,))
         return indexer
@@ -125,6 +152,8 @@ class TestAscendSFAIndexerBackend(TestBase):
     def _make_indexer_metadata(self):
         return SimpleNamespace(
             slot_mapping=MagicMock(name="slot_mapping"),
+            cache_scatter_indices=MagicMock(name="cache_scatter_indices"),
+            uses_pcp_sharded_layout=False,
             num_decode_tokens=0,
             actual_seq_lengths_query=MagicMock(),
             actual_seq_lengths_key=MagicMock(),
@@ -181,7 +210,7 @@ class TestAscendSFAIndexerBackend(TestBase):
             k_li,
             None,
             indexer_metadata.slot_mapping,
-            indexer_attn_metadata=indexer_metadata,
+            indexer_metadata.cache_scatter_indices,
         )
 
     def test_forward_skip_topk_still_persists_cache(self):
@@ -219,14 +248,16 @@ class TestAscendSFAIndexerBackend(TestBase):
 
     def test_gather_cache_inputs_pcp_gathers_prefill_region(self):
         indexer = self._make_forward_indexer()
-        indexer._pcp_active = True
+        indexer.use_pcp = True
         k_li = torch.arange(8, dtype=torch.float32).view(2, 4)
         k_li_scale = torch.ones(2, 1, dtype=torch.float32)
-        slots = torch.tensor([7, 8], dtype=torch.int64)
+        # The PCP slot mapping covers every rank's padded tokens.
+        slots = torch.tensor([1, 2, 7, 8], dtype=torch.int64)
         gathered_k_li = torch.arange(16, dtype=torch.float32).view(4, 4)
         gathered_scale = torch.full((4, 1), 2.0)
         gathered_slots = torch.tensor([1, 2, 7, 8], dtype=torch.int64)
         indexer_metadata = self._make_indexer_metadata()
+        indexer_metadata.uses_pcp_sharded_layout = True
         indexer_metadata.slot_mapping = slots
         indexer_metadata.num_decode_tokens = 1
 
@@ -241,34 +272,35 @@ class TestAscendSFAIndexerBackend(TestBase):
         self.assertIs(out_scale, gathered_scale)
         self.assertIs(out_slots, gathered_slots)
 
-    def test_gather_cache_inputs_dsa_cp_all_gathers_k(self):
+    def test_gather_cache_inputs_pcp_replicated_draft_decode_writes_locally(self):
         indexer = self._make_forward_indexer()
-        indexer._dsa_cp_active = True
-        k_li = MagicMock(name="k_li")
-        gathered_k_li = MagicMock(name="gathered_k_li")
+        indexer.use_pcp = True
+        indexer._is_pcp_decode_sharded = True
+        k_li = torch.arange(8, dtype=torch.float32).view(2, 4)
+        slots = torch.tensor([7, -1], dtype=torch.int64)
         indexer_metadata = self._make_indexer_metadata()
+        # A draft decode built without a PCP context keeps its local slots.
+        indexer_metadata.slot_mapping = slots
+        indexer_metadata.num_decode_tokens = 0
+        indexer_metadata.num_actual_tokens = 1
 
-        with (
-            patch(
-                "vllm_ascend.attention.indexer.all_gather_async",
-                return_value=(gathered_k_li, None),
-            ) as gather,
-            patch("vllm_ascend.attention.indexer.get_tp_group"),
-        ):
+        with patch(
+            "vllm_ascend.attention.indexer._gather_prefill_cache_inputs",
+            return_value=((k_li[:1],), slots[:1]),
+        ) as gather:
             out_k, out_scale, out_slots = indexer._gather_cache_inputs(k_li, None, indexer_metadata)
 
-        gather.assert_called_once()
-        self.assertIs(gather.call_args.args[0], k_li)
-        self.assertIs(out_k, gathered_k_li)
+        # Every token is replicated, so the upstream helper keeps them local.
+        gather.assert_called_once_with((k_li,), slots, 1)
+        torch.testing.assert_close(out_k, k_li[:1])
         self.assertIsNone(out_scale)
-        self.assertIs(out_slots, indexer_metadata.slot_mapping)
+        torch.testing.assert_close(out_slots, slots[:1])
 
-    @patch("vllm_ascend.attention.indexer.get_ascend_config")
-    @patch("vllm_ascend.attention.indexer.torch_npu.npu_scatter_nd_update_")
-    def test_write_cache_scatter_path(self, mock_scatter, mock_get_ascend_config):
-        mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
+    @patch("vllm_ascend.attention.indexer.DeviceOperator.scatter_cache")
+    def test_write_cache_scatter_path(self, mock_scatter):
         indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
         indexer.enable_sparse_li_c8 = True
+        indexer.enable_sparse_li_c4 = False
 
         k_li = torch.zeros(2, 4)
         k_li_scale = torch.zeros(2, 1)
@@ -277,61 +309,56 @@ class TestAscendSFAIndexerBackend(TestBase):
         indexer_scale_cache = torch.zeros(8, 1)
         indexer.k_cache = SimpleNamespace(kv_cache=(indexer_k_cache, indexer_scale_cache))
 
-        indexer.write_cache(k_li, k_li_scale, slot_mapping, MagicMock())
+        indexer.write_cache(k_li, k_li_scale, slot_mapping)
 
         self.assertEqual(mock_scatter.call_count, 2)
         k_call, scale_call = mock_scatter.call_args_list
         self.assertEqual(k_call.args[0].data_ptr(), indexer_k_cache.data_ptr())
-        self.assertTrue(torch.equal(k_call.args[1], slot_mapping.view(-1, 1)))
+        self.assertEqual(k_call.args[1].data_ptr(), slot_mapping.data_ptr())
+        self.assertEqual(k_call.args[2].data_ptr(), k_li.data_ptr())
+        self.assertEqual(len(k_call.args), 3)
         self.assertEqual(scale_call.args[0].data_ptr(), indexer_scale_cache.data_ptr())
+        self.assertEqual(scale_call.args[1].data_ptr(), slot_mapping.data_ptr())
+        self.assertEqual(scale_call.args[2].data_ptr(), k_li_scale.data_ptr())
+        self.assertEqual(len(scale_call.args), 3)
 
-    @patch("vllm_ascend.attention.indexer.get_ascend_config")
-    @patch("vllm_ascend.attention.indexer.torch_npu.npu_scatter_nd_update_")
-    def test_write_cache_without_li_c8_writes_k_only(self, mock_scatter, mock_get_ascend_config):
-        mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
+    @patch("vllm_ascend.attention.indexer.DeviceOperator.scatter_cache")
+    def test_write_cache_without_li_c8_writes_k_only(self, mock_scatter):
         indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
         indexer.enable_sparse_li_c8 = False
+        indexer.enable_sparse_li_c4 = False
 
         k_li = torch.zeros(2, 4)
         slot_mapping = torch.tensor([3, 5])
         indexer_k_cache = torch.zeros(8, 4)
         indexer.k_cache = SimpleNamespace(kv_cache=(indexer_k_cache,))
 
-        indexer.write_cache(k_li, None, slot_mapping, MagicMock())
+        indexer.write_cache(k_li, None, slot_mapping)
 
         mock_scatter.assert_called_once()
         self.assertEqual(mock_scatter.call_args.args[0].data_ptr(), indexer_k_cache.data_ptr())
-
-    @patch("vllm_ascend.attention.indexer.get_ascend_config")
-    @patch("vllm_ascend.attention.indexer.torch.ops._C_ascend.store_kv_block", create=True)
-    def test_write_cache_reshape_optim_path(self, mock_store_kv_block, mock_get_ascend_config):
-        mock_get_ascend_config.return_value.c8_reshape_optim_enabled = True
-        indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
-        indexer.enable_sparse_li_c8 = True
-
-        k_li = torch.zeros(2, 4)
-        k_li_scale = torch.zeros(2, 1)
-        indexer_k_cache = torch.zeros(8, 4)
-        indexer_scale_cache = torch.zeros(8, 1)
-        indexer.k_cache = SimpleNamespace(kv_cache=(indexer_k_cache, indexer_scale_cache))
-        attn_metadata = MagicMock()
-
-        indexer.write_cache(k_li, k_li_scale, torch.tensor([3, 5]), attn_metadata)
-
-        self.assertEqual(mock_store_kv_block.call_count, 2)
-        k_call, scale_call = mock_store_kv_block.call_args_list
-        self.assertIs(k_call.args[0], k_li)
-        self.assertIs(k_call.args[1], indexer_k_cache)
-        self.assertIs(scale_call.args[0], k_li_scale)
-        self.assertIs(scale_call.args[1], indexer_scale_cache)
+        self.assertEqual(mock_scatter.call_args.args[1].data_ptr(), slot_mapping.data_ptr())
+        self.assertEqual(mock_scatter.call_args.args[2].data_ptr(), k_li.data_ptr())
+        self.assertEqual(len(mock_scatter.call_args.args), 3)
 
 
 class TestIndexerWrapper(TestBase):
-    @patch("vllm_ascend.ops.mla.AscendSFAIndexerBackend")
-    def test_constructs_backend_and_delegates_sfa_interface(self, mock_backend_cls):
+    def test_prepare_pcp_hidden_leaves_ordinary_backend_inputs_unchanged(self):
+        backend = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
+        nn.Module.__init__(backend)
+        wrapper = IndexerWrapper.__new__(IndexerWrapper)
+        nn.Module.__init__(wrapper)
+        wrapper.impl = backend
+        hidden = torch.ones(2, 3)
+
+        self.assertIs(wrapper.prepare_pcp_hidden(hidden, SimpleNamespace()), hidden)
+
+    def test_constructs_backend_and_delegates_sfa_interface(self):
         vllm_indexer = MagicMock(name="vllm_indexer")
+        mock_backend_cls = vllm_indexer.k_cache.get_attn_backend.return_value
         wrapper = IndexerWrapper(vllm_indexer, qk_rope_head_dim=64)
 
+        vllm_indexer.k_cache.get_attn_backend.assert_called_once_with()
         mock_backend_cls.assert_called_once_with(vllm_indexer, 64)
         self.assertIs(wrapper.impl, mock_backend_cls.return_value)
         self.assertIs(wrapper.k_cache, wrapper.impl.k_cache)
@@ -381,30 +408,34 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         mock_mla_attn.impl = MagicMock()
         mock_mla_attn.impl.process_weights_after_loading = MagicMock()
 
-        with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn):
+        with patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn) as backend:
             mock_tp_size.return_value = 2
             mock_vllm_config = MagicMock(spec=VllmConfig)
             mock_vllm_config.model_config.hf_text_config = MagicMock(num_hidden_layers=32, first_k_dense_replace=True)
             mock_get_vllm_config.return_value = mock_vllm_config
-            mock_vllm_config.compilation_config = CompilationConfig()
+            # CUDA eligibility must not alter Ascend cache/indexer layout.
+            for shardq_eligible in (False, True):
+                mock_vllm_config.compilation_config = CompilationConfig()
 
-            attn = AscendMultiHeadLatentAttention(
-                hidden_size=self.hidden_size,
-                num_heads=self.num_heads,
-                scale=self.scale,
-                qk_nope_head_dim=self.qk_nope_head_dim,
-                qk_rope_head_dim=self.qk_rope_head_dim,
-                v_head_dim=self.v_head_dim,
-                q_lora_rank=self.q_lora_rank,
-                kv_lora_rank=self.kv_lora_rank,
-                mla_modules=self.mock_mla_modules,
-                cache_config=self.mock_cache_config,
-                quant_config=self.mock_quant_config,
-                prefix=self.prefix,
-            )
+                attn = AscendMultiHeadLatentAttention(
+                    hidden_size=self.hidden_size,
+                    num_heads=self.num_heads,
+                    scale=self.scale,
+                    qk_nope_head_dim=self.qk_nope_head_dim,
+                    qk_rope_head_dim=self.qk_rope_head_dim,
+                    v_head_dim=self.v_head_dim,
+                    q_lora_rank=self.q_lora_rank,
+                    kv_lora_rank=self.kv_lora_rank,
+                    mla_modules=self.mock_mla_modules,
+                    cache_config=self.mock_cache_config,
+                    quant_config=self.mock_quant_config,
+                    prefix=self.prefix,
+                    shardq_eligible=shardq_eligible,
+                )
 
-            self.assertEqual(attn.tp_size, 2)
-            self.assertIsNotNone(attn.mla_attn)
+                self.assertEqual(attn.tp_size, 2)
+                self.assertIsNotNone(attn.mla_attn)
+                self.assertNotIn("shardq_eligible", backend.call_args.kwargs)
 
     @patch("vllm_ascend.ops.mla.IndexerWrapper")
     @patch("vllm_ascend.ops.mla.get_current_vllm_config")
@@ -423,7 +454,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
                 mock_mla_attn.impl.fused_qkv_a_proj = fused_qkv_a_proj
                 mock_mla_attn.impl.q_proj = q_proj
 
-                with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn):
+                with patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn):
                     mock_tp_size.return_value = 2
                     mock_vllm_config = MagicMock(spec=VllmConfig)
                     mock_vllm_config.model_config.hf_text_config = MagicMock(
@@ -477,7 +508,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         mock_mla_attn.impl = MagicMock()
         mock_mla_attn.impl.process_weights_after_loading = MagicMock()
 
-        with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn):
+        with patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn):
             attn = AscendMultiHeadLatentAttention(
                 hidden_size=self.hidden_size,
                 num_heads=self.num_heads,
@@ -546,6 +577,18 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         self.assertIs(attn.topk_indices_buffer, buffer)
         self.assertIs(mock_impl.topk_indices_buffer, buffer)
 
+    def test_lim_topk_metadata_compaction_forwards_to_impl(self):
+        attn = AscendMultiHeadLatentAttention.__new__(AscendMultiHeadLatentAttention)
+        mock_impl = MagicMock()
+        mock_impl.use_fused_copy_sfa = True
+        attn.mla_attn = SimpleNamespace(impl=mock_impl)
+        indices = torch.tensor([1, 5], dtype=torch.int32)
+
+        self.assertTrue(attn.uses_lim_topk_metadata)
+        attn.compact_lim_topk_metadata(indices)
+
+        mock_impl.compact_lim_topk_metadata.assert_called_once_with(indices)
+
     @patch("vllm_ascend.ops.mla.get_current_vllm_config")
     @patch("vllm_ascend.ops.mla.get_tensor_model_parallel_world_size")
     def test_initialization_skip_topk_consistency(self, mock_tp_size, mock_get_vllm_config):
@@ -556,7 +599,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         mock_mla_attn.impl.process_weights_after_loading = MagicMock()
 
         with (
-            patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn) as mock_mla_attn_cls,
+            patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn) as mock_mla_attn_cls,
             patch("vllm_ascend.ops.mla.IndexerWrapper"),
         ):
             mock_tp_size.return_value = 2

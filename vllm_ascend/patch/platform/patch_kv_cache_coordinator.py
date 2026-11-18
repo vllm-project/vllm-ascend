@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM projectx
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import sys
 from collections.abc import Mapping
+from copy import copy
+from dataclasses import replace
 from math import lcm
 
 import vllm
-import vllm.envs as envs_vllm
 import vllm.v1.core.kv_cache_coordinator as vllm_kv_cache_coordinator
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -27,15 +28,13 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
-from vllm_ascend.utils import vllm_version_is
-
-USE_MULTI_GROUPS_KV_CACHE = True
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
@@ -62,13 +61,8 @@ def _skips_eagle_block_drop(kv_transfer_config) -> bool:
     )
 
 
-def _select_kv_token_budget(
-    max_model_len: int,
-    max_in_flight_tokens: int | None,
-    max_num_batched_tokens: int | None,
-) -> int:
-    token_budget = max_in_flight_tokens
-    return token_budget if token_budget is not None else max_model_len
+def _select_kv_token_budget(max_model_len: int, max_in_flight_tokens: int | None) -> int:
+    return max_in_flight_tokens if max_in_flight_tokens is not None else max_model_len
 
 
 def _is_deepseek_v4_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
@@ -121,9 +115,10 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         eagle_attn_layer_names: list[str] | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
         max_in_flight_tokens: int | None = None,
-        max_num_batched_tokens: int | None = None,
         scheduler_block_size: int | None = None,
         num_prefill_lookahead: int = 0,
+        num_hash_lookahead_tokens: int = 0,
+        allow_partial_hash_hits: bool = True,
     ):
         # Keep pcp_world_size in this patched constructor for compatibility
         # with the upstream coordinator interface. PCP is rejected by the platform.
@@ -135,13 +130,15 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
+        # vLLM main (#54736) added allow_partial_hash_hits to the upstream
+        # coordinator interface (fine-grained hybrid prefix hits).
+        self.allow_partial_hash_hits = allow_partial_hash_hits
         # Fall back to `max_model_len` when unset so the recycling-aware
         # admission cap (vLLM PR #40946) collapses to the prior uncapped
         # behavior. The scheduler always supplies the real value at runtime.
-        token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
+        token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens)
         self.max_in_flight_tokens = token_budget
-        self.max_num_batched_tokens = token_budget
-        self.retention_interval = getattr(envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
+        self.retention_interval = kv_cache_config.prefix_cache_retention_interval
         validate_retention_interval = getattr(
             vllm_kv_cache_coordinator,
             "_validate_prefix_cache_retention_interval",
@@ -159,6 +156,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             hash_block_size=hash_block_size,
             enable_kv_cache_events=enable_kv_cache_events,
             metrics_collector=metrics_collector,
+            num_hash_lookahead_tokens=num_hash_lookahead_tokens,
         )
 
         # KV cache group indices that get the EAGLE last-block drop.
@@ -175,6 +173,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 for i, g in enumerate(kv_cache_config.kv_cache_groups)
                 if isinstance(g.kv_cache_spec, FullAttentionSpec)
             }
+        # vLLM main (#61589) reads this base-class attribute in cache_blocks();
+        # lookahead hashes clear the drop while keeping the groups flagged.
+        self.drop_eagle_group_ids = self.eagle_group_ids if use_eagle else set()
 
         extra_mgr_kwargs: dict = {"scheduler_block_size": scheduler_block_size}
         extra_mgr_kwargs["needs_kv_cache_zeroing"] = kv_cache_config.needs_kv_cache_zeroing
@@ -184,7 +185,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 block_pool=self.block_pool,
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
-                dcp_world_size=dcp_world_size,
+                dcp_world_size=(
+                    1 if isinstance(_manager_spec(kv_cache_group.kv_cache_spec), MambaSpec) else dcp_world_size
+                ),
                 pcp_world_size=1,
                 max_in_flight_tokens=token_budget,
                 max_model_len=max_model_len,
@@ -192,12 +195,6 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
-        # vLLM #53614 aligns exported Mamba checkpoints with EAGLE replay.
-        if use_eagle and not vllm_version_is("0.29.0"):
-            for manager in self.single_type_managers:
-                if isinstance(manager, MambaManager):
-                    manager.drop_eagle_checkpoint_block = True
-
         # hash_block_size: the block size used to compute block hashes.
         # The actual block size usually equals hash_block_size, but in cases where
         # different KV cache groups have different block sizes, the actual block size
@@ -212,12 +209,22 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 for g in kv_cache_config.kv_cache_groups
                 if is_prefix_cacheable(g.kv_cache_spec)
             ), "block_size must be divisible by hash_block_size"
-        self.enable_partial_hash_hits = dcp_world_size == 1 and any(
+        self.enable_partial_hash_hits = allow_partial_hash_hits and any(
             isinstance(g.kv_cache_spec, MambaSpec)
             and g.kv_cache_spec.mamba_cache_mode == "align"
-            and g.kv_cache_spec.block_size > hash_block_size
+            and (
+                g.kv_cache_spec.block_size > hash_block_size
+                or (dcp_world_size > 1 and g.kv_cache_spec.block_size == hash_block_size)
+            )
             for g in kv_cache_config.kv_cache_groups
         )
+        if self.enable_partial_hash_hits:
+            self.enable_partial_hash_hits = all(
+                not is_prefix_cacheable(g.kv_cache_spec)
+                or getattr(manager, "block_size", self._get_effective_block_size(g.kv_cache_spec)) == hash_block_size
+                or getattr(manager, "supports_fine_grained_hash_lookup", False)
+                for manager, g in zip(self.single_type_managers, kv_cache_config.kv_cache_groups)
+            )
         self.verify_and_split_kv_cache_groups()
 
         # Align the WRITE-path mask granularity (reachable_block_mask) with the
@@ -248,6 +255,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # of typical ~2K prompts, pinning P-side prefix hits to 0.
         kv_transfer_config = getattr(kv_cache_config, "kv_transfer_config", None)
         self.skips_eagle_block_drop = _skips_eagle_block_drop(kv_transfer_config)
+        # Keep Mamba checkpoint writes on the same boundary as prefill split
+        # and cache lookup. Only roles using EAGLE replay need the block drop.
+        if use_eagle and not self.skips_eagle_block_drop:
+            for group_id, manager in enumerate(self.single_type_managers):
+                if isinstance(manager, MambaManager) and group_id in self.eagle_group_ids:
+                    manager.drop_eagle_checkpoint_block = True
 
     @property
     def _cache_hit_alignment_tokens(self) -> int:
@@ -258,9 +271,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
     def _get_effective_block_size(self, kv_cache_spec: KVCacheSpec) -> int:
         block_size = kv_cache_spec.block_size
-        if isinstance(kv_cache_spec, MambaSpec) and self.enable_caching:
+        if isinstance(kv_cache_spec, MambaSpec):
             return block_size
-        if self.dcp_world_size > 1:
+        if kv_cache_spec.dcp_sharded:
             block_size *= self.dcp_world_size
         return block_size
 
@@ -427,7 +440,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self._cache_hit_alignment_tokens,
-                    dcp_world_size=self.dcp_world_size,
+                    dcp_world_size=self.dcp_world_size if spec.dcp_sharded else 1,
                     pcp_world_size=1,
                 )
                 hit_blocks, _new_hit_length = hit_result
@@ -511,37 +524,61 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     scheduler_block_size: int | None = None,
     eagle_attn_layer_names: list[str] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
-    max_num_batched_tokens: int | None = None,
     num_prefill_lookahead: int = 0,
+    num_hash_lookahead_tokens: int = 0,
+    allow_partial_hash_hits: bool = True,
 ) -> KVCacheCoordinator:
     # Keep pcp_world_size in this patched function for upstream call
     # compatibility; platform validation guarantees that it is one.
     del pcp_world_size
-    token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
-    if _is_deepseek_v4_kv_cache_config(kv_cache_config):
-        return AscendHybridKVCacheCoordinator(  # type: ignore[call-arg]
-            kv_cache_config,
-            max_model_len,
-            use_eagle,
-            enable_caching,
-            enable_kv_cache_events,
-            dcp_world_size=dcp_world_size,
-            pcp_world_size=1,
-            hash_block_size=hash_block_size,
-            eagle_attn_layer_names=eagle_attn_layer_names,
-            metrics_collector=metrics_collector,
-            max_in_flight_tokens=token_budget,
-            max_num_batched_tokens=token_budget,
-            scheduler_block_size=scheduler_block_size,
-            num_prefill_lookahead=num_prefill_lookahead,
+    token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens)
+    hybrid_kwargs = dict(
+        kv_cache_config=kv_cache_config,
+        max_model_len=max_model_len,
+        use_eagle=use_eagle,
+        enable_caching=enable_caching,
+        enable_kv_cache_events=enable_kv_cache_events,
+        dcp_world_size=dcp_world_size,
+        pcp_world_size=1,
+        hash_block_size=hash_block_size,
+        eagle_attn_layer_names=eagle_attn_layer_names,
+        metrics_collector=metrics_collector,
+        max_in_flight_tokens=token_budget,
+        scheduler_block_size=scheduler_block_size,
+        num_prefill_lookahead=num_prefill_lookahead,
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
+    )
+    # vLLM main (#54736) added allow_partial_hash_hits.
+    hybrid_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
+    if any(group.role == KVCacheGroupRole.HISPARSE_SOURCE for group in kv_cache_config.kv_cache_groups):
+        # Core owns HiSparse admission, HMA roles, eviction and prefix state.
+        # Remove this bypass when the Ascend coordinator factory patch retires.
+        return _orig_get_kv_cache_coordinator(
+            **{name: value for name, value in hybrid_kwargs.items() if name != "eagle_attn_layer_names"}
         )
+    # Private state blocks are excluded by the block-size resolver. Keep
+    # their independent manager geometry when prefix caching is disabled too.
+    num_cacheable_groups = sum(is_prefix_cacheable(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)
+    has_private_groups = 0 < num_cacheable_groups < len(kv_cache_config.kv_cache_groups)
+    if num_cacheable_groups and (_is_deepseek_v4_kv_cache_config(kv_cache_config) or has_private_groups):
+        return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]
 
-    if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
+    if num_cacheable_groups == 0 or len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
+        if num_cacheable_groups == 0:
+            # Upstream's no-prefix coordinator expects scheduler specs rather
+            # than the planner's uniform wrappers. Preserve the caller's config.
+            kv_cache_config = copy(kv_cache_config)
+            kv_cache_config.kv_cache_groups = [
+                replace(group, kv_cache_spec=_manager_spec(group.kv_cache_spec))
+                for group in kv_cache_config.kv_cache_groups
+            ]
         orig_kwargs = dict(
             kv_cache_config=kv_cache_config,
             max_model_len=max_model_len,
             use_eagle=use_eagle,
-            enable_caching=enable_caching,
+            # A SWA-only bounded-replay backbone has no persistent KV to hit.
+            # Keep its private managers without constructing a hybrid lookup.
+            enable_caching=enable_caching and num_cacheable_groups > 0,
             enable_kv_cache_events=enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
             pcp_world_size=1,
@@ -551,24 +588,12 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
         orig_kwargs["max_in_flight_tokens"] = token_budget
         orig_kwargs["scheduler_block_size"] = scheduler_block_size
         orig_kwargs["num_prefill_lookahead"] = num_prefill_lookahead
+        orig_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
+        # Both supported versions accept lookahead hash tokens.
+        orig_kwargs["num_hash_lookahead_tokens"] = num_hash_lookahead_tokens
         return _orig_get_kv_cache_coordinator(**orig_kwargs)
 
-    return AscendHybridKVCacheCoordinator(  # type: ignore[call-arg]
-        kv_cache_config,
-        max_model_len,
-        use_eagle,
-        enable_caching,
-        enable_kv_cache_events,
-        dcp_world_size=dcp_world_size,
-        pcp_world_size=1,
-        hash_block_size=hash_block_size,
-        eagle_attn_layer_names=eagle_attn_layer_names,
-        metrics_collector=metrics_collector,
-        max_in_flight_tokens=token_budget,
-        max_num_batched_tokens=token_budget,
-        scheduler_block_size=scheduler_block_size,
-        num_prefill_lookahead=num_prefill_lookahead,
-    )
+    return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]
 
 
 vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator = get_kv_cache_coordinator  # type: ignore[attr-defined]

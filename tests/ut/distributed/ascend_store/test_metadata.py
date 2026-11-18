@@ -18,14 +18,22 @@
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+
+# isort: split
+import torch
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
+
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
+    LayerPoolKey,
+    masked_block_runs,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     ChunkedTokenDatabase,
     KeyMetadata,
-    LayerMultiBlockReqMeta,
-    LayerPoolKey,
     LoadSpec,
     PoolKey,
     ReqMeta,
@@ -33,14 +41,33 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
     get_group_block_size,
     get_group_cache_family,
+    get_sharded_mamba_group_ids,
     infer_cache_transfer_granularity,
+    infer_dcp_mismatch_info,
     infer_group_block_sizes,
-    masked_block_runs,
     uses_hybrid_kv_cache,
 )
 
 
 class TestCacheLayoutHelpers(unittest.TestCase):
+    def test_sharded_mamba_groups_exclude_tp_replicas(self):
+        mamba_spec = MambaSpec(
+            shapes=((4,),),
+            dtypes=(torch.float32,),
+            block_size=16,
+            mamba_cache_mode="align",
+        )
+        specs = [
+            FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32),
+            mamba_spec,
+            replace(mamba_spec, tp_replicated=True),
+            UniformTypeKVCacheSpecs.from_specs({"layer.3": mamba_spec}),
+        ]
+        config = SimpleNamespace(
+            kv_cache_groups=[KVCacheGroupSpec([f"layer.{group_id}"], spec) for group_id, spec in enumerate(specs)]
+        )
+        self.assertEqual(get_sharded_mamba_group_ids(config), {1, 3})
+
     def test_uses_hybrid_kv_cache(self):
         groups = [
             SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
@@ -217,12 +244,14 @@ class TestChunkedTokenDatabase(unittest.TestCase):
     def test_process_tokens_with_tail_clipped_block_ids_maps_tail_chunks(self):
         db = ChunkedTokenDatabase([self.meta], block_size=[128], partitions=None)
         hashes = [bytes([idx % 251]) * 32 for idx in range(128)]
+        predicate = MagicMock(return_value=True)
 
         result = list(
             db.process_token_key_strings_with_block_ids(
                 128 * 128,
                 hashes,
                 [1000, 1001, 1002, 1003],
+                chunk_filter=predicate,
             )
         )
 
@@ -234,6 +263,7 @@ class TestChunkedTokenDatabase(unittest.TestCase):
             [block_id for _, _, _, _, block_id in result],
             [1000, 1001, 1002, 1003],
         )
+        self.assertEqual(predicate.call_count, 4)
 
     def test_process_tokens_token_len_shorter_than_all_blocks(self):
         hashes = ["a", "b", "c", "d"]
@@ -295,17 +325,26 @@ class TestChunkedTokenDatabase(unittest.TestCase):
     def test_key_strings_pre_shard_after_filtering(self):
         hashes = ["a", "b", "c", "d"]
         store_mask = [True, False, True, True]
+        predicate = MagicMock(return_value=True)
         result = list(
             self.db.process_token_key_strings_with_block_ids(
                 64,
                 hashes,
                 [10, 11, 12, 13],
-                chunk_filter=lambda start: store_mask[start // 16],
+                chunk_mask=store_mask,
+                chunk_filter=predicate,
                 shard_rank=1,
                 shard_size=2,
             )
         )
         self.assertEqual([(start, end, block_id) for start, end, _, _, block_id in result], [(32, 48, 12)])
+        self.assertEqual(predicate.call_count, 3)
+
+    def test_lookup_mask_start_and_short_mask_bounds(self):
+        for mask, expected in ((None, [32, 48]), ([], []), ([True, True, True], [32])):
+            with self.subTest(mask=mask):
+                result = list(self.db.process_token_key_strings(64, ["a", "b", "c", "d"], mask_num=17, chunk_mask=mask))
+                self.assertEqual([item[0] for item in result], expected)
 
     def test_compressed_keys_use_logical_spans_and_values_use_physical_rows(self):
         db = ChunkedTokenDatabase(
@@ -545,6 +584,29 @@ class TestReqMeta(unittest.TestCase):
         self.assertEqual(meta.token_len_chunk, 32)
         self.assertIsNone(meta.load_spec)
 
+    def test_from_request_tracker_owns_only_new_token_suffix(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=48,
+            allocated_block_ids=[0, 1, 2],
+            num_saved_tokens=32,
+            token_ids=list(range(48)),
+        )
+
+        meta = ReqMeta.from_request_tracker(
+            tracker,
+            cache_transfer_granularity=16,
+            block_hashes=[b"h1", b"h2", b"h3"],
+        )
+
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta.save_start_token, 32)
+        self.assertEqual(meta.token_ids, list(range(32, 48)))
+        tracker.token_ids.append(99)
+        self.assertEqual(meta.token_ids, list(range(32, 48)))
+        self.assertEqual(meta.get_event_token_ids(32, 48), list(range(32, 48)))
+        self.assertEqual(meta.get_event_token_ids(0, 16), [])
+
     def test_from_request_tracker_skip_save(self):
         tracker = RequestTracker(
             req_id="r1",
@@ -607,7 +669,9 @@ class TestReqMeta(unittest.TestCase):
             allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
-        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, discard_partial_chunks=True)
+        meta = ReqMeta.from_request_tracker(
+            tracker, cache_transfer_granularity=16, discard_partial_chunks=True, block_hashes=[b"h0"]
+        )
         self.assertIsNotNone(meta)
         self.assertEqual(meta.token_len_chunk, 16)
 
@@ -652,6 +716,24 @@ class TestReqMeta(unittest.TestCase):
         self.assertEqual(meta.save_end_token, 32)
         self.assertEqual(meta.target_token_len, 33)
 
+    def test_from_request_tracker_uses_mrv2_reprefill_boundary_for_masks(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=64,
+            allocated_block_ids=[0, 1, 2, 3],
+            num_prompt_tokens=32,
+            prefill_end_tokens=48,
+        )
+
+        meta = ReqMeta.from_request_tracker(
+            tracker,
+            cache_transfer_granularity=16,
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],
+        )
+
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta.num_prompt_tokens, 48)
+
     def test_from_request_tracker_defers_c8_boundary_without_hash(self):
         tracker = RequestTracker(
             req_id="r1",
@@ -693,7 +775,9 @@ class TestReqMeta(unittest.TestCase):
             allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
-        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, discard_partial_chunks=False)
+        meta = ReqMeta.from_request_tracker(
+            tracker, cache_transfer_granularity=16, discard_partial_chunks=False, block_hashes=[b"h0"]
+        )
         self.assertIsNotNone(meta)
         self.assertEqual(meta.token_len_chunk, 20)
 
@@ -744,21 +828,33 @@ class TestAscendConnectorMetadata(unittest.TestCase):
         self.assertEqual(meta.requests[0].req_id, "r1")
 
 
-class TestLayerMultiBlockReqMeta(unittest.TestCase):
-    def test_fields(self):
-        meta = LayerMultiBlockReqMeta(
-            req_id="r1",
-            keys=[],
-            starts=[0, 16],
-            ends=[16, 32],
-            block_ids=[0, 1],
-            layer_id=2,
-        )
-        self.assertEqual(meta.req_id, "r1")
-        self.assertEqual(meta.layer_id, 2)
-        self.assertTrue(meta.is_last_chunk)
-        self.assertIsNone(meta.current_event)
-
-
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestInferDcpMismatchInfo(unittest.TestCase):
+    def test_same_dcp_returns_false(self):
+        self.assertFalse(infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": 2}, 2))
+        self.assertFalse(infer_dcp_mismatch_info("kv_producer", {"decode_dcp_size": 8}, 8, 1))
+
+    def test_missing_peer_key_returns_false(self):
+        # single-group path: peer topology absent -> local layout authoritative
+        self.assertFalse(infer_dcp_mismatch_info("kv_consumer", {}, 2, 1))
+
+    def test_consumer_prefill_dcp_mismatch_detected(self):
+        self.assertTrue(infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": 8}, 2))
+
+    def test_producer_decode_dcp_mismatch_detected(self):
+        self.assertTrue(infer_dcp_mismatch_info("kv_producer", {"decode_dcp_size": 2}, 8))
+
+    def test_pcp_mismatch_detected(self):
+        self.assertTrue(infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": 2, "prefill_pcp_size": 4}, 2, 1))
+
+    def test_non_mapping_extra_config_returns_false(self):
+        self.assertFalse(infer_dcp_mismatch_info("kv_consumer", object(), 2, 1))
+
+    def test_kv_both_returns_false(self):
+        self.assertFalse(infer_dcp_mismatch_info("kv_both", {"prefill_dcp_size": 8}, 2, 1))
+
+    def test_invalid_peer_value_treated_as_local(self):
+        self.assertFalse(infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": "bad"}, 2, 1))

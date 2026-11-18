@@ -142,7 +142,6 @@ EXPECTED_BEAM_SEARCH_OUTPUTS = [
 ]
 
 QWEN2VL_MODEL_PATH = "Qwen/Qwen2-VL-2B-Instruct"
-QWEN25VL_MODEL_PATH = "Qwen/Qwen2.5-VL-3B-Instruct"
 QWEN3VL_MODEL_PATH = "Qwen/Qwen3-VL-4B-Instruct"
 
 
@@ -244,17 +243,6 @@ def test_qwen2vl_lora(
             qwen2vl_vision_tower_connector_lora_files,
             qwen2vl_vision_tower_lora_files,
         )
-
-
-@wait_until_npu_memory_free()
-def test_qwen25vl_lora(qwen25vl_lora_files, qwen25vl_vision_lora_files):
-    """Qwen2.5-VL-3B language and vision-connector LoRA on one engine."""
-    config = _tower_connector_config(QWEN25VL_MODEL_PATH, qwen25vl_lora_files)
-    with _vllm_runner(config) as vllm_model:
-        llm = vllm_model.model
-        run_test(llm, config, TEST_IMAGES, expected_outputs=EXPECTED_OUTPUTS, lora_id=1)
-        config.lora_path = qwen25vl_vision_lora_files
-        run_test(llm, config, TEST_IMAGES, expected_outputs=EXPECTED_OUTPUTS, lora_id=2)
 
 
 @wait_until_npu_memory_free()

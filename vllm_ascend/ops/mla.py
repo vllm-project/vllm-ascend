@@ -20,20 +20,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Callable
+
 import torch
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
-from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.attention.mla_v1 import AscendMLAAttention
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
+from vllm_ascend.utils import vllm_version_is
 
 
 class IndexerWrapper(nn.Module):
@@ -66,7 +68,9 @@ class IndexerWrapper(nn.Module):
                 self.register_parameter(name, parameter)
 
         backend_factory = getattr(type(vllm_indexer), "get_ascend_indexer_backend_cls", None)
-        backend_cls = backend_factory(vllm_indexer) if backend_factory is not None else AscendSFAIndexerBackend
+        backend_cls = (
+            backend_factory(vllm_indexer) if backend_factory is not None else vllm_indexer.k_cache.get_attn_backend()
+        )
         self.impl = backend_cls(vllm_indexer, qk_rope_head_dim)
 
     # Interface consumed by the SFA impl - delegated to the backend impl.
@@ -97,15 +101,30 @@ class IndexerWrapper(nn.Module):
     def process_weights_after_loading(self) -> None:
         self.impl.process_weights_after_loading()
 
+    def prepare_pcp_hidden(
+        self, hidden_states: torch.Tensor, indexer_metadata: AttentionMetadata
+    ) -> torch.Tensor | Callable[[], torch.Tensor]:
+        """Let pooled indexers launch key communication before SFA queries."""
+        prepare = getattr(self.impl, "prepare_pcp_hidden", None)
+        if prepare is None:
+            return hidden_states
+        return prepare(hidden_states, indexer_metadata)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        k_hidden_states: torch.Tensor,
+        k_hidden_states: torch.Tensor | Callable[[], torch.Tensor],
         indexer_metadata: AttentionMetadata,
         compute_topk: bool = True,
     ) -> torch.Tensor | None:
-        return self.impl(hidden_states, q_c, k_hidden_states, indexer_metadata, compute_topk)
+        return self.impl(
+            hidden_states,
+            q_c,
+            k_hidden_states,
+            indexer_metadata,
+            compute_topk,
+        )
 
 
 class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
@@ -140,6 +159,17 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         if impl is not None and hasattr(impl, "topk_indices_buffer"):
             impl.topk_indices_buffer = value
 
+    @property
+    def uses_lim_topk_metadata(self) -> bool:
+        impl = getattr(getattr(self, "mla_attn", None), "impl", None)
+        return bool(getattr(impl, "use_fused_copy_sfa", False))
+
+    def compact_lim_topk_metadata(self, slot_ids: torch.Tensor) -> None:
+        impl = getattr(getattr(self, "mla_attn", None), "impl", None)
+        compact = getattr(impl, "compact_lim_topk_metadata", None)
+        if compact is not None:
+            compact(slot_ids)
+
     def __init__(
         self,
         hidden_size: int,
@@ -162,9 +192,11 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         # both layernorms as extra args, so this flag has no effect here and is
         # accepted for signature compatibility only.
         fuse_qkv_rmsnorm: bool = False,
+        shardq_eligible: bool = False,
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
+        self.output_token_shard_size = 1
         self.kv_lora_rank = kv_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
         self.q_lora_rank = q_lora_rank
@@ -173,12 +205,14 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         self.v_head_dim = v_head_dim
         self.prefix = prefix
         # Goes through the property setter above; mla_attn is not created yet,
-        # so only the backing value is stored here. MLAAttention below receives
-        # the same value and initializes the impl consistently.
+        # so only the backing value is stored here. AscendMLAAttention below
+        # receives the same value and initializes the impl consistently.
         self.skip_topk = skip_topk
         # This is an upstream CUDA indexer hint. Ascend accepts it to preserve
         # constructor compatibility, but its indexer does not consume it.
-        del allow_short_prefill_indexer_scoring_skip
+        # ShardQ eligibility is another CUDA implementation hint (#63956).
+        # Ascend retains its own attention/indexer layout for both values.
+        del allow_short_prefill_indexer_scoring_skip, shardq_eligible
         hf_config = get_current_vllm_config().model_config.hf_text_config
         self.tp_size = get_tensor_model_parallel_world_size()
         self.layers = hf_config.num_hidden_layers
@@ -186,7 +220,13 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             ascend_indexer = IndexerWrapper(mla_modules.indexer, self.qk_rope_head_dim)
         else:
             ascend_indexer = None
-        self.mla_attn = MLAAttention(
+        q_projection = mla_modules.q_b_proj if q_lora_rank is not None else mla_modules.q_proj
+        self.dcp_q_replicate_enabled = getattr(q_projection, "qrep_active", False) is True
+        # AscendMLAAttention opts into upstream's PCP+DCP guard by setting the
+        # ``supports_pcp_dcp`` ClassVar on the Ascend backend layer (see
+        # vllm_ascend.attention.mla_v1) instead of mutating the shared upstream
+        # MLAAttention class.
+        self.mla_attn = AscendMLAAttention(
             num_heads=num_heads,
             scale=scale,
             qk_nope_head_dim=self.qk_nope_head_dim,
@@ -198,8 +238,10 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            dcp_q_replicate=self.dcp_q_replicate_enabled,
             use_sparse=mla_modules.is_sparse,
             indexer=ascend_indexer,
+            index_group_builder=mla_modules.index_group_builder,
             skip_topk=skip_topk,
             topk_indices_buffer=getattr(mla_modules, "topk_indices_buffer", None),
             non_causal_multi_token_decode=non_causal_multi_token_decode,
@@ -224,12 +266,18 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
 
         original_process_weights = self.mla_attn.process_weights_after_loading
 
-        def wrapped_process_weights(act_dtype: torch.dtype):
+        def wrapped_process_weights(act_dtype: torch.dtype | None = None):
             from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 
-            if not isinstance(self.mla_attn.impl, AscendSFAImpl):
-                # Both supported vLLM versions dispatch to the impl here.
-                original_process_weights(act_dtype)
+            if act_dtype is None:
+                act_dtype = self.mla_attn.act_dtype
+            if self.dcp_q_replicate_enabled:
+                self.mla_attn.impl.process_weights_after_loading(act_dtype)
+            elif not isinstance(self.mla_attn.impl, AscendSFAImpl):
+                if vllm_version_is("0.33.0"):
+                    original_process_weights(act_dtype)
+                else:
+                    original_process_weights()
             else:
                 # SFA disposes kv_b_proj, so bypass upstream's dense packing.
                 self.mla_attn.impl.process_weights_after_loading(act_dtype)
@@ -250,9 +298,8 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
         hidden_dim = self.hidden_size
-        output = torch.empty(
-            (hidden_states.shape[0], hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
-        )
+        num_output_tokens = (hidden_states.shape[0] + self.output_token_shard_size - 1) // self.output_token_shard_size
+        output = torch.empty((num_output_tokens, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device)
 
         torch.ops.vllm.mla_forward(hidden_states, output, self.prefix)
         output = output.view(-1, hidden_dim)

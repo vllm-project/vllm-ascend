@@ -41,6 +41,7 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
 
 from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
+from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
 from vllm_ascend._310p.worker.v2.aclgraph import ModelAclGraphManager310
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.input_batch import Ascend310PInputBatch
@@ -48,11 +49,18 @@ from vllm_ascend._310p.worker.v2.kv_block_zeroer import AscendKVBlockZeroer310V2
 from vllm_ascend._310p.worker.v2.spec_utils import (
     combine_sampled_and_draft_tokens_cpu,
     expand_idx_mapping_cpu,
+    set_prefill_host_meta,
 )
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
+from vllm_ascend._310p.worker.v2.structured_outputs import apply_grammar_bitmask
 from vllm_ascend.core.kv_cache_interface import get_storage_block_size
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers, vllm_version_is
+from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_NZ,
+    get_kv_cache_tensor_layers,
+    shared_experts_calculation_stream,
+    vllm_version_is,
+)
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
@@ -134,12 +142,21 @@ class NPUModelRunner310V2(NPUModelRunner):
         make_buffer = self._make_metadata_buffer
         self._decode_req_indices = make_buffer(self.max_num_reqs, torch.int64, pin_memory)
         self._decode_input_indices = make_buffer(self.max_num_reqs, torch.int64, pin_memory)
+        self._draft_positions = make_buffer(self.max_num_tokens, torch.int64, pin_memory)
+        self._draft_src = make_buffer(self.max_num_tokens, torch.int64, pin_memory)
         self._idx_mapping = make_buffer(self.max_num_reqs, torch.int32, pin_memory)
         self._cu_num_logits = make_buffer(self.max_num_reqs + 1, torch.int32, pin_memory)
         self._expanded_idx_mapping = make_buffer(self.max_num_tokens, torch.int32, pin_memory)
         self._expanded_local_pos = make_buffer(self.max_num_tokens, torch.int32, pin_memory)
         self._query_start_loc = make_buffer(self.max_num_reqs + 2, torch.int32, pin_memory)
         self._logits_indices = make_buffer(self.max_num_tokens, torch.int64, pin_memory)
+        # Pinned staging for the per-step last-sample H2D scatter.
+        self._last_tokens_staging = torch.empty(
+            self.max_num_reqs,
+            dtype=torch.int64,
+            device="cpu",
+            pin_memory=pin_memory,
+        )
         self._num_sampled_staging = make_buffer(self.max_num_reqs, torch.int32, pin_memory)
         self._num_rejected_staging = make_buffer(self.max_num_reqs, torch.int32, pin_memory)
         # Keep prefill and prefix-cache hits out of FULL mixed graphs.
@@ -150,6 +167,14 @@ class NPUModelRunner310V2(NPUModelRunner):
         # ``_allocate_kv_cache_tensors`` without going through that path.
         self._attn_kv_copy_params: list[tuple[torch.Tensor, torch.Tensor, int]] = []
         self._attn_kv_storage_ptrs: set[int] = set()
+
+    def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
+        super().load_model(load_dummy_weights, *args, **kwargs)
+        if self.ascend_config.multistream_overlap_shared_expert:
+            # MRv2 profiles and captures after load_model. Allocate the shared
+            # stream here so its resources are accounted for before profiling
+            # and no lazy stream creation is needed inside ACL graph capture.
+            shared_experts_calculation_stream()
 
     def _make_metadata_buffer(
         self,
@@ -202,9 +227,6 @@ class NPUModelRunner310V2(NPUModelRunner):
             raise NotImplementedError("KV cache transfer is not supported by model runner v2 on 310P.")
         # Prefix caching is supported: 310P MRv2 reuses CPU Ascend310PBlockTables /
         # PrefillCacheHit→splitfuse (attention_v1) and hybrid Mamba page sizing below.
-        # TODO: Support LoRA in the next 310P MRV2 iteration.
-        if vllm_config.lora_config is not None:
-            raise NotImplementedError("LoRA is not supported by model runner v2 on 310P.")
 
     def _prepare_inputs_310p(
         self,
@@ -248,6 +270,16 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_reqs,
             num_scheduled_tokens,
             num_valid_tokens,
+            kv_cache_config=self.kv_cache_config,
+        )
+        # Shared build_attn_state (#17461) maps MTP verify → ChunkedPrefill.
+        # 310P FULL capture/replay still uses SpecDecoding (splitfuse); promote
+        # so InputBatch matches ACLGraph make_dummy and pad logic (MRv1 parity).
+        attn_state = self._promote_mtp_spec_decoding_attn_state(
+            attn_state,
+            num_reqs=num_reqs,
+            num_scheduled_tokens=num_scheduled_tokens,
+            num_valid_tokens=num_valid_tokens,
         )
         idx_mapping_np = self._idx_mapping.np[:num_reqs]
         idx_mapping_np[:] = np.fromiter(
@@ -321,6 +353,13 @@ class NPUModelRunner310V2(NPUModelRunner):
         num_computed_prefill_tokens_np = self.req_states.num_computed_prefill_tokens[idx_mapping_np]
         is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
         batch_has_prefill = bool(np.any(is_prefilling_np))
+        prefill_runs_as_decode_np = None
+        decode_graph_eligible = not batch_has_prefill
+        if batch_has_prefill:
+            prefill_runs_as_decode_np = (
+                is_prefilling_np & (num_valid_tokens == 1) & (num_computed_prefill_tokens_np > 0)
+            )
+            decode_graph_eligible = bool((prefill_runs_as_decode_np | ~is_prefilling_np).all())
         self.eplb.set_batch_phase(batch_has_prefill)
         self._prepare_token_inputs_cpu(
             idx_mapping,
@@ -386,10 +425,9 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_computed_tokens_np=self.req_states.num_computed_tokens_np[idx_mapping_np],
             prefill_len_np=prefill_len_np,
             num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
-            **({"max_seq_len_np": None} if vllm_version_is("0.29.0") else {}),
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
-            is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
+            is_padding=self.prepare_padding_mask(num_tokens, num_tokens_after_padding),
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
@@ -401,6 +439,8 @@ class NPUModelRunner310V2(NPUModelRunner):
             logits_indices_np=logits_indices_np,
         )
         input_batch_kwargs["has_prefill"] = batch_has_prefill
+        input_batch_kwargs["decode_graph_eligible"] = decode_graph_eligible
+        input_batch_kwargs["prefill_runs_as_decode_np"] = prefill_runs_as_decode_np
         input_batch = Ascend310PInputBatch(**input_batch_kwargs)
         # MRoPE positions are built in ``model_state.prepare_inputs``; the 1D
         # arange buffer above is only for slot-mapping / non-MRoPE paths.
@@ -455,6 +495,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_reqs,
             num_scheduled,
             num_scheduled,
+            kv_cache_config=self.kv_cache_config,
         )
         # Avoid importing AscendAttentionState at module top (heavy attention_v1).
         return attn_state.name in ("PrefillCacheHit", "ChunkedPrefill")
@@ -533,10 +574,49 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_reqs,
             num_scheduled,
             num_valid_tokens,
+            kv_cache_config=self.kv_cache_config,
         )
         from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
+        # After #17461, uniform MTP verify is ChunkedPrefill in shared helpers.
+        # Without promotion this gate forced CUDAGraphMode.NONE every decode
+        # step and erased the #17278 FULL-replay gains on small 310P models.
+        attn_state = self._promote_mtp_spec_decoding_attn_state(
+            attn_state,
+            num_reqs=num_reqs,
+            num_scheduled_tokens=num_scheduled,
+            num_valid_tokens=num_valid_tokens,
+        )
         return attn_state != AscendAttentionState.SpecDecoding
+
+    def _promote_mtp_spec_decoding_attn_state(
+        self,
+        attn_state: Any,
+        *,
+        num_reqs: int,
+        num_scheduled_tokens: np.ndarray,
+        num_valid_tokens: np.ndarray,
+    ) -> Any:
+        """Map uniform MTP verify batches back to SpecDecoding on 310P.
+
+        Upstream #17461 intentionally uses ChunkedPrefill for MTP on 910-class
+        devices. 310P ACLGraph capture still tags SpecDecoding (splitfuse) via
+        ``ModelAclGraphManager310.make_dummy``; keep runtime/eager-gate aligned.
+        """
+        if self.speculative_config is None or num_reqs <= 0:
+            return attn_state
+        from vllm_ascend.attention.attention_v1 import AscendAttentionState
+
+        if attn_state not in (
+            AscendAttentionState.ChunkedPrefill,
+            AscendAttentionState.SpecDecoding,
+        ):
+            return attn_state
+        if not np.all(num_valid_tokens == 1):
+            return attn_state
+        if not np.all(num_scheduled_tokens == self.decode_query_len):
+            return attn_state
+        return AscendAttentionState.SpecDecoding
 
     def _install_pc_eager_cudagraph_dispatch(self) -> None:
         """Wrap ACLGraph dispatch so PrefillCacheHit cannot replay FULL mixed graphs."""
@@ -581,6 +661,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         is_profile: bool = False,
         context_len: int = 0,
         valid_dummy_state_slots: bool = False,
+        randomize_inputs: bool = False,
     ):
         self._force_eager_pc_batch = False
         self._force_eager_spec_batch = False
@@ -596,6 +677,7 @@ class NPUModelRunner310V2(NPUModelRunner):
                 is_profile=is_profile,
                 context_len=context_len,
                 valid_dummy_state_slots=valid_dummy_state_slots,
+                randomize_inputs=randomize_inputs,
             )
         finally:
             self._force_eager_pc_batch = False
@@ -606,7 +688,10 @@ class NPUModelRunner310V2(NPUModelRunner):
         scheduler_output: SchedulerOutput,
         batch_req_state: BatchReqState,
         batch_desc: BatchExecutionDescriptor,
+        num_active_loras: int,  # noqa: ARG002
     ) -> Ascend310PInputBatch:
+        # vLLM #56456 added the trailing num_active_loras positional
+        # argument; the 310P path does not use it.
         del batch_req_state
         return self._prepare_inputs_310p(scheduler_output, batch_desc)
 
@@ -750,20 +835,23 @@ class NPUModelRunner310V2(NPUModelRunner):
         )
         initialize_mamba_ssu_backend(self.vllm_config.mamba_config, self.kv_cache_config)
 
+        # vLLM #60517 removed the `tensor_parallel_size` parameter on main.
         cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
             attn_cg_support.min_cg_support,
             attn_cg_support.min_cg_attn_backend,
             self.decode_query_len,
             use_v2_model_runner=True,
-            tensor_parallel_size=self.parallel_config.tensor_parallel_size,
             kv_cache_config=kv_cache_config,
             max_num_reqs=self.max_num_reqs,
+            **{},
         )
         self.cudagraph_manager = ModelAclGraphManager310(
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            self.decode_query_len,
+            self.decode_query_len
+            if vllm_version_is("0.33.0")
+            else self.vllm_config.get_decode_cudagraph_query_lens(self.decode_query_len),
             self,
             lora_capture_cases=self.lora_capture_cases,
         )
@@ -802,10 +890,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         spec_config = self.speculative_config
         if spec_config is None:
             return False
-        if vllm_version_is("0.29.0"):
-            uses_eagle_block_drop = any(group.is_eagle_group for group in kv_cache_config.kv_cache_groups)
-        else:
-            uses_eagle_block_drop = spec_config.use_eagle_block_drop()
+        uses_eagle_block_drop = spec_config.use_eagle_block_drop()
         return bool(
             kv_cache_config.has_mamba_layers and uses_eagle_block_drop and spec_config.num_speculative_tokens > 1
         )
@@ -829,10 +914,12 @@ class NPUModelRunner310V2(NPUModelRunner):
                 block_size
                 for block_size in backend.get_supported_kernel_block_sizes()
                 if block_size * max_head_size <= _ATTENTION_BLOCK_SIZE_LIMIT
+                and all(spec.block_size % block_size == 0 for spec in attention_specs)
             ]
             if not supported_sizes:
                 raise NotImplementedError(
-                    f"310P paged attention requires block_size * head_size <= {_ATTENTION_BLOCK_SIZE_LIMIT}."
+                    f"310P paged attention requires block_size * head_size <= {_ATTENTION_BLOCK_SIZE_LIMIT} "
+                    "and a kernel block size that divides every attention cache block size in the group."
                 )
             self.kernel_block_sizes[group_id] = supported_sizes[0]
 
@@ -876,6 +963,13 @@ class NPUModelRunner310V2(NPUModelRunner):
             for layer_name in group.layer_names
         }
         kv_caches: dict[str, Any] = {}
+        layout_resolver = getattr(self.cache_config, "get_resolved_kv_cache_layout", None)
+        share_slots = (
+            get_310p_shared_cache_slots(kv_cache_config.kv_cache_groups, layout_resolver())
+            if callable(layout_resolver)
+            else {}
+        )
+        slot_caches: dict[tuple[Any, ...], Any] = {}
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             layer_names = [name for name in get_kv_cache_tensor_layers(kv_cache_tensor) if name not in shared_layers]
             if not layer_names:
@@ -924,9 +1018,8 @@ class NPUModelRunner310V2(NPUModelRunner):
                         raise NotImplementedError("310P MRV2 does not support asymmetric K/V head sizes.")
                     # Symmetric NZ only: K/V share the 4D view ``kv_cache_shape[1:]``.
                     kv_view_shape = kv_cache_shape[1:]
-                    # Standardized descriptors list distinct layer
-                    # regions. Allocate one private NZ K/V pair per layer;
-                    # only explicit shared_layers below may alias.
+                    # Attention layers in the single supported attention group
+                    # need separate NZ K/V storage for each layer.
                     for name in cache_layer_names:
                         k_cache = torch_npu.empty_with_format(
                             size=kv_view_shape,
@@ -982,7 +1075,13 @@ class NPUModelRunner310V2(NPUModelRunner):
                         return state_tensors
 
                     for name in cache_layer_names:
+                        slot_key = (share_slots[name], cache_key) if name in share_slots else None
+                        if slot_key is not None and slot_key in slot_caches:
+                            kv_caches[name] = slot_caches[slot_key]
+                            continue
                         kv_caches[name] = allocate_mamba_cache()
+                        if slot_key is not None:
+                            slot_caches[slot_key] = kv_caches[name]
                 else:
                     raise NotImplementedError(f"Unsupported 310P KV cache spec: {type(kv_cache_spec).__name__}.")
 
@@ -1043,18 +1142,13 @@ class NPUModelRunner310V2(NPUModelRunner):
     ) -> None:
         """Build host-owned inputs, then patch decode tokens from NPU state."""
         draft_tokens_map = draft_tokens_map or {}
-        active_draft_tokens_cpu = None
-        if draft_tokens_map:
-            # Gather real drafts; scheduler values may be placeholders.
-            active_draft_tokens_cpu = (
-                self.req_states.draft_tokens.index_select(0, idx_mapping.to(torch.int64))
-                .to(dtype=self.input_ids_cpu.dtype)
-                .cpu()
-            )
         self.input_ids_cpu[:num_tokens_after_padding].zero_()
         self.next_prefill_tokens_cpu.zero_()
         decode_req_indices: list[int] = []
         decode_input_indices: list[int] = []
+        draft_positions: list[int] = []
+        draft_src: list[int] = []
+        num_spec = self.req_states.draft_tokens.shape[1]
         needs_host_copy = False
         has_prefill = False
         for batch_idx, req_idx_value in enumerate(idx_mapping_np):
@@ -1079,12 +1173,13 @@ class NPUModelRunner310V2(NPUModelRunner):
                 decode_input_indices.append(start)
             drafts = draft_tokens_map.get(req_ids[batch_idx], ())
             if drafts:
-                assert active_draft_tokens_cpu is not None
+                # Patch drafts on device: a host gather here costs a full stream
+                # drain (sync D2H) at the head of every decode step.
                 needs_host_copy = True
                 draft_count = min(len(drafts), end - start - 1)
-                self.input_ids_cpu[start + 1 : start + 1 + draft_count].copy_(
-                    active_draft_tokens_cpu[batch_idx, :draft_count]
-                )
+                for spec_idx in range(draft_count):
+                    draft_positions.append(start + 1 + spec_idx)
+                    draft_src.append(req_idx * num_spec + spec_idx)
 
         if needs_host_copy:
             self.input_buffers.input_ids[:num_tokens_after_padding].copy_(
@@ -1104,6 +1199,11 @@ class NPUModelRunner310V2(NPUModelRunner):
                 self.input_buffers.input_ids[:num_decode_reqs].copy_(
                     decode_tokens.to(self.input_buffers.input_ids.dtype)
                 )
+                # FULL decode graphs embed padded rows as well. Clear them
+                # after the partial copy: reused buffers may contain stale
+                # out-of-vocabulary IDs, and 310P slice writes can affect the
+                # adjacent tail element.
+                self.input_buffers.input_ids[num_decode_reqs:num_tokens_after_padding].zero_()
                 return
             self._decode_req_indices.np[:num_decode_reqs] = decode_req_indices
             self._decode_input_indices.np[:num_decode_reqs] = decode_input_indices
@@ -1116,6 +1216,22 @@ class NPUModelRunner310V2(NPUModelRunner):
                 0,
                 input_indices,
                 decode_tokens.to(self.input_buffers.input_ids.dtype),
+            )
+        if draft_positions:
+            num_drafts = len(draft_positions)
+            self._draft_positions.np[:num_drafts] = draft_positions
+            self._draft_src.np[:num_drafts] = draft_src
+            self._draft_positions.copy_to_gpu(num_drafts)
+            self._draft_src.copy_to_gpu(num_drafts)
+            draft_values = (
+                self.req_states.draft_tokens.reshape(-1)
+                .index_select(0, self._draft_src.gpu[:num_drafts])
+                .to(self.input_buffers.input_ids.dtype)
+            )
+            self.input_buffers.input_ids.index_copy_(
+                0,
+                self._draft_positions.gpu[:num_drafts],
+                draft_values,
             )
         if has_prefill:
             self.req_states.next_prefill_tokens.copy_(self.next_prefill_tokens_cpu, non_blocking=True)
@@ -1135,14 +1251,24 @@ class NPUModelRunner310V2(NPUModelRunner):
         # TODO: Refactor this CPU fallback to use Triton Dispatcher after vLLM
         # RFC #45133 lands.
         del idx_mapping, query_start_loc, num_computed_tokens
+        num_reqs = idx_mapping_np.size
         self.input_buffers.seq_lens_cpu.zero_()
         self.positions_cpu[: positions.shape[0]].zero_()
-        for batch_idx, (req_idx, num_tokens) in enumerate(zip(idx_mapping_np, num_scheduled_tokens)):
-            num_computed = int(self.req_states.num_computed_tokens_np[req_idx])
-            start = int(query_start_loc_np[batch_idx])
-            end = start + int(num_tokens)
-            self.positions_cpu[start:end] = torch.arange(num_computed, num_computed + num_tokens)
-            self.input_buffers.seq_lens_cpu[batch_idx] = num_computed + num_tokens
+        # Vectorized: one numpy scatter instead of per-request torch.arange
+        # allocations and scalar tensor writes on the decode critical path.
+        counts_np = np.asarray(num_scheduled_tokens[:num_reqs], dtype=np.int64)
+        computed_np = np.asarray(
+            self.req_states.num_computed_tokens_np[idx_mapping_np[:num_reqs]],
+            dtype=np.int64,
+        )
+        num_tokens = int(counts_np.sum())
+        if num_tokens:
+            starts_np = np.asarray(query_start_loc_np[:num_reqs], dtype=np.int64)
+            self.positions_cpu.numpy()[:num_tokens] = np.repeat(computed_np - starts_np, counts_np) + np.arange(
+                num_tokens, dtype=np.int64
+            )
+        if num_reqs:
+            self.input_buffers.seq_lens_np[:num_reqs] = computed_np + counts_np
         positions.copy_(self.positions_cpu[: positions.shape[0]], non_blocking=True)
         seq_lens.copy_(self.input_buffers.seq_lens_cpu, non_blocking=True)
 
@@ -1192,24 +1318,44 @@ class NPUModelRunner310V2(NPUModelRunner):
         input_batch.block_tables_np = tuple(
             table[: input_batch.num_reqs_after_padding] for table in self.block_tables.input_block_tables_cpu
         )
-        positions_np = np.zeros(input_batch.num_tokens_after_padding, dtype=np.int64)
-        for batch_idx, (start_position, num_scheduled_tokens) in enumerate(
-            zip(input_batch.num_computed_tokens_np, input_batch.num_scheduled_tokens)
-        ):
-            start = int(input_batch.query_start_loc_np[batch_idx])
-            end = start + int(num_scheduled_tokens)
-            positions_np[start:end] = np.arange(
-                start_position,
-                start_position + num_scheduled_tokens,
-                dtype=np.int64,
+        num_reqs = input_batch.num_reqs
+        num_tokens_padded = input_batch.num_tokens_after_padding
+        positions_np = np.zeros(num_tokens_padded, dtype=np.int64)
+        # Vectorized counterpart of the per-request ``np.arange`` loop, matching
+        # the decode position layout (computed tokens offset from query start).
+        scheduled_np = np.asarray(input_batch.num_scheduled_tokens[:num_reqs], dtype=np.int64)
+        num_positions = int(scheduled_np.sum())
+        if num_positions:
+            computed_np = np.asarray(input_batch.num_computed_tokens_np[:num_reqs], dtype=np.int64)
+            starts_np = np.asarray(input_batch.query_start_loc_np[:num_reqs], dtype=np.int64)
+            positions_np[:num_positions] = np.repeat(computed_np - starts_np, scheduled_np) + np.arange(
+                num_positions, dtype=np.int64
             )
         slot_mappings = self.block_tables.compute_slot_mappings(
             input_batch.idx_mapping_np,
             input_batch.query_start_loc_np,
             positions_np,
-            num_tokens_padded=input_batch.num_tokens_after_padding,
+            num_tokens_padded=num_tokens_padded,
         )
         return block_tables, slot_mappings
+
+    def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
+        super()._dummy_sampler_run(hidden_states)
+        if not self.ascend_config.multistream_overlap_shared_expert or self.parallel_config.tensor_parallel_size <= 1:
+            return
+        if not self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            return
+
+        # The maximum-batch sampler profile above does not initialize the
+        # small-message HCCL transport used by decode logits AllGather. Do so
+        # before FULL graphs consume the limited 310P Event resources. Include
+        # batch 1 even if graph sizes start at 2: logits are not graph-padded.
+        # The enclosing profile_run already synchronizes before graph capture.
+        profile_rows = hidden_states.shape[0]
+        warmup_sizes = {1, *(self.compilation_config.cudagraph_capture_sizes or [])}
+        for num_rows in sorted(warmup_sizes):
+            if 0 < num_rows < profile_rows:
+                self.model.compute_logits(hidden_states[:num_rows])
 
     def sample(
         self,
@@ -1219,14 +1365,17 @@ class NPUModelRunner310V2(NPUModelRunner):
     ):
         # TODO: Refactor 310P sampling to use Triton Dispatcher after vLLM RFC
         # #45133 lands.
-        if grammar_output is not None:
-            # TODO: Restore structured output support in the next 310P MRV2 iteration.
-            raise NotImplementedError("Structured output is not supported by model runner v2 on 310P.")
         logits = self.model.compute_logits(hidden_states[input_batch.logits_indices])
+        if grammar_output is not None:
+            apply_grammar_bitmask(logits, input_batch, grammar_output)
         if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
             sampler_output = self.sampler(logits, input_batch)
             can_sample_np = input_batch.seq_lens_np[: input_batch.num_reqs] >= input_batch.prefill_len_np
             self._sampled_tokens_cpu = None
+            # Penalties and bad words read host history. MTP also uses it
+            # to prepare the next draft, including steps with no drafts.
+            if self.speculator is not None or self.sampler.needs_cpu_token_history(input_batch.idx_mapping_np):
+                self._sampled_tokens_cpu = sampler_output.sampled_token_ids.detach().to("cpu")
             num_reqs = input_batch.num_reqs
             np.copyto(
                 self._num_sampled_staging.np[:num_reqs],
@@ -1261,13 +1410,17 @@ class NPUModelRunner310V2(NPUModelRunner):
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
         query_start_loc: torch.Tensor | None = None,
+        draft_tokens: torch.Tensor | None = None,
     ) -> None:
         """Run request bookkeeping on CPU; upload only immediate NPU consumers."""
         # Device arguments remain for upstream API compatibility.
-        del num_sampled, num_rejected, query_start_loc
-        if self._sampled_tokens_cpu is not None:
-            assert self.rejection_sampler is not None
+        del num_sampled, num_rejected, query_start_loc, draft_tokens
+        if self._sampled_tokens_cpu is not None and self.rejection_sampler is not None:
             self.rejection_sampler.synchronize_cpu()
+        # Host rejection counts are ready after synchronize_cpu; reuse them in
+        # propose() instead of another device→host copy.
+        if self.speculator is not None and self._num_rejected_cpu is not None:
+            self.speculator._last_num_rejected_cpu = self._num_rejected_cpu
         sampled_tokens_cpu = self._sampled_tokens_cpu
         num_sampled_cpu = _post_update_cpu(
             self._postprocess_idx_mapping_np,
@@ -1281,7 +1434,10 @@ class NPUModelRunner310V2(NPUModelRunner):
         # Chunked-prefill rows have no sample and retain prior state.
         valid_batch_np = np.flatnonzero(self._num_sampled_cpu.numpy() > 0)
         if valid_batch_np.size:
-            all_rows_valid = sampled_tokens_cpu is None and valid_batch_np.size == self._postprocess_idx_mapping_np.size
+            # Reuse the device token for non-speculative decoding, even when
+            # penalties or bad words require a separate CPU history.
+            use_device_tokens = sampled_tokens_cpu is None or (self.speculator is None and sampled_tokens.shape[1] == 1)
+            all_rows_valid = use_device_tokens and valid_batch_np.size == self._postprocess_idx_mapping_np.size
             if all_rows_valid:
                 valid_reqs = idx_mapping.to(torch.int64)
                 last_tokens = sampled_tokens[:, 0]
@@ -1293,19 +1449,20 @@ class NPUModelRunner310V2(NPUModelRunner):
                 valid_reqs = self._decode_req_indices.gpu[:num_valid]
                 self._decode_input_indices.copy_to_gpu(num_valid)
                 self._decode_req_indices.copy_to_gpu(num_valid)
-                if sampled_tokens_cpu is None:
+                if use_device_tokens:
                     last_tokens = sampled_tokens.index_select(0, valid_batch)[:, 0]
                 else:
-                    last_tokens_cpu = torch.stack(
-                        [
-                            sampled_tokens_cpu[
-                                batch_idx,
-                                int(self._num_sampled_cpu[batch_idx]) - 1,
-                            ]
-                            for batch_idx in valid_batch_np
-                        ]
-                    ).to(torch.int64)
-                    last_tokens = last_tokens_cpu.to(self.device, non_blocking=True)
+                    # Single numpy gather instead of a per-request Python loop.
+                    num_sampled_np = np.asarray(self._num_sampled_cpu)
+                    last_tokens_np = self._last_tokens_staging.numpy()[:num_valid]
+                    last_tokens_np[:] = np.asarray(sampled_tokens_cpu)[
+                        valid_batch_np,
+                        num_sampled_np[valid_batch_np] - 1,
+                    ]
+                    last_tokens = self._last_tokens_staging[:num_valid].to(
+                        self.device,
+                        non_blocking=True,
+                    )
             self.req_states.last_sampled_tokens.index_copy_(
                 0,
                 valid_reqs,
@@ -1316,6 +1473,31 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_sampled_cpu,
             self.req_states.num_computed_tokens_cpu,
         )
+        # Publish host mirrors for draft-prefill prepare (avoid 4× D2H there).
+        if self.speculator is not None and self._num_rejected_cpu is not None:
+            num_reqs = int(self._num_rejected_cpu.shape[0])
+            next_cpu = getattr(self, "next_prefill_tokens_cpu", None)
+            if next_cpu is not None:
+                next_prefill_np = np.asarray(next_cpu)
+            else:
+                next_prefill_np = np.zeros(
+                    int(self.req_states.next_prefill_tokens.shape[0]),
+                    dtype=np.int64,
+                )
+            max_reqs = int(self.req_states.last_sampled_tokens.shape[0])
+            last_sampled_np = np.zeros((max_reqs, 1), dtype=np.int64)
+            if valid_batch_np.size and sampled_tokens_cpu is not None:
+                num_sampled_np = np.asarray(self._num_sampled_cpu)
+                last_sampled_np[self._postprocess_idx_mapping_np[valid_batch_np], 0] = np.asarray(sampled_tokens_cpu)[
+                    valid_batch_np, num_sampled_np[valid_batch_np] - 1
+                ]
+            set_prefill_host_meta(
+                num_reqs=num_reqs,
+                num_sampled_np=self._num_sampled_cpu.numpy(),
+                num_rejected_np=self._num_rejected_cpu.numpy(),
+                last_sampled_np=last_sampled_np,
+                next_prefill_np=next_prefill_np,
+            )
 
     def _update_seq_lens_cpu(
         self,
@@ -1343,8 +1525,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         for i, req_id in enumerate(req_ids):
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
-            self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + num_scheduled_tokens[req_id]
-            self.input_buffers.seq_lens_np[i] = self.input_buffers.seq_lens_cpu[i]
+            self.input_buffers.seq_lens_np[i] = num_computed_tokens + num_scheduled_tokens[req_id]
         return changed_req_indices
 
     def postprocess_num_computed_tokens(self, input_batch: Ascend310PInputBatch) -> None:

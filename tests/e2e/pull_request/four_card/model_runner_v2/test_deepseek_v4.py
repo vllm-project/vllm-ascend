@@ -84,7 +84,6 @@ def test_deepseek_v4_mtp_full_decode_only():
             "method": "mtp",
         },
         attention_config={"indexer_kv_dtype": "int8"},
-        additional_config={"enable_dsa_cp": False},
     ) as runner:
         runner.model.generate(prompts, sampling_params)
         metrics = runner.model.get_metrics()
@@ -140,6 +139,7 @@ def test_dspark_spec_decoding(
     with VllmRunner(
         model,
         max_model_len=4096,
+        max_num_seqs=len(prompts),
         tensor_parallel_size=4,
         enable_expert_parallel=True,
         enforce_eager=enforce_eager,

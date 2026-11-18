@@ -191,7 +191,7 @@ We're excited to announce the release of v0.11.0 for vLLM Ascend. This is the of
 
 ### Known Issues
 
-- Qwen3-Next doesn't support expert parallel and MTP features in this release. And it'll be oom if the input is too long. We'll improve it in the next release
+- Qwen3-Next doesn't support expert parallelism and MTP features in this release. And it'll be oom if the input is too long. We'll improve it in the next release
 - Deepseek 3.2 only work with torchair graph mode in this release. We'll make it work with aclgraph mode in the next release.
 - Qwen2-audio doesn't work by default. Temporary solution is to set `--gpu-memory-utilization` to a suitable value, such as 0.8.
 - CPU bind feature doesn't work if more than one vLLM instance is running on the same node.

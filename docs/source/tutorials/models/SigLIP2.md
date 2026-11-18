@@ -123,6 +123,16 @@ vllm serve $MODEL_PATH \
     --max-model-len 64
 ```
 
+Expected Result:
+
+If the service starts successfully, the log contains:
+
+```text
+INFO:     Started server process [<pid>]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+```
+
 Required Parameter Descriptions:
 
 - `--compilation-config` For Atlas 300I DUO, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
@@ -160,6 +170,29 @@ curl -X POST http://127.0.0.1:8000/v1/embeddings \
   }"
 ```
 
+Expected Result:
+
+The service returns HTTP 200 OK with a JSON response containing the `embedding` field. Example output (embedding truncated for brevity):
+
+```json
+{
+  "id": "embd-xxxxxxxx",
+  "object": "list",
+  "created": 1770000000,
+  "model": "<YOUR_MODEL_PATH>",
+  "data": [
+    {
+      "index": 0,
+      "object": "embedding",
+      "embedding": [
+        0.0123,
+        -0.0456
+      ]
+    }
+  ]
+}
+```
+
 Use the template `"This is a photo of {}."` for zero-shot classification prompts. SigLIP2 was trained with `padding=max_length` and `max_length=64` for text; vLLM applies this when using offline `tokenization_kwargs`.
 
 ### 6.2 Image Embedding
@@ -168,7 +201,8 @@ Encode the image as base64 and send via `messages`:
 
 ```bash
 export MODEL_PATH=<YOUR_MODEL_PATH>  # match --served-model-name from Section 5.1
-IMG_B64=$(base64 -w 0 /path/to/image.jpg)
+IMAGE_PATH=/path/to/image.jpg  # Replace with your local image path
+IMG_B64=$(base64 -w 0 "${IMAGE_PATH}")
 
 curl -X POST http://127.0.0.1:8000/v1/embeddings \
   -H "Content-Type: application/json" \
@@ -187,11 +221,32 @@ curl -X POST http://127.0.0.1:8000/v1/embeddings \
 
 Expected Result:
 
-The service returns HTTP 200 OK with a JSON response containing the `embedding` field for each request.
+The service returns HTTP 200 OK with a JSON response containing the `embedding` field. Example output (embedding truncated for brevity):
+
+```json
+{
+  "id": "embd-xxxxxxxx",
+  "object": "list",
+  "created": 1770000000,
+  "model": "<YOUR_MODEL_PATH>",
+  "data": [
+    {
+      "index": 0,
+      "object": "embedding",
+      "embedding": [
+        0.0234,
+        -0.0567
+      ]
+    }
+  ]
+}
+```
 
 For more usage examples, please reference the [vLLM pooling embed examples](https://github.com/vllm-project/vllm/tree/main/examples/pooling/embed).
 
 ### 6.3 Offline Embedding
+
+> **Note**: Stop the online service from [§5.1 Single-Node Online Deployment](#51-single-node-online-deployment) before this offline test (press `Ctrl+C` in the `vllm serve` terminal).
 
 ```python
 from vllm import LLM
@@ -215,7 +270,8 @@ print(len(text_out[0].outputs.embedding))
 # Image (empty prompt; field name must be multi_modal_data)
 from PIL import Image
 
-img = Image.open("/path/to/image.jpg").convert("RGB")
+IMAGE_PATH = "/path/to/image.jpg"  # Replace with your local image path
+img = Image.open(IMAGE_PATH).convert("RGB")
 img_out = llm.embed(
     {"prompt": "", "multi_modal_data": {"image": img}},
 )
@@ -230,9 +286,11 @@ ImageNet val zero-shot Top-1 is a common accuracy benchmark for SigLIP2.
 
 1. Download [ImageNet ILSVRC 2012 val images](https://www.image-net.org/download.php) (login required).
 2. Download `val_label.txt` ([example](https://github.com/rentainhe/simple-imagenet-test/blob/master/val_label.txt)). Each line: `ILSVRC2012_val_00000001.JPEG 65` (PyTorch class id 0–999).
-3. Download `imagenet1000_clsidx_to_labels.txt` for the 1000 class text templates.
+3. Download `imagenet1000_clsidx_to_labels.txt` for the 1000 class text templates from [yrevar gist](https://gist.github.com/yrevar/942d3a0ac09ec9e5eb3a)
 
 ### 7.2 Offline Evaluation
+
+> **Note**: Stop the online service before this evaluation if it is still running (press `Ctrl+C` in the `vllm serve` terminal).
 
 Embed 1000 class texts and val images separately, then compute cosine similarity (L2-normalized dot product). Example workflow:
 
@@ -244,6 +302,11 @@ from vllm import LLM
 
 TEXT_TEMPLATE = "This is a photo of {}."
 TOKEN_KWARGS = {"padding": "max_length", "max_length": 64}
+
+MODEL_PATH = "<YOUR_MODEL_PATH>"  # Replace with the path recorded in Section 3.1
+CLASSNAMES_PATH = "imagenet1000_clsidx_to_labels.txt"  # Replace with the file downloaded in Section 7.1
+VAL_LABEL_PATH = "val_label.txt"  # Replace with the file downloaded in Section 7.1
+IMAGENET_VAL_DIR = "ImageNet/val"  # Replace with the ImageNet val directory downloaded in Section 7.1
 
 def load_classnames(path):
     with open(path, encoding="utf-8") as f:
@@ -259,7 +322,6 @@ def load_val_label(path):
                 gt[parts[0].split(".")[0]] = int(parts[1])
     return gt
 
-MODEL_PATH = "<YOUR_MODEL_PATH>"  # Replace with the path recorded in Section 3.1
 
 llm = LLM(
     model=MODEL_PATH,
@@ -268,7 +330,7 @@ llm = LLM(
     max_model_len=64,
 )
 
-classnames = load_classnames("imagenet1000_clsidx_to_labels.txt")
+classnames = load_classnames(CLASSNAMES_PATH)
 prompts = [TEXT_TEMPLATE.format(c) for c in classnames]
 text_feats = np.asarray(
     [o.outputs.embedding for o in llm.embed(prompts, tokenization_kwargs=TOKEN_KWARGS)],
@@ -276,11 +338,11 @@ text_feats = np.asarray(
 )
 text_feats /= np.linalg.norm(text_feats, axis=1, keepdims=True)
 
-gt = load_val_label("val_label.txt")
+gt = load_val_label(VAL_LABEL_PATH)
 correct = 0
 total = 0
 for stem, label in gt.items():
-    path = f"ImageNet/val/{stem}.JPEG"  # or .jpeg
+    path = f"{IMAGENET_VAL_DIR}/{stem}.JPEG"  # or .jpeg
     img = Image.open(path).convert("RGB")
     feat = np.asarray(
         llm.embed({"prompt": "", "multi_modal_data": {"image": img}})[0]

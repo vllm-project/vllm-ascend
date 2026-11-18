@@ -14,30 +14,47 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from dataclasses import dataclass
 from enum import Enum, auto
 from functools import wraps
+from typing import TypeAlias
 
 import torch
 import torch.nn.functional as F
 import torch_npu
+from vllm.config import get_current_vllm_config
 from vllm.distributed import tensor_model_parallel_all_gather, tensor_model_parallel_reduce_scatter
 from vllm.logger import logger
-from vllm.model_executor.layers.activation import SituAndMul
+from vllm.model_executor.layers.activation import (
+    SiluAndMul,
+    SiluAndMulWithClamp,
+    SituAndMul,
+    SwigluOAIAndMul,
+)
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoEMethodBase
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.lora.fused_moe import has_lora
+from vllm_ascend.ops.activation import AscendSiluAndMul
+from vllm_ascend.ops.fused_moe import moe_utils
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MegamoeSharedExpertFusion, MegamoeSharedWeights
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
     PreparedSharedExpertInput,
     RoutedMoEMilestones,
 )
+from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
+from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import npu_stream_switch, shared_experts_calculation_stream
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, npu_stream_switch, shared_experts_calculation_stream
 
 # CANN uses 36 to select FP8 E4M3FN output for situ_mx_quant.
 SITU_MX_DST_TYPE_E4M3FN = 36
+MXFP8_ACTIVATION_GROUP_SIZE = 32
+# SwiGLU halves the input width; MX scales are stored in pairs of groups.
+SWIGLU_MX_INPUT_ALIGNMENT = 4 * MXFP8_ACTIVATION_GROUP_SIZE
+SWIGLU_MX_QUANT_MODE = 2
 
 
 class SharedExpertParallelMode(Enum):
@@ -54,7 +71,37 @@ class SharedExpertMLPPath(Enum):
 
     A8_INT_FUSED = auto()  # W8A8/W4A8: explicit A8 quant + fused activation quant.
     A8_MXFP_FUSED = auto()  # W4A8MXFP: explicit MXFP8 activation pipeline.
+    W8A8_MXFP_LINEAR = auto()  # Preserve linears; fuse activation quant when supported.
     LINEAR_WRAPPER = auto()  # Dense, other quant schemes, or any active LoRA.
+
+
+LinearInput: TypeAlias = torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor]
+
+
+@dataclass(frozen=True)
+class PreparedSharedExpertExecution:
+    """Shared MLP input preparation submitted before the router matmul.
+
+    ``gate_up_input`` may contain scheme-owned activation quantization that is
+    already queued on the shared-expert stream. Gate-Up consumes it immediately
+    after ``router_output_ready``; activation and Down are appended after the
+    routed path exposes its stage milestones.
+    """
+
+    hidden_states: torch.Tensor
+    gate_up_input: LinearInput
+    local_dp_metadata: tuple[int, int] | None
+
+
+@dataclass(frozen=True)
+class SubmittedSharedExpertGateUp:
+    """Gate-Up work already submitted on the shared-expert stream."""
+
+    hidden_states: torch.Tensor
+    gate_up: torch.Tensor
+    gate_up_input_scale: torch.Tensor | None
+    local_dp_metadata: tuple[int, int] | None
+    path: SharedExpertMLPPath
 
 
 class AscendSharedExperts:
@@ -72,6 +119,10 @@ class AscendSharedExperts:
         quant_type: QuantType,
         quant_method: FusedMoEMethodBase,
     ):
+        """`quant_type` is the ROUTED experts' quant type: it gates whether
+        the routed MegaMoe path supports stacking the shared-expert fusion.
+        The shared expert's own quant type is read from its linear scheme at
+        weight-collection time and may differ (mixed quantization)."""
         self.layer = layer
         self.moe_config = moe_config
         self.hidden_size = moe_config.hidden_dim
@@ -92,6 +143,17 @@ class AscendSharedExperts:
         self.multistream_overlap = ascend_config.multistream_overlap_shared_expert
         self.weights_replicated = ascend_config.enable_shared_expert_dp
 
+        # Shared-expert fusion into the A5 MegaMoe operator: disabled until the
+        # setup below proves the configuration is supported, then armed once
+        # both shared linears have been processed into the MegaMoe layout.
+        self.megamoe_shared_weights_ready = False
+        self._megamoe_shared_fusion_disabled = False
+        self._megamoe_shared_parts: dict[str, torch.Tensor] = {}
+        self._megamoe_shared_quant_type = QuantType.NONE
+        # Handed out by megamoe_shared_fusion() and filled in place once the
+        # shared linears are rebuilt; see MegamoeSharedExpertFusion.
+        self._megamoe_shared_fusion = MegamoeSharedExpertFusion()
+
         if self.multistream_overlap:
             # Wrap the quant_method's process_weights_after_loading to validate that
             # splitting shared expert computation (gate_up projection, activation,
@@ -106,6 +168,380 @@ class AscendSharedExperts:
                 return result
 
             quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
+
+        self._setup_megamoe_shared_fusion()
+
+    def _setup_megamoe_shared_fusion(self) -> None:
+        """Fuse the shared expert into the A5 MegaMoe operator when supported.
+
+        When active, each shared linear's ``process_weights_after_loading`` is
+        wrapped to rebuild the weight into the MegaMoe layout; the rebuilt
+        payload is exposed through ``megamoe_shared_fusion()`` and installed on
+        the routed-expert layer by ``AscendMoERunner``, then forwarded to the
+        operator as ``shared_l1_weights``/``shared_l2_weights``. The runner
+        then skips the separate shared-expert forward whenever the step
+        dispatches to MegaMoe. Any unsupported configuration keeps the
+        standalone shared-expert execution unchanged.
+        """
+        if not use_cann_megamoe(get_current_vllm_config()):
+            return
+        # Only enable_fused_mc2=3 opts into fusing the shared expert into the
+        # MegaMoe operator; =2 keeps the separate shared-expert forward.
+        if not get_ascend_config().megamoe_shared_expert_fusion:
+            return
+        if not get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
+            return
+        # Checks the ROUTED experts' quant type: the shared fusion stacks on
+        # top of the routed MegaMoe path, which must support the scenario
+        # first. The operator's A5 scenarios are A8W8-FP / A8W4-FP / A4W4-FP
+        # (its A2/A3 ones are A16W16 / A8W8-INT / A8W4-INT), so all three MXFP
+        # types pass. The shared expert's own quant type is resolved
+        # per-linear in _collect_megamoe_shared_weight and may differ from
+        # this one (mixed quantization).
+        if self.quant_type not in (QuantType.W8A8MXFP, QuantType.W4A4MXFP, QuantType.W4A8MXFP):
+            # Only MXFP8 and MXFP4 are implemented. Their shared weights
+            # rebuild cheaply from the post-processed linear buffers: MXFP8
+            # needs an (out, in) transpose, packed MXFP4 additionally needs the
+            # same FRACTAL_NZ (w1) / FRACTAL_NZ_C0_32 (w2) rebuild as the
+            # routed experts.
+            logger.info_once(
+                "MegaMoe shared-expert fusion is not implemented for quant type %s; "
+                "keeping the separate shared-expert forward.",
+                self.quant_type,
+            )
+            self._megamoe_shared_fusion_disabled = True
+            return
+        # Output gating (e.g. Qwen3-Next expert_gate) happens outside the
+        # operator and cannot be fused.
+        if getattr(self.layer, "expert_gate", None) is not None:
+            logger.info_once(
+                "MegaMoe shared-expert fusion is not supported with expert gating; "
+                "keeping the separate shared-expert forward."
+            )
+            self._megamoe_shared_fusion_disabled = True
+            return
+        # The operator consumes no shared bias.
+        if (
+            getattr(self.layer.gate_up_proj, "bias", None) is not None
+            or getattr(self.layer.down_proj, "bias", None) is not None
+        ):
+            logger.info_once(
+                "MegaMoe shared-expert fusion is not supported with shared-expert bias; "
+                "keeping the separate shared-expert forward."
+            )
+            self._megamoe_shared_fusion_disabled = True
+            return
+        # The operator exposes a single global activation/activation_params
+        # pair that it applies to the shared experts too, so fusion is only
+        # valid when the shared activation is the *same function* as the
+        # routed one: equal activation type AND equal activation params
+        # (e.g. SituAndMul beta/linear_beta, SwiGLU-OAI alpha/beta/limit).
+        # Parameterized activations of the same class but different params
+        # (or an unbounded shared SiluAndMul under a clamped routed swiglu)
+        # must keep the separate shared-expert forward.
+        # TODO(ZT-AIA): The MegaMoe operator currently executes one activation
+        # for both routed and shared experts, so it cannot represent configs
+        # where the two differ. Remove this activation-signature equality check
+        # once the operator supports distinct routed/shared activations.
+        routed_activation = self._routed_megamoe_activation_signature()
+        shared_activation = self._shared_megamoe_activation_signature()
+        if shared_activation is None or shared_activation != routed_activation:
+            self._disable_megamoe_shared_fusion(
+                f"shared activation {type(self.layer.act_fn).__name__} {shared_activation} "
+                f"does not match the routed activation {routed_activation} executed by the MegaMoe operator"
+            )
+            return
+        # The operator accumulates the shared-expert output into the local
+        # token accumulator with no cross-rank reduction, so fusion is only
+        # correct when every rank holds the full shared weights. That holds
+        # when the physical TP group is trivial (weights are inherently full)
+        # or when enable_shared_expert_dp replicates them; sharded layouts —
+        # plain TP, or SP without SEDP — rely on split/gather reductions that
+        # the fused operator does not reproduce. Fall back to the separate
+        # shared-expert forward.
+        if self.moe_config.tp_group.world_size > 1 and not self.weights_replicated:
+            self._disable_megamoe_shared_fusion(
+                "shared-expert weights are sharded across the TP group; set "
+                "enable_shared_expert_dp=true to enable MegaMoe shared-expert fusion"
+            )
+            return
+
+        for linear, slot in (
+            (self.layer.gate_up_proj, "w1"),
+            (self.layer.down_proj, "w2"),
+        ):
+            self._wrap_linear_for_megamoe_fusion(linear, slot)
+
+    def _routed_megamoe_activation_signature(self) -> tuple[str, dict[str, float]] | None:
+        """Canonical ``(name, params)`` of the activation the operator executes.
+
+        Mirrors :func:`select_mega_moe_activation_kwargs`: whatever kwargs this
+        builds are the ones actually bound into the CANN MegaMoe call, so this
+        — not the raw ``FusedMoEConfig.activation`` tag — is the function the
+        shared experts must equal. ``None`` marks an activation the operator
+        cannot represent (GELU variants, swiglustep, ...), which always keeps
+        the separate shared-expert forward.
+        """
+        moe_config = self.moe_config
+        activation = getattr(moe_config, "activation", "silu")
+        name = str(getattr(activation, "value", activation)).lower()
+        clamp = moe_config.swiglu_limit if (moe_config.swiglu_limit or 0.0) > 0 else None
+        if name == "situ":
+            params = {"beta": 1.0 if moe_config.activation_situ_beta is None else moe_config.activation_situ_beta}
+            if moe_config.activation_situ_linear_beta is not None:
+                params["linear_beta"] = moe_config.activation_situ_linear_beta
+            return ("situglu", params)
+        if name in ("swigluoai", "swigluoai_uninterleave"):
+            params = {
+                "alpha": 1.0 if moe_config.swiglu_alpha is None else moe_config.swiglu_alpha,
+                "beta": 0.0 if moe_config.swiglu_beta is None else moe_config.swiglu_beta,
+            }
+            if clamp is not None:
+                params["clamp"] = clamp
+            return ("swigluoai", params)
+        if name == "silu":
+            params = {"alpha": 1.0, "beta": 0.0}
+            if clamp is not None:
+                params["clamp"] = clamp
+            return ("silu", params)
+        return None
+
+    def _shared_megamoe_activation_signature(self) -> tuple[str, dict[str, float]] | None:
+        """Canonical ``(name, params)`` of the shared expert's activation module.
+
+        ``None`` when the activation has no MegaMoe counterpart (GELU variants,
+        unknown custom activations) or its standalone Ascend semantics cannot
+        be reproduced by the operator's single global activation.
+        """
+        act_fn = self.layer.act_fn
+        if isinstance(act_fn, SituAndMul):
+            params = {"beta": act_fn.beta}
+            if act_fn.linear_beta is not None:
+                params["linear_beta"] = act_fn.linear_beta
+            return ("situglu", params)
+        if isinstance(act_fn, SiluAndMulWithClamp):
+            params = {"alpha": getattr(act_fn, "alpha", 1.0), "beta": getattr(act_fn, "beta", 0.0)}
+            limit = getattr(act_fn, "swiglu_limit", None)
+            if limit is not None and limit > 0:
+                params["clamp"] = limit
+            return ("silu", params)
+        if isinstance(act_fn, SiluAndMul):
+            return ("silu", {"alpha": 1.0, "beta": 0.0})
+        # vLLM's SwigluOAIAndMul hardcodes (up + 1); model-private look-alike
+        # classes (e.g. MiniMaxM3SwiGLUOAI) carry alpha/beta/limit as attributes.
+        if isinstance(act_fn, SwigluOAIAndMul) or (hasattr(act_fn, "alpha") and hasattr(act_fn, "limit")):
+            params = {
+                "alpha": act_fn.alpha,
+                "beta": getattr(act_fn, "beta", 1.0),
+            }
+            limit = getattr(act_fn, "limit", None)
+            if limit is not None and limit > 0:
+                params["clamp"] = limit
+            return ("swigluoai", params)
+        return None
+
+    def _wrap_linear_for_megamoe_fusion(self, linear: torch.nn.Module, slot: str) -> None:
+        """Rebuild the shared weight right after its linear is processed.
+
+        The wrapper is attached to the linear's own quant-method instance and
+        ignores calls for other layers, so a shared quant-method instance
+        stays safe.
+        """
+        quant_method = getattr(linear, "quant_method", None)
+        original = getattr(quant_method, "process_weights_after_loading", None)
+        if original is None:
+            self._disable_megamoe_shared_fusion(
+                f"shared linear {type(linear).__name__} has no process_weights_after_loading"
+            )
+            return
+
+        @wraps(original)
+        def wrapped_megamoe_collect(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if args and args[0] is linear:
+                self._collect_megamoe_shared_weight(slot, linear)
+            return result
+
+        quant_method.process_weights_after_loading = wrapped_megamoe_collect  # type: ignore
+
+    def _collect_megamoe_shared_weight(self, slot: str, linear: torch.nn.Module) -> None:
+        """Rebuild one shared linear into the A5 MegaMoe layout.
+
+        MegaMoe expects (out, in) tensors while the processed linear buffer is
+        (in, out) ND, so a transpose+contiguous materializes the correct ND
+        layout; the per-group scale becomes (n, k//2, 2), matching the routed
+        per-expert scale shape. Mixed-quantization models may quantize the
+        shared expert differently from the routed experts (e.g. W8A8MXFP
+        routed + W4A8MXFP shared), so the shared quant type is read off the
+        shared linear's own quant method; the weight layout follows the shared
+        weight dtype: MXFP8 stores one fp8 per element, packed MXFP4 (both the
+        W4A4MXFP and W4A8MXFP shared experts) stores two fp4 per uint8 byte.
+        Packed MXFP4 additionally applies the same format casts as the routed
+        experts in the W4A4 MoE method: w1 stays FRACTAL_NZ and w2 is rebuilt
+        as FRACTAL_NZ_C0_32 on an fp8 carrier, and the byte-stored E8M0 scales
+        are viewed with their semantic dtype.
+        """
+        if self._megamoe_shared_fusion_disabled:
+            return
+        padding = getattr(linear, "mxfp8_tp_padding", getattr(linear, "mxfp4_tp_padding", (0, 0)))
+        if any(padding):
+            self._disable_megamoe_shared_fusion(
+                f"padded shared-expert weights {padding} do not match the routed "
+                "intermediate size required by the MegaMoe layout"
+            )
+            return
+        weight_dtype = linear.weight.data.dtype
+        if weight_dtype == torch.uint8:
+            # Packed MXFP4 shared expert: two logical K values per byte.
+            packed_fp4 = True
+        elif weight_dtype == torch.float8_e4m3fn:
+            packed_fp4 = False
+        else:
+            self._disable_megamoe_shared_fusion(
+                f"shared-expert weight dtype {weight_dtype} is not "
+                "supported by MegaMoe fusion (expected MXFP8 fp8_e4m3fn or packed "
+                "MXFP4 uint8); keeping the separate shared-expert forward."
+            )
+            return
+        # Resolve the shared expert's own quant type. The packed weight bytes
+        # alone cannot tell an A4 from an A8 shared activation, so prefer the
+        # type declared by the shared linear's quant method (this is what
+        # mixed-quantization checkpoints rely on: W4A8MXFP shared under
+        # W8A8MXFP routed runs the shared GMM in A8W4-FP mode). Fall back to
+        # the weight-dtype heuristic when the method declares nothing.
+        shared_quant_type = getattr(getattr(linear, "quant_method", None), "quant_type", QuantType.NONE)
+        if shared_quant_type in (QuantType.W4A4MXFP, QuantType.W4A8MXFP):
+            if not packed_fp4:
+                self._disable_megamoe_shared_fusion(
+                    f"shared quant type {shared_quant_type} expects packed MXFP4 "
+                    f"weights but the shared linear holds {weight_dtype}"
+                )
+                return
+        elif shared_quant_type == QuantType.W8A8MXFP:
+            if packed_fp4:
+                self._disable_megamoe_shared_fusion(
+                    "shared quant type W8A8MXFP expects MXFP8 weights but the shared linear holds packed MXFP4"
+                )
+                return
+        else:
+            shared_quant_type = QuantType.W4A4MXFP if packed_fp4 else QuantType.W8A8MXFP
+        self._megamoe_shared_quant_type = shared_quant_type
+        if packed_fp4:
+            # Packed FP4 stores two logical K values per byte.
+            expected_weight_shape = (
+                (
+                    2 * self.moe_config.intermediate_size_per_partition,
+                    self.moe_config.hidden_dim // 2,
+                )
+                if slot == "w1"
+                else (
+                    self.moe_config.hidden_dim,
+                    self.moe_config.intermediate_size_per_partition // 2,
+                )
+            )
+        else:
+            expected_weight_shape = (
+                (
+                    2 * self.moe_config.intermediate_size_per_partition,
+                    self.moe_config.hidden_dim,
+                )
+                if slot == "w1"
+                else (
+                    self.moe_config.hidden_dim,
+                    self.moe_config.intermediate_size_per_partition,
+                )
+            )
+        try:
+            # Aclnn-only firmware cannot clone tensors that carry a FRACTAL_NZ
+            # internal format, so force the ND view before the transpose +
+            # contiguous materialization (2 == ACL_FORMAT_ND).
+            weight = torch_npu.npu_format_cast(linear.weight.data, 2)
+            weight = weight.transpose(0, 1).contiguous()
+            scale = linear.weight_scale.data.transpose(0, 1).contiguous()
+        finally:
+            torch.npu.config.allow_internal_format = True
+        if tuple(weight.shape) != expected_weight_shape:
+            self._disable_megamoe_shared_fusion(
+                f"shared-expert weight shape {tuple(weight.shape)} does not match the "
+                f"routed expert layout {expected_weight_shape}"
+            )
+            return
+        if packed_fp4:
+            # Mirror the routed-expert weight rebuild: gate/up (w1) is cast to
+            # FRACTAL_NZ directly, down (w2) goes through the packed-FP4 →
+            # fp8-carrier FRACTAL_NZ_C0_32 conversion.
+            if slot == "w1":
+                weight = torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+            else:
+                weight = torch_npu.npu_format_cast(
+                    weight,
+                    ACL_FORMAT_FRACTAL_NZ,
+                    customize_dtype=torch.float8_e4m3fn,
+                    input_dtype=torch_npu.float4_e2m1fn_x2,
+                )
+        # Checkpoint E8M0 scales are stored as bytes; the MegaMoe A5 input
+        # check requires their semantic dtype for routed and shared experts
+        # alike (the storage is unchanged, only the dtype is reinterpreted).
+        scale = scale.view(torch.float8_e8m0fnu)
+        self._megamoe_shared_parts[slot] = weight
+        self._megamoe_shared_parts[slot + "_scale"] = scale
+        self._publish_megamoe_shared_fusion()
+
+    def megamoe_shared_fusion(self) -> MegamoeSharedExpertFusion:
+        """Payload the routed layer needs to run the shared expert in MegaMoe.
+
+        Returned once, right after construction, so ``AscendMoERunner`` can
+        install it explicitly on the routed-expert layer. Weight loading runs
+        later, hence the returned object is live: this class fills its fields
+        as the shared linears are rebuilt, and consumers treat ``weights is
+        None`` as "fusion inactive".
+        """
+        return self._megamoe_shared_fusion
+
+    def _publish_megamoe_shared_fusion(self) -> None:
+        """Fill the live payload once both shared linears are rebuilt.
+
+        Re-publishing keeps RL weight reloads pointing at the fresh tensors.
+        """
+        if self._megamoe_shared_fusion_disabled:
+            return
+        needed = ("w1", "w2", "w1_scale", "w2_scale")
+        if not all(name in self._megamoe_shared_parts for name in needed):
+            return
+        weights = MegamoeSharedWeights(
+            w1=[self._megamoe_shared_parts["w1"]],
+            w2=[self._megamoe_shared_parts["w2"]],
+            w1_scale=[self._megamoe_shared_parts["w1_scale"]],
+            w2_scale=[self._megamoe_shared_parts["w2_scale"]],
+        )
+        # Record the shared expert's own quant settings so the operator call
+        # can declare them explicitly. The routed and shared experts may
+        # differ (W4A4C8: MXFP4 routed + MXFP8 shared; W8A8 routed +
+        # W4A8MXFP shared): the shared GMM then runs in A4W4-FP / A8W4-FP /
+        # A8W8-FP mode against the routed experts' mode. Mixed quantization
+        # is only supported on the operator's MTE topology (topo_type=0);
+        # Layered topologies reject the mixed descriptors at call time.
+        # Values are the ACL dtype ints the MegaMoe wrapper accepts, matching
+        # _get_cann_mega_moe_quant_settings.
+        shared_quant_type = self._megamoe_shared_quant_type
+        _, shared_quant_out_dtype, shared_weight_type = moe_utils._get_cann_mega_moe_quant_settings(shared_quant_type)
+        fusion = self._megamoe_shared_fusion
+        fusion.weights = weights
+        fusion.quant_out_dtype = shared_quant_out_dtype
+        fusion.weight_type = shared_weight_type
+        if not self.megamoe_shared_weights_ready:
+            self.megamoe_shared_weights_ready = True
+            logger.info_once("Fused the shared expert into the A5 MegaMoe operator.")
+
+    def _disable_megamoe_shared_fusion(self, reason: str) -> None:
+        if not self._megamoe_shared_fusion_disabled:
+            logger.info_once(
+                "Disabling MegaMoe shared-expert fusion: %s; keeping the separate shared-expert forward.",
+                reason,
+            )
+        self._megamoe_shared_fusion_disabled = True
+        self._megamoe_shared_parts.clear()
+        self._megamoe_shared_fusion.weights = None
 
     def set_lora_context(self, lora_context) -> None:
         self.lora_context = lora_context
@@ -125,8 +561,11 @@ class AscendSharedExperts:
 
         integrated_out = self.layer(test_input)
         part1_out = self.part1(test_input)
-        shared_act = self.apply_activation(part1_out)
-        split_out = self.part2(test_input, shared_act)
+        if self._select_mlp_path() is SharedExpertMLPPath.W8A8_MXFP_LINEAR:
+            down_input = self._prepare_w8a8_mxfp_down_input(part1_out)
+        else:
+            down_input = self.apply_activation(part1_out)
+        split_out = self.part2(test_input, down_input)
 
         if not torch.allclose(integrated_out, split_out):
             diff = (integrated_out - split_out).abs()
@@ -149,16 +588,25 @@ class AscendSharedExperts:
             " Integrated and split-path results are consistent."
         )
 
-    def part1(self, hidden_states: torch.Tensor):
+    def part1(
+        self,
+        hidden_states: LinearInput,
+    ):
         shared_gate_up, _ = self.layer.gate_up_proj(hidden_states)  # type: ignore
         return shared_gate_up
 
     def apply_activation(self, shared_gate_up: torch.Tensor):
         return self.layer.act_fn(shared_gate_up)  # type: ignore
 
-    def part2(self, hidden_states: torch.Tensor, shared_act: torch.Tensor):
-        shared_out, _ = self.layer.down_proj(shared_act)  # type: ignore
+    def part2(
+        self,
+        hidden_states: torch.Tensor,
+        down_input: LinearInput,
+    ):
+        shared_out, _ = self.layer.down_proj(down_input)  # type: ignore
+        return self._apply_output_gate(hidden_states, shared_out)
 
+    def _apply_output_gate(self, hidden_states: torch.Tensor, shared_out: torch.Tensor) -> torch.Tensor:
         # Qwen3-Next specific gating mechanism
         if hasattr(self.layer, "expert_gate") and self.layer.expert_gate is not None:
             gate_out, _ = self.layer.expert_gate(hidden_states)  # type: ignore
@@ -197,7 +645,7 @@ class AscendSharedExperts:
         tp_size = tp_group.world_size
         pad_size = (tp_size - original_num_tokens % tp_size) % tp_size
         if pad_size > 0:
-            hidden_states = F.pad(hidden_states, (0, 0, 0, pad_size))
+            hidden_states = _pad_tokens_with_cat(hidden_states, original_num_tokens + pad_size)
         hidden_states = torch.tensor_split(
             hidden_states,
             tp_size,
@@ -347,40 +795,141 @@ class AscendSharedExperts:
             hidden_states = hidden_states[: _EXTRA_CTX.num_tokens]
         return hidden_states, local_dp_metadata
 
-    def _run_a8_int_mlp(
+    def prepare_for_router_overlap(
         self,
-        hidden_states: torch.Tensor,
-        milestones: RoutedMoEMilestones,
-        down_projection_ready: torch.npu.Event | None,
-        down_projection_milestone: str,
-    ) -> torch.Tensor:
-        original_dtype = hidden_states.dtype
-        # Vector dynamic quant overlaps the Cube-heavy router gate.
-        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
-        self._wait_for_milestone(
-            milestones.router_output_ready,
-            "router_output_ready",
-        )
-        # Gate-up is Cube-heavy. From router_output_ready it overlaps the
-        # routed AllGather prepare communication, or All2All preprocessing and
-        # its forward exchange.
-        gate_up = torch_npu.npu_quant_matmul(
-            quantized_x,
-            self.layer.gate_up_proj.weight,
-            self.layer.gate_up_proj.weight_scale,
-            pertoken_scale=None,
-            bias=None,
-            output_dtype=torch.int32,
+        prepared_input: PreparedSharedExpertInput,
+        shared_input_ready: torch.npu.Event,
+    ) -> PreparedSharedExpertExecution | None:
+        """Queue Gate-Up input preparation before the router matmul.
+
+        Recording an event before the router is insufficient by itself: if the
+        auxiliary-stream work is submitted only after routed MoE, device-side
+        execution still starts late. This method is called immediately after
+        ``shared_input_ready`` is recorded, so Vector/AIV activation
+        preparation can run concurrently with the Cube-heavy router matmul.
+
+        Unsupported wrappers return the unmodified tensor as ``gate_up_input``;
+        their complete registered linear is still ordered after
+        ``router_output_ready`` and is submitted before routed TopK/dispatch.
+        """
+        if not self.multistream_overlap:
+            return None
+
+        mode = self.parallel_mode()
+        milestones = RoutedMoEMilestones(shared_input_ready=shared_input_ready)
+        with npu_stream_switch(shared_experts_calculation_stream(), enabled=True):
+            hidden_states, local_dp_metadata = self._prepare_execution_input(
+                prepared_input,
+                milestones,
+                mode,
+            )
+            gate_up_input = self._prepare_gate_up_input(hidden_states)
+        return PreparedSharedExpertExecution(
+            hidden_states=hidden_states,
+            gate_up_input=gate_up_input,
+            local_dp_metadata=local_dp_metadata,
         )
 
+    def _prepare_gate_up_input(self, hidden_states: torch.Tensor) -> LinearInput:
+        """Prepare the selected Gate-Up path without running its matmul."""
+        path = self._select_mlp_path()
+        if path is SharedExpertMLPPath.A8_INT_FUSED:
+            return torch_npu.npu_dynamic_quant(hidden_states)
+        if path is SharedExpertMLPPath.A8_MXFP_FUSED:
+            return torch_npu.npu_dynamic_mx_quant(
+                hidden_states,
+                dst_type=torch.float8_e4m3fn,
+            )
+        return self._prepare_linear_input_for_overlap(self.layer.gate_up_proj, hidden_states)
+
+    def _prepare_linear_input_for_overlap(
+        self,
+        layer: torch.nn.Module,
+        hidden_states: LinearInput,
+    ) -> LinearInput:
+        """Run scheme-owned Vector/AIV preparation before a stage barrier."""
+        if not self.multistream_overlap or has_lora(self.lora_context):
+            return hidden_states
+        if not isinstance(hidden_states, torch.Tensor):
+            # Activation may have already quantized the Down input and scale.
+            return hidden_states
+
+        linear_method = getattr(layer, "quant_method", None)
+        quant_scheme = getattr(linear_method, "quant_method", linear_method)
+        prepare_input = getattr(quant_scheme, "prepare_input_for_overlap", None)
+        if prepare_input is None:
+            return hidden_states
+
+        prepared_input = prepare_input(layer, hidden_states)
+        return hidden_states if prepared_input is None else prepared_input
+
+    def enqueue_gate_up_after_router(
+        self,
+        prepared_execution: PreparedSharedExpertExecution,
+        router_output_ready: torch.npu.Event | None,
+    ) -> SubmittedSharedExpertGateUp:
+        """Submit Gate-Up before routed TopK/dispatch are enqueued.
+
+        Gate-Up remains ordered after the router through ``router_output_ready``
+        but is placed on the auxiliary stream immediately, allowing its Cube
+        work to cover routed TopK and dispatch instead of missing that window
+        because of host-side submission order.
+        """
+        path = self._select_mlp_path()
+        gate_up_input_scale = None
+        with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
+            self._wait_for_milestone(router_output_ready, "router_output_ready")
+            if path is SharedExpertMLPPath.A8_INT_FUSED:
+                # W8A8/W4A8: INT8 activations with INT8 or INT4 weights.
+                assert isinstance(prepared_execution.gate_up_input, tuple)
+                quantized_x, gate_up_input_scale = prepared_execution.gate_up_input
+                gate_up = torch_npu.npu_quant_matmul(
+                    quantized_x,
+                    self.layer.gate_up_proj.weight,
+                    self.layer.gate_up_proj.weight_scale,
+                    pertoken_scale=None,
+                    bias=None,
+                    output_dtype=torch.int32,
+                )
+            elif path is SharedExpertMLPPath.A8_MXFP_FUSED:
+                # W4A8MXFP only: MXFP8 activations with MXFP4 weights.
+                # W8A8MXFP remains on the registered linear-wrapper path.
+                assert isinstance(prepared_execution.gate_up_input, tuple)
+                quantized_x, pertoken_scale = prepared_execution.gate_up_input
+                gate_up = self.layer.gate_up_proj((quantized_x, pertoken_scale))[0]
+            else:
+                gate_up = self.part1(prepared_execution.gate_up_input)
+
+        return SubmittedSharedExpertGateUp(
+            hidden_states=prepared_execution.hidden_states,
+            gate_up=gate_up,
+            gate_up_input_scale=gate_up_input_scale,
+            local_dp_metadata=prepared_execution.local_dp_metadata,
+            path=path,
+        )
+
+    def _run_a8_int_mlp(
+        self,
+        submitted_gate_up: SubmittedSharedExpertGateUp,
+        milestones: RoutedMoEMilestones,
+    ) -> torch.Tensor:
+        """Finish the fused W8A8/W4A8 INT-activation shared MLP.
+
+        Both quantization modes use INT8 activations. W8A8 supplies INT8
+        weights, while W4A8 supplies INT4 weights. Gate-Up has already been
+        submitted before routed TopK/dispatch; this stage performs fused
+        activation/requantization and the Down projection.
+        """
+        pertoken_scale = submitted_gate_up.gate_up_input_scale
+        assert pertoken_scale is not None
         self._wait_for_routed_stage(
             milestones,
-            milestones.routed_gmm2_start,
-            "routed_gmm2_start",
+            milestones.shared_activation_overlap_start,
+            "shared_activation_overlap_start",
         )
         if self.situ_activation is not None:
             quantized_x, swiglu_out_scale = torch.ops._C_ascend.dequant_situ_quant(
-                x=gate_up,
+                x=submitted_gate_up.gate_up,
                 weight_scale=self.layer.gate_up_proj.weight_scale_fp32,
                 activation_scale=pertoken_scale,
                 bias=None,
@@ -394,7 +943,7 @@ class AscendSharedExperts:
             )
         else:
             quantized_x, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
-                x=gate_up,
+                x=submitted_gate_up.gate_up,
                 weight_scale=self.layer.gate_up_proj.weight_scale_fp32,
                 activation_scale=pertoken_scale,
                 bias=None,
@@ -413,43 +962,39 @@ class AscendSharedExperts:
             )
         self._wait_for_routed_stage(
             milestones,
-            down_projection_ready,
-            down_projection_milestone,
+            milestones.routed_combine_start,
+            "routed_combine_start",
         )
-        return torch_npu.npu_quant_matmul(
+        shared_out = torch_npu.npu_quant_matmul(
             quantized_x,
             self.layer.down_proj.weight,
             self.layer.down_proj.weight_scale,
             pertoken_scale=swiglu_out_scale,
             bias=None,
-            output_dtype=original_dtype,
+            output_dtype=submitted_gate_up.hidden_states.dtype,
         )
+        return self._apply_output_gate(submitted_gate_up.hidden_states, shared_out)
 
     def _run_a8_mxfp_mlp(
         self,
-        hidden_states: torch.Tensor,
+        submitted_gate_up: SubmittedSharedExpertGateUp,
         milestones: RoutedMoEMilestones,
-        down_projection_ready: torch.npu.Event | None,
-        down_projection_milestone: str,
     ) -> torch.Tensor:
-        quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
-            hidden_states,
-            dst_type=torch.float8_e4m3fn,
-        )
-        self._wait_for_milestone(
-            milestones.router_output_ready,
-            "router_output_ready",
-        )
-        gate_up = self.layer.gate_up_proj((quantized_x, pertoken_scale))[0]
+        """Finish the fused W4A8MXFP shared MLP.
 
+        This path means MXFP4 weights with MXFP8 activations. W8A8MXFP does
+        not enter here; it keeps the registered linear wrapper so its scheme-
+        owned padding, scale algorithm, and output dtype remain intact.
+        Gate-Up has already been submitted before routed TopK/dispatch.
+        """
         self._wait_for_routed_stage(
             milestones,
-            milestones.routed_gmm2_start,
-            "routed_gmm2_start",
+            milestones.shared_activation_overlap_start,
+            "shared_activation_overlap_start",
         )
         if self.situ_activation is not None:
             quantized_x, swiglu_out_scale = torch.ops._C_ascend.situ_mx_quant(
-                x=gate_up,
+                x=submitted_gate_up.gate_up,
                 beta=self.situ_activation.beta,
                 linear_beta=self.situ_activation.linear_beta or 0.0,
                 activate_left=True,
@@ -457,7 +1002,7 @@ class AscendSharedExperts:
             )
         else:
             quantized_x, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
-                gate_up,
+                submitted_gate_up.gate_up,
                 topk_weight=None,
                 group_index=None,
                 dst_type=torch.float8_e4m3fn,
@@ -466,86 +1011,114 @@ class AscendSharedExperts:
             )
         self._wait_for_routed_stage(
             milestones,
-            down_projection_ready,
-            down_projection_milestone,
+            milestones.routed_combine_start,
+            "routed_combine_start",
         )
-        return self.layer.down_proj((quantized_x, swiglu_out_scale))[0]
+        return self.part2(submitted_gate_up.hidden_states, (quantized_x, swiglu_out_scale))
 
-    def _run_linear_wrapped_mlp(
-        self,
-        hidden_states: torch.Tensor,
-        milestones: RoutedMoEMilestones,
-        down_projection_ready: torch.npu.Event | None,
-        down_projection_milestone: str,
-    ) -> torch.Tensor:
-        self._wait_for_milestone(
-            milestones.router_output_ready,
-            "router_output_ready",
-        )
-        gate_up = self.part1(hidden_states)
+    def _can_fuse_w8a8_mxfp_activation(self, gate_up: torch.Tensor) -> bool:
+        if self.quant_type != QuantType.W8A8MXFP or has_lora(self.lora_context):
+            return False
 
-        self._wait_for_routed_stage(
-            milestones,
-            milestones.routed_gmm2_start,
-            "routed_gmm2_start",
+        # Lazy import: the quantization module imports routed/shared MoE code.
+        from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+
+        down_proj = self.layer.down_proj
+        scheme = getattr(getattr(down_proj, "quant_method", None), "quant_method", None)
+        # Prepared input bypasses the scheme's input padding and quantization.
+        # Limit fusion to the existing kernel's BF16/default-MX contract.
+        return (
+            type(scheme) is AscendW8A8MXFP8DynamicLinearMethod
+            and type(self.layer.act_fn) is AscendSiluAndMul
+            and self.swiglu_limit == 0.0
+            and scheme.dynamic_mx_quant_scale_alg == 0
+            and scheme.group_size == MXFP8_ACTIVATION_GROUP_SIZE
+            and not any(getattr(down_proj, "mxfp8_tp_padding", (0, 0)))
+            and getattr(down_proj, "input_is_parallel", False)
+            and gate_up.dtype == torch.bfloat16
+            and gate_up.ndim == 2
+            and gate_up.shape[-1] > 0
+            and gate_up.shape[-1] % SWIGLU_MX_INPUT_ALIGNMENT == 0
+            and hasattr(torch.ops._C_ascend, "npu_swiglu_group_quant")
         )
+
+    def _prepare_w8a8_mxfp_down_input(self, gate_up: torch.Tensor) -> LinearInput:
+        """Try fused SwiGLU/MX quant, otherwise use the scheme's preparation."""
+        if self._can_fuse_w8a8_mxfp_activation(gate_up):
+            quantized_x, scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
+                gate_up,
+                topk_weight=None,
+                group_index=None,
+                dst_type=torch.float8_e4m3fn,
+                quant_mode=SWIGLU_MX_QUANT_MODE,
+                clamp_value=0.0,
+            )
+            return PreparedLinearInput(quantized_x, scale, gate_up.dtype)
+
         shared_act = self.apply_activation(gate_up)
-        self._wait_for_routed_stage(
-            milestones,
-            down_projection_ready,
-            down_projection_milestone,
-        )
-        return self.part2(hidden_states, shared_act)
+        return self._prepare_linear_input_for_overlap(self.layer.down_proj, shared_act)
 
-    def _run_shared_mlp(
+    def _finish_linear_wrapped_mlp(
         self,
-        hidden_states: torch.Tensor,
+        submitted_gate_up: SubmittedSharedExpertGateUp,
         milestones: RoutedMoEMilestones,
     ) -> torch.Tensor:
-        # The shared Down projection can overlap the routed combine/finalize.
-        # Only the later SP output collective must wait for routed finalize.
-        down_projection_ready = milestones.routed_combine_start
-        down_projection_milestone = "routed_combine_start"
-
-        path = self._select_mlp_path()
-        if path is SharedExpertMLPPath.A8_INT_FUSED:
-            return self._run_a8_int_mlp(
-                hidden_states,
-                milestones,
-                down_projection_ready,
-                down_projection_milestone,
-            )
-        if path is SharedExpertMLPPath.A8_MXFP_FUSED:
-            return self._run_a8_mxfp_mlp(
-                hidden_states,
-                milestones,
-                down_projection_ready,
-                down_projection_milestone,
-            )
-        return self._run_linear_wrapped_mlp(
-            hidden_states,
+        self._wait_for_routed_stage(
             milestones,
-            down_projection_ready,
-            down_projection_milestone,
+            milestones.shared_activation_overlap_start,
+            "shared_activation_overlap_start",
         )
+        # All staged backends place activation/quantization alongside routed
+        # GMM2. The Down matmul remains behind combine.
+        if submitted_gate_up.path is SharedExpertMLPPath.W8A8_MXFP_LINEAR:
+            down_input = self._prepare_w8a8_mxfp_down_input(submitted_gate_up.gate_up)
+        else:
+            shared_act = self.apply_activation(submitted_gate_up.gate_up)
+            down_input = self._prepare_linear_input_for_overlap(self.layer.down_proj, shared_act)
+        self._wait_for_routed_stage(
+            milestones,
+            milestones.routed_combine_start,
+            "routed_combine_start",
+        )
+        return self.part2(submitted_gate_up.hidden_states, down_input)
+
+    def _finish_shared_mlp(
+        self,
+        submitted_gate_up: SubmittedSharedExpertGateUp,
+        milestones: RoutedMoEMilestones,
+    ) -> torch.Tensor:
+        if submitted_gate_up.path is SharedExpertMLPPath.A8_INT_FUSED:
+            return self._run_a8_int_mlp(submitted_gate_up, milestones)
+        if submitted_gate_up.path is SharedExpertMLPPath.A8_MXFP_FUSED:
+            return self._run_a8_mxfp_mlp(submitted_gate_up, milestones)
+        return self._finish_linear_wrapped_mlp(submitted_gate_up, milestones)
 
     def _select_mlp_path(self) -> SharedExpertMLPPath:
         """Select a path without changing the quantization scheme's math.
 
         Only schemes with a proven split activation-quant pipeline bypass the
-        registered linear wrappers.  W8A8MXFP, W8A8FP, W4A4MXFP and other
-        schemes continue through those wrappers.  Active LoRA always needs the
-        wrapper path so its adapter computation is preserved.
+        registered linear wrappers. W8A8MXFP keeps both linears and selects
+        a path that checks activation-fusion compatibility after Gate-Up.
+        W8A8FP, W4A4MXFP and other schemes use the generic wrapper path.
+        Active LoRA always uses that generic path to preserve its adapters.
         """
         has_quantized_shared_without_lora = (
             not has_lora(self.lora_context)
             and hasattr(self.layer.gate_up_proj, "weight_scale")
             and hasattr(self.layer.down_proj, "weight_scale")
         )
+        # W8A8 and W4A8 share an INT8-activation implementation; A8 names
+        # the activation width and does not imply that weights are INT8.
         if has_quantized_shared_without_lora and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
             return SharedExpertMLPPath.A8_INT_FUSED
+        # This MXFP path currently represents W4A8MXFP only (MXFP4 weights
+        # with MXFP8 activations).
         if has_quantized_shared_without_lora and self.quant_type == QuantType.W4A8MXFP:
             return SharedExpertMLPPath.A8_MXFP_FUSED
+        # Selecting this path does not guarantee fusion: tensor metadata and
+        # the Down scheme are checked after the registered Gate-Up linear.
+        if not has_lora(self.lora_context) and self.quant_type == QuantType.W8A8MXFP:
+            return SharedExpertMLPPath.W8A8_MXFP_LINEAR
         return SharedExpertMLPPath.LINEAR_WRAPPER
 
     def wait_for_output(self) -> None:
@@ -560,15 +1133,30 @@ class AscendSharedExperts:
         prepared_input: PreparedSharedExpertInput,
         milestones: RoutedMoEMilestones,
         defer_output_wait: bool = False,
+        submitted_gate_up: SubmittedSharedExpertGateUp | None = None,
     ) -> torch.Tensor:
         mode = self.parallel_mode()
-        with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
-            hidden_states, local_dp_metadata = self._prepare_execution_input(
-                prepared_input,
-                milestones,
-                mode,
+        if submitted_gate_up is None:
+            with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
+                hidden_states, local_dp_metadata = self._prepare_execution_input(
+                    prepared_input,
+                    milestones,
+                    mode,
+                )
+                gate_up_input = self._prepare_gate_up_input(hidden_states)
+            prepared_execution = PreparedSharedExpertExecution(
+                hidden_states=hidden_states,
+                gate_up_input=gate_up_input,
+                local_dp_metadata=local_dp_metadata,
             )
-            shared_out = self._run_shared_mlp(hidden_states, milestones)
+            submitted_gate_up = self.enqueue_gate_up_after_router(
+                prepared_execution,
+                milestones.router_output_ready,
+            )
+
+        local_dp_metadata = submitted_gate_up.local_dp_metadata
+        with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
+            shared_out = self._finish_shared_mlp(submitted_gate_up, milestones)
             if self.multistream_overlap and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
                 self._wait_for_milestone(
                     milestones.routed_finalize_done,

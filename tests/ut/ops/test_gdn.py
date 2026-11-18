@@ -30,6 +30,7 @@ from vllm_ascend.ops.gdn import (
     _PACKED_CONV_WEIGHT_NAME,
     _get_base_conv1d,
     _get_packed_conv_weights,
+    _split_head_first_conv_output,
     initialize_packed_conv_weight,
 )
 
@@ -147,3 +148,18 @@ def test_layerwise_reload_repacks_updated_source_in_place():
         base_conv.get_parameter(_PACKED_CONV_WEIGHT_NAME),
         loaded.squeeze(1).transpose(0, 1).to(torch.bfloat16),
     )
+
+
+def test_head_first_conv_split_preserves_values_and_token_axis():
+    # Unequal K/V head counts catch head/token swaps; cover TP1 and TP2.
+    for tp_size in (1, 2):
+        nk, nv, tokens, dim = 4 // tp_size, 8 // tp_size, 7, 16
+        flat = torch.arange(tokens * (2 * nk + nv) * dim).reshape(tokens, -1)
+        head_first = flat.reshape(tokens, 2 * nk + nv, dim).transpose(0, 1).contiguous()
+        actual = _split_head_first_conv_output(head_first, nk, nv)
+        expected = flat.reshape(1, tokens, 2 * nk + nv, dim).split((nk, nk, nv), dim=2)
+        for result, reference in zip(actual, expected):
+            torch.testing.assert_close(result, reference)
+            assert result.untyped_storage().data_ptr() == head_first.untyped_storage().data_ptr()
+            # The public view keeps tokens on the sequence axis.
+            torch.testing.assert_close(result[:, 2:], reference[:, 2:])

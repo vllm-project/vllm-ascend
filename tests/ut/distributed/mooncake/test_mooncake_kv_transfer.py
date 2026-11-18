@@ -56,19 +56,22 @@ class TestKVTransferMissingKeyPut(unittest.TestCase):
         req_meta = ReqMeta(
             req_id="req-1",
             token_len_chunk=64,
-            block_ids=[0, 1, 2, 3],
+            block_ids=[1, 2, 3, 4],
             block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
             current_event=None,
         )
-        thread.add_stored_request("req-1")
+        thread.add_stored_request(req_meta)
         thread.request_queue.put(req_meta)
         thread._handle_request(req_meta)
 
         self.assertEqual(len(store.put_calls), 1)
         put_keys, put_addrs, put_sizes = store.put_calls[0]
         self.assertEqual(len(put_keys), 2)
-        self.assertEqual(put_addrs, [[1001], [1003]])
+        self.assertEqual(put_addrs, [[1002], [1004]])
         self.assertEqual(put_sizes, [[16], [16]])
+        self.assertEqual(thread.get_saved_offset("req-1"), 64)
+        self.assertFalse(thread.is_stored_request("req-1"))
+        self.assertEqual(thread.request_queue.unfinished_tasks, 0)
 
 
 if __name__ == "__main__":

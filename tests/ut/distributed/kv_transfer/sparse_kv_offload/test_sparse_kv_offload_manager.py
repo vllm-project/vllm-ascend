@@ -2,17 +2,147 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+from torch import Tensor
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload import (
     sparse_kv_offload_manager as manager_module,
 )
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import RequestIdentityRegistry
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     SparseKVOffloadManager,
     get_sparse_kv_offload_cpu_pool_size_bytes,
     plan_sparse_kv_offload_memory,
+    resolve_sparse_kv_offload_store_url,
 )
 from vllm_ascend.utils import AscendDeviceType
+
+
+class TestSparseKVOffloadRequestMetadata(unittest.TestCase):
+    def setUp(self):
+        self.identity = RequestIdentityRegistry()
+        self.req_ids = SimpleNamespace(np=np.full(4, 99, dtype=np.int64), copy_to_gpu=MagicMock())
+        self.token_to_req = SimpleNamespace(np=np.full(8, 99, dtype=np.int32), copy_to_gpu=MagicMock())
+
+    def update(self, ids, *, num_reqs=None, is_dummy=False, query_start=None):
+        if num_reqs is None:
+            num_reqs = len(ids)
+        if query_start is None:
+            query_start = np.arange(num_reqs + 1, dtype=np.int32)
+        manager_module.update_sparse_kv_offload_metadata(
+            int(query_start[-1]),
+            num_reqs,
+            8,
+            4,
+            ids,
+            query_start,
+            self.req_ids,
+            self.token_to_req,
+            request_identity=self.identity,
+            is_dummy=is_dummy,
+        )
+
+    def test_colliding_ids_have_distinct_stable_owners_after_batch_reorder(self):
+        ids = ["234054828099429543", "471754017250656876", "304399536143223879"]
+        self.update(ids)
+        owners = dict(zip(ids, self.req_ids.np[:3].tolist()))
+        self.assertEqual(len(set(owners.values())), 3)
+        self.assertTrue(all(owner > 0 for owner in owners.values()))
+        self.update(ids[::-1])
+        self.assertEqual(self.req_ids.np.tolist(), [owners[req_id] for req_id in ids[::-1]] + [0])
+        self.assertEqual(self.req_ids.np.dtype, np.dtype(np.int64))
+        self.assertEqual(self.token_to_req.np.tolist(), [0, 1, 2, 0, 0, 0, 0, 0])
+        self.req_ids.copy_to_gpu.assert_called_with(4)
+        self.token_to_req.copy_to_gpu.assert_called_with(8)
+
+    def test_owner_change_after_finished_request_reuses_the_same_string(self):
+        self.update(["same-id"])
+        old_owner = int(self.req_ids.np[0])
+        self.identity.remove("same-id")
+        self.update(["same-id"])
+        self.assertGreater(int(self.req_ids.np[0]), old_owner)
+
+    def test_dummy_does_not_alias_live_owners_or_consume_real_ids(self):
+        self.update(["live"])
+        owner = int(self.req_ids.np[0])
+        self.update([], num_reqs=2, is_dummy=True)
+        self.assertEqual(self.req_ids.np.tolist(), [-2, -3, 0, 0])
+        self.update(["live", "next"])
+        self.assertEqual(self.req_ids.np.tolist(), [owner, owner + 1, 0, 0])
+
+    def test_invalid_or_incomplete_active_ids_are_rejected_before_copy(self):
+        for ids in ([], ["only-one"], ["valid", None], ["valid", 123]):
+            with self.subTest(ids=ids):
+                with self.assertRaises((ValueError, TypeError, RuntimeError)):
+                    self.update(ids, num_reqs=2)
+                self.req_ids.copy_to_gpu.assert_not_called()
+                self.token_to_req.copy_to_gpu.assert_not_called()
+
+    def test_zero_request_batch_publishes_only_padding(self):
+        self.update([])
+        self.assertEqual(self.req_ids.np.tolist(), [0] * 4)
+        self.assertEqual(self.token_to_req.np.tolist(), [0] * 8)
+
+    def test_int64_owner_is_published_without_uint32_truncation(self):
+        self.identity._next_owner_id = 1 << 32
+        self.update(["large-owner"])
+        self.assertEqual(self.req_ids.np.tolist(), [1 << 32, 0, 0, 0])
+
+    def test_int64_wrap_publishes_valid_owners_and_keeps_target_draft_identity(self):
+        self.update(["retained"])
+        retained_owner = int(self.req_ids.np[0])
+        invalidate = MagicMock()
+        self.identity._on_wrap = invalidate
+        self.identity._next_owner_id = (1 << 63) - 1
+        self.update(["last", "overflow", "retained"])
+        self.assertEqual(self.req_ids.np.tolist(), [(1 << 63) - 1, 2, retained_owner, 0])
+        invalidate.assert_called_once_with()
+        self.update(["retained", "overflow", "last"])
+        self.assertEqual(self.req_ids.np.tolist(), [retained_owner, 2, (1 << 63) - 1, 0])
+        self.assertEqual(self.req_ids.np.dtype, np.dtype(np.int64))
+
+
+class TestSparseKVOffloadOwnerReset(unittest.TestCase):
+    def test_reset_drains_plans_and_invalidates_target_draft_and_fallback_in_place(self):
+        target_owners = manager_module.torch.tensor([1, 2], dtype=manager_module.torch.int64)
+        draft_owners = manager_module.torch.tensor([3, 4], dtype=manager_module.torch.int64)
+        fallback_owners = manager_module.torch.tensor([5, 6], dtype=manager_module.torch.int64)
+        buffers = (target_owners, draft_owners, fallback_owners)
+        pointers = [buffer.data_ptr() for buffer in buffers]
+        manager = SimpleNamespace(
+            lru_last_req_ids_cpu_list=[target_owners, draft_owners],
+            fused_overlap_plan_owner_layer_id=1,
+            fused_overlap_plan_topk=2,
+            fused_overlap_plan_num_tokens=2,
+            fused_overlap_plan_membership_map=object(),
+        )
+        config = SimpleNamespace(
+            compilation_config=SimpleNamespace(
+                static_forward_context={
+                    "target": SimpleNamespace(impl=SimpleNamespace(fused_overlap_last_req_ids=fallback_owners)),
+                    "draft-unallocated": SimpleNamespace(impl=SimpleNamespace(fused_overlap_last_req_ids=None)),
+                    "other": object(),
+                }
+            )
+        )
+        snapshots = []
+        with (
+            patch.object(manager_module, "get_sparse_kv_offload_manager", return_value=manager),
+            patch.object(
+                manager_module.torch_npu.npu,
+                "synchronize",
+                side_effect=lambda: snapshots.append([buffer.tolist() for buffer in buffers]),
+            ),
+        ):
+            manager_module.reset_sparse_kv_offload_request_owners(config)
+
+        self.assertEqual(snapshots, [[[1, 2], [3, 4], [5, 6]], [[-1, -1], [-1, -1], [-1, -1]]])
+        self.assertEqual([buffer.data_ptr() for buffer in buffers], pointers)
+        self.assertIsNone(manager.fused_overlap_plan_owner_layer_id)
+        self.assertIsNone(manager.fused_overlap_plan_topk)
+        self.assertEqual(manager.fused_overlap_plan_num_tokens, 0)
+        self.assertIsNone(manager.fused_overlap_plan_membership_map)
 
 
 class _FakeKVCacheSpec:
@@ -28,6 +158,8 @@ class _FakeKVCacheSpec:
         self.max_blocks_per_request = max_blocks_per_request
         self.store_on_host = store_on_host
         self.block_size = block_size
+        # vLLM main's UniformTypeKVCacheSpecs reads this from each member spec.
+        self.dcp_sharded = False
 
     def max_memory_usage_bytes(self, _vllm_config):
         return self.max_blocks_per_request * self.page_size_bytes
@@ -245,7 +377,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "host-resident"):
             get_sparse_kv_offload_cpu_pool_size_bytes(kv_cache_config)
 
-    def _make_manager_init_inputs(self, dram_size_per_dp_gb=1):
+    def _make_manager_init_inputs(self, dram_size_per_dp_gb=1, store_port_base=8500):
         spec = _FakeKVCacheSpec(
             page_size_bytes=1024,
             max_blocks_per_request=100,
@@ -260,7 +392,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                 get_num_layers=MagicMock(return_value=1),
                 max_model_len=128,
             ),
-            parallel_config=SimpleNamespace(),
+            parallel_config=SimpleNamespace(data_parallel_index=0),
             scheduler_config=SimpleNamespace(
                 max_num_seqs=1,
                 max_num_batched_tokens=1,
@@ -271,15 +403,26 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
             topk_buffer_size=1,
             topk=1,
             use_fused_overlap=False,
+            use_fused_copy_sfa=False,
             dram_size_per_dp_GB=dram_size_per_dp_gb,
+            store_port_base=store_port_base,
         )
         return vllm_config, kv_cache_config, offload_config
 
     def test_manager_initializes_offload_with_planned_pool_size(self):
         vllm_config, kv_cache_config, offload_config = self._make_manager_init_inputs()
         planned_pool_size = 4096
-        for rank, expected_alloc_size in ((0, planned_pool_size), (1, 0)):
-            with self.subTest(rank=rank):
+        for rank, expected_alloc_size, dp_index, store_port_base in (
+            (0, planned_pool_size, 0, 8500),
+            (1, 0, 0, 8500),
+            (0, planned_pool_size, 1, 8500),
+            (1, 0, 1, 8500),
+            (0, planned_pool_size, 0, 9500),
+            (1, 0, 0, 9500),
+        ):
+            with self.subTest(rank=rank, dp_index=dp_index, store_port_base=store_port_base):
+                vllm_config.parallel_config.data_parallel_index = dp_index
+                offload_config.store_port_base = store_port_base
                 offload_backend = SimpleNamespace(
                     OffloadConfig=lambda: SimpleNamespace(),
                     Scene=SimpleNamespace(SHARED="shared"),
@@ -343,6 +486,10 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                 )
                 self.assertEqual(initialized_config.world_size, 2)
                 self.assertEqual(initialized_config.rank_id, rank)
+                self.assertEqual(
+                    initialized_config.store_url,
+                    f"tcp://127.0.0.1:{offload_config.store_port_base + dp_index}",
+                )
                 tp_group.barrier.assert_called_once_with()
 
     def test_manager_rejects_pool_larger_than_dram_limit(self):
@@ -392,3 +539,120 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHostKVRegistration(unittest.TestCase):
+    def test_topk_cache_components_exclude_only_registered_scratch_views(self):
+        manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
+        manager.offload_layer_names = ["target", "draft"]
+
+        self.assertEqual(
+            manager.get_topk_cache_components(),
+            {("target", 4), ("target", 5), ("draft", 4), ("draft", 5)},
+        )
+        manager.offload_layer_names = ["other"]
+        self.assertEqual(manager.get_topk_cache_components(), {("other", 4), ("other", 5)})
+
+    def test_copy_sfa_exports_block_byte_strides_on_all_tp_ranks(self):
+        torch = manager_module.torch
+        original_zeros = torch.zeros
+        original_tensor = torch.tensor
+        broadcasts: list[Tensor] = []
+        for rank in (0, 1):
+            with self.subTest(rank=rank):
+                manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
+                manager.tp_rank = rank
+                manager.num_layers = 1
+                manager.offload_layer_names = ["layer.0"]
+                manager.kv_cache_config = SimpleNamespace(num_blocks=3)
+                manager.topk_buffer_size = 256
+                manager.block_size = 128
+                manager.max_num_tokens = 2
+                manager.use_fused_copy_sfa = True
+                manager.use_fused_overlap = False
+                manager._register_offload_layers = MagicMock()
+                manager._bind_copy_sfa_bases = MagicMock()
+                manager._init_fused_overlap_planner = MagicMock()
+                manager._restore_bfloat16_tensor = MagicMock(
+                    side_effect=lambda ptr, shape: torch.empty(shape, dtype=torch.bfloat16)
+                )
+                pending = iter(broadcasts)
+
+                def broadcast(tensor, src, rank=rank, pending=pending):
+                    if rank == 0:
+                        broadcasts.append(tensor.clone())
+                    else:
+                        tensor.copy_(next(pending))
+
+                manager.tp_group = SimpleNamespace(broadcast=broadcast)
+                cache = (
+                    torch.empty(0),
+                    torch.empty(0),
+                    torch.empty((3, 128, 1, 4), dtype=torch.bfloat16),
+                    torch.empty((3, 128, 1, 2), dtype=torch.bfloat16),
+                    torch.empty((2, 256, 1, 4), dtype=torch.bfloat16),
+                    torch.empty((2, 256, 1, 2), dtype=torch.bfloat16),
+                )
+
+                def cpu_zeros(*args, **kwargs):
+                    kwargs["device"] = "cpu"
+                    return original_zeros(*args, **kwargs)
+
+                def cpu_tensor(*args, **kwargs):
+                    kwargs["device"] = "cpu"
+                    return original_tensor(*args, **kwargs)
+
+                with (
+                    patch.object(torch, "zeros", side_effect=cpu_zeros),
+                    patch.object(torch, "tensor", side_effect=cpu_tensor),
+                ):
+                    manager.register_kv_caches({"layer.0": cache})
+
+                # SfaRemoteD2H consumes these strides on every TP rank.
+                self.assertEqual(manager.cpu_block_lens, [(1024, 512)])
+                manager._bind_copy_sfa_bases.assert_called_once()
+                manager._init_fused_overlap_planner.assert_not_called()
+
+
+class TestSparseKVOffloadStorePort(unittest.TestCase):
+    def test_default_base_keeps_the_historical_endpoint(self):
+        config = SimpleNamespace(store_port_base=8500)
+
+        self.assertEqual(
+            resolve_sparse_kv_offload_store_url(config, 0),
+            "tcp://127.0.0.1:8500",
+        )
+        self.assertEqual(
+            resolve_sparse_kv_offload_store_url(config, 3),
+            "tcp://127.0.0.1:8503",
+        )
+
+    def test_independent_services_can_use_distinct_bases(self):
+        service_a = SimpleNamespace(store_port_base=8500)
+        service_b = SimpleNamespace(store_port_base=9500)
+
+        # Two services in the same network namespace may reuse the same DP
+        # index, so the configured base has to keep their endpoints apart.
+        self.assertEqual(
+            resolve_sparse_kv_offload_store_url(service_a, 0),
+            "tcp://127.0.0.1:8500",
+        )
+        self.assertEqual(
+            resolve_sparse_kv_offload_store_url(service_b, 0),
+            "tcp://127.0.0.1:9500",
+        )
+
+    def test_tp_ranks_of_one_group_share_the_endpoint(self):
+        config = SimpleNamespace(store_port_base=9000)
+
+        # The endpoint only depends on the DP index, so every TP rank of the
+        # same offload group agrees on it.
+        endpoints = {resolve_sparse_kv_offload_store_url(config, 1) for _ in range(4)}
+
+        self.assertEqual(endpoints, {"tcp://127.0.0.1:9001"})
+
+    def test_port_out_of_range_is_rejected(self):
+        config = SimpleNamespace(store_port_base=65535)
+
+        with self.assertRaisesRegex(ValueError, "valid TCP port"):
+            resolve_sparse_kv_offload_store_url(config, 1)

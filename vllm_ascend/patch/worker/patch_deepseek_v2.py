@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -21,6 +22,7 @@ from vllm.model_executor.layers.mla import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2ForCausalLM,
     DeepSeekV2FusedQkvAProjLinear,
@@ -30,11 +32,19 @@ from vllm.model_executor.models.deepseek_v2 import (
     _get_llama_4_scaling,
     yarn_get_mscale,
 )
-from vllm.model_executor.models.utils import extract_layer_index
+from vllm.model_executor.models.interfaces import EagleModelMixin
+from vllm.model_executor.models.utils import PPMissingLayer, extract_layer_index, spec_decode_needs_target_embed
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
 
-from vllm_ascend.utils import is_mtp_layer
-from vllm_ascend.worker.v2 import pp_utils
+from vllm_ascend.attention.context_parallel.common_cp import use_dcp_q_replicate
+from vllm_ascend.ops.linear import AscendDCPGroupColumnParallelLinear
+from vllm_ascend.utils import is_mtp_layer, should_reuse_topk
+from vllm_ascend.worker.v2 import pp_transport
+from vllm_ascend.worker.v2.pp_transport import (
+    PPTransportDataType,
+    configure_pp_topk_transport,
+)
 
 
 def _should_skip_indexer_init(
@@ -75,9 +85,11 @@ def _deepseek_v2_mla_attention_init(
     topk_indices_buffer: torch.Tensor | None = None,
     input_size: int | None = None,
     reduce_results: bool = True,
+    index_group_builder: SparseMLAIndexGroupBuilder | None = None,
+    non_causal_multi_token_decode: bool = False,
 ) -> None:
-    # 这里不能使用 super().__init__()，因为当前函数定义在原类之外，
-    # 最后通过赋值的方式替换 DeepseekV2MLAAttention.__init__。
+    # Zero-argument super() is unavailable because this function is defined
+    # outside the class and assigned to DeepseekV2MLAAttention.__init__.
     nn.Module.__init__(self)
 
     self.hidden_size = hidden_size
@@ -120,12 +132,14 @@ def _deepseek_v2_mla_attention_init(
             prefix=f"{prefix}.kv_a_proj_with_mqa",
         )
 
+    dcp_q_replicate_enabled = use_dcp_q_replicate(vllm_config)
+    q_proj_cls = AscendDCPGroupColumnParallelLinear if dcp_q_replicate_enabled else ColumnParallelLinear
     if self.q_lora_rank is not None:
         self.q_a_layernorm = RMSNorm(
             self.q_lora_rank,
             eps=config.rms_norm_eps,
         )
-        self.q_b_proj = ColumnParallelLinear(
+        self.q_b_proj = q_proj_cls(
             self.q_lora_rank,
             self.num_heads * self.qk_head_dim,
             bias=False,
@@ -133,7 +147,7 @@ def _deepseek_v2_mla_attention_init(
             prefix=f"{prefix}.q_b_proj",
         )
     else:
-        self.q_proj = ColumnParallelLinear(
+        self.q_proj = q_proj_cls(
             proj_input_size,
             self.num_heads * self.qk_head_dim,
             bias=False,
@@ -198,36 +212,8 @@ def _deepseek_v2_mla_attention_init(
     #
     # skip_topk controls top-k reuse. Indexer initialization is skipped only
     # when the checkpoint marks this layer as sharing another layer's Indexer.
-    _skip_topk = False
-    _index_topk_freq = getattr(
-        config,
-        "index_topk_freq",
-        1,
-    )
-    _index_topk_pattern = getattr(
-        config,
-        "index_topk_pattern",
-        None,
-    )
-    _index_skip_topk_offset = getattr(
-        config,
-        "index_skip_topk_offset",
-        2,
-    )
-
     layer_id = extract_layer_index(prefix)
-
-    if _index_topk_pattern is None:
-        _skip_topk = (
-            max(
-                layer_id - _index_skip_topk_offset + 1,
-                0,
-            )
-            % _index_topk_freq
-            != 0
-        )
-    elif 0 <= layer_id < len(_index_topk_pattern):
-        _skip_topk = _index_topk_pattern[layer_id] == "S"
+    _skip_topk = should_reuse_topk(config, layer_id)
 
     # The skip pattern only governs backbone layers. MTP/nextn layers
     # (layer_id >= num_hidden_layers) must never start with skip_topk=True:
@@ -264,6 +250,11 @@ def _deepseek_v2_mla_attention_init(
         self.indexer_rope_emb = None
         self.indexer = None
 
+    # Keep the shared model-level buffer reachable from every local layer so
+    # the model can transport it when a PP boundary splits an IndexShare or
+    # IndexCache group.
+    self.topk_indices_buffer = topk_indices_buffer
+
     mla_modules = MLAModules(
         kv_a_layernorm=self.kv_a_layernorm,
         kv_b_proj=self.kv_b_proj,
@@ -278,6 +269,7 @@ def _deepseek_v2_mla_attention_init(
         indexer_rotary_emb=self.indexer_rope_emb,
         is_sparse=self.is_v32,
         topk_indices_buffer=topk_indices_buffer,
+        index_group_builder=index_group_builder,
     )
 
     self.mla_attn = MultiHeadLatentAttentionWrapper(
@@ -294,55 +286,72 @@ def _deepseek_v2_mla_attention_init(
         quant_config,
         prefix,
         skip_topk=_skip_topk and not mtp_layer,
+        non_causal_multi_token_decode=non_causal_multi_token_decode,
     )
 
 
 DeepseekV2MLAAttention.__init__ = _deepseek_v2_mla_attention_init
 
 
-# TODO: Retire the legacy aux transport when vLLM 0.28/0.29 are no longer supported.
 _original_deepseek_v2_model_init = DeepseekV2Model.__init__
+
+
+def _find_topk_indices_buffer(layers: Iterable[object]) -> torch.Tensor | None:
+    for layer in layers:
+        self_attn = getattr(layer, "self_attn", None)
+        topk_indices_buffer = getattr(self_attn, "topk_indices_buffer", None)
+        if topk_indices_buffer is not None:
+            return topk_indices_buffer
+    return None
 
 
 def _patched_deepseek_v2_model_init(self, *args, **kwargs):
     _original_deepseek_v2_model_init(self, *args, **kwargs)
-    # Legacy Spec+PP (0.28/0.29 only): 0.30+ uses the upstream aux relay.
-    self._use_upstream_aux_relay = kwargs["vllm_config"].use_v2_model_runner and not pp_utils.use_legacy_spec_pp()
-    if not self._use_upstream_aux_relay:
-        self.make_empty_intermediate_tensors = pp_utils.make_empty_intermediate_tensors(
-            self,
-            self.make_empty_intermediate_tensors,
+    vllm_config = kwargs["vllm_config"]
+    # GLM-5.x uses the generic DeepseekV2Model on Ascend. Provision the
+    # last-stage embedding before the normal target checkpoint load, so
+    # upstream DFlash sharing needs no override. Preserve an embedding that
+    # a newer upstream constructor already provides. Draft QuaRot alignment
+    # remains a separate post-processing step on private draft weights.
+    if isinstance(self.embed_tokens, PPMissingLayer) and spec_decode_needs_target_embed(vllm_config):
+        self.embed_tokens = VocabParallelEmbedding(
+            self.config.vocab_size,
+            self.hidden_size,
+            quant_config=vllm_config.quant_config,
+            prefix=f"{kwargs.get('prefix', '')}.embed_tokens",
         )
+    self.topk_indices_buffer = _find_topk_indices_buffer(self.layers)
+    transport_data_types = (PPTransportDataType.TOPK_INDICES,)
+    configure_pp_topk_transport(self, transport_data_types)
+    self.make_empty_intermediate_tensors = pp_transport.make_empty_intermediate_tensors(
+        self,
+        self.make_empty_intermediate_tensors,
+        transport_data_types,
+    )
 
 
 DeepseekV2Model.__init__ = _patched_deepseek_v2_model_init
 
 
-# Legacy Spec+PP (0.28/0.29 only); the upstream branch below is for 0.30+.
-if not pp_utils.use_legacy_spec_pp():
-    # Release versions do not expose this interface. Reuse only upstream's
-    # slot bookkeeping; the Ascend forward still owns capture and TP gathering.
-    from vllm.model_executor.models.interfaces import EagleModelMixin
+# Reuse upstream slot bookkeeping; Ascend owns capture and TP gathering.
+for _member in (
+    "AUX_HIDDEN_STATE_KEY",
+    "_aux_slot_base_cached",
+    "_aux_upstream_total_cached",
+    "_set_aux_hidden_state_layers",
+    "_cache_aux_pp_layout",
+    "pack_local_aux_hidden_states",
+    "collect_remote_aux_hidden_states",
+):
+    setattr(DeepseekV2Model, _member, getattr(EagleModelMixin, _member))
+DeepseekV2Model.supports_aux_hidden_states_over_pp = True
 
-    for _member in (
-        "AUX_HIDDEN_STATE_KEY",
-        "_aux_slot_base_cached",
-        "_aux_upstream_total_cached",
-        "_set_aux_hidden_state_layers",
-        "_cache_aux_pp_layout",
-        "pack_local_aux_hidden_states",
-        "collect_remote_aux_hidden_states",
-    ):
-        setattr(DeepseekV2Model, _member, getattr(EagleModelMixin, _member))
-    DeepseekV2Model.supports_aux_hidden_states_over_pp = True
 
-    def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        if self.model._use_upstream_aux_relay:
-            self.model._set_aux_hidden_state_layers(layers)
-        else:
-            self.model.aux_hidden_state_layers = layers
+def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+    self.model._set_aux_hidden_state_layers(layers)
 
-    DeepseekV2ForCausalLM.set_aux_hidden_state_layers = _set_aux_hidden_state_layers
+
+DeepseekV2ForCausalLM.set_aux_hidden_state_layers = _set_aux_hidden_state_layers
 
 
 def _capture_aux_hidden_state(self, aux_hidden_states, layer_id, hidden_states, residual, positions):
@@ -376,13 +385,7 @@ def _patched_forward(
         assert intermediate_tensors is not None
         hidden_states = intermediate_tensors["hidden_states"]
         residual = intermediate_tensors["residual"]
-        if self._use_upstream_aux_relay:
-            aux_hidden_states = self.collect_remote_aux_hidden_states(intermediate_tensors)
-        else:
-            aux_hidden_states = pp_utils.get_pp_transport_tensors(
-                intermediate_tensors,
-                pp_utils.PPTransportDataType.AUX_HIDDEN_STATES,
-            )
+        aux_hidden_states = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
     llama_4_scaling_config = getattr(self.config, "llama_4_scaling", None)
     llama_4_scaling: torch.Tensor | None
@@ -406,19 +409,19 @@ def _patched_forward(
         _capture_aux_hidden_state(self, aux_hidden_states, idx + 1, hidden_states, residual, positions)
 
     if not pp_group.is_last_rank:
-        if self._use_upstream_aux_relay:
-            return IntermediateTensors(
-                {
-                    "hidden_states": hidden_states,
-                    "residual": residual,
-                    **self.pack_local_aux_hidden_states(aux_hidden_states),
-                }
+        pp_output = IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+        # vLLM's buffer-mutation check also sees names in traced-out branches.
+        # Avoid leaving "update" in the forward's co_names for PP=1.
+        pp_output = IntermediateTensors({**pp_output.tensors, **self.pack_local_aux_hidden_states(aux_hidden_states)})
+        if self.send_pp_topk_indices:
+            assert self.topk_indices_buffer is not None
+            num_tokens = positions.shape[0]
+            pp_transport.add_pp_transport_tensors(
+                pp_output,
+                PPTransportDataType.TOPK_INDICES,
+                [self.topk_indices_buffer[:num_tokens]],
             )
-        return pp_utils.add_pp_transport_tensors(
-            IntermediateTensors({"hidden_states": hidden_states, "residual": residual}),
-            pp_utils.PPTransportDataType.AUX_HIDDEN_STATES,
-            aux_hidden_states,
-        )
+        return pp_output
 
     if hidden_states.shape[0] != positions.shape[0]:
         combined_states = torch.cat([hidden_states, residual], dim=-1)

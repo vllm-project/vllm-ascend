@@ -3,20 +3,42 @@ import torch
 import torch.nn.functional as F
 
 import vllm_ascend.ops.triton.layernorm_gated as layernorm_gated
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 DEVICE = "npu"
+pytestmark = pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 TOLERANCES = {
-    torch.float16: (2e-3, 2e-2),
-    torch.bfloat16: (2e-2, 5e-2),
-    torch.float32: (1e-4, 1e-4),
+    torch.float16: (2**-9, 2**-9, 0.1),
+    torch.bfloat16: (2**-6, 2**-6, 1.0),
+    torch.float32: (2**-10, 2**-16, 0.01),
 }
 
 
 @pytest.fixture(scope="module", autouse=True)
 def init_triton_device_properties():
+    if get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3):
+        pytest.skip("Requires Ascend A2/A3")
     init_device_properties_triton()
+
+
+def assert_reference_accuracy(actual, expected):
+    """Apply both contribution-guide bounds using the output tensor's dtype."""
+    assert actual.shape == expected.shape
+    assert actual.dtype == expected.dtype
+    rtol, atol, max_error = TOLERANCES[actual.dtype]
+    actual = actual.cpu().float()
+    expected = expected.cpu().float()
+    assert torch.isfinite(actual).all(), "Non-finite actual output"
+    assert torch.isfinite(expected).all(), "Non-finite reference output"
+    error = (actual - expected).abs()
+    within_tolerance = error <= atol + rtol * expected.abs()
+    assert within_tolerance.sum().item() >= 0.99 * error.numel()
+    assert error.max().item() <= max_error
 
 
 def layer_norm_gated_ref(
@@ -28,6 +50,7 @@ def layer_norm_gated_ref(
     group_size: int | None,
     norm_before_gate: bool,
     is_rms_norm: bool,
+    activation: str = "swish",
 ):
     input_dtype = x.dtype
     x = x.cpu().float()
@@ -41,8 +64,11 @@ def layer_norm_gated_ref(
     x_grouped = x.view(num_rows, num_groups, group_size)
     z_grouped = z.view(num_rows, num_groups, group_size) if z is not None else None
 
-    if z_grouped is not None and not norm_before_gate:
-        x_grouped = x_grouped * F.silu(z_grouped)
+    gate = None
+    if z_grouped is not None:
+        gate = torch.sigmoid(z_grouped) if activation == "sigmoid" else F.silu(z_grouped)
+    if gate is not None and not norm_before_gate:
+        x_grouped = x_grouped * gate
 
     if is_rms_norm:
         mean = None
@@ -56,8 +82,8 @@ def layer_norm_gated_ref(
     output = output * weight.view(num_groups, group_size).unsqueeze(0)
     if bias is not None:
         output = output + bias.view(num_groups, group_size).unsqueeze(0)
-    if z_grouped is not None and norm_before_gate:
-        output = output * F.silu(z_grouped)
+    if gate is not None and norm_before_gate:
+        output = output * gate
 
     # The kernel stores statistics group-major: [group, row].
     mean = mean.transpose(0, 1).contiguous().flatten() if mean is not None else None
@@ -80,9 +106,12 @@ def layer_norm_gated_ref(
         pytest.param((1, 128), None, True, False, True, False, torch.float32, False, id="layer-norm-bias"),
         pytest.param((67, 192), 96, False, True, True, True, torch.float16, True, id="group-rms-post-gate"),
         pytest.param((5, 256), 128, True, True, False, True, torch.bfloat16, False, id="group-rms-pre-gate"),
+        pytest.param((65, 192), None, True, True, True, True, torch.float32, False, id="single-group-base16"),
+        pytest.param((65, 512), None, False, True, False, True, torch.float16, False, id="base16-width-limit"),
         pytest.param((7, 180), 60, True, True, False, False, torch.float16, False, id="group-layer-norm-pre-gate"),
     ],
 )
+@pytest.mark.parametrize("activation", ["swish", "silu", "sigmoid"])
 @torch.inference_mode()
 def test_layer_norm_fwd_npu_correctness(
     shape,
@@ -93,6 +122,7 @@ def test_layer_norm_fwd_npu_correctness(
     is_rms_norm,
     dtype,
     use_out,
+    activation,
 ):
     torch.manual_seed(42)
     x = (torch.randn(shape, dtype=torch.float32) * 0.5).to(dtype=dtype, device=DEVICE)
@@ -112,6 +142,7 @@ def test_layer_norm_fwd_npu_correctness(
         group_size=group_size,
         norm_before_gate=norm_before_gate,
         is_rms_norm=is_rms_norm,
+        activation=activation,
     )
     expected, expected_mean, expected_rstd = layer_norm_gated_ref(
         x,
@@ -122,21 +153,21 @@ def test_layer_norm_fwd_npu_correctness(
         group_size,
         norm_before_gate,
         is_rms_norm,
+        activation,
     )
 
     if out is not None:
         assert actual.data_ptr() == out.data_ptr()
     assert actual.shape == x.shape
     assert actual.dtype == dtype
-    rtol, atol = TOLERANCES[dtype]
-    torch.testing.assert_close(actual.float().cpu(), expected.float(), rtol=rtol, atol=atol)
-    torch.testing.assert_close(actual_rstd.cpu(), expected_rstd, rtol=rtol, atol=atol)
+    assert_reference_accuracy(actual, expected)
+    assert_reference_accuracy(actual_rstd, expected_rstd)
     if is_rms_norm:
         assert actual_mean is None
     else:
         assert actual_mean is not None
         assert expected_mean is not None
-        torch.testing.assert_close(actual_mean.cpu(), expected_mean, rtol=rtol, atol=atol)
+        assert_reference_accuracy(actual_mean, expected_mean)
 
 
 class _KernelLaunchRecorder:
@@ -190,6 +221,16 @@ class _KernelLaunchRecorder:
             id="above-quarter-wave-rmsnorm-post-gate",
         ),
         pytest.param(
+            "model",
+            "_layer_norm_fwd_persistent_hoist_kernel_npu",
+            torch.float32,
+            True,
+            False,
+            True,
+            True,
+            id="gdn-flattened-m20449-n128-fp32",
+        ),
+        pytest.param(
             "large",
             "_layer_norm_fwd_persistent_hoist_kernel_npu",
             torch.bfloat16,
@@ -201,6 +242,7 @@ class _KernelLaunchRecorder:
         ),
     ],
 )
+@pytest.mark.parametrize("activation", ["swish", "silu", "sigmoid"])
 @torch.inference_mode()
 def test_layer_norm_fwd_npu_hoist_routes(
     rows_kind,
@@ -210,6 +252,7 @@ def test_layer_norm_fwd_npu_hoist_routes(
     has_bias,
     has_gate,
     norm_before_gate,
+    activation,
     monkeypatch,
 ):
     vector_cores = get_vectorcore_num()
@@ -219,6 +262,7 @@ def test_layer_norm_fwd_npu_hoist_routes(
         "at": threshold,
         "above": threshold + 1,
         "large": 65536,
+        "model": 20449,
     }[rows_kind]
     shape = (rows, 128)
 
@@ -242,11 +286,13 @@ def test_layer_norm_fwd_npu_hoist_routes(
         group_size=128,
         norm_before_gate=norm_before_gate,
         is_rms_norm=is_rms_norm,
+        activation=activation,
     )
     expected, expected_mean, expected_rstd = layer_norm_gated_ref(
-        x, weight, bias, eps, z, 128, norm_before_gate, is_rms_norm
+        x, weight, bias, eps, z, 128, norm_before_gate, is_rms_norm, activation
     )
 
+    assert recorder.launch_kwargs[-1]["ACTIVATION"] == (1 if activation == "sigmoid" else 0)
     uses_hoist = 4 * ((rows + 31) // 32) >= vector_cores
     if not uses_hoist:
         assert recorder.grids == [((rows + 15) // 16, 1)]
@@ -256,14 +302,13 @@ def test_layer_norm_fwd_npu_hoist_routes(
         assert recorder.grids == [(min(vector_cores, (rows + 31) // 32),)]
         assert recorder.launch_kwargs[-1]["BLOCK_M"] == 32
         assert recorder.launch_kwargs[-1]["BLOCK_N"] == 128
-    rtol, atol = TOLERANCES[dtype]
-    torch.testing.assert_close(actual.float().cpu(), expected.float(), rtol=rtol, atol=atol)
-    torch.testing.assert_close(actual_rstd.cpu(), expected_rstd, rtol=rtol, atol=atol)
+    assert_reference_accuracy(actual, expected)
+    assert_reference_accuracy(actual_rstd, expected_rstd)
     if is_rms_norm:
         assert actual_mean is None
         assert expected_mean is None
     else:
-        torch.testing.assert_close(actual_mean.cpu(), expected_mean, rtol=rtol, atol=atol)
+        assert_reference_accuracy(actual_mean, expected_mean)
 
 
 @torch.inference_mode()

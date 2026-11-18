@@ -1,4 +1,5 @@
 import math
+from collections.abc import Iterable
 from typing import Any
 
 import torch
@@ -46,6 +47,29 @@ class RopeDataProxy:
                 new_data[config_key][group_name] = (cos_t, sin_t)
         return RopeDataProxy(new_data, is_cos=(self.idx == 0))
 
+    def copy_to_buffers(
+        self,
+        buffers: dict[tuple[str, str], tuple[torch.Tensor, torch.Tensor]],
+        capacity: int,
+    ) -> tuple["RopeDataProxy", "RopeDataProxy"]:
+        """Copy cos/sin into caller-owned buffers and return proxies viewing them.
+
+        FULL graphs replay captured addresses, so RoPE data built into fresh
+        tensors must be staged in storage that outlives the step. Missing
+        buffers are allocated with room for ``capacity`` tokens.
+        """
+        new_data: dict = {}
+        for config_key, groups in self._data.items():
+            new_data[config_key] = {}
+            for group_name, rope in groups.items():
+                key = (config_key, group_name)
+                if key not in buffers:
+                    buffers[key] = tuple(t.new_empty((capacity, *t.shape[1:])) for t in rope)
+                new_data[config_key][group_name] = tuple(
+                    buffer[: t.shape[0]].copy_(t) for buffer, t in zip(buffers[key], rope, strict=True)
+                )
+        return RopeDataProxy(new_data, is_cos=True), RopeDataProxy(new_data, is_cos=False)
+
     def __getitem__(self, index):
         if not isinstance(index, str):
             new_map: dict = {}
@@ -84,15 +108,30 @@ def get_cos_and_sin_dsa(
     positions: torch.Tensor | dict[str, torch.Tensor],
     use_cache: bool = False,
     draft_index: int | None = None,
+    layer_names: str | Iterable[str] | None = None,
 ):
     if isinstance(positions, torch.Tensor):
         pos_map = {"default": positions}
     else:
         pos_map = positions
 
+    requested_configs: set[str] | None = None
+    if layer_names is not None:
+        names = [layer_names] if isinstance(layer_names, str) else list(layer_names)
+        requested_configs = set()
+        for layer_name in names:
+            info = _ROPE_STATE.layer_info.get(layer_name)
+            if info is None and layer_name.endswith(".swa_cache"):
+                info = _ROPE_STATE.layer_info.get(f"{layer_name.removesuffix('.swa_cache')}.attn")
+            if info is None:
+                raise KeyError(f"Layer {layer_name} not registered.")
+            requested_configs.add(info[0])
+
     batch_result: dict[Any, Any] = {}
 
     for config_key, registered_groups in _ROPE_STATE.registry_summary.items():
+        if requested_configs is not None and config_key not in requested_configs:
+            continue
         if config_key not in _ROPE_STATE.full_rope_cache:
             continue
         full_rope_cos, full_rope_sin = _ROPE_STATE.full_rope_cache[config_key]
@@ -248,6 +287,18 @@ class ComplexExpRotaryEmbedding(nn.Module):
             sin = sin.to(current_platform.device_type)
 
             _ROPE_STATE.full_rope_cache[config_key] = (cos.unsqueeze(1).unsqueeze(1), sin.unsqueeze(1).unsqueeze(1))
+
+        # The DSA RoPE tables are built while the sleep-mode weights mem-pool is
+        # active and every DSA layer reads them through the process-global
+        # ``_ROPE_STATE`` cache. Own them as non-persistent buffers as well, so a
+        # level-2 sleep backs up and restores their contents in place; the cache
+        # keeps the same tensor objects, so the lookup path and the addresses
+        # baked into captured ACL graphs are unchanged. ``named_buffers()``
+        # de-duplicates shared tensors, so the layers that share a config key
+        # cost a single backup entry.
+        full_rope_cos, full_rope_sin = _ROPE_STATE.full_rope_cache[config_key]
+        self.register_buffer("full_rope_cos", full_rope_cos, persistent=False)
+        self.register_buffer("full_rope_sin", full_rope_sin, persistent=False)
 
         use_eagle = (
             vllm_config is not None

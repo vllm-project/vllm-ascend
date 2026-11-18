@@ -57,12 +57,28 @@ class HardwareCapability(Enum):
     ATB_WARMUP = auto()
     # Register fake/meta implementations for the custom BGMV and SGMV LoRA ops.
     BGMV_SGMV_META_REGISTRATION = auto()
+    # SK scatter kernel for paged cache writes (A2/A3/A5 ABI).
+    SCATTER_ND_CACHE_STORE = auto()
+    # Extend SK cache writes to non-overlapping row-strided destinations.
+    # A5 is excluded until arch35 handles their storage bounds correctly.
+    SCATTER_ND_STRIDED_CACHE_STORE = auto()
+    # Extend SK cache writes to FP8 E4M3FN/E5M2 (A5 ABI).
+    SCATTER_ND_FP8_CACHE_STORE = auto()
     # Allow the CANN MegaMoe fused-MC2 path when its model, EP, and config checks pass.
     CANN_MEGAMOE = auto()
     # Allow A5 MegaMoe's MXFP-only path and its A5-specific calling conventions.
     CANN_MEGAMOE_MXFP = auto()
+    # Fuse the shared expert into the A5 MegaMoe operator (enable_fused_mc2=3).
+    # A5 only: the fused shared-expert calling convention assumes the shared and
+    # routed experts share a residual width, which A3 does not provide.
+    CANN_MEGAMOE_SHARED_EXPERT_FUSION = auto()
     # Split a mixed chunked-prefill batch into separate prefill and decode FIA calls.
     CHUNKED_PREFILL_PHASE_SPLIT = auto()
+    # CANN device-side FlashAttn metadata with strided paged GQA K/V.
+    DEVICE_LENGTH_FLASH_ATTN = auto()
+    # Optional flash_attn_npu_3 device-tiling ABI for ordinary MiniMax target/draft
+    # attention. Restricted to A2/A3; A5 uses the CANN backend instead.
+    FLASH_ATTN_NPU_3 = auto()
     # Build CPU-affinity pools from the cluster-aware CPU topology.
     CLUSTER_CPU_TOPOLOGY = auto()
     # Legacy implementation selector: install the 310P-specific operator overrides.
@@ -73,39 +89,62 @@ class HardwareCapability(Enum):
     DSA_C128_STATE_SMALL_BLOCK_SIZES = auto()
     # Use the DeepSeek-V4/DSA compressed-KV-cache layout and compressor/indexer flow.
     DSV4_COMPRESSED_CACHE = auto()
+    # Use the DeepSeek-V4.1 mixed-quant cache and packaged QLI/QSMLA ABI.
+    DSV41_PACKED_CACHE = auto()
+    # Triton RMS/dot/gate/residual fusion for unrotated Engram inputs.
+    ENGRAM_UNROTATED_GATE = auto()
+    # Decode native FP8 codes and E8M0 group scales in Engram table lookups.
+    ENGRAM_MXFP8 = auto()
     # Enable dynamic-MX norm fusion and the associated ``wo_a`` weight-layout contract.
     DYNAMIC_MX_QUANT_FUSION = auto()
     # Select DynamicMxQuantV3 ``scale_alg=1`` for model paths that require it.
     DYNAMIC_MX_QUANT_SCALE_ALG_ONE = auto()
+    # Allow GDN prefill to use the external FLA NPU fused operator.
+    FLA_GDN_PREFILL = auto()
     # Enable the FP8/C8 attention KV-cache ABI and matching attention preprocess paths.
     # This is not a general statement that every FP8 operation is supported.
     FP8_ATTENTION = auto()
+    # CANN PoolKeyIndexer quant_mode=0 with E4M3 query/key and FP32 descales.
+    POOL_KEY_INDEXER_FP8 = auto()
+    # Prepare and reuse the fixed CANN GBSA schedule across supported M3 decode layers.
+    # Callers must also check block size, dtype, and uniform query length.
+    MINIMAX_M3_GBSA_METADATA_REUSE = auto()
     # Select the compatibility grouped-top-k router used by the fused-MoE path.
     FUSED_MOE_COMPATIBILITY = auto()
+    # Use npu_rotary_mul with adjacent pairs (rotary_mode="interleave").
+    FUSED_ROTARY_MUL_INTERLEAVE = auto()
     # Pass ``glu_alpha`` and ``glu_bias`` to the fused dequant-SwiGLU-quant operator.
     FUSED_SWIGLU_TUNING_ARGS = auto()
     # Select the compatibility GatedDeltaNet core and state-dtype implementation.
     GDN_COMPATIBILITY = auto()
+    # Register the FX graph rewrite that fuses a supported matmul/reduce-scatter pattern.
+    GRAPH_MM_REDUCE_SCATTER_FUSION = auto()
     # Register the FX graph rewrite that fuses the supported muls-plus-add pattern.
     GRAPH_MULS_ADD_FUSION = auto()
     # Register the FX graph rewrites for supported RMSNorm-plus-quant patterns.
     GRAPH_NORM_QUANT_FUSION = auto()
+    # Register the FX graph rewrite that fuses q/k RMSNorm, RoPE and the weight-less
+    # v RMSNorm into the SIMD ``split_qkv_rmsnorm_rope_vnorm`` Triton kernel.
+    GRAPH_QKV_NORM_ROPE_FUSION = auto()
     # Let inplace_partial_rotary_mul negate sine internally; profiles without
     # this contract negate the sine input explicitly and pass negate_sin=False.
     INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN = auto()
+    # CANN FP8 indexer quantization plus separate page-strided K/scale writes.
+    INDEXER_QUANT_CACHE = auto()
+    # Prepare per-token INT8 KDA projection inputs before the BFG stream wait.
+    KDA_INT8_QUANT_OVERLAP = auto()
+    # Native sparse indexer ABI with INT8 Q/K, FP16 scales and FP32 scores.
+    NATIVE_INT8_SPARSE = auto()
     # Reserve host CPUs for interrupt handling when constructing worker CPU pools.
     IRQ_CPU_RESERVATION = auto()
     # Create the local communication resource used by supported KV-transfer deployments.
     LOCAL_KV_COMM_RESOURCE = auto()
     # Use vLLM-Ascend's custom BGMV/SGMV LoRA kernels when rank constraints also pass.
     LORA_CUSTOM_OPS = auto()
-    # Allow the fused MLA decode prolog even when the model does not use MLA RoPE.
-    MLA_DECODE_PROLOG_WITHOUT_ROPE = auto()
+    # Use the token-fused MLA cache protocol for eligible FlashMLA models.
+    MLA_FLASH = auto()
     # Allow MLAPO with native floating-point projection weights, not only quantized weights.
     MLAPO_NATIVE_WEIGHTS = auto()
-    # Allow MiniMax-M3 prefill sparse attention to use the KV-gather-Q path;
-    # A3 can fall back when its vendor Split-KV package is unavailable.
-    MINIMAX_M3_PREFILL_KV_GATHER_Q = auto()
     # Accept ``fullmesh_v2`` as the MC2 communication algorithm.
     MC2_FULLMESH_V2_COMM = auto()
     # Accept hierarchical MC2 communication, subject to its expert-count constraints.
@@ -118,20 +157,21 @@ class HardwareCapability(Enum):
     # ``moe_gating_top_k_hash`` ABI with ``bias_vl`` and image sentinels.
     MOE_GATING_TOP_K_HASH_VISION = auto()
     # Allow the extended NPU graph backend; static-kernel mode depends on this contract.
+    MM_REDUCE_SCATTER_AI_CPU_INFERENCE = auto()
     NPUGRAPH_EX = auto()
-    # Use ``torch_npu.npu_top_k_top_p`` for sampling instead of the PyTorch fallback.
+    # Use ``torch_npu.npu_top_k_top_p`` for sampling instead of pytorch fallback.
     NPU_TOP_K_TOP_P = auto()
     # Allow shared paged-attention decode when graph mode, shape, and model checks pass.
     PAGED_ATTENTION = auto()
     # Inspect PCIe topology to distinguish 310P Root-Complex and endpoint deployments.
     RC_DEVICE_DISCOVERY = auto()
-    # Apply the temporary reduced ACL-graph capture-size set required by affected drivers.
-    REDUCED_CUDAGRAPH_CAPTURE_SIZES = auto()
+    # Fused RMSNorm+cast is available for the A2/A3 (CANN 9.1) path.
+    RMS_NORM_CAST = auto()
+    # Fused RMSNorm and dynamic per-token INT8 quantization on A3.
+    RMS_NORM_DYNAMIC_QUANT = auto()
     # Import and register the compiled vLLM-Ascend custom-op library at runtime.
     # This is independent of whether custom ops are enabled by default.
     RUNTIME_CUSTOM_OPS = auto()
-    # Allow C8 SFA decode-context parallelism with a replicated indexer.
-    SFA_C8_DCP_REPLICATED_INDEXER = auto()
     # Legacy implementation selector: install the standard worker patch bundle.
     STANDARD_WORKER_PATCHES = auto()
     # Legacy implementation selector: install the standard Mamba platform patch.
@@ -140,8 +180,40 @@ class HardwareCapability(Enum):
     SWIGLU_OAI_MX_QUANT = auto()
     # Use the Triton batch-memcpy kernel for Mamba state copies.
     TRITON_BATCH_MEMCPY = auto()
+    # Native TurboQuant 4-bit non-causal MLA cache and SFA kernels.
+    TURBOQUANT_4BIT_NC_CACHE = auto()
     # Honor MLAPO enablement on any pipeline role; other profiles limit it to decode consumers.
     UNRESTRICTED_MLAPO = auto()
+
+
+class WeightFormat(Enum):
+    """Data formats a SoC can execute in its matmul units.
+
+    ``FP8`` names the OCP 8-bit floating point family the way checkpoints
+    declare it (``quant_method: fp8``), covering both E4M3 and E5M2 instead of
+    pinning one element dtype; Ascend's own ``hifloat8`` is a different numeric
+    format and keeps its own ``HIF8`` member so callers never have to guess
+    which one a device means. The MX members keep their OCP names because they
+    name a format *and* a scale scheme: ``MXFP8`` is ``FP8`` with one ``E8M0``
+    scale per 32 elements, and ``MXFP4`` is the FP4 E2M1 element format with the
+    same scaling. ``INT4`` covers the integer 4-bit matmul that both ``W4A8``
+    (int4 weights, int8 activations) and ``W4A4`` (int4 weights and activations)
+    build on; it is not interchangeable with the block-scaled ``MXFP4``.
+
+    Format support is a property of the silicon, not of the checkpoint: A5 adds
+    FP8 and the block-scaled MX variants on top of the formats every generation
+    has, so business logic that picks an execution path must ask for the format
+    instead of inferring it from the device identity.
+    """
+
+    BF16 = auto()
+    FP16 = auto()
+    INT8 = auto()
+    INT4 = auto()
+    FP8 = auto()
+    HIF8 = auto()
+    MXFP8 = auto()
+    MXFP4 = auto()
 
 
 class AttentionBackendFamily(Enum):
@@ -216,13 +288,48 @@ class HardwareProfile:
     weight_layout_policy: WeightLayoutPolicy
     moe_comm_policy: MoECommPolicy
     quantization_backend_family: QuantizationBackendFamily
+    native_weight_formats: frozenset[WeightFormat]
     # Independent, additive contracts queried with ``supports``.
     capabilities: frozenset[HardwareCapability]
+
+    # NZ mm/addmm is supported, but batched matmul rejects NZ weights.
+    requires_2d_nz_linear_input: bool = False
+    # A5 uses mixed softmax for compatibility with CANN GBSA packages that
+    # reject BF16 precision 0. A3 retains FP32 online softmax.
+    minimax_m3_gbsa_bf16_softmax_precision: int = 0
+    # Fixed GDN verification uses the strided recurrent kernel at/above this
+    # query length to work around native operator numerical failures. None
+    # retains native dispatch; this is a stack workaround, not a silicon limit.
+    gdn_fixed_spec_recurrent_fallback_min_query_len: int | None = None
 
     def supports(self, capability: HardwareCapability) -> bool:
         """Return whether the exact documented ``capability`` contract is available."""
 
         return capability in self.capabilities
+
+    def supports_weight_format(self, weight_format: WeightFormat) -> bool:
+        """Return whether this hardware family can execute ``weight_format``."""
+
+        return weight_format in self.native_weight_formats
+
+
+_STANDARD_WEIGHT_FORMATS = frozenset(
+    {
+        WeightFormat.BF16,
+        WeightFormat.FP16,
+        WeightFormat.INT8,
+    }
+)
+# A2/A3/A5 run int4 weights through the W4A8 quantized matmul; 310P only ships
+# INT8 quantized kernels.
+_INT4_WEIGHT_FORMATS = _STANDARD_WEIGHT_FORMATS | {WeightFormat.INT4}
+# A5 adds the FP8 and block-scaled MX formats on top of the int4 set.
+_FP8_WEIGHT_FORMATS = _INT4_WEIGHT_FORMATS | {
+    WeightFormat.FP8,
+    WeightFormat.HIF8,
+    WeightFormat.MXFP8,
+    WeightFormat.MXFP4,
+}
 
 
 _STANDARD_CAPABILITIES = frozenset(
@@ -231,9 +338,13 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.ATB_EXTENSIONS,
         HardwareCapability.ATB_WARMUP,
         HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+        HardwareCapability.FLA_GDN_PREFILL,
+        HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
         HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
+        HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION,
         HardwareCapability.GRAPH_MULS_ADD_FUSION,
         HardwareCapability.GRAPH_NORM_QUANT_FUSION,
+        HardwareCapability.GRAPH_QKV_NORM_ROPE_FUSION,
         HardwareCapability.INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN,
         HardwareCapability.IRQ_CPU_RESERVATION,
         HardwareCapability.LORA_CUSTOM_OPS,
@@ -242,21 +353,32 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.PAGED_ATTENTION,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
-        HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER,
+        HardwareCapability.SCATTER_ND_CACHE_STORE,
+        HardwareCapability.SCATTER_ND_STRIDED_CACHE_STORE,
         HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
         HardwareCapability.TRITON_BATCH_MEMCPY,
+        HardwareCapability.TURBOQUANT_4BIT_NC_CACHE,
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.KDA_INT8_QUANT_OVERLAP,
+    HardwareCapability.NATIVE_INT8_SPARSE,
+    HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
+    HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
-    HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
+    HardwareCapability.RMS_NORM_CAST,
 }
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"
 _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyType(
     {
         AscendDeviceType.A2: HardwareProfile(
             _device_type=AscendDeviceType.A2,
+            # A2 BF16 native verification produced NaNs with 8 drafts (9 queries).
+            # Nine is the first observed failing configuration, not a proven
+            # universal kernel bound. Remove after native recurrent parity is
+            # validated on the replacement operator stack.
+            gdn_fixed_spec_recurrent_fallback_min_query_len=9,
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.TOPO_AFFINITY,
             default_worker_cls=_DEFAULT_WORKER_CLS,
@@ -265,7 +387,13 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
-            capabilities=_STANDARD_CAPABILITIES | {HardwareCapability.NPU_TOP_K_TOP_P},
+            native_weight_formats=_INT4_WEIGHT_FORMATS,
+            capabilities=_STANDARD_CAPABILITIES
+            | {
+                HardwareCapability.RMS_NORM_CAST,
+                HardwareCapability.NPU_TOP_K_TOP_P,
+                HardwareCapability.FLASH_ATTN_NPU_3,
+            },
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
@@ -277,9 +405,11 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.FUSED_OR_CAPACITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
+            native_weight_formats=_INT4_WEIGHT_FORMATS,
             capabilities=_A3_CAPABILITIES
             | {
                 HardwareCapability.CANN_MEGAMOE,
+                HardwareCapability.FLASH_ATTN_NPU_3,
                 HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                 HardwareCapability.NPU_TOP_K_TOP_P,
             },
@@ -294,6 +424,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.FORCE_NZ,
             moe_comm_policy=MoECommPolicy.ALLGATHER,
             quantization_backend_family=QuantizationBackendFamily.COMPATIBILITY,
+            native_weight_formats=_STANDARD_WEIGHT_FORMATS,
             capabilities=frozenset(
                 {
                     HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS,
@@ -309,6 +440,8 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A5: HardwareProfile(
             _device_type=AscendDeviceType.A5,
+            requires_2d_nz_linear_input=True,
+            minimax_m3_gbsa_bf16_softmax_precision=1,
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.TOPO_AFFINITY,
             default_worker_cls=_DEFAULT_WORKER_CLS,
@@ -317,35 +450,50 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_WORLD_SIZE,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
+            native_weight_formats=_FP8_WEIGHT_FORMATS,
             capabilities=frozenset(
                 {
                     HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
-                    HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+                    HardwareCapability.SCATTER_ND_CACHE_STORE,
+                    HardwareCapability.SCATTER_ND_FP8_CACHE_STORE,
                     HardwareCapability.CANN_MEGAMOE,
                     HardwareCapability.CANN_MEGAMOE_MXFP,
+                    HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,
+                    HardwareCapability.DEVICE_LENGTH_FLASH_ATTN,
                     HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
                     HardwareCapability.CLUSTER_CPU_TOPOLOGY,
                     HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
                     HardwareCapability.DSV4_COMPRESSED_CACHE,
+                    HardwareCapability.DSV41_PACKED_CACHE,
+                    HardwareCapability.ENGRAM_UNROTATED_GATE,
+                    HardwareCapability.ENGRAM_MXFP8,
                     HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
                     HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
+                    HardwareCapability.FLA_GDN_PREFILL,
                     HardwareCapability.FP8_ATTENTION,
+                    HardwareCapability.POOL_KEY_INDEXER_FP8,
+                    HardwareCapability.INDEXER_QUANT_CACHE,
+                    HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
+                    HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION,
                     HardwareCapability.GRAPH_MULS_ADD_FUSION,
                     HardwareCapability.GRAPH_NORM_QUANT_FUSION,
                     HardwareCapability.LOCAL_KV_COMM_RESOURCE,
                     HardwareCapability.LORA_CUSTOM_OPS,
-                    HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE,
+                    HardwareCapability.MLA_FLASH,
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
-                    HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
+                    HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
+                    HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
+                    HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
                     HardwareCapability.NPUGRAPH_EX,
-                    HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES,
+                    HardwareCapability.RUNTIME_CUSTOM_OPS,
                     HardwareCapability.STANDARD_MAMBA_PATCH,
                     HardwareCapability.STANDARD_WORKER_PATCHES,
                     HardwareCapability.SWIGLU_OAI_MX_QUANT,
                     HardwareCapability.TRITON_BATCH_MEMCPY,
                     HardwareCapability.UNRESTRICTED_MLAPO,
+                    HardwareCapability.NPU_TOP_K_TOP_P,
                 }
             ),
         ),

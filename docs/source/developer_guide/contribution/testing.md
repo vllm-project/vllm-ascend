@@ -199,10 +199,10 @@ You can run tests with `pytest` as well. Typical examples:
     VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/
 
     # Run a certain test script
-    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py
 
     # Run a certain case in test script
-    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/test_qwen3_0_6b.py::test_dense_default_full_and_piecewise_graph
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py::test_qwen3_dense_graph_mode
     ```
 
 === "Multi-card"
@@ -248,19 +248,38 @@ You can run tests with `pytest` as well. Typical examples:
 For running nightly single-node model test cases locally, refer to the following example.
 
 ```bash
+export CONFIG_BASE_PATH=tests/SIT/cases/models/configs/Qwen
 export CONFIG_YAML_PATH=Qwen3-32B.yaml
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/common/single_node/test_single_node.py
 ```
 
 For running nightly multi-node model test cases locally, refer to the `Running Locally` section in [Multi Node Test](./multi_node_test.md).
 
 #### E2E test examples
 
-- Offline test example: [`tests/e2e/pull_request/one_card/test_qwen3_0_6b.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_qwen3_0_6b.py)
+- Offline test example: [`tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py)
+
+### Csrc incremental build cache checks
+
+For changes to native build inputs or the cache adapter, run the cache engine,
+concurrency, and snapshot-key tests before requesting an NPU build:
+
+```bash
+pytest -q --confcutdir=tests/ut/_tools \
+  tests/ut/_tools/test_build_cache.py \
+  tests/ut/_tools/test_build_cache_concurrency.py \
+  tests/ut/_tools/test_prepare_csrc_l1_restore.py
+```
+
+On CI, a successful restore step only proves that an outer L1 snapshot was
+available. Check the inner cache telemetry for action HIT/MISS/BYPASS to
+establish whether a source build actually reused compiled work. See the
+[persistent csrc build cache design](../Design_Documents/persistent_csrc_build_cache.md)
+for the identity and failure contracts.
 
 ### PR selective testing (CI)
 
-The PR CI workflow ([pr_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) does not run the full suite on every PR. It selects tests with a coverage/AST based precision-testing pipeline and routes them to NPU runners. Tests run when the PR has the `ready-precise` label (recommended subset), the `ready-all` label (full suite), or the `main2main` label (full suite executed against both the verified vLLM main commit and the matched vLLM release tag).
+The PR CI workflow ([pr_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) does not run the full suite on every PR. It selects tests with a coverage/AST based precision-testing pipeline and routes them to NPU runners. Tests run when the PR has the `ready-precise` label (recommended subset) or the `main2main` label (full suite executed against both the verified vLLM main commit and the matched vLLM release tag). PRs targeting a release branch (`releases/v*`) are tested against the matched vLLM release tag only.
 
 How tests are selected:
 
@@ -279,9 +298,9 @@ You can preview locally which runners a set of tests would be routed to:
 
 ```bash
 python3 .github/workflows/scripts/select_tests.py \
-  --explicit-e2e-tests tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
+  --explicit-e2e-tests tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py
 
-# Full suite routing (mirrors the ready-all mode)
+# Full suite routing (mirrors the main2main full-suite mode)
 python3 .github/workflows/scripts/select_tests.py --all-tests
 ```
 
@@ -332,7 +351,6 @@ Workflows with a native GitHub cron trigger:
 | `schedule_doc_translate.yaml` | `workflow_dispatch` |
 | `schedule_e2e_upstream_test.yaml` | - |
 | `schedule_lint_image_build.yaml` | `workflow_dispatch`, `push` |
-| `schedule_main2main.yaml` | `workflow_dispatch` |
 | `schedule_stale_manage.yaml` | `issue_comment` |
 
 Workflows without a cron trigger, dispatched externally via `workflow_dispatch`:
@@ -342,6 +360,7 @@ Workflows without a cron trigger, dispatched externally via `workflow_dispatch`:
 | `schedule_doc_getting_started_test.yaml` | PR path filter |
 | `schedule_e2e_test.yaml` | - |
 | `schedule_image_build_and_push.yaml` | PR label, tag `push` |
+| `schedule_main2main.yaml` | - |
 | `schedule_nightly_test_310p.yaml` | - |
 | `schedule_nightly_test_a2.yaml` | - |
 | `schedule_nightly_test_a3.yaml` | - |
@@ -377,22 +396,133 @@ For block extraction, plan preview, and selection rules, see the usage notes and
 
 ### Run docs link check
 
-You can validate external links in the Sphinx docs locally with:
+The **Docs link check** workflow checks changed Markdown files in PRs. Scheduled
+and manual runs, or PRs changing checker-related files, scan all documentation.
+
+For local checks, use a Python 3.11+ virtual environment and run from the repository root:
 
 ```bash
-make -C docs linkcheck SPHINXOPTS="-W --keep-going"
+python -m pip install -r docs/requirements-linkcheck.txt
+
+# Check specific files, or the full documentation directory.
+python .github/workflows/scripts/check_md_links.py docs/source/user_guide/release_notes.md --timeout 300
+python .github/workflows/scripts/check_md_links.py docs/source
 ```
 
-To check links in a specific Markdown file, pass the file to `sphinx-build`.
-For example, to check only `docs/source/user_guide/release_notes.md`:
+Add `--extract-only` to list links without making requests. The checker validates
+rendered HTTP(S) links and images, skipping code examples and `docs/source/zh`.
+Relative links and remote anchors are not checked.
 
-```bash
-cd docs
-sphinx-build -b linkcheck -W --keep-going \
-  source _build/linkcheck source/user_guide/release_notes.md
-```
+The check log ends with all blocking errors and non-blocking warnings, including
+URLs, source files, and reasons. Blocking errors fail CI; unresolved HTTP 429
+responses are warnings and remain unverified.
 
-The detailed report will be written to:
+Reports are saved as `output.json` and `summary.md` under `docs/_build/linkcheck/`
+and uploaded as CI artifacts. Use `--report-dir` to change the local output directory.
 
-- `docs/_build/linkcheck/output.txt`
-- `docs/_build/linkcheck/output.json`
+## PR testing requirements
+
+Use this section when preparing or reviewing a pull request to decide which
+test coverage and validation evidence the change needs. See the preceding
+sections for environment setup and commands, and [E2E CI tests](e2e_ci_test.md)
+for PR CI.
+
+### CODEOWNERS approval gate
+
+Alongside `DCO` and the CI gate, every changed file must be approved by at
+least one of its [CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS)
+owners before the PR can merge. Key points:
+
+- Any owner listed in `.github/CODEOWNERS` counts as an approver, regardless of
+  their repository role — owners without org membership are intentional.
+- A pending "changes requested" review from any owner of a changed file blocks
+  the merge even if another owner has approved. Address the feedback, then ask
+  the owner to re-review (they can approve, or withdraw their objection by
+  requesting changes again — dismissing does not revoke a previous approval).
+- Approvals survive pushes: the repository auto-dismisses reviews on every
+  push, but the gate ignores dismissals, so owners do not need to re-approve
+  after each commit. An owner's latest approve / request-changes review is
+  what counts.
+- Files whose only owner is the PR author do not need an additional approval
+  (a sole owner cannot self-approve). The failure comment lists such files so
+  the module can gain a co-owner over time.
+- Owners are cumulative down the directory tree: when parent and child
+  directories have separate owners (for example `/vllm_ascend/model_loader`
+  and `/vllm_ascend/model_loader/rfork/`), an rfork change needs one approval
+  from either owner, and a "changes requested" from either owner blocks it.
+  A more specific rule adds owners for the subtree; it does not transfer
+  ownership away from the parent owner.
+- The PR author does not count as an approver even when listed as an owner.
+- Submitting or dismissing a review re-evaluates the gate without re-running
+  the heavy CI jobs; previously green CI results on the same commit are kept.
+- The failure comment is posted by `.github/workflows/bot_ci_gate_comment.yaml`
+  (a `workflow_run` bot running in the base repository context), so it works
+  for fork PRs too - the gate job itself only has a read-only token on fork
+  PRs and never posts comments directly.
+- The gate also runs a CODEOWNERS health check. Entries pointing at a
+  deleted/renamed path fail the gate for everyone - if your change removes or
+  renames files, update `.github/CODEOWNERS` in the same PR. Files without an
+  owner yet are reported as non-blocking warnings (unclaimed modules are
+  handled by maintainers at their own pace).
+- Paths marked `SKIP(owner)` in the file (for example, `tests/ut/`) are
+  deliberately unowned and do not require an owner approval.
+- If an owner is unresponsive, contact the module's other owners or a
+  maintainer; maintainers can merge with an admin override in exceptional
+  cases.
+
+The check logic lives in
+`.github/workflows/scripts/codeowner_gate.py` (colocated unit tests in
+`.github/workflows/scripts/test_codeowner_gate.py`; run them manually with
+`pytest .github/workflows/scripts/test_codeowner_gate.py` - the cpu-ut CI
+partition only covers `tests/ut`).
+
+### Choose coverage for the change
+
+Run the affected tests and required repository checks. Expand coverage when the
+change affects shared behavior, failures expose additional risks, or reviewers
+need more evidence. A full local test-suite run is not required for every change.
+
+| Change | Expected coverage |
+| ------ | ----------------- |
+| New behavior | Unit tests for the happy path, failure modes, and relevant boundary cases, such as empty input, single-element input, sequence-length limits, or overflow. |
+| Bug fix | A regression test that reproduces the original failure and passes with the fix. |
+| Integration behavior | Relevant E2E tests for the affected models, configuration, or distributed execution paths. |
+| NPU performance path | Realistic hardware benchmarks and performance regression coverage, including memory use when affected. Add nightly coverage where appropriate. |
+| Documentation or metadata | Focused checks such as Markdown linting, link validation, or parsing changed configuration. Add runtime tests when the change affects runtime behavior. |
+
+Unit tests live in `tests/ut/`, E2E tests in `tests/e2e/`, and nightly tests in
+`tests/e2e/nightly/`.
+
+### Hardware and performance evidence
+
+NPU-specific behavior requires validation on actual hardware before merge.
+Record the affected hardware, relevant software versions, model, configuration,
+commands, and results so reviewers can assess and reproduce the validation.
+
+If local hardware or dependencies are unavailable, continue preparing the PR
+with the checks that can run. Identify the remaining hardware checks for CI or
+reviewers; CPU mocks and static checks do not establish NPU correctness.
+
+For performance changes, compare the baseline and changed implementation under
+the same workload and environment. Include throughput or latency results and,
+when affected, memory use, fragmentation, and CPU-NPU synchronization behavior.
+
+### Report validation in the PR
+
+Complete the PR template's **How was this patch tested?** section with:
+
+- Tests added or updated, including relevant boundary cases.
+- Commands and observed results for local or manual checks.
+- CI jobs or hardware runs that provide additional evidence.
+- Failed, skipped, or unrun checks, the reason, and the validation still needed.
+
+If no tests were added, explain which existing tests or focused checks cover
+the change, or why validation remains pending. Distinguish code inspection,
+CPU tests, NPU execution, and end-to-end validation when reporting results.
+
+### PR submission checklist
+
+- [ ] The title contains a change-type tag accepted by the [CI title check](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml#L59), such as `[BugFix]`, `[Feature]`, or `[Doc]`.
+- [ ] The applicable test coverage and validation results are recorded in the PR.
+- [ ] Required CI checks pass before merge.
+- [ ] Outstanding NPU hardware or performance validation is completed before merge.

@@ -39,15 +39,9 @@ static ge::graphStatus InferShape4ScatterNdUpdateSk(gert::InferShapeContext* con
     gert::Shape* output_shape = context->GetOutputShape(SC_OUT_VAR_IDX);
     OP_CHECK_NULL_WITH_CONTEXT(context, output_shape);
 
-    if (Ops::Base::IsUnknownRank(*var_shape)) {
-        OP_LOGD(context->GetNodeName(), "input shape is UnknownRank, set output shape to (-2, )");
-        Ops::Base::SetUnknownRank(*output_shape);
-        return ge::GRAPH_SUCCESS;
-    }
-
     *output_shape = *var_shape;
+    // var_shape 为 unknown rank（[-2]）时原样拷贝即可，无需额外处理
 
-    OP_LOGD(context->GetNodeName(), "output_shape = %s.", Ops::Base::ToString(*output_shape).c_str());
     OP_LOGD(context->GetNodeName(), "End to do ScatterNdUpdate Infershape.");
 
     return ge::GRAPH_SUCCESS;
