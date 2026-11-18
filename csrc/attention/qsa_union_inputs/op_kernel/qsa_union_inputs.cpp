@@ -14,6 +14,7 @@ constexpr uint32_t BLOCK_Y = 4;
 constexpr int32_t INVALID_KEY = 1 << 30;
 constexpr uint32_t FILL_ELEMENTS = 512;
 constexpr uint32_t OUTPUT_TILE = 512;
+#if __CCE_AICORE__ == 310
 constexpr uint32_t B32_VECTOR_LANES =
     AscendC::VECTOR_REG_WIDTH / sizeof(int32_t);
 
@@ -72,6 +73,47 @@ __aicore__ inline void UnpackPackedMasks(
     }
 }
 
+#else
+__aicore__ inline void UnpackPackedMasks(
+    const LocalTensor<int32_t>& output,
+    const LocalTensor<int32_t>& packed_masks, uint32_t packed_count,
+    const LocalTensor<int32_t>& offsets)
+{
+    constexpr uint32_t PACKED_TILE = FILL_ELEMENTS / BLOCK_Y;
+    for (uint32_t base = 0; base < packed_count; base += PACKED_TILE) {
+        const uint32_t count = packed_count - base < PACKED_TILE
+            ? packed_count - base : PACKED_TILE;
+        const uint32_t elements = count * BLOCK_Y;
+        LocalTensor<int32_t> tile = output[base * BLOCK_Y];
+        ArithProgression(offsets, 0, 1, elements);
+        PipeBarrier<PIPE_ALL>();
+        ShiftRight(offsets.ReinterpretCast<uint32_t>(),
+                   offsets.ReinterpretCast<uint32_t>(), 2U, elements);
+        PipeBarrier<PIPE_ALL>();
+        Muls(offsets, offsets, static_cast<int32_t>(sizeof(int32_t)), elements);
+        PipeBarrier<PIPE_ALL>();
+        Gather(tile.ReinterpretCast<float>(),
+               packed_masks[base].ReinterpretCast<float>(),
+               offsets.ReinterpretCast<uint32_t>(), 0U, elements);
+        PipeBarrier<PIPE_ALL>();
+        const uint8_t repeats = (elements + 63U) / 64U;
+        for (uint32_t byte = 1; byte < BLOCK_Y; ++byte) {
+            uint64_t mask[2] = {0x1111111111111111ULL << byte, 0};
+            ShiftRight(tile.ReinterpretCast<uint32_t>(),
+                       tile.ReinterpretCast<uint32_t>(), byte * 8U,
+                       mask, repeats, {1, 1, 8, 8});
+            PipeBarrier<PIPE_ALL>();
+        }
+        ShiftLeft(tile.ReinterpretCast<uint32_t>(),
+                  tile.ReinterpretCast<uint32_t>(), 24U, elements);
+        PipeBarrier<PIPE_ALL>();
+        ShiftRight(tile.ReinterpretCast<uint32_t>(),
+                   tile.ReinterpretCast<uint32_t>(), 24U, elements);
+        PipeBarrier<PIPE_ALL>();
+    }
+}
+#endif
+
 class QsaUnionInputsKernel {
 public:
     __aicore__ inline explicit QsaUnionInputsKernel(TPipe* pipe) : pipe_(pipe) {}
@@ -105,10 +147,15 @@ public:
         exact_mask_gm_.SetGlobalBuffer(
             reinterpret_cast<__gm__ int32_t*>(exact_mask),
             groups_ * width_ * BLOCK_Y);
+#if __CCE_AICORE__ != 220
         GM_ADDR user_workspace = GetUserWorkspace(workspace);
         count_workspace_gm_.SetGlobalBuffer(
             reinterpret_cast<__gm__ int32_t*>(user_workspace), groups_ * 8);
+#endif
 
+#if __CCE_AICORE__ == 220
+        pipe_->InitBuffer(compare_buf_, width_ * sizeof(float) * 2);
+#endif
         pipe_->InitBuffer(keys_buf_, width_ * sizeof(int32_t));
         pipe_->InitBuffer(sorted_buf_, width_ * sizeof(int32_t));
         pipe_->InitBuffer(sort_tmp_buf_, sort_tmp_bytes_);
@@ -130,15 +177,47 @@ public:
     {
         const uint32_t core = GetBlockIdx();
         const uint32_t launched_cores = GetBlockNum();
-        for (uint32_t group = core; group < groups_;
-             group += launched_cores) {
+        for (uint32_t group = core; group < groups_; group += launched_cores) {
             PublishCount(group, ProcessGroup(group));
         }
+#if __CCE_AICORE__ != 220
         SyncAll();
         GatherCounts(core, launched_cores);
+#endif
     }
 
 private:
+    __aicore__ inline void CompareKeys(const LocalTensor<uint8_t>& mask,
+        const LocalTensor<int32_t>& left, const LocalTensor<int32_t>& right,
+        CMPMODE mode, uint32_t count)
+    {
+#if __CCE_AICORE__ == 220
+        LocalTensor<float> a = compare_buf_.Get<float>();
+        LocalTensor<float> b = a[width_];
+        Cast(a, left, RoundMode::CAST_NONE, count);
+        Cast(b, right, RoundMode::CAST_NONE, count);
+        PipeBarrier<PIPE_V>();
+        Compare(mask, a, b, mode, AlignUp(count, 64));
+        PipeBarrier<PIPE_V>();
+#else
+        Compare(mask, left.ReinterpretCast<float>(), right.ReinterpretCast<float>(), mode, count);
+#endif
+    }
+
+    __aicore__ inline void CompareKeyScalar(const LocalTensor<uint8_t>& mask,
+        const LocalTensor<int32_t>& left, int32_t right,
+        CMPMODE mode, uint32_t count)
+    {
+#if __CCE_AICORE__ == 220
+        LocalTensor<float> a = compare_buf_.Get<float>();
+        Cast(a, left, RoundMode::CAST_NONE, count);
+        PipeBarrier<PIPE_V>();
+        CompareScalar(mask, a, static_cast<float>(right), mode, AlignUp(count, 64));
+        PipeBarrier<PIPE_V>();
+#else
+        CompareScalar(mask, left, right, mode, count);
+#endif
+    }
     __aicore__ static inline uint32_t AlignUp(uint32_t value, uint32_t alignment)
     {
         return (value + alignment - 1) / alignment * alignment;
@@ -152,7 +231,13 @@ private:
             GetTPipePtr()->FetchEventID(HardEvent::S_MTE3));
         SetFlag<HardEvent::S_MTE3>(ready);
         WaitFlag<HardEvent::S_MTE3>(ready);
+#if __CCE_AICORE__ == 220
+        // An exact-width DMA store avoids scalar GM cache-line writeback races.
+        DataCopyPad(union_count_gm_[group], slot,
+                    DataCopyExtParams(1, sizeof(int32_t), 0, 0, 0));
+#else
         DataCopy(count_workspace_gm_[group * 8], slot, 8);
+#endif
         event_t complete = static_cast<event_t>(
             GetTPipePtr()->FetchEventID(HardEvent::MTE3_S));
         SetFlag<HardEvent::MTE3_S>(complete);
@@ -290,13 +375,19 @@ private:
                            row_data.ReinterpretCast<uint32_t>(), 31U,
                            input_groups_);
                 PipeBarrier<PIPE_V>();
-                CompareScalar(negative_mask, sign, 1, CMPMODE::EQ,
+                CompareKeyScalar(negative_mask, sign, 1, CMPMODE::EQ,
                               input_groups_);
                 PipeBarrier<PIPE_V>();
+#if __CCE_AICORE__ == 220
+                Select(filtered.ReinterpretCast<float>(), negative_mask,
+                       invalid.ReinterpretCast<float>(), row_data.ReinterpretCast<float>(),
+                       SELMODE::VSEL_TENSOR_TENSOR_MODE, input_groups_);
+#else
                 Select(filtered, negative_mask, invalid, row_data,
                        SELMODE::VSEL_TENSOR_TENSOR_MODE, input_groups_);
+#endif
                 PipeBarrier<PIPE_V>();
-                CompareScalar(valid_mask, filtered, visible_group,
+                CompareKeyScalar(valid_mask, filtered, visible_group,
                               CMPMODE::LT, input_groups_);
                 PipeBarrier<PIPE_V>();
                 Muls(encoded, filtered, static_cast<int32_t>(UNION_SIZE),
@@ -371,8 +462,7 @@ private:
             GetTPipePtr()->FetchEventID(HardEvent::S_V));
         SetFlag<HardEvent::S_V>(sentinel_ready);
         WaitFlag<HardEvent::S_V>(sentinel_ready);
-        Compare(compact_mask, sorted.ReinterpretCast<float>(),
-                unique_keys.ReinterpretCast<float>(), CMPMODE::NE, width_);
+        CompareKeys(compact_mask, sorted, unique_keys, CMPMODE::NE, width_);
         PipeBarrier<PIPE_V>();
 
         GatherMaskParams compact_params;
@@ -459,6 +549,9 @@ private:
         PipeBarrier<PIPE_V>();
         Mul(unique_keys, scratch1, scratch0, exact_count);
         PipeBarrier<PIPE_V>();
+#if __CCE_AICORE__ == 220
+        PipeBarrier<PIPE_ALL>();
+#endif
 
         // Segmented inclusive reduction.  Exact-key deduplication guarantees
         // at most eight distinct lanes per block, so shifts 1/2/4 propagate
@@ -490,19 +583,33 @@ private:
                 GetTPipePtr()->FetchEventID(HardEvent::S_V));
             SetFlag<HardEvent::S_V>(block_sentinel_ready);
             WaitFlag<HardEvent::S_V>(block_sentinel_ready);
-            Compare(compact_mask, sorted.ReinterpretCast<float>(),
-                    scratch1.ReinterpretCast<float>(), CMPMODE::EQ,
+            CompareKeys(compact_mask, sorted, scratch1, CMPMODE::EQ,
                     exact_count);
             PipeBarrier<PIPE_V>();
             Gather(scratch1.ReinterpretCast<float>(),
                    unique_keys.ReinterpretCast<float>(),
                    scratch0.ReinterpretCast<uint32_t>(), 0U, exact_count);
             PipeBarrier<PIPE_V>();
+#if __CCE_AICORE__ == 220
+            LocalTensor<float> zero = compare_buf_.Get<float>();
+            Duplicate(zero, 0.0f, exact_count);
+            PipeBarrier<PIPE_V>();
+            Select(scratch1.ReinterpretCast<float>(), compact_mask,
+                   scratch1.ReinterpretCast<float>(), zero,
+                   SELMODE::VSEL_TENSOR_TENSOR_MODE, exact_count);
+#else
             Select(scratch1, compact_mask, scratch1, 0,
                    SELMODE::VSEL_TENSOR_SCALAR_MODE, exact_count);
+#endif
             PipeBarrier<PIPE_V>();
+#if __CCE_AICORE__ == 220
+            PipeBarrier<PIPE_ALL>();
+#endif
             Add(unique_keys, unique_keys, scratch1, exact_count);
             PipeBarrier<PIPE_V>();
+#if __CCE_AICORE__ == 220
+            PipeBarrier<PIPE_ALL>();
+#endif
         }
 
         // Retain only the last exact key of every block.  It now carries the
@@ -530,8 +637,7 @@ private:
             GetTPipePtr()->FetchEventID(HardEvent::S_V));
         SetFlag<HardEvent::S_V>(successor_sentinel_ready);
         WaitFlag<HardEvent::S_V>(successor_sentinel_ready);
-        Compare(compact_mask, sorted.ReinterpretCast<float>(),
-                scratch1.ReinterpretCast<float>(), CMPMODE::NE, exact_count);
+        CompareKeys(compact_mask, sorted, scratch1, CMPMODE::NE, exact_count);
         PipeBarrier<PIPE_V>();
 
         uint64_t union_count_u64 = 0;
@@ -575,7 +681,12 @@ private:
                 GetTPipePtr()->FetchEventID(HardEvent::V_S));
             SetFlag<HardEvent::V_S>(packed_ready);
             WaitFlag<HardEvent::V_S>(packed_ready);
+#if __CCE_AICORE__ == 310
             UnpackPackedMasks(mask_tile, packed_masks[base], current);
+#else
+            UnpackPackedMasks(mask_tile, packed_masks[base], current,
+                              fill_buf_.Get<int32_t>());
+#endif
             event_t unpack_ready = static_cast<event_t>(
                 GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
             SetFlag<HardEvent::V_MTE3>(unpack_ready);
@@ -627,7 +738,30 @@ private:
         LocalTensor<uint8_t> sort_tmp = sort_tmp_buf_.Get<uint8_t>();
         LocalTensor<int32_t> meta = meta_buf_.Get<int32_t>();
         PrepareKeys(group, keys, meta);
+#if __CCE_AICORE__ == 220
+        // Hardware sort is descending. Negation preserves ascending integer keys.
+        // Valid encoded keys are exactly representable under the existing 8M-token bound.
+        LocalTensor<float> values = keys.ReinterpretCast<float>();
+        Cast(values, keys, RoundMode::CAST_NONE, width_);
+        PipeBarrier<PIPE_V>();
+        Muls(values, values, -1.0f, width_);
+        PipeBarrier<PIPE_V>();
+        LocalTensor<float> pairs = sort_tmp.ReinterpretCast<float>();
+        LocalTensor<uint32_t> indices = pairs[width_ * 2].ReinterpretCast<uint32_t>();
+        LocalTensor<float> temporary = compact_buf_.Get<float>();
+        ArithProgression(indices.ReinterpretCast<int32_t>(), 0, 1, width_);
+        PipeBarrier<PIPE_V>();
+        Sort<float, true>(pairs, values, indices, temporary, width_ / 32);
+        PipeBarrier<PIPE_V>();
+        Extract(sorted.ReinterpretCast<float>(), indices, pairs, width_ / 32);
+        PipeBarrier<PIPE_V>();
+        Muls(sorted.ReinterpretCast<float>(), sorted.ReinterpretCast<float>(), -1.0f, width_);
+        PipeBarrier<PIPE_V>();
+        Cast(sorted, sorted.ReinterpretCast<float>(), RoundMode::CAST_RINT, width_);
+        PipeBarrier<PIPE_V>();
+#else
         Sort<int32_t, false>(sorted, keys, sort_tmp, width_);
+#endif
         event_t sorted_ready = static_cast<event_t>(
             GetTPipePtr()->FetchEventID(HardEvent::V_S));
         SetFlag<HardEvent::V_S>(sorted_ready);
@@ -635,6 +769,7 @@ private:
         return CompactSorted(group, sorted, meta);
     }
 
+    TBuf<TPosition::VECCALC> compare_buf_;
     TPipe* pipe_;
     TBuf<TPosition::VECCALC> keys_buf_;
     TBuf<TPosition::VECCALC> sorted_buf_;

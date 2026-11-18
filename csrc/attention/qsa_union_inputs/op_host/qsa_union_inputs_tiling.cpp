@@ -58,7 +58,8 @@ ge::graphStatus Tiling4QsaUnionInputs(gert::TilingContext* context)
     auto platform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint64_t ub_size = 0;
     platform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ub_size);
-    const uint32_t sort_tmp_bytes =
+    const bool is_a3 = platform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND910_93;
+    const uint32_t sort_tmp_bytes = is_a3 ? width * sizeof(int32_t) * 3 :
         AscendC::GetSortTmpSize(platform, width, sizeof(int32_t));
     const uint32_t prepare_vector_bytes =
         AlignUp32(input_groups * sizeof(int32_t));
@@ -69,6 +70,7 @@ ge::graphStatus Tiling4QsaUnionInputs(gert::TilingContext* context)
         static_cast<uint64_t>(width) * sizeof(int32_t) * 2 +
         sort_tmp_bytes + AlignUp32(input_groups * sizeof(int32_t)) +
         prepare_vector_bytes * 4 + prepare_mask_bytes * 2 +
+        (is_a3 ? width * sizeof(float) * 2 : 0) +
         OUTPUT_TILE * (1 + BLOCK_Y) * sizeof(int32_t) +
         32 * sizeof(int32_t) + 512 * sizeof(int32_t) + RESERVED_UB_BYTES;
     OP_CHECK_IF(required_ub > ub_size,
@@ -105,7 +107,7 @@ ge::graphStatus Tiling4QsaUnionInputs(gert::TilingContext* context)
     context->SetTilingKey(0);
     // One 32-byte slot per group prevents multi-core false sharing while
     // publishing the compact union counts.
-    context->GetWorkspaceSizes(1)[0] =
+    context->GetWorkspaceSizes(1)[0] = is_a3 ? 0 :
         static_cast<size_t>(platform.GetLibApiWorkSpaceSize()) +
         static_cast<size_t>(groups) * 8 * sizeof(int32_t);
     return ge::GRAPH_SUCCESS;

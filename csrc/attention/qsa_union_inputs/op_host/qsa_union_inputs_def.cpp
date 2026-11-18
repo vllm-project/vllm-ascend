@@ -42,7 +42,7 @@ public:
             .DataType({ge::DT_INT32})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->AICore().AddConfig("ascend950");
+        this->AICore().AddConfig("ascend950").AddConfig("ascend910_93");
     }
 };
 OP_ADD(QsaUnionInputs);
