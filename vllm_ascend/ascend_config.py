@@ -31,9 +31,15 @@ from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend.a2_mega_moe import A2MegaMoEPrefillConfig, validate_a2_mega_moe_prefill
 from vllm_ascend.config_utils import config
 from vllm_ascend.device.device_config import is_950
-from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import (
+    DeviceAdaptorFamily,
+    HardwareCapability,
+    MoECommPolicy,
+    get_current_hardware_profile,
+)
 from vllm_ascend.kv_trace.kv_trace_config import KVTraceConfig
 
 if TYPE_CHECKING:
@@ -533,6 +539,7 @@ class AscendConfig:
             "mix_placement": false,
             "pa_shape_list": [],
             "mega_moe_max_tokens": 0,
+            "a2_mega_moe_prefill": {"enabled": false, "scope": "prefill"},
             "ascend_log_path": "~/ascend/log/vllm_ascend",
             "enable_fused_mc2": 0,
             "enable_mlapo": true,
@@ -690,6 +697,8 @@ class AscendConfig:
     # Plain MC2 (enable_fused_mc2=1): the same value is passed as
     # dispatch_ffn_combine's max_output_size; 0 falls back to 65536 there.
     mega_moe_max_tokens: int = 0
+    # Experimental DeepSeek V4.1 A2 DP1/TP1/PCP8 P-only eager backend.
+    a2_mega_moe_prefill: A2MegaMoEPrefillConfig = dataclasses.field(default_factory=A2MegaMoEPrefillConfig)
     ascend_log_path: str = dataclasses.field(
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
@@ -768,20 +777,34 @@ class AscendConfig:
         # to enable the megamoe for testing capabilities.
         # These codes will be removed after megamoe is ready.
         global _MEGA_MOE_SUPPORTED
+        if self.a2_mega_moe_prefill.enabled:
+            if self.weight_nz_mode == 0:
+                raise ValueError("a2_mega_moe_prefill requires NZ W4A8 weights (weight_nz_mode=1 or 2)")
+            if self.enable_fused_mc2 != 2:
+                raise ValueError("a2_mega_moe_prefill requires enable_fused_mc2=2")
+            if importlib.util.find_spec("cann_ops_transformer") is None:
+                raise ValueError("a2_mega_moe_prefill requires a compatible cann_ops_transformer installation")
+            self.megamoe_shared_expert_fusion = False
+            _MEGA_MOE_SUPPORTED = True
         if self.enable_fused_mc2 in (0, 1):
             # When enable_fused_mc2=1, roll back to dispatch_ffn_combine.
             _MEGA_MOE_SUPPORTED = False
         elif self.enable_fused_mc2 in (2, 3):
-            # =2: MegaMoe with the shared expert kept separate; =3: MegaMoe
-            # with the shared expert fused into the operator.
-            self.megamoe_shared_expert_fusion = self.enable_fused_mc2 == 3
-            _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
-            if self.enable_fused_mc2 == 3 and not _MEGA_MOE_SUPPORTED:
-                logger.warning_once(
-                    "enable_fused_mc2=3 requires the cann_ops_transformer package; "
-                    "MegaMoe (and its shared-expert fusion) will be disabled."
-                )
-            self.enable_fused_mc2 = 1
+            if self.a2_mega_moe_prefill.enabled:
+                # A2 prefill opt-in keeps the real MegaMoe path without the
+                # generic rollback to enable_fused_mc2=1 below.
+                pass
+            else:
+                # =2: MegaMoe with the shared expert kept separate; =3: MegaMoe
+                # with the shared expert fused into the operator.
+                self.megamoe_shared_expert_fusion = self.enable_fused_mc2 == 3
+                _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
+                if self.enable_fused_mc2 == 3 and not _MEGA_MOE_SUPPORTED:
+                    logger.warning_once(
+                        "enable_fused_mc2=3 requires the cann_ops_transformer package; "
+                        "MegaMoe (and its shared-expert fusion) will be disabled."
+                    )
+                self.enable_fused_mc2 = 1
         else:
             raise ValueError(
                 "enable_fused_mc2 must be one of 0, 1, 2 (MegaMoE) or 3 "
@@ -794,6 +817,17 @@ class AscendConfig:
     # pydantic after-validator). Preserves the original __init__ ordering —
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if self.a2_mega_moe_prefill.enabled:
+            if get_current_hardware_profile().moe_comm_policy is not MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY:
+                raise ValueError("a2_mega_moe_prefill is supported only on A2")
+            if self.eplb_config.expert_map_path is not None:
+                raise ValueError("a2_mega_moe_prefill does not support custom expert maps")
+            validate_a2_mega_moe_prefill(
+                vc,
+                dynamic_eplb=self.eplb_config.dynamic_eplb,
+                redundant_experts=self.eplb_config.num_redundant_experts,
+                mix_placement=self.mix_placement,
+            )
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:
                 raise ValueError("shared_engram requires --shutdown-timeout > 0 to retire reader leases")
@@ -907,7 +941,8 @@ class AscendConfig:
             )
 
         # enable_fused_mc2 enum + MiniMax mutex + multistream auto-disable
-        assert self.enable_fused_mc2 in (0, 1), f"enable_fused_mc2 must be 0 or 1, got {self.enable_fused_mc2}"
+        if not self.a2_mega_moe_prefill.enabled:
+            assert self.enable_fused_mc2 in (0, 1), f"enable_fused_mc2 must be 0 or 1, got {self.enable_fused_mc2}"
         model_architectures = getattr(vc.model_config, "architectures", None) or []
         is_minimax_m3 = any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
         # dispatch_ffn_combine (enable_fused_mc2=1 after MegaMoe rollback) does not

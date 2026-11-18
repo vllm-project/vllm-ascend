@@ -815,6 +815,14 @@ class NPUPlatform(Platform):
                 mc2_mask = reserved_mc2_mask[:padded_num_tokens]
                 mc2_mask[:num_actual_tokens] = True
                 mc2_mask[num_actual_tokens:] = False
+        # Read the opt-in from the raw additional config so this hook keeps
+        # working in contexts where the AscendConfig singleton is not
+        # initialized (e.g. standalone unit tests).
+        additional_config = vllm_config.additional_config if isinstance(vllm_config.additional_config, dict) else {}
+        a2_prefill_settings = additional_config.get("a2_mega_moe_prefill") or {}
+        a2_prefill_flag = bool(
+            a2_prefill_settings.get("enabled", False) if isinstance(a2_prefill_settings, dict) else False
+        )
         return {
             "moe_comm_type": moe_comm_type,
             "moe_comm_method": moe_comm_method,
@@ -827,6 +835,7 @@ class NPUPlatform(Platform):
             "max_tokens_across_dp": max_tokens_across_dp,
             "max_tokens_across_pcp": max_tokens_across_pcp,
             "mc2_mask": mc2_mask,
+            "a2_mega_moe_prefill": a2_prefill_flag,
             "is_draft_model": is_draft_model,
             "is_draft_model_prefill": is_draft_model_prefill,
             "in_profile_run": in_profile_run,

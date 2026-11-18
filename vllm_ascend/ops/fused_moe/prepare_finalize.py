@@ -324,6 +324,15 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         """
         self.replace_allreduce = replace_allreduce
         mc2_mask = _EXTRA_CTX.mc2_mask
+        if _EXTRA_CTX.a2_mega_moe_prefill is True:
+            # PCP and bounded replay can contain padding inside the local row
+            # range, not just a suffix beyond num_tokens.
+            is_padding = getattr(get_forward_context(), "is_padding", None)
+            if isinstance(is_padding, torch.Tensor):
+                mc2_mask = torch.logical_not(is_padding)
+                pad = _EXTRA_CTX.padded_num_tokens - mc2_mask.shape[0]
+                if pad > 0:
+                    mc2_mask = nn.functional.pad(mc2_mask, (0, pad), value=False)
         if self.replace_allreduce:
             # SP shards use the local token count, not the largest DP batch.
             # Select valid bits before adding padding for uniform MC2 batches.

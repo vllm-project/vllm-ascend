@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import torch
 import torch_npu
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -29,8 +29,9 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.utils import replace_parameter
 
+from vllm_ascend.a2_mega_moe import a2_prefill_enabled, is_draft_model
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, select_moe_comm_method, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
@@ -705,7 +706,23 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         enable_force_load_balance = _EXTRA_CTX.in_profile_run
 
         lora_context = getattr(self, "_ascend_moe_lora_context", None)
-        moe_comm_method = get_moe_comm_method(_EXTRA_CTX.moe_comm_type, self.moe_config)
+        comm_type = _EXTRA_CTX.moe_comm_type
+        # Real v2 worker forwards run without a current-vllm-config context;
+        # the platform forward-context hook already selected the route for both
+        # the target (FUSED_MC2) and the nested PCP=1 DSpark draft (ordinary).
+        # Re-derive only when a config is present (profile/capture/tests).
+        current_config = get_current_vllm_config_or_none()
+        if current_config is not None and a2_prefill_enabled(get_ascend_config()) and is_draft_model(current_config):
+            # MRv2 draft execution can enter with the target's forward config.
+            # Internal DSpark configs can still have runner_type="generate".
+            # Resolve their ordinary route using the shared draft predicate.
+            comm_type = select_moe_comm_method(
+                _EXTRA_CTX.max_tokens_across_dp,
+                current_config,
+                is_draft_model=True,
+                draft_moe_quant_type=self.quant_type,
+            )
+        moe_comm_method = get_moe_comm_method(comm_type, self.moe_config)
         _EXTRA_CTX.moe_comm_method = moe_comm_method
         assert moe_comm_method is not None
         if lora_context is not None:
