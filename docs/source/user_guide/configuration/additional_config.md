@@ -390,11 +390,13 @@ KV transfer configurations and legacy EAGLE/MTP block dropping without
 lookahead hashes fall back to existing prefill scheduling: the scheduler and
 worker cannot safely assume the same internal checkpoint boundary in these modes.
 
-With FP32 recurrent caches, checkpoint-bearing prefill uses two batched AscendC
-recurrence segments inside one model forward. The first segment's FP32 final
-state supplies the checkpoint and initializes the second segment. Prefills
-without a checkpoint retain the dense AscendC recurrence. The segment packing
-and state copies add memory traffic and require performance qualification.
+With FP32 recurrent caches on A5 and an available fused FLA NPU GDN operator,
+checkpoint-bearing prefill uses two packed fused prefill segments inside one
+model forward. Prefills without a new checkpoint use the ordinary fused path.
+Other supported devices use two batched AscendC recurrence segments, or the
+dense AscendC recurrence when no checkpoint is required. Both segmented paths
+retain the first segment's FP32 final state as the checkpoint and use it to
+initialize the second segment. Packing and state copies add memory traffic.
 Lower-precision recurrent caches continue to use the Triton checkpoint path.
 Convolution history and recurrent state are written through the shared upstream
 checkpoint exporter. The Triton path rounds the FP32 accumulator to the
