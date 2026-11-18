@@ -246,10 +246,10 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
     def get_fused_mc2_weights(self, layer: torch.nn.Module) -> MoEWeights:
         if self.use_expert_weight_list:
             if _EXTRA_CTX.use_mega_moe:
-                # MegaMoe requires packed FP4 bytes; SiTU keeps its semantic
-                # dtype on the canonical weights. Views preserve EPLB updates.
+                # SiTU keeps semantic FP4 on w13; MegaMoe needs packed bytes.
+                # The views preserve EPLB updates. w2 is already packed uint8.
                 w1 = [weight.view(torch.uint8) for weight in layer.w13_weight_list]
-                w2 = [weight.view(torch.uint8) for weight in layer.w2_weight_list]
+                w2 = layer.w2_weight_list
                 # Reinterpret checkpoint bytes without copying: EPLB updates
                 # the same scale storage that MegaMoe consumes.
                 w1_scale = [scale.view(torch.float8_e8m0fnu) for scale in layer.w13_weight_scale_list]

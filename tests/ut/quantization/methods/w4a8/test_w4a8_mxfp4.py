@@ -373,6 +373,7 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
                 with patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4._EXTRA_CTX") as context:
                     context.use_mega_moe = True
                     weights = self.scheme.get_fused_mc2_weights(layer)
+                self.assertIs(weights.w2, layer.w2_weight_list)
                 eplb_views = self.scheme.get_eplb_weight_views(layer)
                 w13_dtype = torch.uint8 if activation == "silu" else torch.float4_e2m1fn_x2
                 self.assertEqual(layer.w13_weight_list[0].dtype, w13_dtype)
