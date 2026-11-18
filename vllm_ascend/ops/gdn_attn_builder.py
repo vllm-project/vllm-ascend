@@ -33,6 +33,10 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 from vllm_ascend.device.hardware_profile import get_current_hardware_profile
+from vllm_ascend.ops.gdn_ascendc_checkpoint import (
+    AscendCCheckpointPlan,
+    build_ascendc_checkpoint_plan,
+)
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
@@ -138,6 +142,7 @@ class GDNChunkedPrefillMetadata:
     num_decodes: int = 0
     cu_seqlens_kern: tuple[int, ...] | None = None
     keep_meta: torch.Tensor | None = None
+    ascendc_checkpoint_plan: AscendCCheckpointPlan | None = None
 
 
 @dataclass
@@ -1015,6 +1020,13 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     query_start_loc.device,
                     build_device_metadata=self.build_device_chunk_metadata or self._ascend_gdn_checkpoints,
                 )
+                if checkpoint is not None:
+                    assert checkpoint.offsets is not None
+                    non_spec_chunked_prefill_metadata.ascendc_checkpoint_plan = build_ascendc_checkpoint_plan(
+                        tuple(prefill_query_start_loc_cpu.tolist()),
+                        checkpoint.offsets,
+                        query_start_loc.device,
+                    )
                 # Common GDN/KDA callers also consume the upstream chunk fields.
                 chunk_indices = non_spec_chunked_prefill_metadata.chunk_indices_chunk64
                 chunk_offsets = non_spec_chunked_prefill_metadata.chunk_offsets_chunk64

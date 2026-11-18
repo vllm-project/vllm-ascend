@@ -532,6 +532,8 @@ def test_host_builder_exposes_host_descriptors_without_device_chunks(has_pcp_con
 
 @pytest.mark.parametrize("creates_checkpoint", [False, True])
 def test_host_builder_materializes_device_chunks_for_checkpoint_enabled_prefill(monkeypatch, creates_checkpoint):
+    from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointMetadata
+
     _patch_missing_runtime_cdiv(monkeypatch)
     builder = _make_builder(
         device=torch.device("cpu"),
@@ -541,7 +543,9 @@ def test_host_builder_materializes_device_chunks_for_checkpoint_enabled_prefill(
     )
     builder._ascend_gdn_checkpoints = True
     checkpoint = (
-        SimpleNamespace(checkpoint_offsets=torch.tensor([64]), state_indices=torch.tensor([NULL_BLOCK_ID]))
+        MambaPrefillCheckpointMetadata(
+            checkpoint_offsets=torch.tensor([64]), state_indices=torch.tensor([NULL_BLOCK_ID]), offsets=[64]
+        )
         if creates_checkpoint
         else None
     )

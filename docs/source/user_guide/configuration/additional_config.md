@@ -390,13 +390,15 @@ KV transfer configurations and legacy EAGLE/MTP block dropping without
 lookahead hashes fall back to existing prefill scheduling: the scheduler and
 worker cannot safely assume the same internal checkpoint boundary in these modes.
 
-Checkpoint-bearing prefill uses the existing Triton recurrence instead of the
-AscendC FwdH implementation to export only selected FP32 chunk-start states.
+With FP32 recurrent caches, checkpoint-bearing prefill uses two batched AscendC
+recurrence segments inside one model forward. The first segment's FP32 final
+state supplies the checkpoint and initializes the second segment. Prefills
+without a checkpoint retain the dense AscendC recurrence. The segment packing
+and state copies add memory traffic and require performance qualification.
+Lower-precision recurrent caches continue to use the Triton checkpoint path.
 Convolution history and recurrent state are written through the shared upstream
-checkpoint exporter. Enabled layers use the same Triton recurrence for cold
-prefills and cache-hit tails, including tails without a new checkpoint. At an
-exported boundary, the cold FP32 accumulator is rounded to the configured SSM
-cache dtype before continuing, matching the state restored by a cache hit.
+checkpoint exporter. The Triton path rounds the FP32 accumulator to the
+configured SSM cache dtype at the exported boundary before continuing.
 Decode is unchanged. This backend change needs numerical
 and performance qualification; skipping a model forward does not guarantee a
 net speedup. A persistent FP32 scratch buffer is allocated during profiling, of size

@@ -16,6 +16,8 @@ from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.third_party.flash_linear_attention.ops.utils import SUPPRESS_LEVEL
 
+from vllm_ascend.ops.gdn_ascendc_checkpoint import ascendc_checkpoint_recurrence
+
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h  # noqa: F401
 from .chunk_delta_hupdate import chunk_gated_delta_rule_fwd_hupdate
 from .chunk_o import chunk_fwd_o  # noqa: F401
@@ -42,6 +44,7 @@ def chunk_gated_delta_rule_fwd(
     checkpoint_offsets=None,
     use_triton_recurrence: bool = False,
     checkpoint_state_dtype: torch.dtype = torch.float32,
+    checkpoint_plan=None,
 ):
     forward_context = get_forward_context()
     num_decodes = 0
@@ -100,7 +103,17 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens_host = tuple(cu_seqlens.tolist())
     if chunk_indices_chunk64_host is None and chunk_indices_chunk64 is not None:
         chunk_indices_chunk64_host = tuple(chunk_indices_chunk64.flatten().tolist())
-    if checkpoint_output is not None or use_triton_recurrence:
+    if checkpoint_plan is not None:
+        h, v_new, final_state = ascendc_checkpoint_recurrence(
+            k_ascendc,
+            w.to(torch.bfloat16).transpose(1, 2).contiguous(),
+            u.to(torch.bfloat16).transpose(1, 2).contiguous(),
+            g_transpose,
+            initial_state,
+            checkpoint_output,
+            checkpoint_plan,
+        )
+    elif checkpoint_output is not None or use_triton_recurrence:
         if get_pcp_group().world_size != 1:
             raise ValueError("GDN internal checkpoints require PCP=1")
         # Keep FP32 snapshots of the recurrence before each 64-token chunk.
@@ -294,6 +307,7 @@ def chunk_gated_delta_rule_checkpoint(
     checkpoint_output,
     checkpoint_offsets,
     checkpoint_state_dtype=torch.float32,
+    use_ascendc: bool = False,
 ):
     required_fields = (
         "chunk_indices_chunk64",
@@ -328,7 +342,10 @@ def chunk_gated_delta_rule_checkpoint(
         prebuilt_meta=prebuilt_meta,
         checkpoint_output=checkpoint_output,
         checkpoint_offsets=checkpoint_offsets,
-        use_triton_recurrence=True,
+        use_triton_recurrence=not use_ascendc,
+        checkpoint_plan=(
+            prebuilt_meta.ascendc_checkpoint_plan if use_ascendc and checkpoint_output is not None else None
+        ),
         checkpoint_state_dtype=checkpoint_state_dtype,
     )
     return output, final_state

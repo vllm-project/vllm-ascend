@@ -102,6 +102,43 @@ def test_shared_exporter_preserves_ascend_conv_layout_and_mtp_slots():
 
 
 @pytest.mark.usefixtures("_init_checkpoint_prefill_ops")
+@pytest.mark.parametrize("offset,length", [(1408, 1464), (1280, 1336), (256, 315)])
+def test_ascendc_segments_preserve_checkpoint_and_final_state(offset, length):
+    from vllm_ascend.ops.gdn_ascendc_checkpoint import (
+        ascendc_checkpoint_recurrence,
+        build_ascendc_checkpoint_plan,
+    )
+
+    torch.manual_seed(31)
+    device = torch.device("npu")
+    k = torch.randn(1, 2, length, 128, device=device, dtype=torch.bfloat16) * 0.01
+    w, u = torch.randn_like(k) * 0.01, torch.randn_like(k) * 0.01
+    g = torch.zeros(1, 2, length, device=device, dtype=torch.float32)
+    initial = torch.randn(1, 2, 128, 128, device=device, dtype=torch.float32) * 0.01
+    states = torch.empty_like(initial)
+    plan = build_ascendc_checkpoint_plan((0, length), [offset], device)
+    _, _, actual_final = ascendc_checkpoint_recurrence(k, w, u, g, initial, states, plan)
+
+    def reference(start, end, state):
+        return torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h_vllm(
+            k[:, :, start:end].contiguous(),
+            w[:, :, start:end].contiguous(),
+            u[:, :, start:end].contiguous(),
+            g=g[:, :, start:end].contiguous(),
+            initial_state=state,
+            output_final_state=True,
+            chunk_size=64,
+            cu_seqlens=(0, end - start),
+            chunk_indices=tuple(value for i in range((end - start + 63) // 64) for value in (0, i)),
+        )[2]
+
+    prefix = reference(0, offset, initial)
+    final = reference(offset, length, prefix)
+    torch.testing.assert_close(states.transpose(-1, -2), prefix, rtol=0, atol=0)
+    torch.testing.assert_close(actual_final, final, rtol=0, atol=0)
+
+
+@pytest.mark.usefixtures("_init_checkpoint_prefill_ops")
 @pytest.mark.parametrize("layout", ["head_first", "token_slice"])
 @pytest.mark.parametrize("cache_dtype", [torch.float32, torch.bfloat16, torch.float16])
 def test_checkpoint_prefill_matches_dense_inputs_and_restored_tail(layout, cache_dtype):

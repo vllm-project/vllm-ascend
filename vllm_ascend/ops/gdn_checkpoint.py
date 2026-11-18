@@ -97,6 +97,7 @@ def run_gdn_checkpoint_prefill(layer, metadata, raw_qkv, q, k, v, g, beta, initi
         states,
         None if checkpoint is None else checkpoint.checkpoint_offsets,
         checkpoint_state_dtype=layer.kv_cache[1].dtype,
+        use_ascendc=layer.kv_cache[1].dtype == torch.float32,
     )
     if checkpoint is not None:
         # Ascend's conv state is [page, history, channel]; the shared exporter
