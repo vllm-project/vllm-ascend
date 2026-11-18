@@ -35,7 +35,11 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
 )
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.observability.spec_decode_dfx import log_accept0_census, log_nan_census
+from vllm_ascend.observability.spec_decode_dfx import (
+    consume_nan_census,
+    issue_nan_census,
+    log_accept0_census,
+)
 from vllm_ascend.ops.triton.spec_decode.entropy_verify import (
     _entropy_partials_kernel,
     _entropy_verify,
@@ -420,6 +424,15 @@ def rejection_sample(
         # vocab size is larger than the draft's due to padding.
         vocab_size = min(vocab_size, draft_logits.size(-1))
 
+    # [dfx/nan] Phase 1 (issue): enqueue the per-row NaN reductions BEFORE
+    # any verify kernel. Under async scheduling the logits buffers get
+    # recycled/rewritten by the next step while this step's host code is
+    # still running, so reductions enqueued at the exit would observe a
+    # foreign step's data. Stream order pins the entry-enqueued reductions
+    # to THIS step's logits; the fresh small result tensors are deferred
+    # to the exit via the pending snapshot (consume_nan_census below).
+    nan_census_pending = issue_nan_census(target_logits, draft_logits, num_speculative_steps, cu_num_logits)
+
     # Compute the block-level logits stats, such as target argmax
     # (for greedy requests), and target max + softmax exponential
     # (for non-greedy requests).
@@ -699,10 +712,12 @@ def rejection_sample(
     )
 
     # [dfx/nan] Output-side census (the accept0 verdict, which synchronizes
-    # the stream) followed by the input-side census: every host sync lands
-    # after this step's verdict, never at an observation point. The packed
-    # row boundaries give correct request/step coordinates for mixed
-    # prefill/decode or shorter-draft batches.
+    # the stream) followed by the input-side census consume phase: every
+    # host sync lands after this step's verdict, never at an observation
+    # point. The reductions were enqueued at the entry (issue_nan_census),
+    # so they observe this step's logits even under async scheduling; the
+    # packed row boundaries give correct request/step coordinates for
+    # mixed prefill/decode or shorter-draft batches.
     log_accept0_census(num_sampled, num_reqs, cu_num_logits)
-    log_nan_census(target_logits, draft_logits, num_speculative_steps, cu_num_logits)
+    consume_nan_census(nan_census_pending)
     return sampled, num_sampled

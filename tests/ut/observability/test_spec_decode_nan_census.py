@@ -4,17 +4,25 @@
 # environment; the full rejection_sample wiring plus kernel behavior under
 # NaN is covered by the NPU nightly e2e (test_rejection_sample_v2.py).
 #
-# Timing contract: the probes are called AFTER the accept0 verdict of the
-# same step -- the verdict path runs with zero diagnostic kernels in
-# flight, and every host sync lands after the verdict (observer-effect
-# free for timing-sensitive NaN failures).
+# Timing contract (issue/consume split, per the async-scheduling review):
+#   * issue_nan_census runs at the rejection_sample ENTRY, before any
+#     verify kernel is enqueued -- its reductions enter the stream ahead
+#     of every logits reader, so stream order pins them to THIS step's
+#     data even when async scheduling recycles the logits buffers before
+#     the exit runs.
+#   * consume_nan_census runs at the EXIT, after the accept0 verdict's
+#     sync; it reads ONLY the small snapshot tensors held by the pending
+#     object, never the (possibly recycled) logits buffers.
 #
 # Verified contract:
 #   * clean inputs  -> zero log records even at DEBUG (no log spam on
 #     healthy steps)
 #   * any NaN       -> exactly one record per input tensor carrying
 #     per-row req/step coordinates and NaN counts
-#   * INFO level    -> zero records AND zero tensor work (gate first line)
+#   * INFO level    -> zero records AND zero tensor work (gate first line;
+#     issue returns None)
+#   * snapshot deferral: mutating the logits tensors AFTER issue must not
+#     change what consume reports (the regression for async buffer reuse)
 #   * num_sampled==1 marks a fully-rejected request (accepted drafts + 1),
 #     restricted to requests that actually had drafts under packed
 #     cu_num_logits
@@ -85,14 +93,20 @@ def _draft_records(cap):
     return [m for m in _messages(cap) if "draft_logits" in m]
 
 
+def _run_census(target, draft, steps, cu=None):
+    """Two-phase path: issue at the entry, consume at the exit."""
+    pending = dfx.issue_nan_census(target, draft, steps, cu)
+    dfx.consume_nan_census(pending)
+
+
 def test_clean_inputs_silent(capture):
-    dfx.log_nan_census(_clean_target(), torch.zeros(4, K, V), K)
+    _run_census(_clean_target(), torch.zeros(4, K, V), K)
     assert capture.records == [], f"clean inputs must stay silent, got {_messages(capture)}"
 
 
 def test_partial_nan_single_element(capture):
     # row 6 = request 1, step 0 (rows_per_req = K + 1 = 6)
-    dfx.log_nan_census(_with_nan(_clean_target(), 6, 1), None, K)
+    _run_census(_with_nan(_clean_target(), 6, 1), None, K)
     recs = _target_records(capture)
     assert len(recs) == 1, recs
     msg = recs[0]
@@ -103,7 +117,7 @@ def test_partial_nan_single_element(capture):
 
 
 def test_whole_row_nan(capture):
-    dfx.log_nan_census(_with_nan(_clean_target(), 3, V), None, K)
+    _run_census(_with_nan(_clean_target(), 3, V), None, K)
     recs = _target_records(capture)
     assert len(recs) == 1, recs
     assert "total_nan=64" in recs[0]  # the whole-row upper bound
@@ -113,7 +127,7 @@ def test_whole_row_nan(capture):
 def test_multiple_rows_nan(capture):
     t = _with_nan(_clean_target(), 2, 3)  # req 0, step 2
     t = _with_nan(t, 7, 5)  # req 1, step 1
-    dfx.log_nan_census(t, None, K)
+    _run_census(t, None, K)
     recs = _target_records(capture)
     assert len(recs) == 1, recs
     assert "rows_with_nan=2/12" in recs[0]
@@ -125,7 +139,7 @@ def test_multiple_rows_nan(capture):
 def test_draft_logits_nan(capture):
     draft = torch.zeros(4, K, V)
     draft[1, 3, :7] = float("nan")  # slot 1, step 3
-    dfx.log_nan_census(_clean_target(), draft, K)
+    _run_census(_clean_target(), draft, K)
     recs = _draft_records(capture)
     assert len(recs) == 1, recs
     assert "rows_with_nan=1" in recs[0]
@@ -134,10 +148,21 @@ def test_draft_logits_nan(capture):
 
 
 def test_draft_logits_none_no_crash(capture):
-    dfx.log_nan_census(_clean_target(), None, K)
+    _run_census(_clean_target(), None, K)
     assert capture.records == []
     # and with a poisoned target while draft is None:
-    dfx.log_nan_census(_with_nan(_clean_target(), 0, 2), None, K)
+    _run_census(_with_nan(_clean_target(), 0, 2), None, K)
+    assert len(_target_records(capture)) == 1
+    assert _draft_records(capture) == []
+
+
+def test_draft_logits_dummy_skipped(capture):
+    """The wiring normalizes draft_logits=None to a 1-element dummy tensor
+    before calling issue; the dummy must not be treated as real logits."""
+    dummy = torch.empty(1, 1, 1)
+    _run_census(_clean_target(), dummy, K)
+    assert capture.records == []
+    _run_census(_with_nan(_clean_target(), 5, 3), dummy, K)
     assert len(_target_records(capture)) == 1
     assert _draft_records(capture) == []
 
@@ -153,7 +178,7 @@ def test_packed_rows_mixed_boundaries(capture):
     t[0, 0] = float("nan")  # request 0's only row
     t[1, 0] = float("nan")  # request 1, step 0
     t[4, :2] = float("nan")  # request 1, last row (bonus)
-    dfx.log_nan_census(t, None, 3, boundaries)
+    _run_census(t, None, 3, boundaries)
     recs = _target_records(capture)
     assert len(recs) == 1, recs
     assert "rows_with_nan=3/5" in recs[0]
@@ -168,15 +193,37 @@ def test_packed_rows_uniform_boundaries_match_legacy(capture):
     boundaries = torch.tensor([0, 6, 12], dtype=torch.int64)
     t = torch.zeros(12, V)
     t[6, 0] = float("nan")  # request 1, step 0
-    dfx.log_nan_census(t, None, K, boundaries)
+    _run_census(t, None, K, boundaries)
     recs = _target_records(capture)
     assert len(recs) == 1, recs
     assert "req=1 step=0 nan=1" in recs[0]
 
 
-def test_info_level_silent(capture_info):
+def test_snapshot_survives_buffer_reuse(capture):
+    """THE regression for the async-scheduling review finding: by consume
+    time the logits buffers may already be recycled and rewritten by the
+    next step. The pending snapshot must reflect the entry-time data, so
+    overwriting the source tensors between issue and consume must not
+    change the report."""
+    t = _with_nan(_clean_target(), 6, 2)  # req 1, step 0, nan=2
+    pending = dfx.issue_nan_census(t, None, K)
+    # simulate the next step overwriting the recycled buffer: poison a
+    # DIFFERENT row and clear the original one
+    t[:] = 0.0
+    t[0, :V] = float("nan")  # row 0 heavily poisoned post-issue
+    dfx.consume_nan_census(pending)
+    recs = _target_records(capture)
+    assert len(recs) == 1, recs
+    # entry-time snapshot: row 6, not the post-overwrite row 0
+    assert "req=1 step=0 nan=2" in recs[0]
+    assert "req=0" not in recs[0]
+
+
+def test_issue_returns_none_at_info(capture_info):
     t = _with_nan(_clean_target(), 6, V)  # poisoned, but gate closed
-    dfx.log_nan_census(t, torch.zeros(4, K, V), K)
+    pending = dfx.issue_nan_census(t, torch.zeros(4, K, V), K)
+    assert pending is None, "INFO gate must skip issue entirely (no tensor work)"
+    dfx.consume_nan_census(pending)  # must tolerate None
     dfx.log_accept0_census(torch.tensor([6], dtype=torch.int32), 1)
     assert capture_info.records == [], f"INFO must stay silent, got {_messages(capture_info)}"
 
@@ -213,7 +260,9 @@ def test_accept0_normal_silent(capture):
 
 def test_census_never_raises(capture):
     """Malformed input must not take down the sampler (never-raise guard)."""
-    dfx.log_nan_census(torch.zeros(0, V), None, K)  # zero rows
-    dfx.log_nan_census(torch.zeros(3, 0), None, K)  # zero vocab
+    _run_census(torch.zeros(0, V), None, K)  # zero rows
+    _run_census(torch.zeros(3, 0), None, K)  # zero vocab
+    dfx.issue_nan_census(torch.zeros(0, V), torch.zeros(0, K, 0), K)
+    dfx.consume_nan_census(None)  # degenerate pending
     dfx.log_accept0_census(torch.zeros(0, dtype=torch.int32), 0)
     # no exception escaped; failures would surface as census-failed DEBUGs
