@@ -14,6 +14,7 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
     resolve_dsv4_cache_dtype,
+    supports_dsa_target_metadata_graph,
 )
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla
 from vllm_ascend.device.hardware_profile import get_hardware_profile
@@ -58,6 +59,31 @@ def _on(device_type):
 def test_get_dsa_attn_kv_plan_requires_vllm_config():
     with pytest.raises(TypeError):
         get_dsa_attn_kv_plan()
+
+
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("unsupported", [None, "model", "vision", "pcp", "dcp", "eager", "turboquant"])
+def test_target_metadata_graph_scope(device_type, unsupported):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            architecture="OtherModel" if unsupported == "model" else "DeepseekV4ForCausalLM",
+            hf_config=SimpleNamespace(vision_n_layers=int(unsupported == "vision")),
+        ),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=8 if unsupported == "pcp" else 1,
+            decode_context_parallel_size=2 if unsupported == "dcp" else 1,
+        ),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: unsupported != "eager")
+        ),
+    )
+    with (
+        _on(device_type),
+        mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.is_turboquant", return_value=unsupported == "turboquant"),
+    ):
+        assert supports_dsa_target_metadata_graph(config) == (
+            unsupported is None and device_type != AscendDeviceType.A5
+        )
 
 
 @pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
