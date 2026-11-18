@@ -35,6 +35,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     RequestTracker,
     StoreLookupResult,
+    infer_cache_transfer_granularity,
     infer_cacheable_group_ids,
     infer_group_block_sizes,
     infer_group_cache_families,
@@ -152,7 +153,9 @@ class BaseKVPoolScheduler(ABC):
             tuple(self.grouped_block_size),
         )
         self._block_size = self.grouped_block_size[0]
-        self.cache_transfer_granularity = self.lcm_block_size
+        self.cache_transfer_granularity = infer_cache_transfer_granularity(
+            self.grouped_block_size, self.lcm_block_size, self.cacheable_group_ids
+        )
         self.cache_coordinator = self._build_cache_coordinator()
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
@@ -228,7 +231,7 @@ class BaseKVPoolScheduler(ABC):
 
     def _build_cache_coordinator(self) -> AscendStoreCoordinator | None:
         """Build the hybrid cache-hit/mask coordinator (mirrors the worker)."""
-        if self.kv_cache_config is None or not (self.use_hybrid or self.enable_partial_hash_hits):
+        if self.kv_cache_config is None or not self.use_hybrid:
             return None
         return AscendStoreCoordinator(
             resolve_pool_cache_groups(self.vllm_config, self.kv_cache_config),
@@ -850,7 +853,7 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         return super().reset_store()
 
     def retain_blocks_for_save(self, req_meta: ReqMeta) -> None:
-        """Keep non-null Mamba blocks alive until their bulk save completes."""
+        """Keep Mamba source blocks alive until bulk save completes."""
         self._in_flight_save_blocks.retain(
             req_meta,
             self.num_speculative_blocks_by_group,

@@ -66,6 +66,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_engine_transfer_config,
     get_group_cache_family,
     get_sharded_mamba_group_ids,
+    infer_cache_transfer_granularity,
     infer_cacheable_group_ids,
     infer_group_block_sizes,
     infer_group_cache_families,
@@ -247,7 +248,9 @@ class BaseKVPoolWorker(ABC):
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
         self.group_uses_align_state = self._infer_group_uses_align_state()
         self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
-        self.cache_transfer_granularity = self.lcm_block_size
+        self.cache_transfer_granularity = infer_cache_transfer_granularity(
+            self.grouped_block_size, self.lcm_block_size, self.cacheable_group_ids
+        )
         self.h2d_stagger_us = int(extra_config.get("h2d_stagger_us", 0))
 
         logger.info(

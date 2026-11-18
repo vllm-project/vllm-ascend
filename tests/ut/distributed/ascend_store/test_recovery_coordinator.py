@@ -406,7 +406,7 @@ def test_store_mask_retention_interval_sparsifies_swa_tails():
     (chunks 7 and 15) instead of every 32 tokens, dropping the mid-segment
     boundaries at 32 and 96."""
     coord = _make_coord(_retention_groups(), hash_block_size=8, retention_interval=64)
-    masks = coord.store_mask(128)
+    masks = coord.store_mask(128, num_prompt_tokens=129)
     assert masks[0] == [True] * 4  # full attn unaffected
     assert masks[1] == [i in (7, 15) for i in range(16)]
 
@@ -415,8 +415,8 @@ def test_store_mask_retention_interval_zero_keeps_only_replay_boundary():
     """retention_interval=0 drops all segment tails; only the latest replay
     boundary (capped at num_prompt-1, aligned down to lcm) is retained."""
     coord = _make_coord(_retention_groups(), hash_block_size=8, retention_interval=0)
-    # No replay info -> nothing reachable for the SWA group.
-    assert coord.store_mask(128)[1] == [False] * 16
+    # Without prompt metadata, preserve the legacy all-LCM-boundaries fallback.
+    assert coord.store_mask(128)[1] == [i % 4 == 3 for i in range(16)]
     # num_prompt=100 -> latest hit boundary = (100-1)//32*32 = 96 -> chunk 11.
     masks = coord.store_mask(128, num_prompt_tokens=100)
     assert masks[1] == [i == 11 for i in range(16)]

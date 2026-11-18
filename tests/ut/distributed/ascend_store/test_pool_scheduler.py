@@ -2249,6 +2249,13 @@ def test_bulk_lookup_passes_result_directly_to_load_spec(mock_client_cls, partia
     config = make_config()
     cache = make_resolved_cache_config(config)
     if partial:
+        config.scheduler_config.disable_hybrid_kv_cache_manager = False
+        cache.kv_cache_groups.append(
+            KVCacheGroupSpec(
+                ["model.layers.mamba"],
+                MambaSpec(shapes=((4,),), dtypes=(torch.float32,), block_size=16, mamba_cache_mode="align"),
+            )
+        )
         cache.hash_block_size = cache.cache_hit_alignment_tokens = 4
     scheduler = KVPoolScheduler(config, use_layerwise=False, kv_cache_config=cache)
     client = mock_client_cls.return_value

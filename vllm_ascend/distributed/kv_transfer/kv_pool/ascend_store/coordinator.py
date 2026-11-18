@@ -263,7 +263,7 @@ class AscendStoreCoordinator:
         reachable_boundaries = (
             replay_boundaries(num_prompt_tokens, self.lcm_block_size, use_eagle=bool(self.eagle_reachable_group_ids))
             if num_prompt_tokens is not None
-            else ()
+            else range(self.lcm_block_size, aligned_token_len + 1, self.lcm_block_size)
         )
         masks: list[tuple[int, list[bool] | None]] = []
         for group_id, spec in enumerate(self.group_effective_specs):

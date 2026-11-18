@@ -660,6 +660,8 @@ class ChunkedTokenDatabase:
         num_logical_blocks = cdiv(token_len, logical_block_size) if token_len > 0 else 0
         if not partial:
             grouped_hashes = get_block_hashes(block_hashes, logical_block_size, self.hash_block_size)
+            if not grouped_hashes:
+                return
             num_logical_blocks = min(len(grouped_hashes), num_logical_blocks)
         block_id_offset = max(num_logical_blocks - len(block_ids), 0) if block_ids is not None else 0
         first_chunk = max(0, cdiv(mask_num, logical_block_size), block_id_offset)
