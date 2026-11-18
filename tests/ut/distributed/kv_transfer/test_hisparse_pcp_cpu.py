@@ -263,7 +263,7 @@ def test_pcp_builder_reuses_state_input_without_per_draft_buffers(monkeypatch):
     capture = builder._build(common, pcp_context=NS(local_request_state_indices=torch.zeros(3, dtype=torch.int64)))
     states = capture.hisparse_request_state_indices
     real = builder._build(common, pcp_context=NS(local_request_state_indices=torch.tensor([7, 7, 9])))
-    assert real.hisparse_request_state_indices is states
+    assert real.hisparse_request_state_indices.data_ptr() == states.data_ptr()
     assert states.dtype == torch.int32 and states.tolist() == [7, 7, 9, -1, -1]
     assert real.hisparse_num_write_tokens == 8 and real.hisparse_num_valid_write_rows is None
     draft = builder._build(common, draft_index=1)
