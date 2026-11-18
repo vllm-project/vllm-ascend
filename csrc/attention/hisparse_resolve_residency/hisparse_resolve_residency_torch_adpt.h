@@ -108,6 +108,8 @@ inline void resolve_residency(
         swap_counts_t, miss_mask_t,
         stats_t);
     if (stats_t.defined() && is_arch22_soc()) {
+        // Submit queued side-stream waits before allocating graph temporaries.
+        c10_npu::getCurrentNPUStream().stream();
         // arch22 DMA atomics cannot carry between the words of an INT64 counter.
         // Reduce per-request counts on the same stream, including during replay.
         stats_t.add_(errors.slice(1, 1, 3).sum(at::IntArrayRef{0}, false, at::kLong));

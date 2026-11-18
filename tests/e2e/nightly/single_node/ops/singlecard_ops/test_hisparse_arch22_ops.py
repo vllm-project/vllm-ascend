@@ -584,7 +584,7 @@ def test_invalidation_write_count(count):
 @pytest.mark.parametrize("request_count", [1, 4, 128])
 @pytest.mark.parametrize("initial", [(1 << 32) - 2, (1 << 33) - 2, (1 << 53) + 1])
 def test_native_resolver_int64_stats_carry(capture, request_count, initial):
-    """Both counters preserve carry across requests, launches and graph replay."""
+    """Counters preserve carry and graph storage on Core's generic side stream."""
     block = 8
     logical = torch.tensor([[0, 0, 0, 1, 2, 3]], dtype=torch.int32, device="npu").repeat(request_count, 1)
     table = torch.arange(1, request_count + 1, dtype=torch.int32, device="npu")[:, None]
@@ -595,7 +595,7 @@ def test_native_resolver_int64_stats_carry(capture, request_count, initial):
     backing = torch.full((6,), -73, dtype=torch.int64, device="npu")
     stats = backing[1:3]
 
-    def forward():
+    def resolve():
         torch.ops._C_ascend.hisparse_resolve_residency(
             logical,
             table,
@@ -626,6 +626,15 @@ def test_native_resolver_int64_stats_carry(capture, request_count, initial):
             0,
         )
 
+    side_stream = torch.Stream(device=logical.device)
+
+    def forward():
+        current = torch.accelerator.current_stream()
+        side_stream.wait_stream(current)
+        with side_stream:
+            resolve()
+        current.wait_stream(side_stream)
+
     graph = None
     try:
         if capture:
@@ -634,6 +643,9 @@ def test_native_resolver_int64_stats_carry(capture, request_count, initial):
             graph = torch.npu.NPUGraph()
             with torch.npu.graph(graph):
                 forward()
+            torch.npu.synchronize()
+            # Captured temporaries must survive release of the eager cache.
+            torch.npu.empty_cache()
         stats.fill_(initial)
         for iteration in range(1, 4):
             # One cached row and three missing rows yield three hits/misses per request.
