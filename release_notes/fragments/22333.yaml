@@ -1,0 +1,7 @@
+pr: 22333
+entries:
+  - category: bugfix
+    text: >-
+      Fixed a packed-FP4 weight dtype error during startup of W4A8-MXFP SiTU
+      models with fused MC2 enabled on Ascend A5.
+    hardware: [A5]
