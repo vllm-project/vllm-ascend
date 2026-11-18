@@ -232,8 +232,6 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
-    --enable-eplb \
-    --eplb-config '{"num_redundant_experts":0,"window_size":50,"step_interval":50}' \
     --additional-config '{"enable_cpu_binding": "True", "multistream_overlap_shared_expert": "True", "enable_flashcomm1": true}'
     ```
 

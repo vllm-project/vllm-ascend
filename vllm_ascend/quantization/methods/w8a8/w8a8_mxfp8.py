@@ -432,6 +432,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 topk_ids=topk_ids,
                 layer=layer,
                 quant_type=self.quant_type,
+                # MXFP8 selects EPLB lists in its own weight accessors;
+                # preserve the existing MLP dispatch flag here.
                 use_expert_weight_list=False,
                 expert_map=layer.ascend_expert_map,
                 global_redundant_expert_num=layer.global_redundant_expert_num,

@@ -91,9 +91,6 @@ templates:
       - --enforce-eager
       - --speculative-config
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
-      - "--enable-eplb"
-      - "--eplb-config"
-      - '{"num_redundant_experts":32,"window_size":50,"step_interval":50}'
       - --additional-config
       - '{"enable_cpu_binding":true,"enable_fused_mc2":0}'
       - --profiler-config
@@ -163,9 +160,6 @@ templates:
       - --enforce-eager
       - --speculative-config
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
-      - "--enable-eplb"
-      - "--eplb-config"
-      - '{"num_redundant_experts":32,"window_size":50,"step_interval":50}'
       - --additional-config
       - '{"enable_cpu_binding":true,"enable_fused_mc2":0}'
       - --profiler-config
@@ -236,9 +230,6 @@ templates:
       - '{"cudagraph_capture_sizes":[4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - --speculative-config
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
-      - "--enable-eplb"
-      - "--eplb-config"
-      - '{"num_redundant_experts":32,"window_size":600,"step_interval":600}'
       - --additional-config
       - '{"recompute_scheduler_enable":true,"enable_cpu_binding":true,"enable_fused_mc2":0}'
       - --profiler-config

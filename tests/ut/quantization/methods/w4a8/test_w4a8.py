@@ -257,10 +257,8 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         expert_map = torch.randint(0, num_experts, (num_experts,), dtype=torch.int64)
         mc2_mask = torch.tensor([1, 0, 1, 0], dtype=torch.bool)
         pertoken_scale = torch.randn(tokens, dtype=torch.float32)
-        log2phy = torch.randint(0, num_experts, (num_experts,), dtype=torch.int64)
         layer.ascend_expert_map = expert_map
         layer.global_redundant_expert_num = 0
-        layer.log2phy = log2phy
         layer.ascend_mc2_mask = mc2_mask
         layer.ascend_pertoken_scale = pertoken_scale
         layer.activation = "silu"

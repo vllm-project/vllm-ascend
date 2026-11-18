@@ -172,7 +172,6 @@ def test_unquantized_apply_310_uses_preselected_experts():
         global_redundant_expert_num=0,
         ascend_mc2_mask=None,
         apply_router_weight_on_input=True,
-        log2phy=None,
         ascend_pertoken_scale=None,
         activation="silu",
         swiglu_limit=0.0,

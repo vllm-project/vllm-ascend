@@ -35,5 +35,4 @@ class MoeRouterInput:
     global_redundant_expert_num: int
     mc2_mask: torch.Tensor | None
     apply_router_weight_on_input: bool
-    log2phy: torch.Tensor | None = None
     pertoken_scale: torch.Tensor | None = None

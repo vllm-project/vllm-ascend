@@ -57,9 +57,6 @@ _server_cmd: &server_cmd
   - '{"use_index_cache": true,"index_topk_frep":4}'
   - "--speculative-config"
   - '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}'
-  - "--enable-eplb"
-  - "--eplb-config"
-  - '{"num_redundant_experts":0,"window_size":50,"step_interval":50}'
   - "--additional-config"
   - '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":"True","enable_sparse_sfa_c8":true,"enable_sparse_li_c8":true}'
 

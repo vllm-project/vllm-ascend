@@ -42,9 +42,6 @@ test_cases:
       - "--async-scheduling"
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "--enable-eplb"
-      - "--eplb-config"
-      - '{"num_redundant_experts":0}'
       - "--additional-config"
       - '{"ascend_compilation_config":{"enable_static_kernel":false},"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}'
       - "--profiler-config"
@@ -107,9 +104,6 @@ test_cases:
       - "--async-scheduling"
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "--enable-eplb"
-      - "--eplb-config"
-      - '{"num_redundant_experts":0}'
       - "--additional-config"
       - '{"ascend_compilation_config":{"enable_static_kernel":false},"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}'
       - "--profiler-config"

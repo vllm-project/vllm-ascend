@@ -185,7 +185,6 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         layer.apply_router_weight_on_input = True
         layer.ascend_expert_map = None
         layer.global_redundant_expert_num = 0
-        layer.log2phy = None
         layer.ascend_mc2_mask = mc2_mask
         layer.ascend_pertoken_scale = pertoken_scale
         layer.swiglu_alpha = 1.0
