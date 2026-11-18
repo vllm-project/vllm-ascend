@@ -1,0 +1,8 @@
+pr: 22222
+entries:
+  - category: feature
+    text: >-
+      Added PD disaggregation KV transfer metrics: kv:xfer_finished_total{connector},
+      kv:invalid_blocks_total{connector}, and kv:remote_kv_waiting_requests{connector},
+      so remote KV receive progress, failed loads, and pending waits are visible on
+      the /metrics endpoint.
