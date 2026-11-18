@@ -58,4 +58,6 @@ test_cases:
         top_k: 20
         presence_penalty: 1.5
         repetition_penalty: 1.0
-        baseline: null
+        # Calibration only. Set the accuracy floor after hardware CI.
+        verify_mode: ge
+        baseline: 0

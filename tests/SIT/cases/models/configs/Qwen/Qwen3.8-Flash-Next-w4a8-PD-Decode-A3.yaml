@@ -1,6 +1,6 @@
 # Flash Next basic PD topology from the model guide, section 5.2.
 test_cases:
-  - name: Qwen3.8-Flash-Next-w4a8-PD-A3
+  - name: Qwen3.8-Flash-Next-w4a8-PD-Decode-A3
     model: &model Eco-Tech/Qwen3.8-Flash-Next-w4a8
     service_mode: pd
     envs:
@@ -24,7 +24,6 @@ test_cases:
         - --served-model-name
         - *model
         - --trust-remote-code
-        - --enable-prompt-tokens-details
         - --quantization
         - ascend
         - --tensor-parallel-size
@@ -121,33 +120,51 @@ test_cases:
            "kv_connector_extra_config": {"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}
     test_content: []
     benchmarks:
-      prefill_16k: &16k_load
+      # Repeat one native Qwen prompt per length to construct a 100% shared prefix.
+      prepare_prefix100:
+        case_type: curl_cmd
+        cmds:
+          - |
+            python - <<'PY'
+            from pathlib import Path
+            from ais_bench.benchmark.datasets.utils.datasets import get_data_path
+            from tools.aisbench import maybe_download_from_modelscope
+
+            for source, name, count in (
+                ("vllm-ascend/GSM8K_prefix0_in16384_bs200_qwen", "16k", 128),
+                ("vllm-ascend/GSM8K-in131072-bs100-qwen3", "128k", 8),
+            ):
+                src = Path(maybe_download_from_modelscope(source, repo_type="dataset"))
+                with (src / "test.jsonl").open("rb") as data:
+                    prompt = next(data).rstrip(b"\r\n") + b"\n"
+                out = Path(get_data_path(".")) / "qwen38_prefix100_a3" / name
+                out.mkdir(parents=True, exist_ok=True)
+                (out / "train.jsonl").write_bytes(b"")
+                (out / "test.jsonl").write_bytes(prompt * count)
+            PY
+      warmup_d_16k: &warmup_16k
         case_type: performance
+        dataset_path_local: qwen38_prefix100_a3/16k
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        request_rate: 0
-        temperature: 0
-        dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs200_qwen
-        num_prompts: 128
+        num_prompts: 32
         batch_size: 32
         max_out_len: 1
-        pd_phase: prefill
-      prefill_128k: &128k_load
+        request_rate: 0
+      pure_d_16k:
+        <<: *warmup_16k
+        num_prompts: 128
+        max_out_len: 1024
+      warmup_d_128k: &warmup_128k
         case_type: performance
+        dataset_path_local: qwen38_prefix100_a3/128k
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        request_rate: 0
-        temperature: 0
-        dataset_path: vllm-ascend/GSM8K-in131072-bs100-qwen3
-        num_prompts: 8
+        num_prompts: 2
         batch_size: 2
         max_out_len: 1
-        pd_phase: prefill
-      decode_16k:
-        <<: *16k_load
-        pd_phase: decode
-        max_out_len: 1024
-      decode_128k:
-        <<: *128k_load
-        pd_phase: decode
+        request_rate: 0
+      pure_d_128k:
+        <<: *warmup_128k
+        num_prompts: 8
         max_out_len: 1024

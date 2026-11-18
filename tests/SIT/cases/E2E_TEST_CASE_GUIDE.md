@@ -203,25 +203,6 @@ test_cases:
       <<: *benchmarks
 ```
 
-### Measuring Prefill and Decode on a single PD node
-
-With `service_mode: pd`, `pd_server_cmds` starts a real KV producer and consumer.
-The runner assigns devices from its visible set. Size the matrix runner for the
-sum of both roles. The Qwen3.8 Flash Next PD cases use one Prefill API, which can
-serve multiple DP replicas. Enable `--enable-prompt-tokens-details` on Prefill
-so each request can verify how much of the prompt was cached.
-
-- `pd_phase: prefill` sends one-token requests directly to Prefill. Each request
-  gets its own cache salt and must report zero cached prompt tokens.
-- `pd_phase: decode` uses the GSM8K performance reader. For each batch of rows,
-  the runner warms the same prompts on each Prefill DP replica, then replays
-  them through the PD proxy. Each response must report a warm Prefill prefix
-  within the aligned cache tail and generate the configured number of tokens.
-  The formal throughput includes real KV handoff. It divides the generated
-  token count by the sum of formal window durations. TTFT and TPOT means are
-  weighted by sample count. Each warmup and measured window retains its native
-  AISBench results under `outputs/`.
-
 ### Single-node EPD case
 
 Use `service_mode: epd` when one case starts encode and decode services plus a proxy:
@@ -754,7 +735,7 @@ Each key under `benchmarks` names one AISBench job. Common fields include:
 | `max_out_len` | Maximum generated tokens |
 | `batch_size` | Client concurrency or batch size |
 | `request_rate` | Request arrival rate; use `0` for no rate limit where supported |
-| `baseline` | Expected reference result. Set to `null` in an accuracy job to collect its score before establishing a threshold. |
+| `baseline` | Expected reference result |
 | `threshold` | Allowed accuracy or performance threshold |
 
 Optional request fields such as `temperature`, `top_k`, and `top_p` are passed to the applicable benchmark configuration.
