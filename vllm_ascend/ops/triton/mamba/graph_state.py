@@ -7,7 +7,8 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-_BLOCK_SIZE = 256
+_BLOCK_SIZE = 256  # One program writes a 256-element tile (1 KiB).
+_POINTERS_PER_GROUP = 3  # Source, destination and optional clear table per group.
 
 
 @triton.jit(do_not_specialize=["actual_rows", "graph_rows"])
@@ -24,8 +25,8 @@ def _graph_state_kernel(
     BLOCK: tl.constexpr,
 ):
     group = tl.program_id(0)
-    source = tl.load(pointers + group * 3).to(tl.pointer_type(tl.int32))
-    destination = tl.load(pointers + group * 3 + 1).to(tl.pointer_type(tl.int32))
+    source = tl.load(pointers + group * _POINTERS_PER_GROUP).to(tl.pointer_type(tl.int32))
+    destination = tl.load(pointers + group * _POINTERS_PER_GROUP + 1).to(tl.pointer_type(tl.int32))
     for tile in range(tl.cdiv(graph_rows * WIDTH, BLOCK)):
         offsets = tile * BLOCK + tl.arange(0, BLOCK)
         rows = offsets // WIDTH
@@ -38,7 +39,7 @@ def _graph_state_kernel(
         # One program owns each allocation, including its partial 32-byte tail.
         tl.store(destination + offsets, values, offsets < graph_rows * WIDTH)
     if CLEAR_WIDTH:
-        clear = tl.load(pointers + group * 3 + 2).to(tl.pointer_type(tl.int32))
+        clear = tl.load(pointers + group * _POINTERS_PER_GROUP + 2).to(tl.pointer_type(tl.int32))
         for tile in range(tl.cdiv(graph_rows * CLEAR_WIDTH, BLOCK)):
             offsets = tile * BLOCK + tl.arange(0, BLOCK)
             tl.store(clear + offsets, CLEAR_VALUE, offsets < graph_rows * CLEAR_WIDTH)
@@ -117,6 +118,7 @@ class GDNGraphStateUpdater:
                 CLEAR_WIDTH=clear_width,
                 CLEAR_VALUE=PAD_SLOT_ID,
                 BLOCK=_BLOCK_SIZE,
+                # Single-buffered, no unit-flag scheduling: one batched copy.
                 multibuffer=False,
                 unit_flag=False,
             )

@@ -16,9 +16,9 @@ from vllm.utils.math_utils import next_power_of_2
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
-_ALIGN_ELEMENTS = 8  # 32 bytes of INT32.
-_FLAT_BLOCK = 256
-_MAX_WINDOW_ELEMENTS = 4096
+_ALIGN_ELEMENTS = 8  # 32 bytes of INT32: output span and window-start alignment.
+_FLAT_BLOCK = 256  # One flat program covers 256 output elements (1 KiB).
+_MAX_WINDOW_ELEMENTS = 4096  # Bounds one row tile so the gathered window fits UB.
 
 
 @triton.jit(do_not_specialize=["num_reqs"])
@@ -53,13 +53,14 @@ def _aligned_indices_window_kernel(
         if BLOCK_ROWS == 1:
             # A true scalar keeps max/div out of Ascend's single-element
             # tensor pointer analysis, which does not support tensor maxsi.
+            # other=1 makes inactive rows select window slot 0 without a read.
             lengths = tl.load(seq_lens + tile * seq_stride, tile < num_reqs, other=1)
         else:
             lengths = tl.load(seq_lens + rows * seq_stride, valid_rows, other=1)
         # Preserve the length dtype: Ascend BlockPtrAnalysis cannot parse an
         # int64-to-int32 truncation in GM pointer offsets.
         first_slot = tl.maximum((lengths - 1) // CACHE_BLOCK_SIZE, 0)
-        window_start = first_slot // 8 * 8
+        window_start = first_slot // _ALIGN_ELEMENTS * _ALIGN_ELEMENTS
         if BLOCK_ROWS == 1:
             source_columns = window_start + columns[None, :]
             local_indices = first_slot - window_start + tl.minimum(slots[None, :], STATE_SLOTS - 1)
@@ -105,6 +106,7 @@ def _aligned_indices_flat_kernel(
     rows = offsets // STATE_SLOTS % MAX_REQS
     slots = offsets % STATE_SLOTS
     valid = (groups < NUM_GROUPS) & (rows < num_reqs)
+    # other=1 keeps inactive rows on window slot 0; the mask skips their read.
     lengths = tl.load(seq_lens + rows * seq_stride, valid, other=1)
     first_slot = tl.maximum((lengths - 1) // CACHE_BLOCK_SIZE, 0).to(tl.int32)
     first_group = program_start // (MAX_REQS * STATE_SLOTS)
@@ -184,6 +186,8 @@ def compute_aligned_state_indices(
             STATE_SLOTS=state_slots,
             CACHE_BLOCK_SIZE=cache_block_size,
             BLOCK=_FLAT_BLOCK,
+            # Single-buffered, no unit-flag scheduling: these short index
+            # kernels are launch-bound and do not benefit from either.
             multibuffer=False,
             unit_flag=False,
         )
@@ -206,6 +210,8 @@ def compute_aligned_state_indices(
             BLOCK_ROWS=block_rows,
             WINDOW=window,
             TILES_PER_PROGRAM=tiles_per_program,
+            # Single-buffered, no unit-flag scheduling: these short index
+            # kernels are launch-bound and do not benefit from either.
             multibuffer=False,
             unit_flag=False,
         )
