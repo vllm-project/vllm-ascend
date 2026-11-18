@@ -858,6 +858,49 @@ def test_vision_router_uses_fused_hash_kernel_on_a2_a3(monkeypatch, device_type)
     assert kwargs["image_sentinel_count"] == DEEPSEEK_V4_IMAGE_SENTINEL_COUNT
 
 
+@pytest.mark.parametrize("uses_vision", [False, True])
+def test_prepared_routing_passes_only_aligned_masks_to_the_hash_kernel(monkeypatch, uses_vision):
+    input_ids = torch.tensor([11, 129257], dtype=torch.int64)
+    image_mask = torch.tensor([False, True])
+    router_logits = torch.zeros(3, 4)
+
+    def gather(tensor):
+        assert tensor.dtype in (torch.int32, torch.int64)
+        return torch.nn.functional.pad(tensor, (0, 1))
+
+    monkeypatch.setattr(
+        fused_topk_router_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(
+            moe_comm_type=MoECommType.ALLGATHER,
+            moe_comm_method=SimpleNamespace(prepare_finalize=SimpleNamespace(all_gather_input_ids=gather)),
+        ),
+    )
+    monkeypatch.setattr(
+        fused_topk_router_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3)
+    )
+    hash_op = MagicMock(return_value=(torch.zeros(3, 2), torch.zeros(3, 2, dtype=torch.int32), None))
+    monkeypatch.setattr(fused_topk_router_module.torch.ops._C_ascend, "moe_gating_top_k_hash", hash_op, raising=False)
+    router = AscendFusedTopKRouter(
+        top_k=2,
+        global_num_experts=4,
+        num_expert_group=1,
+        topk_group=1,
+        scoring_func="sqrtsoftplus",
+        bias_vl=torch.zeros(4) if uses_vision else None,
+    )
+
+    router._compute_routing(router_logits, router_logits, None, input_ids=input_ids, image_mask=image_mask)
+
+    kwargs = hash_op.call_args.kwargs
+    if uses_vision:
+        torch.testing.assert_close(kwargs["input_ids"], torch.tensor([11, 129257, 0]))
+        torch.testing.assert_close(kwargs["image_mask"], torch.tensor([False, True, False]))
+    else:
+        assert kwargs["input_ids"] is None
+        assert kwargs["image_mask"] is None
+
+
 def test_hash_router_chunks_unaligned_input_ids_for_sequence_parallel(monkeypatch):
     input_ids = torch.tensor([11, 22, 33, 44], dtype=torch.int32)
     hidden_states = torch.randn(2, 4)

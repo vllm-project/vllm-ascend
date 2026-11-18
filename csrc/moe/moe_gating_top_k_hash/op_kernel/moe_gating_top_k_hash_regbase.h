@@ -106,7 +106,7 @@ namespace MoeGatingTopKHashRegbaseNS
         GlobalTensor<float> outGm_;
         GlobalTensor<U1> inputIdsGm_;
         GlobalTensor<bool> imageMaskGm_;
-        bool hasPreparedRouting_ = false;
+        bool hasImageMask_ = false;
         GlobalTensor<U2> tid2eidGm_;
 
         LocalTensor<uint32_t> indexTensor;
@@ -569,7 +569,7 @@ namespace MoeGatingTopKHashRegbaseNS
     __aicore__ inline void MoeGatingTopKHashRegbase<T, U1, U2>::ComputeX(int64_t row)
     {
         visionRow_ = false;
-        if (hasPreparedRouting_) {
+        if (hasImageMask_) {
             visionRow_ = hasBiasVl_ && imageMaskGm_.GetValue(row);
         } else if (hasBiasVl_) {
             int64_t tokenId = static_cast<int64_t>(inputIdsGm_.GetValue(row));
@@ -805,9 +805,7 @@ namespace MoeGatingTopKHashRegbaseNS
         LocalTensor<int32_t> hashExpertIdInt32 = hashExpertId.template ReinterpretCast<int32_t>();
 
         U1 key = inputIdsGm_.GetValue(row);
-        if (!hasPreparedRouting_) {
-            key = key == static_cast<U1>(-1) ? static_cast<U1>(0) : key;
-        }
+        key = key == static_cast<U1>(-1) ? static_cast<U1>(0) : key;
         SetWaitFlag<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
         DataCopyExtParams dataCopyParams{1, static_cast<uint32_t>(k_ * sizeof(U2)), 0, 0, 0};
         DataCopyPadExtParams dataCopyPadParams{false, 0, 0, static_cast<U2>(0)};
@@ -1540,8 +1538,8 @@ namespace MoeGatingTopKHashRegbaseNS
         expertIdxGm_.SetGlobalBuffer((__gm__ int32_t *)expertIdx + tilingData_->perCoreRowCount * k_ * blockIdx_, k_);
         outGm_.SetGlobalBuffer((__gm__ float *)out + tilingData_->perCoreRowCount * expertCount_ * blockIdx_, expertCount_);
 
-        hasPreparedRouting_ = imageMask != nullptr;
-        if (hasPreparedRouting_) {
+        hasImageMask_ = imageMask != nullptr;
+        if (hasImageMask_) {
             imageMaskGm_.SetGlobalBuffer((__gm__ bool *)imageMask);
         }
         inputIdsGm_.SetGlobalBuffer((__gm__ U1 *)inputIds);

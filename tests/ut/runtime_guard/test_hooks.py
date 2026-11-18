@@ -85,9 +85,9 @@ def test_step_runs_sync_inside_inference_mode():
     # Inner placement: the wave sync executes inside the inference-mode context.
     assert runner.seen_inference_mode is True
     assert getattr(runner, _PENDING_SO_ATTR) is so
-    guard.sync_for_step.assert_called_once_with(scheduler_output=so, has_scheduled_tokens=True)
+    guard.begin_wave.assert_called_once_with(scheduler_output=so, has_scheduled_tokens=True)
     # No-sample step (execute_model_state stays None) flushes end-of-wave.
-    guard.end_of_wave_sync.assert_called_once_with(has_scheduled_tokens=False)
+    guard.end_of_wave.assert_called_once_with(has_scheduled_tokens=False)
 
 
 def test_step_idle_scheduler_never_arms():
@@ -96,7 +96,7 @@ def test_step_idle_scheduler_never_arms():
     so = _scheduler_output(total=0)
 
     runner.execute_model(so)
-    guard.sync_for_step.assert_called_once_with(scheduler_output=so, has_scheduled_tokens=False)
+    guard.begin_wave.assert_called_once_with(scheduler_output=so, has_scheduled_tokens=False)
 
 
 def test_step_skips_flush_when_sample_phase_will_run():
@@ -105,7 +105,7 @@ def test_step_skips_flush_when_sample_phase_will_run():
     runner.execute_model_state = object()  # sample_tokens will pop it
 
     runner.execute_model(_scheduler_output())
-    guard.end_of_wave_sync.assert_not_called()
+    guard.end_of_wave.assert_not_called()
 
 
 def test_step_flushes_dummy_wave_even_with_state():
@@ -114,7 +114,7 @@ def test_step_flushes_dummy_wave_even_with_state():
     runner.execute_model_state = object()  # dummy waves never reach sample_tokens
 
     runner.execute_model(_scheduler_output(), dummy_run=True)
-    guard.end_of_wave_sync.assert_called_once_with(has_scheduled_tokens=False)
+    guard.end_of_wave.assert_called_once_with(has_scheduled_tokens=False)
 
 
 def test_step_reads_positional_dummy_run():
@@ -124,7 +124,7 @@ def test_step_reads_positional_dummy_run():
 
     # MRV2 signature: (scheduler_output, intermediate_tensors, dummy_run, ...)
     runner.execute_model(_scheduler_output(), None, True)
-    guard.end_of_wave_sync.assert_called_once_with(has_scheduled_tokens=False)
+    guard.end_of_wave.assert_called_once_with(has_scheduled_tokens=False)
 
 
 def test_step_flushes_on_body_exception():
@@ -133,7 +133,7 @@ def test_step_flushes_on_body_exception():
 
     with pytest.raises(RuntimeError):
         runner.execute_model(_scheduler_output())
-    guard.end_of_wave_sync.assert_called_once_with(has_scheduled_tokens=False)
+    guard.end_of_wave.assert_called_once_with(has_scheduled_tokens=False)
 
 
 def test_step_guardless_keeps_bare_path():
@@ -175,13 +175,13 @@ def test_idle_step_syncs_without_arming():
     assert worker.execute_dummy_batch() == "done"
     assert worker.body_ran
     # Dummy waves never burn manual_dump and carry no scheduler_output.
-    guard.sync_for_step.assert_called_once_with(has_scheduled_tokens=False)
+    guard.begin_wave.assert_called_once_with(has_scheduled_tokens=False)
 
 
 def test_idle_step_propagates_sync_failure():
     """Idle sync is a lockstep gate — do not soft-fail (matches busy path)."""
     guard = _active_guard()
-    guard.sync_for_step.side_effect = RuntimeError("boom")
+    guard.begin_wave.side_effect = RuntimeError("boom")
     worker = _IdleWorker(SimpleNamespace(runtime_guard=guard))
 
     with pytest.raises(RuntimeError, match="boom"):
@@ -204,7 +204,7 @@ def test_worker_dummy_batch_uses_idle_decorator():
     assert len(fns) == 1
     assert _decorator_names(fns[0]) == ["runtime_guard_idle_step"]
     # The lockstep sync itself lives in the hook, not in the worker body.
-    assert "rg.sync_for_step" not in src
+    assert "rg.begin_wave" not in src
 
 
 class _SampleRunner:
@@ -243,8 +243,8 @@ def test_step_fully_off_skips_sync_shells():
 
     assert runner.execute_model(_scheduler_output()) == "output"
     assert runner.body_ran
-    guard.sync_for_step.assert_not_called()
-    guard.end_of_wave_sync.assert_not_called()
+    guard.begin_wave.assert_not_called()
+    guard.end_of_wave.assert_not_called()
 
 
 def test_idle_step_fully_off_skips_sync():
@@ -253,7 +253,7 @@ def test_idle_step_fully_off_skips_sync():
     worker = _IdleWorker(SimpleNamespace(runtime_guard=guard))
 
     assert worker.execute_dummy_batch() == "done"
-    guard.sync_for_step.assert_not_called()
+    guard.begin_wave.assert_not_called()
 
 
 def test_sample_tokens_orchestrates_guard_around_body():

@@ -65,7 +65,7 @@ class _StateBackend:
 
 def _make_config():
     return SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=64),
+        model_config=SimpleNamespace(max_model_len=64, hf_config=SimpleNamespace()),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,

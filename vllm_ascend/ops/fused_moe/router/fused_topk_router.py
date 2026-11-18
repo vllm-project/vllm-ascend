@@ -167,7 +167,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                     prepare_finalize = _EXTRA_CTX.moe_comm_method.prepare_finalize
                     input_ids = prepare_finalize.all_gather_input_ids(input_ids)
                     if image_mask is not None:
-                        image_mask = prepare_finalize.all_gather_input_ids(image_mask)
+                        image_mask = prepare_finalize.all_gather_input_ids(image_mask.to(torch.int32)).to(torch.bool)
                 else:
                     input_ids = _EXTRA_CTX.moe_comm_method.pad_and_split_input_ids(input_ids)
                     if image_mask is not None:
@@ -185,6 +185,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             else:
                 input_ids = None
                 tid2eid_ones = None
+                image_mask = None
             fused_vision_hash = self.bias_vl is not None and get_current_hardware_profile().supports(
                 HardwareCapability.MOE_GATING_TOP_K_HASH_VISION
             )
@@ -227,7 +228,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                 bias_vl=bias_vl,
                 image_sentinel_lo=self.image_sentinel_lo,
                 image_sentinel_count=DEEPSEEK_V4_IMAGE_SENTINEL_COUNT,
-                image_mask=image_mask,
+                image_mask=image_mask.contiguous() if image_mask is not None else None,
             )
             return topk_weights.to(torch.float32), topk_ids.to(torch.int32 if indices_type is None else indices_type)
         norm_type = 0 if self.scoring_func == "softmax" else 1

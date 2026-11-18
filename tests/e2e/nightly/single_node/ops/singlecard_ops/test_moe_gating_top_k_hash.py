@@ -29,7 +29,8 @@ def _reference(
     if tid2eid is None:
         expert_ids = dynamic_ids
     else:
-        text_ids = tid2eid[input_ids.clamp_max(tid2eid.shape[0] - 1)].long()
+        hash_keys = torch.where(input_ids == -1, 0, input_ids)
+        text_ids = tid2eid[hash_keys.clamp_max(tid2eid.shape[0] - 1)].long()
         expert_ids = torch.where(image_mask[:, None], dynamic_ids, text_ids)
     weights = scores.gather(1, expert_ids)
     weights = weights / weights.sum(dim=-1, keepdim=True)
@@ -52,7 +53,7 @@ def test_v41_vision_bias_and_image_sentinel(
     text_bias = torch.randn(experts, dtype=dtype) * 0.2
     bias_vl = torch.randn(experts, dtype=dtype) * 0.2
     input_ids = torch.tensor(
-        [11, IMAGE_SENTINEL_LO, 22, IMAGE_SENTINEL_LO + 2, 33, IMAGE_SENTINEL_LO + 4, 44, 55],
+        [11, IMAGE_SENTINEL_LO, 22, IMAGE_SENTINEL_LO + 2, 33, IMAGE_SENTINEL_LO + 4, 44, -1],
         dtype=torch.int64,
     )
     tid2eid = None
