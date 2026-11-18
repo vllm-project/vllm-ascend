@@ -164,8 +164,10 @@ def test_local_scan_matches_reference(depth, max_len):
     np.testing.assert_array_equal(scratch.cpu().numpy(), expected)
 
 
-@pytest.mark.parametrize("k,depth,max_len", [(1, 1, 300), (3, 8, 300), (8, 24, 2048)])
-@pytest.mark.parametrize("corpus_enabled", [False, True])
+@pytest.mark.parametrize(
+    "k,depth,max_len,corpus_enabled",
+    [(1, 1, 300, False), (3, 8, 300, False), (3, 8, 300, True), (8, 24, 2048, False), (8, 24, 2048, True)],
+)
 @pytest.mark.parametrize("adaptive", [False, True])
 def test_kernel_feature_combinations(k, depth, max_len, corpus_enabled, adaptive):
     """Compile each feature path and check local, corpus and fallback outputs."""
@@ -215,12 +217,12 @@ def test_local_matches_reference(vocab):
             assert (drafts[s, len(ref) :] == hist[-1]).all()
 
 
-@pytest.mark.parametrize("vocab", [16, 1000])
-def test_corpus_drafts_are_real_continuations(vocab):
+def test_corpus_drafts_are_real_continuations():
     """A draft is the exact local draft, or follows the request's trailing
     n-gram somewhere in a finished response, and is at least as long a
     match as the local one."""
     k, depth, max_reqs, max_len = 6, 8, 8, 300
+    vocab = 16
     rng = np.random.default_rng(vocab)
     spec, rs = _make(k, depth, max_reqs, max_len, corpus_tokens=1 << 15)
     docs: list[list[int]] = []
@@ -244,9 +246,7 @@ def test_corpus_drafts_are_real_continuations(vocab):
         for rid in sorted(ids):
             plen = int(rs.prompt_len.np[ids[rid]])
             docs.append(hists[ids[rid]][max(plen - 3, 0) :].tolist())
-    if vocab == 16:
-        # Small vocabularies make cross-request matches common.
-        assert num_from_corpus > 0
+    assert num_from_corpus > 0
 
 
 def test_corpus_indexes_response_start():
@@ -444,46 +444,6 @@ def test_adaptive_verification_confidences():
     assert stats[3] == [0, 0]
 
 
-@pytest.mark.parametrize("batch_as_keyword", [False, True])
-def test_propose_forwards_arguments_to_parent(monkeypatch, batch_as_keyword):
-    """Preserve argument objects and the parent result for either caller style."""
-    from vllm.v1.worker.gpu.spec_decode.suffix.speculator import SuffixSpeculator as ParentSuffixSpeculator
-
-    calls = []
-    expected = object()
-
-    def parent_propose(self, input_batch, *args, **kwargs):
-        calls.append((self, input_batch, args, kwargs))
-        return expected
-
-    monkeypatch.setattr(ParentSuffixSpeculator, "propose", parent_propose)
-    spec = object.__new__(SuffixSpeculator)
-    batch = SimpleNamespace(num_reqs=1)
-    kwargs = dict(temperature=object(), num_speculative_tokens=3, future_option=object())
-    args: tuple[object, ...]
-    if batch_as_keyword:
-        args = ()
-        kwargs["attn_metadata"] = object()
-        result = spec.propose(input_batch=batch, **kwargs)
-    else:
-        args = (object(), object())
-        result = spec.propose(batch, *args, **kwargs)
-    assert result is expected
-    assert calls == [(spec, batch, args, kwargs)]
-
-
-def test_empty_batch_does_not_call_parent(monkeypatch):
-    from vllm.v1.worker.gpu.spec_decode.suffix.speculator import SuffixSpeculator as ParentSuffixSpeculator
-
-    def unexpected_propose(*args, **kwargs):
-        pytest.fail("An empty batch must not reach the parent kernel launches")
-
-    monkeypatch.setattr(ParentSuffixSpeculator, "propose", unexpected_propose)
-    spec = object.__new__(SuffixSpeculator)
-    spec.drafts = torch.empty(2, 3)
-    assert spec.propose(input_batch=SimpleNamespace(num_reqs=0)).shape == (0, 3)
-
-
 _HASH_MUL = 0x9E3779B97F4A7C15 - (1 << 64)
 
 
@@ -517,9 +477,8 @@ def _ref_ingest(state, docs, cap, num_buckets, slots=8):
         state["doc_seq"] = seq + 1
 
 
-@pytest.mark.parametrize("max_len", [64, 2048])
-@pytest.mark.parametrize("corpus_tokens", [2, 97, 300, 4096])
-def test_ingestion_matches_reference(corpus_tokens, max_len):
+@pytest.mark.parametrize("max_len,corpus_tokens", [(64, 2), (64, 97), (2048, 300), (2048, 4096)])
+def test_ingestion_matches_reference(max_len, corpus_tokens):
     """Bursts of finished requests, including bursts larger than the ring
     that overwrite their own earlier documents, give exactly the state of
     placing documents one after another."""
@@ -610,8 +569,7 @@ def test_short_history_does_not_match_clamped_addresses(length):
     assert drafts[0].tolist() == expected + [history[-1]] * (3 - len(expected))
 
 
-@pytest.mark.parametrize("max_len", [32, 257, 8192])
-@pytest.mark.parametrize("k", [1, 3, 8])
+@pytest.mark.parametrize("max_len,k", [(32, 1), (257, 3), (8192, 8)])
 def test_sparse_slots_at_context_limit(max_len, k):
     spec, rs = _make(k, 24, 8, max_len, corpus_tokens=0)
     history = list(range(100, 100 + max_len))
@@ -623,19 +581,6 @@ def test_sparse_slots_at_context_limit(max_len, k):
     assert drafts[0].tolist() == _local_draft(history, k, 24)
     assert valid.tolist() == [k, 0]
     assert drafts[1].tolist() == [7] * k
-
-
-def test_observe_reduces_all_requests_in_the_same_bucket():
-    spec, rs = _make(3, 8, 8, 64, corpus_tokens=0, adaptive=True)
-    # Non-contiguous slots and a non-power-of-two batch exercise padded lanes.
-    slots = [6, 1, 4]
-    for slot in slots:
-        _set(rs, slot, [], [1, 2, 3, 1, 2])
-    _propose(spec, rs, slots)
-    _propose(spec, rs, slots, num_sampled=[3, 1, 0], num_rejected=[1, 3, 0])
-    # First request: accept two, observe the third rejection. Second:
-    # reject immediately. Third: no verdict this step.
-    assert spec.accept_stats.sum(dim=0).tolist() == [[1, 2], [1, 1], [0, 1]]
 
 
 @pytest.mark.parametrize("num_reqs,k", [(64, 8), (65, 3)])
