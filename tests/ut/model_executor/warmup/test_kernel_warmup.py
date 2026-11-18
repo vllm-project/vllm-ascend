@@ -16,7 +16,7 @@ from tests.ut.model_executor.warmup.helpers import (
     make_registry,
 )
 from vllm_ascend.ops.triton import rms_norm
-from vllm_ascend.ops.triton.dcp import dcp_a2a, dcp_a2a_batched, dcp_warmup
+from vllm_ascend.ops.triton.dcp import dcp_a2a, dcp_warmup
 from vllm_ascend.ops.triton.dcp.dcp_jit import DcpJitKernel
 
 # The package __init__ re-exports the function of the same name, so resolve
@@ -211,27 +211,31 @@ def _dcp_warmup_keys(registry):
     }
 
 
-@pytest.mark.parametrize("prefer_row_weights", [False, True])
-def test_row_weighted_combine_is_registered_by_production_warmup(prefer_row_weights):
-    with patch.object(
-        dcp_a2a,
-        "get_current_hardware_profile",
-        return_value=SimpleNamespace(prefer_row_weighted_dcp_combine=prefer_row_weights),
-    ):
-        registry = _register_dcp_warmup(
-            dtype=torch.bfloat16,
-            local_heads=12,
-            head_dim=512,
-            scatter_size=8,
-            pcp_size=1,
-            max_tokens=33,
-            from_stats=False,
-            mla=True,
-        )
-    kernels = {owner.kernel for owner in registry._registrations}
-    assert (dcp_a2a_batched._fused_dcp_lse_combine_row_weights in kernels) == prefer_row_weights
-    assert (dcp_a2a_batched._fused_dcp_lse_combine_batched_kernel in kernels) == (not prefer_row_weights)
-    assert (dcp_a2a._fused_dcp_lse_combine_kernel in kernels) == (not prefer_row_weights)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("tokens", [1, 33])
+def test_runtime_combine_matches_registered_warmup(dtype, tokens):
+    heads, dim, ranks = 12, 512, 8
+    registry = _register_dcp_warmup(
+        dtype=dtype,
+        local_heads=heads,
+        head_dim=dim,
+        scatter_size=ranks,
+        pcp_size=1,
+        max_tokens=33,
+        from_stats=False,
+        mla=True,
+    )
+    recv = torch.empty((ranks, heads, tokens, dim + 4), dtype=dtype, device="meta")
+    output = torch.empty((tokens, heads, dim), dtype=dtype, device="meta")
+    launch = MagicMock()
+    dcp_a2a._launch_fused_dcp_lse_combine(recv, output, dim, 1, False, None, None, 24, launch)
+    launch.assert_called_once()
+    expected = (
+        dcp_a2a._fused_dcp_lse_combine_row_weights if dtype == torch.bfloat16 else dcp_a2a._fused_dcp_lse_combine_kernel
+    )
+    assert launch.call_args.args[0] is expected
+    combine_kernels = {dcp_a2a._fused_dcp_lse_combine_kernel, dcp_a2a._fused_dcp_lse_combine_row_weights}
+    assert {owner.kernel for owner in registry._registrations} & combine_kernels == {expected}
 
 
 @pytest.mark.parametrize(
@@ -282,8 +286,7 @@ def test_finite_warmup_covers_every_token_count(
     assert dict(exhaustive) == registered
 
 
-@pytest.mark.parametrize("prefer_row_weights", [False, True])
-def test_registration_is_scoped_deduplicated_and_allocates_nothing(prefer_row_weights):
+def test_registration_is_scoped_deduplicated_and_allocates_nothing():
     kwargs = dict(
         dtype=torch.bfloat16,
         local_heads=8,
@@ -296,11 +299,6 @@ def test_registration_is_scoped_deduplicated_and_allocates_nothing(prefer_row_we
     )
     registry = make_registry()
     with (
-        patch.object(
-            dcp_a2a,
-            "get_current_hardware_profile",
-            return_value=SimpleNamespace(prefer_row_weighted_dcp_combine=prefer_row_weights),
-        ),
         patch.object(dcp_warmup, "init_device_properties_triton"),
         patch.object(dcp_warmup, "get_vectorcore_num", return_value=24),
         patch.object(torch, "empty", side_effect=AssertionError("warmup must not allocate payloads")),
@@ -311,15 +309,7 @@ def test_registration_is_scoped_deduplicated_and_allocates_nothing(prefer_row_we
         with registry.activate():
             dcp_warmup.register_dcp_warmup(**kwargs)
             dcp_warmup.register_dcp_warmup(**kwargs)
-    # General row weighting replaces both scalar and batched combine variants.
-    expected = {owner.kernel for owner in dcp_warmup._DCP_KERNELS}
-    if prefer_row_weights:
-        expected -= {
-            dcp_a2a._fused_dcp_lse_combine_kernel,
-            dcp_a2a._fused_dcp_lse_combine_batched_kernel,
-        }
-    else:
-        expected.remove(dcp_a2a._fused_dcp_lse_combine_row_weights)
+    expected = {owner.kernel for owner in dcp_warmup._DCP_KERNELS} - {dcp_a2a._fused_dcp_lse_combine_kernel}
     assert {owner.kernel for owner in registry._registrations} == expected
     assert all(len(registrations) == 1 for registrations in registry._registrations.values())
     for original, keys in _dcp_warmup_keys(registry).items():

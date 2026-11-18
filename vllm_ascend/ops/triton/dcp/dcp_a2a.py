@@ -8,11 +8,8 @@ from vllm.distributed.parallel_state import GroupCoordinator, _groups
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.device.hardware_profile import get_current_hardware_profile
 from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
-    MAX_UNROLLED_COMBINE_ELEMENTS,
     _encode_lse_fields,
-    _fused_dcp_lse_combine_batched_kernel,
     _fused_dcp_lse_combine_row_weights,
     _pack_dcp_output_lse_batched_kernel,
 )
@@ -452,39 +449,16 @@ def _launch_fused_dcp_lse_combine(
     lse_pack_dim = _lse_pack_dim(recv.dtype)
     total_rows = num_tokens * num_heads
     grid_size = total_rows if total_rows < vector_cores else vector_cores
-    # Both vector kernels use the four-field BF16 head-scatter payload.
-    # Bound the live feature tile and retain the scalar path for other layouts.
     vector_compatible = (
         recv.dtype == torch.bfloat16
         and scatter_dim == 1
         and head_dim <= 512
-        # Keep the validated unit-feature-stride domain for both vector kernels.
         and (local_output is None or local_output.stride(-1) == 1)
         and not return_lse
     )
-    row_weights = vector_compatible and get_current_hardware_profile().prefer_row_weighted_dcp_combine
-    # The row-weighted kernel also handles small worlds, narrow rows and
-    # head-major local tensors. Only the original batched tile needs enough rows.
-    if row_weights or (vector_compatible and total_rows >= 4 * vector_cores):
-        block_d = triton.next_power_of_2(head_dim)
-        if row_weights:
-            kernel = _fused_dcp_lse_combine_row_weights
-            grid_size = min(vector_cores, total_rows)
-            kernel_options = {}
-        else:
-            kernel = _fused_dcp_lse_combine_batched_kernel
-            block_rows = 8
-            # Bound the batched path's live output tiles when unrolling ranks.
-            rank_unroll = (
-                dcp_size
-                if total_rows >= 2 * block_rows * vector_cores
-                and dcp_size * block_rows * block_d <= MAX_UNROLLED_COMBINE_ELEMENTS
-                else 1
-            )
-            grid_size = min(vector_cores, triton.cdiv(total_rows, block_rows))
-            kernel_options = {"BLOCK_ROWS": block_rows, "RANK_UNROLL": rank_unroll}
+    if vector_compatible:
         launch(
-            kernel,
+            _fused_dcp_lse_combine_row_weights,
             (grid_size,),
             recv,
             output,
@@ -499,8 +473,7 @@ def _launch_fused_dcp_lse_combine(
             total_rows,
             DCP_SIZE=dcp_size,
             HAS_LOCAL=local_output is not None,
-            BLOCK_D=block_d,
-            **kernel_options,
+            BLOCK_D=triton.next_power_of_2(head_dim),
             multibuffer=False,
         )
         return

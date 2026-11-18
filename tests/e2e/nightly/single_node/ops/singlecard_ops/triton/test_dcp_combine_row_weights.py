@@ -104,6 +104,4 @@ def test_public_combine_row_weights(shape, edge, monkeypatch):
     assert torch.isfinite(actual).all()
     assert (error <= 2e-5 + 0.004 * expected.abs()).double().mean() >= 0.99
     assert error.max() <= 0.02
-    profile = dcp_a2a.get_current_hardware_profile()
-    selected = profile.prefer_row_weighted_dcp_combine
-    assert ("_fused_dcp_lse_combine_row_weights" in launches) is selected
+    assert launches == ["_fused_dcp_lse_combine_row_weights"]

@@ -16,7 +16,6 @@ from vllm_ascend.ops.triton.dcp.dcp_a2a import (
     _use_fast_exchange,
 )
 from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
-    _fused_dcp_lse_combine_batched_kernel,
     _fused_dcp_lse_combine_row_weights,
     _pack_dcp_output_lse_batched_kernel,
 )
@@ -38,7 +37,6 @@ _DCP_KERNELS = (
     DcpJitKernel(_pack_dcp_output_lse_kernel),
     DcpJitKernel(_pack_dcp_output_lse_batched_kernel),
     DcpJitKernel(_fused_dcp_lse_combine_kernel),
-    DcpJitKernel(_fused_dcp_lse_combine_batched_kernel),
     DcpJitKernel(_fused_dcp_lse_combine_row_weights),
     DcpJitKernel(_pack_t1_peer),
     DcpJitKernel(_pack_token_peer, ("tokens",)),
@@ -69,8 +67,6 @@ def _token_representatives(max_tokens, heads, local_heads, head_dim, vector_core
         2,
         128,
         triton.cdiv(8 * vector_cores, heads),
-        triton.cdiv(4 * vector_cores, local_heads),
-        triton.cdiv(16 * vector_cores, local_heads),
         _FULL_PACK_VECTOR_ELEMENTS // local_heads + 1,
         max_tokens + 1,
     }
