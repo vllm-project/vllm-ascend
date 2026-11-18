@@ -228,6 +228,10 @@ def _run_pool_test(
         hit=_hit,
         prompt_ids=prompt_ids,
         perf_prompt_tokens=POOL_PERF_PROMPT_TOKENS,
+        # Perf was flaky: collect 10 timed samples, drop the highest 2 and the
+        # lowest 2, and gate on the middle 6 (same policy for both A and B).
+        perf_sample_count=10,
+        perf_trim_count=2,
         # Accuracy-only CI verdict: cross-leg token identity and perf stay
         # record-only; run_pool_ab still dumps the A/B token comparison.
         token_identity=False,

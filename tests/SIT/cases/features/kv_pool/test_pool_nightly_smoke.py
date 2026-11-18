@@ -41,13 +41,18 @@ from tests.e2e.pull_request.kv_pool_watch import (
 )
 from tests.e2e.pull_request.utils import PROMPTS_SHORT
 
+os.environ["ASCEND_ENABLE_USE_FABRIC_MEM"] = "1"
+os.environ["ASCEND_AUTO_CONNECT"] = "1"
+os.environ["ASCEND_GLOBAL_RESOURCE_CONFIG"] = '{"fabric_memory.max_capacity": "2"}'
+os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segmentes:True"
+
 DSV4_DSPARK_MODEL = os.environ.get(
     "DEEPSEEK_V41_DSPARK_MODEL_PATH",
     "Eco-Tech/DeepSeek-V4.1-Flash-w8a8",
 )
 DSV4_MTP_MODEL = os.environ.get(
     "DEEPSEEK_V4_MTP_MODEL_PATH",
-    "gdydems/DeepSeek-V4-Flash-w4a8-mtp",
+    "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp",
 )
 QWEN38_MODEL = os.environ.get("QWEN38_DENSE_MODEL", "Qwen/Qwen3.8-27B")
 
@@ -94,8 +99,7 @@ def _build_mooncake_config() -> MooncakeKVPoolConfig:
         config={
             "metadata_server": "P2PHANDSHAKE",
             "protocol": "ascend",
-            "global_segment_size": "2GB",
-            "local_buffer_size": "5GB",
+            "global_segment_size": "20GB",
         },
         master_port=get_open_port(),
         metrics_port=get_open_port(),
@@ -182,7 +186,7 @@ def _dsv4_mooncake_leg(use_pool: bool, case_name: str):
     parallel="DP,TP,EP",
     deploy="pd_mix",
     hardware="A3",
-    quantization="W4A8",
+    quantization="W8A8",
     graph_mode="full_decode_only",
 )
 @patch.dict(
@@ -304,7 +308,7 @@ def _dsv4_leg(use_pool: bool, case_name: str):
     parallel="TP,EP,PCP",
     deploy="pd_mix",
     hardware="A3",
-    quantization="W4A8",
+    quantization="W8A8",
     graph_mode="full_decode_only",
 )
 @patch.dict(
