@@ -2,6 +2,8 @@ from vllm import ModelRegistry
 
 
 def register_model():
+    ModelRegistry.register_model("Qwen3_5MoeForCausalLM", "vllm_ascend.models.qwen3_5:AscendQwen3_5MoeForCausalLM")
+    ModelRegistry.register_model("Qwen3_5MoeMTP", "vllm_ascend.models.qwen3_5:AscendQwen3_5MoeMTP")
     ModelRegistry.register_model(
         "Qwen4ExpForCausalLM",
         "vllm_ascend.models.qwen4_exp:AscendQwen4ExpForCausalLM",
