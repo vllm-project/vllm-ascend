@@ -298,6 +298,7 @@ nav:
         - user_guide/configuration/env_vars.md
         - user_guide/configuration/additional_config.md
         - user_guide/configuration/runtime_config.md
+        - user_guide/ms_service_metric.md
         - user_guide/configuration/encoder_cache_manager.md
     - Feature Guide:
         - user_guide/feature_guide/index.md
@@ -314,6 +315,7 @@ nav:
         - user_guide/feature_guide/expert_parallelism_load_balancer.md
         - user_guide/feature_guide/netloader.md
         - user_guide/feature_guide/rfork.md
+        - user_guide/feature_guide/shared_engram.md
         - user_guide/feature_guide/epd_disaggregation.md
         - user_guide/feature_guide/kv_cache_pool_ascend_store.md
         - user_guide/feature_guide/mooncake_layerwise_adaptation_and_optimization.md
@@ -335,6 +337,7 @@ nav:
         - user_guide/feature_guide/flash_attention.md
         - user_guide/feature_guide/short_request_first.md
         - user_guide/feature_guide/batch_job_aware_scheduler.md
+        - user_guide/feature_guide/dyntra_lb.md
         - user_guide/feature_guide/rl.md
     - user_guide/release_notes.md
   - Developer Guide:

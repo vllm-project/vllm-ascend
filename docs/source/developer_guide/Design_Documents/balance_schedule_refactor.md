@@ -155,7 +155,7 @@ drafting assumptions did not hold; both are corrected here:
 - **Upstream `Scheduler` has no `new_step_starts()` lifecycle hook** (that is a
   `kv_cache_manager` method) and no "per-step scheduling start" overridable
   seam. So gather cannot live inside `schedule()` (see the deadlock lesson in
-  [Step 1 — Hook gather onto `_has_global_unfinished_reqs` and delete the EngineCore copies](#step-1--hook-gather-onto-_has_global_unfinished_reqs-and-delete-the-enginecore-copies));
+  [Step 1 — Hook gather onto `_has_global_unfinished_reqs` and delete the EngineCore copies](#step-1-hook-gather-onto-_has_global_unfinished_reqs-and-delete-the-enginecore-copies));
   it lives on the engine core's `_has_global_unfinished_reqs` instead.
 - **The scheduler cannot lazily fetch the DP group:** `dp_group` is produced in
   `_init_data_parallel` (earlier than scheduler creation) and there is no global

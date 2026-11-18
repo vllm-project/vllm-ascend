@@ -11,7 +11,7 @@ In the measured DeepSeek-R1-W8A8 deployment below, the four knobs together saved
 All knobs shard weights over a process group built along the DP axis, and every rank of that group joins the exchange on every engine step.
 
 - **embedding / LM head (fixed-capacity exchanges)**: the exchange always runs at a fixed, deployment-wide capacity regardless of the real per-step token count, and the padding tail is trimmed afterwards. For embedding, the op pads token IDs to `max(potential_max_tokens, max_num_batched_tokens)` before an `all_gather`, looks up its vocabulary shard, and `reduce_scatter`s the embeddings back to the original owners — prefill-sized steps included. For the LM head, the runner pads the sampled hidden-state rows to `max_num_reqs * decode_query_len` before `all_gather → vocab-sharded GEMM → all_to_all`, and idle DP ranks join through a dummy `compute_logits` at the same capacity. Because the collective shapes never depend on the step, these knobs work in eager and graph mode, in both prefill and decode.
-- **o_proj / MLP (per-step exchanges that require decode-shaped steps)**: the exchange is sized by the actual step. MLP runs plain `all_gather` (gate_up) / `reduce_scatter` (down) whose shapes follow the real token count, so every rank in the group must forward the same number of tokens on every step. o_proj pads to a static capacity — `potential_max_tokens`, the deployment-wide step bound (the largest cudagraph capture size, and at least the largest decode-shaped step) — and fails explicitly beyond it. These knobs are supported only in graph-dispatched P/D decode deployments, where steps stay decode-shaped and aligned across the DP group — see the [preconditions](#preconditions-for-o_proj--mlp-tp) and the runtime guard against eagerly dispatched steps.
+- **o_proj / MLP (per-step exchanges that require decode-shaped steps)**: the exchange is sized by the actual step. MLP runs plain `all_gather` (gate_up) / `reduce_scatter` (down) whose shapes follow the real token count, so every rank in the group must forward the same number of tokens on every step. o_proj pads to a static capacity — `potential_max_tokens`, the deployment-wide step bound (the largest cudagraph capture size, and at least the largest decode-shaped step) — and fails explicitly beyond it. These knobs are supported only in graph-dispatched P/D decode deployments, where steps stay decode-shaped and aligned across the DP group — see the [preconditions](#preconditions-for-o_proj-mlp-tp) and the runtime guard against eagerly dispatched steps.
 - **QKV IProj (per-step exchanges with padding)** shards the GLM-5.3-Flash KDA Q/K/V and beta projection weights by head. Each rank pads its hidden states to a shared capacity from the DP token counts before `all_gather`, including idle ranks. After projection, `all_to_all` restores the full set of heads on each request's DP owner and overlaps with the local forget and gate up-projections. Each owner runs the recurrent core and keeps its convolution and recurrent state. Configure output projection TP independently with `oproj_tensor_parallel_size`.
 
 ### Usage Scenarios
@@ -21,7 +21,7 @@ Fine-grained TP is designed for the **decode instance** of PD separation, where 
 | Scenario | Components that can be enabled | Applicable Conditions |
 |----------|-------------------------------|------------------------|
 | MoE serving with embedding / LM head TP — a standalone instance (optionally stacked with standard TP) or a PD decode node | embedding / LM head | MoE model, sizes evenly divide `data_parallel_size` |
-| P/D-disaggregated decode (D) node | o_proj / MLP / embedding / LM head | The o_proj / MLP knobs require the full [preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp) |
+| P/D-disaggregated decode (D) node | o_proj / MLP / embedding / LM head | The o_proj / MLP knobs require the full [preconditions for o_proj / MLP TP](#preconditions-for-o_proj-mlp-tp) |
 | GLM-5.3-Flash P/D-disaggregated decode node | QKV IProj | See [preconditions for QKV IProj TP](#preconditions-for-qkv-iproj-tp) |
 
 #### Component & Execution Mode Support
@@ -246,8 +246,8 @@ All knobs live under `finegrained_tp_config` inside `--additional-config`. The d
 
 | Parameter | Type | Default | Required | Value Range | Description |
 |-----------|------|---------|----------|-------------|-------------|
-| `oproj_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the attention output projection (`o_proj`, or the two-stage `wo_a`/`wo_b` in DSA-style models). Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
-| `mlp_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the MLP (feed-forward) blocks. Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
+| `oproj_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the attention output projection (`o_proj`, or the two-stage `wo_a`/`wo_b` in DSA-style models). Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj-mlp-tp). |
+| `mlp_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the MLP (feed-forward) blocks. Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj-mlp-tp). |
 | `lmhead_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the LM head. |
 | `embedding_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the token embedding table. |
 | `qkv_iproj_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` and the KDA head count | TP size of the QKV input projection. Values > 1 require the [QKV IProj preconditions](#preconditions-for-qkv-iproj-tp). |
@@ -288,6 +288,6 @@ To evaluate the effectiveness of fine-grained TP in large-scale serving, we depl
 
 **Problem Description**: With `oproj_tensor_parallel_size > 1` or `mlp_tensor_parallel_size > 1`, configuration load raises an error about one of the preconditions (graph mode, the PD scenario, the recompute scheduler, `PreemptOffloadConnector`, `tensor_parallel_size`, or PCP).
 
-**Cause Analysis**: One or more of the [preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp) are not met.
+**Cause Analysis**: One or more of the [preconditions for o_proj / MLP TP](#preconditions-for-o_proj-mlp-tp) are not met.
 
 **Solution Steps**: Follow the preconditions checklist; the most commonly missed items are `scheduler_config.recompute_scheduler_enable = true` and the `PreemptOffloadConnector` entry in the `MultiConnector` chain (see Scenario 2 above).
