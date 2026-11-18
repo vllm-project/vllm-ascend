@@ -1894,7 +1894,10 @@ def _reshape_kv_cache_v2(
                     kv_caches[layer_name] = typed_cache.view(kv_cache_shape)
                 continue
 
-            if getattr(group.backend, "get_name", lambda: None)() == "ASCEND_INDEXER_KPOOL_TAIL":
+            if (
+                isinstance(kv_cache_spec, CircularBufferSpec)
+                and getattr(group.backend, "get_name", lambda: None)() == "ASCEND_INDEXER_KPOOL_TAIL"
+            ):
                 kv_caches[layer_name] = view_kpool_tail_cache(
                     layer_name, kv_cache_spec, raw_cache, kv_cache_config.num_blocks
                 )
