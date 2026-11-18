@@ -2086,11 +2086,13 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         # represents one endpoint; unaligned state uses the partial GVA path.
         result: list[Sequence[bool] | None] = list(masks) if masks is not None else [None] * self.num_kv_cache_groups
         for group_id in reused_state_groups:
-            size = self.grouped_block_size[group_id]
-            result[group_id] = [
-                index == cached_tokens // size - 1 and cached_tokens % size == 0 and block_id != 0
-                for index, block_id in enumerate(request.block_ids_by_group[group_id])
-            ]
+            block_ids = request.block_ids_by_group[group_id]
+            mask = [False] * len(block_ids)
+            full_blocks, tail_tokens = divmod(cached_tokens, self.grouped_block_size[group_id])
+            last_full_block = full_blocks - 1
+            if tail_tokens == 0 and 0 <= last_full_block < len(block_ids) and block_ids[last_full_block] != 0:
+                mask[last_full_block] = True
+            result[group_id] = mask
         return tuple(result)
 
     def _drain_deferred_last_save(self) -> None:
