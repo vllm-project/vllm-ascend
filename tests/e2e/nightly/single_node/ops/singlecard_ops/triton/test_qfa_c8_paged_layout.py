@@ -19,7 +19,11 @@ from vllm_ascend.device.hardware import AscendDeviceType
 )
 @pytest.mark.parametrize("query_tokens", [1, 64])
 @pytest.mark.parametrize("ratio", [1, 2])
-def test_qfa_strided_scales_match_contiguous_reference(query_tokens, ratio):
+def test_qfa_strided_scales_match_contiguous_reference(query_tokens, ratio, tmp_path_factory, monkeypatch):
+    # A shared cache can contain a QFA binding with an older CANN signature.
+    # Reuse the binding built from this image across parameter combinations.
+    monkeypatch.setenv("TORCH_EXTENSIONS_DIR", str(tmp_path_factory.getbasetemp() / "qfa_extensions"))
+
     # Load A5-only dependencies after pytest evaluates the device marker.
     from cann_ops_transformer.ops import quant_flash_attn, quant_flash_attn_metadata
     from vllm.v1.kv_cache_interface import FullAttentionSpec
