@@ -18,7 +18,8 @@ import torch_npu  # noqa: F401
 import vllm_ascend.ops  # noqa: F401  # Register ops before importing DeviceOperator through Engram.
 from vllm_ascend.models.deepseek_v41.engram.npu import CHUNK_ROWS, HostUvaBuffer
 from vllm_ascend.models.qwen4_exp.ple_quant import AscendPLEQuantizedEmbeddingMethod
-from vllm_ascend.ops.triton.qwen4_exp.ple_lookup import _lookup, _lookup_quantized, lookup, lookup_quantized
+from vllm_ascend.ops.triton.qwen4_exp.ple_lookup import _lookup, lookup
+from vllm_ascend.ops.triton.qwen4_exp.ple_lookup_quantized import _lookup_quantized, lookup_quantized
 
 
 def graph_latency(run, samples, repeats):
@@ -51,9 +52,9 @@ def main(args):
     torch.manual_seed(0)
     device = torch.device("npu", args.device)
     method = AscendPLEQuantizedEmbeddingMethod(mxfp8=args.format == "mxfp8")
-    buffers = []
+    buffers: list[HostUvaBuffer] = []
     owner = torch.nn.Module()
-    compile_entries = Counter()
+    compile_entries: Counter[str] = Counter()
     original_compilers = [(kernel, kernel._do_compile) for kernel in (_lookup, _lookup_quantized)]
 
     # Count the actual JIT dispatch entry, including persistent-cache lookups.
@@ -101,7 +102,7 @@ def main(args):
                     args.shard_start,
                     args.shard_start + args.rows,
                     CHUNK_ROWS,
-                    mxfp8=method.mxfp8,
+                    is_mxfp8=method.mxfp8,
                 )
 
             def baseline():

@@ -10,7 +10,7 @@ import torch_npu  # noqa: F401
 
 from vllm_ascend.models.deepseek_v41.engram.npu import CHUNK_ROWS, HostUvaBuffer
 from vllm_ascend.models.qwen4_exp.ple_quant import AscendPLEQuantizedEmbeddingMethod
-from vllm_ascend.ops.triton.qwen4_exp.ple_lookup import _lookup_quantized, lookup_quantized
+from vllm_ascend.ops.triton.qwen4_exp.ple_lookup_quantized import _lookup_quantized, lookup_quantized
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
@@ -74,7 +74,7 @@ def test_host_lookup_chunk_boundary_and_graph(width, mxfp8):
         expected = torch.cat((expected, torch.zeros((2, width), dtype=torch.bfloat16)))
 
         def lookup():
-            lookup_quantized(codes.ptrs, scales.ptrs, ids, output, start, start + rows, CHUNK_ROWS, mxfp8=mxfp8)
+            lookup_quantized(codes.ptrs, scales.ptrs, ids, output, start, start + rows, CHUNK_ROWS, is_mxfp8=mxfp8)
 
         lookup()
         torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0, equal_nan=True)
@@ -87,7 +87,7 @@ def test_host_lookup_chunk_boundary_and_graph(width, mxfp8):
         # Graphs retain device pointers into the host buffers.
         del graph
         empty = torch.empty((0, width), dtype=torch.bfloat16, device=device)
-        lookup_quantized(codes.ptrs, scales.ptrs, ids[:0], empty, start, start + rows, CHUNK_ROWS, mxfp8=mxfp8)
+        lookup_quantized(codes.ptrs, scales.ptrs, ids[:0], empty, start, start + rows, CHUNK_ROWS, is_mxfp8=mxfp8)
     finally:
         torch.npu.synchronize()
         if scales is not None:
@@ -120,7 +120,7 @@ def test_host_lookup_dynamic_shapes_without_recompilation(mxfp8, id_dtype, monke
         scales.tensor.fill_(127 if mxfp8 else 1)
         ids = torch.tensor([0], dtype=id_dtype, device=device)
         output = torch.empty((1, width), dtype=torch.bfloat16, device=device)
-        lookup_quantized(codes.ptrs, scales.ptrs, ids, output, 0, rows, CHUNK_ROWS, mxfp8=mxfp8)
+        lookup_quantized(codes.ptrs, scales.ptrs, ids, output, 0, rows, CHUNK_ROWS, is_mxfp8=mxfp8)
         torch.npu.synchronize()
 
         def forbid_compile(*args, **kwargs):
@@ -136,14 +136,14 @@ def test_host_lookup_dynamic_shapes_without_recompilation(mxfp8, id_dtype, monke
             ids = backing[..., 1]
             ids.copy_(host_ids)
             output = torch.empty((*shape, width), dtype=torch.bfloat16, device=device)
-            lookup_quantized(codes.ptrs, scales.ptrs, ids, output, start, start + rows, CHUNK_ROWS, mxfp8=mxfp8)
+            lookup_quantized(codes.ptrs, scales.ptrs, ids, output, start, start + rows, CHUNK_ROWS, is_mxfp8=mxfp8)
             owned = (host_ids >= start) & (host_ids < start + rows)
             expected = values.float()[(host_ids.long() - start).clamp(0, rows - 1)].bfloat16()
             expected = torch.where(owned.unsqueeze(-1), expected, 0)
             torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
         graph = torch.npu.NPUGraph()
         with torch.npu.graph(graph):
-            lookup_quantized(codes.ptrs, scales.ptrs, ids, output, start, start + rows, CHUNK_ROWS, mxfp8=mxfp8)
+            lookup_quantized(codes.ptrs, scales.ptrs, ids, output, start, start + rows, CHUNK_ROWS, is_mxfp8=mxfp8)
         ids.fill_(start)
         graph.replay()
         torch.testing.assert_close(output.cpu(), values[0].float().bfloat16().expand_as(output.cpu()), rtol=0, atol=0)
@@ -180,14 +180,14 @@ def test_host_lookup_rejects_unsupported_inputs(invalid):
     device = torch.device("npu", torch.npu.current_device())
     pointers = torch.zeros(1, dtype=torch.int64, device=device)
     args = dict(
-        ptrs=pointers,
-        scale_ptrs=pointers,
-        ids=torch.zeros(2, dtype=torch.int64, device=device),
+        code_chunk_ptrs=pointers,
+        scale_chunk_ptrs=pointers,
+        embedding_ids=torch.zeros(2, dtype=torch.int64, device=device),
         output=torch.empty((2, 160), dtype=torch.bfloat16, device=device),
-        start=0,
-        end=32,
-        chunk=CHUNK_ROWS,
-        mxfp8=False,
+        shard_start=0,
+        shard_end=32,
+        chunk_rows=CHUNK_ROWS,
+        is_mxfp8=False,
     )
     if invalid == "output_layout":
         args["output"] = torch.empty((2, 320), dtype=torch.bfloat16, device=device)[:, ::2]
@@ -198,22 +198,22 @@ def test_host_lookup_rejects_unsupported_inputs(invalid):
     elif invalid == "width":
         args["output"] = torch.empty((2, 159), dtype=torch.bfloat16, device=device)
     elif invalid == "ids_dtype":
-        args["ids"] = args["ids"].float()
+        args["embedding_ids"] = args["embedding_ids"].float()
     elif invalid == "pointer_dtype":
-        args["scale_ptrs"] = pointers.int()
+        args["scale_chunk_ptrs"] = pointers.int()
     elif invalid == "pointer_size":
-        args["ptrs"] = pointers[:0]
+        args["code_chunk_ptrs"] = pointers[:0]
     elif invalid == "pointer_layout":
-        args["ptrs"] = pointers.reshape(1, 1)
+        args["code_chunk_ptrs"] = pointers.reshape(1, 1)
     elif invalid == "device":
-        args["ids"] = args["ids"].cpu()
+        args["embedding_ids"] = args["embedding_ids"].cpu()
     elif invalid == "bounds":
-        args["end"] = 0
+        args["shard_end"] = 0
     elif invalid == "chunk":
-        args["chunk"] = 0
+        args["chunk_rows"] = 0
     elif invalid == "scalar_type":
-        args["start"] = 0.0
+        args["shard_start"] = 0.0
     else:
-        args["mxfp8"] = 1
+        args["is_mxfp8"] = 1
     with pytest.raises(ValueError):
         lookup_quantized(**args)

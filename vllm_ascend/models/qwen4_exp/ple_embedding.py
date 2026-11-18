@@ -17,7 +17,7 @@ from vllm_ascend.models.deepseek_v41.engram.npu import (
 )
 from vllm_ascend.models.host_offload import register_host_offload_owner
 from vllm_ascend.models.qwen4_exp.ple_quant import AscendPLEQuantizedEmbeddingMethod
-from vllm_ascend.ops.triton.qwen4_exp import ple_lookup
+from vllm_ascend.ops.triton.qwen4_exp import ple_lookup, ple_lookup_quantized
 
 
 @Qwen4ExpPLEPinnedHostEmbedding.register_oot
@@ -175,7 +175,7 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
             raise ValueError("PLE prefetch output must match the input shape, lookup dtype, and input device")
         if self._quantized:
             assert self._host_scale is not None
-            ple_lookup.lookup_quantized(
+            ple_lookup_quantized.lookup_quantized(
                 self._host_table.ptrs,
                 self._host_scale.ptrs,
                 input_ids,
@@ -183,7 +183,7 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
                 self.shard_indices.org_vocab_start_index,
                 self.shard_indices.org_vocab_end_index,
                 CHUNK_ROWS,
-                mxfp8=self._mxfp8,
+                is_mxfp8=self._mxfp8,
             )
         else:
             ple_lookup.lookup(

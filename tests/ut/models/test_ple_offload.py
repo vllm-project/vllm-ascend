@@ -50,7 +50,7 @@ def test_failed_close_preserves_owner_for_retry():
 @pytest.mark.parametrize("reduce_results", [True, False])
 @pytest.mark.parametrize("format_", ["bf16", "int8", "mxfp8"])
 def test_backend_reduces_only_when_outer_sp_does_not(monkeypatch, reduce_results, format_):
-    from vllm_ascend.ops.triton.qwen4_exp import ple_lookup
+    from vllm_ascend.ops.triton.qwen4_exp import ple_lookup, ple_lookup_quantized
 
     obj = embedding()
     obj._host_table = SimpleNamespace(ptrs=None)
@@ -64,7 +64,9 @@ def test_backend_reduces_only_when_outer_sp_does_not(monkeypatch, reduce_results
     obj.reduce_results = reduce_results
     obj.parallel_group = SimpleNamespace(all_reduce=Mock(side_effect=lambda x: x + 1))
     monkeypatch.setattr(ple_lookup, "lookup", lambda ptrs, ids, out, *args: out.fill_(2))
-    monkeypatch.setattr(ple_lookup, "lookup_quantized", lambda ptrs, scales, ids, out, *args, **kwargs: out.fill_(2))
+    monkeypatch.setattr(
+        ple_lookup_quantized, "lookup_quantized", lambda ptrs, scales, ids, out, *args, **kwargs: out.fill_(2)
+    )
     output = obj(torch.zeros((3, 16), dtype=torch.int64))
     assert torch.all(output == (3 if reduce_results else 2))
     assert obj.parallel_group.all_reduce.call_count == int(reduce_results)

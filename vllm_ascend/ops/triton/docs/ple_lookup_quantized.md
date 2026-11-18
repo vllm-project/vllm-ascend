@@ -1,12 +1,13 @@
-# PLE host lookup
+# Quantized PLE host lookup
 
 ## Description
 
 - **Function**: Gather selected Qwen3.8-Flash-Next PLE embedding rows directly
   from CANN-registered host memory into a caller-provided NPU BF16 output.
-  `lookup` handles existing BF16 storage; `lookup_quantized` fuses lookup and
+  The separate `ple_lookup.py` operator handles existing BF16 storage;
+  `ple_lookup_quantized.py::lookup_quantized` fuses lookup and
   group-32 INT8 or MXFP8 dequantization without expanding the full host table.
-- **Formula**: For an owned global ID `i`, local row `r = i - start` and column
+- **Formula**: For an owned global ID `i`, local row `r = i - shard_start` and column
   `c`, quantized output is `BF16(float(code[r, c]) * scale[r, c // 32])`.
   INT8 uses signed codes and FP32 scales. MXFP8 decodes E4M3FN codes and
   unsigned E8M0 scales: byte `s` represents `2**(s - 127)`, including
@@ -28,24 +29,28 @@
 
 ## Parameters
 
-All parameters are required; `mxfp8` is keyword-only for `lookup_quantized`.
+All parameters are required; `is_mxfp8` is keyword-only for `lookup_quantized`.
 
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
-| `ptrs` | Input | Device addresses of registered host code chunks | NPU INT64 | Contiguous 1-D |
-| `scale_ptrs` | Input | Device addresses of registered host scale chunks; quantized entry only | NPU INT64 | Contiguous 1-D |
-| `ids` | Input | Global embedding IDs; non-owned IDs produce zero | NPU INT32/INT64 | Any shape; copied to contiguous if needed |
-| `output` | Output | Requested rows, written in place | NPU BF16 | `(*ids.shape, width)`, contiguous for quantized lookup |
-| `start`, `end` | Attribute | Inclusive/exclusive global bounds of the owned shard | Python int | `0 <= start < end` |
-| `chunk` | Attribute | Rows per host allocation chunk | Python int | Positive; production uses `CHUNK_ROWS = 1 << 22` |
-| `mxfp8` | Attribute | Select MXFP8 instead of INT8 storage | Python bool | Quantized entry only |
+| `code_chunk_ptrs` | Input | Device addresses of registered host code chunks | NPU INT64 | Contiguous 1-D |
+| `scale_chunk_ptrs` | Input | Device addresses of registered host scale chunks; quantized entry only | NPU INT64 | Contiguous 1-D |
+| `embedding_ids` | Input | Global embedding IDs; non-owned IDs produce zero | NPU INT32/INT64 | Any shape; copied to contiguous if needed |
+| `output` | Output | Requested rows, written in place | NPU BF16 | `(*embedding_ids.shape, width)`, contiguous for quantized lookup |
+| `shard_start`, `shard_end` | Attribute | Inclusive/exclusive global bounds of the owned shard | Python int | `0 <= shard_start < shard_end` |
+| `chunk_rows` | Attribute | Rows per host allocation chunk | Python int | Positive; production uses `CHUNK_ROWS = 1 << 22` |
+| `is_mxfp8` | Attribute | Select MXFP8 instead of INT8 storage | Python bool | Quantized entry only |
+
+The wrapper retains the existing lazy `init_device_properties_triton()` call
+to populate cached core counts and UB size before launch. This lookup uses a
+fixed tile size and does not use those properties to select its grid or tile.
 
 ## Constraints
 
 - Quantized width must be positive and divisible by 32. The target model uses
   width 160 (five scale groups); width 256 is an additional supported test case.
 - All device tensors must be on the same NPU. Each pointer table must contain
-  at least `ceil((end - start) / chunk)` addresses. Code chunks contain rows of
+  at least `ceil((shard_end - shard_start) / chunk_rows)` addresses. Code chunks contain rows of
   `width` elements; scale chunks contain rows of `width // 32` elements.
 - Host code storage is INT8 with FP32 scales, or E4M3FN with UINT8 E8M0 scales.
   Host allocations must remain registered and alive until all eager and graph
@@ -61,9 +66,12 @@ All parameters are required; `mxfp8` is keyword-only for `lookup_quantized`.
 
 ## Origin and Differences
 
-- **Origin**: Extends the existing Ascend BF16 `_lookup` implementation in
-  `ops/triton/qwen4_exp/ple_lookup.py`; this is an existing file, with a new
-  quantized kernel and public wrapper.
+- **Origin**: Based on the existing Ascend BF16 `_lookup` implementation in
+  `ops/triton/qwen4_exp/ple_lookup.py`. The quantized kernel and its public
+  wrapper live independently in `ops/triton/qwen4_exp/ple_lookup_quantized.py`;
+  the model caller selects the operator before invocation. `is_mxfp8` selects
+  the INT8 or MXFP8 quantized format at compile time, not BF16 versus quantized
+  lookup at runtime.
 - **Differences**: Keeps compressed codes and scales in separate host buffers,
   decodes selected rows, preserves out-of-shard zeroing, and retains upstream
   reduction and host-buffer ownership. It is a model-support feature; there is
@@ -163,11 +171,13 @@ performance result.
 
 ## JIT specialization and startup
 
-- `WIDTH` controls row addressing and masks; `CHUNK` controls pointer-table
-  addressing; `GROUP=32` controls scale addressing; `BLOCK=next_power_of_2(WIDTH)`
-  defines vector lanes; `MXFP8` selects different pointer types and decoding.
-  These are compile-time values. Width 160 uses block 256.
-- `start` and `end` are runtime scalars with `do_not_specialize`, so shard-offset
+- `EMBEDDING_WIDTH` controls row addressing and masks; `CHUNK_ROWS` controls pointer-table
+  addressing; `GROUP_SIZE=32` controls scale addressing; `BLOCK_SIZE=next_power_of_2(EMBEDDING_WIDTH)`
+  defines vector lanes; `IS_MXFP8` selects different pointer types and decoding.
+  These are compile-time values. Width 160 uses block 256. E8M0 decoding uses
+  named constants for the exponent bias (127), NaN encoding (255), minimum
+  scale (`2**-127`) and FP32 mantissa width (23 bits).
+- `shard_start` and `shard_end` are runtime scalars with `do_not_specialize`, so shard-offset
   value/alignment classes do not create unnecessary variants. An integer type
   change (for example INT32 to INT64 inference) can still specialize.
 - ID count changes only the launch grid. ID values do not specialize. INT32
@@ -197,6 +207,7 @@ concurrency 1/8/32. Observed IDs were INT64, stride `(16, 1)`, with a 16-wide
 ngram dimension; output width was 160, group size 32, block size 256 and
 chunk size 4,194,304. Shard bounds varied across workers without introducing
 additional serving variants. Compiler entries include cache resolution and
-must not be described as guaranteed cold compilation. This tracing used the
+must not be described as guaranteed cold compilation. Counts describe the
+measured serving snapshot; source/module renames can invalidate cached artifacts. This tracing used the
 r89 serving adapter with the tested operator; it is not a full latest-main
 framework installation or a completed model performance comparison.
