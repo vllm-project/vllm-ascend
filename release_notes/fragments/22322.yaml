@@ -1,0 +1,9 @@
+pr: 22322
+entries:
+  - category: feature
+    text: Enabled the MegaMoe shared-expert fusion (`additional_config.enable_fused_mc2=3`)
+      on A3 for the INT quant family. Unquantized (A16W16) and W8A8 models with a
+      shared expert now run the shared expert inside the MegaMoe operator, removing
+      the separate shared-expert Dispatch/Combine overhead. W4A8 shared experts keep
+      the separate shared-expert forward. A5 behavior is unchanged.
+    hardware: [A3]
