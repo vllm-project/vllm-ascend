@@ -19,14 +19,14 @@ name: E2E
 
 on:
   pull_request:
-    # `synchronize` is temporarily kept so that pushing a commit still starts
-    # E2E while `/run` (see pr_run_command.yml) is being validated on main. It
-    # will be removed once /run is proven, after which a commit is tested only
-    # on opened/reopened, on a label, or when a `/run` comment re-emits the
-    # `labeled` event.
+    # `synchronize` is deliberately absent: pushing a new commit does not start
+    # E2E, so intermediate commits no longer occupy the NPU runner pool. A
+    # commit is tested on opened/reopened, when a label is added, or when a
+    # `/run` comment re-emits the `labeled` event (see pr_run_command.yml).
+    # `ci-gate` is a required check, so a commit that was never tested stays
+    # blocked rather than being merged untested.
     types:
       - opened
-      - synchronize
       - reopened
       - labeled
     branches:

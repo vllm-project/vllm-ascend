@@ -86,6 +86,12 @@ jobs:
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+          # The job only needs refresh_ci_gate.py, under
+          # .github/workflows/scripts/: skip the rest of the tree to keep this
+          # high-frequency job off the CPU pool as briefly as possible (same
+          # pattern as the codeowner-approval job).
+          sparse-checkout: .github
+          fetch-depth: 1
 
       - name: Re-run the pull_request gate jobs
         id: rerun
