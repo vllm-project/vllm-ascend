@@ -1,9 +1,0 @@
-pr: 22270
-entries:
-  - category: bugfix
-    text: >-
-      Fixed incorrect generated output in Mooncake prefill/decode
-      disaggregated serving with sliding-window attention (SWA).
-      The fix prevents prefill from discarding cached context that decode
-      still needs to process the final prompt token.
-      No configuration changes are required.
