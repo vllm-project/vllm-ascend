@@ -70,7 +70,7 @@ def _make_embedding(rank, events):
 def test_real_and_idle_inputs_embeds_join_matching_embedding_collectives(monkeypatch, supports_mm_inputs):
     """Run real lookup/masking on CPU, mocking only the distributed exchange."""
     monkeypatch.setattr(default, "embedding_tp_enable", lambda: True, raising=False)
-    events = []
+    events: list[tuple[int, str, tuple[int, ...]]] = []
     real_layer, weight = _make_embedding(0, events)
     idle_layer, _ = _make_embedding(1, events)
     real = _make_state(supports_mm_inputs, real_layer)
@@ -133,7 +133,7 @@ def test_embedding_tp_disabled_preserves_dummy_buffer(monkeypatch, supports_mm_i
 @pytest.mark.parametrize("mode", [VocabParallelMode.STANDARD, VocabParallelMode.PCP_X_TP])
 def test_other_embedding_plans_do_not_join(monkeypatch, mode):
     monkeypatch.setattr(default, "embedding_tp_enable", lambda: True)
-    events = []
+    events: list[tuple[int, str, tuple[int, ...]]] = []
     layer, _ = _make_embedding(1, events)
     layer.parallel_mode = mode
     state = _make_state(True, layer)
