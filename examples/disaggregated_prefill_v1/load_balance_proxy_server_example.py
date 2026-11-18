@@ -1071,6 +1071,38 @@ async def _replay_first_chunk(first_chunk: bytes, gen: Any):
         yield chunk
 
 
+async def send_cloze_request_to_service(
+    client: httpx.AsyncClient,
+    endpoint: str,
+    payload: dict,
+    request_id: str,
+    max_retries: int = 3,
+    base_delay: float = 0.2,
+):
+    """Post a cloze request WITHOUT build_prefill_request: build_cloze_request
+    already set do_remote_decode=False; send_request_to_service would
+    overwrite it to True via build_prefill_request and defeat the shortcut."""
+    headers = auth_headers(request_id)
+    max_attempts = max(1, max_retries)
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = await client.post(endpoint, json=payload, headers=headers)
+            response.raise_for_status()
+            return response
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 400 or attempt == max_attempts:
+                raise
+            logger.warning("Attempt %s/%s failed with %s, retrying cloze request %s",
+                           attempt, max_attempts, exc.response.status_code, request_id)
+        except httpx.HTTPError as exc:
+            if attempt == max_attempts:
+                raise
+            logger.warning("Attempt %s/%s network error, retrying cloze request %s: %s",
+                           attempt, max_attempts, request_id, exc)
+        await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+    raise RuntimeError("unreachable")
+
+
 def _is_cloze_request(req_data: dict) -> bool:
     """echo+logprobs with max_tokens=0: the client wants prompt-side
     logprobs only (no generation). Serving it via the PD two-hop pipeline
@@ -1115,30 +1147,51 @@ def build_cloze_request(req_data: dict) -> dict:
 
 def strip_sampled_row(response_json: dict) -> dict:
     """Remove the single forced-sampled token from a cloze prefill response
-    so the reply matches native echo semantics (text/logprobs/usage)."""
-    choice = (response_json.get("choices") or [{}])[0]
-    lp = choice.get("logprobs") or {}
-    tok_lp = lp.get("token_logprobs") or []
-    toks = lp.get("tokens") or []
-    top_lp = lp.get("top_logprobs") or []
-    # With min_tokens=1 the engine appends exactly one sampled token after
-    # the echo, so the response text is echo_text + sampled_token: drop the
-    # last row of each logprob sequence and rebuild text from the remainder.
-    if len(tok_lp) > 1 and len(toks) == len(tok_lp):
-        tok_lp = tok_lp[:-1]
-        toks = toks[:-1]
-        if top_lp:
-            top_lp = top_lp[:-1]
-        lp["token_logprobs"] = tok_lp
-        lp["tokens"] = toks
-        if top_lp:
-            lp["top_logprobs"] = top_lp
-        choice["logprobs"] = lp
-        choice["text"] = "".join(toks)
-    usage = response_json.get("usage") or {}
-    usage["completion_tokens"] = 0
-    if choice.get("finish_reason") == "length":
-        choice["finish_reason"] = "stop"
+    so the reply matches native echo semantics (text/logprobs/usage).
+
+    Handles every choice in the list (batched prompts each carry one forced
+    token), keeps text_offset aligned with the trimmed arrays, and recomputes
+    usage.total_tokens after zeroing completion_tokens."""
+    choices = response_json.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            lp = choice.get("logprobs")
+            if not isinstance(lp, dict):
+                # Nothing to trim (no logprobs requested): still fix text/finish.
+                if choice.get("finish_reason") == "length":
+                    choice["finish_reason"] = "stop"
+                continue
+            tok_lp = lp.get("token_logprobs") or []
+            toks = lp.get("tokens") or []
+            top_lp = lp.get("top_logprobs") or []
+            offsets = lp.get("text_offset") or []
+            # With min_tokens=1 the engine appends exactly one sampled token
+            # after the echo: drop the last row of every per-token array and
+            # rebuild text from the remaining echo rows.
+            if len(tok_lp) > 1 and len(toks) == len(tok_lp):
+                tok_lp = tok_lp[:-1]
+                toks = toks[:-1]
+                if top_lp:
+                    top_lp = top_lp[:-1]
+                if len(offsets) == len(tok_lp) + 1:
+                    offsets = offsets[:-1]
+                lp["token_logprobs"] = tok_lp
+                lp["tokens"] = toks
+                if top_lp:
+                    lp["top_logprobs"] = top_lp
+                if offsets:
+                    lp["text_offset"] = offsets
+                choice["logprobs"] = lp
+                choice["text"] = "".join(toks)
+            if choice.get("finish_reason") == "length":
+                choice["finish_reason"] = "stop"
+    usage = response_json.get("usage")
+    if isinstance(usage, dict):
+        prompt_toks = usage.get("prompt_tokens") or 0
+        usage["completion_tokens"] = 0
+        usage["total_tokens"] = prompt_toks
     return response_json
 
 
@@ -1155,7 +1208,7 @@ async def handle_cloze_shortcut(api: str, req_data: dict, request_id: str):
     prefiller = await runtime.schedule("reserve_prefill_kv", prefiller_score)
     prefiller_key = prefiller["key"]
     try:
-        response = await send_request_to_service(
+        response = await send_cloze_request_to_service(
             await runtime.get_client(ServerRole.PREFILL, prefiller_key),
             api,
             payload,
