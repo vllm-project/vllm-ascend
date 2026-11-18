@@ -28,11 +28,6 @@ if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton  # noqa
 
 
-# Flip STR_DTYPE_TO_TORCH_DTYPE["fp8"] -> torch.float8_e4m3fn on vllm builds
-# that lack register_kv_cache_dtype (e.g. releases/v0.27.1). Must run in every
-# worker before model loading resolves kv_cache_dtype. No-op on kvquant_27.
-import vllm_ascend.patch.worker.patch_kv_cache_dtype  # noqa
-
 # Apply before model construction on every device, including 310P.
 
 import vllm_ascend.patch.worker.patch_distributed  # noqa
@@ -66,6 +61,7 @@ import vllm_ascend.patch.worker.patch_uva  # noqa
 import vllm_ascend.patch.worker.patch_input_batch  # noqa
 import vllm_ascend.patch.worker.patch_model_state  # noqa
 import vllm_ascend.patch.worker.patch_block_table  # noqa
+import vllm_ascend.patch.worker.patch_staged_writes  # noqa
 import vllm_ascend.patch.worker.patch_attn_utils  # noqa
 import vllm_ascend.patch.worker.patch_model_runner  # noqa
 

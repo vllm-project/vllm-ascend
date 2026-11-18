@@ -85,7 +85,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         return False
 
     def _init_layerwise_offload(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, extra_config) -> Any:
-        reuse_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
+        reuse_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config, vllm_config=vllm_config)
         if kv_cache_config is not None and reuse_config is not None:
             reuse_layout = build_layerwise_reuse_layout(
                 get_layerwise_kv_cache_specs(kv_cache_config),

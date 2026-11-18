@@ -261,6 +261,7 @@ class MooncakePushConnector(MooncakeBaseConnector):
     """Layerwise Push facade with role-specific initialization."""
 
     requires_full_blocks_on_update_after_alloc = True
+    supports_composite_kv_saves = True
 
     def __init__(
         self,
