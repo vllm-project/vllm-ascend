@@ -15,8 +15,14 @@
 # limitations under the License.
 """Re-run the original pull_request run's gate jobs after a state-changing review.
 
-Run by the ``refresh-ci-gate`` job (``.github/workflows/pr_test.yaml``) on
-``pull_request_review`` events. Instead of producing a second, review-event
+Run by the ``CI Gate Refresh`` bot workflow (``.github/workflows/bot_ci_gate_refresh.yaml``,
+a ``workflow_run`` trigger with a writable base-repo token). The review-event
+relay (``.github/workflows/pr_refresh_ci_gate.yaml``) only ships the review
+payload as an artifact: ``GITHUB_TOKEN`` is read-only for every run tied to a
+fork PR regardless of the triggering event (#22134), so the rerun API calls
+must happen here, in the ``workflow_run`` context. All payload fields arrive
+as environment variables and are re-validated against live API state below.
+Instead of producing a second, review-event
 verdict, this re-runs the gate jobs inside the original ``pull_request`` run
 so the required ``E2E / ci-gate (pull_request)`` check itself updates in
 place:
