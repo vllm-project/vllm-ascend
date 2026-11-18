@@ -87,7 +87,7 @@ export LD_PRELOAD="$LD_PRELOAD:<path>"
 ldd `which python`
 ```
 
-### 2. `torch_npu` Optimization
+### 2. torch_npu Optimization
 
 Some performance tuning features in `torch_npu` are controlled by environment variables. Some features and their related environment variables are shown below.
 

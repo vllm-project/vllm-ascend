@@ -1,6 +1,6 @@
 # Performance Benchmark
 
-This document details the benchmark methodology for vllm-ascend, aimed at evaluating the performance under a variety of workloads. To maintain alignment with vLLM, we use the [benchmark](https://github.com/vllm-project/vllm/tree/main/benchmarks) script provided by the vllm project.
+This document details the benchmark methodology for vllm-ascend, aimed at evaluating the performance under a variety of workloads. To maintain alignment with vLLM, we use the [benchmark](https://github.com/vllm-project/vllm/tree/main/benchmarks) script provided by the vLLM project.
 
 **Benchmark Coverage**: We measure offline E2E latency and throughput, and fixed-QPS online serving benchmarks. For more details, see [vllm-ascend benchmark scripts](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks).
 
@@ -10,7 +10,7 @@ This document details the benchmark methodology for vllm-ascend, aimed at evalua
 - 🟡 = Partial / Work in progress
 - 🚧 = Under development
 
-## 1. Run docker container
+## 1. Run Docker container
 
 ```bash
 # Update DEVICE according to your device (/dev/davinci[0-7])
@@ -97,7 +97,7 @@ th {
     `HF_ENDPOINT` does not rewrite URLs passed directly to `wget` or `git clone`.
     For these commands, replace `huggingface.co` in the URL with an accessible
     mirror explicitly. The availability of third-party mirrors is not guaranteed
-    by vLLM or vLLM Ascend. `VLLM_USE_MODELSCOPE=True` controls model and tokenizer
+    by vLLM or vllm-ascend. `VLLM_USE_MODELSCOPE=True` controls model and tokenizer
     loading in vLLM; it does not redirect benchmark dataset downloads to ModelScope.
 
     Datasets prefixed with `HuggingFace-` in the table should set `dataset-name`
@@ -110,7 +110,7 @@ th {
 
 ### 3.2 Run basic benchmark
 
-#### 3.2.1 Online serving
+#### 3.2.1 Online Serving Benchmark
 
 First start serving your model:
 
@@ -154,7 +154,7 @@ vllm bench serve \
 
 If successful, you will see the following output:
 
-```shell
+```output
 ============ Serving Benchmark Result ============
 Successful requests:                     10
 Failed requests:                         0
@@ -192,7 +192,7 @@ vllm bench throughput \
   --output-len 128
 ```
 
-If successful, you will see the following output
+If successful, you will see the following output:
 
 ```shell
 Processed prompts: 100%|█| 10/10 [00:03<00:00,  2.74it/s, est. speed input: 351.02 toks/s, output: 351.02 toks/s]
