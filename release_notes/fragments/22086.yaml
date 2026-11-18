@@ -1,11 +1,10 @@
 pr: 22086
 entries:
   - category: performance
-    text: Fused QSA rotary-position clamping and gathering into RMSNorm/MRoPE preparation, including main Q/K norm weight offsets.
-    model: Qwen3.8-Flash-Next
-  - category: performance
-    text: Fused QSA compressed-key pooling, RMSNorm, MRoPE and cache writes while retaining the ordering of raw ring-cache updates.
-    model: Qwen3.8-Flash-Next
-  - category: performance
-    text: Fused QSA LightningIndexer visibility, per-row block-table gathering, query offsets, score weights and head padding into one preparation kernel.
+    text: >-
+      Fused QSA preparation paths, including rotary-position clamping and gathering
+      into RMSNorm/MRoPE with main Q/K norm weight offsets; compressed-key pooling,
+      RMSNorm, MRoPE and cache writes while preserving raw ring-cache update ordering;
+      and LightningIndexer visibility, per-row block-table gathering, query offsets,
+      score weights and head padding.
     model: Qwen3.8-Flash-Next
