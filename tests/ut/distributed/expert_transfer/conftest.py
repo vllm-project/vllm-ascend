@@ -76,6 +76,7 @@ def expert_factory(load_hook_class, monkeypatch):
                 ),
                 "MoEActivation": SimpleNamespace(SITU="situ"),
                 "get_current_vllm_config": lambda: None,
+                "get_ascend_config": lambda: SimpleNamespace(deepgemm_mega_moe=False),
                 "use_cann_megamoe": lambda _: False,
                 "ACL_FORMAT_FRACTAL_NZ": 29,
                 "fp4_packed_nz": fp4_packed_nz,

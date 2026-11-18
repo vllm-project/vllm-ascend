@@ -83,3 +83,10 @@ with other token-sharded methods; it adds no new patch registration. Remove
 that classification when upstream capture learns the prepare/finalize token
 layout. Hardware acceptance must cover zero-token ranks, target/draft reuse,
 shared experts, changed-input graph replay and the disabled-backend path.
+
+Each new target/draft layout is compiled in dry-run mode during initialization,
+before its symmetric buffer is published for reuse. Ranks rendezvous on the CPU
+process group after compilation so a faster compiler cannot enter the device
+rank barrier while a peer is still compiling. The previous dry-run setting is
+restored on success or failure. This runs once per layout; ordinary expert
+execution adds no host synchronization.

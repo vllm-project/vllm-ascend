@@ -128,6 +128,7 @@ def create_mock_ascend_config(
 ):
     mock_config = Mock()
     mock_config.eplb_config = Mock(dynamic_eplb=dynamic_eplb)
+    mock_config.deepgemm_mega_moe = False
     return mock_config
 
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 import torch
 from vllm.logger import logger
@@ -66,13 +66,25 @@ def get_moe_comm_method(
 
 
 def setup_moe_comm_method(moe_config):
-    if moe_config.ep_size > 1:
+    if get_ascend_config().deepgemm_mega_moe:
+        _MoECommMethods[_moe_config_key(MoECommType.DEEPGEMM, moe_config)] = DeepGemmCommImpl(moe_config)
+    elif moe_config.ep_size > 1:
         _MoECommMethods[_moe_config_key(MoECommType.ALLTOALL, moe_config)] = AlltoAllCommImpl(moe_config)
         _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, moe_config)] = AllGatherCommImpl(moe_config)
         _MoECommMethods[_moe_config_key(MoECommType.MC2, moe_config)] = MC2CommImpl(moe_config)
         _MoECommMethods[_moe_config_key(MoECommType.FUSED_MC2, moe_config)] = FusedMC2CommImpl(moe_config)
     else:
         _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, moe_config)] = AllGatherCommImpl(moe_config)
+
+    # Model constructors snapshot the most recently registered methods without
+    # a layer config. Preserve that API as well as shape-specific lookup used
+    # by routed experts; target snapshots must survive draft initialization.
+    for kind in MoECommType:
+        method = get_moe_comm_method(kind, moe_config)
+        if method is not None:
+            _MoECommMethods[_moe_config_key(kind, None)] = method
+        else:
+            _MoECommMethods.pop(_moe_config_key(kind, None), None)
 
 
 @dataclass
@@ -103,7 +115,8 @@ class MoECommMethod(ABC):
     def set_lora_context(self, lora_context) -> None:
         self.lora_context = lora_context
         self.prepare_finalize.set_lora_context(lora_context)
-        self.token_dispatcher.set_lora_context(lora_context)
+        if self.token_dispatcher is not None:
+            self.token_dispatcher.set_lora_context(lora_context)
 
     def prepare(
         self,
@@ -145,6 +158,7 @@ class MoECommMethod(ABC):
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
+        assert self.token_dispatcher is not None, "Fused backends must implement fused_experts"
 
         before_dispatch_evt = maybe_record_event()
 
@@ -190,7 +204,7 @@ class MoECommMethod(ABC):
         )
 
     @abstractmethod
-    def _get_token_dispatcher(self) -> MoETokenDispatcher:
+    def _get_token_dispatcher(self) -> MoETokenDispatcher | None:
         raise NotImplementedError("_get_token_dispatcher function not implemented.")
 
     @abstractmethod
@@ -270,6 +284,35 @@ class AlltoAllCommImpl(MoECommMethod):
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithAll2All(self.moe_config)
+
+
+class DeepGemmCommImpl(MoECommMethod):
+    """Fused EP dispatch, experts and combine over local tokens.
+
+    Weight conversion belongs to the quantization method. The communication
+    backend selects execution through the same contract as CANN fused MC2,
+    without constructing a second, unused All2All token dispatcher.
+    """
+
+    prepare_finalize: PrepareAndFinalizeWithAll2All
+
+    def _get_token_dispatcher(self):
+        return None
+
+    def _get_prepare_finalize(self):
+        return PrepareAndFinalizeWithAll2All(self.moe_config)
+
+    def pad_and_split_input_ids(self, input_ids):
+        return self.prepare_finalize.pad_and_split_input_ids(input_ids)
+
+    def fused_experts(self, fused_experts_input: MoEFusedExpertsInput, quant_method=None):
+        layer: Any = fused_experts_input.layer
+        return layer._deepgemm_v41.apply(
+            layer,
+            fused_experts_input.hidden_states,
+            fused_experts_input.topk_weights,
+            fused_experts_input.topk_ids,
+        )
 
 
 class FusedMC2CommImpl(MoECommMethod):
