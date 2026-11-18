@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-"""Semantic profiles for supported Ascend hardware families.
+"""[Role] Declare semantic profiles for supported Ascend hardware families.
+[Invariants] Business code selects capabilities, not device-name strings.
+[Timeouts & Locks] Immutable registration; no waits or locks.
+[Side-Effect Policy] No device contexts or workloads are started here.
 
 This module is the boundary between hardware identity and shared business
 logic. Detection maps a SoC to one immutable :class:`HardwareProfile`; code
@@ -93,6 +96,8 @@ class HardwareCapability(Enum):
     DSV41_PACKED_CACHE = auto()
     # Triton RMS/dot/gate/residual fusion for unrotated Engram inputs.
     ENGRAM_UNROTATED_GATE = auto()
+    # Separate inverse-rotation MatMul followed by a chunked fused A3 gate.
+    ENGRAM_ROTATED_GATE = auto()
     # Decode native FP8 codes and E8M0 group scales in Engram table lookups.
     ENGRAM_MXFP8 = auto()
     # Node-local shared INT8 Engram tables can use the A3 Host VMM backend.
@@ -368,6 +373,7 @@ _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
     HardwareCapability.KDA_INT8_QUANT_OVERLAP,
     HardwareCapability.NATIVE_INT8_SPARSE,
     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
+    HardwareCapability.ENGRAM_ROTATED_GATE,
     HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.RMS_NORM_CAST,
