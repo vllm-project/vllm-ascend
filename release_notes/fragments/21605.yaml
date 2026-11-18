@@ -1,5 +1,5 @@
 pr: 21605
 entries:
   - category: performance
-    text: Reduce packed DCP LSE combine kernel latency by 35-39% on two measured Ascend A3 shapes.
+    text: Speed up the Ascend A3 packed DCP LSE combine kernel by 1.54x-1.64x for 144 or 152 tokens, 12 heads, head dimension 512, and 8 ranks.
     hardware: [A3]
