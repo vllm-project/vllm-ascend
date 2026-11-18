@@ -265,13 +265,13 @@ def test_pcp_builder_reuses_state_input_without_per_draft_buffers(monkeypatch):
     states = capture.hisparse_request_state_indices
     real = builder._build(common, pcp_context=NS(local_request_state_indices=torch.tensor([7, 7, 9])))
     assert real.hisparse_request_state_indices.data_ptr() == states.data_ptr()
-    assert states.dtype == torch.int32 and states.tolist() == [7, 7, 9, -1, -1]
+    assert states.dtype == torch.int32 and states.tolist() == [7, 7, 9]
     assert real.hisparse_num_write_tokens == 8 and real.hisparse_num_valid_write_rows is None
     draft = builder._build(common, draft_index=1)
     assert not hasattr(draft, "hisparse_request_state_indices")
-    assert states.tolist() == [7, 7, 9, -1, -1]
+    assert states.tolist() == [7, 7, 9]
     builder._build(common, pcp_context=NS(local_request_state_indices=torch.tensor([9])))
-    assert states.tolist() == [9, -1, -1, -1, -1]
+    assert states.tolist() == [9, -1, -1]
 
 
 def test_empty_query_rank_still_prepares_host_mirror(monkeypatch):
