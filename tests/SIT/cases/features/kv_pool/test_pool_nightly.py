@@ -1,7 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
-"""Short-input Nightly KV-pool smoke cases for A3 single-host deployments."""
+"""Nightly KV-pool cases for A3 single-host deployments.
+
+The dsv4-mooncake-multiprefix, dsv4-memcache-dsa-pcp-dspark and
+qwen38-memcache-mtp-align cases replay their guarded workloads at
+short-input scale. ``test_dsv4_mooncake_dp4_multiprefix`` is the
+full-scale plan-N12 case: DP4xTP4 mooncake non-layerwise 32K
+multi-prefix with token-exact A/B; performance is recorded only, and
+the Mooncake SSD offload pilot (plan 2.6/7) is a separate harness
+follow-up that this module does not claim.
+"""
 
 from __future__ import annotations
 
@@ -44,7 +53,7 @@ from tests.e2e.pull_request.utils import PROMPTS_SHORT
 os.environ["ASCEND_ENABLE_USE_FABRIC_MEM"] = "1"
 os.environ["ASCEND_AUTO_CONNECT"] = "1"
 os.environ["ASCEND_GLOBAL_RESOURCE_CONFIG"] = '{"fabric_memory.max_capacity": "2"}'
-os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segmentes:True"
+os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
 
 DSV4_DSPARK_MODEL = os.environ.get(
     "DEEPSEEK_V41_DSPARK_MODEL_PATH",
@@ -53,6 +62,10 @@ DSV4_DSPARK_MODEL = os.environ.get(
 DSV4_MTP_MODEL = os.environ.get(
     "DEEPSEEK_V4_MTP_MODEL_PATH",
     "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp",
+)
+DSV4_0731_MODEL = os.environ.get(
+    "DEEPSEEK_V4_0731_MODEL_PATH",
+    "Eco-Tech/DeepSeek-V4-Flash-0731-w8a8",
 )
 QWEN38_MODEL = os.environ.get("QWEN38_DENSE_MODEL", "Qwen/Qwen3.8-27B")
 
@@ -78,6 +91,16 @@ QWEN_POOL_LCM_BLOCK_SIZE = 896
 QWEN_POOL_PROMPT_TOKENS = 2 * QWEN_POOL_LCM_BLOCK_SIZE + 4
 QWEN_POOL_PERF_PROMPT_TOKENS = 10 * QWEN_POOL_LCM_BLOCK_SIZE
 QWEN_POOL_MAX_MODEL_LEN = QWEN_POOL_PERF_PROMPT_TOKENS + 128
+
+# Full-scale plan-N12 32K multi-prefix load: two lcm blocks minus an
+# 8-token tail keeps the second block from transferring, and the plan's
+# measured H3 chunk shape passes max_num_batched_tokens=28672 (plan 2.1).
+DSV4_DP4_POOL_PROMPT_TOKENS = 2 * DSV4_POOL_LCM_BLOCK_SIZE - 8
+DSV4_DP4_POOL_MAX_NUM_BATCHED_TOKENS = 28672
+DSV4_DP4_POOL_MAX_MODEL_LEN = DSV4_DP4_POOL_PROMPT_TOKENS + 128
+# One prompt copy per DP rank; expected hit tokens scale by this factor.
+DSV4_DP4_REPLICAS = 4
+
 PERF_OPTIONS = {
     "perf_sample_count": 10,
     "perf_concurrency": 1,
@@ -145,9 +168,10 @@ def _assert_dspark_accuracy(runner: Any) -> None:
 def _dsv4_mooncake_leg(use_pool: bool, case_name: str):
     with ExitStack() as stack:
         kwargs: dict[str, Any] = dict(
-            data_parallel_size=4,
+            data_parallel_size=2,
             tensor_parallel_size=4,
             distributed_executor_backend="mp",
+            enforce_eager=True,
             max_model_len=DSV4_POOL_MAX_MODEL_LEN,
             max_num_seqs=4,
             max_num_batched_tokens=4096,
@@ -200,7 +224,7 @@ def _dsv4_mooncake_leg(use_pool: bool, case_name: str):
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_nightly_dsv4_multiprefix_mooncake_smoke() -> None:
+def test_dsv4_mooncake_multiprefix() -> None:
     tokenizer = AutoTokenizer.from_pretrained(DSV4_MTP_MODEL, trust_remote_code=True)
     prefix_a = build_pool_accuracy_prompt(
         tokenizer, DSV4_POOL_PROMPT_TOKENS, DSV4_POOL_MAX_MODEL_LEN, secret="7391"
@@ -225,7 +249,7 @@ def test_nightly_dsv4_multiprefix_mooncake_smoke() -> None:
             answer_secret="7391",
             tag="nightly-dsv4-multiprefix-a",
         )
-        return run_pool_hit_sequence(
+        summary = run_pool_hit_sequence(
             runner,
             block_size=128,
             prompt_tokens=DSV4_POOL_PROMPT_TOKENS,
@@ -238,6 +262,12 @@ def test_nightly_dsv4_multiprefix_mooncake_smoke() -> None:
             answer_secret="2846",
             tag="nightly-dsv4-multiprefix-b",
         )
+        # run_pool_ab compares the A-leg hit outputs against the B leg's
+        # single local-hit output. Per-replica cold/hit identity was already
+        # asserted inside run_pool_hit_sequence, so hand over one
+        # representative replica.
+        summary["hit_outputs"] = summary["hit_outputs"][:1]
+        return summary
 
     run_pool_ab(
         case_name="nightly_dsv4_multiprefix_mooncake",
@@ -250,6 +280,133 @@ def test_nightly_dsv4_multiprefix_mooncake_smoke() -> None:
         perf_concurrency=1,
         perf_stability_policy="record",
         perf_gate=False,
+    )
+
+
+@contextmanager
+def _dsv4_dp4_mooncake_leg(use_pool: bool, case_name: str):
+    with ExitStack() as stack:
+        kwargs: dict[str, Any] = dict(
+            data_parallel_size=4,
+            tensor_parallel_size=4,
+            distributed_executor_backend="mp",
+            enforce_eager=True,
+            max_model_len=DSV4_DP4_POOL_MAX_MODEL_LEN,
+            max_num_seqs=4,
+            max_num_batched_tokens=DSV4_DP4_POOL_MAX_NUM_BATCHED_TOKENS,
+            gpu_memory_utilization=0.9,
+            enable_expert_parallel=True,
+            quantization="ascend",
+            tokenizer_mode="deepseek_v4",
+            block_size=128,
+            attention_config={"indexer_kv_dtype": "int8"},
+            enable_prefix_caching=not use_pool,
+            disable_log_stats=False,
+            compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+        )
+        if use_pool:
+            manager = stack.enter_context(
+                SingleNodeMooncakeManager(_build_mooncake_config(), case_name)
+            )
+            stack.enter_context(patch.dict(os.environ, manager.server_envs))
+            kwargs["kv_transfer_config"] = {
+                "kv_connector": "AscendStoreConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {
+                    "backend": "mooncake",
+                    "lookup_rpc_port": "1",
+                    "use_layerwise": False,
+                },
+            }
+        yield stack.enter_context(DPVllmRunner(DSV4_0731_MODEL, **kwargs))
+
+
+@pytest.mark.e2e_model(DSV4_0731_MODEL)
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="prefix_caching,chunked_prefill,mixed_lengths",
+    parallel="DP,TP,EP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="W8A8",
+    graph_mode="eager",
+)
+@patch.dict(
+    os.environ,
+    {
+        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+        "ASCEND_ENABLE_USE_FABRIC_MEM": "1",
+        "ASCEND_AUTO_CONNECT": "1",
+    },
+)
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_dsv4_mooncake_dp4_multiprefix() -> None:
+    """Full-scale plan-N12 case: DP4xTP4 mooncake non-layerwise 32K multi-prefix.
+
+    Two distinct-secret natural-language prefixes each replay R1-R4 with one
+    prompt copy per DP rank (object reuse scaled by replicas, DP replica-level
+    hits, cross-prefix key isolation) and token-exact H3 at the plan's measured
+    chunk shape. The Mooncake SSD offload pilot (plan 2.6/7) is a separate
+    harness follow-up and is not claimed here.
+    """
+    tokenizer = AutoTokenizer.from_pretrained(DSV4_0731_MODEL, trust_remote_code=True)
+    prefix_a = build_pool_accuracy_prompt(
+        tokenizer, DSV4_DP4_POOL_PROMPT_TOKENS, DSV4_DP4_POOL_MAX_MODEL_LEN, secret="7391"
+    )
+    prefix_b = build_pool_accuracy_prompt(
+        tokenizer, DSV4_DP4_POOL_PROMPT_TOKENS, DSV4_DP4_POOL_MAX_MODEL_LEN, secret="2846"
+    )
+
+    def accuracy(runner: Any) -> None:
+        outputs = runner.generate_greedy(PROMPTS_SHORT, max_tokens=64)
+        assert len(outputs) == len(PROMPTS_SHORT)
+        assert all(ids and text.strip() for ids, text in outputs)
+
+    def hit(runner: Any) -> dict[str, Any]:
+        # Each prefix replays R1-R4 with one prompt copy per DP rank
+        # (H1/H2 replica-level hits) and misses on a disjoint random-key
+        # prompt (cross-prefix key isolation). The exact hit-token
+        # expectation comes from expected_hit_token_count with the 16384
+        # lcm; verify the save granularity against the startup logs if this
+        # assertion ever moves (plan 2.2).
+        run_pool_hit_sequence(
+            runner,
+            block_size=128,
+            prompt_tokens=DSV4_DP4_POOL_PROMPT_TOKENS,
+            prompt_ids=prefix_a,
+            replicas=DSV4_DP4_REPLICAS,
+            lcm_block_size=DSV4_POOL_LCM_BLOCK_SIZE,
+            answer_secret="7391",
+            tag="nightly-dsv4-dp4-multiprefix-a",
+        )
+        summary = run_pool_hit_sequence(
+            runner,
+            block_size=128,
+            prompt_tokens=DSV4_DP4_POOL_PROMPT_TOKENS,
+            prompt_ids=prefix_b,
+            miss_prompt_ids=build_pool_prompts(
+                DSV4_DP4_POOL_PROMPT_TOKENS, seed_offset=1
+            )[1],
+            replicas=DSV4_DP4_REPLICAS,
+            lcm_block_size=DSV4_POOL_LCM_BLOCK_SIZE,
+            answer_secret="2846",
+            tag="nightly-dsv4-dp4-multiprefix-b",
+        )
+        # run_pool_ab compares the A-leg hit outputs against the B leg's
+        # single local-hit output, so hand over one representative replica.
+        summary["hit_outputs"] = summary["hit_outputs"][:1]
+        return summary
+
+    run_pool_ab(
+        case_name="nightly_dsv4_dp4_mooncake_multiprefix",
+        build_leg=_dsv4_dp4_mooncake_leg,
+        accuracy=accuracy,
+        hit=hit,
+        prompt_ids=prefix_b,
+        perf_prompt_tokens=DSV4_DP4_POOL_PROMPT_TOKENS,
+        **PERF_OPTIONS,
     )
 
 
@@ -324,7 +481,7 @@ def _dsv4_leg(use_pool: bool, case_name: str):
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_nightly_dsv4_dsa_pcp_dspark_memcache_smoke() -> None:
+def test_dsv4_memcache_dsa_pcp_dspark() -> None:
     tokenizer = AutoTokenizer.from_pretrained(
         DSV4_DSPARK_MODEL, trust_remote_code=True
     )
@@ -420,7 +577,7 @@ def _qwen_leg(use_pool: bool, case_name: str):
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_nightly_qwen38_mtp_align_memcache_smoke() -> None:
+def test_qwen38_memcache_mtp_align() -> None:
     tokenizer = AutoTokenizer.from_pretrained(QWEN38_MODEL, trust_remote_code=True)
     prompt_ids = build_pool_accuracy_prompt(
         tokenizer, QWEN_POOL_PROMPT_TOKENS, QWEN_POOL_MAX_MODEL_LEN

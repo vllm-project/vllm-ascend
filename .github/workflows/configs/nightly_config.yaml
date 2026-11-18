@@ -155,15 +155,18 @@ a3:
         size: 2
   single_node:
     test_config:
-      - name: kv-pool-n3-dsv4-multiprefix-mooncake-smoke
+      - name: dsv4-mooncake-multiprefix
         os: linux-aarch64-a3-800i-16
-        tests: tests/SIT/cases/features/kv_pool/test_pool_nightly_smoke.py::test_nightly_dsv4_multiprefix_mooncake_smoke
-      - name: kv-pool-n6-dsv4-dsa-pcp-dspark-smoke
+        tests: tests/SIT/cases/features/kv_pool/test_pool_nightly.py::test_dsv4_mooncake_multiprefix
+      - name: dsv4-memcache-dsa-pcp-dspark
         os: linux-aarch64-a3-800i-8
-        tests: tests/SIT/cases/features/kv_pool/test_pool_nightly_smoke.py::test_nightly_dsv4_dsa_pcp_dspark_memcache_smoke
-      - name: kv-pool-n7-qwen38-mtp-align-smoke
+        tests: tests/SIT/cases/features/kv_pool/test_pool_nightly.py::test_dsv4_memcache_dsa_pcp_dspark
+      - name: qwen38-memcache-mtp-align
         os: linux-aarch64-a3-800i-4
-        tests: tests/SIT/cases/features/kv_pool/test_pool_nightly_smoke.py::test_nightly_qwen38_mtp_align_memcache_smoke
+        tests: tests/SIT/cases/features/kv_pool/test_pool_nightly.py::test_qwen38_memcache_mtp_align
+      - name: dsv4-mooncake-dp4-multiprefix
+        os: linux-aarch64-a3-800i-16
+        tests: tests/SIT/cases/features/kv_pool/test_pool_nightly.py::test_dsv4_mooncake_dp4_multiprefix
 
 a3-560t:
   single_node:
