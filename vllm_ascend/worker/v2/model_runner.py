@@ -1093,6 +1093,7 @@ class NPUModelRunner(GPUModelRunner):
             req_ids=req_ids,
             num_reqs=num_reqs,
             num_reqs_after_padding=num_reqs_padded,
+            graph_num_reqs=graph_num_reqs,
             idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
             expanded_idx_mapping=expanded_idx_mapping,

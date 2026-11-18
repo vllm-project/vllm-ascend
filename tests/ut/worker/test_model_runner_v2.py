@@ -1678,6 +1678,8 @@ def _run_prepare_inputs(
     ):
         prepared = runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc, 0)
         batch.is_padding = make_batch.call_args.kwargs["is_padding"]
+        batch.graph_num_reqs = make_batch.call_args.kwargs["graph_num_reqs"]
+        batch.num_reqs_after_padding = make_batch.call_args.kwargs["num_reqs_after_padding"]
         assert make_batch.call_args.kwargs["decode_graph_eligible"] == batch_req_state.decode_graph_eligible
         assert make_batch.call_args.kwargs["prefill_runs_as_decode_np"] is batch_req_state.prefill_runs_as_decode_np
         assert make_batch.call_args.kwargs["max_seq_len_np"] is batch_req_state.max_seq_len_np
@@ -1692,6 +1694,19 @@ def test_prepare_inputs_common_path():
     assert out is partitioned
     runner.eplb.set_batch_phase.assert_called_once_with(True)
     np.testing.assert_array_equal(runner.input_buffers.seq_lens_cpu[:2], np.array([3, 4], dtype=np.int32))
+
+
+def test_graph_request_slots_survive_local_attention_padding():
+    runner, scheduler_output, batch_req_state, batch_desc = _prepare_inputs_runner(full_cg=True)
+    batch_desc.num_reqs = 4
+    batch, _ = _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc)
+    # Mixed FULL attention compresses padding into one local dummy request.
+    # LMHead must still see the descriptor's four slots on every DP rank.
+    assert batch.num_reqs_after_padding == 3
+    assert batch.graph_num_reqs == 4
+    with patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
+        dummy = AscendInputBatch.make_dummy(batch_desc.num_reqs, batch_desc.num_tokens, runner.input_buffers)
+    assert dummy.num_reqs == dummy.graph_num_reqs == batch.graph_num_reqs
 
 
 @pytest.mark.parametrize("enabled", [True, False])

@@ -78,6 +78,9 @@ class AscendInputBatch(InputBatch):
     # attn_state is used to build attention metadata.
     attn_state: AscendAttentionState | None = None
     is_dummy: bool = False
+    # Descriptor request slots, before rank-local attention padding adjustments.
+    # FULL graphs agree on this count across DP; PIECEWISE has no request padding.
+    graph_num_reqs: int | None = None
 
     @classmethod
     def make_dummy(
@@ -127,4 +130,7 @@ class AscendInputBatch(InputBatch):
             seq_lens_np=seq_lens_np,
             attn_state=AscendAttentionState.DecodeOnly,
             is_dummy=True,
+            # The runner passes batch_desc.num_reqs (or the scheduled count
+            # when the descriptor does not pad requests) to make_dummy.
+            graph_num_reqs=num_reqs,
         )

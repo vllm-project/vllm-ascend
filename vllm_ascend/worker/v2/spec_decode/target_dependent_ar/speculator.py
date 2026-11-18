@@ -286,6 +286,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             self._lmhead_pad_size_context(
                 sync_state,
                 capture_num_reqs=input_batch.num_reqs if self.dp_size == 1 else None,
+                graph_num_reqs=getattr(input_batch, "graph_num_reqs", None),
             ),
         ):
             return super().propose(
