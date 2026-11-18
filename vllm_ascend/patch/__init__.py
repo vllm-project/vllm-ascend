@@ -1108,3 +1108,28 @@
 #       runner and can rely on upstream's default enablement heuristics
 #       (model architecture, Triton, feature checks) without crashes or
 #       degraded functionality.
+# ** 29. File: worker/patch_qwen3_omni_audio_encoder.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_omni_moe_thinker.Qwen3OmniMoeAudioEncoder.forward`
+#      and `vllm.model_executor.models.qwen3_asr.Qwen3ASRForConditionalGeneration._process_audio_input`
+#    Why:
+#       The audio tower keeps its chunk bookkeeping on the device and reads it
+#       back several times per call (.item() on the post-CNN lengths, .tolist()
+#       on the chunk lengths and on aftercnn_lens, and a boolean-mask gather
+#       whose output size is only known on device). Each read drains the NPU
+#       queue while other requests are decoding on the same engine. Device
+#       lengths also leave cu_seqlens on the NPU, and the encoder attention
+#       calls cu_seqlens.cpu() once per layer.
+#    How：
+#       Override both functions with versions that build the lengths, the
+#       padding mask and cu_seqlens on the host and gather the valid rows with
+#       index_select on host-built indices copied up from pinned memory. The
+#       computation and the results are unchanged.
+#    Related PR (if no, explain why):
+#       1. https://github.com/vllm-project/vllm/pull/68099 (merged on vLLM main)
+#       2. https://github.com/vllm-project/vllm/pull/68402 (backport to vLLM releases/v0.23.0)
+#    Future Plan:
+#       Remove the encoder part of this patch once the vLLM version this branch
+#       builds against contains #68099. Note that vLLM pins cu_seqlens to the
+#       feature device for the CUDA/ROCm attention backends; Ascend wants it on
+#       the host, so that line stays patched here.

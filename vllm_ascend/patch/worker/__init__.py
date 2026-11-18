@@ -84,6 +84,11 @@ if _V2_MODEL_RUNNER_SUPPORTED:
     import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
     import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
 
+# Qwen3-Omni/Qwen3-ASR audio tower: keep the encoder bookkeeping on the host.
+# Keep this import ahead of anything else that rebinds
+# Qwen3OmniMoeAudioEncoder.forward, so that such a patch wraps this version.
+import vllm_ascend.patch.worker.patch_qwen3_omni_audio_encoder  # noqa
+
 # only patch routed experts capture in main2main.
 if _V2_MODEL_RUNNER_SUPPORTED:
     import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
