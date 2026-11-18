@@ -115,6 +115,10 @@ RUN echo '#!/bin/bash' > /usr/local/bin/entrypoint.sh && \
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
 RUN echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib' >> ~/.bashrc
 
+# Empty directories left after uninstall can still expose a Triton namespace.
+RUN triton_dir="$(python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')/triton" && \
+    if [ -d "$triton_dir" ]; then find "$triton_dir" -depth -type d -empty -delete; fi
+
 # Set entrypoint and default command
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["/bin/bash"]
