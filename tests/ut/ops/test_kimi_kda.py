@@ -818,7 +818,7 @@ def test_kda_prefill_direct_norm_and_idle_output(mode, recover):
     ],
 )
 def test_projection_communication_mode_honors_pg_override(monkeypatch, env_mode, pg_mode, expected):
-    monkeypatch.setattr(common_projection.envs, "HCCL_OP_EXPANSION_MODE", env_mode)
+    monkeypatch.setattr(projection_module.envs, "HCCL_OP_EXPANSION_MODE", env_mode)
     options = SimpleNamespace(hccl_config={"hccl_op_expansion_mode": pg_mode})
     backend = SimpleNamespace(options=options)
     group = SimpleNamespace(
@@ -826,7 +826,7 @@ def test_projection_communication_mode_honors_pg_override(monkeypatch, env_mode,
     )
     assert projection_module.uses_aiv_communication(group) is expected
     assert not projection_module.uses_aiv_communication(None)
-    assert common_projection.FullRankGateTP(group, 2, 2).uses_aiv is expected
+    assert projection_module.FullRankGateTP(group, 2, 2).uses_aiv is expected
 
 
 @pytest.mark.parametrize("aiv", [True, False])

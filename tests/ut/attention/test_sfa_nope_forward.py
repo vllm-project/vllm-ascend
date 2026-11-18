@@ -17,8 +17,9 @@ from vllm_ascend import ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, PreprocessType
-from vllm_ascend.models.glm5next.kda_input_projection_tp import KDAInputProjectionTPLayout, PendingGate, PendingTensor
+from vllm_ascend.models.glm5next.kda_input_projection_tp import KDAInputProjectionTPLayout
 from vllm_ascend.ops import linear_op
+from vllm_ascend.ops.kimi_kda import PendingGate, PendingTensor
 from vllm_ascend.ops.linear import AscendRowParallelLinear, AscendUnquantizedLinearMethod
 
 

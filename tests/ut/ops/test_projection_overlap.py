@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import torch
 
-from vllm_ascend.models.glm5next import kda_input_projection_tp as tp
+from vllm_ascend.ops import kimi_kda as tp
 
 
 def test_pending_buffers_follow_actual_consumer(monkeypatch):

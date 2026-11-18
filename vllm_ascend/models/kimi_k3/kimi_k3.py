@@ -92,11 +92,11 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_gproj_tp_group
-from vllm_ascend.models.glm5next.kda_input_projection_tp import FullRankGateTP
 from vllm_ascend.ops.kda_parallel import KDAColumnParallelLinear, KDARowParallelLinear, get_kda_state_shape
 from vllm_ascend.ops.kimi_kda import (
     AscendKimiK3DeltaAttention as AscendKimiK3DeltaAttentionBase,
 )
+from vllm_ascend.ops.kimi_kda import FullRankGateTP
 from vllm_ascend.ops.kimi_pixel_norm import build_kimi_pixel_norm
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
 from vllm_ascend.quantization.configs.modelslim_config import AscendModelSlimConfig

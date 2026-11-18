@@ -6,12 +6,14 @@ from dataclasses import dataclass
 from functools import wraps
 
 import torch
+import torch.distributed as dist
 import torch_npu
 from einops import rearrange
 from fla_npu.ops.ascendc import causal_conv1d_fn, causal_conv1d_update
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.distributed import divide, get_pcp_group
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -29,6 +31,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm_ascend import envs
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -41,11 +44,7 @@ from vllm_ascend.distributed.parallel_state import get_gproj_tp_group, get_qkv_i
 from vllm_ascend.models.glm5next.kda_input_projection_tp import (
     KDAInputProjectionTP,
     KDAInputProjectionTPLayout,
-    PendingGate,
-    PendingTensor,
-    TPCommunication,
     projection_capacity,
-    uses_aiv_communication,
 )
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
 from vllm_ascend.ops.kda_parallel import (
@@ -71,6 +70,109 @@ from vllm_ascend.utils import npu_stream_switch, vllm_version_is
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 _F_PROJ_SHARD_ID = 1
 _KDA_BFG_STREAM: torch.npu.Stream | None = None
+
+
+def uses_aiv_communication(group: GroupCoordinator | None) -> bool:
+    """Resolve the configured communication mode once, without a device probe."""
+    if group is None:
+        return False
+    backend = group.device_group._get_backend(torch.device("npu"))
+    mode = backend.options.hccl_config.get("hccl_op_expansion_mode", 0)
+    if mode:
+        # HcclCommConfig: 3=AIV, 4=AIV_ONLY. All other explicit modes use
+        # separate communication engines; a PG setting overrides the env.
+        return mode in (3, 4)
+    return envs.HCCL_OP_EXPANSION_MODE in ("AIV", "AIV_ONLY")
+
+
+@dataclass
+class PendingTensor:
+    tensor: torch.Tensor
+    work: dist.Work
+    # Retain the send buffer until the corresponding receive has completed.
+    source: torch.Tensor
+
+    def wait(self) -> torch.Tensor:
+        self.work.wait()
+        consumer = torch.npu.current_stream()
+        self.source.record_stream(consumer)
+        self.tensor.record_stream(consumer)
+        return self.tensor
+
+
+class TPCommunication:
+    """One ordered launch stream per executor; no collective is launched on aux."""
+
+    def __init__(self):
+        self.stream = None
+
+    def _launch(self, source, output, group, op):
+        main = torch.npu.current_stream()
+        if self.stream is None:
+            self.stream = torch.npu.Stream()
+        ready = main.record_event()
+        source.record_stream(self.stream)
+        output.record_stream(main)
+        with npu_stream_switch(self.stream):
+            self.stream.wait_event(ready)
+            work = op(output, source, group=group.device_group, async_op=True)
+        return PendingTensor(output, work, source)
+
+    def gather(self, hidden, group):
+        shape = (hidden.shape[0] * group.world_size, *hidden.shape[1:])
+        output = hidden.new_empty(shape)
+        return self._launch(hidden.contiguous(), output, group, dist.all_gather_into_tensor)
+
+    def exchange(self, source, group, *, overlap=True):
+        source = source.contiguous()
+        output = torch.empty_like(source)
+        if overlap:
+            return self._launch(source, output, group, dist.all_to_all_single)
+        # Submit on the caller's stream. The KDA caller joins immediately,
+        # before it can enqueue Vector state recovery or output preparation.
+        work = dist.all_to_all_single(output, source, group=group.device_group, async_op=True)
+        return PendingTensor(output, work, source)
+
+
+@dataclass
+class PendingGate:
+    pending: PendingTensor | None
+    owner_gate: torch.Tensor | None
+    layout: KDAInputProjectionTPLayout
+    capacity: int
+
+    def wait(self) -> torch.Tensor:
+        if self.pending is None:
+            assert self.owner_gate is not None
+            return self.owner_gate.view(self.capacity, self.layout.num_heads, self.layout.head_dim)
+        layout = self.layout
+        self.owner_gate = (
+            self.pending.wait()
+            .view(layout.size, self.capacity, layout.heads, layout.head_dim)
+            .permute(1, 0, 2, 3)
+            .reshape(self.capacity, layout.num_heads, layout.head_dim)
+        )
+        self.pending = None
+        return self.owner_gate
+
+
+class FullRankGateTP:
+    def __init__(self, group: GroupCoordinator, heads: int, head_dim: int):
+        self.layout = KDAInputProjectionTPLayout(group, heads, head_dim)
+        self.group = group
+        self.communication = TPCommunication()
+        self.uses_aiv = uses_aiv_communication(group)
+
+    def gather(self, hidden: torch.Tensor) -> PendingTensor:
+        owner, _ = self.layout.prepare_input(hidden)
+        return self.communication.gather(owner, self.group)
+
+    def project(self, gathered: PendingTensor, layer) -> PendingGate:
+        hidden = gathered.wait()
+        gate = layer(hidden)[0]
+        return PendingGate(
+            self.communication.exchange(gate, self.group), None, self.layout, hidden.shape[0] // self.layout.size
+        )
 
 
 @dataclass
