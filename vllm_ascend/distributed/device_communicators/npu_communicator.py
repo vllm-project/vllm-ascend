@@ -70,10 +70,10 @@ class _NpuAll2AllManager:
         Built on CPU on purpose: this is called while a fault is being
         probed, when the NPU may be hung — any device op would fail.
         """
-        mask = torch.zeros(self._ep_world_size, dtype=torch.int32)
-        for rank in self._dead:
-            mask[rank] = 1
-        return mask
+        return torch.tensor(
+            [int(rank in self._dead) for rank in range(self._ep_world_size)],
+            dtype=torch.int32,
+        )
 
     def query_fault(self) -> torch.Tensor:
         # MC2 has no in-kernel fault detection; faults surface as aborted ops.
@@ -101,15 +101,14 @@ class _NpuAll2AllManager:
         """Rebuild elastic_info from the dead set into the existing device
         tensor (never reallocates, so captured graphs stay valid)."""
 
-        world_size = self._ep_world_size
-        alive = sorted(set(range(world_size)) - self._dead)
-        num_physical_experts = len(alive) * self._num_local_experts
         table1 = self.orig_to_dense_rank_table()
-        table2 = torch.full((world_size,), -1, dtype=torch.int32)
-        table2[: len(alive)] = torch.tensor(alive, dtype=torch.int32)
-        self._elastic_info_host.copy_(
-            torch.cat([torch.tensor([1, len(alive), 0, num_physical_experts], dtype=torch.int32), table1, table2])
-        )
+        # Alive ranks in original-rank order are exactly the dense->orig table.
+        alive = torch.nonzero(table1 >= 0).flatten().to(torch.int32)
+        num_physical_experts = alive.numel() * self._num_local_experts
+        table2 = torch.full((self._ep_world_size,), -1, dtype=torch.int32)
+        table2[: alive.numel()] = alive
+        header = torch.tensor([1, alive.numel(), 0, num_physical_experts], dtype=torch.int32)
+        self._elastic_info_host.copy_(torch.cat([header, table1, table2]))
         self._elastic_info.copy_(self._elastic_info_host, non_blocking=True)
 
 

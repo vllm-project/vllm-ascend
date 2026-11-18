@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
 from datetime import timedelta
+from functools import wraps
 from typing import TYPE_CHECKING
 
 import torch
@@ -48,6 +49,11 @@ if TYPE_CHECKING:
 _sentinel: "WorkerSentinel | None" = None
 
 
+def _num_local_experts(model_state: EplbModelState) -> int:
+    """Physical expert slots per original EP rank (dead ranks keep their slots)."""
+    return model_state.physical_to_logical_map.shape[1] // get_ep_group().world_size
+
+
 def fault_barrier_wrapper(func: Callable):
     """Barrier between device faults and the async step loop.
 
@@ -59,34 +65,26 @@ def fault_barrier_wrapper(func: Callable):
     retry lifts the quarantine only after the groups are rebuilt.
     """
 
+    @wraps(func)
     def wrapped(self, *args, **kwargs):
         sentinel = _sentinel
         if sentinel is None:
             return func(self, *args, **kwargs)
         if sentinel.worker_faulted:
-            raise RuntimeError(f"[FT] worker is quarantined after fault: {sentinel.fault_info}")
+            raise RuntimeError(sentinel.faulted_message())
         try:
             return func(self, *args, **kwargs)
-        except SystemExit:
-            raise
         except Exception as exc:
-            sentinel.worker_faulted = True
-            sentinel.fault_info = f"{type(exc).__name__}: {exc}"
-            logger.warning(
-                "[FT] Quarantining %s after fault: %s",
-                getattr(self, "rank", "worker"),
-                exc,
-            )
+            rank = getattr(self, "rank", "worker")
+            sentinel.mark_faulted(exc)
+            logger.warning("[FT] Quarantining %s after fault: %s", rank, exc)
             try:
                 sentinel.reset_device()
             except Exception:
-                logger.exception(
-                    "[FT] self device reset failed on %s.",
-                    getattr(self, "rank", "worker"),
-                )
+                logger.exception("[FT] self device reset failed on %s.", rank)
             # Drop the frames that pin device tensors of the broken stream.
             exc.__traceback__ = None
-            raise RuntimeError(f"[FT] worker quarantined after fault: {sentinel.fault_info}")
+            raise RuntimeError(sentinel.faulted_message())
 
     return wrapped
 
@@ -115,6 +113,14 @@ class WorkerSentinel(GPUWorkerSentinel):
         self.fault_info: str | None = None
         _sentinel = self
 
+    def mark_faulted(self, exc: Exception) -> None:
+        """Record the first device-touching fault for the barrier."""
+        self.worker_faulted = True
+        self.fault_info = f"{type(exc).__name__}: {exc}"
+
+    def faulted_message(self) -> str:
+        return f"[FT] worker is quarantined after fault: {self.fault_info}"
+
     def query_mask(self, ft_request: FaultToleranceRequest) -> dict:
         """Report the dead-rank mask (upstream convention: 0=live, 1=dead)."""
         return {"mask": get_ep_all2all_manager().query_active_mask().tolist()}
@@ -138,9 +144,7 @@ class WorkerSentinel(GPUWorkerSentinel):
         """Record the per-rank physical expert slot count after model load."""
         if self.worker.model_runner.eplb_state is None:
             return
-        eplb_model_state = self._eplb_model_state()
-        num_local_experts = eplb_model_state.physical_to_logical_map.shape[1] // get_ep_group().world_size
-        get_ep_all2all_manager().set_num_local_physical_experts(num_local_experts)
+        get_ep_all2all_manager().set_num_local_physical_experts(_num_local_experts(self._eplb_model_state()))
         # The MC2 capacity exists only now; surface a config scale_down will reject.
         self._check_mc2_only_execution(raise_on_error=False)
 
@@ -177,8 +181,6 @@ class WorkerSentinel(GPUWorkerSentinel):
             validate_reload_checkpoint(model_config, load_config, model)
 
     def _validate_scale_down_preconditions(self) -> None:
-        if not self.worker.use_v2_model_runner:
-            raise ValueError("[FT] scale_down on Ascend NPU requires the v2 model runner.")
         model_runner = self.worker.model_runner
         eplb_config = self.worker.parallel_config.eplb_config
         if model_runner.eplb_state is None or eplb_config.num_redundant_experts <= 0:
@@ -282,7 +284,7 @@ class WorkerSentinel(GPUWorkerSentinel):
         """Redistribute one model and reload through its own checkpoint config."""
         p2l = model_state.physical_to_logical_map
         num_logical = model_state.logical_replica_count.shape[1]
-        num_local_experts = p2l.shape[1] // get_ep_group().world_size
+        num_local_experts = _num_local_experts(model_state)
 
         mark_dead_expert_slots_inplace(p2l, dead_ep_ranks, num_local_experts)
         reassignments = redistribute_expert_placement(p2l, num_logical, num_local_experts)
@@ -327,8 +329,7 @@ class WorkerSentinel(GPUWorkerSentinel):
         The mapping comes from the manager, which owns the cumulative dead set
         used for elastic_info, so both stay on the same numbering.
         """
-        p2l = eplb_model_state.physical_to_logical_map
-        num_local_experts = p2l.shape[1] // get_ep_group().world_size
+        num_local_experts = _num_local_experts(eplb_model_state)
         orig_to_dense_rank = get_ep_all2all_manager().orig_to_dense_rank_table()
         for layer in eplb_model_state.model.moe_layers:
             routing_table = getattr(getattr(layer, "eplb_state", None), "expert_replica_routing_table", None)
