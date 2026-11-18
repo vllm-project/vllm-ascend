@@ -195,7 +195,7 @@ jobs:
       group: main2main
       cancel-in-progress: false
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.1-a3-ubuntu22.04-py3.12
+      image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.3.0_20261113161300-a3-ubuntu22.04-py3.12
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -218,7 +218,7 @@ jobs:
       GH_TOKEN: ${{ secrets.DEV_SUBMITTER_TOKEN }}
       OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
       OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
-      MAIN2MAIN_IMAGE_TAG: 9.2.1-a3-ubuntu22.04-py3.12
+      MAIN2MAIN_IMAGE_TAG: 9.3.0_20261113161300-a3-ubuntu22.04-py3.12
       TARGET_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
       PUSH_TO_GITHUB: 'true'
       GITHUB_REPO: vllm-project/vllm-ascend
