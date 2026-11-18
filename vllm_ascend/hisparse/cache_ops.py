@@ -241,38 +241,44 @@ class HiSparseNPUOps:
             != 1
         ):
             raise ValueError("All three compact HiSparse swap outputs are required together")
-        # Core uses compact swap outputs and reserves block 0 as the null block.
+        self._resolve(workspace, locals())
+
+    def _resolve(self, workspace: ResolverWorkspace, arguments) -> None:
+        """Dispatch live tensors to the native request-union resolver.
+
+        During replay, external tensors remain owned by the runtime/workspace.
+        Callers must destroy graphs before releasing or rebinding those owners.
+        """
+        rows, topk = arguments["global_indices"].shape
         resolved = workspace.first_refs[: rows * topk].view(rows, topk)
         workspace.native.hisparse_resolve_residency(
-            logical=global_indices,
-            hot_table=hot_block_table,
-            requests=request_ids,
-            states=request_state_indices,
-            source=source_block_table,
-            resident=resident_block_table,
-            valid_rows=num_valid_rows,
-            dgi=device_global_indices,
-            lru=lru_slots,
-            output=hot_indices,
-            resolved=resolved,
-            errors=workspace.errors[:rows],
-            attention=attention_indices,
-            counts=valid_counts,
-            swap_host=swap_host_physical_rows,
-            swap_device=swap_device_physical_rows,
-            swap_counts=swap_counts,
-            miss_mask=None,
-            stats=stats,
-            host_rows=host_cache.shape[0],
-            hot_block_size=hot_cache.shape[1],
-            source_block_size=source_block_size,
-            resident_block_size=resident_block_size,
-            resident_null_block=0,
-            attention_block_stride=(
-                attention_block_stride if self.attention_block_stride is None else self.attention_block_stride
-            ),
-            union_rows=max_union_rows,
-            attention_capacity=self.attention_capacity,
+            arguments["global_indices"],
+            arguments["hot_block_table"],
+            arguments["request_ids"],
+            arguments["request_state_indices"],
+            arguments["source_block_table"],
+            arguments["resident_block_table"],
+            arguments["num_valid_rows"],
+            arguments["device_global_indices"],
+            arguments["lru_slots"],
+            arguments["hot_indices"],
+            resolved,
+            workspace.errors[:rows],
+            arguments["attention_indices"],
+            arguments["valid_counts"],
+            arguments["swap_host_physical_rows"],
+            arguments["swap_device_physical_rows"],
+            arguments["swap_counts"],
+            None,
+            arguments["stats"],
+            arguments["host_cache"].shape[0],
+            arguments["hot_cache"].shape[1],
+            arguments["source_block_size"],
+            arguments["resident_block_size"],
+            0,
+            arguments["attention_block_stride"] if self.attention_block_stride is None else self.attention_block_stride,
+            arguments["max_union_rows"],
+            self.attention_capacity,
         )
 
     def hisparse_gather_compact(
