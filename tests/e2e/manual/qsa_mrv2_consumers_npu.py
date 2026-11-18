@@ -25,6 +25,7 @@ from vllm_ascend.worker.v2 import attn_utils
 parser = argparse.ArgumentParser()
 parser.add_argument("--output", required=True)
 parser.add_argument("--fixture-file")
+parser.add_argument("--plain-rope", action="store_true", help="Also requires the separate plain-RoPE fallback fix")
 args = parser.parse_args()
 torch.npu.set_device(0)
 torch.manual_seed(21945)
@@ -41,6 +42,7 @@ results = {
     ).strip(),
     "cases": [],
     "threshold": {"atol": 0.04, "rtol": 0.02},
+    "rotary_mode": "plain" if args.plain_rope else "mrope",
 }
 
 
@@ -142,15 +144,18 @@ def execute(negative=False):
         obj.compress_ratio = 4
         obj.raw_key_cache = NS(key_cache=cache, rope_position_cache=None)
         obj.compressed_key_cache = NS(kv_cache=compressed)
-        obj.rotary_emb = get_rope(
-            head_size=256,
-            max_position=128,
-            rope_parameters={
-                "rope_type": "default",
-                "rope_theta": 10000000.0,
-                "partial_rotary_factor": 0.25,
-            },
-        ).to(device="npu", dtype=torch.bfloat16)
+        rope_parameters = {
+            "rope_type": "default",
+            "rope_theta": 10000000.0,
+            "partial_rotary_factor": 0.25,
+        }
+        if not args.plain_rope:
+            # Exercise raw stride independently of the separate plain-RoPE
+            # fallback bug. All three axes use the same logical first token.
+            rope_parameters.update(mrope_section=[11, 11, 10], mrope_interleaved=True)
+        obj.rotary_emb = get_rope(head_size=256, max_position=128, rope_parameters=rope_parameters).to(
+            device="npu", dtype=torch.bfloat16
+        )
         obj.k_layernorm = GemmaRMSNorm(128, eps=1e-6).to(device="npu", dtype=torch.bfloat16)
         obj.k_layernorm.weight.data.copy_(torch.linspace(-0.2, 0.4, 128, device="npu", dtype=torch.bfloat16))
         table = torch.tensor([[2], [1]], device="npu", dtype=torch.int32)
