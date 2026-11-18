@@ -26,8 +26,10 @@ def _supports_checkpoint_boundary_policy(config) -> bool:
 
 
 def initialize_gdn_checkpoints(layer) -> None:
-    if not get_ascend_config().gdn_internal_prefill_checkpoints:
+    ascend_config = get_ascend_config()
+    if not ascend_config.gdn_internal_prefill_checkpoints:
         return
+    layer._ascend_checkpoint_policy = ascend_config.gdn_checkpoint_policy
     # Do not advertise unsupported layers: the upstream all-layer capability
     # check keeps the scheduler's split fallback when any layer cannot export.
     config = layer.vllm_config
@@ -60,6 +62,7 @@ def initialize_gdn_checkpoints(layer) -> None:
 
 def separate_gdn_checkpoint_spec(layer, spec):
     """Opt in only when the worker and paired core carry private page IDs."""
+    policy = getattr(layer, "_ascend_checkpoint_policy", "all")
     if (
         getattr(layer, "_ascend_internal_checkpoint_enabled", False)
         and layer._exports_checkpoints
@@ -67,7 +70,13 @@ def separate_gdn_checkpoint_spec(layer, spec):
         and layer.vllm_config.speculative_config is None
         and hasattr(spec, "separate_prefill_checkpoint_blocks")
     ):
+        if policy == "prefix_only":
+            if not hasattr(spec, "cache_hit_reuses_prefix_only"):
+                raise ValueError("GDN prefix_only policy requires a vLLM core with prefix-only cache-hit support")
+            return replace(spec, separate_prefill_checkpoint_blocks=True, cache_hit_reuses_prefix_only=True)
         return replace(spec, separate_prefill_checkpoint_blocks=True)
+    if policy == "prefix_only":
+        raise ValueError("GDN prefix_only policy requires checkpoint-capable layers, Model Runner V2 and no MTP")
     return spec
 
 

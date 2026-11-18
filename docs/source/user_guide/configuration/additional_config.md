@@ -380,6 +380,26 @@ Omitting `quant_dtype` selects MXFP8 on 950DT Products:
 ## GDN internal prefill checkpoints
 
 Enable with `--additional-config '{"gdn_internal_prefill_checkpoints": true}'`.
+`gdn_checkpoint_policy` is a string, default `"all"`. Set it to `"prefix_only"`
+with internal checkpoints enabled to prioritize repeated public prefixes:
+
+```bash
+--additional-config '{"gdn_internal_prefill_checkpoints": true, "gdn_checkpoint_policy": "prefix_only"}'
+```
+
+In `prefix_only` mode, a cold prefix producer still exports its checkpoint.
+Requests admitted with a local prefix-cache hit reuse that immutable state,
+skip the tail checkpoint split, and publish no new recurrent states, including
+during decode. Their existing prefix remains reusable; an identical full-prompt
+replay may therefore hit only that original prefix. Prewarm public prefixes on
+an empty cache when a particular fine-grained boundary is required. Cold chunked
+prefills keep their normal checkpoint behavior. This mode requires Model Runner
+V2, speculative decoding disabled, and a paired core supporting the policy.
+
+The new policy uses additional config because it controls Ascend's GDN backend
+and changes the cache-retention/performance tradeoff. It is independent of the
+prefix match unit, which continues to control matching granularity.
+
 The option remains disabled by default pending numerical and performance
 qualification of the alternate prefill recurrence on supported NPUs.
 Requires prefix caching in align mode and vLLM with #60050. The optimization is

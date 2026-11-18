@@ -217,6 +217,25 @@ def test_private_checkpoint_spec_requires_supported_worker(enabled, mrv2, specul
     assert not spec.separate_prefill_checkpoint_blocks
 
 
+def test_prefix_only_policy_requires_explicit_core_capability(monkeypatch):
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    spec = MambaSpec(block_size=2048, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
+    monkeypatch.setattr(gdn_checkpoint.envs, "VLLM_USE_V2_MODEL_RUNNER", True)
+    layer = SimpleNamespace(
+        _ascend_internal_checkpoint_enabled=True,
+        _exports_checkpoints=True,
+        _ascend_checkpoint_policy="prefix_only",
+        vllm_config=SimpleNamespace(speculative_config=None),
+    )
+    actual = gdn_checkpoint.separate_gdn_checkpoint_spec(layer, spec)
+    assert actual.separate_prefill_checkpoint_blocks and actual.cache_hit_reuses_prefix_only
+    assert not spec.cache_hit_reuses_prefix_only
+    monkeypatch.setattr(gdn_checkpoint.envs, "VLLM_USE_V2_MODEL_RUNNER", False)
+    with pytest.raises(ValueError, match="Model Runner V2"):
+        gdn_checkpoint.separate_gdn_checkpoint_spec(layer, spec)
+
+
 @pytest.mark.parametrize("suppress_level", [0, 3])
 def test_chunk_forward_only_returns_converted_intermediates_when_requested(monkeypatch, suppress_level):
     q = torch.zeros(1, 4, 1, 8, dtype=torch.bfloat16)

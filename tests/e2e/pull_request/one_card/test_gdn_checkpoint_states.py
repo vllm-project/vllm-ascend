@@ -210,7 +210,9 @@ def test_fused_segments_preserve_checkpoint_and_restored_tail(lengths, offsets, 
         torch.testing.assert_close(output[:, begin:end], expected_output, rtol=0, atol=0)
 
 
-def test_cache_hit_prefill_exports_tail_in_one_model_step(monkeypatch, model_name="Qwen/Qwen3.5-35B-A3B"):
+def test_cache_hit_prefill_exports_tail_in_one_model_step(
+    monkeypatch, model_name="Qwen/Qwen3.5-35B-A3B", *, prefix_only=False
+):
     """Exercise private checkpoint pages through the real two-layer engine."""
     from vllm import LLM, SamplingParams
     from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointExporter
@@ -258,13 +260,18 @@ def test_cache_hit_prefill_exports_tail_in_one_model_step(monkeypatch, model_nam
         gpu_memory_utilization=0.2,
         enforce_eager=True,
         limit_mm_per_prompt={"image": 0, "video": 0},
-        additional_config={"gdn_internal_prefill_checkpoints": True},
+        additional_config={
+            "gdn_internal_prefill_checkpoints": True,
+            "gdn_checkpoint_policy": "prefix_only" if prefix_only else "all",
+        },
     )
     params = SamplingParams(max_tokens=1, ignore_eos=True, temperature=0)
     for hit, end in [(2048, 3512), (2176, 3512), (896, 1211)]:
         assert engine.reset_prefix_cache()
         seed = [i % 1000 + 100 for i in range(hit + 1)]
+        exports.clear()
         engine.generate([{"prompt_token_ids": seed}], params, use_tqdm=False)
+        assert exports == [[hit]], exports
         prompt = seed[:hit] + [2000 + i % 1000 for i in range(end - hit)]
         steps.clear()
         exports.clear()
@@ -272,13 +279,18 @@ def test_cache_hit_prefill_exports_tail_in_one_model_step(monkeypatch, model_nam
         assert output.num_cached_tokens == hit
         assert [sum(row.values()) for row in steps if row] == [end - hit]
         boundary = (end - 1) // 128 * 128
-        assert exports == [[boundary - hit]], exports
+        assert exports == ([] if prefix_only else [[boundary - hit]]), exports
         steps.clear()
         exports.clear()
         replay = engine.generate([{"prompt_token_ids": prompt}], params, use_tqdm=False)[0]
-        assert replay.num_cached_tokens == boundary
-        assert [sum(row.values()) for row in steps if row] == [end - boundary]
+        replay_hit = hit if prefix_only else boundary
+        assert replay.num_cached_tokens == replay_hit
+        assert [sum(row.values()) for row in steps if row] == [end - replay_hit]
         assert exports == []
+
+
+def test_prefix_only_hit_preserves_public_state_without_tail_exports(monkeypatch, model_name="Qwen/Qwen3.5-35B-A3B"):
+    test_cache_hit_prefill_exports_tail_in_one_model_step(monkeypatch, model_name, prefix_only=True)
 
 
 @pytest.mark.usefixtures("_init_checkpoint_prefill_ops")

@@ -772,6 +772,7 @@ class AscendConfig:
     # This switches the prefill recurrence; keep opt-in until cold/cache-hit
     # numerical equivalence and performance are qualified on supported NPUs.
     gdn_internal_prefill_checkpoints: bool = False
+    gdn_checkpoint_policy: Literal["all", "prefix_only"] = "all"
     enable_shared_expert_dp: bool = False
     enable_sp_by_pass: bool = False
     enable_sparse_sfa_turboquant: bool = False
@@ -792,6 +793,8 @@ class AscendConfig:
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
+        if self.gdn_checkpoint_policy == "prefix_only" and not self.gdn_internal_prefill_checkpoints:
+            raise ValueError("gdn_checkpoint_policy=prefix_only requires gdn_internal_prefill_checkpoints=true")
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.
