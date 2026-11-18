@@ -19,6 +19,18 @@ name: PR Create
 
 on:
   pull_request_target:
+    # opened + synchronize cover everything meaningful: the welcome comment
+    # fires on opened, and label/description maintenance re-runs when the
+    # pushed file set changes. Other actions (labeled, edited, ...) only
+    # re-run idempotent no-ops.
+    types: [opened, synchronize]
+
+concurrency:
+  # The steps are idempotent maintenance (welcome comment + labels), so a
+  # rapid synchronize burst (e.g. a mass rebase) only needs the newest run:
+  # older in-flight ones are cancelled instead of piling up in the queue.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: true
 
 permissions:
   pull-requests: write
@@ -97,7 +109,7 @@ jobs:
           fi
 
       - name: Label the PR
-        uses: actions/labeler@v6
+        uses: actions/labeler@v7
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           configuration-path: .github/labeler.yml

@@ -754,8 +754,8 @@ def _make_generic_indexer_descriptors(replication=1, quantized=True):
 def test_reuse_rebuilds_generic_indexer_descriptors_with_physical_capacity(replication, quantized):
     config, spec, names = _make_generic_indexer_descriptors(replication, quantized)
     original = config.kv_cache_tensors[-1]
-    # The spec keeps upstream MLA semantics, including outside the reuse path.
-    content_bytes = 128 if quantized else 256
+    # Stored rows include scale bytes and all replicated indexer regions.
+    content_bytes = replication * (130 if quantized else 256)
     assert spec.state_content_size_bytes == content_bytes
     assert original.block_stride == spec.block_size * content_bytes
     assert spec.page_size_bytes == spec.block_size * replication * (130 if quantized else 256)
@@ -781,8 +781,8 @@ def test_generic_indexer_descriptors_unchanged_without_reuse(reuse_disabled):
     apply_layerwise_kv_cache_plan(config, vllm_config)
 
     assert config.kv_cache_tensors is original
-    assert spec.state_content_size_bytes == 128
-    assert original[-1].block_stride == 256
+    assert spec.state_content_size_bytes == 2 * 130
+    assert original[-1].block_stride == 2 * 2 * 130
 
 
 def test_reuse_rejects_unknown_indexer_stride():

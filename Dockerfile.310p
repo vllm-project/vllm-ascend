@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:9.2.1-310p-ubuntu22.04-py3.12
+FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.3.0_20261113161300-310p-ubuntu22.04-py3.12
 
 WORKDIR /workspace
 
@@ -30,7 +30,7 @@ RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_TAG=v0.32.0
+ARG VLLM_TAG=v0.33.0
 ARG VLLM_COMMIT=""
 ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
 RUN if [ -n "$VLLM_COMMIT" ]; then \
@@ -55,6 +55,12 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
 # Dependency versions used by the vllm-ascend build.
 ARG SOC_VERSION="ascend310p1"
 ENV DEBIAN_FRONTEND=noninteractive
+# Cap opc/c++/rust build parallelism to bound memory on shared buildkitd nodes:
+# the heavy vllm-ascend compile otherwise spawns unbounded jobs and can exhaust
+# a 128Gi node (OOM-killing kubelet). CI passes --build-arg MAX_JOBS=32 /
+# CARGO_BUILD_JOBS=32; leaving them unset keeps the default nproc parallelism.
+ARG MAX_JOBS
+ARG CARGO_BUILD_JOBS
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
     OMP_NUM_THREADS=1

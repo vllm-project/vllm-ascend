@@ -28,14 +28,16 @@ from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.device.hardware_profile import WeightFormat
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
+from vllm_ascend.quantization.nz import mxfp8_nz
 from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg, get_dynamic_mx_quant_scale_alg
 from vllm_ascend.utils import (
-    ACL_FORMAT_FRACTAL_NZ,
     FP8_METHOD,
+    _should_trans_nz,
     dispose_tensor,
     maybe_trans_nz,
     maybe_trans_nz_with_scale,
@@ -47,6 +49,7 @@ from ..base import (
     PreparedLinearInput,
     QuantType,
     WeightSwitchGatherSpec,
+    require_mx_weight_format,
 )
 from ..registry import register_scheme
 
@@ -60,6 +63,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
     microscaling, and weights are stored in FP8 format with per-group scales.
     """
 
+    quant_type: QuantType = QuantType.W8A8MXFP
     model_dtype = None
     weight_switch_gather_specs = (
         WeightSwitchGatherSpec("weight"),
@@ -73,6 +77,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
     supports_unaligned_tp_groups = True
 
     def __init__(self):
+        require_mx_weight_format(WeightFormat.MXFP8)
         vllm_config = get_current_vllm_config()
         quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
         self.group_size = quant_description.get("group_size", 32)
@@ -163,6 +168,58 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
         return output
 
+    def apply_single_group_gmm(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        """Use single-group GMM for a bias-free, 2-D MXFP8 projection.
+
+        This eager path targets QMM workspace/tiling submission overhead,
+        for example in prefill QKV and routed down/up projections. The caller
+        selects it only in eager execution; graph capture/replay, biased and
+        higher-dimensional projections continue through ``apply``.
+
+        ``x`` contains [tokens, K] activations, either unquantized or already
+        quantized with MX scales (a tuple or PreparedLinearInput). All token
+        rows form one group. Weights must have completed post-processing:
+        ND uses [K, N]; single-group NZ uses [1, K, N] with the corresponding
+        scale layout and ``_mxfp8_gmm_nz_layout`` set on the layer.
+        """
+        if isinstance(x, PreparedLinearInput):
+            quantized_x = x.quantized
+            if x.scale is None:
+                raise ValueError("PreparedLinearInput scale must not be None for single-group GMM.")
+            pertoken_scale = x.scale
+            output_dtype = x.output_dtype
+        elif isinstance(x, tuple):
+            quantized_x, pertoken_scale = x
+            output_dtype = torch.bfloat16
+        else:
+            quantized_x, pertoken_scale = self._quantize_input(layer, x)
+            output_dtype = x.dtype
+
+        weight = layer.weight
+        weight_scale = layer.weight_scale
+        if not getattr(layer, "_mxfp8_gmm_nz_layout", False):
+            # Post-processing already adds the group dimension for NZ.
+            # ND weights only need a view for this single-group call.
+            weight = weight.unsqueeze(0)
+            weight_scale = weight_scale.unsqueeze(0)
+        group_list = torch.full((1,), quantized_x.shape[0], dtype=torch.int64, device=quantized_x.device)
+        return torch_npu.npu_grouped_matmul(
+            x=[quantized_x],
+            weight=[weight],
+            scale=[weight_scale],
+            per_token_scale=[pertoken_scale],
+            group_list=group_list,
+            split_item=2,
+            group_type=0,
+            output_dtype=output_dtype,
+            scale_dtype=torch_npu.float8_e8m0fnu,
+            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+        )[0]
+
     def process_weights_after_loading(self, layer):
         """Process weights after loading for MXFP8 inference.
 
@@ -218,15 +275,30 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             reshaped_scale = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
         target_scale = reshaped_scale.transpose(0, 1)
 
+        transposed_weight = padded_weight.transpose(0, 1).contiguous()
+        layer._mxfp8_gmm_nz_layout = (
+            getattr(layer, "_single_group_gmm_nz", False)
+            and not getattr(layer, "_fused_preprocess_managed", False)
+            and _should_trans_nz(transposed_weight)
+        )
+        if layer._mxfp8_gmm_nz_layout:
+            # Add the group dimension before casting: WeightNz GMM needs
+            # physical rank-5 NZ storage, not a view of rank-4 NZ storage.
+            transposed_weight = transposed_weight.unsqueeze(0)
+            target_scale = target_scale.unsqueeze(0)
+
         if not hasattr(layer, "_mxfp8_weight_buf"):
             # First call: allocate the persistent transformed buffers.
-            layer._mxfp8_weight_buf = padded_weight.transpose(0, 1).contiguous()
+            layer._mxfp8_weight_buf = transposed_weight
             if not getattr(layer, "_fused_preprocess_managed", False):
-                layer._mxfp8_weight_buf = maybe_trans_nz(layer._mxfp8_weight_buf, customize_dtype=torch.float8_e4m3fn)
+                layer._mxfp8_weight_buf = maybe_trans_nz(layer._mxfp8_weight_buf, **mxfp8_nz().cast_kwargs())
             layer._mxfp8_scale_buf = target_scale.contiguous()
         else:
             # Subsequent calls (RL reload path): copy in place to keep data_ptr stable.
-            layer._mxfp8_weight_buf.copy_(padded_weight.transpose(0, 1).contiguous())
+            if layer._mxfp8_gmm_nz_layout:
+                # A5 only supports NZ-to-NZ copies into an internal-format buffer.
+                transposed_weight = maybe_trans_nz(transposed_weight, customize_dtype=torch.float8_e4m3fn)
+            layer._mxfp8_weight_buf.copy_(transposed_weight)
             layer._mxfp8_scale_buf.copy_(target_scale.contiguous())
 
         layer.weight.data = layer._mxfp8_weight_buf
@@ -266,17 +338,23 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         orig_shapes = layer._mxfp8_original_shapes
         orig_scale_shape = orig_shapes["weight_scale"]
 
-        # Restore weight: (input_size, output_size) -> (output_size, input_size)
-        target_weight = layer.weight.data.transpose(0, 1).contiguous()
-        layer.weight.data = layer.weight.data.transpose(0, 1)
-        layer.weight.data.copy_(target_weight)
+        if getattr(layer, "_mxfp8_gmm_nz_layout", False):
+            restored_weight = torch_npu.npu_format_cast(layer.weight.data, 2, customize_dtype=torch.float8_e4m3fn)
+            target_weight = restored_weight.squeeze(0).transpose(0, 1).contiguous()
+            layer.weight.data = target_weight
+            target_scale = layer.weight_scale.data.squeeze(0).transpose(0, 1).reshape(orig_scale_shape).contiguous()
+            layer.weight_scale.data = target_scale
+            # Retain the transformed buffers captured by ACL graphs.
+            # process_weights_after_loading copies reloaded data into them.
+            layer._mxfp8_gmm_nz_layout = False
+        else:
+            target_weight = layer.weight.data.transpose(0, 1).contiguous()
+            layer.weight.data = layer.weight.data.transpose(0, 1)
+            layer.weight.data.copy_(target_weight)
 
-        # Restore weight_scale: (k_dim//2, n_dim, 2) -> (n_dim, k_dim)
-        # Current shape: (k_dim//2, n_dim, 2)
-        # Target shape: (n_dim, k_dim)
-        target_scale = layer.weight_scale.data.transpose(0, 1).reshape(orig_scale_shape).contiguous()
-        layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1).reshape(orig_scale_shape)
-        layer.weight_scale.data.copy_(target_scale)
+            target_scale = layer.weight_scale.data.transpose(0, 1).reshape(orig_scale_shape).contiguous()
+            layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1).reshape(orig_scale_shape)
+            layer.weight_scale.data.copy_(target_scale)
 
         # Mark as not transformed (ready for weight loading)
         layer._mxfp8_transformed = False
@@ -289,10 +367,11 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
     model_dtype = None
     quant_type: QuantType = QuantType.W8A8MXFP
     act_quant_type: torch.dtype = torch.float8_e4m3fn
-    fused_activations = frozenset({"silu"})
+    fused_activations = frozenset({"silu", "swiglustep"})
     supports_eplb = True
 
     def __init__(self):
+        require_mx_weight_format(WeightFormat.MXFP8)
         vllm_config = get_current_vllm_config()
         quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
         self.group_size = quant_description.get("group_size", 32)
@@ -374,6 +453,11 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def get_fused_mc2_weights(self, layer: torch.nn.Module) -> MoEWeights:
         if hasattr(layer, "cann_mega_moe_w13_weight_list"):
+            # MegaMoe consumes the non-transposed per-expert weight/scale lists
+            # built in process_weights_after_loading (the non-mega path uses the
+            # transposed single tensors below).
+            shared_fusion = getattr(layer, "ascend_megamoe_shared_fusion", None)
+            shared = shared_fusion.weights if shared_fusion is not None else None
             return MoEWeights(
                 w1=layer.cann_mega_moe_w13_weight_list,
                 w2=layer.cann_mega_moe_w2_weight_list,
@@ -381,6 +465,10 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=layer.cann_mega_moe_w2_weight_scale_list,
                 w1_scale_bias=None,
                 w2_scale_bias=None,
+                shared_w1=shared.w1 if shared else None,
+                shared_w2=shared.w2 if shared else None,
+                shared_w1_scale=shared.w1_scale if shared else None,
+                shared_w2_scale=shared.w2_scale if shared else None,
             )
         return MoEWeights(
             w1=layer.w13_weight_list if self.use_expert_weight_list else layer.w13_weight,
@@ -476,11 +564,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 for expert in weight_nd.unbind(dim=0):
                     expert = expert.clone()
                     if expert.device.type == "npu":
-                        torch_npu.npu_format_cast_(
-                            expert,
-                            ACL_FORMAT_FRACTAL_NZ,
-                            customize_dtype=torch.float8_e4m3fn,
-                        )
+                        mxfp8_nz().cast_(expert)
                     weight_list.append(expert)
                 list_prefix = ""
             # Checkpoint E8M0 scales are stored as bytes; CANN requires their semantic dtype.
@@ -511,7 +595,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                     weight.data,
                     target_scale,
                     transpose_dims=(1, 2),
-                    customize_dtype=torch.float8_e4m3fn,
+                    **mxfp8_nz().cast_kwargs(),
                 )
             else:
                 weight_buffer, scale_buffer = layer._mxfp8_moe_buffers[weight_name]
@@ -632,20 +716,38 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         return [getattr(layer, name)]
 
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
-        if mlp_compute_input.activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
-            # GMM produces contiguous [gate | up] BF16 output. Mode 2 applies
-            # the clipped, non-interleaved SwiGLU-OAI before MXFP8 quantization;
+        if mlp_compute_input.activation in (MoEActivation.SWIGLUOAI_UNINTERLEAVE, MoEActivation.SWIGLUSTEP):
+            # Both modes consume GMM's contiguous [gate | up] BF16 output;
             # mode 1 would instead interpret alternating gate/up elements.
             hidden_states = self.apply_gmm1(mlp_compute_input)
+            activation_kwargs: dict[str, Any]
+            if mlp_compute_input.activation == MoEActivation.SWIGLUSTEP:
+                # Mode 3 clamps gate after SiLU, matching SwigluStepAndMul
+                # without alpha/bias or interleaving.
+                activation_kwargs = dict(
+                    swiglu_mode=3,
+                    # Match the fixed post-SiLU limit in moe_mlp.py's
+                    # unfused SWIGLUSTEP path, independent of MoE config.
+                    clamp_limit=7.0,
+                )
+            else:
+                # Mode 2 applies the non-interleaved SwiGLU-OAI activation:
+                # clamp before activation, using the configured alpha/bias.
+                activation_kwargs = dict(
+                    swiglu_mode=2,
+                    clamp_limit=mlp_compute_input.swiglu_limit,
+                    glu_alpha=mlp_compute_input.swiglu_alpha,
+                    glu_bias=mlp_compute_input.swiglu_beta,
+                )
             hidden_states, out_scale = torch_npu.npu_swiglu_mx_quant(
                 hidden_states,
+                # vLLM list type 1 and operator group_mode 0 both mean token counts.
+                group_index=cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 1),
+                group_mode=0,
                 activate_left=True,
-                swiglu_mode=2,
-                clamp_limit=mlp_compute_input.swiglu_limit,
-                glu_alpha=mlp_compute_input.swiglu_alpha,
-                glu_bias=mlp_compute_input.swiglu_beta,
                 dst_type=self.act_quant_type,
                 scale_alg=self._dynamic_mx_quant_scale_alg,
+                **activation_kwargs,
             )
             return hidden_states, maybe_normalize_mxfp_scale_layout(out_scale)
 

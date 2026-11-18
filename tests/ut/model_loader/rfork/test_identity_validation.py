@@ -215,14 +215,12 @@ def _ascend_config(**overrides):
         "pd_tp_ratio": 1,
         "pd_head_ratio": 1,
         "num_head_replica": 1,
-        "draft_window_size": None,
         "finegrained_tp_config": SimpleNamespace(
             oproj_tensor_parallel_size=1,
             lmhead_tensor_parallel_size=1,
             embedding_tensor_parallel_size=1,
             mlp_tensor_parallel_size=1,
         ),
-        "dynamic_spec_config": SimpleNamespace(method=None, method_params={}),
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -278,7 +276,6 @@ def test_ascend_layout_switches_do_not_partition_weight_seeds(identity_module, m
         ("pd_tp_ratio", 1, 2),
         ("pd_head_ratio", 1, 2),
         ("num_head_replica", 1, 2),
-        ("draft_window_size", None, 8),
     )
     for field, base_value, changed_value in changes:
         monkeypatch.setattr(
@@ -635,17 +632,6 @@ def test_draft_model_and_parallel_layout_do_not_partition_weight_seeds(identity_
     parallel_changed = _build_fingerprint(identity_module, _model_config(), speculative_config=changed_parallel_spec)
     assert model_changed == base
     assert parallel_changed == base
-
-
-def test_dynamic_spec_layout_does_not_partition_weight_seeds(identity_module, monkeypatch):
-    monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config())
-    base = _fingerprint(identity_module)
-    monkeypatch.setattr(
-        identity_module,
-        "get_ascend_config",
-        lambda: _ascend_config(dynamic_spec_config=SimpleNamespace(method="mtp", method_params={"window": 4})),
-    )
-    assert _fingerprint(identity_module) == base
 
 
 def test_compilation_capture_sizes_do_not_partition_weight_seeds(identity_module):

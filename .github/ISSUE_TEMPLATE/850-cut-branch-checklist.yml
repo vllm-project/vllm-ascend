@@ -53,9 +53,9 @@ body:
       CI/CD configuration changes on the release branch.
     label: Release Branch CI Updates (on release branch)
     value: >
-      - [ ] pr_test.yaml: Remove main_commit from run-selected-tests and run-selected-tests-upstream job matrices (keep release_tag only)
+      - [ ] pr_test.yaml / pr_e2e_command.yml: No manual edit needed. CI detects the PR base branch automatically: `main` / `*-dev` test the verified vLLM main commit, `releases/v*` test only the pinned vLLM release tag.
 
-      - [ ] pr_e2e_command.yml: Remove main_commit from trigger-selected-tests job matrix (keep release_tag only)
+      - [ ] Keep `.github/vllm-main-verified.commit` on the release branch: `pre-commit`/mypy still checks out that commit on every branch. Only test execution switches to the release tag.
 
       - [ ] Version Bump: Update internal version strings in setup files or vllm_ascend/__init__.py
 

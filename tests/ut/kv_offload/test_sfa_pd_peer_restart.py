@@ -36,6 +36,7 @@ def sender(monkeypatch):
     monkeypatch.setattr(sending.zmq, "Context", MagicMock(return_value=context))
     thread = sending.MembPullSendingThread(
         ready_event=threading.Event(),
+        device_id=0,
         state=sending.ProducerSendState(
             last_layer_idx=0,
             main_group_idx=0,

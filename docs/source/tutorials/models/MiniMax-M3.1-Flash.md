@@ -33,6 +33,10 @@ The official release of MiniMax-M3.1-Flash is available on [Hugging Face](https:
 
 Download the weight variant used by the serving commands to the same model directory on all participating nodes. It is recommended to place the model weight in a shared cache directory.
 
+The Ascend-adapted W8A8 and W8A8-MXFP8 weights above are published on ModelScope only; the Hugging Face repository contains the original NVFP4 checkpoint, which cannot be loaded on Ascend.
+
+Record the downloaded model directories, for example `/models/MiniMax-M3.1-Flash-W8A8` and `/models/MiniMax-M3.1-Flash-W8A8-MXFP8`, and ensure they are accessible inside the container. The commands in this guide use the placeholders `<MINIMAX_M31_FLASH_W8A8_PATH>` and `<MINIMAX_M31_FLASH_W8A8_MXFP8_PATH>` in Section 4.1, and the `MODEL_PATH` variable in Section 5. Replace them with the paths you recorded.
+
 ### 3.2 Verify Multi-node Communication
 
 Prepare the business network and the NPU interconnect by following
@@ -45,6 +49,8 @@ On each host, use `ip addr` or `ifconfig` to identify the host communication IP 
 ### 4.1 Docker Image Installation
 
 Choose the tab for your hardware and run the commands on each participating host.
+
+The image tags below are fixed to the release that matches this guide. If your vLLM-Ascend version differs, replace the tag with the one for your release; see [Using Docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "A2 series (W8A8)"
 
@@ -146,6 +152,46 @@ Choose the tab for your hardware and run the commands on each participating host
         -w /workspace "$IMAGE" bash
     ```
 
+After the container starts, check that it is running and that the expected NPUs are visible:
+
+```bash
+docker ps --filter name=minimax_m31_flash
+docker exec minimax_m31_flash bash -lc 'npu-smi info'
+```
+
+Expected result: the container status is `Up`; `npu-smi info` lists 8 NPUs on A2 and 950DT products, and 16 NPUs on A3.
+
+### 4.2 Source Code Installation
+
+If you prefer not to use the Docker image, build both packages from source. MiniMax-M3.1-Flash support is available on the vLLM Ascend `main` branch, so install that branch rather than an older release.
+
+1. Clone and install vLLM:
+
+    ```bash
+    git clone https://github.com/vllm-project/vllm.git
+    cd vllm
+    pip install -v -e .
+    ```
+
+2. Clone and install vLLM Ascend (`main` branch):
+
+    ```bash
+    git clone https://github.com/vllm-project/vllm-ascend.git
+    cd vllm-ascend
+    git checkout main
+    pip install -v -e .
+    ```
+
+3. Verify the installation:
+
+    ```bash
+    pip show vllm vllm-ascend
+    ```
+
+    Expected result: both packages are listed with the expected versions.
+
+When the service spans multiple nodes, install the same vLLM and vLLM Ascend revisions in every container so that the distributed group uses identical code.
+
 ## 5 Online Service Deployment
 
 Use the container and model weights for your hardware from [Installation](#4-installation).
@@ -168,7 +214,7 @@ These values belong to different deployment profiles. Weights, communication buf
 
 For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use `--limit-mm-per-prompt '{"image":2,"video":0}'` for two-image requests, and use `--limit-mm-per-prompt '{"image":0,"video":1}'` for one-video requests.
 
-### 5.1 Single-Node Deployment
+### 5.1 Single-Node Online Deployment
 
 Single-node deployment runs Prefill and Decode on the same host. The A3 example uses W8A8 weights on all 16 NPUs, and the 950DT products example uses W8A8-MXFP8 weights on all eight NPUs. Both use [DSpark speculative decoding](../../user_guide/feature_guide/speculative_decoding.md#speculating-using-dspark), which generates draft tokens and verifies them with the target model.
 
@@ -240,7 +286,7 @@ Single-node deployment runs Prefill and Decode on the same host. The A3 example 
         --write-out '%{http_code}\n' http://127.0.0.1:11223/health
     ```
 
-    Expected output: `200`. Send requests to port `11223` with model name `minimax-m3.1-flash`. If startup is still in progress or fails, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails).
+    Expected result: `200`. Send requests to port `11223` with model name `minimax-m3.1-flash`. If startup is still in progress or fails, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails).
 
 === "950DT products"
 
@@ -305,7 +351,7 @@ Single-node deployment runs Prefill and Decode on the same host. The A3 example 
         --write-out '%{http_code}\n' http://127.0.0.1:11223/health
     ```
 
-    Expected output: `200`. Send requests to port `11223` with model name `minimax-m3.1-flash`. If startup is still in progress or fails, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails).
+    Expected result: `200`. Send requests to port `11223` with model name `minimax-m3.1-flash`. If startup is still in progress or fails, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails).
 
 ### 5.2 Multi-Node Deployment
 
@@ -487,7 +533,7 @@ There are two A2 nodes, DP4 × TP4 / EP16 in total. The following values match t
         --write-out '%{http_code}\n' http://127.0.0.1:11223/health
     ```
 
-    Expected output: `200`. Send requests to port `11223` on node 0 with model name `minimax-m3.1-flash`.
+    Expected result: `200`. Send requests to port `11223` on node 0 with model name `minimax-m3.1-flash`.
 
 ### 5.3 PD Disaggregation (1P1D)
 
@@ -702,7 +748,7 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
         --data-parallel-rank "$DP_RANK" \
         --data-parallel-address "$LOCAL_IP" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":512}' \
         --additional-config '{
             "enable_cpu_binding":true,
             "multistream_overlap_shared_expert":true,
@@ -796,7 +842,7 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
         --data-parallel-rank "$DP_RANK" \
         --data-parallel-address "$DECODE_HEAD_IP" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":512}' \
         --additional-config '{
             "enable_cpu_binding":true,
             "multistream_overlap_shared_expert":true,
@@ -1608,7 +1654,7 @@ The 1P1D topology uses one Prefill service with `DP1 × TP4 × PP2` on one host 
         --data-parallel-rank "$DP_RANK" \
         --data-parallel-address "$LOCAL_IP" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":512}' \
         --additional-config '{
             "enable_cpu_binding":true,
             "multistream_overlap_shared_expert":true,
@@ -1727,7 +1773,7 @@ The 1P1D topology uses one Prefill service with `DP1 × TP4 × PP2` on one host 
         --data-parallel-rank "$DP_RANK" \
         --data-parallel-address "$DECODE_HEAD_IP" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":512}' \
         --additional-config '{
             "enable_cpu_binding":true,
             "multistream_overlap_shared_expert":true,
@@ -2841,7 +2887,7 @@ models = [
         use_timestamp=False,
         retry=2,
         host_ip="127.0.0.1",
-        host_port=8009,
+        host_port=11223,
         max_out_len=1024,
         batch_size=32,
         trust_remote_code=False,
@@ -2853,11 +2899,15 @@ models = [
 ]
 ```
 
+`host_ip` and `host_port` must point at the endpoint you deployed: `127.0.0.1` and `11223` for the single-node or A2 colocated service, and the proxy host and `19080` for the PD and KV-pool topologies in Sections 5.3 and 5.4.
+
 **Run the performance evaluation using the GSM8K dataset as an example:**
 
 ```bash
 ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf --debug --summarizer default_perf --mode perf --num-prompts 128
 ```
+
+Expected result: the run prints a performance summary that includes request throughput (req/s), output-token throughput (token/s), mean and P99 TTFT, mean and P99 TPOT, and the number of completed and failed requests. A run is valid when the failed-request count is zero and the sample count matches `--num-prompts`.
 
 ## 9 Performance Tuning
 

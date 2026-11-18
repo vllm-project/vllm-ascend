@@ -1516,7 +1516,7 @@ This is the first release candidate of v0.15.0 for vLLM Ascend. Please follow th
 ### Documentation
 
 - Added AI-assisted model-adaptation workflow documentation for vllm-ascend. [#6731](https://github.com/vllm-project/vllm-ascend/pull/6731)
-- Added vLLM Ascend development guidelines (AGETNS.md). [#6797](https://github.com/vllm-project/vllm-ascend/pull/6797)
+- Added vLLM Ascend development guidelines (AGENTS.md). [#6797](https://github.com/vllm-project/vllm-ascend/pull/6797)
 - Added GLM5 tutorial documentation. [#6709](https://github.com/vllm-project/vllm-ascend/pull/6709) [#6717](https://github.com/vllm-project/vllm-ascend/pull/6717)
 - Added Memcache Usage Guide. [#6476](https://github.com/vllm-project/vllm-ascend/pull/6476)
 - Added request forwarding documentation. [#6780](https://github.com/vllm-project/vllm-ascend/pull/6780)
@@ -1949,7 +1949,7 @@ This is the second release candidate of v0.11.0 for vLLM Ascend. In this release
 
 ### Known Issues
 
-- Ray + EP doesn't work, if you run vLLM Ascend with ray, please disable expert parallelism. [#4123](https://github.com/vllm-project/vllm-ascend/issues/4123)
+- Ray + EP doesn't work, if you run vLLM Ascend with ray, please disable expert parallelism.
 - `response_format` parameter is not supported yet. We'll support it soon. [#4175](https://github.com/vllm-project/vllm-ascend/issues/4175)
 - cpu bind feature doesn't work for multi instance case(Such as multi DP on one node). We'll fix it in the next release.
 
