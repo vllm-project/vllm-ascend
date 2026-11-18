@@ -16,6 +16,8 @@ import pytest
 import torch
 from torch import nn
 
+from vllm_ascend.quantization.quant_type import QuantType
+
 ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -70,6 +72,7 @@ def runtime(monkeypatch):
         get_current_hardware_profile=lambda: profile,
         HardwareCapability=SimpleNamespace(DYNAMIC_MX_QUANT_FUSION=object(), RMS_NORM_DYNAMIC_QUANT=object()),
         AscendLinearScheme=object,
+        QuantType=QuantType,
         WeightSwitchGatherSpec=lambda *a, **kw: None,
         register_scheme=lambda *a: lambda cls: cls,
         __name__=__name__,

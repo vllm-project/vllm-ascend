@@ -11,6 +11,8 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.speculative import SpeculativeConfig
 from vllm.model_executor.layers import rotary_embedding
 
+from vllm_ascend import ascend_config
+from vllm_ascend import logger as ascend_logger
 from vllm_ascend.patch.platform.patch_speculative_config import _normalize_kimi_dflash_rope
 
 
@@ -170,6 +172,9 @@ def test_kimi_dflash_prefers_canonical_rope_parameters():
 
 
 def test_kimi_dflash_get_rope_cache_matches_legacy_yarn(monkeypatch):
+    monkeypatch.setattr(ascend_config, "_ASCEND_CONFIG", None)
+    monkeypatch.setattr(ascend_config, "_INIT_VLLM_CONFIG", None)
+    monkeypatch.setattr(ascend_logger, "configure_ascend_file_logging", lambda: None)
     config = Qwen3Config(**_kimi_dflash_config_dict())
     reference_parameters = dict(_rope_parameters(config))
     # vLLM 0.29 did not forward these two fields for ordinary YaRN.

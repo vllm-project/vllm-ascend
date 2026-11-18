@@ -9,19 +9,28 @@ import torch
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMulWithClamp
 
+from vllm_ascend import ascend_config
+from vllm_ascend import logger as ascend_logger
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.ops.fused_moe import fused_moe, moe_utils, shared_experts
-from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MegamoeSharedExpertFusion
+from vllm_ascend.ops.fused_moe import fused_moe, moe_comm_method, moe_utils, shared_experts
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MegamoeSharedExpertFusion, MegamoeSharedWeights
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedMC2CommImpl
 from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts
+from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithMC2
+from vllm_ascend.quantization.methods.w4a8 import w4a8
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.quant_type import QuantType
 
 
 @pytest.fixture(autouse=True)
-def default_vllm_config():
+def default_vllm_config(monkeypatch):
+    # Config initialization must not reuse another test's mocked singleton or
+    # create log files. Restore the previous platform state after each case.
+    monkeypatch.setattr(ascend_config, "_ASCEND_CONFIG", None)
+    monkeypatch.setattr(ascend_config, "_INIT_VLLM_CONFIG", None)
+    monkeypatch.setattr(ascend_logger, "configure_ascend_file_logging", lambda: None)
     with set_current_vllm_config(VllmConfig()):
         yield
 
@@ -212,6 +221,78 @@ def test_integer_shared_abi_rejects_each_missing_descriptor(missing_arg):
 
 def test_integer_shared_abi_accepts_complete_descriptor_set():
     FusedMC2CommImpl._validate_integer_shared_abi(_INTEGER_SHARED_ABI)
+
+
+@pytest.mark.parametrize("use_expert_weight_list", [False, True])
+@pytest.mark.parametrize("use_mega_moe", [False, True])
+@pytest.mark.parametrize("shared_state", ["missing", "pending", "ready"])
+def test_w4a8_shared_weights_reach_megamoe(monkeypatch, use_expert_weight_list, use_mega_moe, shared_state):
+    context = SimpleNamespace(use_mega_moe=use_mega_moe, is_decode_only_node=False)
+    monkeypatch.setattr(w4a8, "_EXTRA_CTX", context)
+    monkeypatch.setattr(moe_comm_method, "_EXTRA_CTX", context)
+    monkeypatch.setattr(
+        moe_comm_method, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3)
+    )
+    method = w4a8.AscendW4A8DynamicFusedMoEMethod.__new__(w4a8.AscendW4A8DynamicFusedMoEMethod)
+    method.use_expert_weight_list = use_expert_weight_list
+    layer = SimpleNamespace()
+    for name in ("w13", "w2"):
+        weight = torch.zeros(4, 4, dtype=torch.int8)
+        scale = torch.ones(4)
+        bias = torch.zeros(4)
+        for suffix, tensor in (("weight", weight), ("weight_scale", scale), ("scale_bias", bias)):
+            setattr(layer, f"{name}_{suffix}", tensor)
+            setattr(layer, f"{name}_{suffix}_list", [tensor])
+            setattr(layer, f"cann_mega_moe_{name}_{suffix}_list", [tensor])
+    shared = MegamoeSharedWeights(
+        w1=[torch.ones(4, 4, dtype=torch.int8)],
+        w2=[torch.ones(2, 4, dtype=torch.int8)],
+        w1_scale=[torch.ones(4, dtype=torch.int64)],
+        w2_scale=[torch.ones(4, dtype=torch.int64)],
+    )
+    _, quant_out_dtype, weight_type = moe_utils._get_cann_mega_moe_quant_settings(QuantType.W8A8)
+    if shared_state != "missing":
+        layer.ascend_megamoe_shared_fusion = MegamoeSharedExpertFusion(
+            weights=shared if shared_state == "ready" else None,
+            quant_out_dtype=quant_out_dtype,
+            weight_type=weight_type,
+        )
+    weights = method.get_fused_mc2_weights(layer)
+    active = use_mega_moe and shared_state == "ready"
+    for name in ("w1", "w2", "w1_scale", "w2_scale"):
+        assert getattr(weights, f"shared_{name}") is (getattr(shared, name) if active else None)
+    if not use_mega_moe:
+        return
+
+    # Execute the real communicator and W4A8 getter. Only the native kernel is
+    # mocked, so a dropped payload cannot be hidden by a mocked getter.
+    comm = FusedMC2CommImpl.__new__(FusedMC2CommImpl)
+    comm.token_dispatcher = Mock(spec=TokenDispatcherWithMC2)
+    comm.token_dispatcher.max_num_tokens_per_rank = 4
+    comm.token_dispatcher.global_bs = 0
+    comm.enable_fused_mc2 = 1
+    comm.mega_moe_symm_buffer = SimpleNamespace()
+    comm._mega_moe_supported_kwargs = _INTEGER_SHARED_ABI
+    comm.mega_moe = Mock(return_value=(torch.zeros(2, 4), torch.zeros(1, dtype=torch.int64)))
+    inputs = SimpleNamespace(
+        hidden_states=torch.ones(2, 4),
+        topk_ids=torch.zeros(2, 1, dtype=torch.int64),
+        topk_weights=torch.ones(2, 1),
+        routing=SimpleNamespace(mc2_mask=None),
+        quant=SimpleNamespace(quant_type=QuantType.W4A8),
+        layer=layer,
+    )
+    comm.fused_experts(inputs, quant_method=method)
+    kwargs = comm.mega_moe.call_args.kwargs
+    if active:
+        assert kwargs["shared_l1_weights"] is shared.w1
+        assert kwargs["shared_l2_weights"] is shared.w2
+        assert kwargs["shared_l1_weights_sf"] is shared.w1_scale
+        assert kwargs["shared_l2_weights_sf"] is shared.w2_scale
+        assert kwargs["shared_expert_quant_out_dtype"] == quant_out_dtype
+        assert kwargs["shared_weight1_type"] == kwargs["shared_weight2_type"] == weight_type
+    else:
+        assert not (_INTEGER_SHARED_ABI & kwargs.keys())
 
 
 @pytest.mark.parametrize("sequence_parallel,replicated", [(False, False), (False, True), (True, False)])
