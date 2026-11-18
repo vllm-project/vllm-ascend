@@ -450,6 +450,7 @@ class TestMooncakeHybrid(unittest.TestCase):
 
     def test_coordinator_queries_all_heads_using_mooncake_existence(self):
         scheduler = object.__new__(LayerwiseKVPoolScheduler)
+        scheduler.use_layerwise_transfer = False
         scheduler.sharded_mamba_group_ids = set()
         scheduler.dspark_prefix_keys = None
         scheduler.num_speculative_blocks_by_group = {}

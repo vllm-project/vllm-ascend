@@ -274,6 +274,38 @@ def test_unsupported_dsv4_commit_protocol_is_rejected():
         AscendKVCacheConfigBuilder().get_kv_cache_config_from_groups(runtime, groups, num_blocks=8)
 
 
+@pytest.mark.parametrize("model", ["flash", "pro"])
+def test_pd_stage_layout_does_not_require_rotating_speculative_decode(model):
+    # P can rotate without a draft executor; D keeps native caches with MTP.
+    # This proves layout eligibility only, not draft-context transfer or a
+    # successful P/D cache hit. Both remain end-to-end acceptance gates.
+    prefill, prefill_groups, _ = make_layout(model=model, buffers=3)
+    decode, decode_groups, _ = make_layout(model=model, buffers=None)
+    decode.kv_transfer_config.kv_role = "kv_consumer"
+    decode.speculative_config = SimpleNamespace(method="mtp")
+    assert get_layerwise_reuse_layout(make_worker_config(prefill, prefill_groups, 8)) is not None
+    assert get_layerwise_reuse_layout(make_worker_config(decode, decode_groups, 8)) is None
+
+
+@pytest.mark.parametrize("model", ["flash", "pro"])
+def test_pool_identity_must_not_silently_drop_draft_members(model):
+    from copy import deepcopy
+
+    from vllm_ascend.models.deepseek_v4.cache_transfer import cache_format_digest
+
+    runtime, groups, _ = make_layout(model=model, buffers=None)
+    target = AscendKVCacheConfigBuilder().get_kv_cache_config_from_groups(runtime, groups, num_blocks=8)
+    with_draft = deepcopy(target)
+    group = with_draft.kv_cache_groups[0]
+    owner = group.layer_names[0]
+    draft_name = "mtp.layers.0.self_attn.attn"
+    group.layer_names.append(draft_name)
+    group.kv_cache_spec.kv_cache_specs[draft_name] = group.kv_cache_spec.kv_cache_specs[owner]
+    # Adding a member changes the packed group payload. Equalizing only keys
+    # would load the wrong offsets or declare an absent draft cache a hit.
+    assert cache_format_digest(target) != cache_format_digest(with_draft)
+
+
 def test_turboquant_rejected_by_dsv4_guard():
     from vllm_ascend.models.deepseek_v4.cache_reuse import validate_deepseek_v4_layerwise_config
     from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE

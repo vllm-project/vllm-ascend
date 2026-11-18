@@ -20,6 +20,9 @@ entries:
       Private-window mask preparation reuses the current request's ID arrays.
       DSV4 Decode also queues attention before publishing the transfer gate;
       this does not remove cache-write, lease, or shared-slot dependencies.
+      Memcache warm-prefix lookup batches readability checks across cache
+      groups, preserving reachability and all-rank checks without caching hits
+      across requests. P/D with resident MTP Decode remains an acceptance gate.
     model: deepseek-v4
   - category: bugfix
     text: >-

@@ -202,23 +202,40 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         coordinator = self.cache_coordinator
         assert coordinator is not None
 
+        def query_groups(
+            queries: Sequence[tuple[int, Sequence[BlockHash | str], Sequence[bool] | None]],
+        ) -> list[list[BlockHash | str]]:
+            # Warm-prefix lookups otherwise issue one serial SDK call per
+            # group before any layer can start. Batch only this lookup's keys;
+            # worker-side leasing still pins and refreshes every load address.
+            keys_by_block: list[list[str]] = []
+            hashes_by_group: list[list[BlockHash | str]] = []
+            for group_id, group_block_hashes, lookup_mask in queries:
+                allowed_hashes: list[BlockHash | str] = []
+                local_blocks = num_computed_tokens // self.grouped_block_size[group_id]
+                for block_idx, block_hash in enumerate(group_block_hashes):
+                    if block_idx < local_blocks:
+                        continue
+                    if lookup_mask is not None and not (block_idx < len(lookup_mask) and lookup_mask[block_idx]):
+                        continue
+                    keys_by_block.append(self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(block_hash)))
+                    allowed_hashes.append(block_hash)
+                hashes_by_group.append(allowed_hashes)
+            block_hits = self._query_layerwise_block_hits(keys_by_block)
+            results = []
+            offset = 0
+            for hashes in hashes_by_group:
+                end = offset + len(hashes)
+                results.append([h for h, hit in zip(hashes, block_hits[offset:end], strict=True) if hit])
+                offset = end
+            return results
+
         def query_group_hits(
             group_id: int,
             group_block_hashes: Sequence[BlockHash | str],
             lookup_mask: Sequence[bool] | None,
-        ) -> list[BlockHash]:
-            keys_by_block: list[list[str]] = []
-            allowed_hashes: list[BlockHash] = []
-            local_blocks = num_computed_tokens // self.grouped_block_size[group_id]
-            for block_idx, block_hash in enumerate(group_block_hashes):
-                if block_idx < local_blocks:
-                    continue
-                if lookup_mask is not None and not (block_idx < len(lookup_mask) and lookup_mask[block_idx]):
-                    continue
-                keys_by_block.append(self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(block_hash)))
-                allowed_hashes.append(block_hash)
-            block_hits = self._query_layerwise_block_hits(keys_by_block)
-            return [block_hash for block_hash, hit in zip(allowed_hashes, block_hits) if hit]
+        ) -> list[BlockHash | str]:
+            return query_groups([(group_id, group_block_hashes, lookup_mask)])[0]
 
         return coordinator.find_reachable_hit_tokens(
             request.block_hashes,
@@ -226,6 +243,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             query_group_hits,
             log_context=f"hit_check: req={request.request_id}",
             hbm_hit_tokens=num_computed_tokens,
+            batch_query=query_groups if self.use_layerwise_transfer else None,
         )
 
     def _lookup_layerwise_contiguous(

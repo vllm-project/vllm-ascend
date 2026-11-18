@@ -84,11 +84,48 @@ The adapter adds the following contracts:
 
 The adapter reuses the common planner, allocation, transfer threads, and reuse
 fences. It does not bypass save completion or enable speculative overwrite.
-For Memcache Prefill, the attention event is still recorded before the kernel,
+For Memcache Prefill and Decode, the attention event is still recorded before the kernel,
 but transfer threads are notified after the host has submitted attention. This
 keeps the device dependency while preventing a transfer call from being started
 before the work it should overlap has been enqueued. Backends with pre-attention
-callbacks keep their established ordering. Decode keeps the immediate policy.
+callbacks keep their established ordering.
+
+For Memcache warm-prefix lookup, the scheduler batches readability probes across
+cache groups within one lookup. It still checks each group's required hashes and
+every rank's key. The existing transfer batch limit bounds the requests. No hit
+results or addresses are cached across requests; workers still acquire leases
+and refresh addresses before copying. Other backends retain per-group probing.
+
+## P/D, pooling and speculative decoding acceptance
+
+The intended deployment places shared-buffer rotation on Prefill and keeps the
+Decode cache resident while Decode runs MTP. `sparse_kv_offload_config` is a
+separate Decode feature and is not required for this deployment. Pooling alone
+does not reduce HBM allocation: `use_layerwise` selects transfer scheduling,
+whereas `layerwise_num_shared_buffers` selects reusable device storage.
+
+This deployment is not yet certified. The current adapter rejects speculation
+on a worker that actually rotates cache storage. Keeping speculation on a
+resident Decode worker avoids that guard, but does not prove P/D compatibility:
+MTP adds draft cache members, so the producer and consumer must agree on the
+complete group payload and on how the draft obtains its prompt context. Do not
+remove draft members from the format digest or simply disable the guard to make
+a test start. A target-only hit is not a complete draft-context hit.
+
+The acceptance metric is end-to-end, unprofiled TTFT: DRAM-hit TTFT must be less
+than 1.05 times the single-prefix HBM-hit control. Evaluate single-prefix and
+multi-prefix DRAM workloads separately, with identical prefix/suffix lengths,
+output length, load, P/D topology and Decode MTP settings. TPOT, throughput and
+draft acceptance are observation metrics. Record local HBM hits and external
+pool hits separately; identical aggregate cached-token counts do not prove
+that the intended storage tier served the request. Cold 128K results are useful
+diagnostics but cannot validate this warm-hit target.
+
+All compared runs must use the same compatible pool format and checkpoint
+retention policy. For multi-prefix load, warm every prefix into DRAM and prevent
+local HBM reuse without evicting the DRAM objects. Do not include warmup or
+profiling in timed samples. Record fallback/recomputation and preemption, and
+report affected samples explicitly rather than silently removing them.
 
 ## Validation and merge gates
 
@@ -101,6 +138,7 @@ pytest -q \
   tests/ut/distributed/ascend_store/test_dsv4_prefix_offload.py \
   tests/ut/distributed/ascend_store/test_dsv4_transfer_registration.py \
   tests/ut/distributed/ascend_store/test_layerwise_save_batching.py \
+  tests/ut/distributed/ascend_store/test_layerwise_prefix_batching.py \
   tests/ut/distributed/ascend_store/test_window_snapshot_ranges.py \
   tests/ut/distributed/ascend_store/test_window_snapshot_integration.py \
   tests/ut/distributed/ascend_store/test_attention_enqueue_gate.py \

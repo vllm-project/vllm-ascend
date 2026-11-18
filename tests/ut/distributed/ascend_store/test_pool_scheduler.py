@@ -1980,7 +1980,7 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
         self._stub_pool(scheduler, 4, {})
 
         self.assertEqual(scheduler._get_layerwise_hit_tokens(self._request(4), 64, 64), 0)
-        self.assertEqual(scheduler.store_scheduler.batch_is_readable.call_count, 2)
+        self.assertEqual(scheduler.store_scheduler.batch_is_readable.call_count, 1)
 
     def test_partial_group_block_is_still_queried(self):
         scheduler = self._make_scheduler()
