@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
 )
+from vllm_ascend.models.qwen4_exp.quantization import QSAC8Spec
 
 QSA_MAIN: Final = "qsa_main"
 QSA_RAW: Final = "qsa_raw"
@@ -159,6 +160,9 @@ def _state_bytes(spec: MambaSpec, index: int) -> int:
 
 
 def _qsa_main_page_bytes(spec: FullAttentionSpec) -> tuple[int, int]:
+    if isinstance(spec, QSAC8Spec):
+        page_bytes = spec.block_size * spec.num_kv_heads * spec.storage_head_size
+        return page_bytes, page_bytes
     dtype_size = get_dtype_size(spec.dtype)
     tokens_heads = spec.block_size * spec.num_kv_heads
     return (
@@ -238,8 +242,12 @@ def build_qwen4_kv_cache_layout(
     conv_bytes = max(_state_bytes(spec, 0) for spec in gdn_specs)
     for layer_name, spec in role_members[QSA_MAIN]:
         assert isinstance(spec, FullAttentionSpec)
-        kv_token_bytes = spec.num_kv_heads * (spec.head_size + spec.head_size_v) * get_dtype_size(spec.dtype)
+        kv_token_bytes = sum(_qsa_main_page_bytes(spec)) // spec.block_size
         minimum_block_size = round_up((max_ssm_bytes + kv_token_bytes - 1) // kv_token_bytes, 128)
+        # C8 views explicitly honor the shared pool stride. They need not
+        # grow their logical block to fit a GDN state in their useful bytes.
+        if isinstance(spec, QSAC8Spec):
+            minimum_block_size = 128
         if spec.block_size < minimum_block_size or spec.block_size % 128:
             raise ValueError(
                 f"{layer_name} block_size={spec.block_size} violates packed K/V-SSM alignment: "
@@ -274,11 +282,14 @@ def build_qwen4_kv_cache_layout(
     # Independent scheduler groups own disjoint block IDs. QSA uses the
     # whole page; GDN interprets the same bytes as adjacent conv and SSM.
     subpage_alignment = math.lcm(
+        16,
         *(
             2 * 128 * spec.num_kv_heads * size * get_dtype_size(spec.dtype)
             for _, spec in role_members[QSA_MAIN]
             for size in (spec.head_size, spec.head_size_v)
-        )
+            if not isinstance(spec, QSAC8Spec)
+        ),
+        *(16 * (spec.block_size // 128) for _, spec in role_members[QSA_MAIN]),
     )
     state_stride = round_up(max(conv_bytes + max_ssm_bytes, *(k + v for k, v in main_pages)), subpage_alignment)
     regions = [
@@ -406,6 +417,36 @@ def make_qsa_kernel_page_cache(
             block_stride=pair_bytes,
         )
         for width, offset in ((head_size, 0), (head_size_v, page_bytes))
+    )
+    return key, value
+
+
+def make_qsa_c8_kernel_page_cache(
+    backing: torch.Tensor,
+    *,
+    spec: QSAC8Spec,
+    num_blocks: int,
+    storage_offset: int,
+    block_stride: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Keep MRV2's virtual page IDs, allowing gaps beside BF16/GDN owners."""
+    kernel_pages = spec.block_size // 128
+    if not kernel_pages or spec.block_size % 128 or block_stride % kernel_pages:
+        raise ValueError("QSA C8 manager pages must split into whole 128-token pages")
+    page_stride = block_stride // kernel_pages
+    key_bytes = 128 * spec.num_kv_heads * spec.storage_head_size
+    if page_stride < 2 * key_bytes:
+        raise ValueError("QSA C8 page stride must fit both codes and scales for K/V")
+    key, value = (
+        make_slab_view(
+            backing,
+            dtype=torch.int8,
+            num_blocks=num_blocks * kernel_pages,
+            item_shape=(128, spec.num_kv_heads, spec.storage_head_size),
+            storage_offset=storage_offset + offset,
+            block_stride=page_stride,
+        )
+        for offset in (0, key_bytes)
     )
     return key, value
 

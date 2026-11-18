@@ -221,15 +221,15 @@ class Qwen4ExpPreparedInputAdapter:
             compressed = metadata.get(layer.indexer.compressed_key_cache.prefix)
             if main is None or raw is None or compressed is None:
                 continue
-            self._prepare_lightning(
-                layer,
-                compressed,
-                prepared_this_step=prepared_this_step,
-            )
-            # Mixed Prefill/Decode dispatch slices GBSA rows dynamically.  Keep
-            # its existing per-span fallback; the hot decode-only path has no
-            # host request plan and can safely reuse one prepared schedule.
-            if getattr(main, "qsa_request_plan", None) is None:
+            # INT8 QLI and GBSA build their own schedules. The BF16
+            # schedule is reusable only when dispatch does not slice rows.
+            if not layer.indexer.c8_enabled:
+                self._prepare_lightning(
+                    layer,
+                    compressed,
+                    prepared_this_step=prepared_this_step,
+                )
+            if not layer.c8_enabled and getattr(main, "qsa_request_plan", None) is None:
                 self._prepare_gbsa(
                     layer,
                     main,

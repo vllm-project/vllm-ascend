@@ -13,8 +13,8 @@ import torch
 
 @pytest.fixture
 def selector(monkeypatch):
-    # Load the real selector without importing vLLM or a Triton NPU runtime.
-    # Only device kernels and the external stride utility are replaced.
+    # Load the selector in its package so it can resolve the C8 cache helpers.
+    # The BF16 device kernels and stride utility are replaced below.
     upstream = ModuleType("cann_ops_transformer")
     bindings = SimpleNamespace(
         lightning_indexer_v2_metadata=Mock(return_value=torch.empty(1024, dtype=torch.int32)),
@@ -43,7 +43,7 @@ def selector(monkeypatch):
     for module in (upstream, packing, utilities):
         monkeypatch.setitem(sys.modules, module.__name__, module)
     source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/lightning_indexer.py"
-    spec = importlib.util.spec_from_file_location("qsa_liv2_contract", source)
+    spec = importlib.util.spec_from_file_location("vllm_ascend.models.qwen4_exp.qsa_liv2_contract", source)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

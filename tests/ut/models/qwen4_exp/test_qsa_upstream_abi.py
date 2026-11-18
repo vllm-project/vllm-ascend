@@ -51,7 +51,7 @@ def test_indexer_accepts_main_packed_inputs_without_fused_preparation() -> None:
     layer._update_and_compress = Mock()
     selected = torch.zeros((2, 3), dtype=torch.int32)
     layer._select = Mock(return_value=selected)
-    hidden_states = torch.empty((4, 8))
+    hidden_states = torch.arange(32).reshape(4, 8)
     positions = torch.arange(4)
     gate = torch.full((2, 2, 4), 7.0)
 
@@ -131,6 +131,8 @@ def test_indexer_query_falls_back_when_fused_abi_is_not_satisfied(monkeypatch) -
     layer.index_n_heads = 2
     layer.index_head_dim = 4
     layer.index_kv_heads = 1
+    layer.c8_enabled = False
+    layer.q_layernorm = Mock()
     layer.index_qk_proj = Mock(return_value=(torch.empty((2, 12)), None))
     layer._fused_norm_rope_eligible = Mock(return_value=False)
     hidden_states = torch.empty((2, 8))
@@ -150,6 +152,8 @@ def test_indexer_compressed_key_falls_back_when_fused_abi_is_not_satisfied(monke
     layer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
     torch.nn.Module.__init__(layer)
     layer.index_head_dim = 4
+    layer.c8_enabled = False
+    layer.k_layernorm = Mock()
     layer.rotary_emb = SimpleNamespace(mrope_section=[1, 1, 0])
     layer._fused_norm_rope_eligible = Mock(return_value=False)
     pooled = torch.empty((2, 4))
@@ -162,6 +166,7 @@ def test_indexer_compressed_key_falls_back_when_fused_abi_is_not_satisfied(monke
 def test_text_only_indexer_uses_fused_rope_without_mrope_sections(monkeypatch) -> None:
     indexer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
     torch.nn.Module.__init__(indexer)
+    indexer.c8_enabled = False
     indexer.index_n_heads = 4
     indexer.index_kv_heads = 1
     indexer.index_head_dim = 128

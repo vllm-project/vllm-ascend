@@ -52,6 +52,7 @@ def _load_adapter(monkeypatch, *, load_wrapper: bool = False):
 class AscendQwen4ExpQSAAttention:
     def __init__(self):
         self.layer_name = "model.layers.0.self_attn"
+        self.c8_enabled = False
         # The adapter attaches this fixed-address buffer before model replay.
         # Keep the annotation uninitialized so the stub matches that lifecycle.
         self._qsa_prepared_cos_sin: torch.Tensor
@@ -61,6 +62,7 @@ class AscendQwen4ExpQSAAttention:
         self.rotary_emb = SimpleNamespace(cos_sin_cache=torch.arange(64 * 8).reshape(64, 8).float())
         self.q_norm = SimpleNamespace(weight=torch.empty(1))
         self.indexer = SimpleNamespace(
+            c8_enabled=False,
             index_n_heads=4,
             index_head_dim=128,
             token_topk=2048,
@@ -76,6 +78,25 @@ class _Model:
 
     def modules(self):
         return iter((self.layer,))
+
+
+@pytest.mark.parametrize("attention_c8", [False, True])
+@pytest.mark.parametrize("indexer_c8", [False, True])
+def test_prepares_bf16_schedules_only_for_bf16_owners(monkeypatch, attention_c8, indexer_c8):
+    adapter_cls, _ = _load_adapter(monkeypatch)
+    layer = AscendQwen4ExpQSAAttention()
+    layer.c8_enabled = attention_c8
+    layer.indexer.c8_enabled = indexer_c8
+    adapter = adapter_cls(_Model(layer))
+    calls = []
+    monkeypatch.setattr(adapter, "_prepare_lightning", lambda *args, **kwargs: calls.append("lightning"))
+    monkeypatch.setattr(adapter, "_prepare_gbsa", lambda *args, **kwargs: calls.append("gbsa"))
+    metadata = {name: SimpleNamespace() for name in (layer.layer_name, "raw", "compressed")}
+
+    adapter.prepare_attention_metadata(metadata, full_graph=True)
+
+    assert ("lightning" in calls) is not indexer_c8
+    assert ("gbsa" in calls) is not attention_c8
 
 
 class _TwoLayerModel:
