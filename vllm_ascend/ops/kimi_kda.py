@@ -40,10 +40,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
     record_attention_compute_start,
 )
 from vllm_ascend.distributed.parallel_state import get_gproj_tp_group, get_qkv_iproj_tp_group
-from vllm_ascend.models.glm5next.kda_input_projection_tp import (
-    KDAInputProjectionTP,
-    KDAInputProjectionTPLayout,
-)
+from vllm_ascend.models.glm5next.kda_input_projection_tp import KDAInputProjectionTPLayout
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
 from vllm_ascend.ops.kda_parallel import (
     KDAColumnParallelLinear,
@@ -161,7 +158,7 @@ class PendingKDAProjection:
     forget: torch.Tensor
     gate: PendingGate
     pending_qkv: PendingTensor | None
-    layout: KDAInputProjectionTP
+    layout: KDAInputProjectionTPLayout
     capacity: int
 
     def wait(self):
@@ -179,7 +176,7 @@ class PendingKDAProjection:
 class KDAProjectionTP:
     def __init__(self, qkv_group, gate_group, heads: int, head_dim: int):
         self.qkv_group, self.gate_group = qkv_group, gate_group
-        self.qkv_layout = KDAInputProjectionTP(qkv_group, heads, head_dim)
+        self.qkv_layout = KDAInputProjectionTPLayout(qkv_group, heads, head_dim)
         self.gate_layout = KDAInputProjectionTPLayout(gate_group, heads, head_dim)
         self.communication = TPCommunication()
 

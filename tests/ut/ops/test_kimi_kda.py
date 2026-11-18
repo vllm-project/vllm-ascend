@@ -904,7 +904,7 @@ def test_pending_kda_projection_restores_owner_heads_once(monkeypatch):
         torch.zeros(2, 4),
         gate,
         projection_module.PendingTensor(receive, work, receive),
-        common_projection.KDAInputProjectionTP(SimpleNamespace(world_size=2), 2, 2),
+        common_projection.KDAInputProjectionTPLayout(SimpleNamespace(world_size=2), 2, 2),
         2,
     )
     qkv, _, beta, _ = pending.wait()
