@@ -4,10 +4,8 @@
 
 import os
 import socket
-from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import lru_cache
-from importlib import import_module
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
@@ -28,7 +26,6 @@ from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
 )
-from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -201,15 +198,7 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
                 weight = rebuild_npu_tensor(*list_args)
                 weights.append((name, weight))
 
-        mtp_check = nullcontext()
-        if vllm_version_is("0.33.0"):
-            # The pinned main tree used by mypy no longer contains this
-            # release-only module. Resolve it only in the release runtime.
-            mtp_validation = import_module("vllm.model_executor.model_loader.mtp_validation")
-            mtp_check = mtp_validation.disable_mtp_completeness_check()
-
-        with mtp_check:
-            self.model.load_weights(weights)
+        self.model.load_weights(weights)
 
 
 class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):

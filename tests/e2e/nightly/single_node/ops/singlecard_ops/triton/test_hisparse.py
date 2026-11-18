@@ -16,10 +16,8 @@ from vllm_ascend.hisparse.cache_ops import (
     scatter_packed_kv,
 )
 from vllm_ascend.hisparse.host_pool import allocate_mapped_host
-from vllm_ascend.utils import vllm_version_is
 
 pytestmark = [
-    pytest.mark.skipif(vllm_version_is("0.33.0"), reason="HiSparse e2e is not supported on vLLM v0.33.0"),
     pytest.mark.skipif(not is_950(), reason="HiSparse Triton tests require Ascend 950 (A5)"),
 ]
 
