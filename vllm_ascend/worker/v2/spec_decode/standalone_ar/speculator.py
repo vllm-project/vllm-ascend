@@ -3,17 +3,15 @@
 # This file is a part of the vllm-ascend project.
 
 from collections.abc import Mapping
-from copy import copy
 from typing import Any
 
 import numpy as np
 import torch
-from vllm.config import VllmConfig
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator import StandaloneARSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.utils import model_supports_dcp, vllm_version_is
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
@@ -26,17 +24,6 @@ class AscendStandaloneARSpeculator(StandaloneARSpeculator):
         def supports_batch_sharded_draft_logits(self) -> bool:
             # NPU draft-logits kernels index the cache by request state.
             return False
-
-    def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        speculative_config = vllm_config.speculative_config
-        assert speculative_config is not None
-        if not model_supports_dcp(speculative_config.draft_model_config):
-            # The upstream loader runs GQA drafts at DCP=1. Cache planning,
-            # metadata builders, and graph execution must use that topology too.
-            vllm_config = copy(vllm_config)
-            vllm_config.parallel_config = copy(vllm_config.parallel_config)
-            vllm_config.parallel_config.decode_context_parallel_size = 1
-        super().__init__(vllm_config, device)
 
     def _build_attn_metadata(
         self,
