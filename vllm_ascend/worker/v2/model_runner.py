@@ -626,6 +626,8 @@ class NPUModelRunner(GPUModelRunner):
             self._shared_engram_parent_stopped = True
         first_error = None
         for embedding in shared_embeddings:
+            if getattr(embedding, "local_vmm", False) is True:
+                continue
             try:
                 embedding.close_host_offload()
             except Exception as exc:
@@ -633,7 +635,21 @@ class NPUModelRunner(GPUModelRunner):
                     first_error = exc
         if first_error is not None:
             raise first_error
-        self._shared_engram_shutdown_pending = []
+        pending = [owner for owner in shared_embeddings if getattr(owner, "local_vmm", False) is True]
+        self._shared_engram_shutdown_pending = pending
+        if pending:
+            from vllm_ascend.models.deepseek_v41.engram.local_shared_vmm import EngramSharedReleaseError
+
+            errors = []
+            for index in range(len(pending) - 1, -1, -1):
+                try:
+                    pending[index].close_host_offload()
+                except EngramSharedReleaseError as exc:
+                    errors.append(str(exc))
+                else:
+                    del pending[index]
+            if errors:
+                raise EngramSharedReleaseError("; ".join(errors))
 
     def _register_sparse_kv_caches(self, kv_caches: dict[str, Any]) -> None:
         """Bind host pools before the V2 KV connector registers its destinations."""
