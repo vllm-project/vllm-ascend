@@ -49,7 +49,7 @@ def test_bus_worker_runs_due_bits_off_main_thread():
         group = SimpleNamespace(world_size=2, is_first_rank=True, rank_in_group=0)
         with (
             patch(
-                "vllm_ascend.observability.runtime_config.dist.sync_due_bits_from_src",
+                "vllm_ascend.observability.runtime_config.dist.broadcast_due_bits_from_src",
                 side_effect=_fake_sync,
             ),
             patch(
@@ -92,7 +92,7 @@ def test_bus_worker_rejects_second_submit_while_inflight():
         group = SimpleNamespace(world_size=2, is_first_rank=True)
         with (
             patch(
-                "vllm_ascend.observability.runtime_config.dist.sync_due_bits_from_src",
+                "vllm_ascend.observability.runtime_config.dist.broadcast_due_bits_from_src",
                 side_effect=_fake_sync,
             ),
             patch(
@@ -234,7 +234,7 @@ def test_async_merged_bus_warns_when_drain_waits():
                 return_value=False,
             ),
             patch(
-                "vllm_ascend.observability.runtime_config.dist.sync_due_bits_from_src",
+                "vllm_ascend.observability.runtime_config.dist.broadcast_due_bits_from_src",
                 side_effect=_slow_sync,
             ),
             patch(
@@ -306,7 +306,7 @@ def test_wave_head_submit_failure_refunds_handed_off_jobs():
                 return_value=True,
             ),
             patch(
-                "vllm_ascend.observability.runtime_config.dist.sync_due_bits_from_src",
+                "vllm_ascend.observability.runtime_config.dist.broadcast_due_bits_from_src",
                 return_value=[False, False],
             ),
             patch(
@@ -358,7 +358,7 @@ def test_drain_timeout_refunds_pending_jobs_and_clears_state():
                 return_value=True,
             ),
             patch(
-                "vllm_ascend.observability.runtime_config.dist.sync_due_bits_from_src",
+                "vllm_ascend.observability.runtime_config.dist.broadcast_due_bits_from_src",
                 side_effect=_stuck_sync,
             ),
             patch(
@@ -379,3 +379,56 @@ def test_drain_timeout_refunds_pending_jobs_and_clears_state():
     finally:
         gate.set()
         worker.stop()
+
+
+def test_run_sample_phase_drains_bus_before_sample_fn():
+    """Sample entry must drain TP Gloo bus before connector post_forward/SFA.
+
+    Wave-head submit overlaps forward; draining at ``run_sample_phase`` entry
+    keeps that overlap while preventing bus broadcast from crossing
+    ``all_gather_object`` inside ``sample_fn`` / ``get_finished``.
+    """
+    from vllm_ascend.observability.runtime_guard.processor import (
+        RuntimeGuardProcessor,
+        SamplePhaseResult,
+    )
+
+    order: list[str] = []
+    p = object.__new__(RuntimeGuardProcessor)
+    p.runtime_config = MagicMock()
+    p.runtime_config.is_fully_off.return_value = False
+    p.detectors = MagicMock()
+    p.wave_tracker = MagicMock()
+    p.runner = MagicMock()
+    p._last_input_batch = None
+    p._merged_bus_inflight = True
+
+    def _drain(*, warn_if_pending: bool = False, timeout: float | None = None):
+        order.append("drain")
+        p._merged_bus_inflight = False
+        return True
+
+    def sample_fn():
+        order.append("sample")
+        assert p._merged_bus_inflight is False
+        return SamplePhaseResult(
+            scheduler_output=None,
+            input_batch=None,
+            model_runner_output=None,
+            sampler_output=SimpleNamespace(sampled_token_ids=[1]),
+            valid_sampled_token_ids=[1],
+            req_ids_output_copy=["r1"],
+            finished_req_ids=None,
+        )
+
+    p._drain_merged_bus = _drain  # type: ignore[method-assign]
+    p._drain_merged_bus_before_sample_tp_gloo = (  # type: ignore[method-assign]
+        RuntimeGuardBusMixin._drain_merged_bus_before_sample_tp_gloo.__get__(p)
+    )
+    p.mark_finished = MagicMock()
+    p.needs_sample_phase_hooks = lambda: False  # type: ignore[method-assign]
+    p.end_of_wave = MagicMock()  # type: ignore[method-assign]
+
+    p.run_sample_phase(sample_fn=sample_fn, speculative_config=None, use_async=False)
+    assert order == ["drain", "sample"]
+    p.end_of_wave.assert_called_once()
