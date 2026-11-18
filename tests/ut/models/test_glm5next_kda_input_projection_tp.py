@@ -19,9 +19,11 @@ from vllm_ascend.ops import linear_op
 @pytest.mark.parametrize("explicit_group", [False, True])
 @pytest.mark.parametrize("direction", ["column", "row"])
 def test_projection_selects_explicit_group_without_forwarding_it(monkeypatch, size, explicit_group, direction):
-    pcp_group = SimpleNamespace(world_size=1, rank_in_group=0)
+    pcp_group = SimpleNamespace(world_size=2, rank_in_group=1)
+    tp_group = SimpleNamespace(world_size=2, rank_in_group=1)
     kda_group = SimpleNamespace(world_size=size, rank_in_group=size - 1)
-    selected = kda_group if explicit_group else pcp_group
+    expected_size = size if explicit_group else 4
+    expected_rank = size - 1 if explicit_group else 3
     seen: dict[str, int | bool] = {}
 
     def linear_init(self, input_size, output_size, **kwargs):
@@ -30,21 +32,23 @@ def test_projection_selects_explicit_group_without_forwarding_it(monkeypatch, si
         seen.update(input_size=input_size, output_size=output_size, **kwargs)
 
     monkeypatch.setattr(model_kda, "get_pcp_group", lambda: pcp_group)
+    monkeypatch.setattr(model_kda, "get_tp_group", lambda: tp_group)
     base = model_kda.ColumnParallelLinear if direction == "column" else model_kda.RowParallelLinear
     cls = model_kda.PCPColumnParallelLinear if direction == "column" else model_kda.PCPRowParallelLinear
     monkeypatch.setattr(base, "__init__", linear_init)
     layer = cls(4 * size, 8 * size, tp_group=kda_group if explicit_group else None)
-    assert layer.tp_group is selected
+    assert layer.tp_group is (kda_group if explicit_group else tp_group)
+    assert layer.pcp_group is (None if explicit_group else pcp_group)
     if direction == "column":
         assert seen == {
             "input_size": 4 * size,
             "output_size": 8 * size,
-            "tp_rank": selected.rank_in_group,
-            "tp_size": selected.world_size,
+            "tp_rank": expected_rank,
+            "tp_size": expected_size,
         }
     else:
-        assert seen == {"input_size": 4 * size // selected.world_size, "output_size": 8 * size, "disable_tp": True}
-        assert layer.tp_rank == selected.rank_in_group and layer.tp_size == selected.world_size
+        assert seen == {"input_size": 4 * size // expected_size, "output_size": 8 * size, "disable_tp": True}
+        assert layer.tp_rank == expected_rank and layer.tp_size == expected_size
 
 
 class CollectiveReference:

@@ -67,6 +67,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         worker.cache_config = mock_cache_config
 
         worker.model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3"))
+        worker.vllm_config.model_config = worker.model_config
 
         mock_snapshot = MagicMock()
         mock_snapshot.free_memory = init_free_memory

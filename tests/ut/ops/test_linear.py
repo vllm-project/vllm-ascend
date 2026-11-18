@@ -28,6 +28,10 @@ from vllm_ascend.utils import vllm_version_is
 
 class BaseLinearTest(unittest.TestCase):
     def setUp(self):
+        # Several tests in this file replace the process-global AscendConfig
+        # with a MagicMock; snapshot it so tearDown restores the worker state
+        # for later tests in the same xdist worker.
+        self._previous_ascend_config = ascend_config._ASCEND_CONFIG
         self.mock_group = mock.MagicMock()
         self.mock_group.world_size = 2
         self.mock_group.rank_in_group = 0
@@ -56,6 +60,7 @@ class BaseLinearTest(unittest.TestCase):
             p.start()
 
     def tearDown(self):
+        ascend_config._ASCEND_CONFIG = self._previous_ascend_config
         for p in self.patches:
             p.stop()
 

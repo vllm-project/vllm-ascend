@@ -28,6 +28,7 @@ import torch
 from safetensors.torch import save_file
 from torch import nn
 
+import vllm_ascend.models.quarot_utils as quarot_utils
 import vllm_ascend.models.qwen3_dspark as qwen3_dspark
 from vllm_ascend.models import qwen3_dflash2
 from vllm_ascend.models.qwen3_dflash2 import DFlash2Qwen3ForCausalLM
@@ -53,8 +54,8 @@ class TestQwen3DSparkWeightLoading:
         head_before = model.lm_head.weight.detach().clone()
         config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace()))
         with (
-            patch.object(qwen3_dspark, "get_rotation_path", return_value="quarot.safetensors"),
-            patch.object(qwen3_dspark, "get_rotation_matrix", return_value=rotation_matrix) as rotation_loader,
+            patch.object(quarot_utils, "get_rotation_path", return_value="quarot.safetensors"),
+            patch.object(quarot_utils, "get_rotation_matrix", return_value=rotation_matrix) as rotation_loader,
         ):
             model.post_process(config)
         rotation_loader.assert_called_once_with("quarot.safetensors")
@@ -108,10 +109,10 @@ def test_quarot_loads_missing_target_vocab_shards(tmp_path, model_cls, embed_nam
         model_config=SimpleNamespace(model=str(tmp_path), hf_text_config=SimpleNamespace(vocab_size=4, hidden_size=2))
     )
     with (
-        patch.object(qwen3_dspark, "get_rotation_path", return_value=rotation_path),
+        patch.object(quarot_utils, "get_rotation_path", return_value=rotation_path),
         patch.object(qwen3_dflash2, "get_rotation_path", return_value=rotation_path),
-        patch.object(qwen3_dspark, "VocabParallelEmbedding", side_effect=vocab_layer),
-        patch.object(qwen3_dspark, "ParallelLMHead", side_effect=vocab_layer),
+        patch.object(quarot_utils, "VocabParallelEmbedding", side_effect=vocab_layer),
+        patch.object(quarot_utils, "ParallelLMHead", side_effect=vocab_layer),
     ):
         model.post_process(config)
     assert model.model.embed_tokens is not original_embed
