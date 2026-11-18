@@ -73,6 +73,3 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_dire
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_split_qkv_rmsnorm_mrope.py
 pytest -sv tests/ut/models/qwen4_exp/test_qsa_upstream_abi.py
 ```
-
-See [validation and specialization](qsa_preparation_validation.md) for evidence
-status and remaining model/TP coverage.

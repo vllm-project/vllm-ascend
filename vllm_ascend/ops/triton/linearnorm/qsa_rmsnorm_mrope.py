@@ -43,9 +43,9 @@ def _qsa_rmsnorm_mrope_kernel(
     has_mrope: tl.constexpr,
     block_dim: tl.constexpr,
     positions_ptr=None,
-    position_stride_axis: tl.constexpr = 0,
-    position_stride_token: tl.constexpr = 0,
-    cache_rows: tl.constexpr = 0,
+    POSITION_STRIDE_AXIS: tl.constexpr = 0,
+    POSITION_STRIDE_TOKEN: tl.constexpr = 0,
+    CACHE_ROWS: tl.constexpr = 0,
     GATHER_CACHE: tl.constexpr = False,
 ):
     token_id = tl.program_id(0)
@@ -66,12 +66,12 @@ def _qsa_rmsnorm_mrope_kernel(
             h_mask = (rotary_offsets % 3 == 1) & (rotary_offsets < mrope_section_h * 3)
             w_mask = (rotary_offsets % 3 == 2) & (rotary_offsets < mrope_section_w * 3)
             axis = tl.where(h_mask, 1, tl.where(w_mask, 2, 0))
-            position = tl.load(positions_ptr + axis * position_stride_axis + token_id * position_stride_token)
+            position = tl.load(positions_ptr + axis * POSITION_STRIDE_AXIS + token_id * POSITION_STRIDE_TOKEN)
         else:
             # Keep the shared position scalar: an all-zero axis vector creates
             # a repeated-address gather unsupported by Triton Ascend lowering.
-            position = tl.load(positions_ptr + token_id * position_stride_token)
-        position = tl.minimum(tl.maximum(position, 0), cache_rows - 1)
+            position = tl.load(positions_ptr + token_id * POSITION_STRIDE_TOKEN)
+        position = tl.minimum(tl.maximum(position, 0), CACHE_ROWS - 1)
         cache_row = cos_sin_ptr + position.to(tl.int64) * cos_sin_stride_token
         cos = tl.load(cache_row + rotary_offsets).to(tl.float32)
         sin = tl.load(cache_row + rotary_offsets + half_rope_dim).to(tl.float32)
@@ -168,9 +168,9 @@ def triton_qsa_rmsnorm_mrope(
         has_mrope=has_mrope,
         block_dim=triton.next_power_of_2(head_dim),
         positions_ptr=positions,
-        position_stride_axis=positions.stride(0) if positions is not None and positions.ndim == 2 else 0,
-        position_stride_token=positions.stride(-1) if positions is not None else 0,
-        cache_rows=cos_sin.shape[0],
+        POSITION_STRIDE_AXIS=positions.stride(0) if positions is not None and positions.ndim == 2 else 0,
+        POSITION_STRIDE_TOKEN=positions.stride(-1) if positions is not None else 0,
+        CACHE_ROWS=cos_sin.shape[0],
         GATHER_CACHE=positions is not None,
         num_warps=1,
         num_stages=1,

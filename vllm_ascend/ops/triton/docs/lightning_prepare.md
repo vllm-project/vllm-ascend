@@ -67,6 +67,3 @@ include synthetic padding boundaries, not a claim of model support for each.
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_lightning_prepare.py
 pytest -sv tests/ut/ops/test_qsa_lightning_prepare_contract.py
 ```
-
-See [validation and specialization](qsa_preparation_validation.md) for remaining
-evidence and dynamic metadata specialization risks.

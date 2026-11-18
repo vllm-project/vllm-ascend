@@ -79,8 +79,4 @@ This checks decomposition equivalence, not independent model accuracy.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_compress_norm_store.py
-pytest -sv tests/ut/ops/test_qsa_compress_eligibility.py
 ```
-
-See [validation and specialization](qsa_preparation_validation.md) for pending
-hardware evidence and model configuration coverage.

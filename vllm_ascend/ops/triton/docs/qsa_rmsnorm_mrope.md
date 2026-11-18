@@ -103,6 +103,3 @@ graph replay. Legacy coverage is in
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope.py
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_direct_rope.py
 ```
-
-See [QSA preparation validation and specialization](qsa_preparation_validation.md)
-for the coverage matrix, remaining evidence and JIT analysis.

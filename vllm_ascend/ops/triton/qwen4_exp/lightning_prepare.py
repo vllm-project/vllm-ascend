@@ -14,16 +14,16 @@ _SUPPORTED_HEAD_COUNTS = (8, 16, 24, 32, 64)
 
 @triton.jit
 def _prepare_lightning_kernel(
-    query,
-    positions,
-    lengths,
-    owners,
-    table,
-    padded_query,
-    weights,
-    visible,
-    cu_query,
-    row_table,
+    query_ptr,
+    positions_ptr,
+    lengths_ptr,
+    owners_ptr,
+    table_ptr,
+    padded_query_ptr,
+    weights_ptr,
+    visible_ptr,
+    cu_query_ptr,
+    row_table_ptr,
     stride_q_row,
     stride_q_head,
     stride_pos,
@@ -31,45 +31,47 @@ def _prepare_lightning_kernel(
     stride_owner,
     stride_table_row,
     stride_table_col,
-    requests: tl.constexpr,
-    heads: tl.constexpr,
-    padded_heads: tl.constexpr,
-    columns: tl.constexpr,
-    block_q: tl.constexpr,
-    block_heads: tl.constexpr,
-    block_table: tl.constexpr,
-    score_weight: tl.constexpr,
-    head_dim: tl.constexpr,
-    compress_ratio: tl.constexpr,
+    REQUESTS: tl.constexpr,
+    HEADS: tl.constexpr,
+    PADDED_HEADS: tl.constexpr,
+    COLUMNS: tl.constexpr,
+    BLOCK_Q: tl.constexpr,
+    BLOCK_HEADS: tl.constexpr,
+    BLOCK_TABLE: tl.constexpr,
+    SCORE_WEIGHT: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
     PAD_QUERY: tl.constexpr,
 ):
     row = tl.program_id(0)
-    owner = tl.load(owners + row * stride_owner).to(tl.int64)
+    owner = tl.load(owners_ptr + row * stride_owner).to(tl.int64)
     # Match advanced indexing for valid negative request indices as well.
-    owner = tl.where(owner < 0, owner + requests, owner)
-    valid = (owner >= 0) & (owner < requests)
-    safe_owner = tl.minimum(tl.maximum(owner, 0), requests - 1)
-    length = tl.load(lengths + safe_owner * stride_len, mask=valid, other=0).to(tl.int64)
-    position_end = tl.load(positions + row * stride_pos).to(tl.int64) + 1
+    owner = tl.where(owner < 0, owner + REQUESTS, owner)
+    valid = (owner >= 0) & (owner < REQUESTS)
+    safe_owner = tl.minimum(tl.maximum(owner, 0), REQUESTS - 1)
+    length = tl.load(lengths_ptr + safe_owner * stride_len, mask=valid, other=0).to(tl.int64)
+    position_end = tl.load(positions_ptr + row * stride_pos).to(tl.int64) + 1
     # Triton's signed division truncates; torch.floor_divide rounds down.
-    position_groups = position_end // compress_ratio - ((position_end < 0) & (position_end % compress_ratio != 0)).to(
+    position_groups = position_end // COMPRESS_RATIO - ((position_end < 0) & (position_end % COMPRESS_RATIO != 0)).to(
         tl.int64
     )
-    length_groups = length // compress_ratio - ((length < 0) & (length % compress_ratio != 0)).to(tl.int64)
-    tl.store(visible + row, tl.where(valid, tl.minimum(position_groups, length_groups), 0))
-    tl.store(cu_query + row, row + 1)
-    cols = tl.arange(0, block_table)
+    length_groups = length // COMPRESS_RATIO - ((length < 0) & (length % COMPRESS_RATIO != 0)).to(tl.int64)
+    tl.store(visible_ptr + row, tl.where(valid, tl.minimum(position_groups, length_groups), 0))
+    tl.store(cu_query_ptr + row, row + 1)
+    cols = tl.arange(0, BLOCK_TABLE)
     blocks = tl.load(
-        table + safe_owner * stride_table_row + cols * stride_table_col, mask=valid & (cols < columns), other=0
+        table_ptr + safe_owner * stride_table_row + cols * stride_table_col, mask=valid & (cols < COLUMNS), other=0
     )
-    tl.store(row_table + row * columns + cols, blocks, mask=cols < columns)
-    head = tl.arange(0, block_heads)
-    tl.store(weights + row * padded_heads + head, tl.where(head < heads, score_weight, 0), mask=head < padded_heads)
+    tl.store(row_table_ptr + row * COLUMNS + cols, blocks, mask=cols < COLUMNS)
+    head = tl.arange(0, BLOCK_HEADS)
+    tl.store(weights_ptr + row * PADDED_HEADS + head, tl.where(head < HEADS, SCORE_WEIGHT, 0), mask=head < PADDED_HEADS)
     if PAD_QUERY:
-        offsets = tl.arange(0, block_q)
-        source = query + row * stride_q_row + offsets // head_dim * stride_q_head + offsets % head_dim
-        values = tl.load(source, mask=offsets < heads * head_dim, other=0)
-        tl.store(padded_query + row * padded_heads * head_dim + offsets, values, mask=offsets < padded_heads * head_dim)
+        offsets = tl.arange(0, BLOCK_Q)
+        source = query_ptr + row * stride_q_row + offsets // HEAD_DIM * stride_q_head + offsets % HEAD_DIM
+        values = tl.load(source, mask=offsets < HEADS * HEAD_DIM, other=0)
+        tl.store(
+            padded_query_ptr + row * PADDED_HEADS * HEAD_DIM + offsets, values, mask=offsets < PADDED_HEADS * HEAD_DIM
+        )
 
 
 def prepare_qsa_lightning_inputs(
@@ -135,16 +137,16 @@ def prepare_qsa_lightning_inputs(
             token_to_req.stride(0),
             block_table.stride(0),
             block_table.stride(1),
-            requests=sequence_lengths.shape[0],
-            heads=heads,
-            padded_heads=padded_heads,
-            columns=block_table.shape[1],
-            block_q=triton.next_power_of_2(padded_heads * _HEAD_DIM),
-            block_heads=triton.next_power_of_2(padded_heads),
-            block_table=triton.next_power_of_2(block_table.shape[1]),
-            score_weight=1.0 / math.sqrt(_HEAD_DIM),
-            head_dim=_HEAD_DIM,
-            compress_ratio=_COMPRESS_RATIO,
+            REQUESTS=sequence_lengths.shape[0],
+            HEADS=heads,
+            PADDED_HEADS=padded_heads,
+            COLUMNS=block_table.shape[1],
+            BLOCK_Q=triton.next_power_of_2(padded_heads * _HEAD_DIM),
+            BLOCK_HEADS=triton.next_power_of_2(padded_heads),
+            BLOCK_TABLE=triton.next_power_of_2(block_table.shape[1]),
+            SCORE_WEIGHT=1.0 / math.sqrt(_HEAD_DIM),
+            HEAD_DIM=_HEAD_DIM,
+            COMPRESS_RATIO=_COMPRESS_RATIO,
             PAD_QUERY=padded_heads != heads,
             num_warps=4,
         )
