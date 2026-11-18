@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Any
 
 import torch
+from vllm import envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
@@ -443,7 +444,8 @@ def select_moe_comm_method(
     lora_config = getattr(vllm_config, "lora_config", None)
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
-    elif lora_config is not None and vllm_config.parallel_config.enable_expert_parallel:
+    elif (lora_config is not None or envs.VLLM_BATCH_INVARIANT) and vllm_config.parallel_config.enable_expert_parallel:
+        # Batch-invariant mode uses the same communication path for every token count.
         # LoRA + EP requires AlltoAll because the MC2/FusedMC2 paths
         # Ascend MoE LoRA cannot patch FusedMC2 path for dispatch_ffn_combine/mega_moe
         # is a single fused C++ op. This covers both normal model

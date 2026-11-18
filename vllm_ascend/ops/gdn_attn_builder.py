@@ -1413,6 +1413,10 @@ class AscendGDNHostMetadataBackend(AscendGDNAttentionBackend):
 class AscendGDNFusedAttentionBackend(AscendGDNAttentionBackend):
     """Select host-only metadata when Qwen can use a fused prefill op."""
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
     @staticmethod
     def get_builder_cls() -> type[AscendGDNAttentionMetadataBuilder]:
         # Import lazily to avoid the gdn <-> builder import cycle at module

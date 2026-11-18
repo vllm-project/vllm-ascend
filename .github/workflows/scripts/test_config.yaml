@@ -43,6 +43,7 @@ curated_tests:
     - tests/e2e/pull_request/two_card/test_kvpp.py
   # A5 (Ascend 950) curated test suite
   a5:
+    - tests/e2e/pull_request/one_card/test_qwen4_gbsa_batch_invariant.py
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
     - tests/e2e/pull_request/one_card/test_mla_fp8_decode_layout_a5.py
     - tests/e2e/pull_request/one_card/test_flash_attn_precision.py
@@ -114,6 +115,8 @@ runner_mapping:
   # Sparse KV offload native ops require A3, even for the TP=1 runner test.
   tests/e2e/pull_request/one_card/test_sparse_kv_offload_lifecycle\.py$:
     default: a3-2
+  tests/e2e/pull_request/one_card/test_qwen4_gbsa_batch_invariant\.py$:
+    default: a5-4
   # Native padded-head Q_B packing regressed on A3; keep its numerical test there.
   tests/e2e/pull_request/one_card/test_mla_prolog_head_padding\.py$:
     default: a3-2

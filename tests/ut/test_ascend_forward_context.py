@@ -512,6 +512,27 @@ def test_select_moe_comm_method_a5(monkeypatch, num_tokens, world_size, top_k_ex
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
 
 
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("num_tokens", [1, 64, 128, 129, 2048, 20480])
+def test_batch_invariant_ep_keeps_same_communication_across_token_counts(monkeypatch, device_type, num_tokens):
+    _patch_select_moe_comm_method_deps(monkeypatch, device_type=device_type, capacity=128)
+    config = _make_vllm_config(world_size=8, top_k_experts=8)
+    monkeypatch.setattr(afc.envs, "VLLM_BATCH_INVARIANT", False)
+    baseline = afc.select_moe_comm_method(num_tokens, config)
+    monkeypatch.setattr(afc.envs, "VLLM_BATCH_INVARIANT", True)
+    assert afc.select_moe_comm_method(num_tokens, config) == MoECommType.ALLTOALL
+    monkeypatch.setattr(afc.envs, "VLLM_BATCH_INVARIANT", False)
+    assert afc.select_moe_comm_method(num_tokens, config) == baseline
+
+
+@pytest.mark.parametrize("enable_ep,ep_world_size", [(False, 8), (True, 1)])
+def test_batch_invariant_without_effective_ep_preserves_allgather(monkeypatch, enable_ep, ep_world_size):
+    _patch_select_moe_comm_method_deps(monkeypatch, device_type=AscendDeviceType.A5, ep_world_size=ep_world_size)
+    monkeypatch.setattr(afc.envs, "VLLM_BATCH_INVARIANT", True)
+    config = _make_vllm_config(enable_expert_parallel=enable_ep)
+    assert afc.select_moe_comm_method(64, config) == MoECommType.ALLGATHER
+
+
 @pytest.mark.parametrize("num_tokens", [128, 4096])
 def test_select_moe_comm_method_a5_uses_megamoe_when_enabled(monkeypatch, num_tokens):
     _patch_select_moe_comm_method_deps(
