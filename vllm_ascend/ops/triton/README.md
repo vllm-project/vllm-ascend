@@ -47,7 +47,7 @@ examples and links together.
 | [sample/thinking_budget.py](sample/thinking_budget.py) | `patch/worker/patch_triton.py` | [thinking_budget.md](docs/thinking_budget.md) |
 | [spec_decode/prepare_dflash_inputs.py](spec_decode/prepare_dflash_inputs.py) | `worker/v2/spec_decode/dflash/speculator.py` | [prepare_dflash_inputs.md](docs/prepare_dflash_inputs.md) |
 | [spec_decode/resample.py](spec_decode/resample.py) | `worker/v2/spec_decode/rejection_sampler_utils.py` | [resample.md](docs/resample.md) |
-| [spec_decode/suffix.py](spec_decode/suffix.py) | `patch/worker/patch_triton.py` (upstream Suffix runner) | [suffix.md](docs/suffix.md) |
+| [spec_decode/suffix.py](spec_decode/suffix.py) | `patch/worker/patch_triton.py` | [suffix.md](docs/suffix.md) |
 | [mamba/gdn_prepare.py](mamba/gdn_prepare.py) | `attention/gdn_attn_builder.py` | [gdn_prepare.md](docs/gdn_prepare.md) |
 | [spec_decode/entropy_verify.py](spec_decode/entropy_verify.py) | `worker/v2/spec_decode/rejection_sampler_utils.py` | [entropy_verify.md](docs/entropy_verify.md) |
 
