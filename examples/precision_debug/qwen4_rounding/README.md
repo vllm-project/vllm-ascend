@@ -24,3 +24,17 @@ production operator with this function alone.
 
 Run the CPU regression tests from this directory with `python -m pytest -q`.
 The helpers require PyTorch; no model weights are bundled.
+
+## Shared-expert SiLU
+
+```python
+from shared_silu import silu_bf16_then_mul
+
+activation = silu_bf16_then_mul(gate_up_projection)
+```
+
+This materializes SiLU(gate) in BF16 before multiplying by the up projection.
+The investigation applied it to the first layer's shared expert, not to every
+activation or the routed experts. Applying it globally would be a different
+experiment. The later down projection and shared-expert sigmoid gate are
+unchanged.
