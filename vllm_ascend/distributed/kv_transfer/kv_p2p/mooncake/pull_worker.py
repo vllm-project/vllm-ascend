@@ -481,9 +481,17 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             head_end = min(local_head_interval[1], remote_head_interval[1])
             if head_start >= head_end:
                 continue
-            ranks_by_head_piece.setdefault((head_start, head_end), []).extend(
-                range(remote_rank_start, remote_rank_start + remote_dcp_size)
-            )
+            members = list(range(remote_rank_start, remote_rank_start + remote_dcp_size))
+            if remote_dcp_size > 1:
+                import inspect
+
+                import vllm.distributed.parallel_state as parallel_state
+
+                if "group_ranks = [sorted(x.tolist()) for x in group_ranks]" in inspect.getsource(
+                    parallel_state.initialize_model_parallel
+                ):
+                    members.sort(key=lambda m: (m % remote_pcp_size) * remote_tp_size + m // remote_pcp_size)
+            ranks_by_head_piece.setdefault((head_start, head_end), []).extend(members)
 
         if not ranks_by_head_piece:
             raise ValueError(
