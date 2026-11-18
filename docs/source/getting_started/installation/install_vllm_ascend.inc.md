@@ -156,11 +156,13 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
         Clear the custom cache separately after verifying it is safe to
         remove, especially if it is shared by other builds.
 
-Finally, handle `triton` and `triton-ascend` according to the hardware:
+After completing any of the three installation methods, install the kernel packages for your hardware in the same Python environment:
 
 === "A2 / A3 / 950DT Products"
 
-    To ensure that Triton Ascend matches the current vLLM Ascend version, remove any existing `triton` and `triton-ascend` packages before installing the corresponding version of `triton-ascend`:
+    Reinstall the matching Triton Ascend version, then install FLA NPU. FLA NPU is required during worker initialization on these devices and is not installed automatically with `vllm-ascend`.
+
+    The following example installs FLA NPU for A2:
 
     <!-- doctest: installation-post-standard -->
     ```bash
@@ -169,7 +171,17 @@ Finally, handle `triton` and `triton-ascend` according to the hardware:
     pip install \
         --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
         "triton-ascend=={{ release_triton_ascend_version }}"
+
+    pip install --no-deps \
+        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+        "flash-linear-attention-npu-a2=={{ release_fla_npu_version }}"
     ```
+
+    ???+ note "FLA NPU packages"
+
+        For A3, replace `flash-linear-attention-npu-a2` with `flash-linear-attention-npu-a3`. For 950DT Products (A5), use `flash-linear-attention-npu-a5` instead. Keep the same version; pip selects the wheel for your host architecture automatically.
+
+        These packages require glibc 2.34 or later and a libstdc++ runtime providing `GLIBCXX_3.4.29`.
 
     ??? note "Can community Triton and Triton Ascend coexist?"
 
@@ -182,6 +194,8 @@ Finally, handle `triton` and `triton-ascend` according to the hardware:
     When installing another version of `vllm-ascend`, check the repository's `requirements.txt` for the corresponding `triton-ascend` version.
 
 === "Atlas 300I DUO / Atlas 200I Pro"
+
+    FLA NPU is not required for these devices.
 
     Atlas 300I DUO and Atlas 200I Pro do not support `triton` or `triton-ascend`. If either package is already installed in the environment, uninstall it and do not reinstall `triton-ascend`:
 
