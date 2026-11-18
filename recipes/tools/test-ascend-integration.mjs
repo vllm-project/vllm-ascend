@@ -56,6 +56,35 @@ test("valid fixture uses the official assembler and has no semantic errors", asy
   assert.equal(report.provenance.vllm.local, true);
 });
 
+function unrestrictedVariantConfig(declareA5 = false) {
+  const unrestrictedCore = path.join(tmp, "unrestricted-core");
+  write(path.join(unrestrictedCore, "models/test/Fixture.yaml"), {
+    ...structuredClone(core), variants: { default: { precision: "bf16", vram_minimum_gb: 1 } },
+  });
+  const recipes = fixture((o) => {
+    o.variants.default = { hardware_overrides: structuredClone(overlay.variants.ascend.hardware_overrides) };
+    if (declareA5) o.meta.hardware.ascend_950dt = "supported";
+  });
+  return config({ recipes, override: overrides.map((value) => value.startsWith("vllm=") ? `vllm=${unrestrictedCore}` : value) });
+}
+
+test("undeclared restricted hardware does not create fallback errors for an inherited variant", async () => {
+  const report = await run(unrestrictedVariantConfig());
+  assert.deepEqual(report.results.filter((r) => r.variant === "default").map((r) => r.hardware), ["ascend_910c"]);
+  assert.equal(report.summary.blocking, 0);
+});
+
+test("declared restricted hardware still blocks missing Ascend installation settings", async () => {
+  const report = await run(unrestrictedVariantConfig(true));
+  assert.deepEqual(report.comparison.blocking.map((f) => [f.hardware, f.code]),
+    [["ascend_950dt", "ASC001"], ["ascend_950dt", "ASC002"]]);
+});
+
+test("an explicit hardware filter cannot enable an undeclared restricted profile", async () => {
+  const report = await run({ ...unrestrictedVariantConfig(), hardware: "ascend_950dt" });
+  assert.ok(hasCode(report, "SOURCE_EMPTY"));
+});
+
 function standaloneFixture(change = () => {}) {
   const recipes = fixture();
   const doc = { ...structuredClone(core), meta: { hardware: { ascend_910c: "verified" } },

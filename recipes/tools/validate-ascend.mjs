@@ -92,6 +92,8 @@ function inspectSource(recipes, content, tools, options, allowEmpty = false) {
         if (options.hardware && options.hardware !== hw) continue;
         const profile = taxonomy.hardware_profiles[hw];
         if (profile.brand !== "Huawei" || profile.generation !== "npu") continue;
+        // Match the builder and JSON API's restricted-profile visibility gate.
+        if (profile.restricted && !(hw in (recipe.meta?.hardware || {}))) continue;
         for (const strategyName of synth.effectiveCompatibleStrategies(recipe)) {
           if (options.strategy && options.strategy !== strategyName) continue;
           if (!synth.isStrategySupportedOnHardware(recipe, strategyName, profile, hw)) continue;
