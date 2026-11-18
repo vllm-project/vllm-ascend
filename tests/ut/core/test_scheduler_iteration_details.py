@@ -154,3 +154,28 @@ def test_iteration_encoder_counts_remove_preempted_inputs(scheduler_cls):
     assert first.status == RequestStatus.PREEMPTED
     assert output.scheduled_encoder_inputs == {"second": [0]}
     assert output.iteration_details.num_encoder_inputs == 1
+
+
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Legacy encoder statistics are release-only")
+@pytest.mark.parametrize("scheduler_cls", SCHEDULERS)
+@pytest.mark.parametrize("log_stats", [False, True])
+@pytest.mark.parametrize("log_details", [False, True])
+def test_release_encoder_statistics(scheduler_cls, log_stats, log_details):
+    scheduler = _make_scheduler(scheduler_cls)
+    scheduler.log_stats = log_stats
+    scheduler.observability_config.enable_logging_iteration_details = log_details
+    request = make_mm_request("mm", [("image", [True, True])])
+    scheduler.add_request(request)
+    # Verify dispatch and the exact scheduled inputs without coupling to the
+    # release statistics object's representation.
+    stats = object()
+    with patch.object(scheduler, "_make_scheduled_encoder_input_stats", return_value=stats) as collect:
+        output = scheduler.schedule()
+
+    assert output.scheduled_encoder_inputs == {"mm": [0]}
+    if log_stats and log_details:
+        collect.assert_called_once_with({"mm": [0]})
+        assert output.scheduled_encoder_input_stats is stats
+    else:
+        collect.assert_not_called()
+        assert output.scheduled_encoder_input_stats is None
