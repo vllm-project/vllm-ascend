@@ -7,8 +7,11 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from vllm.config.vllm import set_current_vllm_config
+from vllm.model_executor.layers.vocab_parallel_embedding import UnquantizedEmbeddingMethod
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
+import vllm_ascend.ops.vocab_parallel_embedding as vocab_module
 from vllm_ascend.models import quarot_utils, qwen3_dflash2
 from vllm_ascend.models.kimi_k3.kimi_k3_dspark import AscendK3DSparkForCausalLM
 from vllm_ascend.models.qwen3_dflash2 import DFlash2Qwen3ForCausalLM
@@ -59,9 +62,11 @@ def test_post_process_receives_target_config_after_loading(monkeypatch, fail):
 @pytest.mark.parametrize("own_embed,own_head", [(False, False), (True, False), (False, True), (True, True)])
 @pytest.mark.parametrize("rotated", [False, True])
 @pytest.mark.parametrize("pp_size", [1, 2])
+@pytest.mark.parametrize("lmhead_tp", [False, True])
 def test_post_process_aligns_weights_without_modifying_target(
-    monkeypatch, model_cls, projection_name, num_aux_layers, own_embed, own_head, rotated, pp_size
+    monkeypatch, model_cls, projection_name, num_aux_layers, own_embed, own_head, rotated, pp_size, lmhead_tp
 ):
+    monkeypatch.setattr(quarot_utils, "lmhead_tp_enable", lambda: lmhead_tp)
     target_embed = torch.nn.Embedding(4, 2, dtype=torch.float64)
     target_head = torch.nn.Linear(2, 4, bias=False, dtype=torch.float64)
     target_embed_before = target_embed.weight.detach().clone()
@@ -94,8 +99,9 @@ def test_post_process_aligns_weights_without_modifying_target(
     monkeypatch.setattr(quarot_utils, "get_rotation_matrix", loader)
     created = []
 
-    def make_layer(vocab, hidden, params_dtype):
+    def make_layer(vocab, hidden, params_dtype, *, prefix):
         layer = torch.nn.Embedding(vocab, hidden, dtype=params_dtype)
+        layer.prefix = prefix
         layer.quant_method = SimpleNamespace(process_weights_after_loading=MagicMock())
         created.append(layer)
         return layer
@@ -132,6 +138,10 @@ def test_post_process_aligns_weights_without_modifying_target(
         if not owns and (reload_embed if is_embed else rotated):
             assert actual is not original
             assert actual.weight.data_ptr() != original.weight.data_ptr()
+            expected_prefix = ""
+            if not is_embed and lmhead_tp:
+                expected_prefix = "lm_head"
+            assert actual.prefix == expected_prefix
             torch.testing.assert_close(actual.weight, target_weight @ rotation.T if rotated else target_weight)
         else:
             assert actual is original
@@ -153,3 +163,68 @@ def test_dflash2_without_aux_hidden_states_requires_unrotated_target(monkeypatch
     with pytest.raises(ValueError, match=expected_error) if rotated else nullcontext():
         draft.post_process(config)
     align.assert_not_called()
+
+
+@pytest.mark.parametrize("rank", range(8))
+def test_dspark_dense_logits_keep_dp_rows_with_shared_lmhead_exchange(monkeypatch, rank):
+    """Exercise the DSpark model and worker wrapper through real logits processing."""
+    world_size, capacity, hidden_size, shard_size = 8, 6, 4, 5
+    counts = [0, 1, 6, 2, 4, 0, 3, 5]
+    generator = torch.Generator().manual_seed(43)
+    hidden = torch.randn(world_size, capacity, hidden_size, generator=generator)
+    for dp, count in enumerate(counts):
+        hidden[dp, count:] = 0
+    weight = torch.randn(world_size * shard_size, hidden_size, generator=generator)
+    all_hidden = hidden.flatten(0, 1)
+    full_logits = all_hidden @ weight.T
+    calls = []
+
+    def gather(rows, dim):
+        assert dim == 0
+        torch.testing.assert_close(rows, hidden[rank])
+        calls.append("gather")
+        return all_hidden
+
+    group = SimpleNamespace(world_size=world_size, device_group=object(), all_gather=gather)
+
+    def all_to_all(output, input_, *, group):
+        local_logits = full_logits[:, rank * shard_size : (rank + 1) * shard_size]
+        torch.testing.assert_close(input_, local_logits.reshape(world_size, capacity, shard_size))
+        for source in range(world_size):
+            output[source].copy_(
+                full_logits[rank * capacity : (rank + 1) * capacity, source * shard_size : (source + 1) * shard_size]
+            )
+        calls.append("exchange")
+
+    monkeypatch.setattr(vocab_module, "get_lmhead_tp_group", lambda: group)
+    monkeypatch.setattr(vocab_module.dist, "all_to_all_single", all_to_all)
+    monkeypatch.setattr(shared, "lmhead_tp_enable", lambda: True)
+    config = MagicMock()
+    config.compilation_config.custom_ops = ["all"]
+    config.model_config = None
+    # The final row is padding and must not reach DSpark's sampler.
+    vocab_size = world_size * shard_size - 1
+    with set_current_vllm_config(config):
+        processor = vocab_module.AscendLogitsProcessor(vocab_size=vocab_size, scale=1.25, soft_cap=2.0)
+    draft = AscendQwen3DSparkForCausalLM.__new__(AscendQwen3DSparkForCausalLM)
+    torch.nn.Module.__init__(draft)
+    draft.lm_head = torch.nn.Linear(hidden_size, shard_size, bias=False)
+    draft.lm_head.weight = torch.nn.Parameter(weight[rank * shard_size : (rank + 1) * shard_size])
+    draft.lm_head.quant_method = UnquantizedEmbeddingMethod()
+    draft.lm_head.parallel_mode = vocab_module.VocabParallelMode.FINE_GRAINED
+    draft.logits_processor = processor
+    spec = shared.AscendDSparkSpeculator.__new__(shared.AscendDSparkSpeculator)
+    spec.max_num_reqs, spec.num_speculative_steps = 2, 3
+    spec._lmhead_tp_wrap_draft_logits(draft)
+
+    logits = draft.compute_draft_logits(hidden[rank, : counts[rank]])
+    expected = full_logits[rank * capacity : rank * capacity + counts[rank], :vocab_size]
+    torch.testing.assert_close(logits, torch.tanh(expected / 2.0) * 2.0 * 1.25)
+    assert logits.shape == (counts[rank], vocab_size)
+    assert calls == ["gather", "exchange"]
+    # Local-logit callers must still bypass all communication. Exercise the
+    # hook directly: older upstream DSpark models do not expose a local method.
+    local = processor._get_logits(hidden[rank, : counts[rank]], draft.lm_head, skip_gather=True)
+    expected_local = hidden[rank, : counts[rank]] @ draft.lm_head.weight.T
+    torch.testing.assert_close(local, expected_local)
+    assert calls == ["gather", "exchange"]
