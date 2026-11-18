@@ -128,7 +128,7 @@ static bool exact(const Ring& raw, int nnew, int pmin, int pmax, int copies) {
   return false;
 }
 
-constexpr int NUM_RULES = 14, NUM_FEATURE_RULES = 11, MAX_ATOMS = 4, NUM_FEATURES = 9;
+constexpr int MAX_ATOMS = 4, NUM_FEATURES = 9, MAX_FEATURE_RULES = 64;
 constexpr int OP_GE = 0, OP_LE = 1;
 
 struct FeatureAtom {
@@ -146,8 +146,11 @@ struct Rules {
   // exact[0], exact[1]: pmin, pmax, copies
   std::array<int32_t, 3> exact0{{32, 500, 5}}, exact1{{32, 2000, 3}};
   int32_t run_max_threshold = 500;
-  std::array<FeatureRule, NUM_FEATURE_RULES> feature{};
-  std::array<int32_t, NUM_RULES> persist{{1, 1, 1, 8, 4, 4, 24, 16, 24, 8, 8, 24, 40, 48}};
+  // Feature share windows in f[0]..f[8] order (from pattern.json).
+  std::array<int32_t, NUM_FEATURES> feat_win{{1024, 512, 512, 1024, 2048, 1024, 1024, 16, 256}};
+  std::vector<FeatureRule> feature;
+  std::vector<int32_t> persist;  // length = 2 exact + run_max + feature.size()
+  int num_rules() const { return static_cast<int>(persist.size()); }
 };
 
 struct Tables {
@@ -176,8 +179,9 @@ struct State {
   int sentence_len = 0;
   std::array<uint64_t, 4> signature;
   std::array<std::array<uint64_t, 4>, 512> sentence_history{};
-  std::array<int, NUM_RULES> streak{};
-  explicit State(std::shared_ptr<const Tables> tab) : tables(std::move(tab)), seen(tables->nbits / 8 + 1, 0) {
+  std::vector<int> streak;
+  explicit State(std::shared_ptr<const Tables> tab)
+      : tables(std::move(tab)), seen(tables->nbits / 8 + 1, 0), streak(tables->rules.num_rules(), 0) {
     for (auto r : {&sep, &chars, &ws, &repeat, &marker, &duplicate}) r->push(0);
     signature.fill(UINT64_MAX);
   }
@@ -201,16 +205,18 @@ struct State {
   }
   std::array<double, 9> features() const {
     if (failed) throw std::runtime_error("failed detector state; discard it");
-    return {
-        n4.counts[0].share(nx, 1024),
-        n4.counts[1].share(nx, 512),
-        n4.counts[3].share(nx, 512),
-        n8.counts[2].share(nx, 1024),
-        repeat.share(nx, 2048),
-        repeat.share(nx, 1024),
-        marker.share(t, 1024),
-        duplicate.share(sentences, 16),
-        double(sep.at(t) - sep.at(std::max<int64_t>(t - 256, 0))) / std::max<int64_t>(std::min<int64_t>(t, 256), 1)};
+    const auto& w = tables->rules.feat_win;
+    const int64_t sep_w = w[8];
+    return {n4.counts[0].share(nx, w[0]),
+            n4.counts[1].share(nx, w[1]),
+            n4.counts[3].share(nx, w[2]),
+            n8.counts[2].share(nx, w[3]),
+            repeat.share(nx, w[4]),
+            repeat.share(nx, w[5]),
+            marker.share(t, w[6]),
+            duplicate.share(sentences, w[7]),
+            double(sep.at(t) - sep.at(std::max<int64_t>(t - sep_w, 0))) /
+                std::max<int64_t>(std::min<int64_t>(t, sep_w), 1)};
   }
   void block(int n) {
     // Find the answer boundary before feeding any normalized positions in
@@ -263,12 +269,13 @@ struct State {
     // Preserve NumPy float32 rounding followed by Python float comparison.
     for (auto& v : f) v = double(float(v));
     const Rules& rules = tables->rules;
-    std::array<bool, NUM_RULES> ok{};
+    const int n_rules = rules.num_rules();
+    std::vector<char> ok(static_cast<size_t>(n_rules), 0);
     // Evaluation order determines the first alert reason (matches pattern.json).
     ok[0] = exact(raw, n, rules.exact0[0], rules.exact0[1], rules.exact0[2]);
     if (!ok[0]) ok[1] = exact(raw, n, rules.exact1[0], rules.exact1[1], rules.exact1[2]);
     ok[2] = run_max >= rules.run_max_threshold;
-    for (int r = 0; r < NUM_FEATURE_RULES; ++r) {
+    for (size_t r = 0; r < rules.feature.size(); ++r) {
       const FeatureRule& fr = rules.feature[r];
       bool hold = fr.n_atoms > 0;
       for (int a = 0; hold && a < fr.n_atoms; ++a) {
@@ -278,7 +285,7 @@ struct State {
       }
       ok[3 + r] = hold;
     }
-    for (int i = 0; i < NUM_RULES; ++i) {
+    for (int i = 0; i < n_rules; ++i) {
       streak[i] = ok[i] ? streak[i] + 1 : 0;
       if (streak[i] >= rules.persist[i]) {
         reason = i;
@@ -317,7 +324,7 @@ struct Detector {
   // callers must not silently truncate float/int64/unsigned lookup tables.
   using Array = py::array;
   Detector(Array norm, Array chars, Array ws, Array rc, Array marker, Array send, int64_t think, Array exact_params,
-           int64_t run_max_threshold, Array atom_meta, Array atom_thr, Array persist) {
+           int64_t run_max_threshold, Array feature_windows, Array atom_meta, Array atom_thr, Array persist) {
     auto copy = [](const Array& x) {
       if (x.ndim() != 1) throw std::invalid_argument("lookup tables must be one-dimensional");
       if (!x.dtype().is(py::dtype::of<int32_t>()) || !(x.flags() & py::array::c_style))
@@ -364,17 +371,28 @@ struct Detector {
     if (run_max_threshold < 1) throw std::invalid_argument("run_max_threshold");
     tables->rules.run_max_threshold = static_cast<int32_t>(run_max_threshold);
 
+    require_i32(feature_windows, "feature_windows", 1);
+    if (feature_windows.shape(0) != NUM_FEATURES) throw std::invalid_argument("feature_windows length");
+    {
+      const int32_t* fw = static_cast<const int32_t*>(feature_windows.data());
+      for (int i = 0; i < NUM_FEATURES; ++i) {
+        if (fw[i] < 1) throw std::invalid_argument("feature_windows");
+        tables->rules.feat_win[i] = fw[i];
+      }
+    }
+
     require_i32(atom_meta, "atom_meta", 2);
     require_f64(atom_thr, "atom_thr", 2);
-    if (atom_meta.shape(0) != NUM_FEATURE_RULES || atom_meta.shape(1) != 1 + MAX_ATOMS * 2)
-      throw std::invalid_argument("atom_meta shape");
-    if (atom_thr.shape(0) != NUM_FEATURE_RULES || atom_thr.shape(1) != MAX_ATOMS)
-      throw std::invalid_argument("atom_thr shape");
+    const int n_feat = static_cast<int>(atom_meta.shape(0));
+    if (n_feat < 1 || n_feat > MAX_FEATURE_RULES) throw std::invalid_argument("feature rule count");
+    if (atom_meta.shape(1) != 1 + MAX_ATOMS * 2) throw std::invalid_argument("atom_meta shape");
+    if (atom_thr.shape(0) != n_feat || atom_thr.shape(1) != MAX_ATOMS) throw std::invalid_argument("atom_thr shape");
+    tables->rules.feature.assign(static_cast<size_t>(n_feat), FeatureRule{});
     {
       const int32_t* meta = static_cast<const int32_t*>(atom_meta.data());
       const double* thr = static_cast<const double*>(atom_thr.data());
       const int meta_stride = 1 + MAX_ATOMS * 2;
-      for (int r = 0; r < NUM_FEATURE_RULES; ++r) {
+      for (int r = 0; r < n_feat; ++r) {
         FeatureRule& fr = tables->rules.feature[r];
         fr.n_atoms = meta[r * meta_stride];
         if (fr.n_atoms < 1 || fr.n_atoms > MAX_ATOMS) throw std::invalid_argument("feature n_atoms");
@@ -388,10 +406,12 @@ struct Detector {
       }
     }
     require_i32(persist, "persist", 1);
-    if (persist.shape(0) != NUM_RULES) throw std::invalid_argument("persist length");
+    const int n_rules = 2 + 1 + n_feat;
+    if (persist.shape(0) != n_rules) throw std::invalid_argument("persist length");
+    tables->rules.persist.resize(static_cast<size_t>(n_rules));
     {
       const int32_t* pr = static_cast<const int32_t*>(persist.data());
-      for (int i = 0; i < NUM_RULES; ++i) {
+      for (int i = 0; i < n_rules; ++i) {
         if (pr[i] < 1) throw std::invalid_argument("persist");
         tables->rules.persist[i] = pr[i];
       }
@@ -459,13 +479,13 @@ PYBIND11_MODULE(_pattern_native, m) {
         return s.t + s.n_pending;
       });
   py::class_<Detector>(m, "Detector")
-      .def(
-          py::init<Detector::Array, Detector::Array, Detector::Array, Detector::Array, Detector::Array, Detector::Array,
-                   int64_t, Detector::Array, int64_t, Detector::Array, Detector::Array, Detector::Array>(),
-          py::arg("norm").noconvert(), py::arg("chars").noconvert(), py::arg("ws").noconvert(),
-          py::arg("rc").noconvert(), py::arg("marker").noconvert(), py::arg("send").noconvert(), py::arg("think"),
-          py::arg("exact_params").noconvert(), py::arg("run_max_threshold"), py::arg("atom_meta").noconvert(),
-          py::arg("atom_thr").noconvert(), py::arg("persist").noconvert())
+      .def(py::init<Detector::Array, Detector::Array, Detector::Array, Detector::Array, Detector::Array,
+                    Detector::Array, int64_t, Detector::Array, int64_t, Detector::Array, Detector::Array,
+                    Detector::Array, Detector::Array>(),
+           py::arg("norm").noconvert(), py::arg("chars").noconvert(), py::arg("ws").noconvert(),
+           py::arg("rc").noconvert(), py::arg("marker").noconvert(), py::arg("send").noconvert(), py::arg("think"),
+           py::arg("exact_params").noconvert(), py::arg("run_max_threshold"), py::arg("feature_windows").noconvert(),
+           py::arg("atom_meta").noconvert(), py::arg("atom_thr").noconvert(), py::arg("persist").noconvert())
       .def("start", &Detector::start)
       .def("finish", &Detector::finish)
       .def("feed_events", &Detector::feed_events);

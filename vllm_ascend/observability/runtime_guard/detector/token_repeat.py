@@ -213,7 +213,7 @@ class TokenRepeatDetector(ConfigBackedDetector):
 
         return self._check_pattern(req_ids, skip_req_ids)
 
-    def _incident(self, rid, idx, fired_at, reason, finish=False):
+    def _incident(self, rid, idx, fired_at, reason, rule="", finish=False):
         self._alerted.add(rid)
         fired_at += self._start_offset.get(rid, 0)
         return Incident(
@@ -222,7 +222,12 @@ class TokenRepeatDetector(ConfigBackedDetector):
             req_idx=idx,
             is_ill=True,
             ill_type=ILL_TYPE_REPEAT,
-            detail={"fired_at": fired_at, "reason": reason, "finish_only": finish},
+            detail={
+                "fired_at": fired_at,
+                "reason": reason,
+                "rule": rule,
+                "finish_only": finish,
+            },
         )
 
     def _check_pattern(self, req_ids, skip_req_ids):
@@ -277,21 +282,23 @@ class TokenRepeatDetector(ConfigBackedDetector):
                     if receipt is None:
                         self._failed.add(rid)
                         continue
-                    received, _, fired_at, reason = receipt
+                    received, _, fired_at, reason, rule = receipt
                     cursor = self._start_offset.get(rid, 0) + received
                     previous = self._consumed_len.get(rid, 0)
                     if not previous <= cursor <= previous + len(ids):
                         raise ValueError("pattern receipt outside submitted input")
                     self._consumed_len[rid] = cursor
                     if reason:
-                        alerts.append(self._incident(rid, idx, fired_at, reason))
+                        alerts.append(self._incident(rid, idx, fired_at, reason, rule))
                 except Exception:
                     self._failed.add(rid)
                     logger.exception("[runtime_guard: token_repeat] pattern receipt unavailable req=%s", rid)
             return alerts
         for rid, ids in zip(keys, inputs):
             self._consumed_len[rid] = self._consumed_len.get(rid, 0) + len(ids)
-        return [self._incident(keys[slot], indices[slot], fired_at, reason) for slot, fired_at, reason in events]
+        return [
+            self._incident(keys[slot], indices[slot], fired_at, reason, rule) for slot, fired_at, reason, rule in events
+        ]
 
     def finish_requests(self, req_ids):
         """Drain unread output and flush tails BEFORE shared IO is removed."""
@@ -331,14 +338,17 @@ class TokenRepeatDetector(ConfigBackedDetector):
                 try:
                     result = backend.finish(state)
                     if result.is_ill:
-                        alerts.append(self._incident(rid, None, result.fired_at, result.reason, True))
+                        alerts.append(
+                            self._incident(rid, None, result.fired_at, result.reason, getattr(result, "rule", ""), True)
+                        )
                 except Exception:
                     self._failed.add(rid)
                     logger.exception("[runtime_guard: token_repeat] pattern finish failed req=%s", rid)
                     try:
                         receipt = backend.progress(state)
                         if receipt is not None and receipt[3]:
-                            alerts.append(self._incident(rid, None, receipt[2], receipt[3], True))
+                            rule = receipt[4] if len(receipt) > 4 else ""
+                            alerts.append(self._incident(rid, None, receipt[2], receipt[3], rule, True))
                     except Exception:
                         logger.exception("[runtime_guard: token_repeat] pattern finish receipt unavailable req=%s", rid)
             return alerts

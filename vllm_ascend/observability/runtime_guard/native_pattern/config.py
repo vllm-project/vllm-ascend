@@ -15,17 +15,20 @@
 # This file is a part of the vllm-ascend project.
 #
 
-"""Pattern-repeat result type and alert reason strings (from packaged pattern.json)."""
+"""Pattern-repeat result type and alert labels (from packaged pattern.json)."""
 
 from dataclasses import dataclass
 
 from vllm_ascend.observability.runtime_guard.native_pattern.rules import load_pattern_rules
 
-REASONS = load_pattern_rules()["reasons"]
+_RULES = load_pattern_rules()
+TITLES = _RULES["titles"]
+REASONS = _RULES["reasons"]
 
 
 @dataclass
 class Result:
     is_ill: bool = False
     fired_at: int = -1  # raw-token boundary at which the alert is raised
-    reason: str = ""
+    reason: str = ""  # short on-call title
+    rule: str = ""  # long rule id from pattern.json

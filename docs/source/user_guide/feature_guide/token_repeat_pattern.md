@@ -5,7 +5,10 @@ boundaries and a final partial-block flush. There is no sliding-window
 algorithm and no `algorithm` selector. The native CPU extension ships with
 vllm-ascend (`native_pattern`); no separate install step is required.
 
-Alert thresholds and reason strings live in packaged `native_pattern/pattern.json` (loaded once at detector init; not a `runtime_config` hot-reload field).
+Alert thresholds, short on-call titles, and long rule ids live in packaged
+`native_pattern/pattern.json` (loaded once at detector init; not a
+`runtime_config` hot-reload field). Feature share windows and the feature-rule
+list are also JSON-driven.
 
 **Breaking change:** former sliding-window keys (`window`,
 `repeat_sum_threshold`, `min_tokens`, `consecutive_hits`, `ignore_token_ids`,
@@ -36,15 +39,17 @@ Terminal tails are checked before Store cleanup after CPU jobs drain. Forced
 cleanup at the deferred-wave limit can skip the terminal check for outstanding
 jobs; this is explicitly logged.
 
-Alert `detail.reason` strings (native evaluation order):
+Incident `detail` carries a short on-call `reason` (JSON `title`) and a long
+`rule` id (JSON `reason`), in native evaluation order:
 
-| reason | meaning (short) |
-|--------|-----------------|
-| `vllm[32,500]x5` / `vllm[32,2000]x3` | exact raw-token period copies |
-| `run>=500` | long same-char run |
-| `A3_*` / `A5_*` / `P_*` | n-gram density features |
-| `wrep_*` | word-repeat share |
-| `sdup_*` | sentence-duplicate share |
+| reason (title) | rule (long id) | meaning (short) |
+|----------------|----------------|-----------------|
+| `exact_x5` / `exact_x3` | `vllm[32,500]x5` / `vllm[32,2000]x3` | exact raw-token period copies |
+| `run_char` | `run>=500` | long same-char run |
+| `a3_dense` / `a5_*` / `p_n8` | `A3_*` / `A5_*` / `P_*` | n-gram density features |
+| `wrep_*` | `wrep_*` | word-repeat share |
+| `sdup_*` | `sdup_*` | sentence-duplicate share |
 
 Focused regression tests are in `tests/ut/runtime_guard/test_token_repeat_pattern.py`.
-Native cases require a compiled install and skip when the extension is absent.
+Native cases and Python-gold parity require a compiled install and skip when the
+extension is absent.

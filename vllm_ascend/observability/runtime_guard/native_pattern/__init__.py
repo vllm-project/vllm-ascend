@@ -18,6 +18,6 @@
 """In-tree CPU pattern backend for ``token_repeat`` (built with vllm-ascend)."""
 
 from vllm_ascend.observability.runtime_guard.native_pattern.adapter import PatternDetector
-from vllm_ascend.observability.runtime_guard.native_pattern.config import REASONS, Result
+from vllm_ascend.observability.runtime_guard.native_pattern.config import REASONS, TITLES, Result
 
-__all__ = ["PatternDetector", "REASONS", "Result"]
+__all__ = ["PatternDetector", "REASONS", "TITLES", "Result"]

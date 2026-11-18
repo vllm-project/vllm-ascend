@@ -1,62 +1,103 @@
 {
+  "feature_windows": {
+    "a3_n4": 1024,
+    "a5_n4": 512,
+    "novel_n4": 512,
+    "p_n8": 1024,
+    "wrep_long": 2048,
+    "wrep_short": 1024,
+    "marker": 1024,
+    "sdup": 16,
+    "sep": 256
+  },
   "exact": [
-    {"pmin": 32, "pmax": 500, "copies": 5, "persist": 1, "reason": "vllm[32,500]x5"},
-    {"pmin": 32, "pmax": 2000, "copies": 3, "persist": 1, "reason": "vllm[32,2000]x3"}
+    {
+      "pmin": 32,
+      "pmax": 500,
+      "copies": 5,
+      "persist": 1,
+      "title": "exact_x5",
+      "reason": "vllm[32,500]x5"
+    },
+    {
+      "pmin": 32,
+      "pmax": 2000,
+      "copies": 3,
+      "persist": 1,
+      "title": "exact_x3",
+      "reason": "vllm[32,2000]x3"
+    }
   ],
-  "run_max": {"threshold": 500, "persist": 1, "reason": "run>=500"},
+  "run_max": {
+    "threshold": 500,
+    "persist": 1,
+    "title": "run_char",
+    "reason": "run>=500"
+  },
   "feature_rules": [
     {
       "persist": 8,
+      "title": "a3_dense",
       "reason": "A3_n4_W1024>=0.6 S8 N_n4_W512<=0.05",
       "all": [{"f": 0, "ge": 0.6}, {"f": 2, "le": 0.05}]
     },
     {
       "persist": 4,
+      "title": "a5_dense",
       "reason": "A5_n4_W512>=0.7 S4 N_n4_W512<=0.1",
       "all": [{"f": 1, "ge": 0.7}, {"f": 2, "le": 0.1}]
     },
     {
       "persist": 4,
+      "title": "a5_sep",
       "reason": "A5_n4_W512>=0.5 S4 sep<=0.5 N_n4_W512<=0.05",
       "all": [{"f": 1, "ge": 0.5}, {"f": 8, "le": 0.5}, {"f": 2, "le": 0.05}]
     },
     {
       "persist": 24,
+      "title": "p_n8",
       "reason": "P_n8_W1024>=0.6 S24 N_n4_W512<=0.02",
       "all": [{"f": 3, "ge": 0.6}, {"f": 2, "le": 0.02}]
     },
     {
       "persist": 16,
+      "title": "wrep_mark",
       "reason": "wrep_W2048>=0.95 S16 & mark_W1024>=0.05",
       "all": [{"f": 4, "ge": 0.95}, {"f": 6, "ge": 0.05}]
     },
     {
       "persist": 24,
+      "title": "wrep_hi",
       "reason": "wrep_W2048>=0.99 S24",
       "all": [{"f": 4, "ge": 0.99}]
     },
     {
       "persist": 8,
+      "title": "wrep_mark_s",
       "reason": "wrep_W1024>=0.99 S8 & mark_W1024>=0.04",
       "all": [{"f": 5, "ge": 0.99}, {"f": 6, "ge": 0.04}]
     },
     {
       "persist": 8,
+      "title": "wrep_mark_m",
       "reason": "wrep_W1024>=0.98 S8 & mark_W1024>=0.05",
       "all": [{"f": 5, "ge": 0.98}, {"f": 6, "ge": 0.05}]
     },
     {
       "persist": 24,
+      "title": "sdup_wrep",
       "reason": "sdup_N16>=0.7 S24 & wrep_W2048>=0.9 & mark_W1024>=0.03",
       "all": [{"f": 7, "ge": 0.7}, {"f": 4, "ge": 0.9}, {"f": 6, "ge": 0.03}]
     },
     {
       "persist": 40,
+      "title": "sdup_mark",
       "reason": "sdup_N16>=0.6 S40 & mark_W1024>=0.03",
       "all": [{"f": 7, "ge": 0.6}, {"f": 6, "ge": 0.03}]
     },
     {
       "persist": 48,
+      "title": "wrep_mark_l",
       "reason": "wrep_W2048>=0.95 S48 & mark_W1024>=0.03",
       "all": [{"f": 4, "ge": 0.95}, {"f": 6, "ge": 0.03}]
     }

@@ -57,12 +57,14 @@ class PatternDetector:
                 raise ValueError(f"{key} values must fit int32 without truncation")
             arrays.append(np.ascontiguousarray(array, dtype=np.int32))
         rules = load_pattern_rules(rules_path)
+        self.titles = rules["titles"]
         self.reasons = rules["reasons"]
         self.native = Detector(
             *arrays,
             -1 if think_end is None else think_end,
             rules["exact_params"],
             int(rules["run_max_threshold"]),
+            rules["feature_windows"],
             rules["atom_meta"],
             rules["atom_thr"],
             rules["persist"],
@@ -74,7 +76,9 @@ class PatternDetector:
     def result(self, st):
         if st.failed:
             raise RuntimeError("failed detector state; discard it")
-        return Result(True, st.fired_at, self.reasons[st.reason]) if st.reason >= 0 else None
+        if st.reason < 0:
+            return None
+        return Result(True, st.fired_at, self.titles[st.reason], self.reasons[st.reason])
 
     def progress(self, st):
         """Exceptional-path receipt, not a retry/rollback promise.
@@ -85,23 +89,14 @@ class PatternDetector:
         """
         if st.failed:
             return None
-        return (
-            st.received,
-            st.t,
-            st.fired_at,
-            self.reasons[st.reason] if st.reason >= 0 else "",
-        )
+        title = self.titles[st.reason] if st.reason >= 0 else ""
+        rule = self.reasons[st.reason] if st.reason >= 0 else ""
+        return (st.received, st.t, st.fired_at, title, rule)
 
     def feed_events(self, states, token_lists):
-        """Return only new (submission_slot, fired_at, reason) events.
-
-        No Result is constructed for non-alert requests. The native layer
-        preserves lazy token consumption and first-alert semantics.
-        On exception the batch is NOT atomic: use progress() on every submitted
-        state to recover committed prefixes/events; do not replay the whole batch.
-        """
+        """Return ``(slot, fired_at, title, rule)`` for new alerts only."""
         return [
-            (slot, fired_at, self.reasons[reason])
+            (slot, fired_at, self.titles[reason], self.reasons[reason])
             for slot, fired_at, reason in self.native.feed_events(states, token_lists)
         ]
 

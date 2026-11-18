@@ -42,7 +42,7 @@ class Backend:
         self.bad_slot = None
 
     def start(self):
-        return SimpleNamespace(received=0, fired_at=-1, reason="", failed=False)
+        return SimpleNamespace(received=0, fired_at=-1, reason="", rule="", failed=False)
 
     def feed_events(self, states, rows):
         self.calls.append(rows)
@@ -53,19 +53,19 @@ class Backend:
                 raise ValueError("invalid token in this request")
             state.received += len(row)
             if row and row[-1] == 9:
-                state.fired_at, state.reason = state.received, "test reason"
-                events.append((slot, state.fired_at, state.reason))
+                state.fired_at, state.reason, state.rule = state.received, "test reason", "test.rule"
+                events.append((slot, state.fired_at, state.reason, state.rule))
             if self.fail:
                 raise ValueError("partial consumption")
         return events
 
     def finish(self, state):
-        return SimpleNamespace(is_ill=True, fired_at=state.received, reason="tail")
+        return SimpleNamespace(is_ill=True, fired_at=state.received, reason="tail", rule="tail.rule")
 
     def progress(self, state):
         if state.failed:
             return None
-        return state.received, state.received, state.fired_at, state.reason
+        return state.received, state.received, state.fired_at, state.reason, state.rule
 
 
 class _PatternFixture(unittest.TestCase):
@@ -144,7 +144,7 @@ class ProductionPatternTests(_PatternFixture):
     def test_finish_consumes_unread_suffix_and_preserves_tail_incident(self):
         RequestIoSnapshotManager.get().append_batch(["a"], [[1, 2, 3]])
         alerts = self.manager.finish_requests(["a"])
-        self.assertEqual(alerts[0].detail, dict(fired_at=3, reason="tail", finish_only=True))
+        self.assertEqual(alerts[0].detail, dict(fired_at=3, reason="tail", rule="tail.rule", finish_only=True))
         self.assertEqual(self.det._consumed_len["a"], 3)
         self.assertEqual(self.manager.finish_requests(["a"]), [])
 
@@ -607,8 +607,11 @@ class NativePatternTests(_PatternFixture):
                 for offset in range(0, length, width):
                     alerts.extend(self.sampled(["native"], [tokens[offset : offset + width]]))
                 alerts.extend(self.manager.finish_requests(["native"]))
-                actual = [(a.detail["fired_at"], a.detail["reason"], a.detail["finish_only"]) for a in alerts]
-                expected = [] if length < 96 else [(min(length, 128), "vllm[32,2000]x3", length < 128)]
+                actual = [
+                    (a.detail["fired_at"], a.detail["reason"], a.detail["rule"], a.detail["finish_only"])
+                    for a in alerts
+                ]
+                expected = [] if length < 96 else [(min(length, 128), "exact_x3", "vllm[32,2000]x3", length < 128)]
                 self.assertEqual(actual, expected, (length, width))
 
     def test_native_bad_slot_preserves_other_requests(self):
@@ -619,7 +622,8 @@ class NativePatternTests(_PatternFixture):
         self.assertEqual(self.det._consumed_len.get("after", 0), 0)
         alerts = self.manager.finish_requests(["before", "bad", "after"])
         self.assertEqual(
-            [(a.req_id, a.detail["fired_at"], a.detail["reason"]) for a in alerts], [("after", 96, "vllm[32,2000]x3")]
+            [(a.req_id, a.detail["fired_at"], a.detail["reason"], a.detail["rule"]) for a in alerts],
+            [("after", 96, "exact_x3", "vllm[32,2000]x3")],
         )
 
     def test_native_preflight_rejects_invalid_batch_before_consumption(self):
@@ -642,3 +646,66 @@ class NativePatternTests(_PatternFixture):
                     with self.assertRaises((ValueError, RuntimeError, TypeError)):
                         backend.feed_events(states, rows)
                     self.assertEqual([backend.progress(state)[0] for state in original], [0] * size)
+
+
+class PatternParityTests(unittest.TestCase):
+    """Python gold must match native on the same tables and pattern.json."""
+
+    def setUp(self):
+        import numpy as np
+
+        try:
+            from vllm_ascend.observability.runtime_guard.native_pattern import PatternDetector
+            from vllm_ascend.observability.runtime_guard.native_pattern.reference import ReferenceDetector
+        except ImportError:
+            self.skipTest("native_pattern extension not built with this install")
+        self.native_cls = PatternDetector
+        self.ref_cls = ReferenceDetector
+        self.tables = dict(
+            norm=np.arange(256, dtype=np.int32),
+            chars=np.ones(256, np.int32),
+            ws=np.zeros(256, np.int32),
+            run_char=np.full(256, -1, np.int32),
+            marker=np.zeros(256, np.int32),
+            send=np.zeros(256, np.int32),
+        )
+
+    def test_parity_exact_period_and_clean(self):
+        cases = {
+            "clean": list(range(1, 80)),
+            "exact_x3": (list(range(32)) * 5)[:128],
+            "exact_x3_short": (list(range(32)) * 3),
+            "no_fire_short": list(range(32)) * 2,
+        }
+        for name, tokens in cases.items():
+            with self.subTest(name=name):
+                native = self.native_cls(self.tables, think_end=None)
+                ref = self.ref_cls(self.tables, think_end=None)
+                for width in (1, 17, 64, 96, 129):
+                    ns, rs = native.start(), ref.start()
+                    n_events, r_events = [], []
+                    for offset in range(0, len(tokens), width):
+                        chunk = tokens[offset : offset + width]
+                        n_events.extend(native.feed_events([ns], [chunk]))
+                        r_events.extend(ref.feed_events([rs], [chunk]))
+                        if ns.fired_at >= 0 or rs.fired_at >= 0:
+                            break
+                    if ns.fired_at < 0:
+                        nr = native.finish(ns)
+                        if nr.is_ill:
+                            n_events.append((0, nr.fired_at, nr.reason, nr.rule))
+                    if rs.fired_at < 0:
+                        rr = ref.finish(rs)
+                        if rr.is_ill:
+                            r_events.append((0, rr.fired_at, rr.reason, rr.rule))
+                    self.assertEqual(n_events, r_events, (name, width))
+
+    def test_parity_titles_match_packaged_rules(self):
+        from vllm_ascend.observability.runtime_guard.native_pattern import REASONS, TITLES
+
+        self.assertEqual(TITLES[1], "exact_x3")
+        self.assertEqual(REASONS[1], "vllm[32,2000]x3")
+        native = self.native_cls(self.tables)
+        ref = self.ref_cls(self.tables)
+        self.assertEqual(native.titles, ref.titles)
+        self.assertEqual(native.reasons, ref.reasons)
