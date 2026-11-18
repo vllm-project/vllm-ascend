@@ -985,6 +985,7 @@ def _preflight(case_name: str, use_layerwise: bool, tier_ssd: bool) -> None:
     print(f"[kv_pool_a2] {case_name}: npu devices: {npu_evidence} (visible={VISIBLE_DEVICES})", flush=True)
     if npu_count is None:
         pytest.skip(f"this TP8 case needs an Ascend NPU host: {npu_evidence}")
+    assert npu_count is not None  # type narrowing for mypy
     if npu_count < TP_SIZE:
         pytest.skip(
             f"TP8 needs {TP_SIZE} NPUs, container sees {npu_count} ({npu_evidence}). "
