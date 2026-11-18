@@ -1,9 +1,14 @@
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+from vllm.v1.sample.logits_processor import LogitsProcessors
+from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 from tests.ut.base import TestBase
 from vllm_ascend.sample.rejection_sampler import (
+    AscendRejectionSampler,
     expand_batch_to_tokens,
     expand_pytorch,
     rejection_greedy_sample_pytorch,
@@ -266,6 +271,49 @@ class TestAscendRejectionSampler(TestBase):
             result = expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
             expected = torch.tensor([10, 10, 20, 20, 20, 30, 30])
             assert torch.equal(result, expected)
+
+    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
+    @patch("vllm.v1.sample.ops.penalties.is_pin_memory_available", return_value=False)
+    @patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False)
+    @patch(
+        "vllm_ascend.sample.rejection_sampler.get_ascend_config",
+        return_value=SimpleNamespace(enable_reduce_sample=False),
+    )
+    def test_apply_penalties_without_triton_uses_per_token_mapping(self, _mock_config, _mock_pin_memory):
+        sampler = AscendRejectionSampler(SimpleNamespace(logprobs_mode="raw_logits"))
+        cases = (
+            # Fewer draft rows than requests: regression for the original scatter_add_ error.
+            ([[2], []], [[4.0, 2.5, 8.0, 8.0]]),
+            # Same number of rows as requests, but both rows belong to request 1.
+            # Its first draft token (0) enters the history for the second row only.
+            ([[], [0, 3]], [[8.0, 2.0, -0.5, 8.0], [-0.25, 2.0, -0.5, 8.0]]),
+        )
+        for spec_token_ids, expected in cases:
+            with self.subTest(spec_token_ids=spec_token_ids):
+                device = torch.device("cpu")
+                metadata = SpecDecodeMetadata.make_dummy(spec_token_ids, device)
+                logits = torch.full((metadata.draft_token_ids.numel(), 4), 8.0, dtype=torch.float32)
+                sampling_metadata = SamplingMetadata(
+                    temperature=None,
+                    all_greedy=True,
+                    all_random=False,
+                    top_p=None,
+                    top_k=None,
+                    generators={},
+                    max_num_logprobs=None,
+                    no_penalties=False,
+                    prompt_token_ids=torch.tensor([[0], [1]]),
+                    presence_penalties=torch.tensor([1.0, 2.0]),
+                    frequency_penalties=torch.tensor([0.5, 0.25]),
+                    repetition_penalties=torch.tensor([2.0, 4.0]),
+                    output_token_ids=[[1], [2, 2]],
+                    allowed_token_ids_mask=None,
+                    bad_words_token_ids={},
+                    logitsprocs=LogitsProcessors(),
+                    spec_token_ids=spec_token_ids,
+                )
+                result = sampler.apply_logits_processors(logits, sampling_metadata, metadata)
+                torch.testing.assert_close(result, torch.tensor(expected, dtype=logits.dtype), rtol=0, atol=0)
 
     @patch("torch.arange", new=mock_pin_memory(torch.arange))
     @patch("torch.ones", new=mock_pin_memory(torch.ones))

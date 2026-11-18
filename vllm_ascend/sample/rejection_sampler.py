@@ -17,7 +17,6 @@ from vllm.v1.sample.rejection_sampler import (
     RejectionSampler,
     generate_uniform_probs,
 )
-from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -52,17 +51,20 @@ class AscendRejectionSampler(RejectionSampler):
         repeat_indices: torch.Tensor,
         output_token_ids: list[list[int]],
     ) -> torch.Tensor:
+        """Apply penalties to flattened draft-token logits."""
         if sampling_metadata.no_penalties:
             return logits
 
-        """Use Triton-Ascend penalties on NPU when Triton is available; else vLLM default."""
         if not HAS_TRITON:
             logger.warning_once(
                 "[sample/rejection_sampler] Triton not available, falling back to vLLM default "
                 "penalty implementation in rejection sampler. Rejection sampling performance "
                 "may be degraded on NPU. "
             )
-            return Sampler.apply_penalties(logits, sampling_metadata, output_token_ids)
+            # The upstream rejection sampler expands per-request metadata to match the token rows.
+            return RejectionSampler.apply_penalties(
+                logits, sampling_metadata, metadata, repeat_indices, output_token_ids
+            )
 
         assert sampling_metadata.prompt_token_ids is not None
         prompt_token_ids = sampling_metadata.prompt_token_ids[repeat_indices]
