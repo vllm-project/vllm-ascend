@@ -1499,13 +1499,6 @@ def test_verify_and_split_propagates_eagle_to_managers() -> None:
     assert coordinator.single_type_managers[0].use_eagle is False
 
 
-@pytest.mark.parametrize(
-    ("text_model_type", "text_architectures"),
-    [
-        ("qwen4_exp_mtp", []),
-        ("qwen4_exp_text", ["Qwen4ExpMTP"]),
-    ],
-)
 def test_verify_and_split_propagates_eagle_to_merged_spec_siblings() -> None:
     """Upstream ``_annotate_eagle_groups_deepseek_v4`` flags only the single
     group holding the MTP layer, but the read path merges same-spec groups and
