@@ -242,7 +242,11 @@ class DSparkPrefixCache:
                 continue
             allocated: list[str] = []
             try:
-                gvas = self.backend.batch_alloc(missing, [self.page_bytes] * len(missing), _LEASE_TTL_MS)
+                # Request-affinity placement: the draft prefix blocks of this
+                # request share one session id and land on the same node.
+                gvas = self.backend.batch_alloc(
+                    missing, [self.page_bytes] * len(missing), _LEASE_TTL_MS, [request.req_id] * len(missing)
+                )
                 if gvas is not None:
                     allocated = [
                         key

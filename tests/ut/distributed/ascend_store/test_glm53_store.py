@@ -342,7 +342,7 @@ class TestGLM53Store(unittest.TestCase):
         range_store = MemoryRangeStore()
         readable = range_store.complete if backend == "mooncake" else set()
 
-        def alloc(keys, sizes, ttl):
+        def alloc(keys, sizes, ttl, session_ids=None):
             for key, size in zip(keys, sizes):
                 self.assertNotIn(key, buffers)
                 buffers[key] = ctypes.create_string_buffer(size)
@@ -544,7 +544,9 @@ class TestGLM53Store(unittest.TestCase):
             extra_config={"backend": "memcache"},
         )
         worker.register_kv_caches(make_glm53_caches(plan))
-        worker.m_store.batch_alloc.side_effect = lambda keys, sizes, ttl: [100000 + i * 4096 for i in range(len(keys))]
+        worker.m_store.batch_alloc.side_effect = lambda keys, sizes, ttl, session_ids=None: [
+            100000 + i * 4096 for i in range(len(keys))
+        ]
         worker.m_store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
         hashes = [bytes([i]) * 32 for i in (1, 2, 3)]
         blocks = [[1, 2, 3], [4], [0, 5, 0], [6, 0, 0], [0, 0, 7]]

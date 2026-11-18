@@ -153,7 +153,15 @@ class Backend(ABC):
     def batch_get_key_info(self, keys: list[str], *, for_load: bool = False):
         raise NotImplementedError(f"{type(self).__name__} does not support batch_get_key_info")
 
-    def batch_alloc(self, keys: list[str], sizes: list[int], lease_ttl_ms: int = 0) -> list[int]:
+    def batch_alloc(
+        self,
+        keys: list[str],
+        sizes: list[int],
+        lease_ttl_ms: int = 0,
+        session_ids: list[str] | None = None,
+    ) -> list[int]:
+        # session_ids (per-key request affinity) is a MemCache-only placement
+        # hint; backends without placement control ignore it.
         raise NotImplementedError(f"{type(self).__name__} does not support batch_alloc")
 
     def batch_add_lease(self, keys: list[str], lease_ttl_ms: int = 0) -> list[int]:

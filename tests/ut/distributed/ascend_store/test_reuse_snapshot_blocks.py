@@ -17,7 +17,7 @@ class Store:
         self.committed = set()
         self.queries = []
 
-    def batch_alloc(self, keys, sizes, ttl):
+    def batch_alloc(self, keys, sizes, ttl, session_ids=None):
         for key in keys:
             self.data.setdefault(key, len(self.data) + 100)
         return [self.data[key] for key in keys]

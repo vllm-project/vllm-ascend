@@ -1903,7 +1903,9 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                         worker.configure_dspark_prefix_cache(DSparkPrefixKeys("checkpoint", pp_size=1, tp_size=1))
                     expected_groups = [0, 2] if paired else [0, 1, 2]
                     expected_keys = [f"llama-7b@{group}@h0@0" for group in expected_groups]
-                    worker.m_store.batch_alloc.side_effect = lambda keys, sizes, ttl: [101] * len(keys)
+                    worker.m_store.batch_alloc.side_effect = lambda keys, sizes, ttl, session_ids=None: [101] * len(
+                        keys
+                    )
                     info = SimpleNamespace(size=lambda: 64, gva_list=lambda: [201])
                     worker.m_store.batch_get_key_info.side_effect = lambda keys, info=info, **kwargs: [info] * len(keys)
                     worker.m_store.batch_add_lease.side_effect = lambda keys, ttl: [0] * len(keys)
@@ -1915,6 +1917,8 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                         [key for call in worker.m_store.batch_alloc.call_args_list for key in call.args[0]],
                         expected_keys,
                     )
+                    for call in worker.m_store.batch_alloc.call_args_list:
+                        self.assertEqual(call.args[3], ["r1"] * len(call.args[0]))
                     self.assertEqual([blocks.tolist() for blocks in save.block_ids_by_group_np], [[7], [8], [9]])
                     self.assertEqual(
                         [gvas.tolist() for gvas in save.block_gvas_by_group_np],

@@ -1372,8 +1372,13 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 block_gvas: list[int] = []
                 if transfer_blocks:
                     transfer_keys = [key for key in candidate_keys if key in missing_keys]
+                    # Request-affinity placement: batch_alloc honors per-key
+                    # session ids, so this request's blocks land on one node.
                     transfer_gvas = self.m_store.batch_alloc(
-                        transfer_keys, [alloc_size] * len(transfer_keys), LAYERWISE_READ_LEASE_TTL_MS
+                        transfer_keys,
+                        [alloc_size] * len(transfer_keys),
+                        LAYERWISE_READ_LEASE_TTL_MS,
+                        [request.req_id] * len(transfer_keys),
                     )
                     if transfer_gvas is None or len(transfer_gvas) != len(transfer_keys):
                         return False
@@ -1414,6 +1419,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         [partial_key],
                         [alloc_size],
                         LAYERWISE_READ_LEASE_TTL_MS,
+                        [request.req_id],
                     )
                     if not allocated or len(allocated) != 1:
                         return False

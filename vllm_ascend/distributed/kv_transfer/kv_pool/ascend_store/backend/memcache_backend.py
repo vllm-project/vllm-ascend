@@ -434,10 +434,27 @@ class MemcacheBackend(Backend):
                 raise BatchResultShapeError("batch_get_key_info returned invalid key metadata") from exc
         return readable
 
-    def batch_alloc(self, keys: list[str], sizes: list[int], lease_ttl_ms: int = 0) -> list[int]:
-        """Return GVAs, 0 for allocation failures, and UINT64_MAX for SSD hits."""
+    def batch_alloc(
+        self,
+        keys: list[str],
+        sizes: list[int],
+        lease_ttl_ms: int = 0,
+        session_ids: list[str] | None = None,
+    ) -> list[int]:
+        """Return GVAs, 0 for allocation failures, and UINT64_MAX for SSD hits.
+
+        ``session_ids`` carries one session id per key so MemCache places the
+        allocated objects of the same request on the same node; it must match
+        ``keys`` in length when provided. ``replicaNum`` stays 1, which is the
+        only value the session-affinity allocation contract allows.
+        """
+        if session_ids is not None and len(session_ids) != len(keys):
+            raise ValueError(f"session_ids must have the same length as keys: {len(session_ids)} != {len(keys)}")
         self.ensure_initialized()
         assert self.store is not None
+        if session_ids is not None:
+            config = _make_session_replicate_config(session_ids)
+            return self.store.batch_alloc(keys, sizes, 1, lease_ttl_ms, config)
         return self.store.batch_alloc(keys, sizes, 1, lease_ttl_ms)
 
     def batch_add_lease(self, keys: list[str], lease_ttl_ms: int = 0) -> list[int]:
@@ -550,11 +567,25 @@ class MemcacheBackend(Backend):
         addr: int,
         size: int,
         direction: int = MmcDirect.COPY_L2G.value,
+        session_ids: list[str] | None = None,
     ) -> int | None:
+        """Store one object, optionally with a session-affinity placement.
+
+        ``session_ids`` must contain exactly one session id when provided;
+        a single-key write carries one session id per the MemCache API
+        contract. Content-addressed objects shared across requests (e.g. the
+        EC embedding store) keep the default and use the original placement.
+        """
+        if session_ids is not None and len(session_ids) != 1:
+            raise ValueError(f"session_ids must contain exactly one session id, got {len(session_ids)}")
         self.ensure_initialized()
         assert self.store is not None
         try:
-            res = self.store.put_from(key, addr, size, direction)
+            if session_ids is not None:
+                config = _make_session_replicate_config(session_ids)
+                res = self.store.put_from(key, addr, size, direction, config)
+            else:
+                res = self.store.put_from(key, addr, size, direction)
             if res != 0:
                 logger.error(
                     "Failed to put key %s. error_code=%s. Check memory and store capacity.",
