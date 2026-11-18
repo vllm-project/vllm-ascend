@@ -2,8 +2,8 @@ pr: 20854
 entries:
   - category: feature
     text: >-
-      Added an NPU suffix drafter for Model Runner V2 with
-      request-history matching, shared completed-response reuse and optional
-      adaptive verification, including non-power-of-two draft lengths.
-      Suffix requires upstream vLLM #60339, including its request lifecycle
-      hooks and concrete speculator implementation.
+      Added NPU support for suffix speculative decoding, generating draft
+      tokens by matching request history and completed responses without
+      an additional draft model. Enable it with method="suffix" in
+      speculative_config; optionally enable adaptive verification with
+      enable_adaptive_verification=true.
