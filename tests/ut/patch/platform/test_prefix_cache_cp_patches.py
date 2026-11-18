@@ -7,8 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.v1.core.block_pool import BlockPool
 import vllm.v1.core.kv_cache_planning as planning
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_planning import _pool_bytes_per_block_from_builder
 from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
