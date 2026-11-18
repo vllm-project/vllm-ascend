@@ -36,7 +36,10 @@ from vllm_ascend.distributed.eplb.tensor_ops import (
     count_allgather_tokens,
     make_allgather_mask,
 )
-from vllm_ascend.utils import get_config_hash
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.33.0"):
+    from vllm.config.utils import hash_config_cached
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 _EPLB_CLOSE_TIMEOUT_SECONDS = 300
@@ -315,7 +318,11 @@ class AscendEplbState(_eplb_state.EplbState):
         # refresh_model_routing_tables needs the previous placement to notice.
         # Seeding here rather than on first use also covers the first commit,
         # which already carries the new mapping by the time the tables refresh.
-        model_state = self.model_states[get_config_hash(model_config, cached=True)]
+        if vllm_version_is("0.33.0"):
+            key = model_config.compute_hash()
+        else:
+            key = hash_config_cached(model_config)
+        model_state = self.model_states[key]
         model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
         if self.uses_custom_load_stats:
             self._initialize_load_stats_state(model_state)
@@ -727,7 +734,11 @@ class AscendEplbState(_eplb_state.EplbState):
         super().update_mapping(model_config, expanded_physical_to_logical)
         # Verified main updates a live state during elastic EP. Refresh the
         # Ascend replica table in place so captured graphs use the new mapping.
-        refresh_model_routing_tables(self.model_states[get_config_hash(model_config, cached=True)])
+        if vllm_version_is("0.33.0"):
+            key = model_config.compute_hash()
+        else:
+            key = hash_config_cached(model_config)
+        refresh_model_routing_tables(self.model_states[key])
 
     @classmethod
     def from_mapping(

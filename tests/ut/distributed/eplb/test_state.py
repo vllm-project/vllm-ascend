@@ -19,7 +19,10 @@ from vllm_ascend.distributed.eplb.eplb_state import (
     AscendEplbState,
 )
 from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
-from vllm_ascend.utils import get_config_hash
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.33.0"):
+    from vllm.config.utils import hash_config_cached
 
 
 def test_update_mapping_refreshes_ascend_routing_without_replacing_state():
@@ -32,7 +35,11 @@ def test_update_mapping_refreshes_ascend_routing_without_replacing_state():
     model_config.compile_factors.return_value = {"identity": "target"}
     model_state = object()
     state.model_states = {"target": model_state}
-    state.model_states[get_config_hash(model_config, cached=True)] = model_state
+    if vllm_version_is("0.33.0"):
+        key = model_config.compute_hash()
+    else:
+        key = hash_config_cached(model_config)
+    state.model_states[key] = model_state
     mapping = torch.tensor([[1, 0]], dtype=torch.int32)
     events = []
     with (
@@ -227,7 +234,11 @@ def test_add_model_snapshots_the_placement_on_every_profile(monkeypatch, device)
     state._configured_policy = None
     state.parallel_config = SimpleNamespace(eplb_config=SimpleNamespace(policy="default"))
     state.model_states = {"target": SimpleNamespace(physical_to_logical_map=physical)}
-    state.model_states[get_config_hash(model_config, cached=True)] = state.model_states["target"]
+    if vllm_version_is("0.33.0"):
+        key = model_config.compute_hash()
+    else:
+        key = hash_config_cached(model_config)
+    state.model_states[key] = state.model_states["target"]
     monkeypatch.setattr(AscendEplbState, "uses_custom_load_stats", property(lambda _: False))
 
     state.add_model(object(), model_config)

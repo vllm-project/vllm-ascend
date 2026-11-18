@@ -21,13 +21,16 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.distributed.eplb.tensor_ops import make_allgather_mask
-from vllm_ascend.utils import get_config_hash, vllm_version_is
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     AscendTargetDependentARSpeculator,
     gather,
     torch_gather_wrapper,
 )
+
+if not vllm_version_is("0.33.0"):
+    from vllm.config.utils import hash_config_cached
 
 
 def test_calc_next_seq_lens_cpu():
@@ -810,9 +813,12 @@ def test_eplb_draft_mask_tracks_prefill_decode_and_dummy_replay():
             "draft": SimpleNamespace(model=SimpleNamespace(moe_layers=[SimpleNamespace(eplb_state=layer_state)]))
         },
     )
-    state.model_states[get_config_hash(speculator.speculative_config.draft_model_config, cached=True)] = (
-        state.model_states["draft"]
-    )
+    model_config = speculator.speculative_config.draft_model_config
+    if vllm_version_is("0.33.0"):
+        key = model_config.compute_hash()
+    else:
+        key = hash_config_cached(model_config)
+    state.model_states[key] = state.model_states["draft"]
     speculator.set_eplb_state(state)
     mask = layer_state.allgather_source_is_padding
     speculator.set_eplb_state(state)
