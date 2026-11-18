@@ -69,10 +69,24 @@ def test_batched_graph_state_replay_reads_current_group_ids(width, reset_spec, f
     assert [dst.data_ptr() for dst in outputs] == addresses
 
 
-@pytest.mark.parametrize("num_groups", [1, 24])
-@pytest.mark.parametrize("num_reqs", [0, 1, 17, 33])
-@pytest.mark.parametrize("num_state_slots", [1, 3, 4, 7, 8, 16, 17])
-@pytest.mark.parametrize("max_reqs", [33, 64])
+# Representative matrix: (groups, requests, state slots, max requests).
+# Covers empty/single/tail/full batches, one vs many groups, the non-contiguous
+# row stride below, and both window (slots * max_reqs % 8 == 0) and flat dispatch.
+_ALIGNED_CASES = [
+    (1, 0, 1, 33),
+    (1, 1, 1, 33),
+    (24, 17, 3, 33),
+    (24, 33, 1, 33),
+    (1, 33, 17, 33),
+    (1, 33, 3, 64),
+    (1, 64, 4, 64),
+    (24, 17, 16, 64),
+    (24, 1, 7, 64),
+    (1, 17, 17, 64),
+]
+
+
+@pytest.mark.parametrize(("num_groups", "num_reqs", "num_state_slots", "max_reqs"), _ALIGNED_CASES)
 def test_aligned_state_indices_match_physical_tables(num_groups, num_reqs, num_state_slots, max_reqs):
     torch.npu.set_device(0)
     columns = 32

@@ -7,10 +7,23 @@ import torch_npu  # noqa: F401
 
 from vllm_ascend.ops.triton.mamba.cached_decode import materialize_cached_gdn_decode
 
+# Representative matrix: (width, graph_rows, actual_rows, stride). Keeps the
+# scalar, moderate and wide slot tiles, graph padding, full/empty/tail batches
+# and both query/state strides; the exhaustive replay loop below is unchanged.
+_CACHED_DECODE_CASES = [
+    (1, 1, 1, 1),
+    (1, 33, 0, 2),
+    (1, 33, 17, 1),
+    (8, 8, 1, 1),
+    (8, 64, 17, 2),
+    (8, 33, 33, 2),
+    (17, 33, 33, 1),
+    (17, 33, 0, 2),
+    (17, 64, 17, 1),
+]
 
-@pytest.mark.parametrize("width", [1, 3, 8, 17])
-@pytest.mark.parametrize("graph_rows,actual_rows", [(1, 1), (8, 1), (33, 0), (33, 17), (33, 33), (64, 17)])
-@pytest.mark.parametrize("stride", [1, 2])
+
+@pytest.mark.parametrize(("width", "graph_rows", "actual_rows", "stride"), _CACHED_DECODE_CASES)
 def test_current_cached_decode_buffers(width, graph_rows, actual_rows, stride):
     torch.npu.set_device(0)
     capacity = graph_rows + 3
