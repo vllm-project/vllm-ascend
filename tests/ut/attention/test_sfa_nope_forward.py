@@ -17,9 +17,8 @@ from vllm_ascend import ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, PreprocessType
-from vllm_ascend.models.glm5next.kda_input_projection_tp import KDAInputProjectionTPLayout
+from vllm_ascend.models.kimi_k3.kimi_k3 import _make_dsa_gate_projection
 from vllm_ascend.ops import linear_op
-from vllm_ascend.ops.kimi_kda import FullRankGateTP, PendingGate, PendingTensor
 from vllm_ascend.ops.linear import AscendRowParallelLinear, AscendUnquantizedLinearMethod
 
 
@@ -581,18 +580,14 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
         return torch.ones(4, 2)
 
     impl._execute_sparse_flash_attention_process = MagicMock(side_effect=sparse_attention)
-    gate_work = MagicMock()
-    gate_work.wait.side_effect = lambda: trace.append("join-G")
+
+    def finish_gate():
+        trace.append("join-G")
+        return torch.zeros(4, 1, 2)
+
     if gate_tp_enabled:
-        gate = torch.zeros(4, 2)
-        pending_gate = PendingGate(
-            PendingTensor(gate, gate_work, gate), None, KDAInputProjectionTPLayout(None, 1, 2), 4
-        )
         impl.g_proj = MagicMock()
-        impl.gproj_tp = SimpleNamespace(
-            gather=MagicMock(return_value=object()),
-            project=MagicMock(return_value=pending_gate),
-        )
+        impl.begin_gate = MagicMock(return_value=MagicMock(return_value=finish_gate))
     impl._v_up_proj = lambda value: value
     impl.o_proj = None
     impl._finalize_o_proj = MagicMock(side_effect=lambda value, output: output.copy_(value))
@@ -620,7 +615,7 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     else:
         impl.indexer.assert_not_called()
     if gate_tp_enabled:
-        gate_work.wait.assert_called_once()
+        assert trace.count("join-G") == 1
         if has_indexer:
             assert trace.index("indexer-vector") < trace.index("join-G")
         if actual_tokens > 0:
@@ -713,8 +708,8 @@ def test_sfa_oproj_tp_aligns_uneven_and_idle_owners(monkeypatch, graph_mode, gat
         impl.preprocess_type = PreprocessType.NATIVE
         impl.g_proj = impl.layerwise_kv_cache_hook = None
         if gate_tp_enabled:
-            impl.gproj_tp = FullRankGateTP(thread.group, group_size, head_dim)
             impl.g_proj = _Linear(gate_weight.chunk(group_size, dim=1)[rank])
+            impl.begin_gate = _make_dsa_gate_projection(impl.g_proj, thread.group, group_size, head_dim)
         impl.has_indexer = False
         impl.skip_topk = True
         impl.layer_name = "layer"

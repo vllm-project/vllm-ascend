@@ -2,18 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Ascend Kimi K3 delta attention with TP x PCP head-sharded state."""
 
-from dataclasses import dataclass
 from functools import wraps
 
 import torch
-import torch.distributed as dist
 import torch_npu
 from einops import rearrange
 from fla_npu.ops.ascendc import causal_conv1d_fn, causal_conv1d_update
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.distributed import divide, get_pcp_group
-from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -64,85 +61,6 @@ from vllm_ascend.utils import npu_stream_switch, vllm_version_is
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 _F_PROJ_SHARD_ID = 1
 _KDA_BFG_STREAM: torch.npu.Stream | None = None
-
-
-@dataclass
-class PendingTensor:
-    tensor: torch.Tensor
-    work: dist.Work
-    # Retain the send buffer until the corresponding receive has completed.
-    source: torch.Tensor
-
-    def wait(self) -> torch.Tensor:
-        self.work.wait()
-        consumer = torch.npu.current_stream()
-        self.source.record_stream(consumer)
-        self.tensor.record_stream(consumer)
-        return self.tensor
-
-
-class TPCommunication:
-    """One ordered launch stream per executor; no collective is launched on aux."""
-
-    def __init__(self):
-        self.stream = None
-
-    def _launch(self, source, output, group, op):
-        main = torch.npu.current_stream()
-        if self.stream is None:
-            self.stream = torch.npu.Stream()
-        ready = main.record_event()
-        source.record_stream(self.stream)
-        output.record_stream(main)
-        with npu_stream_switch(self.stream):
-            self.stream.wait_event(ready)
-            work = op(output, source, group=group.device_group, async_op=True)
-        return PendingTensor(output, work, source)
-
-    def gather(self, hidden, group):
-        shape = (hidden.shape[0] * group.world_size, *hidden.shape[1:])
-        output = hidden.new_empty(shape)
-        return self._launch(hidden.contiguous(), output, group, dist.all_gather_into_tensor)
-
-    def exchange(self, source, group):
-        source = source.contiguous()
-        output = torch.empty_like(source)
-        return self._launch(source, output, group, dist.all_to_all_single)
-
-
-@dataclass
-class PendingGate:
-    pending: PendingTensor | None
-    owner_gate: torch.Tensor | None
-    layout: KDAInputProjectionTPLayout
-    capacity: int
-
-    def wait(self) -> torch.Tensor:
-        if self.pending is None:
-            assert self.owner_gate is not None
-            return self.owner_gate.view(self.capacity, self.layout.num_heads, self.layout.head_dim)
-        layout = self.layout
-        self.owner_gate = layout.restore_gate(self.pending.wait(), self.capacity)
-        self.pending = None
-        return self.owner_gate
-
-
-class FullRankGateTP:
-    def __init__(self, group: GroupCoordinator, heads: int, head_dim: int):
-        self.layout = KDAInputProjectionTPLayout(group, heads, head_dim)
-        self.group = group
-        self.communication = TPCommunication()
-
-    def gather(self, hidden: torch.Tensor) -> PendingTensor:
-        owner, _ = self.layout.prepare_input(hidden)
-        return self.communication.gather(owner, self.group)
-
-    def project(self, gathered: PendingTensor, layer) -> PendingGate:
-        hidden = gathered.wait()
-        gate = layer(hidden)[0]
-        return PendingGate(
-            self.communication.exchange(gate, self.group), None, self.layout, hidden.shape[0] // self.layout.size
-        )
 
 
 def _kda_bfg_stream() -> torch.npu.Stream:

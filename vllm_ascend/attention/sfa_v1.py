@@ -1918,10 +1918,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         output.copy_(self.o_proj(attn_output)[0][: output.shape[0]])
 
     def _forward_dummy(
-        self, hidden_states: torch.Tensor, output: torch.Tensor, gate_input, o_capacity: int | None
+        self, hidden_states: torch.Tensor, output: torch.Tensor, project_gate, o_capacity: int | None
     ) -> torch.Tensor:
-        if gate_input is not None:
-            self.gproj_tp.project(gate_input, self.g_proj).wait()
+        if project_gate is not None:
+            finish_gate = project_gate()
+            finish_gate()
         if o_capacity is not None:
             attn_output = hidden_states.new_zeros((o_capacity, self.local_num_heads * self.v_head_dim))
             self.o_proj(attn_output)
@@ -2079,11 +2080,11 @@ class AscendSFAImpl(MLAAttentionImpl):
             dp_tokens = _EXTRA_CTX.max_tokens_across_dp
             if dp_tokens is not None:
                 o_capacity = max(o_capacity, dp_tokens)
-        gate_tp = getattr(self, "gproj_tp", None)
+        begin_gate = getattr(self, "begin_gate", None)
         # Gather before NoPE trims live rows so idle and active ranks send the same shape.
-        gate_input = gate_tp.gather(hidden_states) if gate_tp is not None else None
+        project_gate = begin_gate(hidden_states) if begin_gate is not None else None
         if attn_metadata is None:
-            return self._forward_dummy(hidden_states, output, gate_input, o_capacity)
+            return self._forward_dummy(hidden_states, output, project_gate, o_capacity)
 
         if self.qk_rope_head_dim == 0:
             num_tokens = min(hidden_states.shape[0], attn_metadata.slot_mapping.shape[0])
@@ -2097,7 +2098,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 else:
                     num_tokens = min(num_tokens, attn_metadata.num_actual_tokens)
             if num_tokens == 0:
-                return self._forward_dummy(hidden_states, output, gate_input, o_capacity)
+                return self._forward_dummy(hidden_states, output, project_gate, o_capacity)
 
             hidden_states = hidden_states[:num_tokens]
         gate_hidden_states = hidden_states if self.g_proj is not None else None
@@ -2230,7 +2231,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             self._on_kv_cache_written(kv_cache, attn_metadata)
 
         # Return G to its token owners while the indexer and attention run.
-        pending_gate = gate_tp.project(gate_input, self.g_proj) if gate_tp is not None else None
+        finish_gate = project_gate() if project_gate is not None else None
 
         # A sharded-decode PCP rank can own no request but must still write
         # and gather KV with the other ranks.
@@ -2294,8 +2295,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             attn_output = hidden_states.new_zeros((ql_nope.shape[0], self.local_num_heads * self.v_head_dim))
         if gate_hidden_states is not None:
             assert self.g_proj is not None
-            if pending_gate is not None:
-                gate = pending_gate.wait().flatten(1)[: attn_output.shape[0]]
+            if finish_gate is not None:
+                gate = finish_gate().flatten(1)[: attn_output.shape[0]]
             else:
                 gate = self.g_proj(gate_hidden_states.contiguous())[0]
             flash_attention_gate(attn_output, gate)

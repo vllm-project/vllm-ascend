@@ -14,6 +14,7 @@ from copy import copy
 from typing import Any, ClassVar, Literal, TypeVar, cast
 
 import torch
+import torch.distributed as dist
 import vllm.envs as envs
 from torch import nn
 from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig, get_current_vllm_config
@@ -21,7 +22,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
-from vllm.distributed.parallel_state import model_parallel_is_initialized
+from vllm.distributed.parallel_state import GroupCoordinator, model_parallel_is_initialized
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -92,18 +93,19 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_gproj_tp_group
+from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.models.glm5next.kda_input_projection_tp import KDAInputProjectionTPLayout
 from vllm_ascend.ops.kda_parallel import KDAColumnParallelLinear, KDARowParallelLinear, get_kda_state_shape
 from vllm_ascend.ops.kimi_kda import (
     AscendKimiK3DeltaAttention as AscendKimiK3DeltaAttentionBase,
 )
-from vllm_ascend.ops.kimi_kda import FullRankGateTP
 from vllm_ascend.ops.kimi_pixel_norm import build_kimi_pixel_norm
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
 from vllm_ascend.quantization.configs.modelslim_config import AscendModelSlimConfig
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from vllm_ascend.utils import get_rotation_path, is_950, vllm_version_is
+from vllm_ascend.utils import get_rotation_path, is_950, npu_stream_switch, vllm_version_is
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
     add_pp_transport_tensors,
@@ -635,6 +637,48 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
         return self.mla_attn(positions, hidden_states)
 
 
+def _make_dsa_gate_projection(g_proj: nn.Module, group: GroupCoordinator, num_heads: int, head_dim: int):
+    layout = KDAInputProjectionTPLayout(group, num_heads, head_dim)
+    comm_stream = None
+
+    def begin_gate(hidden: torch.Tensor) -> Callable[[], Callable[[], torch.Tensor]]:
+        nonlocal comm_stream
+        if comm_stream is None:
+            comm_stream = torch.npu.Stream()
+        owner, capacity = layout.prepare_input(hidden)
+        owner = owner.contiguous()
+        comm_stream.wait_stream(torch.npu.current_stream())
+        owner.record_stream(comm_stream)
+        with npu_stream_switch(comm_stream):
+            gathered, gather_work = all_gather_async(owner, group)
+
+        def project_gate() -> Callable[[], torch.Tensor]:
+            gather_work.wait()
+            consumer = torch.npu.current_stream()
+            # Keep the contiguous send alive through the wait on the consuming stream.
+            owner.record_stream(consumer)
+            gathered.record_stream(consumer)
+            gate = g_proj(gathered)[0].contiguous()
+            comm_stream.wait_stream(consumer)
+            gate.record_stream(comm_stream)
+            with npu_stream_switch(comm_stream):
+                received = torch.empty_like(gate)
+                exchange = dist.all_to_all_single(received, gate, group=group.device_group, async_op=True)
+
+            def finish_gate() -> torch.Tensor:
+                exchange.wait()
+                consumer = torch.npu.current_stream()
+                gate.record_stream(consumer)
+                received.record_stream(consumer)
+                return layout.restore_gate(received, capacity)
+
+            return finish_gate
+
+        return project_gate
+
+    return begin_gate
+
+
 class AscendKimiDSAAttention(AscendKimiMLAAttention):
     """Kimi projections and output gate on the shared GLM/DeepSeek SFA stack."""
 
@@ -675,7 +719,9 @@ class AscendKimiDSAAttention(AscendKimiMLAAttention):
                     quant_config=None,
                     prefix=f"{prefix}.g_proj",
                 )
-                self.impl.gproj_tp = FullRankGateTP(group, config.num_attention_heads, config.v_head_dim)
+                self.impl.begin_gate = _make_dsa_gate_projection(
+                    self.g_proj, group, config.num_attention_heads, config.v_head_dim
+                )
             else:
                 self.g_proj = ColumnParallelLinear(
                     config.hidden_size,
