@@ -4,15 +4,19 @@ e2e-upstream_pr:
 e2e-upstream_singlecard:
   - name: tests/entrypoints/pooling/scoring/test_cross_encoder_online_vision.py
     estimated_time: 20
-  - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_utils.py
-    estimated_time: 20
   - name: tests/models/multimodal/processing/test_minicpmv.py
     estimated_time: 20
   - name: tests/models/multimodal/processing/test_qwen2_vl.py
     estimated_time: 20
-  - name: tests/models/multimodal/processing/test_transformers_video.py
-    estimated_time: 20
   - name: tests/v1/core/test_scheduler.py
+    estimated_time: 20
+  - name: tests/renderers/chat_utils/test_vision_chunk.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/decisions/test_decisions_e2e.py
+    estimated_time: 20
+  - name: tests/entrypoints/rl/state_transitions/test_pause_multi_frontend.py
+    estimated_time: 20
+  - name: tests/models/multimodal/processing/test_nemotron_parse_35.py
     estimated_time: 20
 e2e-upstream_online_1:
   - name: tests/tokenizers_/test_mistral.py
@@ -24,10 +28,6 @@ e2e-upstream_online_1:
   - name: tests/entrypoints/llm/offline_mode/test_offline_mode.py
     estimated_time: 20
   - name: tests/model_executor/test_model_load_with_params.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/parser/test_harmony_render_parity.py
-    estimated_time: 20
-  - name: tests/parser/test_harmony.py
     estimated_time: 20
   - name: tests/models/language/generation/test_granite.py
     estimated_time: 20
@@ -44,7 +44,7 @@ e2e-upstream_online_1:
   - name: tests/v1/structured_output/test_backend_guidance.py
     estimated_time: 20
 e2e-upstream_a2_2:
-  - name: tests/v1/distributed/test_async_llm_dp.py
+  - name: tests/models/multimodal/pooling/test_d3.py
     estimated_time: 20
 e2e-upstream_a2_4:
   - name: tests/v1/distributed/test_hybrid_lb_dp.py
