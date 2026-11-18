@@ -39,7 +39,6 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
-
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -601,15 +600,14 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         qkv: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        # The Ascend fused MRoPE path gathers a temporary rotary-cache tensor.
-        # That temporary is not replay-safe in the MTP FULL graph: after the
-        # graph reuses its memory, the source QKV remains finite while the
-        # fused result can contain NaNs in Q/K. The draft model has only one
-        # QSA layer, so keep the target-model fusion and use the graph-safe
-        # decomposition for MTP.
-        # ForwardContext has no draft-model flag. The layer name is fixed when
-        # the target or MTP model is built and remains stable during graph replay.
-        if self.layer_name.startswith("mtp.") or not self._main_fused_norm_rope_eligible(qkv, positions):
+        # Preserve upstream MTP projection and its normalization/RoPE contract.
+        # Plain RoPE can receive the target's three-axis positions in text-only
+        # deployments; upstream expects its one-dimensional position vector.
+        if self.layer_name.startswith("mtp."):
+            if positions.ndim == 2 and not getattr(self.rotary_emb, "mrope_section", None):
+                positions = positions[0]
+            return super()._project_qkv_gate(qkv, positions)
+        if not self._main_fused_norm_rope_eligible(qkv, positions):
             gate_size = self.q_size if self.attn_output_gate else 0
             q_gate, k, v = qkv.split((self.q_size + gate_size, self.kv_size, self.kv_size), dim=-1)
             q_gate = q_gate.reshape(-1, self.num_heads, self.head_dim + gate_size // self.num_heads)

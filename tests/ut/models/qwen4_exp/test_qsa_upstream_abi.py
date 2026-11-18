@@ -5,7 +5,6 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-
 from vllm_ascend.models.qwen4_exp import qsa
 
 
@@ -29,12 +28,12 @@ def _expected_rotary_rows(rows: torch.Tensor) -> torch.Tensor:
     return expected
 
 
-@pytest.mark.parametrize("layer_name", ["model.layers.3.self_attn", "mtp.layers.48.self_attn"])
+@pytest.mark.parametrize("mrope_1d", [False, True])
 @pytest.mark.parametrize("has_gate", [True, False])
-def test_main_and_draft_project_plain_rope(layer_name: str, has_gate: bool) -> None:
+def test_main_fallback_for_plain_rope_or_1d_mrope(monkeypatch, mrope_1d: bool, has_gate: bool) -> None:
     layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
     torch.nn.Module.__init__(layer)
-    layer.layer_name = layer_name
+    layer.layer_name = "model.layers.3.self_attn"
     layer.head_dim = 256
     layer.num_heads = 2
     layer.num_kv_heads = 1
@@ -44,6 +43,11 @@ def test_main_and_draft_project_plain_rope(layer_name: str, has_gate: bool) -> N
     layer.q_norm = torch.nn.RMSNorm(256, eps=1e-6, dtype=torch.bfloat16)
     layer.k_norm = torch.nn.RMSNorm(256, eps=1e-6, dtype=torch.bfloat16)
     layer.rotary_emb = _plain_rotary_embedding(torch.bfloat16)
+    if mrope_1d:
+        layer.rotary_emb.mrope_section = [11, 11, 10]
+        layer.rotary_emb.mrope_interleaved = True
+    fused = Mock(side_effect=AssertionError("ineligible inputs must not use fusion"))
+    monkeypatch.setattr(torch.ops.vllm, "triton_split_qkv_rmsnorm_mrope", fused, raising=False)
 
     query = torch.arange(1024, dtype=torch.bfloat16).reshape(2, 2, 256)
     key = torch.arange(512, dtype=torch.bfloat16).reshape(2, 1, 256) + 1
@@ -51,7 +55,7 @@ def test_main_and_draft_project_plain_rope(layer_name: str, has_gate: bool) -> N
     gate = query + 200
     q_gate = torch.cat((query, gate), dim=-1) if has_gate else query
     qkv = torch.cat((q_gate.flatten(1), key.flatten(1), value.flatten(1)), dim=-1)
-    positions = torch.tensor([[0, 1], [1, 0], [1, 0]])
+    positions = torch.tensor([0, 1]) if mrope_1d else torch.tensor([[0, 1], [1, 0], [1, 0]])
 
     q, k, v, actual_gate = layer._project_qkv_gate(qkv, positions)
 
@@ -62,6 +66,27 @@ def test_main_and_draft_project_plain_rope(layer_name: str, has_gate: bool) -> N
         torch.testing.assert_close(actual_gate, gate.flatten(1))
     else:
         assert actual_gate is None
+    fused.assert_not_called()
+
+
+@pytest.mark.parametrize("mrope", [False, True])
+@pytest.mark.parametrize("position_dims", [1, 2])
+def test_draft_keeps_upstream_projection(monkeypatch, mrope: bool, position_dims: int) -> None:
+    upstream = Mock(return_value=("q", "k", "v", "gate"))
+    monkeypatch.setattr(qsa.upstream_qsa.Qwen4ExpQSAAttention, "_project_qkv_gate", upstream)
+    layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.layer_name = "mtp.layers.48.self_attn.attn"
+    layer.rotary_emb = SimpleNamespace(mrope_section=[11, 11, 10] if mrope else None)
+    qkv = torch.empty((2, 8))
+    positions = torch.arange(2)
+    if position_dims == 2:
+        positions = torch.stack((positions, positions + 1, positions + 2))
+    assert layer._project_qkv_gate(qkv, positions) == ("q", "k", "v", "gate")
+    expected_positions = positions[0] if position_dims == 2 and not mrope else positions
+    upstream.assert_called_once()
+    assert upstream.call_args.args[0] is qkv
+    torch.testing.assert_close(upstream.call_args.args[1], expected_positions)
 
 
 def test_indexer_falls_back_for_plain_rope() -> None:
