@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import torch
 from vllm import envs
-from vllm.config import CompilationMode, CUDAGraphMode
+from vllm.config import CompilationMode, CUDAGraphMode, ParallelConfig
 from vllm.config.attention import AttentionConfig
 from vllm.config.offload import OffloadConfig, PrefetchOffloadConfig
 from vllm.model_executor.layers.attention import MLAAttention
@@ -336,7 +336,7 @@ def test_gather_pcp_classifies_only_cached_one_token_prefill_as_decode(
     runner._target_uses_flashmla = backend == "flashmla"
     runner.vllm_config = SimpleNamespace(
         model_config=runner.model_config,
-        parallel_config=SimpleNamespace(
+        parallel_config=ParallelConfig(
             prefill_context_parallel_size=2,
             decode_context_parallel_size=1,
         ),
@@ -380,7 +380,7 @@ def test_gather_pcp_flashmla_keeps_dispatch_mask_in_final_request_order():
     runner._target_uses_flashmla = True
     runner.vllm_config = SimpleNamespace(
         model_config=runner.model_config,
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=2, decode_context_parallel_size=1),
+        parallel_config=ParallelConfig(prefill_context_parallel_size=2, decode_context_parallel_size=1),
     )
     manager = AscendPCPManager(2, 0, torch.device("cpu"), shard_decode_requests=True)
     manager.bind_config(runner.vllm_config)
