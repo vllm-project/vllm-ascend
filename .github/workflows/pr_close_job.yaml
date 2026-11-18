@@ -2,13 +2,15 @@ name: Cancel runs on PR close
 on:
   pull_request:
     types: [closed]
-
-permissions:
-  actions: write
-  contents: read
+  pull_request_target:
+    types: [closed]
 
 jobs:
   cancel:
+    if: github.event_name == 'pull_request'
+    permissions:
+      actions: write
+      contents: read
     runs-on: linux-amd64-cpu-2-hk
     steps:
       - uses: actions/github-script@v9
@@ -44,5 +46,28 @@ jobs:
 
                 if (runs.length < 100) break;
                 page++;
+              }
+            }
+
+  clear-ready-labels:
+    if: github.event_name == 'pull_request_target' && github.event.pull_request.merged == false
+    permissions:
+      pull-requests: write
+    runs-on: linux-amd64-cpu-2-hk
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const { number, labels } = context.payload.pull_request;
+
+            for (const { name } of labels) {
+              if (name !== "ready" && !name.startsWith("ready-")) continue;
+
+              try {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: number, name });
+                core.info(`Removed ${name} from PR #${number}`);
+              } catch (error) {
+                if (error.status !== 404) throw error;
               }
             }

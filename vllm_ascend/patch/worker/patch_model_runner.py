@@ -142,9 +142,13 @@ def initialize_kv_cache(
         self.kv_cache_config,
         use_replayssm=self.cache_config.use_replayssm,
     )
-    piecewise_capture_available = bool(
-        upstream.envs.VLLM_USE_BREAKABLE_CUDAGRAPH or upstream.has_compiled_submodule(self.model)
-    )
+    if vllm_version_is("0.33.0"):
+        breakable_cg = upstream.envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+        graph_kwargs = {"decode_query_len": self.decode_query_len}
+    else:
+        breakable_cg = upstream.is_breakable_cudagraph_enabled(self.compilation_config)
+        graph_kwargs = {"decode_query_lens": self.vllm_config.get_decode_cudagraph_query_lens(self.decode_query_len)}
+    piecewise_capture_available = bool(breakable_cg or upstream.has_compiled_submodule(self.model))
     if self.adaptive_verification is not None:
         self.compilation_config.cudagraph_mode = upstream.resolve_adaptive_cudagraph_mode(
             self.compilation_config.cudagraph_mode,
@@ -166,7 +170,7 @@ def initialize_kv_cache(
         self.vllm_config,
         self.device,
         cudagraph_mode,
-        decode_query_len=self.decode_query_len,
+        **graph_kwargs,
         lora_capture_cases=self.lora_capture_cases,
         varlen_decode=self.adaptive_verification is not None,
         ubatch_runner=self.ubatch_runner,
@@ -208,6 +212,11 @@ def initialize_kv_cache(
         for tensor in (cache if isinstance(cache, (tuple, list)) else (cache,))
         if tensor is not None and tensor.device == self.device
     ]
+    # #55688 adds the collector on main; v0.33.0 shares trackers during binding.
+    if not vllm_version_is("0.33.0"):
+        self.replayssm_block_copy_tensors = upstream.get_replayssm_block_copy_tensors(
+            self.compilation_config.static_forward_context
+        )
     if is_profiling:
         self.kv_connector = upstream.NO_OP_KV_CONNECTOR
     else:

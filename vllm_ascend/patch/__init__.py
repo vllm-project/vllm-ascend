@@ -146,6 +146,23 @@
 #       engine-core-level customization, or when the feature modules no longer
 #       need an entry-point hook.
 #
+# ** 5b. File: platform/patch_metrics_level.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.engine.core.EngineCore.set_metrics_level`
+#   2. `vllm.entrypoints.serve.register_vllm_serve_api_routers`
+#    Why:
+#       The MS metric level is an integer in each process. A file poll on the
+#       last pipeline stage does not update earlier stages, and the API server
+#       has no command that reaches every worker.
+#    How:
+#       Add `POST /set_metrics_level` on the API server. The handler utility-RPCs
+#       `set_metrics_level` to every EngineCore. That method sets the engine
+#       process level and collective-RPCs the same method on every worker.
+#    Related PR (if no, explain why):
+#       No upstream PR. The command is Ascend MS metric control.
+#    Future Plan:
+#       Drop the monkeypatch if upstream grows a generic runtime-config RPC.
+#
 # ** 6. File: platform/patch_engram_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.engram.EngramConfig.verify_model_config`
@@ -602,6 +619,21 @@
 #       separate hook that can be overridden per-model-type.
 #
 # ** 19. File: platform/patch_speculative_config.py**
+# Native MiniMax Flash draft extension:
+#   Targets: SpeculativeConfig.__post_init__ and draft HF configuration loading.
+#   Why: native DSpark exports use a standalone architecture and carry their
+#        own dspark/config.json, while upstream normalizes unknown drafts to
+#        DSparkDraftModel.
+#   How: preserve DSparkMiniMaxDraftModel before Pydantic validation and
+#        normalize the checkpoint's dspark/config.json without changing the
+#        target or checkpoint. The adapter, its checkpoint contract and weight
+#        loading live in models/minimax_m3/minimax_m3_dspark.py; it inherits
+#        DSpark drafting and changes only Flash norms, MLP and loading.
+#   Related PR:
+#        https://github.com/vllm-project/vllm/pull/64111
+#   Future Plan: remove the architecture guard and config/weight normalization
+#        once upstream loads native MiniMax Flash drafts. Retain only required
+#        Ascend quantized projection handling behind the upstream extension points.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
 #    Why:
@@ -821,40 +853,6 @@
 # * Worker Patch:
 # ========#
 # Entries are listed in alphabetical order by file name.
-#
-# ** 0. File: worker/patch_kv_cache_dtype.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.utils.torch_utils.STR_DTYPE_TO_TORCH_DTYPE["fp8"]`
-#    Why:
-#       vLLM ``releases/v0.27.1`` does not ship the pluggable kv-cache-dtype
-#       mechanism that the ``kvquant_27`` branch added
-#       (``register_kv_cache_dtype`` injects ``fp8 -> torch.float8_e4m3fn``
-#       in place). On such vLLM builds the upstream
-#       ``STR_DTYPE_TO_TORCH_DTYPE["fp8"]`` is ``torch.uint8`` (raw fp8 bytes
-#       for NVIDIA cutlass), but Ascend MLA/DSA kernels need native
-#       ``torch.float8_e4m3fn``. Without the flip, the call sites in
-#       ``vllm_ascend/models/deepseek_v4/{model,indexer}.py`` that do
-#       ``kv_cache_dtype_str_to_dtype("fp8", ...)`` resolve to ``uint8`` and
-#       the Ascend kernels fail (e.g. GLM-5.1 with ``--kv-cache-dtype fp8``
-#       and ``--attention_config.indexer_kv_dtype fp8``).
-#       ``vllm_ascend/core/kv_cache_dtype_handlers.py`` is import-guarded so
-#       it no longer raises ``ImportError`` on vLLM without
-#       ``register_kv_cache_dtype``; this worker patch then performs the
-#       dtype flip the handler would have done, in every spawned Worker
-#       process (the dtype is resolved per-worker, before model loading).
-#    How：
-#       At worker patch time, if ``register_kv_cache_dtype`` cannot be
-#       imported from ``vllm.config.cache``, mutate
-#       ``vllm.utils.torch_utils.STR_DTYPE_TO_TORCH_DTYPE["fp8"]`` to
-#       ``torch.float8_e4m3fn`` in place. When the API exists, also replace
-#       the upstream ``torch.uint8`` default if no handler updated it yet.
-#       Preserve any other dtype supplied by a registered handler.
-#    Related PR (if no, explain why):
-#       vLLM commit ``dd7e350c9 pluggable kv quant dtype`` (on kvquant_27).
-#    Future Plan:
-#       Remove this patch once the pluggable kv-cache-dtype mechanism lands on
-#       the vLLM release vllm-ascend targets, so the handler path alone
-#       handles the dtype flip.
 #
 # ** 2. File: worker/patch_deepseek_v2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1115,6 +1113,39 @@
 #       patch Qwen3_5GatedDeltaNet._forward_core to use triton ops like `fused_recurrent_gated_delta_rule`.
 #    Future Plan:
 #       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
+#   2. `vllm.model_executor.models.qwen3_5.Qwen3_5DecoderLayer.__init__` and
+#      `vllm.model_executor.models.qwen3_5.Qwen3_5DecoderLayer.forward`
+#    Why:
+#       Upstream gates sequence parallelism on `use_sequence_parallel_moe`, so
+#       dense Qwen3.5-family checkpoints (Qwen3.5/3.6/3.8-27B dense,
+#       model_type `qwen3_5_text`) cannot run sequence parallel at all. On
+#       Ascend the FlashComm switch (`additional_config.enable_flashcomm1`)
+#       also covers the dense family: hidden states and the residual stay
+#       sequence-sharded across the decoder stack, attention (full and GDN)
+#       gathers before / reduce-scatters after its sequence-parallel output
+#       projection, and the dense MLP gathers around its TP-sharded weights.
+#    How:
+#       `__init__`: after the upstream constructor, raise
+#       `use_attn_reduce_scatter_for_moe` for the dense family when dense SP
+#       is active (this module's `enable_dense_sp` resolves the FlashComm
+#       switch), and flip `o_proj` / GDN `out_proj` / dense `down_proj`
+#       to `reduce_results=False`. Reusing the upstream flag keeps
+#       Qwen3NextModel's entry chunk / exit all-gather and the MTP head's
+#       chunk / gather working unchanged.
+#       `forward`: replicate the upstream layout and, for dense MLPs, wrap
+#       gate_up/down with `sp_all_gather` / `sp_reduce_scatter` (MiniMax-M3 /
+#       DeepSeek-V4 pattern); MoE blocks keep the upstream
+#       `already_sequence_parallel=True` contract.
+#       The module-level patch applications are guarded by
+#       `STANDARD_WORKER_PATCHES` (mirroring `patch/worker/__init__.py`) so
+#       the lazy import from `utils.enable_sp` stays side-effect-free on
+#       devices that exclude this patch (310P).
+#    Related PR (if no, explain why):
+#       No, upstream has no dense-model sequence-parallel switch.
+#    Future Plan:
+#       Contribute the dense-MLP gather/scatter layout upstream once vLLM
+#       grows a dense sequence-parallelism config; until then the patch is
+#       gated on the FlashComm switch and the `qwen3_5_text` model type.
 #
 # ** 15. File: worker/patch_qwen3_dflash.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1529,8 +1560,8 @@
 # ** 25. File: worker/patch_eagle_speculator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator.SpeculatorCudaGraphManager`
-#       (named `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator` before
-#       upstream vLLM #60335; both supported lanes use the new path).
+#   2. `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.SpeculatorCudaGraphManager`
+#       (vLLM main #60989 constructs the decode manager in the shared AR base).
 #    Why:
 #       The shared v2 autoregressive speculative-decoding path (Eagle/MTP) uses
 #       an upstream CUDA graph manager, which is not usable on Ascend.
@@ -1655,6 +1686,8 @@
 #       before device filtering. Preserve the original dictionary and container
 #       types for model bindings and connector registration; remove the old
 #       first-tensor wrapper in patch_attn_utils.py.
+#       Preserve #55688's ReplaySSM tracker collection for inherited scheduler
+#       block copies when the supported upstream exports that collector.
 #    Related PR (if no, explain why):
 #       No upstream PR linked; this adapts Ascend multi-tensor allocations.
 #    Future Plan:
@@ -1717,37 +1750,6 @@
 #       Remove this patch once vllm-ascend's bundled PyTorch >= 2.13.0
 #       (which, like upstream, allows eps >= 0 for inference).
 #
-# ** 34. File: platform/patch_indexer_kv_dtype.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.attention.AttentionConfig.indexer_kv_dtype`
-#      `vllm.config.attention.IndexerKVDType`
-#    Why:
-#       DeepSeek V4 (and similar Ascend sparse-attention models) use an `int8`
-#       indexer K cache. Upstream vLLM types `indexer_kv_dtype` as the Literal
-#       `IndexerKVDType = Literal["bf16", "fp8", "mxfp4", "nvfp4"]`, which rejects
-#       `"int8"` at CLI/config validation with a pydantic `literal_error` -- before
-#       the value reaches `kv_cache_dtype_str_to_dtype`, which already supports
-#       `int8` (maps to `torch.int8` upstream, see `worker/patch_kv_cache_dtype.py`).
-#       So `vllm serve ... --attention_config.indexer_kv_dtype int8` fails to start
-#       even though the Ascend indexer kernels (`vllm_ascend/models/deepseek_v4/`)
-#       expect it.
-#    How：
-#       Widen the accepted `Literal` to include `"int8"` and rebuild the pydantic
-#       dataclass schema in place -- without editing the upstream vllm tree. The
-#       field's Literal is held in three places (the module-level `IndexerKVDType`
-#       symbol, the class `__annotations__`, and the stdlib `__dataclass_fields__`
-#       `.type`); all three are updated, then `pydantic.dataclasses.rebuild_dataclass`
-#       is called with `force=True` to regenerate the validator + core schema. Runs
-#       as a platform patch (in `pre_register_and_update`, after the `--attention-config`
-#       argparse args are registered and before `parse_args`), so the per-call
-#       `TypeAdapter(AttentionConfig)` used to validate the dotted-path argument
-#       picks up the widened Literal. Idempotent: no-ops if `int8` is already present.
-#    Related PR (if no, explain why):
-#       No, Ascend-specific int8 indexer cache support not yet upstream.
-#    Future Plan:
-#       Remove this patch once upstream `IndexerKVDType` includes `"int8"` (or once
-#       the indexer kv dtype is pluggable like the fp8 kv-cache-dtype mechanism).
-#
 # ** 35. File: platform/patch_parallel_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
@@ -1788,3 +1790,24 @@
 # How: initialize the capability-gated per-layer NPU adaptation after upstream init.
 # Related PR: vllm-project/vllm#60050.
 # Future Plan: remove this initialization hook when a shared backend extension supports it.
+
+# ** 36. File: worker/patch_staged_writes.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.block_table.BlockTables.__init__`,
+#      `vllm.v1.worker.gpu.block_table.BlockTables.append_block_ids`
+#    Why:
+#      num_blocks.np is written only in append_block_ids, but upstream flushes
+#      num_blocks.copy_to_uva unconditionally on every step, costing one H2D
+#      copy per decode step even when no block was appended.
+#    How:
+#      Track a dirty flag set by append_block_ids and make the instance-level
+#      num_blocks.copy_to_uva a no-op when clean. apply_staged_writes keeps
+#      calling it, so upstream logic and ordering are untouched. The flag is
+#      cleared only after a successful copy so failed flushes are retried.
+#    Related PR (if no, explain why):
+#      Upstream vllm#62748 already guarded the Sampler staged-write flush
+#      (removed here per review; arrives via main2main). No upstream PR yet
+#      for the num_blocks flush; follow https://github.com/vllm-project/vllm/pull/65880.
+#    Future Plan:
+#      Remove when upstream adds dirty tracking to UvaBackedTensor flushes.
+#

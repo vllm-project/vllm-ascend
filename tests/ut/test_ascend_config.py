@@ -1404,8 +1404,9 @@ class TestSubconfigPydanticTypeValidation(TestBase):
                 config.lmhead_tensor_parallel_size,
                 config.embedding_tensor_parallel_size,
                 config.mlp_tensor_parallel_size,
+                config.qkv_iproj_tensor_parallel_size,
             ),
-            (1, 1, 1, 1),
+            (1, 1, 1, 1, 1),
         )
 
     def _oproj_tp_vllm_config(
@@ -1444,6 +1445,39 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         # single check covers both spellings of "no graph mode".
         with self.assertRaisesRegex(AssertionError, "only supported in graph mode"):
             config._validate_preconditions(self._oproj_tp_vllm_config(cudagraph_mode=CUDAGraphMode.NONE))
+
+    def test_qkv_iproj_tp_preconditions(self):
+        def deployment():
+            vc = self._oproj_tp_vllm_config()
+            vc.parallel_config.pipeline_parallel_size = 1
+            vc.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next_text", linear_num_heads=64)
+            return vc
+
+        for size in (2, 4, 8):
+            config = FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=size)
+            config._validate_preconditions(deployment())
+            self.assertEqual(config.qkv_iproj_tensor_parallel_size, size)
+        for field in ("tensor_parallel_size", "prefill_context_parallel_size", "pipeline_parallel_size"):
+            vc = deployment()
+            setattr(vc.parallel_config, field, 2)
+            with self.assertRaisesRegex(ValueError, "TP=1, PCP=1 and PP=1"):
+                FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)._validate_preconditions(vc)
+        vc = deployment()
+        vc.kv_transfer_config.is_kv_consumer = False
+        with self.assertRaisesRegex(ValueError, "PD decode node"):
+            FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)._validate_preconditions(vc)
+        vc = deployment()
+        vc.model_config.hf_text_config.model_type = "other"
+        with self.assertRaisesRegex(ValueError, "GLM-5.3-Flash only"):
+            FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)._validate_preconditions(vc)
+        with self.assertRaisesRegex(ValueError, "divide the KDA head count"):
+            FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=3)._validate_preconditions(deployment())
+        vc = deployment()
+        vc.parallel_config.data_parallel_size = 6
+        with self.assertRaisesRegex(AssertionError, "divide by data_parallel_size"):
+            FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=4)._validate_preconditions(vc)
+        with self.assertRaisesRegex(ValueError, "qkv_iproj_tensor_parallel_size must be non-negative"):
+            FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=-1)
 
     def test_oproj_tp_rejects_pcp(self):
         config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
@@ -2300,6 +2334,7 @@ class TestKVPPConfig(TestBase):
         from tests.ut.kvpp_utils import make_kvpp_config
 
         mooncake = {"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer"}
+        push = {**mooncake, "kv_connector": "MooncakePushConnector"}
         store = {"kv_connector": "AscendStoreConnector", "kv_role": "kv_both"}
 
         def multi(children):
@@ -2309,7 +2344,7 @@ class TestKVPPConfig(TestBase):
                 "kv_connector_extra_config": {"connectors": children},
             }
 
-        for transfer in (mooncake, store, multi([mooncake, store]), multi([store, mooncake])):
+        for transfer in (mooncake, push, store, multi([mooncake, store]), multi([store, mooncake])):
             with self.subTest(transfer=transfer):
                 config = make_kvpp_config()
                 config.kv_transfer_config = KVTransferConfig(**deepcopy(transfer))
@@ -2319,6 +2354,7 @@ class TestKVPPConfig(TestBase):
         unsupported = {**mooncake, "kv_connector": "MooncakeConnectorV1"}
         cases = (
             (consumer, "decode-only"),
+            ({**push, "kv_role": "kv_consumer"}, "decode-only"),
             (multi([store, consumer]), "decode-only"),
             (unsupported, "MooncakeConnectorV1"),
             (multi([mooncake, unsupported]), "MooncakeConnectorV1"),

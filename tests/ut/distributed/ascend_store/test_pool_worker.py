@@ -116,6 +116,7 @@ def make_worker(
     pp_size=1,
     pp_rank=0,
     dcp_size=1,
+    dcp_rank=0,
     kv_cache_config=None,
     prefix_match_unit=None,
     layer_offset=0,
@@ -132,7 +133,7 @@ def make_worker(
     pcp_group.return_value.world_size = pcp_size
     pcp_group.return_value.rank_in_group = pcp_rank
     start_patch(test, f"{module}.get_decode_context_model_parallel_world_size", return_value=dcp_size)
-    start_patch(test, f"{module}.get_decode_context_model_parallel_rank", return_value=0)
+    start_patch(test, f"{module}.get_decode_context_model_parallel_rank", return_value=dcp_rank)
     importlib = start_patch(test, f"{module}.importlib")
     importlib.import_module.return_value = MagicMock()
 
@@ -2559,20 +2560,21 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             load_spec=LoadSpec(0, 16 * len(block_hashes), True),
         )
 
-    def test_layerwise_lease_refresh_preserves_first_duplicate_key_index(self):
+    def test_layerwise_lease_refresh_refreshes_all_duplicate_key_indices(self):
         worker = self._make_gva_worker()
         request = self._make_multi_block_gva_request(["h0", "h1", "h0"])
         before = [SimpleNamespace(size=lambda: 64, gva_list=lambda gva=gva: [gva]) for gva in (201, 202, 203)]
         pinned = [SimpleNamespace(gva_list=lambda gva=gva: [gva]) for gva in (301, 302, 303)]
         worker.m_store.batch_get_key_info.side_effect = [before, pinned]
-        worker.m_store.batch_add_lease.return_value = [0, 0, 0]
+        worker.m_store.batch_add_lease.return_value = [0, 0]
 
         self.assertIsNone(worker._prepare_load_gvas_for_request([request]))
 
-        # Repeated replies update the first matching slot, as keys.index did.
-        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [303, 302, 203])
+        # Every occurrence must use the pinned GVA, never the pre-lease address.
+        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [303, 302, 303])
         queried = worker.m_store.batch_get_key_info.call_args_list[0].args[0]
         self.assertEqual(queried[0], queried[2])
+        self.assertEqual(worker.m_store.batch_add_lease.call_args.args[0], queried[:2])
         self.assertEqual(request.load_keys, queried)
         self.assertEqual(worker._step_load_keys, set(queried))
 
