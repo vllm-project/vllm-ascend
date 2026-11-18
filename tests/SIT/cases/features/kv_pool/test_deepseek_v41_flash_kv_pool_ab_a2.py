@@ -137,6 +137,9 @@ from vllm import SamplingParams
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
 
+from tests.e2e.common.kv_pool.config import MooncakeKVPoolConfig
+from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMooncakeManager
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.kv_pool_watch import (
     AB_ARTIFACT,
     AB_LEG_GAP_SECONDS,
@@ -148,9 +151,6 @@ from tests.e2e.pull_request.kv_pool_watch import (
     assert_output_identical,
     snapshot_metrics,
 )
-from tests.e2e.common.kv_pool.config import MooncakeKVPoolConfig
-from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMooncakeManager
-from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 try:
     # vLLM's native Engram config (docs/source/tutorials/models/DeepSeek-V4.1-Flash.md:233).
