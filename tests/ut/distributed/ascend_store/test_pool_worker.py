@@ -1173,9 +1173,8 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.layer_load_finished_events = [threading.Event()]
         worker.kv_recv_thread = MagicMock()
         worker.external_slot_release_waiter = MagicMock()
-        worker._submit_ready_layer_loads = MagicMock()
-
-        worker.wait_for_layer_load()
+        with patch.object(worker, "_submit_ready_layer_loads"):
+            worker.wait_for_layer_load()
 
         worker.external_slot_release_waiter.assert_called_once_with(0)
 
@@ -1719,10 +1718,9 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             self.assertEqual(len(result), 1)
             self.assertIs(result[0], cache)
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreSendingThread")
-    def test_transfer_threads_use_grouped_block_sizes(self, send_thread, recv_thread, event):
+    def test_transfer_threads_use_grouped_block_sizes(self, send_thread, recv_thread):
         worker = self._make_worker(kv_role="kv_both", extra_config={"backend": "mooncake", "load_async": True})
         worker.grouped_block_size = [128, 128, 128, 128, 8, 32]
 
@@ -1732,7 +1730,44 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(recv_thread.call_args.args[2], worker.grouped_block_size)
         self.assertIsNone(send_thread.call_args.kwargs["worker"])
         self.assertIsNone(recv_thread.call_args.kwargs["worker"])
-        event.return_value.wait.assert_called()
+        for thread in (send_thread.return_value, recv_thread.return_value):
+            thread.ready_event.wait.assert_called_once_with()
+            thread.raise_if_failed.assert_called_once_with()
+
+    def test_receive_startup_failure_releases_sender_and_allows_retry(self):
+        worker = self._make_worker(kv_role="kv_both", extra_config={"backend": "mooncake", "load_async": True})
+        worker.token_database.set_group_buffers({0: [1000]}, {0: [160]})
+        error = RuntimeError("cannot bind receiver to device")
+        worker.m_store.set_device.side_effect = [None, error]
+        errors = []
+
+        def start_threads():
+            try:
+                worker._start_kv_transfer_threads()
+            except Exception as exc:
+                errors.append(exc)
+
+        registration = threading.Thread(target=start_threads, daemon=True)
+        registration.start()
+        try:
+            registration.join(timeout=5)
+            self.assertFalse(registration.is_alive(), "registration hung on the failed receiver")
+            self.assertEqual(len(errors), 1)
+            self.assertIs(errors[0].__cause__, error)
+            self.assertFalse(worker._transfer_threads_started)
+            self.assertFalse(worker.kv_send_thread.is_alive())
+            self.assertFalse(worker.kv_recv_thread.is_alive())
+
+            worker.m_store.set_device.side_effect = None
+            worker._start_kv_transfer_threads()
+            self.assertTrue(worker._transfer_threads_started)
+            self.assertTrue(worker.kv_send_thread.is_alive())
+            self.assertTrue(worker.kv_recv_thread.is_alive())
+        finally:
+            if registration.is_alive() and worker.kv_recv_thread is not None:
+                worker.kv_recv_thread.ready_event.set()
+                registration.join(timeout=5)
+            worker.shutdown()
 
     def test_register_kv_caches_initializes_layerwise_memcache(self):
         worker = self._make_worker(extra_config={"backend": "memcache"}, use_layerwise=True)
@@ -1857,14 +1892,6 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             kv_role="kv_consumer",
             extra_config={"backend": "mooncake", "load_async": True},
         )
-        recv_thread = MagicMock()
-
-        def create_recv_thread(*args, **kwargs):
-            args[6].set()
-            return recv_thread
-
-        recv_thread_cls.side_effect = create_recv_thread
-
         worker._start_kv_transfer_threads()
 
         kwargs = recv_thread_cls.call_args.kwargs
@@ -3983,10 +4010,9 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
                 self.assertEqual(worker.effective_tp_size, 4)
                 self.assertEqual(worker.num_sub_keys, expected_sub_keys)
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreSendingThread")
-    def test_transfer_threads_receive_worker_when_tp_mismatch(self, send_thread, recv_thread, event):
+    def test_transfer_threads_receive_worker_when_tp_mismatch(self, send_thread, recv_thread):
         worker = self._make_worker(
             tp_size=2,
             kv_role="kv_consumer",
@@ -4003,7 +4029,6 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
 
         self.assertIs(send_thread.call_args.kwargs["worker"], worker)
         self.assertIs(recv_thread.call_args.kwargs["worker"], worker)
-        event.return_value.wait.assert_called()
 
     def test_start_load_kv_sync_dispatches_tp_mismatch_reader(self):
         worker = self._make_strided_worker()

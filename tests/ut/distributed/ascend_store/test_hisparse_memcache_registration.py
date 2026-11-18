@@ -27,13 +27,65 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_b
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import (
     aligned_hisparse_allocation_config,
-    hisparse_layout_id,
+    store_model_name,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import get_by_residency
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 from vllm_ascend.hisparse.binding import prepare_hisparse_cache_views
 
 SLAB_ALIGNMENT = 2 * 1024 * 1024
+
+
+def _checkpoint(model, revision=None, *, model_weights=""):
+    return SimpleNamespace(
+        model=model,
+        model_weights=model_weights,
+        revision=revision,
+        code_revision=None,
+        dtype=torch.bfloat16,
+        quantization=None,
+    )
+
+
+def test_hisparse_pool_keys_track_checkpoint_identity():
+    cache = KVCacheConfig(2, [], [], hisparse_host_num_blocks=3)
+    config = SimpleNamespace(model_config=_checkpoint("team-a/glm", "v1"), speculative_config=None)
+
+    def key():
+        return store_model_name(config, cache, 1, 128)
+
+    original = key()
+    for model, revision in [("team-b/glm", "v1"), ("team-a/glm", "v2")]:
+        config.model_config = _checkpoint(model, revision)
+        assert key() != original
+        assert store_model_name(config, None, 1, 128) == "glm"
+
+    # Object-store staging directories and public serving aliases can change on each rank or restart.
+    config.model_config = _checkpoint("/tmp/worker-1", "v1", model_weights="s3://weights/glm")
+    staged = key()
+    config.model_config.model = "/tmp/worker-2"
+    config.model_config.served_model_name = "new-endpoint"
+    assert key() == staged
+    config.speculative_config = SimpleNamespace(draft_model_config=_checkpoint("draft/glm", "v1"))
+    with_draft = key()
+    assert with_draft != staged
+    config.speculative_config.draft_model_config.revision = "v2"
+    assert key() != with_draft
+
+
+def test_relative_checkpoint_keys_follow_the_local_directory(tmp_path, monkeypatch):
+    cache = KVCacheConfig(2, [], [], hisparse_host_num_blocks=3)
+    keys = []
+    for parent in (tmp_path / "team-a", tmp_path / "team-b"):
+        model = parent / "weights"
+        model.mkdir(parents=True)
+        monkeypatch.chdir(parent)
+        config = SimpleNamespace(model_config=_checkpoint("./weights"), speculative_config=None)
+        relative = store_model_name(config, cache, 1, 128)
+        config.model_config.model = str(model)
+        assert store_model_name(config, cache, 1, 128) == relative
+        keys.append(relative)
+    assert keys[0] != keys[1]
 
 
 def aligned_tensor(size: int) -> torch.Tensor:
@@ -192,12 +244,17 @@ def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool,
             block_stride=17408 if indexer_c8 else 98304,
         ),
     ]
-    layout_id = hisparse_layout_id(worker.kv_cache_config, worker.dcp_size, worker.cache_transfer_granularity)
+    config.model_config = _checkpoint("team/glm")
+
+    def pool_key():
+        return store_model_name(config, worker.kv_cache_config, worker.dcp_size, worker.cache_transfer_granularity)
+
+    original_key = pool_key()
     worker.kv_cache_config.num_blocks += 1
     worker.kv_cache_config.hisparse_host_num_blocks += 1
-    assert hisparse_layout_id(worker.kv_cache_config, worker.dcp_size, worker.cache_transfer_granularity) == layout_id
+    assert pool_key() == original_key
     worker.kv_cache_config.kv_cache_tensors[1].block_stride += 512
-    assert hisparse_layout_id(worker.kv_cache_config, worker.dcp_size, worker.cache_transfer_granularity) != layout_id
+    assert pool_key() != original_key
     worker.kv_cache_config.kv_cache_tensors[1].block_stride -= 512
     spec = groups[1].kv_cache_spec
     replacement = replace(indexer_spec, block_size=64)
@@ -206,7 +263,7 @@ def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool,
         if isinstance(spec, UniformTypeKVCacheSpecs)
         else replacement
     )
-    assert hisparse_layout_id(worker.kv_cache_config, worker.dcp_size, worker.cache_transfer_granularity) != layout_id
+    assert pool_key() != original_key
 
 
 def test_hisparse_alignment_is_scoped_to_the_padded_allocation():
@@ -222,8 +279,8 @@ def test_hisparse_alignment_is_scoped_to_the_padded_allocation():
     assert caches["cache"] is original
 
 
-@pytest.mark.parametrize("wrong_storage", [False, True], ids=["bad-indexer-shape", "bad-slab-owner"])
-def test_hisparse_late_view_failure_leaves_all_bindings_untouched(wrong_storage):
+@pytest.mark.parametrize("failure", ["bad-indexer-shape", "bad-slab-owner", "missing-context"])
+def test_hisparse_late_view_failure_leaves_all_bindings_untouched(failure):
     from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 
     names = ["indexer.0", "indexer.1", "indexer.2"]
@@ -237,13 +294,22 @@ def test_hisparse_late_view_failure_leaves_all_bindings_untouched(wrong_storage)
     slab = torch.zeros(padded_size, dtype=torch.int8)
     typed = slab[:size].view(torch.bfloat16).view(3, 1, 1, 128, 128)
     original = dict(zip(names, typed.unbind(), strict=True))
-    original[names[-1]] = original[names[-1]].clone() if wrong_storage else original[names[-1]].flatten()
-    caches = original.copy()
     context = {name: SimpleNamespace(hisparse_block_stride=99) for name in names}
-    message = "share one backing allocation" if wrong_storage else "Unexpected HiSparse indexer cache shape"
+    error: type[Exception] = ValueError
+    if failure == "bad-slab-owner":
+        original[names[-1]] = original[names[-1]].clone()
+        message = "share one backing allocation"
+    elif failure == "bad-indexer-shape":
+        original[names[-1]] = original[names[-1]].flatten()
+        message = "Unexpected HiSparse indexer cache shape"
+    else:
+        del context[names[-1]]
+        error = KeyError
+        message = names[-1]
 
+    caches = original.copy()
     allocation_config = aligned_hisparse_allocation_config(config)
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(error, match=message):
         prepare_hisparse_cache_views(allocation_config, caches, context)
     assert all(caches[name] is original[name] for name in names)
     assert [tensor.size for tensor in allocation_config.kv_cache_tensors] == [padded_size, padded_size]

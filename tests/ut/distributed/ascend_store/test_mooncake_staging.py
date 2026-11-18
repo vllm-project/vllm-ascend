@@ -23,9 +23,14 @@ def registered(monkeypatch):
     sdk = Mock()
     sdk.register_buffer.return_value = 0
     sdk.unregister_buffer.return_value = 0
-    bulk = mooncake_staging.MooncakeHostStaging(sdk, {host_ptr: ctypes.sizeof(host)})
+    bulk = mooncake_staging.MooncakeHostStaging(sdk)
     try:
-        bulk.register([host_ptr, device_ptr], [ctypes.sizeof(host), ctypes.sizeof(device)])
+        bulk.register(
+            [
+                BufferDescriptor(address=host_ptr, size_bytes=ctypes.sizeof(host), host=True),
+                BufferDescriptor(address=device_ptr, size_bytes=ctypes.sizeof(device)),
+            ]
+        )
         assert sdk.register_buffer.call_args_list == [
             call(bulk._send.base, 16),
             call(bulk._recv.base, 16),
@@ -33,6 +38,7 @@ def registered(monkeypatch):
         ]
         yield bulk, sdk, host, device
     finally:
+        bulk.unregister()
         bulk.close()
     assert sdk.unregister_buffer.call_args_list == [call(device_ptr), call(bulk._recv.base), call(bulk._send.base)]
     sdk.close.assert_not_called()
@@ -243,7 +249,7 @@ def test_staging_pages_are_faulted_and_zeroed_before_registration(monkeypatch):
     monkeypatch.setattr(mooncake_staging, "_HOST_STAGING_BYTES", 16)
     sdk = Mock()
     sdk.unregister_buffer.return_value = 0
-    bulk = mooncake_staging.MooncakeHostStaging(sdk, {100: 32})
+    bulk = mooncake_staging.MooncakeHostStaging(sdk)
 
     def register(ptr, size):
         assert ctypes.string_at(ptr, size) == bytes(size)
@@ -251,8 +257,9 @@ def test_staging_pages_are_faulted_and_zeroed_before_registration(monkeypatch):
 
     sdk.register_buffer.side_effect = register
     try:
-        bulk.register([100], [32])
+        bulk.register([BufferDescriptor(address=100, size_bytes=32, host=True)])
     finally:
+        bulk.unregister()
         bulk.close()
     sdk.close.assert_not_called()
 
@@ -265,8 +272,8 @@ def test_backend_closes_store_before_releasing_failed_deregistration(monkeypatch
     sdk = Mock()
     sdk.register_buffer.return_value = 0
     sdk.unregister_buffer.return_value = -1
-    bulk = mooncake_staging.MooncakeHostStaging(sdk, {100: 32})
-    bulk.register([100], [32])
+    bulk = mooncake_staging.MooncakeHostStaging(sdk)
+    bulk.register([BufferDescriptor(address=100, size_bytes=32, host=True)])
     backend._host_staging, backend.store = bulk, sdk
     backend._store_initialized = True
 
@@ -281,3 +288,28 @@ def test_backend_closes_store_before_releasing_failed_deregistration(monkeypatch
     assert backend.store is None and backend._host_staging is None
     backend.close()
     sdk.close.assert_called_once_with()
+
+
+def test_failed_store_shutdown_keeps_mappings_and_retries_only_outstanding_registration(monkeypatch):
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
+
+    monkeypatch.setattr(mooncake_staging, "_HOST_STAGING_BYTES", 16)
+    backend = MooncakeBackend.__new__(MooncakeBackend)
+    sdk = Mock()
+    sdk.register_buffer.return_value = 0
+    sdk.unregister_buffer.side_effect = [-1, 0, 0]
+    sdk.close.side_effect = [RuntimeError("Store close failed"), None]
+    staging = mooncake_staging.MooncakeHostStaging(sdk)
+    staging.register([BufferDescriptor(address=100, size_bytes=32, host=True)])
+    backend._host_staging, backend.store = staging, sdk
+
+    with pytest.raises(RuntimeError, match="Store close failed"):
+        backend.close()
+    assert not staging._send.buffer.closed and not staging._recv.buffer.closed
+    backend.close()
+    assert sdk.unregister_buffer.call_args_list == [
+        call(staging._recv.base),
+        call(staging._send.base),
+        call(staging._recv.base),
+    ]
+    assert staging._send.buffer.closed and staging._recv.buffer.closed

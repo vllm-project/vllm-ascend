@@ -6,10 +6,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Callable
 from copy import copy
 from dataclasses import dataclass, fields
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor, UniformTypeKVCacheSpecs
@@ -17,7 +18,10 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor, UniformType
 from vllm_ascend.core.kv_cache_interface import AlignedKVCacheTensor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import DEVICE_BUFFER_ALIGNMENT, BufferDescriptor
 
-_HISPARSE_CACHE_NAMESPACE = "hisparse-v3"
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig, VllmConfig
+
+_HISPARSE_CACHE_NAMESPACE = "hisparse-v4"
 
 
 def has_hisparse_layout(config: KVCacheConfig | None) -> bool:
@@ -35,14 +39,28 @@ def uses_hisparse_store(vllm_config: Any, config: KVCacheConfig | None) -> bool:
     return has_hisparse_layout(config) and transfer is not None and transfer.has_connector("AscendStoreConnector")
 
 
-def store_model_name(model_config: Any, config: KVCacheConfig | None, dcp_size: int, granularity: int) -> str:
-    name = model_config.model.rstrip("/").split("/")[-1]
+def _checkpoint_identity(model: ModelConfig) -> tuple[str, str | None, str | None, str, str | None]:
+    # Core keeps the original URI in model_weights when downloading to a temporary directory.
+    source = (model.model_weights or model.model).rstrip("/")
+    if not model.model_weights and not os.path.isabs(source) and os.path.exists(source):
+        source = os.path.abspath(source)
+    return source, model.revision, model.code_revision, str(model.dtype), model.quantization
+
+
+def store_model_name(vllm_config: VllmConfig, config: KVCacheConfig | None, dcp_size: int, granularity: int) -> str:
+    model = vllm_config.model_config
     if not has_hisparse_layout(config):
-        return name
+        return model.model.rstrip("/").split("/")[-1]
     assert config is not None
-    # Older keys may contain draft pages saved before their Host mirror.
-    layout_id = hisparse_layout_id(config, dcp_size, granularity)
-    return f"{name}:{_HISPARSE_CACHE_NAMESPACE}:{model_config.dtype}:{layout_id}"
+    speculative = vllm_config.speculative_config
+    draft = speculative.draft_model_config if speculative is not None else None
+    identity = (
+        _checkpoint_identity(model),
+        _checkpoint_identity(draft) if draft is not None else None,
+        _hisparse_page_geometry(config, dcp_size, granularity),
+    )
+    digest = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()[:24]
+    return f"{_HISPARSE_CACHE_NAMESPACE}:{digest}"
 
 
 def aligned_hisparse_allocation_config(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
@@ -129,8 +147,8 @@ def plan_hisparse_store_views(
     return layout, normalized, excluded
 
 
-def hisparse_layout_id(kv_cache_config: KVCacheConfig, dcp_size: int, transfer_granularity: int) -> str:
-    # Hash planned page geometry, never addresses or pool capacity. Bump
+def _hisparse_page_geometry(kv_cache_config: KVCacheConfig, dcp_size: int, transfer_granularity: int) -> tuple:
+    # Include planned page geometry, never addresses or pool capacity. Bump
     # the key version for any serialization change outside these fields.
     groups = []
     layers = set()
@@ -162,5 +180,4 @@ def hisparse_layout_id(kv_cache_config: KVCacheConfig, dcp_size: int, transfer_g
         for name in tensor.layers
         if name in layers
     )
-    identity = (dcp_size, transfer_granularity, groups, block_strides)
-    return hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()[:24]
+    return dcp_size, transfer_granularity, groups, block_strides

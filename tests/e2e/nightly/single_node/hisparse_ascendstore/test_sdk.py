@@ -17,6 +17,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_b
     MemcacheBackend,
     require_hisparse_host_tcp,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import DEVICE_BUFFER_ALIGNMENT, BufferDescriptor
 
 
 def test_real_memcache_registration_rollback_and_retry(pytestconfig):
@@ -26,26 +27,31 @@ def test_real_memcache_registration_rollback_and_retry(pytestconfig):
     assert torch.npu.is_available()
     require_hisparse_host_tcp()
     torch.npu.set_device(0)
-    alignment = 2 * 1024 * 1024
-    allocations = [torch.empty(3 * alignment, dtype=torch.uint8, device="npu:0") for _ in range(2)]
-    first, second = [tensor.data_ptr() + (-tensor.data_ptr() % alignment) for tensor in allocations]
+    size = DEVICE_BUFFER_ALIGNMENT
+    host_tensor = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+    host = BufferDescriptor(address=host_tensor.data_ptr(), size_bytes=size, host=True)
+    allocations = [torch.empty(3 * size, dtype=torch.uint8, device="npu:0") for _ in range(2)]
+    candidate, conflict = [
+        BufferDescriptor(address=t.data_ptr() + (-t.data_ptr() % size), size_bytes=size, alignment_bytes=size)
+        for t in allocations
+    ]
     backend = MemcacheBackend(ParallelConfig(), device_id=0)
     try:
         sdk = backend.store
         assert sdk is not None
-        backend.register_buffer([first], [alignment], check_result=True)
-        assert sdk.register_buffer(first, alignment) == 0
-        assert sdk.register_buffer(first, 2 * alignment) == -1
-        # Use a valid address inside the second allocation, but break the
-        # device registration's 2 MiB alignment on the final entry. The
-        # rollback must preserve the first range from a prior registration.
+        backend.register_buffer([host])
+        # A pre-existing SDK registration with different geometry forces the
+        # final entry to fail after the candidate has actually been registered.
+        assert sdk.register_buffer(conflict.address, 2 * size) == 0
         with pytest.raises(RuntimeError, match="MemCache buffer registration failed"):
-            backend.register_buffer([first, second, second + 1], [alignment] * 3, check_result=True)
-        assert backend._pending_buffers is None
-        assert sdk.register_buffer(first, 2 * alignment) == -1
-        backend.register_buffer([second], [alignment], check_result=True)
-        backend.unregister_buffer([second], [alignment])
-        backend.register_buffer([second], [2 * alignment], check_result=True)
-        backend.unregister_buffer([first, second], [alignment, 2 * alignment])
+            backend.register_buffer([host, candidate, conflict])
+        # The earlier Host registration survives. Re-registering the candidate
+        # with a different size succeeds only if the failed batch rolled it back.
+        assert sdk.register_buffer(host.address, size // 2) == -1
+        assert sdk.unregister_buffer(conflict.address, 2 * size) == 0
+        resized = BufferDescriptor(address=candidate.address, size_bytes=2 * size, alignment_bytes=size)
+        backend.register_buffer([host, resized, conflict])
+        assert sdk.register_buffer(candidate.address, 2 * size) == 0
+        backend.unregister_buffer([host.address, resized.address, conflict.address], [size, 2 * size, size])
     finally:
         backend.close()

@@ -362,9 +362,7 @@ class BaseKVPoolWorker(ABC):
                     for i in range(2, remaining_layers + 2):
                         partitions[-i] += 1
 
-        model_name = store_model_name(
-            model_config, self.kv_cache_config, self.dcp_size, self.cache_transfer_granularity
-        )
+        model_name = store_model_name(vllm_config, self.kv_cache_config, self.dcp_size, self.cache_transfer_granularity)
         self.metadata: list[KeyMetadata] = []
         for group_id in range(self.num_kv_cache_groups):
             # the mamba kv_heads is not same with the full attention, can't share the cache data
@@ -423,15 +421,30 @@ class BaseKVPoolWorker(ABC):
         if kv_event_config and kv_event_config.enable_kv_cache_events:
             self.enable_kv_events = True
 
-    def shutdown(self) -> None:
-        if self._closed:
-            return
+    def _start_threads_and_wait(self) -> None:
+        try:
+            for thread in (self.kv_send_thread, self.kv_recv_thread):
+                if thread is not None:
+                    thread.start()
+                    thread.ready_event.wait()
+                    thread.raise_if_failed()
+        except BaseException:
+            self._stop_transfer_threads()
+            raise
+        self._transfer_threads_started = True
+
+    def _stop_transfer_threads(self) -> None:
         threads = [thread for thread in (self.kv_send_thread, self.kv_recv_thread) if thread is not None]
         for thread in threads:
             thread.stop()
         for thread in threads:
             if thread.is_alive():
                 thread.join()
+
+    def shutdown(self) -> None:
+        if self._closed:
+            return
+        self._stop_transfer_threads()
         self.m_store.close()
         self._closed = True
 
@@ -737,18 +750,14 @@ class BaseKVPoolWorker(ABC):
                 self._get_storage_key,
             )
         self._set_num_blocks(kv_caches)
-        if excluded_layer_names is None:
-            self._register_kv_caches(kv_caches)
-        else:
-            self._register_kv_caches(kv_caches, excluded_layer_names=excluded_layer_names)
+        self._register_kv_caches(kv_caches, excluded_layer_names=excluded_layer_names)
 
     def _set_num_blocks(self, kv_caches: dict[str, torch.Tensor]) -> None:
-        _, first_kv_cache_tuple = next(iter(kv_caches.items()))
-        first_kv_cache_tuple = self._as_cache_tuple(first_kv_cache_tuple)
-        first_kv_cache = first_kv_cache_tuple[0]
-        self.num_blocks = (
-            self.kv_cache_config.num_blocks if self.kv_cache_config is not None else first_kv_cache.shape[0]
-        )
+        if self.kv_cache_config is not None:
+            self.num_blocks = self.kv_cache_config.num_blocks
+        else:
+            first_cache = self._as_cache_tuple(next(iter(kv_caches.values())))[0]
+            self.num_blocks = first_cache.shape[0]
 
     def _register_kv_caches(
         self,
@@ -1483,7 +1492,6 @@ class KVPoolWorker(BaseKVPoolWorker):
         )
 
         if self.can_put:
-            ready_event_sending = threading.Event()
             self.kv_send_thread = KVCacheStoreSendingThread(
                 self.m_store,
                 self.token_database,
@@ -1496,17 +1504,13 @@ class KVPoolWorker(BaseKVPoolWorker):
                 self.dcp_size,
                 self.put_step,
                 self.kv_role,
-                ready_event_sending,
-                self.group_uses_align_state,
-                self.enable_kv_events,
+                group_uses_align_state=self.group_uses_align_state,
+                enable_kv_event=self.enable_kv_events,
                 worker=self if self.tp_mismatch else None,
                 sharded_mamba_group_ids=self.sharded_mamba_group_ids,
                 host_resident_groups=host_resident_groups,
             )
-            self.kv_send_thread.start()
-            ready_event_sending.wait()
         if self.load_async:
-            ready_event = threading.Event()
             self.kv_recv_thread = KVCacheStoreRecvingThread(
                 self.m_store,
                 self.token_database,
@@ -1514,16 +1518,13 @@ class KVPoolWorker(BaseKVPoolWorker):
                 self.tp_rank,
                 self.tp_size,
                 self.dcp_size,
-                ready_event,
                 invalid_block_ids=self._invalid_block_ids,
                 invalid_block_ids_lock=self._invalid_block_ids_lock,
                 worker=self if self.tp_mismatch else None,
                 record_operation=self._record_kv_connector_operation,
                 host_resident_groups=host_resident_groups,
             )
-            self.kv_recv_thread.start()
-            ready_event.wait()
-        self._transfer_threads_started = True
+        self._start_threads_and_wait()
 
     def start_load_kv(self, metadata: AscendConnectorMetadata):
         self.current_layer = 0
