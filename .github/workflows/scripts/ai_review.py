@@ -67,6 +67,8 @@ def resolve_domains(domains_yaml: str, files: list[str]) -> list[dict]:
         if any(fnmatch.fnmatch(f, g) for f in files for g in globs):
             matched.append(domain)
     return matched
+
+
 # The agent signals "all MUST-FIX resolved" with this marker line, which the
 # orchestrator (not the agent itself) turns into the `ai-review-passed` label.
 PASS_MARKER = "AI-REVIEW-VERDICT: PASS"
@@ -106,9 +108,7 @@ class Orchestrator:
     # ---- thin gh wrappers -------------------------------------------------
 
     def _gh(self, *args: str) -> str:
-        return subprocess.run(
-            ["gh", *args], check=True, capture_output=True, text=True
-        ).stdout.strip()
+        return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout.strip()
 
     def _gh_json(self, *args: str):
         return json.loads(self._gh(*args))
@@ -125,9 +125,13 @@ class Orchestrator:
 
     def _load_state(self) -> State:
         comments = self._gh_json(
-            "pr", "view", str(self.pr),
-            "--json", "comments",
-            "-q", ".comments",
+            "pr",
+            "view",
+            str(self.pr),
+            "--json",
+            "comments",
+            "-q",
+            ".comments",
         )
         for c in reversed(comments):
             m = SIGNATURE_RE.search(c.get("body", ""))
@@ -145,9 +149,7 @@ class Orchestrator:
     # ---- gates ------------------------------------------------------------
 
     def actor_can_write(self) -> bool:
-        perm = self._gh_json(
-            "api", f"repos/:owner/:repo/collaborators/{self.actor}/permission"
-        )
+        perm = self._gh_json("api", f"repos/:owner/:repo/collaborators/{self.actor}/permission")
         return perm.get("permission") in ("admin", "maintain", "write")
 
     def author_in_allowlist(self) -> bool:
@@ -185,16 +187,19 @@ class Orchestrator:
 
         prompt = (
             instructions
-            + "\n\n## Knowledge base map\n\n" + kb_map + "\n"
+            + "\n\n## Knowledge base map\n\n"
+            + kb_map
+            + "\n"
             + "\n\n## Domains this PR touches\n\n"
             + (
-                "\n".join(f"- {d['name']}: {d.get('description', '')} — read `L2/{d['name']}/` first"
-                          for d in domains)
+                "\n".join(f"- {d['name']}: {d.get('description', '')} — read `L2/{d['name']}/` first" for d in domains)
                 or "(none matched — L1 global rules only)"
             )
             + f"\n\n## PR diff (head {self.head_sha[:12]})\n```diff\n{diff}\n```\n"
-            + "\n## Your previous comment\n" + (prev_agent_comment or "(first round)")
-            + "\n\n## Developer / reviewer reply to address\n" + user_reply
+            + "\n## Your previous comment\n"
+            + (prev_agent_comment or "(first round)")
+            + "\n\n## Developer / reviewer reply to address\n"
+            + user_reply
             + closing_note
             + f"\nRound for this push: {round_no}/{MAX_ROUNDS_PER_PUSH}. "
             + f"Whole-PR rounds so far: {self.state.total + 1}/{MAX_TOTAL_ROUNDS}."
@@ -262,15 +267,11 @@ class Orchestrator:
 
     def _touched_domains(self) -> list[dict]:
         registry_path = os.path.join(self.workspace, ".github", "agent-review", "domains.yaml")
-        files = self._gh_json(
-            "pr", "view", str(self.pr), "--json", "files", "-q", "[.files[].path]"
-        )
+        files = self._gh_json("pr", "view", str(self.pr), "--json", "files", "-q", "[.files[].path]")
         return resolve_domains(open(registry_path).read(), files)
 
     def _last_agent_comment_text(self) -> str:
-        comments = self._gh_json(
-            "pr", "view", str(self.pr), "--json", "comments", "-q", ".comments"
-        )
+        comments = self._gh_json("pr", "view", str(self.pr), "--json", "comments", "-q", ".comments")
         for c in reversed(comments):
             if BOT_MARKER in c.get("body", ""):
                 return c.get("body", "")
@@ -296,8 +297,13 @@ class Orchestrator:
 
     def _handle_pr_event(self, action: str) -> int:
         labels = self._gh_json(
-            "pr", "view", str(self.pr), "--json", "labels",
-            "-q", "[.labels[].name]",
+            "pr",
+            "view",
+            str(self.pr),
+            "--json",
+            "labels",
+            "-q",
+            "[.labels[].name]",
         )
 
         if action == "labeled":
@@ -311,8 +317,7 @@ class Orchestrator:
                 return 0
             if not self.author_in_allowlist():
                 self.post_notice(
-                    "AI review POC 未覆盖此 PR（作者不在灰度名单），已忽略并移除标签。"
-                    "如需参与请在 RFC #21451 留言。",
+                    "AI review POC 未覆盖此 PR（作者不在灰度名单），已忽略并移除标签。如需参与请在 RFC #21451 留言。",
                 )
                 subprocess.run(
                     ["gh", "pr", "edit", str(self.pr), "--remove-label", AI_REVIEW_LABEL],
