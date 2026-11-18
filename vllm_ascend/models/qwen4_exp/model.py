@@ -6,7 +6,6 @@
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
-from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
 from vllm.model_executor.models.qwen3_vl import Qwen3VLDummyInputsBuilder
 from vllm.models.qwen4_exp.amd import hyperconnection as upstream_hc
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -60,19 +59,6 @@ upstream_ple.sp_shard = sp_shard
 upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention
 
 
-class AscendQwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
-    """Keep Ascend MoE outputs local to the existing SP token shard."""
-
-    def __init__(self, vllm_config: VllmConfig, prefix: str = "", **_: object) -> None:
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-        config = vllm_config.model_config.hf_text_config
-        self.n_shared_experts = int(config.shared_expert_intermediate_size > 0)
-
-
-# The upstream decoder resolves this module global when constructing its MoE.
-upstream_model.Qwen4ExpSparseMoeBlock = AscendQwen4ExpSparseMoeBlock
-
-
 class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
     """Qwen4Exp backbone with Ascend-safe graph shape annotations."""
 
@@ -96,10 +82,9 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
         pp_group = get_pp_group()
         if not pp_group.is_first_rank and self.use_hc_sequence_parallel and intermediate_tensors is not None:
             hidden_states = intermediate_tensors["hidden_states"]
-            if hidden_states.shape[0] == positions.shape[-1]:
-                intermediate_tensors = IntermediateTensors(
-                    {**intermediate_tensors.tensors, "hidden_states": sp_shard(hidden_states)}
-                )
+            intermediate_tensors = IntermediateTensors(
+                {**intermediate_tensors.tensors, "hidden_states": sp_shard(hidden_states)}
+            )
 
         output = super().forward(
             input_ids,
@@ -168,5 +153,4 @@ __all__ = [
     "AscendQwen4ExpForCausalLM",
     "AscendQwen4ExpForConditionalGeneration",
     "AscendQwen4ExpModel",
-    "AscendQwen4ExpSparseMoeBlock",
 ]

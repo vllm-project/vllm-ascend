@@ -1,26 +1,104 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
+import sys
 from contextlib import AbstractContextManager
+from dataclasses import replace
 
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu import dp_utils as upstream_dp_utils
 from vllm.v1.worker.gpu import model_runner as upstream
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp as _dispatch_cg_and_sync_dp
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import (
+    align_num_tokens_to_tp,
+    get_current_runner_tp_token_alignment,
+    get_runner_tp_token_alignment,
+    vllm_version_is,
+)
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
+
+
+_DISPATCH_CONSUMER_MODULES = (
+    "vllm.v1.worker.gpu.spec_decode.autoregressive.speculator",
+    "vllm.v1.worker.gpu.spec_decode.dflash.speculator",
+    "vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator",
+    "vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator",
+    "vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator",
+)
+
+
+def _patch_loaded_dispatch_consumers() -> None:
+    """Update consumers that imported the upstream dispatch symbol eagerly."""
+    for module_name in _DISPATCH_CONSUMER_MODULES:
+        module = sys.modules.get(module_name)
+        if (
+            module is not None
+            and getattr(module, "dispatch_cg_and_sync_dp", None)
+            is _dispatch_cg_and_sync_dp
+        ):
+            module.dispatch_cg_and_sync_dp = dispatch_cg_and_sync_dp
 
 
 # TODO: Remove once upstream GPUModelRunner dispatches sharded PCP decode with
 # rank-local request counts.
 def dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_token_count, *args, **kwargs):
+    """Apply TP row alignment without changing graph bucket selection."""
     vllm_config = getattr(cudagraph_manager, "vllm_config", None)
     if uniform_token_count and vllm_config is not None and is_pcp_decode_sharding_enabled(vllm_config):
         # num_tokens is already the largest rank-local count, and each sharded
         # decode request stays whole on one rank.
         num_reqs = num_tokens // uniform_token_count
-    return _dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_token_count, *args, **kwargs)
+    tp_size = (
+        get_runner_tp_token_alignment(vllm_config)
+        if vllm_config is not None
+        else 1
+    )
+    if tp_size <= 1:
+        # Profile/enforce-eager dispatch has no graph manager. The owning
+        # runner publishes its explicit alignment through a call-local scope.
+        tp_size = get_current_runner_tp_token_alignment()
+    requires_padding = tp_size > 1
+    dp_sync_state = kwargs.get("dp_sync_state")
+    if dp_sync_state is None and len(args) > 9:
+        dp_sync_state = args[9]
+    if requires_padding and dp_sync_state is not None and dp_sync_state.eager:
+        # A target eager dispatch records aligned physical rows. Align a
+        # drafter's reused count before upstream validates that agreement.
+        num_tokens = align_num_tokens_to_tp(
+            num_tokens,
+            tp_size,
+        )
+    batch_desc, dp_sync_state = _dispatch_cg_and_sync_dp(
+        cudagraph_manager,
+        num_reqs,
+        num_tokens,
+        uniform_token_count,
+        *args,
+        **kwargs,
+    )
+    if not requires_padding or batch_desc.cg_mode != CUDAGraphMode.NONE:
+        return batch_desc, dp_sync_state
+
+    # Captured graph descriptors are aligned at manager initialization. Only
+    # an actual eager/single-op dispatch is padded here, after logical graph
+    # matching, so uniform-decode request buckets are not changed by padding.
+    batch_desc = replace(
+        batch_desc,
+        num_tokens=align_num_tokens_to_tp(batch_desc.num_tokens, tp_size),
+    )
+    if dp_sync_state is not None:
+        aligned_counts = dp_sync_state.num_tokens_across_dp.clone()
+        for rank in range(aligned_counts.numel()):
+            aligned_counts[rank] = align_num_tokens_to_tp(
+                int(aligned_counts[rank]), tp_size
+            )
+        dp_sync_state = replace(
+            dp_sync_state, num_tokens_across_dp=aligned_counts
+        )
+    return batch_desc, dp_sync_state
 
 
 # Adapted from vLLM ced6857afa GPUModelRunner.initialize_kv_cache.
@@ -242,6 +320,12 @@ def initialize_kv_cache(
 
 upstream.copy_kv_cache_blocks_inplace = copy_kv_cache_blocks_inplace
 
+# Patch the definition for speculator modules imported after platform setup;
+# GPUModelRunner imported the original symbol eagerly, so update it explicitly.
+# The adapter is stateless: alignment comes from the current manager/config
+# contract and never captures the first runner instance.
+upstream_dp_utils.dispatch_cg_and_sync_dp = dispatch_cg_and_sync_dp
 upstream.dispatch_cg_and_sync_dp = dispatch_cg_and_sync_dp
+_patch_loaded_dispatch_consumers()
 
 upstream.GPUModelRunner.initialize_kv_cache = initialize_kv_cache

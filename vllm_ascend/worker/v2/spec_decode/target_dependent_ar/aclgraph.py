@@ -31,8 +31,11 @@ from vllm_ascend.compilation.updatable_graph import (
 )
 from vllm_ascend.utils import is_drafter_moe_model, use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import (
+    align_decode_capture_request_sizes,
     collect_sorted_captured_token_sizes,
     model_capture_wrapper,
+    normalize_tp_aligned_token_descriptors,
+    validate_tp_aligned_capture_descriptors,
 )
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -87,6 +90,12 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
                 decode_query_lens = decode_query_len
             query_shapes = decode_query_lens
             decode_query_len = max(decode_query_lens)
+            if decode_request_sizes is not None:
+                decode_request_sizes = align_decode_capture_request_sizes(
+                    vllm_config,
+                    list(decode_request_sizes),
+                    decode_query_lens,
+                )
             if (
                 decode_query_len == 1
                 and decode_request_sizes is not None
@@ -115,6 +124,10 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,
             **graph_kwargs,
+        )
+        normalize_tp_aligned_token_descriptors(vllm_config, self)
+        validate_tp_aligned_capture_descriptors(
+            vllm_config, self._capture_descs
         )
 
         # Upstream constructs graph managers without a speculator reference.

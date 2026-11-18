@@ -22,8 +22,7 @@ import logging
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
-from dataclasses import replace
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import torch
@@ -36,7 +35,6 @@ from vllm.distributed.utils import get_distributed_timeout_or_none
 from vllm.logger import logger
 from vllm.model_executor.offloader.base import set_offloader
 from vllm.sequence import IntermediateTensors
-from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -114,6 +112,7 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_sharded_indexer,
     enable_sp,
     get_pcp_profile_num_tokens,
+    get_runner_tp_token_alignment,
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
     lmhead_tp_enable,
@@ -121,6 +120,7 @@ from vllm_ascend.utils import (
     lmhead_tp_pad_rows,
     requires_lmhead_dp_sync,
     set_potential_max_tokens,
+    set_runner_tp_token_alignment,
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
 )
@@ -328,64 +328,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 self.debugger = AclGraphDumper(dump_cfg)
         self.runtime_guard = RuntimeGuardProcessor.bind(self)
-        self._install_sp_dp_token_padding()
         self._kv_trace = install_trace(self)
-
-    def _requires_runner_dp_token_padding(self) -> bool:
-        """Return whether this runner owns DP token-row alignment.
-
-        PP transports require one shared full-token layout across stages. On
-        current vLLM, Qwen4Exp's target-dependent MTP drafter also reuses the
-        target DP agreement in PP=1. Its eager prefill must therefore keep
-        real and dummy DP ranks TP-aligned before entering EP collectives.
-
-        Keep the PP=1 exception model- and method-specific so models that
-        still own their single-stage SP padding are unaffected.
-        """
-        parallel_config = self.vllm_config.parallel_config
-        pp_size = getattr(parallel_config, "pipeline_parallel_size", 1)
-        architecture = getattr(self.model_config, "architecture", "")
-        speculative_method = getattr(self.speculative_config, "method", None)
-        qwen4_exp_mtp = architecture in {
-            "Qwen4ExpForCausalLM",
-            "Qwen4ExpForConditionalGeneration",
-        } and speculative_method in {"mtp", "qwen3_5_mtp"}
-        if pp_size == 1 and qwen4_exp_mtp:
-            return True
-
-        return pp_size > 1 and enable_sp(self.vllm_config)
-
-    def _install_sp_dp_token_padding(self) -> None:
-        """Keep DP metadata consistent with runner-level SP token padding."""
-        parallel_config = self.vllm_config.parallel_config
-        if getattr(parallel_config, "data_parallel_size", 1) <= 1 or not self._requires_runner_dp_token_padding():
-            return
-
-        dispatch_and_sync = vllm_model_runner.dispatch_cg_and_sync_dp
-        if getattr(dispatch_and_sync, "_ascend_sp_token_padding", False):
-            return
-
-        tp_size = parallel_config.tensor_parallel_size
-
-        def dispatch_and_sync_with_sp(*args, **kwargs):
-            batch_desc, dp_sync_state = dispatch_and_sync(*args, **kwargs)
-            if dp_sync_state is not None:
-                num_tokens_across_dp = (
-                    torch.div(
-                        dp_sync_state.num_tokens_across_dp + tp_size - 1,
-                        tp_size,
-                        rounding_mode="floor",
-                    )
-                    * tp_size
-                )
-                dp_sync_state = replace(
-                    dp_sync_state,
-                    num_tokens_across_dp=num_tokens_across_dp,
-                )
-            return batch_desc, dp_sync_state
-
-        cast(Any, dispatch_and_sync_with_sp)._ascend_sp_token_padding = True
-        vllm_model_runner.dispatch_cg_and_sync_dp = dispatch_and_sync_with_sp
 
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
@@ -826,7 +769,10 @@ class NPUModelRunner(GPUModelRunner):
         dp_coordination_context = skip_dp_coordination() if skip_dp_metadata_sync else nullcontext()
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
-        with dp_coordination_context:
+        with (
+            dp_coordination_context,
+            set_runner_tp_token_alignment(self.vllm_config),
+        ):
             try:
                 output = super().execute_model(
                     scheduler_output,
@@ -959,19 +905,6 @@ class NPUModelRunner(GPUModelRunner):
         mask[num_tokens:].fill_(True)
         return mask
 
-    def _get_num_tokens_after_padding(
-        self,
-        num_tokens: int,
-        batch_desc: BatchExecutionDescriptor,
-    ) -> int:
-        num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
-        if self._requires_runner_dp_token_padding():
-            num_tokens_after_padding = round_up(
-                num_tokens_after_padding,
-                self.vllm_config.parallel_config.tensor_parallel_size,
-            )
-        return num_tokens_after_padding
-
     def _prepare_inputs_impl(
         self,
         scheduler_output: SchedulerOutput,
@@ -985,7 +918,7 @@ class NPUModelRunner(GPUModelRunner):
         """
         self._check_finegrained_tp_graph_step(batch_desc.cg_mode)
         num_tokens = batch_req_state.num_tokens
-        num_tokens_after_padding = self._get_num_tokens_after_padding(num_tokens, batch_desc)
+        num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
         graph_num_reqs = batch_desc.num_reqs
         global_graph_num_reqs = (
             self.pcp_manager.get_global_graph_num_reqs(batch_desc) if self.pcp_manager is not None else None
@@ -1366,20 +1299,45 @@ class NPUModelRunner(GPUModelRunner):
         # preserves logical query lengths separately from graph padding.
         dummy_query_tokens: int | None = None
         if (
-            # FULL modes can also pad requests; only change token-only PIECEWISE padding.
-            self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
             # PCP prepares and partitions its own dummy input layout.
-            and self.pcp_manager is None
+            self.pcp_manager is None
+            and (
+                self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+                # A FULL-capable service can still dispatch an individual
+                # batch eagerly; preserve its logical query count as well.
+                or get_runner_tp_token_alignment(self.vllm_config) > 1
+            )
         ):
             # Match the logical token count in the upstream dummy scheduler.
             dummy_query_tokens = max(num_tokens, self.decode_query_len) if uniform_decode else num_tokens
 
+        dummy_num_reqs: int | None = None
+        if dummy_query_tokens is not None:
+            dummy_num_reqs = min(num_tokens, self.max_num_reqs)
+            if uniform_decode:
+                dummy_num_reqs = dummy_query_tokens // self.decode_query_len
+            elif self.speculator is not None:
+                assert self.speculative_config is not None
+                dummy_num_reqs = min(
+                    dummy_num_reqs,
+                    self.max_num_tokens // self.speculator.num_query_per_req,
+                )
+                dummy_query_tokens = min(
+                    dummy_query_tokens,
+                    self.max_num_tokens
+                    - dummy_num_reqs
+                    * self.speculative_config.max_num_new_slots_for_drafting,
+                )
+
         previous_dummy_tokens = self.input_buffers.dummy_num_tokens
+        previous_dummy_reqs = self.input_buffers.dummy_num_reqs
         self.input_buffers.dummy_num_tokens = dummy_query_tokens
+        self.input_buffers.dummy_num_reqs = dummy_num_reqs
         try:
             yield
         finally:
             self.input_buffers.dummy_num_tokens = previous_dummy_tokens
+            self.input_buffers.dummy_num_reqs = previous_dummy_reqs
 
     @step_eplb_after(is_dummy=True)
     def _dummy_run(

@@ -211,11 +211,9 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
         layer = self.layers[current_step_idx]
-        # The local MTP drafter is constructed with PP=1 even when the target
-        # model runs with PP>1. Depending on the runner path, its target hidden
-        # state is either full-token or already SP-local. Shard only the former;
-        # global PP rank is not a valid indicator for this local model.
-        if layer.use_sequence_parallel and hidden_states.shape[0] == positions.shape[-1]:
+        # Match the upstream transport contract: the drafter boundary is
+        # full-token, and HC SP owns the local shard independently of MoE SP.
+        if self.use_hc_sequence_parallel:
             hidden_states = sp_shard(hidden_states)
         hidden_states, block_output, injection = layer(
             hidden_states=hidden_states,
@@ -233,7 +231,7 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
         multi_hidden, sample_hidden_states, _ = self.hyper_connection_mixer.combine_and_mix(
             hidden_states, block_output, injection
         )
-        if layer.use_sequence_parallel:
+        if self.use_hc_sequence_parallel:
             full_num_tokens = positions.shape[-1]
             multi_hidden_size = multi_hidden.shape[-1]
             gathered_hidden = sp_all_gather(torch.cat((multi_hidden, sample_hidden_states), dim=-1))[:full_num_tokens]

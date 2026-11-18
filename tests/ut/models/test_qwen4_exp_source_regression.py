@@ -45,11 +45,12 @@ def test_qwen4_exp_ascend_wrapper_reuses_upstream_pp_sp_control_flow() -> None:
     assert "upstream_ple.sp_all_gather = sp_all_gather" in model
     assert "upstream_ple.sp_shard = sp_shard" in model
     assert "upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention" in model
-    assert "class AscendQwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock)" in model
-    assert "upstream_model.Qwen4ExpSparseMoeBlock = AscendQwen4ExpSparseMoeBlock" in model
+    assert "AscendQwen4ExpSparseMoeBlock" not in model
+    assert "upstream_model.Qwen4ExpSparseMoeBlock" not in model
     assert "inputs_embeds: torch.Tensor | None = None" in model
     assert "inputs_embeds=inputs_embeds" in model
-    assert "and hidden_states.shape[0] == positions.shape[-1]" in mtp
+    assert "hidden_states.shape[0] == positions.shape[-1]" not in model + mtp
+    assert "if self.use_hc_sequence_parallel:" in mtp
     assert "hidden_states = sp_all_gather(hidden_states)" not in mtp
     assert "torch.cat((multi_hidden, sample_hidden_states), dim=-1)" in mtp
     assert not (ROOT / "vllm_ascend/patch/platform/patch_qwen4_exp_pp.py").exists()

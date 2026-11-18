@@ -23,7 +23,9 @@ import functools
 import json
 import math
 import os
+from collections.abc import Iterable
 from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -1122,6 +1124,110 @@ def enable_sp(vllm_config=None) -> bool:
     from vllm_ascend.patch.worker.patch_qwen3_5 import enable_dense_sp
 
     return enable_dense_sp(vllm_config)
+
+
+def align_cudagraph_capture_sizes(
+    sizes: Iterable[int], alignment: int, max_size: int
+) -> list[int]:
+    """Round graph gears to ``alignment`` without exceeding capacity.
+
+    This is the MRV2 equivalent of MRV1's
+    ``adjust_cudagraph_sizes_for_spec_decode`` call.  Keeping the rule in one
+    helper lets token-keyed and request-keyed graph grids use the same
+    initialization-time contract.
+    """
+    if alignment < 1:
+        raise ValueError(f"alignment must be positive, got {alignment}")
+    return sorted(
+        {
+            aligned
+            for size in sizes
+            if size > 0
+            and (aligned := _round_up(size, alignment)) <= max_size
+        }
+    )
+
+
+def align_num_tokens_to_tp(num_tokens: int, tp_size: int) -> int:
+    """Return the physical token rows required by a TP-sharded layout."""
+    if tp_size < 1:
+        raise ValueError(f"tp_size must be positive, got {tp_size}")
+    return _round_up(num_tokens, tp_size)
+
+
+def requires_tp_token_padding(vllm_config: VllmConfig) -> bool:
+    """Whether the runner must materialize TP-aligned token rows.
+
+    PP transports use a shared full-token layout across stages. Qwen4Exp's
+    target-dependent MTP drafter also reuses the target DP agreement, so its
+    target and draft descriptors must use the same physical row count even
+    when HC SP is enabled independently of MoE SP.
+
+    Keep the Qwen4Exp exception model- and method-specific. Other single-stage
+    SP models continue to own their padding inside the model implementation.
+    """
+    parallel_config = vllm_config.parallel_config
+    if getattr(parallel_config, "tensor_parallel_size", 1) <= 1:
+        return False
+
+    pp_size = getattr(parallel_config, "pipeline_parallel_size", 1)
+    architecture = getattr(vllm_config.model_config, "architecture", "")
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    speculative_method = getattr(speculative_config, "method", None)
+    qwen4_exp_mtp = architecture in {
+        "Qwen4ExpForCausalLM",
+        "Qwen4ExpForConditionalGeneration",
+        "Qwen4ExpMTP",
+    } and speculative_method in {"mtp", "qwen3_5_mtp"}
+    token_sp_enabled = bool(
+        getattr(parallel_config, "enable_hc_sp", False)
+        or getattr(parallel_config, "use_sequence_parallel_moe", False)
+    )
+    if qwen4_exp_mtp and token_sp_enabled:
+        return True
+
+    return pp_size > 1 and (enable_sp(vllm_config) or token_sp_enabled)
+
+
+def get_tp_graph_token_alignment(vllm_config: VllmConfig) -> int:
+    """Return the token alignment recorded while graph gears were resolved."""
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    ascend_config = additional_config.get("ascend_compilation_config", {})
+    return int(ascend_config.get("tp_token_alignment_size", 1))
+
+
+def get_runner_tp_token_alignment(vllm_config: VllmConfig) -> int:
+    """Return the explicit eager/single-op token-row alignment contract."""
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    ascend_config = additional_config.get("ascend_compilation_config", {})
+    return int(ascend_config.get("runner_tp_token_alignment_size", 1))
+
+
+_CURRENT_RUNNER_TP_TOKEN_ALIGNMENT: ContextVar[int] = ContextVar(
+    "ascend_runner_tp_token_alignment", default=1
+)
+
+
+@contextmanager
+def set_runner_tp_token_alignment(vllm_config: VllmConfig):
+    """Scope eager token alignment to one runner invocation.
+
+    This is call-context state rather than a process-global wrapper capturing
+    the first runner's TP configuration. Nested target/draft execution and
+    multiple runner configurations therefore restore the owning contract.
+    """
+    token = _CURRENT_RUNNER_TP_TOKEN_ALIGNMENT.set(
+        get_runner_tp_token_alignment(vllm_config)
+    )
+    try:
+        yield
+    finally:
+        _CURRENT_RUNNER_TP_TOKEN_ALIGNMENT.reset(token)
+
+
+def get_current_runner_tp_token_alignment() -> int:
+    """Return the runner alignment active for the current execution context."""
+    return _CURRENT_RUNNER_TP_TOKEN_ALIGNMENT.get()
 
 
 def pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:
