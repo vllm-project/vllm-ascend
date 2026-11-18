@@ -1390,9 +1390,13 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     """Decide whether to skip the all-reduce across the DP group.
 
     Skipping is applicable for all dense models and for moe models only on ranks
-    that act as KV consumers. We skip the DP all-reduce when either:
-    - Both the prefill and decode communication methods are MC2 (or FUSED_MC2), or
-    - Decode requires MC2 and ascend_config.scheduler_config.recompute_scheduler_enable is True.
+    that act as KV consumers. We skip the DP all-reduce only when both the
+    prefill and decode communication methods are MC2 (or FUSED_MC2) and the
+    cudagraph modes are uniform, so every rank selects the same communication
+    method and graph mode for the whole runnable input range.
+
+    ``recompute_scheduler_enable`` alone is not such a proof: the scheduler
+    still admits local prefill chunks, which can exceed MC2 capacity.
 
     Skipping means each rank may have a different number of tokens, so MC2 needs
     a non-zero global_bs and must NOT receive mc2_mask. CANN MegaMoe requires
@@ -1446,7 +1450,7 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     prefill_must_use_mc2 = needs_mc2(scheduler_config.max_num_batched_tokens)
     uniform_cudagraph_mode = not vllm_config.compilation_config.cudagraph_mode.separate_routine()
     chunked_prefill_can_skip = prefill_must_use_mc2 and uniform_cudagraph_mode
-    return decode_can_skip and (chunked_prefill_can_skip or ascend_config.scheduler_config.recompute_scheduler_enable)
+    return decode_can_skip and chunked_prefill_can_skip
 
 
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
