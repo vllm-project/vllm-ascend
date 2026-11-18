@@ -210,10 +210,10 @@ def test_aux_relay_matches_unpartitioned_forward(monkeypatch, with_topk, boundar
                     torch.testing.assert_close(transported[0], expected_topk)
                     assert transported[0].data_ptr() == model.topk_indices_buffer.data_ptr()
                 assert set(output.tensors) == expected_keys
-            elif not vllm_version_is("0.33.0") and not vllm_version_is("0.34.0"):
+            elif not vllm_version_is("0.34.0"):
                 output = PPHandler.add_upstream_aux_hidden_states(handler, incoming, output)
             incoming = output
-        return output if aux_layers or not vllm_version_is("0.33.0") else (output, [])
+        return output
 
     expected_hidden, expected_aux = run((0, 78))
     actual_hidden, actual_aux = run(boundaries)
