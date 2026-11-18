@@ -119,10 +119,6 @@ Run the integration and independent plan-copy suites together; the latter
 uses test-local worker-owned plans and a compiler-denying fixture:
 
 ```bash
-python -m pytest --confcutdir=tests/ut/ops \
-  tests/ut/ops/test_kda_state_copy_lifecycle.py \
-  tests/ut/ops/test_kda_state_copy_integration.py \
-  tests/ut/ops/test_kimi_kda.py
 python -m pytest --confcutdir=tests/e2e/nightly/single_node/ops/singlecard_ops \
   tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_state_copy_integration.py \
   tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_state_copy_triton.py
