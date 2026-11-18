@@ -1,5 +1,5 @@
 pr: 21605
 entries:
   - category: performance
-    text: Speed up the Ascend A3 packed DCP LSE combine kernel by 1.54x-1.64x for 144 or 152 tokens, 12 heads, head dimension 512, and 8 ranks.
+    text: Speed up the Ascend A3 packed DCP LSE combine kernel by 1.54x-1.64x for the target shapes.
     hardware: [A3]
