@@ -67,11 +67,11 @@
 /vllm_ascend/attention/fa_v1.py @jiajinzhu2 @CXY-Katrina
 /vllm_ascend/attention/fa3_v1.py @Ronald1995 @CXY-Katrina
 /vllm_ascend/attention/flash_attention_v3.py @earthmanylf @CXY-Katrina
-# /vllm_ascend/attention/flashmla.py
+/vllm_ascend/attention/flashmla.py @hust17yixuan @Dawn952
 /vllm_ascend/attention/indexer.py @weijinqian0 @lijiahang226
 /vllm_ascend/attention/indexer_kpool.py @weijinqian0 @lijiahang226
 /vllm_ascend/attention/mixed_quant_sparse_flash_mla.py @kunpengW-code
-# /vllm_ascend/attention/mla_v1.py
+/vllm_ascend/attention/mla_v1.py @hust17yixuan @Dawn952
 # /vllm_ascend/attention/sfa_kv_offload.py
 /vllm_ascend/attention/sfa_v1.py @lijiahang226
 /vllm_ascend/attention/sparse_flash_mla.py @kunpengW-code 
@@ -114,8 +114,8 @@
 /vllm_ascend/ops/fused_moe @weijinqian0 @Tflowers-0129 @ZT-AIA @zhenwenqi2024 @linfeng-yuan
 /vllm_ascend/ops/fused_moe/eplb.py @freyfwt
 /vllm_ascend/ops/fused_moe/force_eplb.py @freyfwt
-/vllm_ascend/ops/kimi_kda.py @Dawn952 @drslark @chenxi-hh
-/vllm_ascend/ops/kimi_mla.py @Dawn952
+/vllm_ascend/ops/kimi_kda.py @Dawn952 @drslark @chenxi-hh @hust17yixuan
+/vllm_ascend/ops/kimi_mla.py @Dawn952 @hust17yixuan
 /vllm_ascend/ops/kda_pcp.py @weiguihua2 @zhenwenqi2024 @pisceskkk @zhaochuang001 @li1how @wzx0726
 
 # quantization
@@ -158,7 +158,7 @@
 /vllm_ascend/patch/platform/patch_replayssm_config.py @drslark @chenxi-hh
 /vllm_ascend/patch/worker/patch_kda_recoverssm.py @drslark @chenxi-hh
 /vllm_ascend/patch/platform/patch_eplb.py @freyfwt
-/vllm_ascend/patch/worker/patch_kimi_k25.py @Dawn952
+/vllm_ascend/patch/worker/patch_kimi_k25.py @Dawn952 @hust17yixuan
 /vllm_ascend/patch/worker/patch_minimax_m2.py @CXY-Katrina
 /vllm_ascend/patch/worker/patch_step3p5.py @earthmanylf
 
@@ -201,7 +201,7 @@
 /vllm_ascend/models/glm5next/recoverssm_config.py @drslark @chenxi-hh
 /vllm_ascend/models/glm5next/recoverssm_metadata.py @drslark @chenxi-hh
 /vllm_ascend/models/glm5_dspark.py @lijiahang226
-/vllm_ascend/models/kimi_k3 @Dawn952
+/vllm_ascend/models/kimi_k3 @Dawn952 @hust17yixuan
 /vllm_ascend/models/kimi_k3/recoverssm_config.py @drslark @chenxi-hh
 /vllm_ascend/models/kimi_k3/recoverssm_metadata.py @drslark @chenxi-hh
 # /vllm_ascend/models/d3.py
@@ -226,6 +226,8 @@
 
 # tests
 /tests/ @wenjun91
+# RLHF e2e tests
+/tests/e2e/common/rlhf/ @Ronald1995
 /tests/e2e/nightly @wenjun91
 /tests/e2e/nightly/single_node/ops @Foriv
 /tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_recoverssm_npu.py @drslark @chenxi-hh
