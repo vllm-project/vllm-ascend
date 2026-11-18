@@ -9,8 +9,6 @@ consumer; rejection-corrected positions and execution lengths stay on device.
 
 from typing import Any
 
-from vllm_ascend.utils import vllm_version_is
-
 
 def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
     """Return False for consumers that still require exact CPU lengths."""
@@ -24,16 +22,10 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
 
         # main renamed the QSA side-cache module and its builder/backend; the
         # release tree still ships qsa_cache.py.
-        if vllm_version_is("0.33.0"):
-            import vllm.models.qwen4_exp.common.qsa_cache as qsa_cache  # type: ignore[import-not-found]
+        import vllm.models.qwen4_exp.common.qsa_indexer as qsa_indexer
 
-            QSAIndexerMetadataBuilder = qsa_cache.QSAMetadataBuilder
-            QSAIndexerBackend = qsa_cache.QSAStateBackend
-        else:
-            import vllm.models.qwen4_exp.common.qsa_indexer as qsa_indexer
-
-            QSAIndexerMetadataBuilder = qsa_indexer.QSAIndexerMetadataBuilder
-            QSAIndexerBackend = qsa_indexer.QSAIndexerBackend
+        QSAIndexerMetadataBuilder = qsa_indexer.QSAIndexerMetadataBuilder
+        QSAIndexerBackend = qsa_indexer.QSAIndexerBackend
         from vllm.v1.attention.backends.short_conv_attn import (
             PleShortConvAttentionBackend,
             PleShortConvAttentionMetadataBuilder,

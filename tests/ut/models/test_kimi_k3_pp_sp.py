@@ -203,6 +203,8 @@ def runtime(monkeypatch):
     context = threading.local()
     context.rank = 0
     context.pp = SimpleNamespace(is_first_rank=True, is_last_rank=True)
+    # BaseModel above models the release's cumulative aux protocol.
+    # Native main's centralized relay is covered separately with its real mixin/PPHandler.
     namespace = {
         "torch": torch,
         "F": torch.nn.functional,
@@ -224,9 +226,6 @@ def runtime(monkeypatch):
         "get_pp_group": lambda: context.pp,
         "get_tensor_model_parallel_world_size": lambda: context.tp,
         "get_tensor_model_parallel_rank": lambda: context.rank,
-        # BaseModel above models the release's cumulative aux protocol.
-        # Native main's centralized relay is covered separately with its real mixin/PPHandler.
-        "vllm_version_is": lambda _: True,
     }
     # Transport and sharding use the repository implementations, including
     # multi-dimensional residuals and zero-length token tensors.
@@ -343,10 +342,7 @@ def native_aux_runtime(runtime, monkeypatch):
     from vllm.model_executor.models.interfaces import EagleModelMixin
     from vllm.v1.worker.gpu.pp_utils import PPHandler
 
-    from vllm_ascend.utils import vllm_version_is
-
     namespace, context = runtime
-    release = vllm_version_is("0.33.0")
 
     class NativeBase(BaseModel, EagleModelMixin):
         _cache_aux_pp_layout = EagleModelMixin._cache_aux_pp_layout
@@ -354,16 +350,15 @@ def native_aux_runtime(runtime, monkeypatch):
         pack_local_aux_hidden_states = EagleModelMixin.pack_local_aux_hidden_states
         AUX_HIDDEN_STATE_KEY = "pp_transport_aux_hidden_states_"
 
-    if not release:
-        NativeBase.aux_hidden_state_slot_keys = EagleModelMixin.aux_hidden_state_slot_keys
-        # Alias the original test's legacy diagnostic to native receive slots.
-        # Production main no longer has or needs this attribute.
-        setattr(  # noqa: B010 - install the main-only diagnostic descriptor on the test class
-            NativeBase,
-            "_aux_upstream_total_cached",
-            property(lambda self: self._aux_slot_base_cached if context.pp.is_last_rank else 0),
-        )
-    namespace.update(BaseModel=NativeBase, vllm_version_is=vllm_version_is)
+    NativeBase.aux_hidden_state_slot_keys = EagleModelMixin.aux_hidden_state_slot_keys
+    # Alias the original test's legacy diagnostic to native receive slots.
+    # Production main no longer has or needs this attribute.
+    setattr(  # noqa: B010 - install the main-only diagnostic descriptor on the test class
+        NativeBase,
+        "_aux_upstream_total_cached",
+        property(lambda self: self._aux_slot_base_cached if context.pp.is_last_rank else 0),
+    )
+    namespace.update(BaseModel=NativeBase)
     load_definitions(
         "vllm_ascend/models/kimi_k3/kimi_k3.py",
         {"AscendKimiLinearModel"},
@@ -394,18 +389,11 @@ def native_aux_runtime(runtime, monkeypatch):
     def forward_with_runner(self, input_ids, positions, intermediate_tensors, inputs_embeds=None):
         self._cache_aux_pp_layout()
         handler = SimpleNamespace()
-        if release:
-            handler.aux_hidden_state_relay_keys = tuple(
-                f"{self.AUX_HIDDEN_STATE_KEY}{i}" for i in range(self._aux_slot_base_cached)
-            )
-        else:
-            PPHandler.configure_aux_hidden_state_relay(handler, SimpleNamespace(model=self))
+        PPHandler.configure_aux_hidden_state_relay(handler, SimpleNamespace(model=self))
         output = forward(self, input_ids, positions, intermediate_tensors, inputs_embeds)
         if not context.pp.is_last_rank:
             return PPHandler.relay_aux_hidden_states(handler, intermediate_tensors, output)
-        if not release:
-            return PPHandler.add_upstream_aux_hidden_states(handler, intermediate_tensors, output)
-        return output
+        return PPHandler.add_upstream_aux_hidden_states(handler, intermediate_tensors, output)
 
     model_cls.forward = forward_with_runner
     return namespace, context
