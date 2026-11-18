@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import unittest
+from typing import Any
 from unittest.mock import patch
 
 import torch
@@ -56,24 +57,16 @@ class TestPackedNzSnapshotRoundtrip(unittest.TestCase):
 
     def setUp(self):
         self._tmpdir = tempfile.mkdtemp(prefix="packed_nz_ut_")
-        self._old_ckpt = os.environ.get("VLLM_ASCEND_CHECKPOINT_PATH")
-        os.environ["VLLM_ASCEND_CHECKPOINT_PATH"] = self._tmpdir
-        self._old_verify = os.environ.get("VLLM_ASCEND_BIGTENSOR_VERIFY")
-        os.environ.pop("VLLM_ASCEND_BIGTENSOR_VERIFY", None)
-        self.loader = BigTensorLoader(LoadConfig(load_format="bigtensorloader"))
+        self.loader = self._make_loader()
 
     def tearDown(self):
-        if self._old_ckpt is None:
-            os.environ.pop("VLLM_ASCEND_CHECKPOINT_PATH", None)
-        else:
-            os.environ["VLLM_ASCEND_CHECKPOINT_PATH"] = self._old_ckpt
-        if self._old_verify is None:
-            os.environ.pop("VLLM_ASCEND_BIGTENSOR_VERIFY", None)
-        else:
-            os.environ["VLLM_ASCEND_BIGTENSOR_VERIFY"] = self._old_verify
         for fname in os.listdir(self._tmpdir):
             os.remove(os.path.join(self._tmpdir, fname))
         os.rmdir(self._tmpdir)
+
+    def _make_loader(self, **overrides: Any) -> BigTensorLoader:
+        extra = {"checkpoint_path": self._tmpdir, **overrides}
+        return BigTensorLoader(LoadConfig(load_format="bigtensorloader", model_loader_extra_config=extra))
 
     def _roundtrip_once(self, shape_int8: tuple, bulk: bool) -> None:
         packed = _make_packed_int32_nz(shape_int8)
@@ -100,22 +93,8 @@ class TestPackedNzSnapshotRoundtrip(unittest.TestCase):
         self.assertNotIn("save_dtype", manifest["tensors"]["w_plain"])
 
         restored = _PackedModel(torch.empty(0, dtype=torch.int32)).to("npu")
-        old_bulk = os.environ.get("VLLM_ASCEND_BIGTENSOR_BULK_H2D")
-        old_chunk = os.environ.get("VLLM_ASCEND_BIGTENSOR_BULK_CHUNK_MB")
-        os.environ["VLLM_ASCEND_BIGTENSOR_BULK_H2D"] = "1" if bulk else "0"
-        if bulk:
-            os.environ["VLLM_ASCEND_BIGTENSOR_BULK_CHUNK_MB"] = "1"
-        try:
-            self.loader.restore_snapshot(restored, torch.device("npu"))
-        finally:
-            for key, old in (
-                ("VLLM_ASCEND_BIGTENSOR_BULK_H2D", old_bulk),
-                ("VLLM_ASCEND_BIGTENSOR_BULK_CHUNK_MB", old_chunk),
-            ):
-                if old is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = old
+        restore_loader = self._make_loader(bulk_h2d=True, bulk_chunk_mb=1) if bulk else self.loader
+        restore_loader.restore_snapshot(restored, torch.device("npu"))
 
         got = restored.w_packed.data
         self.assertEqual(got.dtype, torch.int32)
@@ -233,16 +212,9 @@ class TestPackedNzSnapshotRoundtrip(unittest.TestCase):
             f.write(bytes([b ^ 0xFF]))
 
         restored = M().to("npu")
-        old_verify = os.environ.get("VLLM_ASCEND_BIGTENSOR_VERIFY")
-        os.environ["VLLM_ASCEND_BIGTENSOR_VERIFY"] = "sha256"
-        try:
-            with self.assertRaisesRegex(RuntimeError, "sha256 mismatch"):
-                self.loader.restore_snapshot(restored, torch.device("npu"))
-        finally:
-            if old_verify is None:
-                os.environ.pop("VLLM_ASCEND_BIGTENSOR_VERIFY", None)
-            else:
-                os.environ["VLLM_ASCEND_BIGTENSOR_VERIFY"] = old_verify
+        sha_loader = self._make_loader(verify="sha256")
+        with self.assertRaisesRegex(RuntimeError, "sha256 mismatch"):
+            sha_loader.restore_snapshot(restored, torch.device("npu"))
 
     @patch("torch.distributed.get_world_size", return_value=1)
     @patch("torch.distributed.get_rank", return_value=0)
@@ -271,16 +243,9 @@ class TestPackedNzSnapshotRoundtrip(unittest.TestCase):
             f.write(bytes([b ^ 0xFF]))
 
         restored = M().to("npu")
-        old_verify = os.environ.get("VLLM_ASCEND_BIGTENSOR_VERIFY")
-        os.environ["VLLM_ASCEND_BIGTENSOR_VERIFY"] = "size"
-        try:
-            with self.assertRaisesRegex(RuntimeError, "spot hash mismatch"):
-                self.loader.restore_snapshot(restored, torch.device("npu"))
-        finally:
-            if old_verify is None:
-                os.environ.pop("VLLM_ASCEND_BIGTENSOR_VERIFY", None)
-            else:
-                os.environ["VLLM_ASCEND_BIGTENSOR_VERIFY"] = old_verify
+        size_loader = self._make_loader(verify="size")
+        with self.assertRaisesRegex(RuntimeError, "spot hash mismatch"):
+            size_loader.restore_snapshot(restored, torch.device("npu"))
 
     @patch("torch.distributed.get_world_size", return_value=1)
     @patch("torch.distributed.get_rank", return_value=0)

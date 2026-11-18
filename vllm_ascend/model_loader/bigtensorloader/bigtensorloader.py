@@ -19,10 +19,10 @@ from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.utils import initialize_model, process_weights_after_loading
 from vllm.utils.torch_utils import set_default_torch_dtype
 
-from vllm_ascend import envs
 from vllm_ascend.model_loader.weight_state import iter_module_weight_states
 
 from .bigtensordefaultloader import BigTensorDefaultLoader
+from .config import BigTensorConfig, unknown_extra_config_keys
 
 # torch_npu exposes the ACL Fractal NZ format only as the raw id 29 (there is
 # no named symbol to import); manifest "format" entries and npu_format_cast
@@ -34,6 +34,22 @@ ACL_FORMAT_FRACTAL_NZ = 29
 class BigTensorLoader(BigTensorDefaultLoader):
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
+        self._config = BigTensorConfig.from_extra_config(load_config.model_loader_extra_config)
+        unknown_keys = unknown_extra_config_keys(load_config.model_loader_extra_config)
+        if unknown_keys:
+            logger.warning(
+                "bigtensorloader ignored unknown model_loader_extra_config keys: %s; check the spelling.",
+                ", ".join(unknown_keys),
+            )
+        logger.debug(
+            "Initializing bigtensorloader with config: fast_restore=%s, checkpoint_path=%s, "
+            "verify=%s, bulk_h2d=%s, bulk_chunk_mb=%s",
+            self._config.fast_restore,
+            self._config.checkpoint_path,
+            self._config.verify,
+            self._config.bulk_h2d,
+            self._config.bulk_chunk_mb,
+        )
 
     # Manifest schema this loader writes and restores. v3 adds: container
     # capture (module/attr/path chains + container defs), alias dedup
@@ -126,18 +142,17 @@ class BigTensorLoader(BigTensorDefaultLoader):
 
     def _snapshot_paths(self) -> tuple:
         rank = torch.distributed.get_rank()
-        path = envs.VLLM_ASCEND_CHECKPOINT_PATH
+        path = self._config.checkpoint_path
         if not path:
             raise RuntimeError(
-                "VLLM_ASCEND_BIGTENSOR_FAST_RESTORE=1 requires VLLM_ASCEND_CHECKPOINT_PATH "
-                "to be set to a writable directory where the post-process "
-                "snapshot is stored (e.g. VLLM_ASCEND_CHECKPOINT_PATH="
-                "/path/to/snapshot_dir). Unset VLLM_ASCEND_BIGTENSOR_FAST_RESTORE to "
-                "use the normal fresh-load path."
+                "bigtensorloader: snapshot paths requested but checkpoint_path is not "
+                "configured; set it via --model-loader-extra-config "
+                '\'{"checkpoint_path": "/path/to/snapshot_dir"}\' when enabling '
+                "fast_restore."
             )
         if os.path.exists(path) and not os.path.isdir(path):
             raise RuntimeError(
-                f"VLLM_ASCEND_CHECKPOINT_PATH={path!r} is not a directory; "
+                f"checkpoint_path={path!r} is not a directory; "
                 f"bigtensorloader needs a writable directory to store "
                 f"snapshot files. Point it to a directory instead."
             )
@@ -145,7 +160,7 @@ class BigTensorLoader(BigTensorDefaultLoader):
         return f"{path}/{rank}.json", f"{path}/{rank}.snapshot"
 
     def _has_snapshot(self) -> bool:
-        if not envs.VLLM_ASCEND_CHECKPOINT_PATH:
+        if not self._config.checkpoint_path:
             return False
         manifest, blob = self._snapshot_paths()
         return os.path.exists(manifest) and os.path.exists(blob)
@@ -408,26 +423,19 @@ class BigTensorLoader(BigTensorDefaultLoader):
             raise RuntimeError(
                 f"snapshot restore: snapshot fingerprint mismatch {mismatched}; "
                 f"the snapshot at {os.path.dirname(manifest_path)} was converted "
-                f"under a different config -- use a fresh CHECKPOINT_PATH and "
+                f"under a different config -- use a fresh checkpoint_path and "
                 f"re-run convert"
             )
 
-    @staticmethod
-    def _plan_bulk(tensors: dict[str, dict], blob_len: int) -> tuple[bool, int, int, int]:
+    def _plan_bulk(self, tensors: dict[str, dict], blob_len: int) -> tuple[bool, int, int, int]:
         """Decide bulk H2D chunk size. Returns (bulk, chunk_size, dev_bytes, nz_bytes)."""
-        if not envs.VLLM_ASCEND_BIGTENSOR_BULK_H2D:
+        if not self._config.bulk_h2d:
             return False, 0, 0, 0
         dev_entries = [e for e in tensors.values() if e.get("device") != "cpu"]
         dev_bytes = sum(e["nbytes"] for e in dev_entries)
         nz_bytes = sum(e["nbytes"] for e in dev_entries if e["format"] == ACL_FORMAT_FRACTAL_NZ)
-        env_chunk_raw = os.getenv("VLLM_ASCEND_BIGTENSOR_BULK_CHUNK_MB")
-        if env_chunk_raw is not None:
-            try:
-                chunk_size = envs.VLLM_ASCEND_BIGTENSOR_BULK_CHUNK_MB * 1024 * 1024
-            except ValueError:
-                raise RuntimeError(
-                    f"VLLM_ASCEND_BIGTENSOR_BULK_CHUNK_MB must be an integer (MB), got {env_chunk_raw!r}"
-                )
+        if self._config.bulk_chunk_mb is not None:
+            chunk_size = self._config.bulk_chunk_mb * 1024 * 1024
         else:
             free_b, _ = torch.npu.mem_get_info()
             # free_b already excludes model params (allocated by
@@ -807,18 +815,17 @@ class BigTensorLoader(BigTensorDefaultLoader):
                 if rollback is not None:
                     moe_layers[:] = rollback[1]
 
-    @staticmethod
-    def _verify_blob(mm: "mmap.mmap", manifest: dict, manifest_path: str) -> float:
+    def _verify_blob(self, mm: "mmap.mmap", manifest: dict, manifest_path: str) -> float:
         """Pre-restore integrity gate. Returns elapsed time.
 
-        Modes (VLLM_ASCEND_BIGTENSOR_VERIFY):
+        Modes (BigTensorConfig.verify, validated at loader init):
         - size (default): per-entry bounds, sub-ms
         - sha256: bounds + whole-blob hash, ~tens of seconds on 31GB
         - none: skip
         """
-        verify_mode = envs.VLLM_ASCEND_BIGTENSOR_VERIFY
+        verify_mode = self._config.verify
         if verify_mode == "none":
-            logger.info("snapshot restore: blob verification disabled (VLLM_ASCEND_BIGTENSOR_VERIFY=none)")
+            logger.info("snapshot restore: blob verification disabled (verify=none)")
             return 0.0
 
         blob_len = len(mm)
@@ -865,17 +872,11 @@ class BigTensorLoader(BigTensorDefaultLoader):
             )
             return time.perf_counter() - t0
 
-        if verify_mode != "sha256":
-            raise RuntimeError(
-                f"snapshot restore: invalid VLLM_ASCEND_BIGTENSOR_VERIFY={verify_mode!r}; "
-                "must be one of: none, size, sha256"
-            )
-
         # (2) whole-blob sha256
         saved_sha = manifest.get("sha256")
         if not saved_sha:
             logger.warning(
-                "snapshot restore: VLLM_ASCEND_BIGTENSOR_VERIFY=sha256 but "
+                "snapshot restore: verify=sha256 but "
                 "manifest has no sha256 field (pre-checksum snapshot); "
                 "skipping sha256"
             )
@@ -904,7 +905,7 @@ class BigTensorLoader(BigTensorDefaultLoader):
         Each tensor is cloned into standalone offset-0 storage (aclnn rejects
         nonzero-offset views). Aliased tensors (tied weights, re-referenced
         derived tensors) are installed once and re-shared, so tying survives.
-        Bulk H2D (VLLM_ASCEND_BIGTENSOR_BULK_H2D=1) chunks the blob to keep
+        Bulk H2D (BigTensorConfig bulk_h2d=true) chunks the blob to keep
         peak memory at weights + one chunk.
 
         Raises on any integrity/staleness problem; the caller (load_model)
@@ -1131,7 +1132,7 @@ class BigTensorLoader(BigTensorDefaultLoader):
         model_config: ModelConfig,
         prefix: str = "",
     ) -> nn.Module:
-        """Load model. FAST_RESTORE=1: snapshot present -> restore-only; absent -> load+process+async save.
+        """Load model. fast_restore=true: snapshot present -> restore-only; absent -> load+process+async save.
 
         Restore failures never kill startup: the stale snapshot is deleted
         and loading falls back to the fresh path (which re-saves a new,
@@ -1143,7 +1144,7 @@ class BigTensorLoader(BigTensorDefaultLoader):
         load_device = device_config.device if load_config.device is None else load_config.device
         target_device = torch.device(load_device)
 
-        fast_restore_enabled = envs.VLLM_ASCEND_BIGTENSOR_FAST_RESTORE
+        fast_restore_enabled = self._config.fast_restore
         fingerprint = self._fingerprint(vllm_config, model_config) if fast_restore_enabled else None
 
         if fast_restore_enabled and self._has_snapshot():

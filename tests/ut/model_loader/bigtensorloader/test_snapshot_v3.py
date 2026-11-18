@@ -21,6 +21,7 @@ import tempfile
 import time
 import unittest
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import torch
@@ -85,31 +86,16 @@ class TestSnapshotV3(unittest.TestCase):
 
     def setUp(self):
         self._tmpdir = tempfile.mkdtemp(prefix="snapshot_v3_ut_")
-        self._env = {}
-        for key in (
-            "VLLM_ASCEND_CHECKPOINT_PATH",
-            "VLLM_ASCEND_BIGTENSOR_VERIFY",
-            "VLLM_ASCEND_BIGTENSOR_FAST_RESTORE",
-            "VLLM_ASCEND_BIGTENSOR_BULK_H2D",
-            "VLLM_ASCEND_BIGTENSOR_BULK_CHUNK_MB",
-        ):
-            self._env[key] = os.environ.get(key)
-        os.environ["VLLM_ASCEND_CHECKPOINT_PATH"] = self._tmpdir
-        os.environ.pop("VLLM_ASCEND_BIGTENSOR_VERIFY", None)
-        os.environ.pop("VLLM_ASCEND_BIGTENSOR_FAST_RESTORE", None)
-        os.environ.pop("VLLM_ASCEND_BIGTENSOR_BULK_H2D", None)
-        os.environ.pop("VLLM_ASCEND_BIGTENSOR_BULK_CHUNK_MB", None)
-        self.loader = BigTensorLoader(LoadConfig(load_format="bigtensorloader"))
+        self.loader = self._make_loader()
 
     def tearDown(self):
-        for key, value in self._env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
         for fname in os.listdir(self._tmpdir):
             os.remove(os.path.join(self._tmpdir, fname))
         os.rmdir(self._tmpdir)
+
+    def _make_loader(self, **overrides: Any) -> BigTensorLoader:
+        extra = {"checkpoint_path": self._tmpdir, **overrides}
+        return BigTensorLoader(LoadConfig(load_format="bigtensorloader", model_loader_extra_config=extra))
 
     # -- helpers -----------------------------------------------------------
 
@@ -384,8 +370,7 @@ class TestSnapshotV3(unittest.TestCase):
     def test_bulk_restore_with_containers(self):
         model = _ContainerModel().to("npu")
         self._save(model)
-        os.environ["VLLM_ASCEND_BIGTENSOR_BULK_H2D"] = "1"
-        os.environ["VLLM_ASCEND_BIGTENSOR_BULK_CHUNK_MB"] = "1"
+        self.loader = self._make_loader(bulk_h2d=True, bulk_chunk_mb=1)
         restored = _BareModel().to("npu")
         self._restore(restored)
         self.assertTrue(torch.equal(restored.caches[0], model.caches[0]))
@@ -418,7 +403,7 @@ class TestSnapshotV3(unittest.TestCase):
         with open(blob_path, "r+b") as f:
             f.truncate(size // 10)
 
-        os.environ["VLLM_ASCEND_BIGTENSOR_FAST_RESTORE"] = "1"
+        self.loader = self._make_loader(fast_restore=True)
 
         created = []
         processed = []
@@ -495,7 +480,7 @@ class TestSnapshotV3(unittest.TestCase):
     def test_load_model_restores_without_process_when_snapshot_valid(self, _r, _w):
         model = _BareModel().to("npu").to("npu")
         self._save(model)
-        os.environ["VLLM_ASCEND_BIGTENSOR_FAST_RESTORE"] = "1"
+        self.loader = self._make_loader(fast_restore=True)
 
         created = []
         processed = []
