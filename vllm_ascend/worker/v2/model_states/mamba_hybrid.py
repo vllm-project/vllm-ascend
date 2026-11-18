@@ -364,8 +364,17 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             pcp_context = pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
 
         def build_metadata(**kwargs):
-            if pcp_context is not None and not getattr(input_batch, "is_dummy", False):
+            if pcp_context is not None and (
+                not getattr(input_batch, "is_dummy", False)
+                or (
+                    pcp_manager is not None
+                    and model_uses_kpool_indexer(self.vllm_config.model_config)
+                    and pcp_manager.is_decode_sharded
+                )
+            ):
                 # Recurrent state uses global request order; SFA keeps local queries.
+                # Sharded GLM decode capture must use the same global KDA
+                # extent as replay, even on a rank with no live requests.
                 local_groups = [
                     [group for group in groups if not isinstance(group.kv_cache_spec, MambaSpec)]
                     for groups in attn_groups

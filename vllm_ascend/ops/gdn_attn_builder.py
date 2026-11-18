@@ -1404,9 +1404,9 @@ class AscendGDNHostMetadataBackend(AscendGDNAttentionBackend):
             from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
 
             if use_glm_recoverssm(vllm_config):
-                from vllm_ascend.models.glm5next.recoverssm_metadata import AscendKDARecoverSSMMetadataBuilder
+                from vllm_ascend.models.glm5next.recoverssm_metadata import Glm5NextRecoverSSMMetadataBuilder
 
-                return AscendKDARecoverSSMMetadataBuilder
+                return Glm5NextRecoverSSMMetadataBuilder
         return AscendGDNHostMetadataBuilder
 
 

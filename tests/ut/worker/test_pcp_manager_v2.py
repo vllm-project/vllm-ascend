@@ -35,6 +35,7 @@ from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.models.deepseek_v41.engram import model_state as engram_state
+from vllm_ascend.models.glm5next.pcp_metadata import Glm5NextGDNHostMetadataBuilder
 from vllm_ascend.platform import _setup_worker_and_scheduler
 from vllm_ascend.worker.v2 import states as states_module
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
@@ -191,7 +192,7 @@ def test_factory_partition_decode_ownership(pcp_size, stack_dcp, kpool, query_le
         config.model_config.hf_text_config.index_kpool = 4
     if query_len > 1:
         config.speculative_config = SimpleNamespace(method="mtp", num_speculative_tokens=query_len - 1)
-    sharded = dcp_size == 1 and not kpool
+    sharded = dcp_size == 1
     if batch_kind == "mixed":
         counts, prefilling = (
             [query_len, 0, 32, query_len, 3, query_len, 0],
@@ -308,18 +309,151 @@ def test_setup_preserves_upstream_decode_sharding_policy():
 
 @pytest.mark.parametrize("bind_runner_state", [False, True])
 @pytest.mark.parametrize("speculative", [False, True])
-def test_kpool_decode_keeps_replicated_pcp_state(speculative: bool, bind_runner_state: bool):
+@pytest.mark.parametrize("dcp_size", [1, 2])
+def test_kpool_decode_sharding_follows_parallel_config(speculative: bool, bind_runner_state: bool, dcp_size: int):
     config = _make_pcp_config(CUDAGraphMode.NONE)
     config.model_config.hf_text_config.index_kpool = 4
     config.speculative_config = SimpleNamespace(method="mtp") if speculative else None
-    config.parallel_config = ParallelConfig(prefill_context_parallel_size=2, decode_context_parallel_size=1)
+    config.parallel_config = ParallelConfig(prefill_context_parallel_size=2, decode_context_parallel_size=dcp_size)
     manager = _make_factory_pcp_manager(config, 1, bind_runner_state=bind_runner_state)
     assert manager.vllm_config is config
-    assert not manager.shard_decode_requests
-    assert config.parallel_config.pcp_shard_decode_requests is True
+    sharded = dcp_size == 1
+    assert manager.shard_decode_requests is sharded
+    assert config.parallel_config.pcp_shard_decode_requests is sharded
     replace(config.parallel_config)
-    assert not is_pcp_decode_sharding_enabled(config)
-    assert not manager.shard_decode_requests
+    query_len = 6 if speculative else 1
+    counts = np.array([query_len, query_len], dtype=np.int32)
+    prefilling = np.array([False, False])
+
+    assert is_pcp_decode_sharding_enabled(config) is sharded
+    expected = [(1, 0, query_len)] if sharded else [(0, 0, query_len), (1, 0, query_len)]
+    assert list(manager._iter_rank_chunks(1, counts, prefilling)) == expected
+
+
+@pytest.mark.parametrize("pcp_size", [2, 4])
+@pytest.mark.parametrize(
+    "counts,prefilling",
+    [([1], [False]), ([6, 1, 3], [False, False, False]), ([1, 3, 2, 0, 6], [False, True, False, False, False])],
+)
+def test_kpool_decode_requests_have_one_owner(pcp_size, counts, prefilling):
+    config = _make_pcp_config(CUDAGraphMode.NONE)
+    config.model_config.hf_text_config.index_kpool = 4
+    config.parallel_config.prefill_context_parallel_size = pcp_size
+    counts, prefilling = np.array(counts), np.array(prefilling)
+    owners: dict[int, list[int]] = {req: [] for req, count in enumerate(counts) if count and not prefilling[req]}
+    for rank in range(pcp_size):
+        manager = _make_factory_pcp_manager(config, rank)
+        for req, offset, length in manager._iter_rank_chunks(rank, counts, prefilling):
+            if not prefilling[req]:
+                assert (offset, length) == (0, counts[req])
+                owners[req].append(rank)
+    assert list(owners.values()) == [[ordinal % pcp_size] for ordinal in range(len(owners))]
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize("query_len", [1, 6])
+def test_kpool_decode_capture_permutations_are_refreshed_by_partition(rank, query_len):
+    config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    config.model_config.hf_text_config.index_kpool = 4
+    manager = AscendPCPManager(
+        2, rank, torch.device("cpu"), shard_decode_requests=True, max_num_reqs=3, max_num_tokens=32
+    )
+    manager.bind_config(config)
+    manager.global_input_buffers = AscendInputBuffers(3, 32, torch.device("cpu"))
+    manager._block_tables = SimpleNamespace(
+        get_dummy_block_tables=lambda num_reqs: (torch.zeros(num_reqs, 1, dtype=torch.int32),)
+    )
+    manager._global_batch_slot_mappings = torch.full((1, 32), -1, dtype=torch.int64)
+    with (
+        patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"),
+        patch("vllm_ascend.worker.v2.pcp_manager.update_cos_sin"),
+    ):
+        dummy = AscendInputBatch.make_dummy(2, 2 * query_len, manager._input_buffers, max_query_len=query_len)
+        captured = manager.build_attention_context(dummy, (), torch.empty(1, 4 * query_len, dtype=torch.int64))
+        batch = AscendInputBatch.make_dummy(3, 3 * query_len, manager.global_input_buffers, max_query_len=query_len)
+    batch.is_dummy = False
+    batch.is_prefilling_np[:] = False
+    batch.has_prefill = False
+    batch.input_ids.copy_(torch.arange(1, 3 * query_len + 1, dtype=torch.int32))
+    assert captured.padded_gather_idx is None
+    builder = Glm5NextGDNHostMetadataBuilder.__new__(Glm5NextGDNHostMetadataBuilder)
+    builder._pcp_size = 2
+    builder._is_pcp_decode_sharded = True
+    builder._pcp_gather_indices = torch.empty(64, dtype=torch.int64)
+    captured = builder._attach_pcp_permutation(SimpleNamespace(pcp_context=captured)).pcp_context
+    assert captured.global_batch.num_tokens == 3 * query_len
+    assert captured.padded_gather_idx.numel() == 4 * query_len
+    # The global capacity is capped at three requests, so rank padding must
+    # never index a fourth request, even during capture.
+    assert int(captured.padded_gather_idx.max()) < 3 * query_len
+    with (
+        patch("vllm.v1.worker.gpu.pcp_manager.async_tensor_h2d", side_effect=_mock_async_copy_to_cpu),
+        patch("vllm_ascend.worker.v2.pcp_manager.async_copy_to_gpu", side_effect=_mock_async_copy_to_cpu),
+    ):
+        local = manager.partition_batch(
+            batch, BatchExecutionDescriptor(CUDAGraphMode.FULL, 2 * query_len, 2, query_len)
+        )
+    assert captured.hidden_restore_idx.data_ptr() == manager._hidden_restore_idx.data_ptr()
+    live = replace(
+        captured,
+        global_batch=batch,
+        hidden_restore_idx=manager._hidden_restore_idx,
+        padded_gather_idx=manager._padded_gather_idx,
+    )
+    metadata = builder._attach_pcp_permutation(SimpleNamespace(pcp_context=live))
+    assert captured.padded_gather_idx.data_ptr() == metadata.pcp_context.padded_gather_idx.data_ptr()
+    assert captured.padded_gather_idx.data_ptr() != manager._padded_gather_idx.data_ptr()
+    expected_mapping = torch.cat(
+        [
+            torch.arange(query_len),
+            torch.arange(2 * query_len, 3 * query_len),
+            torch.arange(query_len, 2 * query_len),
+            torch.zeros(query_len, dtype=torch.int64),
+        ]
+    )
+    torch.testing.assert_close(captured.padded_gather_idx, expected_mapping)
+    valid_rows = batch.input_ids[captured.padded_gather_idx].view(2, -1)[rank, : local.num_tokens]
+    torch.testing.assert_close(local.input_ids[: local.num_tokens], valid_rows)
+    gathered = batch.input_ids[captured.padded_gather_idx]
+    torch.testing.assert_close(gathered[captured.hidden_restore_idx], batch.input_ids)
+
+
+@pytest.mark.parametrize("kpool", [False, True])
+@pytest.mark.parametrize("dcp_size", [1, 2])
+def test_pcp_manager_keeps_upstream_gather_indices(kpool, dcp_size):
+    config = _make_pcp_config(CUDAGraphMode.NONE)
+    config.parallel_config.decode_context_parallel_size = dcp_size
+    if kpool:
+        config.model_config.hf_text_config.index_kpool = 4
+    manager = AscendPCPManager(
+        2,
+        0,
+        torch.device("cpu"),
+        shard_decode_requests=dcp_size == 1,
+        max_num_reqs=3,
+        max_num_tokens=32,
+        dcp_world_size=dcp_size,
+    )
+    manager.bind_config(config)
+    buffers = AscendInputBuffers(3, 32, torch.device("cpu"))
+    with patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
+        batch = AscendInputBatch.make_dummy(3, 3, buffers)
+    batch.is_dummy = False
+    batch.is_prefilling_np[:] = False
+    batch.has_prefill = False
+    before_finalize = []
+    finalize = manager._finalize_partition
+
+    def record_indices(*args):
+        before_finalize.append(manager._padded_gather_idx)
+        return finalize(*args)
+
+    with (
+        patch("vllm.v1.worker.gpu.pcp_manager.async_tensor_h2d", side_effect=_mock_async_copy_to_cpu),
+        patch.object(manager, "_finalize_partition", side_effect=record_indices),
+    ):
+        _partition_batch(manager, batch)
+    assert manager._padded_gather_idx is before_finalize[0]
 
 
 def test_validate_config_allows_sparse_mla_full_decode_only():
@@ -809,11 +943,11 @@ def _make_slot_mapping_case(pcp_size, route, batch_kind, query_len, mode, slot_d
         batch.num_draft_tokens = int(batch.num_draft_tokens_per_req.sum())
 
     # Independent expected rank segments: decodes first, then front/back prefill
-    # chunks. DCP replicates the short prefill; KPool only replicates decodes.
+    # chunks. DCP replicates decodes and the short prefill; KPool uses sharded decodes.
     tokens_by_rank = []
     for rank in range(pcp_size):
         if batch_kind == "mixed":
-            decodes = [0, 36] if route != "sharded" else ([0] if rank == 0 else [36] if rank == 1 else [])
+            decodes = [0, 36] if route == "dcp" else ([0] if rank == 0 else [36] if rank == 1 else [])
             width = 32 // (2 * pcp_size)
             tokens = decodes + list(range(1 + rank * width, 1 + (rank + 1) * width))
             tokens += list(range(1 + (2 * pcp_size - 1 - rank) * width, 1 + (2 * pcp_size - rank) * width))
@@ -824,7 +958,7 @@ def _make_slot_mapping_case(pcp_size, route, batch_kind, query_len, mode, slot_d
             tokens = [
                 req * query_len + j
                 for req in range(len(counts))
-                if route != "sharded" or req % pcp_size == rank
+                if route == "dcp" or req % pcp_size == rank
                 for j in range(query_len)
             ]
         tokens_by_rank.append(tokens)
@@ -904,7 +1038,7 @@ def test_partition_slot_mappings_and_refresh(pcp_size, route, slot_dtype, mode, 
             pcp_size,
             rank,
             torch.device("cpu"),
-            shard_decode_requests=route == "sharded",
+            shard_decode_requests=route != "dcp",
             max_num_reqs=8,
             max_num_tokens=64,
             block_tables=tables,
@@ -996,7 +1130,7 @@ def test_engram_refresh_preserves_parent_slot_layout(pcp_size, rank, route, slot
         pcp_size,
         rank,
         torch.device("cpu"),
-        shard_decode_requests=route == "sharded",
+        shard_decode_requests=route != "dcp",
         max_num_reqs=8,
         max_num_tokens=64,
         block_tables=tables,
