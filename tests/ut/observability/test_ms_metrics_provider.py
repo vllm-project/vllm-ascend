@@ -82,12 +82,13 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     assert [Path(path).name for path in provider.config_paths] == [
         "base_metrics.yaml",
         "eplb_metrics.yaml",
+        "rl_lifecycle_metrics.yaml",
         "runtime_guard_metrics.yaml",
         "schedule_execute_metrics.yaml",
     ]
     assert all(Path(path).is_file() for path in provider.config_paths)
     config = _load_all_provider_configs(provider.config_paths)
-    assert len(config) == 13
+    assert len(config) == 16
     assert all(item["symbol"].startswith("vllm_ascend.") for item in config)
     assert all("id" not in item for item in config)
     assert all(
@@ -152,6 +153,7 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
         "vllm_ascend.observability.ms_metrics.handlers",
         "vllm_ascend.observability.ms_metrics.handlers.common",
         "vllm_ascend.observability.ms_metrics.handlers.eplb",
+        "vllm_ascend.observability.ms_metrics.handlers.rl_lifecycle",
         "vllm_ascend.observability.ms_metrics.handlers.runtime_guard",
         "vllm_ascend.observability.ms_metrics.handlers.schedule_execute",
     ):
@@ -171,7 +173,7 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
 
 def test_provider_yaml_symbols_exist_in_current_vllm_ascend_source():
     config_paths = sorted((_PACKAGE_ROOT / "config").glob("*.yaml"))
-    assert len(config_paths) == 4
+    assert len(config_paths) == 5
     config = _load_all_provider_configs(config_paths)
 
     for item in config:
@@ -456,6 +458,31 @@ def test_symbol_hook_handlers_honor_level_and_labels(monkeypatch):
 
     assert handlers.sample_tokens_handler(lambda runner, grammar: "sampled", object(), None) == "sampled"
     metrics.record_metric.assert_not_called()
+
+    lifecycle = _load_feature_handlers(monkeypatch, "test_rl_lifecycle_symbol_hooks", "rl_lifecycle")
+    sys.modules[_COMMON_MODULE].set_metric_level("basic")
+    assert lifecycle.sleep_handler(lambda worker, level: "slept", object(), 2) == "slept"
+    assert metrics.record_metric.call_args.kwargs["labels"] == {"level": "2"}
+    assert metrics.record_metric.call_args.args[0] == "lifecycle:sleep:duration_ms"
+
+
+def test_record_sleep_freed_gb_records_within_sleep(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_rl_lifecycle_freed_gb", "rl_lifecycle")
+
+    handlers.record_sleep_freed_gb(2, 12.5)
+
+    metrics.record_metric.assert_called_once_with(
+        "lifecycle:sleep:freed_gb",
+        value=12.5,
+        labels={"level": "2"},
+    )
 
 
 def test_custom_handlers_are_not_factory_created_from_yaml_metrics():

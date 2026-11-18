@@ -1,0 +1,11 @@
+# Release note fragment. See release_notes/README.md.
+pr: 22052
+entries:
+  - category: feature
+    text: >
+      Add RL lifecycle metrics for NPUWorker sleep, wake_up, and update_weights:
+      lifecycle:sleep:duration_ms, lifecycle:wake:duration_ms, and
+      lifecycle:update_weights:duration_ms histograms plus the
+      lifecycle:sleep:freed_gb histogram reporting the memory released by each
+      sleep level. All series stay at the basic metric level; recording is
+      gated by the MS metric level runtime config.

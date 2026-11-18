@@ -1,0 +1,11 @@
+# RL 休眠与恢复. Durations of the existing NPUWorker methods.
+# wake has a tags argument and no sleep_opt argument.
+
+- symbol: vllm_ascend.worker.worker:NPUWorker.sleep
+  handler: vllm_ascend.observability.ms_metrics.handlers:sleep_handler
+
+- symbol: vllm_ascend.worker.worker:NPUWorker.wake_up
+  handler: vllm_ascend.observability.ms_metrics.handlers:wake_handler
+
+- symbol: vllm_ascend.worker.worker:NPUWorker.update_weights
+  handler: vllm_ascend.observability.ms_metrics.handlers:update_weights_handler
