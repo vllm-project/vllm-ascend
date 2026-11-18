@@ -1,0 +1,7 @@
+pr: 22240
+entries:
+  - category: breaking
+    text: >-
+      A3 QuantLightningIndexer scores with return_value=1 now use BF16 instead of FP32,
+      matching A5. Cast the returned scores to FP32 in callers that require FP32.
+    hardware: [A3]
