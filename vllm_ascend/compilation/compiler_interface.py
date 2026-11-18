@@ -19,6 +19,8 @@ import copy
 import functools
 import os
 from collections.abc import Callable
+from dataclasses import asdict
+from pathlib import Path
 from typing import Any, cast
 
 import torch
@@ -35,7 +37,27 @@ from vllm.logger import logger
 from vllm.utils.math_utils import round_up
 
 from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
-from vllm_ascend.utils import COMPILATION_PASS_KEY
+from vllm_ascend.compilation.fusion_cache import compile_cached_fusion
+from vllm_ascend.device.hardware_profile import get_current_hardware_profile
+from vllm_ascend.utils import COMPILATION_PASS_KEY, enable_sp
+
+# Fixed transitive dependencies of GraphFusionPassManager; unrelated modules
+# must not invalidate the fusion cache. Update this list when adding a pass.
+FUSION_CACHE_SOURCE_FILES = (
+    "compiler_interface.py",
+    "fusion_cache.py",
+    "graph_fusion_pass_manager.py",
+    "passes/base_pattern.py",
+    "passes/norm_quant_fusion_pass.py",
+    "passes/qknorm_rope_fusion_pass.py",
+    "passes/muls_add_pass.py",
+    "passes/mm_reduce_scatter_fusion_pass.py",
+    "passes/utils/npugraph_ex_utils_check.py",
+    "../ascend_config.py",
+    "../device/hardware_profile.py",
+    "../device/device_op.py",
+    "../utils.py",
+)
 
 
 def compile_fx(graph: GraphModule, example_inputs: list, inner_compile: Callable, decompositions: dict) -> Callable:
@@ -52,11 +74,19 @@ def fusion_pass_compile(
     compiler_config: dict[str, Any],
     compile_range: Range,
     key: str | None = None,
+    cache_dir: str | None = None,
 ) -> tuple[Callable | None, Any | None]:
     def compile_inner(graph, example_inputs):
         current_pass_manager = compiler_config[COMPILATION_PASS_KEY]
         graph = current_pass_manager(graph)
         return graph
+
+    if cache_dir is not None:
+        from torch._inductor.runtime.cache_dir_utils import temporary_cache_dir
+
+        with temporary_cache_dir(cache_dir):
+            compiled_fn = compile_cached_fusion(graph, example_inputs, compile_inner)
+        return compiled_fn, None
 
     decompositions = select_decomp_table()
 
@@ -272,7 +302,6 @@ class AscendCompiler(CompilerInterface):
 
     name = "AscendCompiler"
 
-    # TODO(wxs): add passes related to compilation in compute_hash
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         self.vllm_config = vllm_config
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
@@ -286,6 +315,19 @@ class AscendCompiler(CompilerInterface):
             "enable_static_kernel": ascend_compilation_config.enable_static_kernel,
             "enable_super_kernel": ascend_compilation_config.enable_super_kernel,
         }
+        if not ascend_compilation_config.enable_npugraph_ex:
+            factors.update(
+                {
+                    "fusion_config": asdict(ascend_compilation_config),
+                    "fusion_capabilities": sorted(cap.name for cap in get_current_hardware_profile().capabilities),
+                    "fusion_source_hash": sha256(
+                        b"".join(
+                            path.encode() + (Path(__file__).parent / path).read_bytes()
+                            for path in FUSION_CACHE_SOURCE_FILES
+                        )
+                    ).hexdigest(),
+                }
+            )
         logger.info("AscendCompiler hash factors: %s", factors)
         return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]
 
@@ -343,7 +385,16 @@ class AscendCompiler(CompilerInterface):
                 cache_dir,
             )
         else:
-            return fusion_pass_compile(graph, example_inputs, compiler_config, compile_range, key)
+            cache_dir = None
+            # Collective fusion embeds a process-local HCCL communicator name.
+            # Rebuild those graphs rather than restoring a previous process's handle.
+            if (
+                not getattr(self, "disable_cache", True)
+                and getattr(self, "cache_dir", None)
+                and not enable_sp(self.vllm_config)
+            ):
+                cache_dir = os.path.join(self.cache_dir, "fusion_aot_cache")
+            return fusion_pass_compile(graph, example_inputs, compiler_config, compile_range, key, cache_dir)
 
     def load(self, handle, graph, example_inputs, graph_index, compile_range):
         key, path = handle
