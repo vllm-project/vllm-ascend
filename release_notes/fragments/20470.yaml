@@ -2,5 +2,6 @@ pr: 20470
 entries:
   - category: bugfix
     text: >-
-      Fixed wait-mode pauses and sleeps hanging when Ascend-specific schedulers
-      had requests holding KV blocks for asynchronous loads.
+      Fixed a bug in the Recompute, DyntraLB, and Balance schedulers that
+      could cause a wait-mode pause or sleep to hang when a request still
+      held KV cache blocks for an asynchronous load.
