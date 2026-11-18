@@ -1147,7 +1147,7 @@ def build_cloze_request(req_data: dict) -> dict:
         "remote_port": None,
     }
     n_lp = payload.get("logprobs")
-    payload["prompt_logprobs"] = int(n_lp)
+    payload["prompt_logprobs"] = int(n_lp) if n_lp is not None else 0
     return payload
 
 

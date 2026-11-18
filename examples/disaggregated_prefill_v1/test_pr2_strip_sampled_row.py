@@ -45,7 +45,9 @@ def _load_strip_sampled_row():
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == "strip_sampled_row":
             seg = ast.get_source_segment(src, node)
-            ns = {}
+            if seg is None:
+                raise RuntimeError("could not extract strip_sampled_row source")
+            ns: dict = {}
             exec(compile(seg, "<strip_sampled_row>", "exec"), ns)
             return ns["strip_sampled_row"]
     raise RuntimeError("strip_sampled_row not found in source")
@@ -63,7 +65,7 @@ def _echo_response(choices):
       logprobs_rows -- list of logprob floats, one per row (echo + forced)
       offsets       -- text_offset list, one entry per row (vLLM semantics)
     """
-    out_choices = []
+    out_choices: list = []
     for spec in choices:
         rows = list(spec["echo_tokens"]) + [spec["forced_token"]]
         out_choices.append(
