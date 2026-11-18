@@ -399,11 +399,10 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         mega_moe.start()
 
     def test_expert_lists_follow_upstream_eplb_configuration(self):
-        for use_v2, enable_eplb in ((False, False), (True, False), (True, True)):
+        for enable_eplb in (False, True):
             expected = enable_eplb
-            with self.subTest(use_v2=use_v2, enable_eplb=enable_eplb):
+            with self.subTest(enable_eplb=enable_eplb):
                 config = create_mock_vllm_config()
-                config.use_v2_model_runner = use_v2
                 config.parallel_config.enable_eplb = enable_eplb
                 with (
                     patch(

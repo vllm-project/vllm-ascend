@@ -540,11 +540,6 @@ msgstr ""
 "策略（昇腾上的默认策略）、HIXL 和 Gloo 迁移适配器，以及 `load_collection_phase` 扩展。"
 
 msgid ""
-"The legacy vLLM Ascend dynamic, recording, and static EPLB modes belonged to\n"
-"Model Runner V1 and have been removed."
-msgstr "旧版 vLLM Ascend 的动态、记录和静态 EPLB 模式属于 Model Runner V1，现已移除。"
-
-msgid ""
 "The model-level validation uses Qwen3-30B-A3B W8A8 with asynchronous EPLB. Validate accuracy and performance with the target model, topology, and\n"
 "traffic before production deployment."
 msgstr "模型级验证使用 Qwen3-30B-A3B W8A8 配合异步 EPLB。在生产部署前，请使用目标模型、拓扑和流量验证精度与性能。"

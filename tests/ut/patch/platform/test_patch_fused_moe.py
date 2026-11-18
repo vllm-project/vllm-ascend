@@ -36,11 +36,6 @@ def test_factory_adapts_only_the_returned_router():
 
     with (
         patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
-        patch.object(
-            patch_fused_moe,
-            "get_current_vllm_config",
-            return_value=SimpleNamespace(use_v2_model_runner=True),
-        ),
     ):
         result = patch_fused_moe._ascend_FusedMoE(
             num_experts=8,

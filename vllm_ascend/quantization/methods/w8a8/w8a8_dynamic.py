@@ -155,9 +155,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
-        self.use_expert_weight_list = (
-            vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
-        )
+        self.use_expert_weight_list = vllm_config.parallel_config.enable_eplb is True
         self.in_dtype = vllm_config.model_config.dtype
         try:
             device_group = get_mc2_group().device_group

@@ -1412,7 +1412,7 @@ In addition to the single-node and multi-node parameters described above, the fo
 
 **Prefill node-specific configurations:**
 
-- `--additional-config '{"enable_fused_mc2": true}'`: Enables fused MC2 operators (`dispatch_ffn_combine`/`mega_moe`) to optimize MoE communication. Constraints: `dispatch_ffn_combine` only for w8a8 and EP≤32; `mega_moe` works for w8a8/w4a8/bf16 with EP≤64. Both are incompatible with MTP and dynamic EPLB.
+- `--additional-config '{"enable_fused_mc2": true}'`: Enables fused MC2 operators (`dispatch_ffn_combine`/`mega_moe`) to optimize MoE communication. Constraints: `dispatch_ffn_combine` only for w8a8 and EP≤32; `mega_moe` works for w8a8/w4a8/bf16 with EP≤64. Both are incompatible with MTP. For EPLB compatibility and validation limits, see [EPLB weight formats](../../user_guide/feature_guide/expert_parallelism_load_balancer.md#weight-formats).
 - `--prefill-context-parallel-size`: Enables PCP on prefill nodes to accelerate long-context prefill. Required for handling prompts up to 128k tokens.
 
 **Decode node-specific configurations:**
@@ -1511,7 +1511,7 @@ The following optimizations must be explicitly enabled to take effect. They appl
 |Optimization|Scenario|Enablement|Principle (Benefits)|Notes|
 |------------|--------|----------|---------------------|-----|
 |FlashComm_v1|A3 prefill nodes / co-located nodes|`--additional-config '{"enable_flashcomm1": true}'`|Splits AllReduce into Reduce-Scatter and All-Gather, improving prefill throughput and reducing communication latency|Not available when `layer_sharding` includes `o_proj`|
-|Fused MC2|A3 prefill nodes|`--additional-config '{"enable_fused_mc2": true}'`|Replaces ALLTOALL+MC2 with the `dispatch_ffn_combine`/`dispatch_gmm_combine_decode` operators, reducing MoE communication overhead and improving MoE inference performance|`dispatch_ffn_combine` only for w8a8, EP≤32, non-MTP, non-dynamic-EPLB; conflicts with `multistream_overlap_shared_expert` (the latter is auto-disabled)|
+|Fused MC2|A3 prefill nodes|`--additional-config '{"enable_fused_mc2": true}'`|Replaces ALLTOALL+MC2 with the `dispatch_ffn_combine`/`dispatch_gmm_combine_decode` operators, reducing MoE communication overhead and improving MoE inference performance|`dispatch_ffn_combine` only for w8a8, EP≤32, non-MTP; EPLB compatibility follows the [weight-format support table](../../user_guide/feature_guide/expert_parallelism_load_balancer.md#weight-formats); conflicts with `multistream_overlap_shared_expert` (the latter is auto-disabled)|
 |MLAPO|A3 co-located high-throughput / PD decode nodes|`--additional-config '{"enable_mlapo": true}'`|Fuses the MLA preprocess operations, significantly improving decode performance|Consumes more NPU memory; in PD scenarios enable on decode nodes only|
 |PCP|A3 prefill nodes; long context (≥128k)|`--prefill-context-parallel-size`|PCP accelerates long-context prefill, reducing TTFT for long prompts|In the reference configs, enabled on co-located nodes and PD prefill nodes|
 |Balance Scheduling|A3 single-node / co-located / non-PD scenarios|`--additional-config '{"enable_balance_scheduling": true}'`|Improves output throughput and reduces TPOT in the v1 scheduler|TTFT may degrade; not recommended when Prefill-Decode is separated|

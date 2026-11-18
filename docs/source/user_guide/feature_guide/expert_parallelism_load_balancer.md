@@ -26,9 +26,6 @@ asynchronous worker, and rearrangement lifecycle. Ascend adds the STAIR policy
 (the default policy on Ascend), the HIXL and Gloo movement adapters, and the
 `load_collection_phase` extension.
 
-The legacy vLLM Ascend dynamic, recording, and static EPLB modes belonged to
-Model Runner V1 and have been removed.
-
 ### Constraints and Limitations
 
 #### Models

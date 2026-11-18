@@ -36,7 +36,6 @@ from typing import Any
 import torch
 import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
 import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
-from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
 
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
@@ -133,7 +132,6 @@ def _ascend_FusedMoE(
     image_sentinel_lo: int = 129257,
     **kwargs,
 ):
-    enable_router_eplb = enable_eplb and get_current_vllm_config().use_v2_model_runner
     if router is None:
         router = create_ascend_fused_moe_router(
             top_k=top_k,
@@ -150,7 +148,7 @@ def _ascend_FusedMoE(
             hash_indices_table=hash_indices_table,
             bias_vl=bias_vl,
             image_sentinel_lo=image_sentinel_lo,
-            eplb_state=AscendEplbLayerState() if enable_router_eplb else None,
+            eplb_state=AscendEplbLayerState() if enable_eplb else None,
         )
     routed_experts_cls = _adapt_routed_experts_cls(routed_experts_cls)
     routed_experts_args = dict(routed_experts_args) if routed_experts_args is not None else {}
@@ -179,7 +177,7 @@ def _ascend_FusedMoE(
         routed_experts_args=routed_experts_args,
         **kwargs,
     )
-    _adapt_eplb_router(runner.router, enable_router_eplb)
+    _adapt_eplb_router(runner.router, enable_eplb)
     return runner
 
 

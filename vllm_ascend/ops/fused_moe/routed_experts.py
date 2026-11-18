@@ -401,7 +401,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.n_shared_experts = n_shared_experts
         self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
-        self._use_v2_model_runner = bool(vllm_config.use_v2_model_runner)
         self.global_redundant_expert_num: int = 0
         self.ascend_pertoken_scale: torch.Tensor | None = None
         self.ascend_mc2_mask: torch.Tensor | None = None
@@ -584,26 +583,25 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
 
-        if self._use_v2_model_runner:
-            eplb_state = self.router.eplb_state
-            if eplb_state is not None:
-                # eplb_state imports vllm_ascend.ops.fused_moe at module scope, so a
-                # top-level import here would close an import cycle.
-                from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
+        eplb_state = self.router.eplb_state
+        if eplb_state is not None:
+            # eplb_state imports vllm_ascend.ops.fused_moe at module scope, so a
+            # top-level import here would close an import cycle.
+            from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 
-                assert isinstance(eplb_state, AscendEplbLayerState)
-                all_gather_mask = None
-                if use_allgather_eplb():
-                    assert isinstance(moe_comm_method.prepare_finalize, PrepareAndFinalizeWithAllGather)
-                    all_gather_mask = moe_comm_method.prepare_finalize.all_gather_eplb_mask
-                eplb_state.record_load(
-                    fused_experts_results.expert_tokens,
-                    fused_experts_results.group_list_type,
-                    topk_ids=topk_ids,
-                    num_source_tokens=num_source_tokens,
-                    is_sequence_parallel=self.moe_config.is_sequence_parallel,
-                    all_gather_mask=all_gather_mask,
-                )
+            assert isinstance(eplb_state, AscendEplbLayerState)
+            all_gather_mask = None
+            if use_allgather_eplb():
+                assert isinstance(moe_comm_method.prepare_finalize, PrepareAndFinalizeWithAllGather)
+                all_gather_mask = moe_comm_method.prepare_finalize.all_gather_eplb_mask
+            eplb_state.record_load(
+                fused_experts_results.expert_tokens,
+                fused_experts_results.group_list_type,
+                topk_ids=topk_ids,
+                num_source_tokens=num_source_tokens,
+                is_sequence_parallel=self.moe_config.is_sequence_parallel,
+                all_gather_mask=all_gather_mask,
+            )
 
         assert _EXTRA_CTX.moe_comm_method is not None
         routed_out = _EXTRA_CTX.moe_comm_method.finalize(

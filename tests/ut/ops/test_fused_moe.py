@@ -174,7 +174,6 @@ def test_ascend_routed_experts_replaces_only_unquantized_method_after_parent_ini
         routed_experts_module,
         "get_current_vllm_config",
         lambda: SimpleNamespace(
-            use_v2_model_runner=False,
             model_config=SimpleNamespace(is_deepseek_mla=False),
         ),
     )
@@ -797,11 +796,9 @@ def test_hash_router_chunks_unaligned_input_ids_for_sequence_parallel(monkeypatc
 
 
 @pytest.mark.parametrize("return_with_event", [False, True])
-@pytest.mark.parametrize("use_v2,v2_eplb", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("v2_eplb", [False, True])
 @pytest.mark.parametrize("is_sequence_parallel", [False, True])
-def test_routed_experts_forward_impl_runs_current_flow(
-    monkeypatch, return_with_event, use_v2, v2_eplb, is_sequence_parallel
-):
+def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_event, v2_eplb, is_sequence_parallel):
     """Verify routed-expert forward preserves the current dispatch flow."""
     _disable_force_eplb(monkeypatch)
     routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
@@ -860,7 +857,6 @@ def test_routed_experts_forward_impl_runs_current_flow(
     routed_experts.apply_router_weight_on_input = True
     routed_experts.global_redundant_expert_num = 0
     routed_experts.n_shared_experts = 0
-    routed_experts._use_v2_model_runner = use_v2
     routed_experts.return_with_event = return_with_event
     moe_comm_method = MagicMock()
     moe_comm_method.prepare.return_value = SimpleNamespace(

@@ -817,30 +817,6 @@ class TestNPUPlatform(TestBase):
         self.assertIn("stair_config.hysteresis_relative", rendered_warning)
         self.assertIn("stair_config.unknown_option", rendered_warning)
 
-    def test_validate_eplb_config_rejects_v1_load_collection_phase(self):
-        vllm_config = self.mock_vllm_config()
-        vllm_config.use_v2_model_runner = False
-        vllm_config.additional_config = {"eplb_config": {"load_collection_phase": "decode"}}
-
-        with self.assertRaisesRegex(ValueError, "only supported by Model Runner V2"):
-            _validate_eplb_config(vllm_config)
-
-    def test_validate_eplb_config_rejects_v1_stair_config(self):
-        vllm_config = self.mock_vllm_config()
-        vllm_config.use_v2_model_runner = False
-        vllm_config.additional_config = {"eplb_config": {"stair_config": {}}}
-
-        with self.assertRaisesRegex(ValueError, "only supported by Model Runner V2"):
-            _validate_eplb_config(vllm_config)
-
-    def test_validate_eplb_config_rejects_upstream_eplb_on_v1(self):
-        vllm_config = self.mock_vllm_config()
-        vllm_config.use_v2_model_runner = False
-        vllm_config.parallel_config.enable_eplb = True
-
-        with self.assertRaisesRegex(ValueError, "only supported by Model Runner V2"):
-            _validate_eplb_config(vllm_config)
-
     def test_get_recompute_scheduler_cls(self):
         from vllm_ascend import platform
 

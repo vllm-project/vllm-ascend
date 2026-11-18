@@ -199,7 +199,7 @@ def _apply_dynamic_int8_moe_lora(
     w1_scale = weights.w1_scale if isinstance(weights.w1_scale, list) else [weights.w1_scale]
     w2_scale = weights.w2_scale if isinstance(weights.w2_scale, list) else [weights.w2_scale]
     if not all(len(values) == 1 for values in (w1, w2, w1_scale, w2_scale)):
-        raise NotImplementedError("Quantized MoE LoRA does not support per-expert tensor lists used by dynamic EPLB.")
+        raise NotImplementedError("Quantized MoE LoRA does not support per-expert tensor lists.")
 
     input_dtype = hidden_states.dtype
     quantized_input, input_scale = DeviceOperator.npu_dynamic_quant(
