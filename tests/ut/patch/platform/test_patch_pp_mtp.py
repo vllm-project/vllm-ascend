@@ -8,7 +8,6 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.structured_output import StructuredOutputManager
 
-from tests.ut.patch.platform.release_scheduler_fixture import release_cached_request_abi
 from vllm_ascend.patch.platform.patch_pp_mtp import (
     _apply_patch,
     _is_pd_prefill_node,
@@ -22,19 +21,6 @@ from vllm_ascend.patch.platform.patch_pp_mtp import (
     _use_pp_ipc_runtime_patch,
     _use_pp_mtp_runtime_patch,
 )
-from vllm_ascend.utils import vllm_version_is
-
-
-@pytest.fixture(autouse=True)
-def _release_ipc_payload_abi_on_main(monkeypatch, request):
-    if vllm_version_is("0.33.0") or not request.node.originalname.startswith("test_pp_ipc_cached_request_data_"):
-        return
-    from vllm.v1.core.sched import scheduler as native_module
-
-    legacy_scheduler, _ = release_cached_request_abi()
-    monkeypatch.setattr(request.module, "Scheduler", legacy_scheduler)
-    monkeypatch.setattr(native_module, "Scheduler", legacy_scheduler)
-    _patch_scheduler_make_cached_request_data()
 
 
 @pytest.mark.parametrize(
@@ -175,7 +161,6 @@ def test_pp_ipc_cached_request_data_carries_confirmed_token_for_sync_and_async(
     cached_reqs_data = Scheduler._make_cached_request_data(
         scheduler,
         running_reqs=[request],
-        resumed_reqs=[],
         num_scheduled_tokens={"req-0": 3},
         spec_decode_tokens={"req-0": [101, 102]},
         req_to_new_blocks={"req-0": blocks},
@@ -217,7 +202,6 @@ def test_pp_ipc_cached_request_data_fills_empty_confirmed_token_only_for_async(
     cached_reqs_data = Scheduler._make_cached_request_data(
         scheduler,
         running_reqs=[request],
-        resumed_reqs=[],
         num_scheduled_tokens={"req-0": 2},
         spec_decode_tokens={"req-0": [101, 102]},
         req_to_new_blocks={"req-0": blocks},
@@ -327,9 +311,8 @@ def test_pp_mtp_spec_token_id_edge_cases():
     _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, model_runner_output)
     assert finished.spec_token_ids == ["keep"]
     assert empty_sampled.spec_token_ids == []
-    # Main trims to the validated prefix plus one lookahead token; 0.33.0 returns
-    # only the validated prefix.
-    assert advancing.spec_token_ids == ([401] if vllm_version_is("0.33.0") else [401, 402])
+    # The validated prefix keeps its lookahead token.
+    assert advancing.spec_token_ids == [401, 402]
 
 
 def test_pp_mtp_spec_tokens_remain_unconstrained_during_reasoning(monkeypatch):
@@ -389,7 +372,6 @@ def test_pp_ipc_cached_request_data_skips_empty_output_tokens():
     cached = Scheduler._make_cached_request_data(
         scheduler,
         running_reqs=[req_empty],
-        resumed_reqs=[],
         num_scheduled_tokens={"req-0": 2},
         spec_decode_tokens={},
         req_to_new_blocks={"req-0": blocks},

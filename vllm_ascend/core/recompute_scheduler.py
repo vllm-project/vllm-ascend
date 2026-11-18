@@ -924,33 +924,22 @@ class RecomputeScheduler(Scheduler):
         new_request_kwargs = {
             "uses_mrope": self.model_uses_mrope,
         }
-        if not vllm_version_is("0.33.0") or self.use_v2_model_runner:
-            scheduled_new_reqs.extend(scheduled_resumed_reqs)
-            scheduled_resumed_reqs.clear()
-            new_reqs_data = [
-                NewRequestData.from_request(
-                    req,
-                    req_to_new_blocks[req.request_id].get_block_ids(),
-                    req._all_token_ids,
-                    **new_request_kwargs,
-                )
-                for req in scheduled_new_reqs
-            ]
-        else:
-            new_reqs_data = [
-                NewRequestData.from_request(
-                    req,
-                    req_to_new_blocks[req.request_id].get_block_ids(),
-                    **new_request_kwargs,
-                )
-                for req in scheduled_new_reqs
-            ]
+        scheduled_new_reqs.extend(scheduled_resumed_reqs)
+        scheduled_resumed_reqs.clear()
+        new_reqs_data = [
+            NewRequestData.from_request(
+                req,
+                req_to_new_blocks[req.request_id].get_block_ids(),
+                req._all_token_ids,
+                **new_request_kwargs,
+            )
+            for req in scheduled_new_reqs
+        ]
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = make_cached_request_data(
                 self,
                 scheduled_running_reqs,
-                scheduled_resumed_reqs,
                 num_scheduled_tokens,
                 scheduled_spec_decode_tokens,
                 req_to_new_blocks,
@@ -967,11 +956,6 @@ class RecomputeScheduler(Scheduler):
                 iteration_details.num_encoder_inputs = num_scheduled_encoder_inputs
                 iteration_details.num_encoder_output_tokens = self.max_num_encoder_input_tokens - encoder_compute_budget
             schedule_metadata["iteration_details"] = iteration_details
-
-        # Record the request ids that were scheduled in this step (MRV1-only).
-        if vllm_version_is("0.33.0") and not self.use_v2_model_runner:
-            self.prev_step_scheduled_req_ids.clear()
-            self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
         kv_connector_block_state = None
         # #51358 drains boundary offers even without a connector.
@@ -1028,11 +1012,6 @@ class RecomputeScheduler(Scheduler):
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             kv_cache_block_copies=pending_kv_cache_block_copies,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
-            **(
-                {"ec_manager_metadata": self.encoder_cache_manager.get_manager_metadata()}
-                if vllm_version_is("0.33.0")
-                else {}
-            ),
             recomputed_reqs=self._recomputed_reqs or None,
             has_sync_kv_loads=has_sync_kv_loads,
             kv_connector_block_state=kv_connector_block_state,
