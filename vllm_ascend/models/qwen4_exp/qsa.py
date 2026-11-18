@@ -929,20 +929,15 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         if not self._main_fused_norm_rope_eligible(qkv, positions):
             raise ValueError("QSA main-attention fused norm+RoPE ABI is not satisfied")
 
-        # Preserve valid scheduler positions while mapping padded profiling rows
-        # to a safe cache entry, matching the QSA indexer path above.
-        cache = self.rotary_emb.cos_sin_cache
-        safe_positions = positions.clamp(0, cache.shape[0] - 1).contiguous()
-        cos_sin = cache[safe_positions]
-        if cos_sin.device != qkv.device:
-            cos_sin = cos_sin.to(qkv.device)
-        if cos_sin.dtype != qkv.dtype:
-            cos_sin = cos_sin.to(qkv.dtype)
+        # Pass the full rotary table and positions into the Triton kernel.  It
+        # clamps and gathers each row while loading Q/K, removing the Prefill
+        # Slice/Clamp/Index chain without materializing a temporary cos/sin
+        # tensor in the forward path.
+        cache = self.rotary_emb._match_cos_sin_cache_dtype(qkv)  # noqa: SLF001
         op_kwargs = dict(
             qkv=qkv,
             q_weight=self.q_norm.weight,
             k_weight=self.k_norm.weight,
-            cos_sin=cos_sin,
             num_q_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
@@ -955,11 +950,15 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         if gate_out is None:
             return torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
                 **op_kwargs,
+                cos_sin=cache,
+                positions=positions,
                 has_gate=True,
             )
         flat_gate = gate_out.view(qkv.shape[0], -1)
         q, k, v = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope_with_gate_out(
             **op_kwargs,
+            cos_sin=cache,
+            positions=positions,
             gate_output=flat_gate,
         )
         return q, k, v, flat_gate
