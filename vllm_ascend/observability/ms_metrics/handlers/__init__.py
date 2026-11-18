@@ -8,9 +8,19 @@ them. Re-export new feature handlers here so the YAML reference
 """
 
 from vllm_ascend.observability.ms_metrics.handlers.eplb import eplb_do_update_hotness_handler
+from vllm_ascend.observability.ms_metrics.handlers.kv_transfer import (
+    kv_transfer_finished_handler,
+    kv_transfer_finished_pair_handler,
+    kv_transfer_invalid_blocks_handler,
+    kv_transfer_remote_waiting_handler,
+)
 from vllm_ascend.observability.ms_metrics.handlers.schedule_execute import sample_tokens_handler
 
 __all__ = [
     "eplb_do_update_hotness_handler",
+    "kv_transfer_finished_handler",
+    "kv_transfer_finished_pair_handler",
+    "kv_transfer_invalid_blocks_handler",
+    "kv_transfer_remote_waiting_handler",
     "sample_tokens_handler",
 ]
