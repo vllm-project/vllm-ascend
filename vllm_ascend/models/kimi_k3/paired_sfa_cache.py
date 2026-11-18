@@ -236,4 +236,3 @@ def paired_sfa_cache_config(
         kv_cache_groups=kv_cache_groups,
         prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
     )
-
