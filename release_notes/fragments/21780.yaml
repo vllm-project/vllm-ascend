@@ -1,0 +1,7 @@
+pr: 21780
+entries:
+  - category: performance
+    text: >-
+      DeepSeek V4.1 Flash on Atlas A2 and A3 uses less logits memory traffic
+      with Model Runner V2 and standard tensor parallelism. Eligible sampling
+      steps also avoid a separate FP32 logits copy.

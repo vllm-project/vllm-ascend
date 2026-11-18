@@ -121,6 +121,7 @@ from vllm_ascend.worker.v2.sample.gumbel import apply_temperature  # noqa: E402
 from vllm_ascend.worker.v2.sample.logprob import compute_token_logprobs, compute_topk_logprobs  # noqa: E402
 from vllm_ascend.worker.v2.sample.min_p import apply_min_p  # noqa: E402
 from vllm_ascend.worker.v2.sample.penalties import apply_penalties, bincount  # noqa: E402
+from vllm_ascend.worker.v2.sample.target_logits import reuse_writable_target_logits  # noqa: E402
 from vllm_ascend.worker.v2.sample.trace_replay import apply_trace_tokens  # noqa: E402
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import (  # noqa: E402
     rejection_sample as npu_rejection_sample,
@@ -137,6 +138,9 @@ penalties.bincount = bincount
 bad_words.apply_bad_words = apply_bad_words
 gumbel.apply_temperature = apply_temperature
 states.apply_temperature = apply_temperature
+# Both stock V2 samplers use this entry point. Remove this wrapper when
+# upstream vLLM provides its writable FP32 logits contract.
+sampler.Sampler.apply_sampling_params = reuse_writable_target_logits(sampler.Sampler.apply_sampling_params)
 logprob.compute_token_logprobs = compute_token_logprobs
 rejection_sampler_utils.rejection_sample = npu_rejection_sample
 rejection_sampler.rejection_sample = npu_rejection_sample
