@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:9.2.1-950-openeuler24.03-py3.12
+FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.3.0_20261113161300-950-openeuler24.03-py3.12
 
 WORKDIR /workspace
 
@@ -35,7 +35,7 @@ ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_TAG=v0.33.0
 ARG VLLM_COMMIT=""
 ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
-ARG CARGO_BUILD_JOBS=32
+ARG CARGO_BUILD_JOBS
 RUN if [ -n "$VLLM_COMMIT" ]; then \
       git init /vllm-workspace/vllm && \
       git -C /vllm-workspace/vllm fetch --depth 1 $VLLM_REPO "$VLLM_COMMIT" && \
@@ -48,7 +48,6 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
     python3 -m pip uninstall -y triton && \
     # The same step also builds the optional Rust frontend (vllm-rs).
     cd /vllm-workspace/vllm && \
-    export CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS && \
     export PATH="/root/.cargo/bin:$PATH" && \
     export PROTOC_INCLUDE=/usr/include && \
     python3 -m pip install -r requirements/build/rust.txt && \
@@ -57,21 +56,20 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
 
 # Install vllm-ascend
 # Limit cargo parallelism to avoid OOM in constrained build environments.
-# Overridable via --build-arg CARGO_BUILD_JOBS=N (e.g. 32-CPU/128Gi buildkitd
-# runs up to 2 builds in parallel; gy006 run observed ~45GiB node peak with 2
-# concurrent MAX_JOBS=32 builds, so 32 jobs is safe).
+# CI passes --build-arg CARGO_BUILD_JOBS=32 / MAX_JOBS=32 (e.g. 32-CPU/128Gi
+# buildkitd runs up to 2 builds in parallel; gy006 run observed ~45GiB node peak
+# with 2 concurrent MAX_JOBS=32 builds, so 32 jobs is safe). Leaving the ARGs
+# unset keeps the default nproc parallelism for local builds.
 # Limit opc/c++ build parallelism to avoid OOM. Mirrors
 # .github/workflows/_build_csrc_cache.yaml.
 # TODO: auto-detect buildkitd CPU cores and set MAX_JOBS accordingly
 
 # Dependency versions used by the vllm-ascend build.
 ARG SOC_VERSION="ascend950dt_9582"
-ARG MAX_JOBS=32
+ARG MAX_JOBS
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
-    OMP_NUM_THREADS=1 \
-    CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS \
-    MAX_JOBS=$MAX_JOBS
+    OMP_NUM_THREADS=1
 COPY . /vllm-workspace/vllm-ascend/
 
 ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi \
@@ -95,7 +93,7 @@ RUN ARCH=$(uname -m); \
     fi
 
 # ===== Install FLA =====
-ARG FLA_VERSION="26.9.1"
+ARG FLA_VERSION="26.10.0+feature"
 ARG FLA_PACKAGE="flash-linear-attention-npu-a5"
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     # Install memfabric_hybrid kernels

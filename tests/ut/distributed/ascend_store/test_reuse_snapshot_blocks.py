@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -8,6 +9,10 @@ from unittest.mock import patch
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise import pool_worker as module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import LayerBatchBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes.gva import (
+    MEMCACHE_UNMATCHED_STATE,
+    GvaDataPlane,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import LoadSpec, ReqMeta, RequestTracker
 
 
@@ -40,6 +45,8 @@ def worker():
     w.use_layerwise = w.use_layerwise_transfer = w.layerwise_offload = True
     w.use_block_key_layerwise = False
     w.tp_size = 16
+    w._snapshot_keys = {}
+    w._reused_layers_by_group = {0: {1}}
     w.kv_role, w.consumer_is_to_put = "kv_producer", False
     w.can_put = True
     w.num_kv_cache_groups, w.num_layers = 1, 2
@@ -56,6 +63,7 @@ def worker():
     w._save_disabled = threading.Event()
     w.layerwise_max_transfer_blocks = 0
     w.m_store = Store()
+    w._data_plane = GvaDataPlane(w)
     reset(w)
     return w
 
@@ -75,9 +83,6 @@ def step(tracker, target, hashes, cached=None):
             kvpool_cached_tokens=cached,
             can_load=True,
             layerwise_previous_step=True,
-            layerwise_snapshot_end_token=tracker.last_layerwise_snapshot_end_token,
-            layerwise_snapshot_block_index=tracker.last_layerwise_snapshot_block_index,
-            layerwise_snapshot_start_block=tracker.last_layerwise_snapshot_start_block,
         )
     )
     tracker.token_len = target
@@ -92,15 +97,21 @@ def transferred(w, is_save):
     if not tasks:
         return {}
     data = builder.build_shared(tasks[0], is_save=is_save)
-    return dict(zip(data.block_ids_arr.tolist(), data.block_gvas_arr.tolist()))
+    pairs = list(zip(data.block_ids_arr.tolist(), data.block_gvas_arr.tolist()))
+    if is_save:
+        request = tasks[0].block_ranges[0].request
+        # Private snapshots and public prefix pages can copy the same block
+        # into different GVAs. Verify both before selecting the snapshot view.
+        assert set(w.m_store.data[k] for k in request.save_keys) == {gva for _, gva in pairs}
+        public_gvas = {int(gva) for _, values in request.public_save_blocks.values() for gva in values}
+        pairs = [(block, gva) for block, gva in pairs if gva not in public_gvas]
+    return dict(pairs)
 
 
 def save(w, meta):
     w._process_save_for_layer_batch([meta], 1)
-    w._alloc_gvas_for_save([meta])
+    w._data_plane._alloc_gvas_for_save([meta])
     addresses = transferred(w, True)
-    # Every key being committed must have a transfer, not just an allocation.
-    assert set(w.m_store.data[k] for k in meta.save_keys) == set(addresses.values())
     w.m_store.committed.update(meta.save_keys)
     return addresses
 
@@ -112,14 +123,14 @@ class SnapshotTests(unittest.TestCase):
         save(w, step(t, 127, []))
         reset(w)
         m = step(t, 129, [], 127)
-        w._prepare_load_gvas([m])
+        w._data_plane._prepare_load_gvas([m])
         saved = save(w, m)
         self.assertEqual(set(saved), {0, 1})
         self.assertEqual(t.num_saved_tokens, 0)
-        self.assertEqual(t.last_layerwise_snapshot_start_block, 0)
+        self.assertEqual(set(w._snapshot_keys["r"][0]), {0, 1})
         reset(w)
         m = step(t, 131, ["h0"], 129)
-        w._prepare_load_gvas([m])
+        w._data_plane._prepare_load_gvas([m])
         w._process_load_for_layer_batch([m], 1)
         self.assertEqual(transferred(w, False), saved)
         self.assertNotIn("full:h0", w.m_store.queries)
@@ -128,8 +139,8 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(t.num_saved_tokens, 128)
         reset(w)
         m = step(t, 133, ["h0"], 131)
-        w._prepare_load_gvas([m])
-        self.assertIn("full:h0", w.m_store.queries)
+        w._data_plane._prepare_load_gvas([m])
+        self.assertNotIn("full:h0", w.m_store.queries)
         save(w, m)
         self.assertNotIn("full:h0", m.save_keys)
 
@@ -145,7 +156,7 @@ class SnapshotTests(unittest.TestCase):
                     self.assertEqual(set(saved), set(range((end + 127) // 128)))
                     reset(w)
                     m = step(t, cached + 2, ["h" + str(i) for i in range(cached // 128)], cached)
-                    w._prepare_load_gvas([m])
+                    w._data_plane._prepare_load_gvas([m])
                     w._process_load_for_layer_batch([m], 1)
                     self.assertEqual(transferred(w, False), {i: saved[i] for i in range((cached + 127) // 128)})
                     self.assertFalse(w._invalid_block_ids)
@@ -159,7 +170,7 @@ class SnapshotTests(unittest.TestCase):
                 saved = save(w, m)
                 self.assertEqual(len(saved), (end + 127) // 128)
                 self.assertEqual(t.num_saved_tokens, end // 128 * 128)
-                self.assertEqual(t.last_layerwise_snapshot_start_block, end // 128 if end % 128 else None)
+                self.assertEqual(max(w._snapshot_keys["r"][0]), (end - 1) // 128)
 
     def test_external_hit_is_not_previous_snapshot(self):
         w = worker()
@@ -175,7 +186,7 @@ class SnapshotTests(unittest.TestCase):
         save(w, step(t, 129, []))
         reset(w)
         m = step(t, 131, ["h0"], 129)
-        w._prepare_load_gvas([m])
+        w._data_plane._prepare_load_gvas([m])
         w._process_load_for_layer_batch([m], 0)
         self.assertFalse(w.layer_load_tasks[0])
 
@@ -187,9 +198,9 @@ class SnapshotTests(unittest.TestCase):
         m = step(t, 129, [], 127)
         with (
             patch.object(w.m_store, "batch_get_key_info", return_value=[None]) as query,
-            patch.object(module.time, "sleep") as sleep,
+            patch.object(time, "sleep") as sleep,
         ):
-            w._prepare_load_gvas([m])
+            w._data_plane._prepare_load_gvas([m])
         query.assert_called_once()
         sleep.assert_not_called()
         self.assertEqual(w._invalid_block_ids, {1})
@@ -204,17 +215,17 @@ class SnapshotTests(unittest.TestCase):
                 save(w, step(t, 127, []))
                 reset(w)
                 m = step(t, 129, [], 127)
-                results = [[module.MEMCACHE_UNMATCHED_STATE], [0]] if recover else None
+                results = [[MEMCACHE_UNMATCHED_STATE], [0]] if recover else None
                 with (
                     patch.object(
                         w.m_store,
                         "batch_add_lease",
-                        return_value=[module.MEMCACHE_UNMATCHED_STATE],
+                        return_value=[MEMCACHE_UNMATCHED_STATE],
                         side_effect=results,
                     ) as lease,
-                    patch.object(module.time, "sleep") as sleep,
+                    patch.object(time, "sleep") as sleep,
                 ):
-                    w._prepare_load_gvas([m])
+                    w._data_plane._prepare_load_gvas([m])
                 expected_retries = 1 if recover else 10
                 self.assertEqual(lease.call_count, 1 + expected_retries)
                 self.assertEqual(sleep.call_count, expected_retries)
@@ -223,9 +234,8 @@ class SnapshotTests(unittest.TestCase):
                 self.assertEqual(bool(m.load_keys), recover)
 
     def test_other_data_planes_keep_their_save_range(self):
-        legacy = LoadSpec(1, 1, True, None, 0, 7, 0, True)
+        legacy = LoadSpec(1, 1, True, layerwise_previous_step=True)
         self.assertTrue(legacy.layerwise_previous_step)
-        self.assertIsNone(legacy.layerwise_snapshot_start_block)
         w = worker()
         m = ReqMeta("r", target_token_len=385, save_end_token=128)
         w.use_layerwise_transfer = False

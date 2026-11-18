@@ -52,6 +52,44 @@ if TYPE_CHECKING:
     from .shared_host import HostTableSlice
     from .shared_pool import SharedPoolClient
 
+HOST_OFFLOAD_STORAGE_ATTR = "_host_offload_storage"
+
+_HOST_OFFLOAD_PARAMS = (
+    ("weight", "_codes_uva"),
+    ("weight_scale_inv", "_scales_uva"),
+)
+
+
+def register_host_offload_storage(module: nn.Module) -> None:
+    """Expose a host-offloaded table's storage to reload and weight updates.
+
+    ``cpu_offload`` aliases ``weight``/``weight_scale_inv`` onto registered host
+    memory.  A layerwise reload moves the parameters to the meta device and would
+    materialize them again on the device - a full per-rank allocation for a table
+    this large (see ``worker/patch_offload_reload.py`` in
+    ``vllm_ascend/patch/__init__.py``).  Attaching the host range here gives the
+    reload the tensor to rebuild the parameter on, so an update lands in the
+    storage the lookup kernel already reads.
+    """
+    for param_name, holder_attr in _HOST_OFFLOAD_PARAMS:
+        param = getattr(module, param_name, None)
+        holder = getattr(module, holder_attr, None)
+        if holder is None:
+            continue
+        if not isinstance(param, nn.Parameter):
+            raise TypeError(f"{type(module).__name__}.{param_name} must be a Parameter to carry {holder_attr}")
+        # Registered storage, not a registered buffer: a non-persistent buffer
+        # that aliases a parameter's storage is deliberately not captured for
+        # reloading (`_is_non_persistent_parameter_alias_buffer`), and the
+        # quantized scale parameter is a second alias of the codes range.
+        try:
+            param.__dict__[HOST_OFFLOAD_STORAGE_ATTR] = holder.tensor
+        except AttributeError as exc:
+            raise RuntimeError(
+                f"{type(module).__name__}.{param_name} cannot carry its host storage; a layerwise reload would "
+                f"rebuild the offloaded table on the device and run out of memory"
+            ) from exc
+
 
 class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
     """TP(+EDP) head shard with BF16, INT8/FP32 or native MXFP8/E8M0."""
@@ -163,6 +201,8 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                     self._shared_pool_client = None
             raise
 
+        register_host_offload_storage(self)
+
     def _get_shard_info(self) -> tuple[int, int]:
         if self.dp_size == 1:
             return self.tp_size, get_tensor_model_parallel_rank()
@@ -220,17 +260,23 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         if self._shared_group is not None:
             # One physical copy of the mapped range, registered by each
             # rank in the sharing group.
-            self._codes_uva = SharedUvaBuffer(codes_shape, self.storage_dtype, device, self._shared_group)
+            self._codes_uva = SharedUvaBuffer(
+                codes_shape, self.storage_dtype, device, self._shared_group, "_codes_uva", self
+            )
             if quantized:
-                self._scales_uva = SharedUvaBuffer(scales_shape, self.scale_dtype, device, self._shared_group)
+                self._scales_uva = SharedUvaBuffer(
+                    scales_shape, self.scale_dtype, device, self._shared_group, "_scales_uva", self
+                )
             return self._codes_uva.tensor, self._scales_uva.tensor if self._scales_uva is not None else None
-        self._codes_uva = HostUvaBuffer(codes_shape, self.storage_dtype, device)
+        self._codes_uva = HostUvaBuffer(codes_shape, self.storage_dtype, device, "_codes_uva", self)
         if quantized:
-            self._scales_uva = HostUvaBuffer(scales_shape, self.scale_dtype, device)
+            self._scales_uva = HostUvaBuffer(scales_shape, self.scale_dtype, device, "_scales_uva", self)
+            assert self._scales_uva.tensor is not None
             self._scales_uva.tensor.zero_()
         # Same reason as the device path: aclrtMallocHost hands back whatever
         # was in the pages, and the profiling forward looks up before the
         # checkpoint load fills them.
+        assert self._codes_uva.tensor is not None
         self._codes_uva.tensor.zero_()
         return self._codes_uva.tensor, self._scales_uva.tensor if self._scales_uva is not None else None
 
@@ -269,6 +315,11 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             buffer.close()
             setattr(self, name, None)
             param = getattr(self, alias)
+            # The released range is gone; drop the host storage the alias was
+            # rebuilt on so a later reload cannot materialize a parameter into
+            # unmapped host memory.
+            if isinstance(param, nn.Parameter):
+                param.__dict__.pop(HOST_OFFLOAD_STORAGE_ATTR, None)
             setattr(
                 self,
                 alias,

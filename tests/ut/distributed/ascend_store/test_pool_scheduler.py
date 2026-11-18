@@ -1013,7 +1013,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
             },
             num_layers=4,
         )
-        scheduler = create_kv_pool_scheduler(config, use_layerwise=True)
+        scheduler = LayerwiseKVPoolScheduler(config, use_layerwise=True, layerwise_offload=True)
         self._set_running_chunk(scheduler)
 
         meta = scheduler.build_connector_meta(self._make_running_chunk_output([]))
@@ -1035,7 +1035,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
             },
             num_layers=4,
         )
-        scheduler = create_kv_pool_scheduler(config, use_layerwise=True)
+        scheduler = LayerwiseKVPoolScheduler(config, use_layerwise=True, layerwise_offload=True)
         request = MagicMock()
         request.num_computed_tokens = 32
         request.num_prompt_tokens = 32
