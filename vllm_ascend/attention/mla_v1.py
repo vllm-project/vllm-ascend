@@ -106,6 +106,10 @@ def _uses_unpadded_drafter_batch(speculative_config) -> bool:
 # Exclusive batch * K limit of the fused op with perm_x1=(1, 0, 2).
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
 
+FIA_MLA_LATENT_DIM = 512
+FIA_MLA_ROPE_DIM = 64
+FIA_MLA_MAX_QUERY_HEADS = 128
+
 PROLOG_V3_SUPPORTED_INPUT_SIZES = (1024, 2048, 3072, 4096, 5120, 6144, 7168, 7680, 8192)
 PROLOG_V3_MAX_BLOCK_SIZE = 1024
 
@@ -1084,9 +1088,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # may be a quantization rollback layer.
         if not self.fa_quant_layer:
             self.dtype = self.vllm_config.model_config.dtype
-        # For models whose num_heads is not a power of 2 (e.g., GLM-4.7-Flash
-        # with 20 heads), ascend attention ops require padding heads to the
-        # next power of 2.
+        # Keep the padded size for MLA kernels that require power-of-two heads.
         self.num_heads_padded = 1 << (self.num_heads - 1).bit_length()
         self.head_padding = self.num_heads_padded - self.num_heads
         self.mlapo_num_heads = self.num_heads
@@ -2779,9 +2781,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         dequant_scale_q_nope = decode_preprocess_res.dequant_scale_q_nope
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
-        # TODO: The CANN package is expected to support num_heads that are not
-        # powers of 2 in 2026 Q2. Once supported, all padding operations under
-        # `if self.head_padding > 0` in this function can be removed.
+        fia_num_heads = self.num_heads_padded
         num_tokens = q_nope.size(0)
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
@@ -2838,10 +2838,23 @@ class AscendMLAImpl(MLAAttentionImpl):
             q_nope = q_nope.view(num_tokens, self.num_heads, -1).contiguous()
             q_pe = q_pe.view(num_tokens, self.num_heads, -1)
             if self.head_padding > 0:
-                q_pe = F.pad(q_pe, (0, 0, 0, self.head_padding), "constant", 0)
-                q_nope = F.pad(q_nope, (0, 0, 0, self.head_padding), "constant", 0)
+                # Both mask modes below support native heads for BF16 split-RoPE FIA.
+                if (
+                    not self.fa_quant_layer
+                    and not self.enable_kv_nz
+                    and q_nope.dtype == k_nope.dtype == torch.bfloat16
+                    and self.num_kv_heads == 1
+                    and 1 <= self.num_heads <= FIA_MLA_MAX_QUERY_HEADS
+                    and self.kv_lora_rank == FIA_MLA_LATENT_DIM
+                    and self.qk_rope_head_dim in (0, FIA_MLA_ROPE_DIM)
+                    and get_current_hardware_profile().supports(HardwareCapability.FIA_MLA_BF16_TND_NATIVE_HEADS)
+                ):
+                    fia_num_heads = self.num_heads
+                else:
+                    q_pe = F.pad(q_pe, (0, 0, 0, self.head_padding), "constant", 0)
+                    q_nope = F.pad(q_nope, (0, 0, 0, self.head_padding), "constant", 0)
             # Output shape: [num_heads, num_tokens, dim]
-            attn_output_shape = (self.num_heads_padded, num_tokens, self.kv_lora_rank)
+            attn_output_shape = (fia_num_heads, num_tokens, self.kv_lora_rank)
             if not attn_metadata.causal:
                 # K3's DSpark draft block is bidirectional. With FIA this is
                 # sparse_mode=0 and no mask; a default mask here would hide the
@@ -2913,18 +2926,17 @@ class AscendMLAImpl(MLAAttentionImpl):
         # mla_nope_zero_rope64: FIA MLA requires rope D=64. All-zero rope
         # keeps NoPE scores and stays on the kv_lora_rank=512 MLA kernel.
         if self.qk_rope_head_dim == 0:
-            rope_dim = 64
             zero_rope_cache = decode_meta.nope_zero_rope_cache
             assert zero_rope_cache is not None, (
                 "MLA-NoPE decode needs the zero rope buffers owned by the metadata "
                 "builder, but none were created: hf_text_config.qk_rope_head_dim "
                 "disagrees with this layer's qk_rope_head_dim."
             )
-            q_pe = _mla_nope_zero_rope(q_nope, rope_dim, zero_rope_cache)
-            k_pe = _mla_nope_zero_rope(k_nope, rope_dim, zero_rope_cache)
+            q_pe = _mla_nope_zero_rope(q_nope, FIA_MLA_ROPE_DIM, zero_rope_cache)
+            k_pe = _mla_nope_zero_rope(k_nope, FIA_MLA_ROPE_DIM, zero_rope_cache)
 
         common_kwargs = {
-            "num_query_heads": self.num_heads_padded,
+            "num_query_heads": fia_num_heads,
             "num_key_value_heads": self.num_kv_heads,
             "input_layout": input_layout,
             "atten_mask": attn_mask,
@@ -2973,7 +2985,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 weak_ref_tensors(k_nope),
                 weak_ref_tensors(q_pe),
                 weak_ref_tensors(k_pe),
-                self.num_heads_padded,
+                fia_num_heads,
                 self.num_kv_heads,
                 input_layout,
                 weak_ref_tensors(attn_mask) if attn_mask is not None else None,
@@ -3016,7 +3028,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         if fp8_token_major_output:
             return self._v_up_proj_fp8_batch_major(attn_output)
-        if self.head_padding > 0:
+        if fia_num_heads != self.num_heads:
             attn_output = attn_output[: self.num_heads]
         return self._v_up_proj(attn_output)
 
