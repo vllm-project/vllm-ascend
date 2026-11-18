@@ -101,7 +101,7 @@ def _bare_executor(**kwargs) -> ActionExecutor:
 
 def test_handle_returns_early_when_detection_gated():
     ex = _bare_executor()
-    ex.can_run_detection = MagicMock(return_value=False)
+    ex.is_action_leader = MagicMock(return_value=False)
     ex.resolve_actions = MagicMock()
     ex.handle(
         Incident(incident_type="token_repeat", req_id="r1"),
@@ -113,7 +113,7 @@ def test_handle_returns_early_when_detection_gated():
 
 def test_handle_write_report_false_strips_report_action():
     ex = _bare_executor()
-    ex.can_run_detection = MagicMock(return_value=True)
+    ex.is_action_leader = MagicMock(return_value=True)
     prepared: list[str] = []
 
     def _get_action(name: str):
@@ -145,7 +145,7 @@ def test_handle_write_report_false_strips_report_action():
 
 def test_handle_manual_trigger_injects_dump_kv_all_requests():
     ex = _bare_executor()
-    ex.can_run_detection = MagicMock(return_value=True)
+    ex.is_action_leader = MagicMock(return_value=True)
     rc = ex._runtime_config
     rc.detector_section.return_value = {"on_trigger": ["report"]}
     captured: list[dict] = []

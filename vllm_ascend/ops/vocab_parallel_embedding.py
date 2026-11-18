@@ -52,6 +52,7 @@ from vllm_ascend.utils import (
     enable_pcp_embedding_lmhead_weight_sharding,
     get_potential_max_tokens,
     lmhead_tp_enable,
+    lmhead_tp_pad_rows,
 )
 
 
@@ -500,6 +501,40 @@ def lmhead_all_to_all(
     return output.permute(1, 0, 2).contiguous().view(-1, world_size * vocab_per_partition)
 
 
+def gather_lm_head_hidden_states(hidden_states: torch.Tensor, capacity: int | None = None) -> torch.Tensor:
+    """Gather DP rows for vocabulary-sharded scoring; callers may supply padded rows."""
+    if capacity is not None:
+        hidden_states = lmhead_tp_pad_rows(hidden_states, capacity, "max_num_seqs * num_speculative_tokens")
+    return get_lmhead_tp_group().all_gather(hidden_states, dim=0)
+
+
+def gather_lm_head_outputs(output: torch.Tensor, parallel_mode: VocabParallelMode) -> torch.Tensor:
+    """Exchange dense logits or candidates, keeping any trailing score/ID pairs intact.
+
+    Dim 0 contains token rows and dim 1 vocabulary entries or candidates.
+    Fine-grained TP routes rows to their DP owner; PCP/standard TP joins
+    vocabulary shards for identical rows. This helper does not select TopK.
+    """
+    if parallel_mode is VocabParallelMode.FINE_GRAINED:
+        group = get_lmhead_tp_group()
+        exchanged = lmhead_all_to_all(output.flatten(1), group)
+        return exchanged.reshape(
+            output.shape[0] // group.world_size, output.shape[1] * group.world_size, *output.shape[2:]
+        )
+    # Use the same vocabulary/candidate axis for [rows, vocab] logits and
+    # [rows, candidates, 2] packed score/ID tensors.
+    dim = 1 - output.ndim
+    if parallel_mode is VocabParallelMode.PCP_X_TP:
+        pcp_group = get_pcp_group()
+        if pcp_group.world_size > 1:
+            output = pcp_group.all_gather(output.contiguous(), dim=dim)
+    if parallel_mode is not VocabParallelMode.REPLICATED:
+        tp_group = get_tp_group()
+        if tp_group.world_size > 1:
+            output = tp_group.all_gather(output.contiguous(), dim=dim)
+    return output
+
+
 class AscendLogitsProcessor(LogitsProcessor):
     """
     Register LogitsProcessor as a custom op for Ascend.
@@ -543,15 +578,8 @@ class AscendLogitsProcessor(LogitsProcessor):
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor:
         """Return full-vocab logits for globally restored token rows."""
-        pcp_group = get_pcp_group()
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
-        # PCPManager restores the global token order before sampling, so only
-        # the vocabulary shards need to be reconstructed here.
-        if pcp_group.world_size > 1:
-            logits = pcp_group.all_gather(logits, dim=-1)
-        tp_group = get_tp_group()
-        if tp_group.world_size > 1:
-            logits = tp_group.all_gather(logits, dim=-1)
+        logits = gather_lm_head_outputs(logits, lm_head.parallel_mode)
         return logits[..., : self.org_vocab_size]
 
     def _get_logits_lmheadtp(
@@ -561,10 +589,10 @@ class AscendLogitsProcessor(LogitsProcessor):
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor | None:
         # Gather hidden states from all devices in tensor parallel group
-        gathered_hidden_states = get_lmhead_tp_group().all_gather(hidden_states, dim=0)
+        gathered_hidden_states = gather_lm_head_hidden_states(hidden_states)
         logits = self._apply_head(lm_head, gathered_hidden_states, embedding_bias)
         # Gather logits for tensor parallel
-        logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
+        logits = gather_lm_head_outputs(logits, lm_head.parallel_mode)
 
         # Remove paddings in vocab (if any)
         if logits is not None:
