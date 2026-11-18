@@ -132,8 +132,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.use_block_key_layerwise = self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = self.layerwise_data_plane == "gva"
         self._step_load_keys: set[str] = set()
-        # Request ID -> cache group ID -> request block index -> (saved end token, pool key).
-        self._snapshot_keys: dict[str, dict[int, dict[int, tuple[int, str]]]] = {}
+        # Request ID -> cache group ID -> request block index -> (saved end token, pool key, is public).
+        self._snapshot_keys: dict[str, dict[int, dict[int, tuple[int, str, bool]]]] = {}
         super()._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self._dspark_draft_layer_names = (
@@ -796,7 +796,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         group_id: int,
         cached_tokens: int,
         block_hashes: Sequence[BlockHash],
-    ) -> tuple[int, Callable[[int], str | None]] | None:
+    ) -> tuple[int, Callable[[int], tuple[str, bool] | None]] | None:
         if group_id not in self._reused_layers_by_group:
             # Resident pages remain available for the running request.
             return None
@@ -805,23 +805,22 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         uses_align_state = self.group_uses_align_state[group_id]
         snapshot = self._snapshot_keys.get(request.req_id, {}).get(group_id, {})
 
-        def get_saved_key(block_idx: int) -> str | None:
+        def get_saved_key(block_idx: int) -> tuple[str, bool] | None:
+            """Return the pool key and whether it is public."""
             block_end = (block_idx + 1) * block_size
             end = min(block_end, cached_tokens)
             saved = snapshot.get(block_idx)
             if saved is not None:
-                saved_end_token, pool_key = saved
+                saved_end_token, pool_key, is_public = saved
                 if saved_end_token == end or (not uses_align_state and saved_end_token > end):
                     # A hash can become available after the preceding save.
-                    return pool_key
-            # An aligned Mamba endpoint uses the single-page transfer slot
-            # even when its complete state is stored under a public key.
+                    return pool_key, is_public
             if end == block_end and block_idx < len(block_hashes):
-                return self._make_layerwise_full_key(group_id, block_hash_to_str(block_hashes[block_idx]))
+                return self._make_layerwise_full_key(group_id, block_hash_to_str(block_hashes[block_idx])), True
             logger.error("No saved KV page for request %s group %d block %d", request.req_id, group_id, block_idx)
             return None
 
-        return (0 if uses_align_state else cached_tokens // block_size), get_saved_key
+        return cached_tokens // block_size, get_saved_key
 
     def _layerwise_key_batches(self, keys: list[str]) -> list[list[str]]:
         batch_size = self.layerwise_max_transfer_blocks if self.layerwise_max_transfer_blocks > 0 else max(1, len(keys))
@@ -1377,11 +1376,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 if self.layerwise_offload:
                     pages = self._snapshot_keys.setdefault(request.req_id, {}).setdefault(group_id, {})
                     pages.update(
-                        (index, ((index + 1) * effective_block_size, key))
+                        (index, ((index + 1) * effective_block_size, key, index < len(group_block_hashes)))
                         for index, key in zip(candidate_blocks, candidate_keys)
                     )
                     if partial_key is not None:
-                        pages[partial_block_index] = (request.target_token_len, partial_key)
+                        pages[partial_block_index] = (request.target_token_len, partial_key, False)
                 if not save_owner:
                     all_group_gvas.append(np.zeros(len(block_ids_by_group), dtype=np.int64))
                     all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
@@ -1657,14 +1656,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if self.layerwise_offload and request.load_spec.layerwise_previous_step:
                 if not reuses_buffer:
                     continue
-                full_blocks = 0 if self.group_uses_align_state[group_id] else cached_full_blocks
-            partial_block_index, _ = self._resolve_layerwise_load_partial(
-                request,
-                group_id,
-                cached_tokens,
-                block_size,
-                len(group_block_hashes),
-            )
+                full_blocks = cached_full_blocks
+            partial_block_index = self._resolve_layerwise_load_partial(cached_tokens, block_size)
             if not reuses_buffer:
                 partial_block_index = None
             partial_gva = (
@@ -1736,29 +1729,13 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
 
     def _resolve_layerwise_load_partial(
         self,
-        request: ReqMeta,
-        group_id: int,
         cached_tokens: int,
         block_size: int,
-        hash_count: int,
-    ) -> tuple[int | None, int]:
-        """Select the trailing page in the transfer, independently of hash availability."""
-        if (
-            self.layerwise_offload
-            and request.load_spec is not None
-            and request.load_spec.layerwise_previous_step
-            and cached_tokens > 0
-        ):
-            if self.group_uses_align_state[group_id] or cached_tokens % block_size:
-                return (cached_tokens - 1) // block_size, cached_tokens
-            return None, cached_tokens
-        partial_block_index = get_partial_block_index(
-            cached_tokens,
-            block_size,
-            hash_count,
-            self.layerwise_offload,
-        )
-        return partial_block_index, cached_tokens
+    ) -> int | None:
+        """Return the trailing incomplete block for offload restores."""
+        if self.layerwise_offload and cached_tokens % block_size:
+            return cached_tokens // block_size
+        return None
 
     def _prepare_load_gvas(self, requests: list[ReqMeta]) -> bool | None:
         """Fetch per-rank GVA and acquire read lease for the load path.
@@ -1828,13 +1805,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     continue
                 full_len = len(block_ids_by_group)
 
-                partial_block_index, partial_end_token = self._resolve_layerwise_load_partial(
-                    request,
-                    group_id,
-                    cached_tokens,
-                    effective_block_size,
-                    len(group_block_hashes),
-                )
+                partial_block_index = self._resolve_layerwise_load_partial(cached_tokens, effective_block_size)
                 if partial_block_index is not None and (
                     partial_block_index < load_start_block or partial_block_index >= full_len
                 ):
@@ -1870,18 +1841,24 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     return False
 
                 keys = []
+                private_keys: set[str] = set()
                 if partial_block_index is not None:
                     block_indices.append(partial_block_index)
                 for block_idx in block_indices:
                     if get_saved_key is not None:
-                        key = get_saved_key(block_idx)
-                        if key is None:
+                        saved_key = get_saved_key(block_idx)
+                        if saved_key is None:
                             return False
+                        key, is_public = saved_key
                     elif block_idx == partial_block_index:
-                        key = self._make_layerwise_partial_key(request, group_id, block_idx, partial_end_token)
+                        key = self._make_layerwise_partial_key(request, group_id, block_idx, cached_tokens)
+                        is_public = False
                     else:
                         block_hash = block_hash_to_str(group_block_hashes[block_idx])
                         key = self._make_layerwise_full_key(group_id, block_hash)
+                        is_public = True
+                    if not is_public:
+                        private_keys.add(key)
                     keys.append(key)
                 if not keys:
                     all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
@@ -1925,19 +1902,19 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     leased_keys = []
                     for gva_index, lease_res in zip(valid_gva_indices, lease_results):
                         block_idx = block_indices[gva_index]
-                        if lease_res == MEMCACHE_UNMATCHED_STATE and block_idx == partial_block_index:
-                            partial_key = keys[gva_index]
+                        if lease_res == MEMCACHE_UNMATCHED_STATE and keys[gva_index] in private_keys:
+                            private_key = keys[gva_index]
                             for retry in range(1, PARTIAL_LEASE_RETRY_COUNT + 1):
                                 time.sleep(PARTIAL_LEASE_RETRY_INTERVAL_S)
                                 retry_results = self.m_store.batch_add_lease(
-                                    [partial_key],
+                                    [private_key],
                                     LAYERWISE_READ_LEASE_TTL_MS,
                                 )
                                 if retry_results is None or len(retry_results) != 1:
                                     return False
                                 lease_res = retry_results[0]
                                 if lease_res == 0:
-                                    self._step_load_keys.add(partial_key)
+                                    self._step_load_keys.add(private_key)
                                 if lease_res != MEMCACHE_UNMATCHED_STATE:
                                     break
                         block_id = int(block_ids_by_group[block_idx]) if block_idx < len(block_ids_by_group) else None
