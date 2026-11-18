@@ -1849,6 +1849,9 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
     def prime_engram_v2_graph_inputs(self, padded_tokens):
         return self.model.prime_engram_v2_graph_inputs(padded_tokens)
 
+    def compute_logits_local(self,hidden_states: torch.Tensor,) -> torch.Tensor | None:
+        return self.logits_processor(self.lm_head,hidden_states,skip_gather=True,)
+    
     def retire_engram_lookups(self, *, reset_events=False):
         self.model.retire_engram_lookups(reset_events=reset_events)
 
