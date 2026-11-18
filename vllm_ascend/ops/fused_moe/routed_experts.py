@@ -26,6 +26,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoERouter, RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.router.custom_routing_router import CustomRoutingRouter
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.utils import replace_parameter
 
@@ -712,12 +713,22 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             sync_lora_context(self.quant_method, lora_context)
 
         num_source_tokens = hidden_states.shape[0]
+        prepare_quant_type = self.quant_type
+        if (
+            prepare_quant_type == QuantType.W8A8
+            and isinstance(moe_comm_method, AllGatherCommImpl)
+            and self.moe_config.pcp_size > 1
+            and not self.moe_config.is_sequence_parallel
+            and (self.apply_router_weight_on_input or isinstance(self.router, CustomRoutingRouter))
+        ):
+            # Custom routing and input-side weighting consume floating-point activations.
+            prepare_quant_type = QuantType.NONE
         prepare_output = moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
             # The SP model wrapper already shards and gathers the MoE sequence.
             replace_allreduce=self.moe_config.is_sequence_parallel,
-            quant_type=self.quant_type,
+            quant_type=prepare_quant_type,
         )
         hidden_states = prepare_output.hidden_states
         router_logits = prepare_output.router_logits
