@@ -5892,6 +5892,32 @@ class NPUModelRunner(GPUModelRunner):
                         and len(kv_cache_shape) == 5
                         and kv_cache_shape[0] == 2
                     ):
+                        if current_kv_cache_spec.page_size_padded is not None:
+                            # Shared hybrid pages are padded individually. Trimming
+                            # padding from the whole allocation moves logical block
+                            # IDs into other physical pages. Keep K and V within
+                            # each kernel block's share of its manager page.
+                            page_bytes = current_kv_cache_spec.page_size_bytes
+                            dtype = current_kv_cache_spec.dtype
+                            dtype_size = get_dtype_size(dtype)
+                            if (
+                                block_size_chunk < 1
+                                or current_kv_cache_spec.block_size % kernel_block_size
+                                or page_bytes % (block_size_chunk * dtype_size)
+                            ):
+                                raise ValueError("Padded attention pages must split into dtype-aligned kernel blocks.")
+                            kernel_page_bytes = page_bytes // block_size_chunk
+                            k_shape = kv_cache_shape[1:]
+                            v_shape = (*kv_cache_shape[1:-1], current_kv_cache_spec.head_size_v)
+                            payload_bytes = (math.prod(k_shape[1:]) + math.prod(v_shape[1:])) * dtype_size
+                            if payload_bytes > kernel_page_bytes:
+                                raise ValueError("Padded attention page is too small for its K/V payload.")
+                            kv_caches[layer_name] = tuple(
+                                self._adjust_kv_layout(
+                                    raw_k_tensor, [k_shape, v_shape], [dtype, dtype], kernel_page_bytes
+                                )
+                            )
+                            continue
                         raw_typed = raw_k_tensor.view(current_kv_cache_spec.dtype)
                         if raw_typed.numel() == math.prod(kv_cache_shape):
                             hidden_size = math.prod(kv_cache_shape[2:])
