@@ -22,7 +22,7 @@
 # This file is a part of the vllm-ascend project
 #
 
-"""Generate a compact PR comment from diff-cover output.
+"""Generate a compact PR comment from diff-cover and slipcover output.
 
 diff-cover produces a markdown report like:
 
@@ -43,9 +43,25 @@ diff-cover produces a markdown report like:
 This script extracts the H1 title and the three summary bullet points
 (Total, Missing, Coverage) and writes them to the output file as a
 compact PR comment.
+
+With --input-json, the overall coverage from a slipcover coverage.json is
+rendered in the same format as the first part of the comment:
+
+    # Total Coverage
+    - **Total**: 145055 lines
+    - **Missing**: 41592 lines
+    - **Coverage**: 71%
+
+The second part keeps the original diff-cover summary:
+
+    # Diff Coverage
+    - **Total**: 191 lines
+    - **Missing**: 85 lines
+    - **Coverage**: 55%
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -82,6 +98,39 @@ def extract_lines(markdown: str) -> list[str]:
     return [line for line in (title,) + tuple(summary_bullets) if line is not None]
 
 
+def summary_lines_from_json(json_text: str) -> list[str]:
+    """Render the top-level summary of a slipcover coverage.json.
+
+    Generates the first part of the comment, mirroring the diff-cover
+    summary format:
+
+        # Total Coverage
+        - **Total**: 145055 lines
+        - **Missing**: 41592 lines
+        - **Coverage**: 71%
+
+    Returns an empty list when the JSON carries no top-level summary.
+    """
+    try:
+        summary = json.loads(json_text)["summary"]
+        covered = int(summary["covered_lines"])
+        missing = int(summary["missing_lines"])
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return []
+
+    percent = summary.get("percent_covered_display")
+    if percent is None:
+        percent = round(float(summary["percent_covered"]))
+    if isinstance(percent, float) and percent.is_integer():
+        percent = int(percent)
+    return [
+        "# Total Coverage",
+        f"- **Total**: {covered + missing} lines",
+        f"- **Missing**: {missing} lines",
+        f"- **Coverage**: {percent}%",
+    ]
+
+
 def build_comment(lines: list[str], summary_url: str = "") -> str:
     """Render the extracted lines as a markdown PR comment."""
     if not lines:
@@ -94,18 +143,28 @@ def build_comment(lines: list[str], summary_url: str = "") -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", required=True, help="Path to diff_coverage.md")
+    parser.add_argument("--input-json", required=True, help="Path to coverage.json produced by slipcover")
+    parser.add_argument("--input-diff", required=True, help="Path to diff_coverage.md")
     parser.add_argument("--output", required=True, help="Path to write coverage_comment.md")
     parser.add_argument("--summary-url", default="", help="URL to the cpu-ut job execution page")
     args = parser.parse_args()
 
-    in_path = Path(args.input)
-    if not in_path.exists():
-        print(f"::warning::input file {in_path} not found; no coverage comment generated", file=sys.stderr)
+    json_path = Path(args.input_json)
+    if not json_path.exists():
+        print(f"::warning::input json file {json_path} not found; no coverage comment generated", file=sys.stderr)
+        return 0
+    total_lines = summary_lines_from_json(json_path.read_text(encoding="utf-8"))
+    if not total_lines:
+        print(f"::warning::no top-level summary in {json_path}; no coverage comment generated", file=sys.stderr)
         return 0
 
-    markdown = in_path.read_text(encoding="utf-8")
-    lines = extract_lines(markdown)
+    diff_path = Path(args.input_diff)
+    if not diff_path.exists():
+        print(f"::warning::input file {diff_path} not found; no coverage comment generated", file=sys.stderr)
+        return 0
+    diff_lines = extract_lines(diff_path.read_text(encoding="utf-8"))
+
+    lines = total_lines + ([""] if diff_lines else []) + diff_lines
     comment = build_comment(lines, args.summary_url)
 
     out_path = Path(args.output)

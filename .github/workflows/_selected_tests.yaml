@@ -429,7 +429,8 @@ jobs:
         if: ${{ matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' }}
         run: |
            python3 .github/workflows/scripts/coverage_comment.py \
-            --input ./tests/diff_coverage.md \
+            --input-json ./tests/coverage.json \
+            --input-diff ./tests/diff_coverage.md \
             --output ./tests/coverage_comment.md \
             --summary-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
