@@ -148,8 +148,6 @@ class DeepseekV4DSparkModel(nn.Module):
 
         first_layer = self.layers[str(self.mtp_start_layer_idx)]
         self.use_sequence_parallel_moe = first_layer.use_sequence_parallel_moe
-        # Include redundant physical slots so every routed slot loads its weights.
-        self.num_redundant_experts = first_layer.mlp.n_redundant_experts
 
         # Stack the WKV projections from all DSpark layers into one linear.
         #
@@ -391,9 +389,7 @@ class DeepseekV4DSparkModel(nn.Module):
     ) -> torch.Tensor:
         return logits_processor(lm_head, self.norm(hidden_states))
 
-    def get_expert_mapping(self, *, num_redundant_experts: int | None = None) -> list[tuple[str, str, int, str]]:
-        if num_redundant_experts is None:
-            num_redundant_experts = self.num_redundant_experts
+    def get_expert_mapping(self, *, num_redundant_experts: int = 0) -> list[tuple[str, str, int, str]]:
         return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
@@ -452,8 +448,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
 
         self.num_moe_layers = len(self.moe_layers)
         self.extract_moe_parameters(example_moe)
-        # EPLB identifies a MoE model via num_moe_layers > 0
-        self.num_moe_layers = len(self.moe_layers)
 
     def forward(
         self,

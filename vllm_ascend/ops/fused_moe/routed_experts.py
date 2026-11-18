@@ -48,7 +48,7 @@ from vllm_ascend.ops.fused_moe.router.fused_topk_router import AscendFusedTopKRo
 from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
 from vllm_ascend.quantization.nz import NzCastSpec
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, _should_trans_nz, maybe_trans_nz, transpose_weight_to_runtime
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, _should_trans_nz, maybe_trans_nz, transpose_expert_dims
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -108,7 +108,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # reuse storage in the same place that chooses the expert weight format.
         for name in ("w13_weight", "w2_weight"):
             weight = getattr(layer, name)
-            transposed = transpose_weight_to_runtime(self._maybe_pad_weight(weight.data))
+            transposed = transpose_expert_dims(self._maybe_pad_weight(weight.data))
             if weight.shape != transposed.shape and (enable_fused_mc2 or _should_trans_nz(transposed)):
                 # NZ packing reads the NPU storage's base shape. Reusing the
                 # pre-transpose storage here would pack a rectangular matrix
