@@ -107,11 +107,9 @@ Per-req INFO short-log throttle is a fixed internal interval (2s), not a JSON fi
 | `enabled` | bool | `false` | Master switch |
 | `think_end` | int | `-1` | `-1` chat mode, or explicit `</think>` token id for reasoning |
 
-Requires the optional native extension:
-
-```bash
-pip install ./tools/token_repeat_pattern/src
-```
+Native CPU pattern backend is built with vllm-ascend (no separate install).
+Former sliding-window keys (`window`, `repeat_sum_threshold`, `min_tokens`,
+`consecutive_hits`, `ignore_token_ids`, `algorithm`) are rejected as unknown.
 
 See [token_repeat_pattern.md](../feature_guide/token_repeat_pattern.md).
 

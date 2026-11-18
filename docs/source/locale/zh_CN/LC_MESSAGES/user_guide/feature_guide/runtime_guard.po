@@ -304,9 +304,6 @@ msgstr ""
 "`request_info` / `.pt` 会设置 `request_finished_at_dump: true` —— KV "
 "可能已被释放或复用，因此应将张量视为可疑。被回收的 ids 在布防时会被拒绝。"
 
-msgid "| `token_repeat` | after sample | Pattern-based stutter / repetition (native CPU extension) |"
-msgstr "| `token_repeat` | 采样后 | 基于模式的卡顿/重复（原生 CPU 扩展） |"
-
 msgid ""
 "```json\n"
 "\"token_repeat\": {\n"
@@ -326,10 +323,15 @@ msgstr ""
 "}\n"
 "```"
 
+
+msgid "| `token_repeat` | after sample | Pattern-based stutter / repetition (in-tree native CPU extension) |"
+msgstr "| `token_repeat` | 采样后 | 基于模式的卡顿/重复（随包原生 CPU 扩展） |"
+
 msgid "## Token repetition (pattern)"
 msgstr "## Token 重复检测（pattern）"
 
 msgid ""
-"See [token_repeat_pattern.md](token_repeat_pattern.md) for the native CPU extension\n"
-"installation, tokenizer warmup, configuration and validation."
-msgstr "参见 [token_repeat_pattern.md](token_repeat_pattern.md)，了解原生 CPU 扩展的安装、tokenizer 预热、配置与验证。"
+"See [token_repeat_pattern.md](token_repeat_pattern.md) for tokenizer warmup,\n"
+"configuration, alert reasons, and validation. The native extension is built\n"
+"with vllm-ascend."
+msgstr "参见 [token_repeat_pattern.md](token_repeat_pattern.md)，了解 tokenizer 预热、配置、告警 reason 与验证。原生扩展随 vllm-ascend 构建。"

@@ -43,7 +43,8 @@ class TokenRepeatDetector(ConfigBackedDetector):
     Consumes the cumulative output stream from ``RequestIoSnapshotManager``
     (IO is appended once in after-sample, not in ``check_after_spec``). A
     per-req cursor tracks how far the stream has been folded so each id is
-    pushed once. Requires ``pip install ./tools/token_repeat_pattern/src``.
+    pushed once. Uses the in-tree ``native_pattern`` CPU extension built with
+    vllm-ascend.
     """
 
     incident_type = "token_repeat"
@@ -74,7 +75,7 @@ class TokenRepeatDetector(ConfigBackedDetector):
         self._epoch = 0
         self._think_end = -1
         self._backend: PatternBackend | None = None
-        self._states: dict[str, Any] = {}
+        self._states: dict[str, Any] = {}  # native PatternDetector state objects
         self._owners: dict[str, ReferenceType[RequestGuardState]] = {}
         self._start_offset: dict[str, int] = {}
         self._failed: set[str] = set()
@@ -131,7 +132,7 @@ class TokenRepeatDetector(ConfigBackedDetector):
         except Exception:
             # Optional detection must not break model initialization or the bus.
             logger.exception(
-                "[runtime_guard: token_repeat] pattern warmup failed; detection unavailable until re-enabled"
+                "[runtime_guard: token_repeat] pattern warmup failed; detection unavailable until fixed and re-enabled"
             )
 
     def rebind_runner(self, runner: Any, *, runtime_config: RuntimeConfig | None = None) -> None:
@@ -298,27 +299,28 @@ class TokenRepeatDetector(ConfigBackedDetector):
             if not self.enabled:
                 return []
             skipped = RequestGuardStore.get().stopped_req_ids()
-            alerts = []
+            alerts: list[Incident] = []
             pending = list(req_ids)
-            for _ in range(len(req_ids) + 1):
+            # Keep folding until every cursor catches up (or backend is gone).
+            while pending and self._backend is not None:
                 alerts.extend(self.check_all(None, pending, skipped))
-                pending = [
-                    rid
-                    for rid in pending
-                    if rid not in skipped
-                    and rid not in self._alerted
-                    and rid not in self._failed
-                    and (owner := RequestGuardStore.get().get_state(rid)) is not None
-                    and self._consumed_len.get(rid, 0) < len(owner.output_token_ids)
-                ]
-                if not pending or self._backend is None:
+                next_pending = []
+                for rid in pending:
+                    if rid in skipped or rid in self._alerted or rid in self._failed:
+                        continue
+                    owner = RequestGuardStore.get().get_state(rid)
+                    if owner is None:
+                        continue
+                    if self._consumed_len.get(rid, 0) < len(owner.output_token_ids):
+                        next_pending.append(rid)
+                if next_pending == pending:
+                    self._failed.update(pending)
+                    logger.error(
+                        "[runtime_guard: token_repeat] terminal pattern drain could not consume requests: %s",
+                        pending,
+                    )
                     break
-            if pending and self._backend is not None:
-                self._failed.update(pending)
-                logger.error(
-                    "[runtime_guard: token_repeat] terminal pattern drain could not consume requests: %s",
-                    pending,
-                )
+                pending = next_pending
             backend = self._backend
             if backend is None:
                 return alerts

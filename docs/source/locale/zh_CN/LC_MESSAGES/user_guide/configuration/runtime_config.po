@@ -396,12 +396,6 @@ msgstr "| `enabled` | bool | `false` | 总开关 |"
 msgid "| `think_end` | int | `-1` | `-1` chat mode, or explicit `</think>` token id for reasoning |"
 msgstr "| `think_end` | int | `-1` | `-1` 为 chat 模式；否则为推理场景下显式的 `</think>` token id |"
 
-msgid "Requires the optional native extension:"
-msgstr "需要可选的原生扩展："
-
-msgid "See [token_repeat_pattern.md](../feature_guide/token_repeat_pattern.md)."
-msgstr "参见 [token_repeat_pattern.md](../feature_guide/token_repeat_pattern.md)。"
-
 msgid ""
 "```json\n"
 "{\n"
@@ -444,3 +438,15 @@ msgstr ""
 "  }\n"
 "}\n"
 "```"
+
+msgid ""
+"Native CPU pattern backend is built with vllm-ascend (no separate install).\n"
+"Former sliding-window keys (`window`, `repeat_sum_threshold`, `min_tokens`,\n"
+"`consecutive_hits`, `ignore_token_ids`, `algorithm`) are rejected as unknown."
+msgstr ""
+"原生 CPU pattern 后端随 vllm-ascend 一并构建（无需单独安装）。\n"
+"原滑动窗口相关键（`window`、`repeat_sum_threshold`、`min_tokens`、\n"
+"`consecutive_hits`、`ignore_token_ids`、`algorithm`）会作为未知键被拒绝。"
+
+msgid "See [token_repeat_pattern.md](../feature_guide/token_repeat_pattern.md)."
+msgstr "参见 [token_repeat_pattern.md](../feature_guide/token_repeat_pattern.md)。"

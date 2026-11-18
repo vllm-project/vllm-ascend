@@ -1,4 +1,5 @@
-// CPU pattern-repeat rules (upstream CONFIG_M4) at c455af6c4fa15dd027b8388b70691df7c81af57e.
+// CPU pattern-repeat rules (frozen offline detector provenance
+// c455af6c4fa15dd027b8388b70691df7c81af57e).
 // Unsigned hashing deliberately wraps modulo 2^64. No fast-math: thresholds
 // compare double(float(feature)) to the original JSON double constants.
 #include <pybind11/pybind11.h>

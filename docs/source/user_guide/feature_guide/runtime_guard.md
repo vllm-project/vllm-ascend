@@ -85,7 +85,7 @@ Report JSON top-level includes `dump_attempted` (whether `dump_kv` was in `on_tr
 
 | Type | Stage | Typical use |
 |------|-------|-------------|
-| `token_repeat` | after sample | Pattern-based stutter / repetition (native CPU extension) |
+| `token_repeat` | after sample | Pattern-based stutter / repetition (in-tree native CPU extension) |
 | `logits_finite` | before sample | NaN/Inf logits (``isfinite`` + gate; default **async** ``.item()`` wait at after-sample — logits may be mutated by grammar before wait; set ``item_sync: true`` for sync pre-sample gate/kind). Hit resolves indices/kind then enqueues; after-sample drains. Unattributable rows: warning only (no guessed / null-req report). |
 | `spec_acceptance` | after spec | Spec-decode acceptance drift (via `run_sample_phase` → `check_after_spec`; v2 stashes accept stats in `postprocess_sampled`) |
 
@@ -131,5 +131,6 @@ Throughput A/B (with vs without Runtime Guard) should be measured on Ascend hard
 
 ## Token repetition (pattern)
 
-See [token_repeat_pattern.md](token_repeat_pattern.md) for the native CPU extension
-installation, tokenizer warmup, configuration and validation.
+See [token_repeat_pattern.md](token_repeat_pattern.md) for tokenizer warmup,
+configuration, alert reasons, and validation. The native extension is built
+with vllm-ascend.

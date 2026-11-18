@@ -10,14 +10,15 @@ msgstr "# Token 重复检测（pattern 后端）"
 msgid ""
 "`token_repeat` uses a fixed pattern-based rule set with 64 raw-token check\n"
 "boundaries and a final partial-block flush. There is no sliding-window\n"
-"algorithm and no `algorithm` selector."
-msgstr "`token_repeat` 使用固定的基于 pattern 的规则集，在 64 个原始 token 检查边界处判定，并在末尾做部分块 flush。不再提供滑动窗口算法，也没有 `algorithm` 选择器。"
+"algorithm and no `algorithm` selector. The native CPU extension ships with\n"
+"vllm-ascend (`native_pattern`); no separate install step is required."
+msgstr "`token_repeat` 使用固定的基于 pattern 的规则集，在 64 个原始 token 检查边界处判定，并在末尾做部分块 flush。不再提供滑动窗口算法，也没有 `algorithm` 选择器。原生 CPU 扩展随 vllm-ascend（`native_pattern`）一并提供，无需单独安装。"
 
-msgid "Build the optional CPU extension independently in the serving environment (Linux, C++17):"
-msgstr "在推理环境中独立构建可选 CPU 扩展（Linux，C++17）："
-
-msgid "Set these fields under `detector.token_repeat` in runtime_config:"
-msgstr "在 runtime_config 的 `detector.token_repeat` 下设置："
+msgid ""
+"**Breaking change:** former sliding-window keys (`window`,\n"
+"`repeat_sum_threshold`, `min_tokens`, `consecutive_hits`, `ignore_token_ids`,\n"
+"`algorithm`) are rejected as unknown. Migrate to:"
+msgstr "**破坏性变更：** 原滑动窗口相关键（`window`、`repeat_sum_threshold`、`min_tokens`、`consecutive_hits`、`ignore_token_ids`、`algorithm`）会作为未知键被拒绝。请迁移为："
 
 msgid ""
 "Use `-1` for chat mode, or the model's explicit `</think>` token ID for reasoning.\n"
@@ -30,18 +31,43 @@ msgstr "chat 模式使用 `-1`；推理场景使用模型显式的 `</think>` to
 
 msgid ""
 "Warmup failure is logged once for that enable attempt and leaves detection\n"
-"unavailable; inference can continue. Fix the extension/resources and\n"
+"unavailable; inference can continue. Fix the tokenizer/resources and\n"
 "disable/re-enable to retry. Rebinding to a different model rebuilds the tables."
-msgstr "某次启用若预热失败只会记一次日志，检测不可用，但推理可继续。修好扩展/资源后，通过禁用再启用以重试。换绑到不同模型会重建表。"
+msgstr "某次启用若预热失败只会记一次日志，检测不可用，但推理可继续。修好 tokenizer/资源后，通过禁用再启用以重试。换绑到不同模型会重建表。"
 
 msgid ""
-"Detection uses the existing CPU ActionQueue and Incident actions. Terminal\n"
-"tails are checked before Store cleanup after CPU jobs drain. Forced cleanup at\n"
-"the deferred-wave limit can skip the terminal check for outstanding jobs; this\n"
-"is explicitly logged."
-msgstr "检测复用现有 CPU ActionQueue 与 Incident 动作。CPU 任务排空后、Store 清理前会检查终端尾巴。在延迟波次上限强制清理时，可能跳过未完成任务的终端检查；该情况会显式打日志。"
+"Detection uses the existing CPU ActionQueue and Incident actions. If the queue\n"
+"is full or stopping, that step's detect job may be dropped (warning logged)."
+msgstr "检测复用现有 CPU ActionQueue 与 Incident 动作。若队列已满或正在停止，该步的检测任务可能被丢弃（会打 warning 日志）。"
+
+msgid ""
+"Terminal tails are checked before Store cleanup after CPU jobs drain. Forced\n"
+"cleanup at the deferred-wave limit can skip the terminal check for outstanding\n"
+"jobs; this is explicitly logged."
+msgstr "CPU 任务排空后、Store 清理前会检查终端尾巴。在延迟波次上限强制清理时，可能跳过未完成任务的终端检查；该情况会显式打日志。"
+
+msgid "Alert `detail.reason` strings (native evaluation order):"
+msgstr "告警 `detail.reason` 字符串（原生求值顺序）："
+
+msgid "| reason | meaning (short) |"
+msgstr "| reason | 含义（简） |"
+
+msgid "| `vllm[32,500]x5` / `vllm[32,2000]x3` | exact raw-token period copies |"
+msgstr "| `vllm[32,500]x5` / `vllm[32,2000]x3` | 原始 token 周期精确拷贝 |"
+
+msgid "| `run>=500` | long same-char run |"
+msgstr "| `run>=500` | 超长同字符 run |"
+
+msgid "| `A3_*` / `A5_*` / `P_*` | n-gram density features |"
+msgstr "| `A3_*` / `A5_*` / `P_*` | n-gram 密度特征 |"
+
+msgid "| `wrep_*` | word-repeat share |"
+msgstr "| `wrep_*` | 词重复占比 |"
+
+msgid "| `sdup_*` | sentence-duplicate share |"
+msgstr "| `sdup_*` | 句子重复占比 |"
 
 msgid ""
 "Focused regression tests are in `tests/ut/runtime_guard/test_token_repeat_pattern.py`.\n"
-"Native cases require the optional extension and skip when it is absent."
-msgstr "专项回归测试见 `tests/ut/runtime_guard/test_token_repeat_pattern.py`。原生用例需要可选扩展，缺失时 skip。"
+"Native cases require a compiled install and skip when the extension is absent."
+msgstr "专项回归测试见 `tests/ut/runtime_guard/test_token_repeat_pattern.py`。原生用例需要已编译安装；扩展缺失时 skip。"

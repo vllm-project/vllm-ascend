@@ -217,8 +217,6 @@ class ProductionPatternTests(_PatternFixture):
         self.assertEqual(new.cpu_jobs, 1)
 
     def test_processor_reap_routes_tail_before_cleanup(self):
-        import importlib.util
-
         if importlib.util.find_spec("vllm") is None:
             self.skipTest("full vLLM runtime unavailable")
         processor = self.processor()
@@ -507,10 +505,8 @@ class ProductionPatternTests(_PatternFixture):
 
 class ResourceValidationTests(unittest.TestCase):
     def test_warmup_builds_only_from_served_tokenizer(self):
-        import sys
         import tempfile
         from pathlib import Path
-        from types import ModuleType
 
         import numpy as np
 
@@ -521,11 +517,17 @@ class ResourceValidationTests(unittest.TestCase):
             source.write_text("{}")
             runner = SimpleNamespace(model_config=SimpleNamespace(tokenizer=tmp))
             tables = {"norm": np.arange(16)}
-            adapter, vocab = ModuleType("pattern_cpp"), ModuleType("pattern_vocab")
             constructor, build = MagicMock(return_value="loaded"), MagicMock(return_value=tables)
-            vars(adapter)["RepDetectorCPP"] = constructor
-            vars(vocab)["build"] = build
-            with patch.dict(sys.modules, {"pattern_cpp": adapter, "pattern_vocab": vocab}):
+            with (
+                patch(
+                    "vllm_ascend.observability.runtime_guard.native_pattern.PatternDetector",
+                    constructor,
+                ),
+                patch(
+                    "vllm_ascend.observability.runtime_guard.native_pattern.vocab.build",
+                    build,
+                ),
+            ):
                 self.assertEqual(load_pattern(runner, -1), "loaded")
                 build.assert_called_once_with(str(source))
                 constructor.assert_called_once_with(tables, think_end=None)
@@ -580,9 +582,11 @@ class NativePatternTests(_PatternFixture):
         import numpy as np
 
         super().setUp()
-        if importlib.util.find_spec("_pattern_native") is None:
-            self.skipTest("independent native extension not built")
-        self.native = importlib.import_module("pattern_cpp").RepDetectorCPP
+        try:
+            from vllm_ascend.observability.runtime_guard.native_pattern import PatternDetector
+        except ImportError:
+            self.skipTest("native_pattern extension not built with this install")
+        self.native = PatternDetector
         self.tables: dict[str, np.ndarray] = dict(
             norm=np.arange(256, dtype=np.int32),
             chars=np.ones(256, np.int16),

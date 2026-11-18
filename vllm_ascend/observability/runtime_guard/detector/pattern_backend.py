@@ -12,12 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
 
-"""Warm up the optional CPU pattern-repeat backend from the served tokenizer."""
+"""Warm up the in-tree CPU pattern-repeat backend from the served tokenizer."""
 
 from __future__ import annotations
 
-from importlib import import_module
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Protocol
@@ -61,18 +62,24 @@ def load_pattern(runner: Any, think_end: int) -> PatternBackend:
         if cached is None:
             raise ValueError("token_repeat requires the served tokenizer.json in the local model cache")
         source = Path(cached)
+    from vllm_ascend.observability.runtime_guard.native_pattern import PatternDetector
+    from vllm_ascend.observability.runtime_guard.native_pattern import vocab as pattern_vocab
+
+    started = perf_counter()
     try:
-        adapter = import_module("pattern_cpp")
-        vocab = import_module("pattern_vocab")
+        tables = pattern_vocab.build(str(source))
     except ImportError as exc:
         raise RuntimeError(
-            "token_repeat requires the independent extension: pip install ./tools/token_repeat_pattern/src"
+            "token_repeat pattern backend requires a compiled vllm-ascend install (native_pattern / tokenizers)"
         ) from exc
-    started = perf_counter()
-    tables = vocab.build(str(source))
     if think_end >= len(tables["norm"]):
         raise ValueError("think_end is outside the served tokenizer vocabulary")
-    backend = adapter.RepDetectorCPP(tables, think_end=None if think_end == -1 else think_end)
+    try:
+        backend = PatternDetector(tables, think_end=None if think_end == -1 else think_end)
+    except ImportError as exc:
+        raise RuntimeError(
+            "token_repeat pattern backend requires a compiled vllm-ascend install (native_pattern)"
+        ) from exc
     elapsed = perf_counter() - started
     logger.info(
         "[runtime_guard: token_repeat] pattern table build and native init: %d tokens in %.3fs",
