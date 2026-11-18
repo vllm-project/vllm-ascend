@@ -38,3 +38,26 @@ The investigation applied it to the first layer's shared expert, not to every
 activation or the routed experts. Applying it globally would be a different
 experiment. The later down projection and shared-expert sigmoid gate are
 unchanged.
+
+## PLE gate
+
+```python
+from ple_gate import ple_gate_materialized
+
+gated, conv_input, scalars = ple_gate_materialized(
+    key, value, hidden, norm_key, norm_query, norm_conv, hc=4, eps=1e-6
+)
+```
+
+This Ascend-only replay uses five separate kernels and four actual BF16 scratch
+buffers: dot reduction, scaling by sqrt(hidden size), signed square root, and
+sigmoid. A cast inside a fused kernel is not a substitute for these observed
+memory boundaries. It returns the gate output and the following grouped
+RMSNorm output. It does not change KV projection, embedding lookup, GR Read,
+or convolution. Inputs are read-only; key/value can share a strided KV storage.
+
+Tests in `test_ple_gate.py` require an allocated NPU and the experiment's
+vLLM/triton-ascend runtime. Skip them on CPU with
+`python -m pytest -q test_conv.py test_shared_silu.py`.
+Kernel specializations depend on hidden width and residual group count;
+this offline diagnostic does not register serving warmup variants.
