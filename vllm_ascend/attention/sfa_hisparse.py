@@ -424,8 +424,8 @@ class AscendHiSparseImpl(AscendSFAImpl):
             for _, work in pending:
                 if work is not None:
                     work.wait()
-            values = tuple(value for value, _ in pending)
-            return self._exec_kv_local(*values, kv_cache, slots, attn_metadata)
+            gathered_kv, gathered_cos, gathered_sin = (value for value, _ in pending)
+            return self._exec_kv_local(gathered_kv, gathered_cos, gathered_sin, kv_cache, slots, attn_metadata)
 
         return finish if defer_wait else finish()
 
