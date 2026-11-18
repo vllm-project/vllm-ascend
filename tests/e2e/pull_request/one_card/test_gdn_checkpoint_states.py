@@ -213,12 +213,20 @@ def test_fused_segments_preserve_checkpoint_and_restored_tail(lengths, offsets, 
 def test_cache_hit_prefill_exports_tail_in_one_model_step(monkeypatch, model_name="Qwen/Qwen3.5-35B-A3B"):
     """Exercise private checkpoint pages through the real two-layer engine."""
     from vllm import LLM, SamplingParams
+    from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointExporter
     from vllm.v1.core.sched.scheduler import Scheduler
 
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     steps = []
+    exports = []
     original_schedule = Scheduler.schedule
+    original_export = MambaPrefillCheckpointExporter.export
+
+    def record_export(self, checkpoint, **kwargs):
+        result = original_export(self, checkpoint, **kwargs)
+        exports.append(checkpoint.offsets)
+        return result
 
     def record_schedule(self, *args, **kwargs):
         output = original_schedule(self, *args, **kwargs)
@@ -234,6 +242,7 @@ def test_cache_hit_prefill_exports_tail_in_one_model_step(monkeypatch, model_nam
         return config
 
     monkeypatch.setattr(Scheduler, "schedule", record_schedule)
+    monkeypatch.setattr(MambaPrefillCheckpointExporter, "export", record_export)
     engine = LLM(
         model=model_name,
         load_format="dummy",
@@ -258,14 +267,18 @@ def test_cache_hit_prefill_exports_tail_in_one_model_step(monkeypatch, model_nam
         engine.generate([{"prompt_token_ids": seed}], params, use_tqdm=False)
         prompt = seed[:hit] + [2000 + i % 1000 for i in range(end - hit)]
         steps.clear()
+        exports.clear()
         output = engine.generate([{"prompt_token_ids": prompt}], params, use_tqdm=False)[0]
         assert output.num_cached_tokens == hit
         assert [sum(row.values()) for row in steps if row] == [end - hit]
-        steps.clear()
-        replay = engine.generate([{"prompt_token_ids": prompt}], params, use_tqdm=False)[0]
         boundary = (end - 1) // 128 * 128
+        assert exports == [[boundary - hit]], exports
+        steps.clear()
+        exports.clear()
+        replay = engine.generate([{"prompt_token_ids": prompt}], params, use_tqdm=False)[0]
         assert replay.num_cached_tokens == boundary
         assert [sum(row.values()) for row in steps if row] == [end - boundary]
+        assert exports == []
 
 
 @pytest.mark.usefixtures("_init_checkpoint_prefill_ops")
