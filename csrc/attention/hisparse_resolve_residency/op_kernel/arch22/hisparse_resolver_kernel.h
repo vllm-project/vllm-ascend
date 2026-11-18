@@ -80,21 +80,53 @@ public:
         return d.pointers[1] ? Read<int32_t>(d.pointers[1], row) : row;
     }
 
-    __aicore__ inline void Translate(int32_t token, int32_t &host, int32_t &device) const
+    // Page tables repeat one entry across geometry[10]/[14] consecutive
+    // tokens and the block table across geometry[16] slots, so the last
+    // valid entry is cached to drop the dependent GM scalar loads that
+    // dominate the fallback path. No in-kernel writer mutates these tables,
+    // and request/state stay fixed for the whole group, so the cache is
+    // stable between resets at construction time.
+    __aicore__ inline void Translate(int32_t token, int32_t &host, int32_t &device)
     {
         host = token;
         device = -1;
         if (d.pointers[3]) {
-            int32_t col = token >= 0 ? token / d.geometry[10] : -1;
+            const uint64_t reqTable = d.pointers[3];
+            const uint64_t stateTable = d.pointers[4];
+            const int64_t reqStride = d.geometry[9];
+            const int64_t stateStride = d.geometry[13];
+            const int32_t tokenSpan = d.geometry[10];
+            const int32_t residentSpan = d.geometry[14];
+            int32_t col = token >= 0 ? token / tokenSpan : -1;
             bool valid = token >= 0 && request >= 0 && request < d.geometry[7] && col < d.geometry[8];
-            int32_t page = valid ? Read<int32_t>(d.pointers[3], int64_t(request) * d.geometry[9] + col) : 0;
-            host = valid && page > 0 ? page * d.geometry[10] + token % d.geometry[10] : -1;
-            if (d.pointers[4]) {
-                col = token >= 0 ? token / d.geometry[14] : -1;
+            if (valid) {
+                int32_t page;
+                if (col == reqCol) {
+                    page = reqPage;
+                } else {
+                    page = Read<int32_t>(reqTable, int64_t(request) * reqStride + col);
+                    reqCol = col;
+                    reqPage = page;
+                }
+                host = page > 0 ? page * tokenSpan + token % tokenSpan : -1;
+            } else {
+                host = -1;
+            }
+            if (stateTable) {
+                col = token >= 0 ? token / residentSpan : -1;
                 valid = token >= 0 && state >= 0 && state < d.geometry[11] && col < d.geometry[12];
-                page = valid ? Read<int32_t>(d.pointers[4], int64_t(state) * d.geometry[13] + col) : d.geometry[15];
-                device = valid && page >= 0 && page != d.geometry[15]
-                    ? page * d.geometry[14] + token % d.geometry[14] : -1;
+                if (valid) {
+                    int32_t resident;
+                    if (col == stCol) {
+                        resident = stPage;
+                    } else {
+                        resident = Read<int32_t>(stateTable, int64_t(state) * stateStride + col);
+                        stCol = col;
+                        stPage = resident;
+                    }
+                    device = resident >= 0 && resident != d.geometry[15]
+                        ? resident * residentSpan + token % residentSpan : -1;
+                }
             }
         }
         if (host < 0 || host >= d.geometry[3]) host = -1;
@@ -102,9 +134,10 @@ public:
 
     __aicore__ inline int32_t Lookup(int32_t host, bool insert = false, int32_t position = 0)
     {
+        const int32_t size = hashSize;
         uint32_t mixed = uint32_t(host) * 2654435761U;
-        int32_t h = uint64_t(mixed) * uint32_t(hashSize) >> 32;
-        for (int32_t probe = 0; probe < hashSize; ++probe) {
+        int32_t h = uint64_t(mixed) * uint32_t(size) >> 32;
+        for (int32_t probe = 0; probe < size; ++probe) {
             int32_t key = keys.GetValue(h);
             if (key == host) return h;
             if (key == -1) {
@@ -113,15 +146,24 @@ public:
                 values.SetValue(h, position);
                 return h;
             }
-            if (++h == hashSize) h = 0;
+            if (++h == size) h = 0;
         }
         return -1;
     }
 
-    __aicore__ inline int32_t Physical(int32_t slot) const
+    __aicore__ inline int32_t Physical(int32_t slot)
     {
-        int32_t block = Read<int32_t>(d.pointers[5], int64_t(request) * d.geometry[17] + slot / d.geometry[16]);
-        return block * d.geometry[16] + slot % d.geometry[16];
+        const int32_t blockSpan = d.geometry[16];
+        const int32_t col = slot / blockSpan;
+        int32_t block;
+        if (col == blkCol) {
+            block = blkPage;
+        } else {
+            block = Read<int32_t>(d.pointers[5], int64_t(request) * d.geometry[17] + col);
+            blkCol = col;
+            blkPage = block;
+        }
+        return block * blockSpan + slot % blockSpan;
     }
 
     __aicore__ inline void Scalar(uint64_t address, int64_t index, int32_t value)
@@ -373,14 +415,21 @@ public:
         if (PublishResident(true)) return;
         for (int32_t h = 0; h < hashSize; ++h) keys.SetValue(h, -1);
         // Construct the entire cold union before inspecting or evicting Hot.
+        // Descriptor fields are hoisted into locals: the compiler cannot
+        // prove the opaque UB tensor ops do not alias the descriptor, so
+        // every d.* access would otherwise re-load UB inside the hot loop.
+        const uint64_t logicalBase = d.pointers[0];
+        const int64_t logicalStride = d.geometry[4];
+        int32_t position = 0;
         for (int32_t row = first; row < end; ++row) {
             for (int32_t col = 0; col < topk; ++col) {
                 int32_t host, device;
-                Translate(Read<int32_t>(d.pointers[0], int64_t(row) * d.geometry[4] + col), host, device);
+                Translate(Read<int32_t>(logicalBase, int64_t(row) * logicalStride + col), host, device);
                 if (device < 0 && host >= 0) {
                     ++references;
-                    if (Lookup(host, true, (row - first) * topk + col) < 0) error = -1;
+                    if (Lookup(host, true, position) < 0) error = -1;
                 }
+                ++position;
             }
         }
         if (!references || error) {
@@ -393,22 +442,26 @@ public:
                     DataCopyExtParams{1, uint32_t(hot * sizeof(int32_t)), 0, 0, 0},
                     DataCopyPadExtParams<int32_t>{false, 0, 0, 0});
         Sync<HardEvent::MTE2_S>();
-        for (int32_t slot = 0; slot < hot; ++slot) {
-            int32_t host = tags.GetValue(slot);
-            int32_t h = host >= 0 ? Lookup(host) : -1;
-            if (h >= 0) {
-                int32_t value = kHit | slot;
-                if (values.GetValue(h) > value) values.SetValue(h, value);
-            }
-        }
-        // LRU is oldest-first. Preserve hit order and reverse the evictable
-        // partition exactly as the shared A5/Core algorithm does.
+        // LRU is oldest-first and always a permutation of the hot slots (the
+        // resolver itself rebuilds it every launch, and Core keeps the same
+        // invariant). One pass over the LRU list therefore both marks the
+        // smallest hit slot per union entry and builds the reversed
+        // evictable/hit partition, halving the hash probes per slot.
         int32_t hits = 0, evictable = 0;
+        const uint64_t lruBase = d.pointers[7];
         for (int32_t p = 0; p < hot; ++p) {
-            int32_t slot = Read<int16_t>(d.pointers[7], int64_t(state) * hot + p);
+            int32_t slot = Read<int16_t>(lruBase, int64_t(state) * hot + p);
             if (slot < 0 || slot >= hot) { error = -1; break; }
             int32_t host = tags.GetValue(slot);
-            bool hit = host >= 0 && Lookup(host) >= 0;
+            bool hit = false;
+            if (host >= 0) {
+                int32_t h = Lookup(host);
+                if (h >= 0) {
+                    hit = true;
+                    int32_t value = kHit | slot;
+                    if (values.GetValue(h) > value) values.SetValue(h, value);
+                }
+            }
             order.SetValue(hit ? hits++ : hot - 1 - evictable++, slot);
         }
         for (int32_t h = 0; h < hashSize; ++h) {
@@ -418,12 +471,14 @@ public:
         if (error) { Publish(true); return; }
 
         int32_t rank = 0, buffered = 0;
+        const int64_t swapBase = int64_t(first) * topk;
+        position = 0;
         for (int32_t row = first; row < end; ++row) {
             for (int32_t col = 0; col < topk; ++col) {
                 int32_t host, device;
-                Translate(Read<int32_t>(d.pointers[0], int64_t(row) * d.geometry[4] + col), host, device);
+                Translate(Read<int32_t>(logicalBase, int64_t(row) * logicalStride + col), host, device);
                 int32_t h = device < 0 && host >= 0 ? Lookup(host) : -1;
-                if (h >= 0 && values.GetValue(h) == (row - first) * topk + col) {
+                if (h >= 0 && values.GetValue(h) == position) {
                     int32_t slot = order.GetValue(hot - 1 - rank);
                     values.SetValue(h, kMiss | slot);
                     tags.SetValue(slot, host);
@@ -431,11 +486,12 @@ public:
                     io.SetValue(kTile + buffered, Physical(slot));
                     ++rank;
                     if (++buffered == kTile || rank == misses) {
-                        Store(d.pointers[12], int64_t(first) * topk + rank - buffered, io, buffered);
-                        Store(d.pointers[13], int64_t(first) * topk + rank - buffered, io[kTile], buffered);
+                        Store(d.pointers[12], swapBase + rank - buffered, io, buffered);
+                        Store(d.pointers[13], swapBase + rank - buffered, io[kTile], buffered);
                         buffered = 0;
                     }
                 }
+                ++position;
             }
         }
         Store(d.pointers[6], int64_t(state) * hot, tags, hot);
@@ -457,15 +513,29 @@ public:
     __aicore__ inline void Publish(bool valid)
     {
         // Recompute translations; never read another program's output or
-        // scalar-cache data that has just been updated by MTE3.
+        // scalar-cache data that has just been updated by MTE3. Descriptor
+        // fields are hoisted into locals: the compiler cannot prove the
+        // opaque UB tensor ops do not alias the descriptor, so every d.*
+        // access would otherwise re-load UB inside the hot loop.
         const bool compact = d.geometry[23] != 0;
+        const uint64_t logicalBase = d.pointers[0];
+        const int64_t logicalStride = d.geometry[4];
+        const uint64_t deviceOut = d.pointers[8];
+        const uint64_t hostOut = d.pointers[10];
+        const uint64_t attentionOut = d.pointers[9];
+        const int64_t attentionStride = d.geometry[18];
+        const int32_t blockSpan = d.geometry[16];
+        const int64_t attentionGap = d.geometry[19];
+        const int64_t attentionCapacity = d.geometry[23];
+        const uint64_t maskOut = d.pointers[15];
+        const bool byteMask = d.geometry[24] != 0;
         for (int32_t row = first; row < end; ++row) {
             int32_t count = 0, compactCount = 0;
             for (int32_t base = 0; base < topk; base += kTile) {
                 int32_t extent = topk - base < kTile ? topk - base : kTile;
                 for (int32_t i = 0; i < extent; ++i) {
                     int32_t host = -1, device = -1;
-                    if (valid) Translate(Read<int32_t>(d.pointers[0], int64_t(row) * d.geometry[4] + base + i), host, device);
+                    if (valid) Translate(Read<int32_t>(logicalBase, int64_t(row) * logicalStride + base + i), host, device);
                     io.SetValue(kTile + i, host);
                     if (valid && !error && device < 0 && host >= 0) {
                         int32_t h = Lookup(host);
@@ -475,29 +545,29 @@ public:
                     io.SetValue(i, device);
                     count += device >= 0;
                 }
-                Store(d.pointers[8], int64_t(row) * topk + base, io, extent);
-                Store(d.pointers[10], int64_t(row) * topk + base, io[kTile], extent);
-                if (d.pointers[9]) {
+                Store(deviceOut, int64_t(row) * topk + base, io, extent);
+                Store(hostOut, int64_t(row) * topk + base, io[kTile], extent);
+                if (attentionOut) {
                     int32_t kept = 0;
                     for (int32_t i = 0; i < extent; ++i) {
                         int32_t device = io.GetValue(i);
                         int64_t mapped = device < 0 ? -1 :
-                            int64_t(device / d.geometry[16]) * d.geometry[19] + device % d.geometry[16];
+                            int64_t(device / blockSpan) * attentionGap + device % blockSpan;
                         if (!compact) io.SetValue(i, mapped);
-                        else if (mapped >= 0 && mapped < int64_t(d.geometry[23])) io.SetValue(kept++, mapped);
+                        else if (mapped >= 0 && mapped < attentionCapacity) io.SetValue(kept++, mapped);
                     }
                     if (compact) {
                         // Keep order and duplicates; only Attention is compacted.
                         // Virtual indices and the refill plan retain their ABI.
-                        Store(d.pointers[9], int64_t(row) * d.geometry[18] + compactCount, io, kept);
+                        Store(attentionOut, int64_t(row) * attentionStride + compactCount, io, kept);
                         compactCount += kept;
                     } else {
-                        Store(d.pointers[9], int64_t(row) * d.geometry[18] + base, io, extent);
+                        Store(attentionOut, int64_t(row) * attentionStride + base, io, extent);
                     }
                 }
                 // The Core compact plan is the primary interface. Optional
                 // masks identify only the first occurrence of each miss.
-                if (d.pointers[15]) {
+                if (maskOut) {
                     for (int32_t i = 0; i < extent; ++i) {
                         int32_t host = io.GetValue(kTile + i);
                         int32_t h = valid && !error && host >= 0 ? Lookup(host) : -1;
@@ -508,23 +578,23 @@ public:
                                 int32_t limit = earlier == row ? base + i : topk;
                                 for (int32_t col = 0; col < limit; ++col) {
                                     int32_t oldHost, oldDevice;
-                                    Translate(Read<int32_t>(d.pointers[0], int64_t(earlier) * d.geometry[4] + col), oldHost, oldDevice);
+                                    Translate(Read<int32_t>(logicalBase, int64_t(earlier) * logicalStride + col), oldHost, oldDevice);
                                     if (oldDevice < 0 && oldHost == host) { miss = false; break; }
                                 }
                             }
                         }
-                        if (d.geometry[24]) io.ReinterpretCast<uint8_t>().SetValue(i, uint8_t(miss));
+                        if (byteMask) io.ReinterpretCast<uint8_t>().SetValue(i, uint8_t(miss));
                         else io.SetValue(i, int32_t(miss));
                     }
-                    if (d.geometry[24]) Store(d.pointers[15], int64_t(row) * topk + base, io.ReinterpretCast<uint8_t>(), extent);
-                    else Store(d.pointers[15], int64_t(row) * topk + base, io, extent);
+                    if (byteMask) Store(maskOut, int64_t(row) * topk + base, io.ReinterpretCast<uint8_t>(), extent);
+                    else Store(maskOut, int64_t(row) * topk + base, io, extent);
                 }
             }
             if (compact) {
                 for (int32_t i = 0; i < kTile; ++i) io.SetValue(i, -1);
                 for (int32_t base = compactCount; base < topk; base += kTile) {
                     int32_t extent = topk - base < kTile ? topk - base : kTile;
-                    Store(d.pointers[9], int64_t(row) * d.geometry[18] + base, io, extent);
+                    Store(attentionOut, int64_t(row) * attentionStride + base, io, extent);
                 }
                 count = compactCount;
             }
@@ -565,6 +635,8 @@ private:
     int32_t rows, topk, hot, hashSize;
     int32_t first = 0, end = 0, request = -1, state = -1;
     int32_t references = 0, misses = 0, error = 0;
+    // Last valid page/block-table entries cached by Translate/Physical.
+    int32_t reqCol = -1, reqPage = 0, stCol = -1, stPage = 0, blkCol = -1, blkPage = 0;
     TBuf<TPosition::VECCALC> keysBuffer, valuesBuffer, tagsBuffer, orderBuffer, ioBuffer;
     LocalTensor<int32_t> keys, values, tags, order, io;
 };
