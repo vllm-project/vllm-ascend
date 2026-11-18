@@ -1,0 +1,4 @@
+pr: 22293
+entries:
+  - category: bugfix
+    text: On PD-disaggregated decode nodes with the recompute scheduler enabled, DP ranks now coordinate MoE communication selection when a local prefill can exceed the MC2 capacity, preventing stream-synchronization timeouts caused by ranks entering different collectives.
