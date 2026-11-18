@@ -390,3 +390,160 @@ def test_a5_indexer_uses_prequantized_query(monkeypatch):
     )
     assert result[0] is quantized
     assert result[1].shape == (2, 1, 2, 2)
+
+
+def test_native_captured_swa_slot_and_metadata_priorities_and_waits(monkeypatch):
+    from vllm_ascend.attention.context_parallel.dsa_v41_cp import _ReplicatedCacheMetadataBuilder
+
+    smla_op = Mock(return_value=torch.ones((dsa_v41.V41_METADATA_BUFFER_SIZE,), dtype=torch.int32))
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_sparse_flash_mla_metadata", smla_op, raising=False)
+
+    def _make_builder(cls, cache_kind: str):
+        builder = cls.__new__(cls)
+        builder._cache_kind = cache_kind
+        builder._device_metadata_enabled = False
+        builder._device_metadata_in_graph = False
+        builder._device_metadata_tasks = ()
+        builder._first_consumer_slot = False
+        builder._supports_device_ops = True
+        builder._uses_a5_packed_cache = False
+        builder._device_backend = None
+        builder._build_compressor_metadata = False
+        builder._slot_mapping_2d = torch.full((4, 2), -1, dtype=torch.int32)
+        builder._flat_slot_mapping = torch.full((4,), -1, dtype=torch.int64)
+        builder._slot_valid_end = torch.zeros((), dtype=torch.int32)
+        builder._cache_seq_lens = torch.zeros((2,), dtype=torch.int32)
+        builder._cmp_residual = torch.zeros((2,), dtype=torch.int32)
+        builder._smla_metadata = torch.zeros((dsa_v41.V41_METADATA_BUFFER_SIZE,), dtype=torch.int32)
+        builder.common_v41_metadata = {}
+        builder.common_v41_batch_metadata = {}
+        builder.common_v41_smla_metadata = {}
+        builder.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_text_config=SimpleNamespace(num_attention_heads=64, head_dim=512, index_topk=512)
+            ),
+            parallel_config=SimpleNamespace(tensor_parallel_size=8),
+        )
+        return builder
+
+    common = SimpleNamespace(
+        slot_mapping=torch.tensor([130, -1], dtype=torch.int64),
+        query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+        max_query_len=2,
+    )
+
+    for first_slot in (False, True):
+        swa = _make_builder(dsa_v41.AscendDSAV41SWAMetadataBuilder, "swa")
+        swa.first_consumer_slot = first_slot
+        req = dsa_v41.AscendDSAV41Metadata(
+            block_table=torch.zeros((1, 1), dtype=torch.int32),
+            query_start_loc=common.query_start_loc,
+            seq_lens=torch.tensor([4], dtype=torch.int32),
+            slot_mapping=torch.full((2,), -1, dtype=torch.int64),
+            compress_ratio=1,
+            storage_block_size=128,
+            is_compressor_state=False,
+            cache_kind="swa",
+            num_actual_reqs=1,
+            num_actual_tokens=0,  # Zero active tokens during capture must still invoke smla op!
+            num_input_tokens=2,
+            num_reqs=1,
+        )
+        smla_op.reset_mock()
+        with swa.defer_device_metadata(in_graph=True):
+            swa._build_cache_slots(common, req)
+            swa._build_smla_metadata(common, req, max_ori_seq_len=4)
+            tasks = swa.take_device_metadata_tasks()
+
+        assert req.slot_metadata_group_id == id(swa._slot_mapping_2d)
+        assert [(task.stage, task.priority) for task in tasks] == [
+            (
+                dsa_v41.DeviceMetadataStage.PREPARE,
+                dsa_v41.DeviceMetadataPriority.FIRST_CONSUMER_SLOT
+                if first_slot
+                else dsa_v41.DeviceMetadataPriority.DEFAULT,
+            ),
+            (dsa_v41.DeviceMetadataStage.ATTENTION, dsa_v41.DeviceMetadataPriority.SWA_METADATA),
+        ]
+        # Deferred execution happens after leaving defer_device_metadata(in_graph=True).
+        for task in tasks:
+            task.run()
+        smla_op.assert_called_once()
+        assert req.slot_mapping.tolist() == [[1, 2], [-1, -1]]
+        assert req.flat_slot_mapping.tolist() == [130, -1]
+
+    # Verify _write_swa_cache and _write_compressed_caches wait on PREPARE slot frontiers.
+    waits: list[tuple[dsa_v41.DeviceMetadataStage, int]] = []
+    monkeypatch.setattr(dsa_v41, "wait_for_device_metadata", lambda stg, gid: waits.append((stg, gid)))
+    monkeypatch.setattr(dsa_v41, "scatter_cache_sk", lambda *args, **kwargs: None)
+
+    swa_attn = SimpleNamespace(
+        packed_cache_ops=None,
+        dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(kv_cache=[torch.zeros((2, 128, 1, 8))])),
+    )
+    dsa_v41.AscendDSAV41Impl._write_swa_cache(swa_attn, req, torch.zeros((2, 1, 8)))
+    assert waits == [(dsa_v41.DeviceMetadataStage.PREPARE, req.slot_metadata_group_id)]
+
+    # Compressed C2 builder tasks keep DEFAULT priority and respect skip_ring_state_update.
+    c2 = _make_builder(dsa_v41.AscendDSAV41AttentionMetadataBuilder, "long_kv")
+    c2.first_consumer_slot = True
+    c2_req = dsa_v41.AscendDSAV41Metadata(
+        block_table=torch.zeros((1, 1), dtype=torch.int32),
+        query_start_loc=common.query_start_loc,
+        seq_lens=torch.tensor([5], dtype=torch.int32),
+        slot_mapping=torch.full((2,), -1, dtype=torch.int64),
+        compress_ratio=2,
+        storage_block_size=64,
+        is_compressor_state=False,
+        cache_kind="long_kv",
+        positions=torch.tensor([2, 3], dtype=torch.int64),
+        num_actual_reqs=1,
+        num_actual_tokens=2,
+        num_input_tokens=2,
+        num_reqs=1,
+    )
+    with c2.defer_device_metadata(in_graph=True):
+        c2._prepare_cache_lengths(common, c2_req, full_graph_mode=True)
+        c2._build_cache_slots(common, c2_req, skip_ring_state_update=True)
+        c2._build_smla_metadata(common, c2_req, max_ori_seq_len=5)
+        c2_tasks = c2.take_device_metadata_tasks()
+
+    assert [(task.stage, task.priority) for task in c2_tasks] == [
+        (dsa_v41.DeviceMetadataStage.PREPARE, dsa_v41.DeviceMetadataPriority.DEFAULT),
+        (dsa_v41.DeviceMetadataStage.PREPARE, dsa_v41.DeviceMetadataPriority.DEFAULT),
+        (dsa_v41.DeviceMetadataStage.ATTENTION, dsa_v41.DeviceMetadataPriority.DEFAULT),
+    ]
+    for task in c2_tasks:
+        task.run()
+    assert c2_req.cache_seq_lens.tolist() == [2]
+    assert c2_req.cmp_residual.tolist() == [1]
+    assert c2_req.slot_mapping.tolist() == [[-1, -1], [-1, -1]]
+
+    waits.clear()
+    impl = _impl("compressed")
+    monkeypatch.setattr(dsa_v41.AscendDSAV41Impl, "_apply_rotary", staticmethod(lambda *a, **kw: None))
+    cmp_attn = SimpleNamespace(
+        head_dim=4,
+        packed_cache_ops=None,
+        indexer=SimpleNamespace(update_keys=lambda *a, **kw: None),
+        long_kv_cache=SimpleNamespace(kv_cache=[torch.zeros((2, 64, 4))]),
+    )
+    idx_cache = SimpleNamespace(slot_mapping=torch.zeros((2, 2), dtype=torch.int32), slot_metadata_group_id=701)
+    cmp_cache = SimpleNamespace(slot_mapping=torch.zeros((2, 2), dtype=torch.int32), slot_metadata_group_id=702)
+    bundle = SimpleNamespace(
+        indexer=SimpleNamespace(cache=idx_cache),
+        compressor=SimpleNamespace(cache=cmp_cache),
+    )
+    impl._write_compressed_caches(cmp_attn, torch.zeros((2, 4)), torch.ones((2, 4)), torch.zeros((2, 4)), bundle)
+    assert waits == [
+        (dsa_v41.DeviceMetadataStage.PREPARE, 701),
+        (dsa_v41.DeviceMetadataStage.PREPARE, 702),
+    ]
+
+    replicated = _ReplicatedCacheMetadataBuilder.__new__(_ReplicatedCacheMetadataBuilder)
+    replicated._global_builder = _make_builder(dsa_v41.AscendDSAV41MetadataBuilder, "swa")
+    replicated.first_consumer_slot = True
+    assert replicated.first_consumer_slot
+    assert replicated._global_builder.first_consumer_slot
+    replicated.first_consumer_slot = False
+    assert not replicated._global_builder.first_consumer_slot

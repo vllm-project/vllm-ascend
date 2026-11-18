@@ -63,6 +63,17 @@ class _ReplicatedCacheMetadataBuilder(AscendDSAV41MetadataBuilder):
         super().prepare_source_rope()
         self._global_builder.prepare_source_rope()
 
+    @property
+    def first_consumer_slot(self) -> bool:
+        return self._first_consumer_slot
+
+    @first_consumer_slot.setter
+    def first_consumer_slot(self, value: bool) -> None:
+        self._first_consumer_slot = value
+        global_builder = getattr(self, "_global_builder", None)
+        if global_builder is not None:
+            global_builder.first_consumer_slot = value
+
     def enable_device_metadata(self):
         super().enable_device_metadata()
         self._global_builder.enable_device_metadata()

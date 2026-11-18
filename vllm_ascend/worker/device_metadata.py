@@ -13,20 +13,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
+import regex as re
 import torch
 from vllm.forward_context import BatchDescriptor, get_forward_context, is_forward_context_available
+
+_LAYER_INDEX_PATTERN = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
 
 
 class DeviceMetadataStage(IntEnum):
     COMPRESSOR = 0
-    ATTENTION = 1
-    INDEXER = 2
+    PREPARE = 1
+    ATTENTION = 2
+    INDEXER = 3
+
+
+class DeviceMetadataPriority(IntEnum):
+    SWA_METADATA = 0
+    FIRST_CONSUMER_SLOT = 1
+    DEFAULT = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +44,7 @@ class DeviceMetadataTask:
     stage: DeviceMetadataStage
     run: Callable[[], None]
     group_id: int
+    priority: DeviceMetadataPriority = DeviceMetadataPriority.DEFAULT
 
 
 @runtime_checkable
@@ -71,6 +82,20 @@ class DeviceMetadataExecutor:
     def uses_external_events(self) -> bool:
         return self._batch_descriptor is not None
 
+    def _task_sort_key(self, task: DeviceMetadataTask) -> tuple[int, int, int]:
+        if task.priority == DeviceMetadataPriority.SWA_METADATA and task.stage == DeviceMetadataStage.ATTENTION:
+            bucket = int(DeviceMetadataPriority.SWA_METADATA)
+        elif task.priority == DeviceMetadataPriority.FIRST_CONSUMER_SLOT and task.stage == DeviceMetadataStage.PREPARE:
+            bucket = int(DeviceMetadataPriority.FIRST_CONSUMER_SLOT)
+        else:
+            bucket = int(DeviceMetadataPriority.DEFAULT)
+        attention_order = (
+            self._attention_order.get(task.group_id, len(self._attention_order))
+            if task.stage == DeviceMetadataStage.ATTENTION
+            else 0
+        )
+        return bucket, int(task.stage), attention_order
+
     def submit(
         self,
         tasks: Iterable[DeviceMetadataTask],
@@ -80,15 +105,7 @@ class DeviceMetadataExecutor:
             raise ValueError("Graph-side producers must not use graph-external events")
         if self._submission_in_flight:
             raise RuntimeError("The previous device metadata submission has not been released")
-        ordered_tasks = sorted(
-            tasks,
-            key=lambda task: (
-                task.stage,
-                self._attention_order.get(task.group_id, len(self._attention_order))
-                if task.stage == DeviceMetadataStage.ATTENTION
-                else 0,
-            ),
-        )
+        ordered_tasks = sorted(tasks, key=self._task_sort_key)
         if not ordered_tasks:
             raise ValueError("At least one device metadata task is required")
         # Graph waits bind to event keys, independently of producer order.
@@ -115,17 +132,13 @@ class DeviceMetadataExecutor:
             if self._has_reuse_fence and not self.capture_producers:
                 self.stream.wait_event(self._buffer_reusable)
 
-            task_index = 0
-            for stage in DeviceMetadataStage:
-                while task_index < len(ordered_tasks) and ordered_tasks[task_index].stage == stage:
-                    task = ordered_tasks[task_index]
-                    task.run()
-                    frontier = (stage, task.group_id)
-                    if batch_descriptor is None:
-                        self._stage_ready[frontier].record(self.stream)
-                    else:
-                        self._external_stage_ready[(batch_descriptor, *frontier)].record(self.stream)
-                    task_index += 1
+            for task in ordered_tasks:
+                task.run()
+                frontier = (task.stage, task.group_id)
+                if batch_descriptor is None:
+                    self._stage_ready[frontier].record(self.stream)
+                else:
+                    self._external_stage_ready[(batch_descriptor, *frontier)].record(self.stream)
 
     def wait(self, stage: DeviceMetadataStage, group_id: int) -> None:
         if not self._submission_in_flight:
@@ -171,6 +184,46 @@ def wait_for_device_metadata(stage: DeviceMetadataStage, group_id: int) -> None:
         executor.wait(stage, group_id)
 
 
+def _is_target_group(layer_names: frozenset[str], draft_names: frozenset[str]) -> bool:
+    if layer_names & draft_names:
+        if not layer_names <= draft_names:
+            raise ValueError(f"Mixed target/draft attention group requires separate ownership: {sorted(layer_names)}")
+        return False
+    return True
+
+
+def _mark_first_consumer_slots(
+    attn_groups: Sequence[Sequence[Any]],
+    draft_layer_names: Collection[str] = (),
+) -> list[Any]:
+    """Mark the SWA slot builder used by the earliest target layer."""
+    draft_names = frozenset(draft_layer_names)
+    resettable_builders: dict[int, Any] = {}
+    entries: list[tuple[Any, int]] = []
+    for groups in attn_groups:
+        for group in groups:
+            builder = group.get_metadata_builder(0)
+            if not hasattr(builder, "defer_device_metadata"):
+                continue
+            if hasattr(builder, "first_consumer_slot") or hasattr(builder, "_cache_kind"):
+                resettable_builders[id(builder)] = builder
+            layer_names = frozenset(getattr(group, "layer_names", ()))
+            if not _is_target_group(layer_names, draft_names):
+                continue
+            layers = [
+                int(match.group(1)) for name in layer_names if (match := _LAYER_INDEX_PATTERN.search(name)) is not None
+            ]
+            if layers:
+                entries.append((builder, min(layers)))
+    first_layer = min((layer for _, layer in entries), default=None)
+    for builder in resettable_builders.values():
+        builder.first_consumer_slot = False
+    for builder, layer in entries:
+        if layer == first_layer and getattr(builder, "_cache_kind", None) == "swa":
+            builder.first_consumer_slot = True
+    return list(resettable_builders.values())
+
+
 class TargetDeviceMetadata:
     """Target-owned producer stream, isolated from DSpark's metadata builders.
 
@@ -180,17 +233,22 @@ class TargetDeviceMetadata:
     Every producer is joined before the next async step may reuse its inputs.
     """
 
-    def __init__(self):
+    def __init__(self, *, draft_layer_names: Collection[str] = (), full_graph_only: bool = False) -> None:
         self.executor = DeviceMetadataExecutor(capture_producers=True)
+        self._draft_layer_names = frozenset(draft_layer_names)
+        self.full_graph_only = full_graph_only
         self._tasks: tuple[DeviceMetadataTask, ...] = ()
         self._failed = False
 
     def run_build(self, build_fn, **kwargs):
         full_graph = kwargs.get("full_graph_mode", False) or kwargs.get("for_cudagraph_capture", False)
+        if self.full_graph_only and not full_graph:
+            return build_fn(**kwargs)
         with self.build(kwargs["attn_groups"], full_graph):
             metadata = build_fn(**kwargs)
-            for resource in metadata.values():
-                resource.device_metadata_executor = self.executor
+            for name, resource in metadata.items():
+                if name not in self._draft_layer_names:
+                    resource.device_metadata_executor = self.executor
             return metadata
 
     @contextmanager
@@ -203,21 +261,27 @@ class TargetDeviceMetadata:
             id(builder): builder
             for groups in attn_groups
             for group in groups
+            if _is_target_group(frozenset(getattr(group, "layer_names", ())), self._draft_layer_names)
             for builder in (group.get_metadata_builder(0),)
             if hasattr(builder, "defer_device_metadata")
         }
-        with ExitStack() as stack:
-            for provider in providers.values():
-                stack.enter_context(provider.defer_device_metadata(in_graph=full_graph))
-            try:
-                yield
-            except BaseException:
+        marked_builders = _mark_first_consumer_slots(attn_groups, self._draft_layer_names)
+        try:
+            with ExitStack() as stack:
                 for provider in providers.values():
-                    provider.take_device_metadata_tasks()
-                raise
-            self._tasks = tuple(
-                task for provider in providers.values() for task in provider.take_device_metadata_tasks()
-            )
+                    stack.enter_context(provider.defer_device_metadata(in_graph=full_graph))
+                try:
+                    yield
+                except BaseException:
+                    for provider in providers.values():
+                        provider.take_device_metadata_tasks()
+                    raise
+                self._tasks = tuple(
+                    task for provider in providers.values() for task in provider.take_device_metadata_tasks()
+                )
+        finally:
+            for builder in marked_builders:
+                builder.first_consumer_slot = False
         if not full_graph:
             self.begin_forward()
 
