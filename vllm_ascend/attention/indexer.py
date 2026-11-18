@@ -934,6 +934,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             if not self.enable_sparse_li_c8 or self.enable_sparse_li_c4:
                 raise NotImplementedError("Sharded Kimi indexer requires the native C8 QLI path.")
             cu_seqlens_q, seqused_k, qli_metadata = self._get_local_qli_inputs(indexer_metadata)
+            pack_visible_lengths = None
             if indexer_metadata.qli_dcp_args is not None:
                 indices, scores = DeviceOperator.indexer_select_dcp_candidates(
                     q_li.view(*q_li_shape_ori),
@@ -949,6 +950,9 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                     **indexer_metadata.qli_dcp_args,
                 )
             elif get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE):
+                pack_visible_lengths = indexer_metadata.local_visible_lengths
+                if pack_visible_lengths is not None and pack_visible_lengths.numel() < q_li_shape_ori[0]:
+                    pack_visible_lengths = None
                 indices, scores = DeviceOperator.indexer_select_dcp_candidates(
                     q_li.view(*q_li_shape_ori),
                     weights,
@@ -962,6 +966,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                     cp_world=get_dcp_group().world_size,
                     cp_rank=get_dcp_group().rank_in_group,
                     cp_interleave=self._dcp_interleave,
+                    initialize_outputs=pack_visible_lengths is None,
                     qli_metadata=qli_metadata,
                     topk=self.topk_tokens,
                 )
@@ -987,6 +992,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 self.topk_tokens,
                 self._dcp_interleave,
                 return_local=self._local_topk,
+                visible_lengths=pack_visible_lengths,
             )
         return DeviceOperator.indexer_select_post_process(
             q_li,
@@ -1589,12 +1595,14 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                     cp_rank=group.rank_in_group,
                     cp_interleave=interleave,
                 )
-            elif get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE):
-                build_local_key_lengths(
-                    seq_lens, actual_seq_lengths_key, group.world_size, group.rank_in_group, interleave
-                )
             else:
-                local_visible = visible_buffer[:num_input_tokens]
+                visible_rows = num_input_tokens
+                if get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE):
+                    # A captured pack can retain a longer view than the next live
+                    # batch. Refresh its padding in the same metadata kernel.
+                    max_capture = self.vllm_config.compilation_config.max_cudagraph_capture_size or 0
+                    visible_rows = max(visible_rows, max_capture)
+                local_visible = visible_buffer[:visible_rows]
                 build_local_lengths(
                     seq_lens,
                     cum_query_lens,

@@ -168,15 +168,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
         Upstream inlines the shared+routed output combine, which is not
         exposed as an overridable hook. On NPU the combine goes through the
-        fused multi-tensor add kernel (``torch._foreach_add``), whose kernel
-        launch count is independent of the tensor-list length and which is
-        the NPU-validated fast path for the MoE combine. Every other step,
+        ordinary add kernel: there is only one shared/routed tensor pair,
+        so no multi-tensor list handling is needed. Every other step,
         including the runtime-aware reduction hooks (#16550), is inherited
         unchanged.
-
-        Future plan: once the aclnnAdd_AddAiCore_Add kernel is available via
-        the superkernel integration, upstream's plain add becomes the fast
-        path and this override can be dropped.
         """
         # Apply transform for routed experts (e.g., latent projection for
         # latent MoE). When the caller pre-applies the routed input transform
@@ -266,7 +261,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         fused_output = self.apply_routed_output_transform(fused_output)
 
         if shared_output is not None:
-            result = torch._foreach_add([shared_output], [fused_output])[0]
+            result = shared_output + fused_output
         else:
             result = fused_output
 

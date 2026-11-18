@@ -1343,14 +1343,14 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_v2_compat_npu(
     int64_t max_seqlen_q, c10::string_view layout_q, c10::string_view layout_k,
     int64_t mask_mode, int64_t cmp_ratio, int64_t return_value,
     bool enable_dcp, int64_t cp_world, int64_t cp_rank, int64_t cp_interleave,
-    const c10::optional<at::Tensor> &causal_seqlens_kv_global)
+    const c10::optional<at::Tensor> &causal_seqlens_kv_global, bool initialize_outputs)
 {
     auto outputs = qli_v2::QuantLightningIndexerCandidate(
         query, key, weights, query_dequant_scale, key_dequant_scale, topk, quant_mode,
         c10::nullopt, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, cmp_residual_k,
         block_table, output_idx_offset, metadata, max_seqlen_q, layout_q, layout_k,
         mask_mode, cmp_ratio, 3, 2048, 8, enable_dcp, cp_world, cp_rank, cp_interleave,
-        causal_seqlens_kv_global, return_value);
+        causal_seqlens_kv_global, return_value, initialize_outputs);
     return {std::get<0>(outputs), std::get<1>(outputs)};
 }
 
@@ -3181,7 +3181,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "int max_seqlen_q=-1, str layout_q='TND', str layout_k='PA_BBND', int mask_mode=3, "
         "int cmp_ratio=1, int candidate_mode=3, int candidate_topk_blocks=2048, "
         "int candidate_block_size=8, bool enable_dcp=False, int cp_world=1, int cp_rank=0, "
-        "int cp_kv_cache_interleave_size=1, Tensor? causal_seqlens_kv_global=None, int return_value=0)"
+        "int cp_kv_cache_interleave_size=1, Tensor? causal_seqlens_kv_global=None, int return_value=0, "
+        "bool initialize_outputs=True)"
         " -> (Tensor, Tensor, Tensor)"
     );
     ops.impl("npu_quant_lightning_indexer_v3", torch::kPrivateUse1,
@@ -3361,7 +3362,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "str layout_q=\"TND\", str layout_k=\"PA_BBND\", "
             "int mask_mode=3, int cmp_ratio=4, int return_value=0, "
             "bool enable_dcp=False, int cp_world=1, int cp_rank=0, int cp_kv_cache_interleave_size=1, "
-            "Tensor? causal_seqlens_kv_global=None"
+            "Tensor? causal_seqlens_kv_global=None, bool initialize_outputs=True"
         ") -> (Tensor sparse_indices, Tensor sparse_values)"
         );
     ops.impl("npu_quant_lightning_indexer_v2", torch::kPrivateUse1,

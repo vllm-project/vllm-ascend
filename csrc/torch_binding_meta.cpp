@@ -921,7 +921,7 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_v2_meta(
     int64_t max_seqlen_q, c10::string_view layout_q, c10::string_view layout_k,
     int64_t mask_mode, int64_t cmp_ratio, int64_t return_value,
     bool enable_dcp, int64_t cp_world, int64_t cp_rank, int64_t cp_kv_cache_interleave_size,
-    const c10::optional<at::Tensor> &causal_seqlens_kv_global)
+    const c10::optional<at::Tensor> &causal_seqlens_kv_global, bool /*initialize_outputs*/)
 {
     std::string query_layout_str = std::string(layout_q);
     std::string key_layout_str = std::string(layout_k);

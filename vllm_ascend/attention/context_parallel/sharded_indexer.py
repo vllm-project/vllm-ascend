@@ -27,7 +27,9 @@ def gathered_candidate_row_tile(rows: int, world_size: int, local_k: int) -> int
     return max(MIN_SINGLE_TILE_ROWS, MAX_GATHERED_CANDIDATE_BYTES // row_bytes)
 
 
-def distributed_topk(indices, scores, group, topk: int, interleave: int, *, return_local: bool = False):
+def distributed_topk(
+    indices, scores, group, topk: int, interleave: int, *, return_local: bool = False, visible_lengths=None
+):
     from vllm_ascend.ops.triton.sharded_indexer import MAX_FUSED_TOPK, merge_packed_candidates, pack_local_candidates
 
     # Exchange candidates only. Never gather an indexer's token-history cache.
@@ -49,6 +51,7 @@ def distributed_topk(indices, scores, group, topk: int, interleave: int, *, retu
             interleave,
             sort_candidates=presorted,
             fuse_sort=return_local and presorted,
+            visible_lengths=visible_lengths[start:end] if visible_lengths is not None else None,
         )
         gathered = group.all_gather(packed, dim=0)
         merge_packed_candidates(

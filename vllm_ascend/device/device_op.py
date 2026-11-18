@@ -108,8 +108,9 @@ class BaseDeviceAdaptor:
         cp_interleave: int,
         qli_metadata: torch.Tensor,
         topk: int = 2048,
+        initialize_outputs: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Select owner-local causal candidates with the A3 QLI DCP kernel."""
+        """Return raw A3 candidates for packing with per-row local visible lengths."""
         if (
             not get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
             or q_li.dtype != torch.int8
@@ -139,10 +140,9 @@ class BaseDeviceAdaptor:
             cp_kv_cache_interleave_size=cp_interleave,
             causal_seqlens_kv_global=global_seq_lens,
             return_value=1,
+            initialize_outputs=initialize_outputs,
         )
-        from vllm_ascend.ops.triton.sharded_indexer import normalize_dcp_candidates
-
-        return normalize_dcp_candidates(indices, scores, query_start_loc)
+        return indices, scores
 
     @staticmethod
     def indexer_select_local_candidates(

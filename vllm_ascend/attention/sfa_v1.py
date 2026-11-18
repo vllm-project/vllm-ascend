@@ -50,7 +50,7 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     attention_transfer_window,
 )
@@ -76,6 +76,7 @@ from vllm_ascend.utils import (
     enable_pcp_o_proj_weight_sharding,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
+    is_internal_npu_format,
     is_mtp_layer,
     is_rl_weight_update_enabled,
     maybe_trans_nz,
@@ -775,6 +776,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     # value. With DCP disabled it does not change the draft KV-cache layout.
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
 
+    _decode_o_proj_out: bool = False
     supports_pcp: ClassVar[bool] = True
     o_proj_full_pools: ClassVar[dict[Any, torch.Tensor]] = {}
     o_proj_weight_switch_pool_key = "sfa_pcp_o_proj"
@@ -853,6 +855,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         hf_config = self.vllm_config.model_config.hf_config
         hf_text_config = getattr(self.vllm_config.model_config, "hf_text_config", None)
         self.is_kimi_k31 = hf_config.model_type == "kimi_k31" or getattr(type(hf_config), "is_kimi_k31", False)
+        self._decode_o_proj_out = (
+            self.is_kimi_k31
+            and not self.pcp_enabled
+            and self.vllm_config.lora_config is None
+            and get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
+        )
         self.use_rope = not (self.is_kimi_k31 and getattr(hf_text_config, "mla_use_nope", False))
         config_candidates = (hf_config, hf_text_config)
         index_cache_enabled = _get_config_bool(
@@ -1885,6 +1893,49 @@ class AscendSFAImpl(MLAAttentionImpl):
             return self._parallel_o_proj.forward(attn_output, output)
         return self._project_o_proj_full(attn_output, output)
 
+    def _can_project_decode_into(self, x: torch.Tensor, out: torch.Tensor) -> bool:
+        from vllm_ascend.ops.linear import AscendRowParallelLinear, AscendUnquantizedLinearMethod
+
+        layer = self.o_proj
+        if (
+            type(layer) is not AscendRowParallelLinear
+            or type(layer.quant_method) is not AscendUnquantizedLinearMethod
+            or layer.custom_op is not None
+            or not layer.input_is_parallel
+            or (layer.reduce_results and layer.tp_size > 1)
+            or layer.bias is not None
+            or not layer.return_bias
+            or layer.out_dtype is not None
+        ):
+            return False
+        # Calling matmul directly would bypass hooks and per-instance overrides.
+        module = torch.nn.modules.module
+        if (
+            layer._forward_hooks
+            or layer._forward_pre_hooks
+            or module._global_forward_hooks
+            or module._global_forward_pre_hooks
+            or "forward" in vars(layer)
+            or "apply" in vars(layer.quant_method)
+            or layer._compiled_call_impl is not None
+            or torch.is_grad_enabled()
+            or torch.is_autocast_enabled("npu")
+        ):
+            return False
+        weight = layer.weight
+        return (
+            x.device.type == "npu"
+            and x.device == weight.device == out.device
+            and x.dtype == weight.dtype == out.dtype == torch.bfloat16
+            and x.ndim == weight.ndim == out.ndim == 2
+            and x.shape[1] == weight.shape[1]
+            and out.shape == (x.shape[0], weight.shape[0])
+            and x.is_contiguous()
+            and weight.is_contiguous()
+            and out.is_contiguous()
+            and not is_internal_npu_format(out)
+        )
+
     def _project_o_proj_full(self, attn_output: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         output[...] = self.o_proj(attn_output)[0]
         return output
@@ -2246,7 +2297,16 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert self.g_proj is not None
             gate = self.g_proj(gate_hidden_states.contiguous())[0]
             flash_attention_gate(attn_output, gate)
-        self._finalize_o_proj(attn_output, output[:num_input_tokens])
+        dst = output[:num_input_tokens]
+        if (
+            self._decode_o_proj_out
+            and attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            and self._can_project_decode_into(attn_output, dst)
+        ):
+            # The plain bias-free row projection is linear(x, W) = x @ W.T.
+            torch.matmul(attn_output, self.o_proj.weight.t(), out=dst)
+        else:
+            self._finalize_o_proj(attn_output, dst)
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
