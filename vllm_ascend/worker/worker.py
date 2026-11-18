@@ -174,7 +174,10 @@ class NPUWorker(GPUWorker):
         # Ascend V2 model runner overrides so the worker resolves the same
         # runner version as the engine. Idempotent.
         from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs
-        from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
+        from vllm_ascend.mrv2_utils import (
+            allow_v2_model_runner_without_triton,
+            apply_v2_model_runner_config_patch,
+        )
         from vllm_ascend.utils import adapt_patch
 
         apply_v2_model_runner_config_patch()
@@ -201,6 +204,12 @@ class NPUWorker(GPUWorker):
 
         if getattr(vllm_config.parallel_config, "enable_fault_tolerance", False):
             raise NotImplementedError("Ascend does not support the GPU fault-tolerance sentinel.")
+
+        # GPUWorker.__init__ repeats Model Runner V2's Triton precondition, which
+        # apply_v2_model_runner_config_patch() already drops for the config layer.
+        # Ascend keeps the runner available without Triton: the 310P lanes run it
+        # with Triton uninstalled and there is no V1 runner to fall back to.
+        allow_v2_model_runner_without_triton()
 
         super().__init__(
             vllm_config=vllm_config,

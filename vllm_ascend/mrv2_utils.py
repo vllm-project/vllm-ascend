@@ -57,13 +57,30 @@ def _validate_v2_model_runner(self) -> None:
     """Reject the configurations Model Runner V2 cannot serve.
 
     The feature list comes from upstream so it keeps growing with it. Only the
-    Triton precondition is dropped: an Ascend deployment always ships Triton,
-    while the CPU test lanes and config-only hosts import neither, and there
-    is no V1 runner left to fall back to.
+    Triton precondition is dropped: Ascend keeps Model Runner V2 available where
+    Triton is absent (the CPU test lanes, config-only hosts and the 310P lanes
+    import neither), and there is no V1 runner left to fall back to.
     """
     unsupported = self._get_v2_model_runner_unsupported_features()
     if unsupported:
         raise ValueError(f"Model Runner V2 does not yet support: {', '.join(unsupported)}")
+
+
+def allow_v2_model_runner_without_triton() -> None:
+    """Drop the Triton precondition that ``GPUWorker.__init__`` repeats.
+
+    ``_validate_v2_model_runner`` covers the config layer, but the upstream
+    worker constructor checks its own import of ``HAS_TRITON`` and raises before
+    the Ascend runner is selected. Ascend has no V1 runner to fall back to, and
+    the 310P lanes run Model Runner V2 with Triton uninstalled, so the
+    worker-level copy of the flag is relaxed here. Only
+    ``vllm.v1.worker.gpu_worker`` is affected; every other module keeps the real
+    detection, and the guard keeps this working once upstream drops the flag.
+    """
+    from vllm.v1.worker import gpu_worker
+
+    if hasattr(gpu_worker, "HAS_TRITON") and not gpu_worker.HAS_TRITON:
+        gpu_worker.HAS_TRITON = True
 
 
 def apply_v2_model_runner_config_patch() -> None:

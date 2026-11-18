@@ -121,7 +121,6 @@ def worker_constructor(monkeypatch):
     monkeypatch.setattr(worker_module, "SleepWakeupManager", Mock(side_effect=make_sleep_manager))
     monkeypatch.setattr(linear, "WEIGHT_LOADER_V2_SUPPORTED", ["UnquantizedLinearMethod", "Other"])
     monkeypatch.setattr(vllm.ir, "set_default_torch_wrap", Mock())
-    monkeypatch.setattr(gpu_worker, "HAS_TRITON", True)
     monkeypatch.setattr(gpu_worker.torch, "set_float32_matmul_precision", Mock())
     monkeypatch.setattr(gpu_worker, "validate_worker_profiler_config", record("validate_profiler"))
     executor_module = ModuleType("vllm.distributed.elastic_ep.elastic_execute")
@@ -228,6 +227,15 @@ def test_real_npu_worker_constructor_initializes_parent_and_npu_state(worker_con
 
     worker = construct_worker(worker_constructor, cache_dtype=cache_dtype)
     assert worker.cache_dtype == (torch.float16 if cache_dtype == "auto" else torch.float32)
+
+
+def test_parent_constructor_accepts_model_runner_v2_without_triton(worker_constructor, monkeypatch):
+    """The 310P lanes run Model Runner V2 with Triton uninstalled."""
+    from vllm.v1.worker import gpu_worker
+
+    monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
+    construct_worker(worker_constructor)
+    assert gpu_worker.HAS_TRITON is True
 
 
 def test_310p_constructor_device_runner_and_export(worker_constructor, monkeypatch):
