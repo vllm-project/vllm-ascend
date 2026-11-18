@@ -2024,7 +2024,7 @@ def _want_b1_paged_verify(attn_selector_config) -> bool:
     if not ascend_envs.VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY:
         return False
     vllm_config = get_current_vllm_config_or_none()
-    if vllm_config is None or not bool(getattr(vllm_config, "use_v2_model_runner", False)):
+    if vllm_config is None:
         return False
     if vllm_config.speculative_config is None:
         return False
@@ -2042,7 +2042,6 @@ def _want_b1_paged_verify(attn_selector_config) -> bool:
     if (
         attn_selector_config.use_mla
         or attn_selector_config.use_sparse
-        or getattr(attn_selector_config, "use_compress", False)
         or attn_selector_config.use_pcp
         or attn_selector_config.use_dcp
         or attn_selector_config.use_kv_connector
@@ -2050,6 +2049,8 @@ def _want_b1_paged_verify(attn_selector_config) -> bool:
         or attn_selector_config.use_non_causal
         or attn_selector_config.use_per_head_quant_scales
         or getattr(attn_selector_config, "use_adaptive_verification", False)
+        or getattr(attn_selector_config, "use_rswa", False)
+        or getattr(attn_selector_config, "use_hisparse", False)
     ):
         return False
     if is_950():
