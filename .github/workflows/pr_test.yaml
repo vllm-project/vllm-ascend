@@ -804,6 +804,11 @@ jobs:
     # manually. Review events re-evaluate the gate by re-running this job
     # inside the original pull_request run (see pr_refresh_ci_gate.yaml),
     # never through a second check under the same name.
+    # Runs after pre-commit on purpose: a lint failure forces a new push that
+    # re-runs everything anyway, so skipping the gate on those runs keeps it
+    # off the CPU pool without delaying merge readiness (ci-gate waits on
+    # pre-commit regardless, and checks pre-commit before the owner gate).
+    needs: [pre-commit]
     if: ${{ github.event.label.name != 'ci-run' }}
     runs-on: linux-amd64-cpu-2-hk
     permissions:
@@ -819,6 +824,11 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.ref }}
           persist-credentials: false
+          # The gate only needs the gate script and CODEOWNERS, both under
+          # .github/: skip the rest of the tree to keep this high-frequency
+          # job off the CPU pool as briefly as possible.
+          sparse-checkout: .github
+          fetch-depth: 1
 
       - name: CODEOWNERS coverage check
         env:
