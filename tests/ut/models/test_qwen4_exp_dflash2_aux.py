@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import torch
 from vllm.model_executor.models.interfaces import SupportsEagle3, supports_eagle3
+from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.models.qwen4_exp.model as qwen4_exp
 
@@ -67,12 +68,48 @@ def test_dflash2_aux_outputs_are_completed_layer_stream_means(monkeypatch):
 
 def test_default_qwen4_exp_output_is_unchanged_without_aux_layers(monkeypatch):
     model = _model(monkeypatch, ())
+    expected = torch.full((2, 8), 7.0)
+
+    def upstream_forward(self, input_ids, positions, **kwargs):
+        assert kwargs["inputs_embeds"] is not None
+        return expected
+
+    monkeypatch.setattr(qwen4_exp.upstream_model.Qwen4ExpModel, "forward", upstream_forward)
 
     output = _forward(model)
 
-    assert isinstance(output, torch.Tensor)
-    assert output.shape == (2, 8)
+    assert output is expected
     assert model.layers[0].combine_calls == 0
+
+
+def test_pp_sp_boundary_adaptation_wraps_upstream_forward(monkeypatch):
+    model = _model(monkeypatch, ())
+    model.use_hc_sequence_parallel = True
+    monkeypatch.setattr(
+        qwen4_exp,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=False, is_last_rank=False),
+    )
+    monkeypatch.setattr(qwen4_exp, "sp_shard", lambda hidden: hidden[:2])
+    monkeypatch.setattr(qwen4_exp, "sp_all_gather", lambda hidden: torch.cat((hidden, hidden), dim=0))
+    full_hidden = torch.arange(32, dtype=torch.float32).reshape(4, 8)
+    seen = {}
+
+    def upstream_forward(self, input_ids, positions, intermediate_tensors=None, **kwargs):
+        seen["hidden_states"] = intermediate_tensors["hidden_states"]
+        return IntermediateTensors({"hidden_states": intermediate_tensors["hidden_states"] + 1})
+
+    monkeypatch.setattr(qwen4_exp.upstream_model.Qwen4ExpModel, "forward", upstream_forward)
+
+    output = model.forward(
+        input_ids=None,
+        positions=torch.zeros(4, dtype=torch.long),
+        intermediate_tensors=IntermediateTensors({"hidden_states": full_hidden}),
+    )
+
+    assert isinstance(output, IntermediateTensors)
+    torch.testing.assert_close(seen["hidden_states"], full_hidden[:2])
+    torch.testing.assert_close(output["hidden_states"], torch.cat((full_hidden[:2] + 1, full_hidden[:2] + 1)))
 
 
 def test_dflash2_aux_outputs_keep_hidden_width_with_hc_sequence_parallel(monkeypatch):

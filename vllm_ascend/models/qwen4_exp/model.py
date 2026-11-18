@@ -27,6 +27,7 @@ from vllm.models.qwen4_exp.amd import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 from vllm_ascend.models.qwen3_5_vl import (
     AscendQwen3_5VLProcessor,
     _AscendProcessorMixin,
@@ -79,6 +80,48 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel, EagleModelMixin):
             }
 
     def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        """Reuse the upstream forward except for DFlash2 auxiliary capture."""
+        pp_group = get_pp_group()
+        if not pp_group.is_first_rank and self.use_hc_sequence_parallel and intermediate_tensors is not None:
+            hidden_states = intermediate_tensors["hidden_states"]
+            if hidden_states.shape[0] == positions.shape[-1]:
+                intermediate_tensors = IntermediateTensors(
+                    {**intermediate_tensors.tensors, "hidden_states": sp_shard(hidden_states)}
+                )
+
+        if self.aux_hidden_state_layers:
+            # Upstream does not expose completed decoder-layer HC states. Only
+            # DFlash2 uses the local loop that captures and returns them.
+            output = self._forward_with_dflash2_aux(
+                input_ids,
+                positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                **kwargs,
+            )
+        else:
+            output = super().forward(
+                input_ids,
+                positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                **kwargs,
+            )
+
+        if not pp_group.is_last_rank and self.use_hc_sequence_parallel:
+            assert isinstance(output, IntermediateTensors)
+            hidden_states = sp_all_gather(output["hidden_states"])
+            output = IntermediateTensors({**output.tensors, "hidden_states": hidden_states[: positions.shape[-1]]})
+        return output
+
+    def _forward_with_dflash2_aux(
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
