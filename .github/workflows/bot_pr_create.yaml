@@ -19,6 +19,18 @@ name: PR Create
 
 on:
   pull_request_target:
+    # opened + synchronize cover everything meaningful: the welcome comment
+    # fires on opened, and label/description maintenance re-runs when the
+    # pushed file set changes. Other actions (labeled, edited, ...) only
+    # re-run idempotent no-ops.
+    types: [opened, synchronize]
+
+concurrency:
+  # The steps are idempotent maintenance (welcome comment + labels), so a
+  # rapid synchronize burst (e.g. a mass rebase) only needs the newest run:
+  # older in-flight ones are cancelled instead of piling up in the queue.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: true
 
 permissions:
   pull-requests: write
@@ -97,7 +109,7 @@ jobs:
           fi
 
       - name: Label the PR
-        uses: actions/labeler@v6
+        uses: actions/labeler@v7
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           configuration-path: .github/labeler.yml
@@ -117,7 +129,16 @@ jobs:
               '- A PR should do only one thing, smaller PRs enable faster reviews.\n' +
               '- Every PR should include unit tests and end-to-end tests ‌to ensure it works and is not broken by other future PRs.\n' +
               '- Write the commit message by fulfilling the PR description to help reviewer and future developers understand.\n\n' +
-              'If CI fails, you can run linting and testing checks locally according [Contributing](https://docs.vllm.ai/projects/ascend/zh-cn/latest/developer_guide/contribution/index.html) and [Testing](https://docs.vllm.ai/projects/ascend/zh-cn/latest/developer_guide/contribution/testing.html).\n';
+              'If CI fails, you can run linting and testing checks locally according [Contributing](https://docs.vllm.ai/projects/ascend/zh-cn/latest/developer_guide/contribution/index.html) and [Testing](https://docs.vllm.ai/projects/ascend/zh-cn/latest/developer_guide/contribution/testing.html).\n\n' +
+              '## :robot: How to trigger CI\n\n' +
+              '> CI runs automatically when the PR is opened or reopened. **Pushing a new commit no longer re-runs the E2E CI** (to save NPU runner resources), so use the comment commands below when needed. They are available to the PR author and users with triage permission or above:\n\n' +
+              '- `/run` — run the full PR CI gate on the latest commit.\n' +
+              '- `/rerun` — re-run the failed CI jobs (e.g. after a flaky failure).\n' +
+              '- `/e2e` — run selected E2E tests instead of the full gate.\n' +
+              '- `/nightly` / `/presmoke` / `/weekly` — run the corresponding large-scale tests (triage permission or above; blocked during the nightly maintenance window).\n' +
+              '- `/cancel` — cancel a running CI on this PR.\n\n' +
+              '> [!NOTE]\n' +
+              '> Until the CI gate has run on a commit, the required `ci-gate` check stays pending and the PR cannot merge — remember to comment `/run` after pushing.\n';
 
             if (isBugFix || isFeature) {
               body += '\n---\n\n' +

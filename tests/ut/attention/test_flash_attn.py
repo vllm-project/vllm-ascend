@@ -132,7 +132,6 @@ def test_flash_attn_192_cache_spec_integration(monkeypatch, backend):
         cache_config=SimpleNamespace(cache_dtype="fp8", block_size=128, skip_page_size_padded=None),
     )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {"draft.attn": layer})
-    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
     spec = attn_utils.get_kv_cache_spec(config)["draft.attn"]
     physical_size = 256 if backend is AscendFlashAttentionBackend else 192
     assert spec.head_size == spec.head_size_v == physical_size
@@ -160,7 +159,7 @@ def test_flash_attn_preserves_m3_fp8_target_kernel_pages(monkeypatch):
 @pytest.fixture
 def dflash2_config():
     return SimpleNamespace(
-        model_config=SimpleNamespace(runner_type="generate"),
+        model_config=SimpleNamespace(runner_type="generate", hf_config=SimpleNamespace(architectures=["DFlash2Model"])),
         speculative_config=SimpleNamespace(
             method="dflash",
             target_model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm_moe_dsa")),
@@ -490,7 +489,6 @@ def test_only_undersized_draft_swa_pages_drop_inherited_padding(
     get_spec = Mock(wraps=layer.get_kv_cache_spec)
     monkeypatch.setattr(layer, "get_kv_cache_spec", get_spec)
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {"draft.attn": layer})
-    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
 
     spec = attn_utils.get_kv_cache_spec(config)["draft.attn"]
 
