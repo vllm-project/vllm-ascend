@@ -192,17 +192,11 @@ extra:
   release_fla_npu_version: "26.9.1"
   # ================== Current main development stack ==========================
   # The compatibility policy and CPU-only build instructions use these values.
-  # The framework versions derive from requirements.txt via req_version() so
-  # the pins have a single source of truth; update this group only when the
-  # verified main build image changes.
+  # docs/hooks/macros_main.py reads framework versions from requirements.txt.
+  # Update this group when the verified main build image changes.
   cann_image_tag: 9.2.1-910b-ubuntu22.04-py3.12
   main_python_version: ">= 3.10, < 3.13"
   main_cann_version: "9.2.1"
-  main_pytorch_version: '{{ req_version("torch") }}'
-  main_torch_npu_version: '{{ req_version("torch-npu") }}'
-  main_torchvision_version: '{{ req_version("torchvision") }}'
-  main_torchaudio_version: '{{ req_version("torchaudio") }}'
-  main_triton_ascend_version: '{{ req_version("triton-ascend") }}'
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/vllm-project/vllm-ascend
