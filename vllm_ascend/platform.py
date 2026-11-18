@@ -1853,7 +1853,7 @@ def _validate_minimax_dspark_flash_attn(config, selector) -> bool:
 
 
 def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
-    """Select FA3 only for supported DFlash2 and MiniMax DSpark drafts."""
+    """Select FA3 for Qwen DFlash2 targets/drafts and MiniMax DSpark drafts."""
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
         HardwareCapability.FLASH_ATTN_NPU_3
     ):
@@ -1871,10 +1871,10 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
     from vllm.compilation import backends
 
     model_tag = backends.model_tag
-    if model_tag not in ("dflash_head", "dspark_head"):
+    if model_tag not in ("backbone", "dflash_head", "dspark_head"):
         return False
 
-    is_dflash = model_tag == "dflash_head"
+    is_dflash = model_tag in ("backbone", "dflash_head")
     if is_dflash:
         if (
             spec.method != "dflash"

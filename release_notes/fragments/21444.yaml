@@ -8,6 +8,10 @@ entries:
       avoids draft attention length copies on the supported sliding-window
       path and the runner's post-sampling length snapshot and Event wait for
       supported single-stage configurations with unquantized draft KV caches.
-      Target attention keeps its existing backend and length copies.
+      Qwen target full attention also uses FA3 with its default unlimited
+      window; linear attention keeps GDN. With FA3 0.5.0, full attention at
+      KV capacity >=1024 requires eager execution because graph capture fails
+      on synchronous length copies, including in FULL_DECODE_ONLY mode.
+      FA3 0.5.1 supports this full-attention graph path with the default window.
     model: qwen3.5-dflash2
     hardware: [A2, A3]
