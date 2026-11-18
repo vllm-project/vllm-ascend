@@ -196,6 +196,8 @@ def _get_replicated_draft_pools(
     groups: list[KVCacheGroupSpec],
 ) -> list[list[KVCacheGroupSpec]] | None:
     """Keep contiguous dense draft K/V outside the target/state alias pool."""
+    if _get_glm5_next_cache_layout(groups) is not None:
+        return None
     if not any(get_kv_cache_spec_kind(group.kv_cache_spec) == KVCacheSpecKind.MAMBA for group in groups):
         return None
     target_groups = []

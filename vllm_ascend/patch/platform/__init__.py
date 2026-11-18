@@ -19,6 +19,7 @@ import os
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kimi_k31_config  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_admission  # noqa
+import vllm_ascend.patch.platform.patch_kv_cache_layout  # noqa
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
 import vllm_ascend.patch.platform.patch_parallel_config  # noqa
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa
