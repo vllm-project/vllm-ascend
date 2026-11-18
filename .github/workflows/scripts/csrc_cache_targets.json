@@ -12,7 +12,7 @@
     "cache_arch": "ARM64",
     "runner": "linux-arm64-cpu-16",
     "os": "ubuntu",
-    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.1-a3-ubuntu22.04-py3.12",
+    "image": "swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.3.0_20261113161300-a3-ubuntu22.04-py3.12",
     "soc_version": "ascend910_9391"
   },
   "310p-arm64-ubuntu": {
