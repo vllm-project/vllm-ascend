@@ -16,10 +16,21 @@
 #
 
 import torch
+import torch_npu
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import LayerNameType, _resolve_layer_name, direct_register_custom_op
 
-from vllm_ascend.ops.triton.triton_utils import extract_slice, get_element, get_vectorcore_num, insert_slice
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ops.triton.triton_utils import (
+    extract_slice,
+    get_element,
+    get_vectorcore_num,
+    init_device_properties_triton,
+    insert_slice,
+)
+
+_get_raw_stream = getattr(getattr(torch_npu, "_C", None), "_npu_getCurrentRawStream", None)
 
 
 @triton.jit
@@ -261,6 +272,273 @@ def split_qkv_rmsnorm_rope_kernel(
         mblk_idx += v_batch_size_per_iter_per_vec
 
 
+@triton.jit(do_not_specialize=["batch_size"])
+def fast_split_qkv_rope_kernel(
+    input_ptr,
+    q_ptr,
+    k_ptr,
+    v_ptr,
+    cos_sin_ptr,
+    pos_ptr,
+    qw_ptr,
+    kw_ptr,
+    batch_size,
+    eps: tl.constexpr,
+    q_hidden: tl.constexpr,
+    kv_hidden: tl.constexpr,
+    total_hidden: tl.constexpr,
+    q_heads: tl.constexpr,
+    kv_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    rope_dim: tl.constexpr,
+    half_rope: tl.constexpr,
+    num_vec: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    per = tl.cdiv(batch_size, num_vec)
+    b0 = pid * per
+    b1 = tl.minimum(b0 + per, batch_size)
+    qn = tl.arange(0, q_hidden)
+    kn = tl.arange(q_hidden, q_hidden + kv_hidden)
+    vn = tl.arange(q_hidden + kv_hidden, total_hidden)
+    wd = tl.arange(0, head_dim)
+    qw = tl.load(qw_ptr + wd).to(tl.float32)
+    kw = tl.load(kw_ptr + wd).to(tl.float32)
+    out_qn = tl.arange(0, q_hidden)
+    kvn = tl.arange(0, kv_hidden)
+    half_off = tl.arange(0, half_rope)
+    for m in tl.range(b0, b1):
+        qv = tl.load(input_ptr + m * total_hidden + qn).to(tl.float32).reshape(q_heads, head_dim)
+        qvar = tl.sum(qv * qv, axis=1, keep_dims=True) / head_dim
+        qnorm = (qv * tl.math.rsqrt(qvar + eps) * qw[None, :]).to(tl.bfloat16)
+        kv = tl.load(input_ptr + m * total_hidden + kn).to(tl.float32).reshape(kv_heads, head_dim)
+        kvar = tl.sum(kv * kv, axis=1, keep_dims=True) / head_dim
+        knorm = (kv * tl.math.rsqrt(kvar + eps) * kw[None, :]).to(tl.bfloat16)
+        pos = tl.load(pos_ptr + m).to(tl.int64)
+        csoff = pos * rope_dim + half_off
+        cos = tl.load(cos_sin_ptr + csoff)[None, :]
+        sin = tl.load(cos_sin_ptr + csoff + half_rope)[None, :]
+        qx1 = extract_slice(qnorm, (0, 0), (q_heads, half_rope), (1, 1))
+        qx2 = extract_slice(qnorm, (0, half_rope), (q_heads, half_rope), (1, 1))
+        qo = tl.zeros((q_heads, rope_dim), dtype=tl.bfloat16)
+        qo = insert_slice(qo, (qx1 * cos - qx2 * sin), (0, 0), (q_heads, half_rope), (1, 1))
+        qo = insert_slice(qo, (qx2 * cos + qx1 * sin), (0, half_rope), (q_heads, half_rope), (1, 1))
+        tl.store(q_ptr + m * q_hidden + out_qn, qo.reshape(q_hidden))
+
+        kx1 = extract_slice(knorm, (0, 0), (kv_heads, half_rope), (1, 1))
+        kx2 = extract_slice(knorm, (0, half_rope), (kv_heads, half_rope), (1, 1))
+        ko = tl.zeros((kv_heads, rope_dim), dtype=tl.bfloat16)
+        ko = insert_slice(ko, (kx1 * cos - kx2 * sin), (0, 0), (kv_heads, half_rope), (1, 1))
+        ko = insert_slice(ko, (kx2 * cos + kx1 * sin), (0, half_rope), (kv_heads, half_rope), (1, 1))
+        tl.store(k_ptr + m * kv_hidden + kvn, ko.reshape(kv_hidden))
+        vv = tl.load(input_ptr + m * total_hidden + vn)
+        tl.store(v_ptr + m * kv_hidden + kvn, vv)
+
+
+@triton.jit(
+    do_not_specialize=[
+        "batch_size",
+        "n_slots",
+        "total_slots",
+        "kc_block_stride",
+        "vc_block_stride",
+    ]
+)
+def fused_qkv_cache_bs1_kernel(
+    input_ptr,
+    q_ptr,
+    k_ptr,
+    v_ptr,
+    kc_ptr,
+    vc_ptr,
+    slots_ptr,
+    cos_sin_ptr,
+    pos_ptr,
+    qw_ptr,
+    kw_ptr,
+    batch_size,
+    n_slots,
+    total_slots,
+    kc_block_stride,
+    vc_block_stride,
+    eps: tl.constexpr,
+    q_hidden: tl.constexpr,
+    kv_hidden: tl.constexpr,
+    total_hidden: tl.constexpr,
+    q_heads: tl.constexpr,
+    kv_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    rope_dim: tl.constexpr,
+    half_rope: tl.constexpr,
+    block_size: tl.constexpr,
+    num_vec: tl.constexpr,
+    WRITE_KV_TENSORS: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    per = tl.cdiv(batch_size, num_vec)
+    b0 = pid * per
+    b1 = tl.minimum(b0 + per, batch_size)
+    qn = tl.arange(0, q_hidden)
+    kn = tl.arange(q_hidden, q_hidden + kv_hidden)
+    vn = tl.arange(q_hidden + kv_hidden, total_hidden)
+    wd = tl.arange(0, head_dim)
+    qw = tl.load(qw_ptr + wd).to(tl.float32)
+    kw = tl.load(kw_ptr + wd).to(tl.float32)
+    out_qn = tl.arange(0, q_hidden)
+    kvn = tl.arange(0, kv_hidden)
+    half_off = tl.arange(0, half_rope)
+    for m in tl.range(b0, b1):
+        qv = tl.load(input_ptr + m * total_hidden + qn).to(tl.float32).reshape(q_heads, head_dim)
+        qvar = tl.sum(qv * qv, axis=1, keep_dims=True) / head_dim
+        qnorm = (qv * tl.math.rsqrt(qvar + eps) * qw[None, :]).to(tl.bfloat16)
+        kv = tl.load(input_ptr + m * total_hidden + kn).to(tl.float32).reshape(kv_heads, head_dim)
+        kvar = tl.sum(kv * kv, axis=1, keep_dims=True) / head_dim
+        knorm = (kv * tl.math.rsqrt(kvar + eps) * kw[None, :]).to(tl.bfloat16)
+        pos = tl.load(pos_ptr + m).to(tl.int64)
+        csoff = pos * rope_dim + half_off
+        cos = tl.load(cos_sin_ptr + csoff)[None, :]
+        sin = tl.load(cos_sin_ptr + csoff + half_rope)[None, :]
+        qx1 = extract_slice(qnorm, (0, 0), (q_heads, half_rope), (1, 1))
+        qx2 = extract_slice(qnorm, (0, half_rope), (q_heads, half_rope), (1, 1))
+        qo = tl.zeros((q_heads, rope_dim), dtype=tl.bfloat16)
+        qo = insert_slice(qo, (qx1 * cos - qx2 * sin), (0, 0), (q_heads, half_rope), (1, 1))
+        qo = insert_slice(qo, (qx2 * cos + qx1 * sin), (0, half_rope), (q_heads, half_rope), (1, 1))
+        tl.store(q_ptr + m * q_hidden + out_qn, qo.reshape(q_hidden))
+
+        kx1 = extract_slice(knorm, (0, 0), (kv_heads, half_rope), (1, 1))
+        kx2 = extract_slice(knorm, (0, half_rope), (kv_heads, half_rope), (1, 1))
+        ko = tl.zeros((kv_heads, rope_dim), dtype=tl.bfloat16)
+        ko = insert_slice(ko, (kx1 * cos - kx2 * sin), (0, 0), (kv_heads, half_rope), (1, 1))
+        ko = insert_slice(ko, (kx2 * cos + kx1 * sin), (0, half_rope), (kv_heads, half_rope), (1, 1))
+        kflat = ko.reshape(kv_hidden)
+        vv = tl.load(input_ptr + m * total_hidden + vn)
+        if WRITE_KV_TENSORS:
+            tl.store(k_ptr + m * kv_hidden + kvn, kflat)
+            tl.store(v_ptr + m * kv_hidden + kvn, vv)
+        if m < n_slots:
+            slot = tl.load(slots_ptr + m).to(tl.int64)
+            if (slot >= 0) & (slot < total_slots):
+                blk = slot // block_size
+                off = slot % block_size
+                tl.store(kc_ptr + blk * kc_block_stride + off * kv_hidden + kvn, kflat)
+                tl.store(vc_ptr + blk * vc_block_stride + off * kv_hidden + kvn, vv)
+
+
+_VEC_CORES: int | None = None
+_ATTN_STATE_CLS = None
+_FAST_SPLIT_KERNELS: dict[tuple, object] = {}
+_FUSED_QKV_CACHE_KERNELS: dict[tuple, object] = {}
+
+
+def _get_safe_vec_cores() -> int:
+    global _VEC_CORES
+    if _VEC_CORES is None:
+        init_device_properties_triton()
+        _VEC_CORES = int(get_vectorcore_num())
+    return _VEC_CORES
+
+
+def _get_attn_state_cls():
+    global _ATTN_STATE_CLS
+    if _ATTN_STATE_CLS is None:
+        from vllm_ascend.attention.attention_v1 import AscendAttentionState
+
+        _ATTN_STATE_CLS = AscendAttentionState
+    return _ATTN_STATE_CLS
+
+
+def _is_pure_chunked_pfa_step(attn_metadata, attn_state_cls, batch_size: int) -> bool:
+    if (
+        attn_metadata.attn_state != attn_state_cls.ChunkedPrefill
+        or batch_size < 1152
+        or getattr(attn_metadata, "num_decodes", 0) != 0
+        or getattr(attn_metadata, "num_prefills", 0) <= 0
+        or getattr(attn_metadata, "attn_mask", None) is None
+    ):
+        return False
+    cached = getattr(attn_metadata, "_m21_can_pure_pfa", None)
+    if cached is not None:
+        return cached
+    aq = getattr(attn_metadata, "actual_seq_lengths_q", None)
+    skv = getattr(attn_metadata, "seq_lens_list", None)
+    if not aq or not skv or len(aq) != len(skv) or int(aq[-1]) < 1152:
+        can = False
+    else:
+        can = True
+        prev_q = 0
+        for i in range(len(aq)):
+            cur_q = int(aq[i])
+            if cur_q - prev_q != int(skv[i]):
+                can = False
+                break
+            prev_q = cur_q
+    attn_metadata._m21_can_pure_pfa = can
+    return can
+
+
+def _resolve_qkv_cache_ctx(resolved_name: str):
+    if not is_forward_context_available():
+        return None, None, None, None
+    fc = get_forward_context()
+    no_compile = getattr(fc, "no_compile_layers", None)
+    if no_compile is None:
+        return None, None, None, None
+    attn_layer = no_compile.get(resolved_name)
+    if attn_layer is None:
+        return None, None, None, None
+    kv_cache = getattr(attn_layer, "kv_cache", None)
+    raw_meta = getattr(fc, "attn_metadata", None)
+    if isinstance(raw_meta, dict):
+        attn_metadata = raw_meta.get(resolved_name)
+    elif isinstance(raw_meta, list) and raw_meta and isinstance(raw_meta[0], dict):
+        attn_metadata = raw_meta[0].get(resolved_name)
+    else:
+        attn_metadata = raw_meta
+    fc_slots = getattr(fc, "slot_mapping", None)
+    fc_slot_mapping = fc_slots.get(resolved_name) if isinstance(fc_slots, dict) else None
+    return attn_metadata, attn_layer, kv_cache, fc_slot_mapping
+
+
+def _can_use_fast_split(
+    input: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    q_hidden_size: int,
+    kv_hidden_size: int,
+    head_dim: int,
+    q_bias: torch.Tensor | None,
+    k_bias: torch.Tensor | None,
+) -> bool:
+    total_hidden = q_hidden_size + 2 * kv_hidden_size
+    return (
+        q_bias is None
+        and k_bias is None
+        and 0 < head_dim <= 256
+        and (head_dim & (head_dim - 1)) == 0
+        and 0 < q_hidden_size <= 8192
+        and (q_hidden_size & (q_hidden_size - 1)) == 0
+        and 0 < kv_hidden_size <= 2048
+        and (kv_hidden_size & (kv_hidden_size - 1)) == 0
+        and q_hidden_size % head_dim == 0
+        and kv_hidden_size % head_dim == 0
+        and cos_sin_cache.shape[-1] == head_dim
+        and input.shape[0] > 0
+        and input.ndim == 2
+        and input.shape[1] == total_hidden
+        and input.dtype == torch.bfloat16
+        and cos_sin_cache.dtype == torch.bfloat16
+        and q_weight.dtype == torch.bfloat16
+        and k_weight.dtype == torch.bfloat16
+        and cos_sin_cache.is_contiguous()
+        and q_weight.is_contiguous()
+        and k_weight.is_contiguous()
+        and positions.ndim == 1
+        and positions.stride(0) == 1
+    )
+
+
 def split_qkv_rmsnorm_rope_impl(
     input: torch.Tensor,
     cos_sin_cache: torch.Tensor,
@@ -274,6 +552,114 @@ def split_qkv_rmsnorm_rope_impl(
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if _can_use_fast_split(
+        input,
+        cos_sin_cache,
+        positions,
+        q_weight,
+        k_weight,
+        q_hidden_size,
+        kv_hidden_size,
+        head_dim,
+        q_bias,
+        k_bias,
+    ):
+        if not input.is_contiguous():
+            input = input.contiguous()
+        num_vectorcore = _get_safe_vec_cores()
+        batch_size = input.shape[0]
+        q_output = torch.empty(batch_size, q_hidden_size, device=input.device, dtype=input.dtype)
+        k_output = torch.empty(batch_size, kv_hidden_size, device=input.device, dtype=input.dtype)
+        v_output = torch.empty(batch_size, kv_hidden_size, device=input.device, dtype=input.dtype)
+        feps = float(eps)
+        total_hidden = q_hidden_size + 2 * kv_hidden_size
+        q_heads = q_hidden_size // head_dim
+        kv_heads = kv_hidden_size // head_dim
+        rope_dim = head_dim
+        half_rope = head_dim // 2
+        if _get_raw_stream is None or torch.npu.is_current_stream_capturing():
+            fast_split_qkv_rope_kernel[(num_vectorcore,)](
+                input,
+                q_output,
+                k_output,
+                v_output,
+                cos_sin_cache,
+                positions,
+                q_weight,
+                k_weight,
+                batch_size,
+                feps,
+                q_hidden_size,
+                kv_hidden_size,
+                total_hidden,
+                q_heads,
+                kv_heads,
+                head_dim,
+                rope_dim,
+                half_rope,
+                num_vectorcore,
+            )
+        else:
+            dev_idx = input.device.index if input.device.index is not None else 0
+            key = (dev_idx, feps, num_vectorcore, positions.dtype, q_hidden_size, kv_hidden_size, head_dim)
+            k = _FAST_SPLIT_KERNELS.get(key)
+            if k is None:
+                k = fast_split_qkv_rope_kernel[(num_vectorcore,)](
+                    input,
+                    q_output,
+                    k_output,
+                    v_output,
+                    cos_sin_cache,
+                    positions,
+                    q_weight,
+                    k_weight,
+                    batch_size,
+                    feps,
+                    q_hidden_size,
+                    kv_hidden_size,
+                    total_hidden,
+                    q_heads,
+                    kv_heads,
+                    head_dim,
+                    rope_dim,
+                    half_rope,
+                    num_vectorcore,
+                )
+                _FAST_SPLIT_KERNELS[key] = k
+            else:
+                st = _get_raw_stream(dev_idx)
+                k.run(  # type: ignore[attr-defined]
+                    num_vectorcore,
+                    1,
+                    1,
+                    st,
+                    k.function,  # type: ignore[attr-defined]
+                    k.packed_metadata,  # type: ignore[attr-defined]
+                    None,
+                    None,
+                    None,
+                    input,
+                    q_output,
+                    k_output,
+                    v_output,
+                    cos_sin_cache,
+                    positions,
+                    q_weight,
+                    k_weight,
+                    batch_size,
+                    feps,
+                    q_hidden_size,
+                    kv_hidden_size,
+                    total_hidden,
+                    q_heads,
+                    kv_heads,
+                    head_dim,
+                    rope_dim,
+                    half_rope,
+                    num_vectorcore,
+                )
+        return q_output, k_output, v_output
+
     # get available vector core
     num_vectorcore = get_vectorcore_num()
     rope_dim = cos_sin_cache.shape[-1]
@@ -385,6 +771,283 @@ direct_register_custom_op(
     op_name="qkv_rmsnorm_rope",
     op_func=split_qkv_rmsnorm_rope_impl,
     fake_impl=split_qkv_rmsnorm_rope_impl_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+
+def qkv_rmsnorm_rope_cache_impl(
+    input: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    layer_name: LayerNameType,
+    q_hidden_size: int,
+    kv_hidden_size: int,
+    head_dim: int,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    batch_size = input.shape[0]
+    if batch_size == 0:
+        return (
+            torch.empty(0, q_hidden_size, device=input.device, dtype=input.dtype),
+            torch.empty(0, kv_hidden_size, device=input.device, dtype=input.dtype),
+            torch.empty(0, kv_hidden_size, device=input.device, dtype=input.dtype),
+        )
+
+    if not input.is_contiguous():
+        input = input.contiguous()
+
+    resolved_name = _resolve_layer_name(layer_name)
+    is_capturing = torch.npu.is_current_stream_capturing()
+    has_fc = is_forward_context_available()
+    is_full_capture = bool(_EXTRA_CTX.capturing) if has_fc else False
+    if (is_full_capture or not is_capturing) and _can_use_fast_split(
+        input,
+        cos_sin_cache,
+        positions,
+        q_weight,
+        k_weight,
+        q_hidden_size,
+        kv_hidden_size,
+        head_dim,
+        None,
+        None,
+    ):
+        attn_metadata, attn_layer, kv_cache, fc_slot_mapping = _resolve_qkv_cache_ctx(resolved_name)
+        impl = getattr(attn_layer, "impl", None) if attn_layer is not None else None
+        attn_state_cls = _get_attn_state_cls()
+        attn_type_str = str(getattr(impl, "attn_type", "")) if impl is not None else ""
+        if (
+            attn_metadata is not None
+            and impl is not None
+            and "ENCODER_DECODER" not in attn_type_str
+            and not getattr(impl, "use_bnsd_kv_cache", False)
+            and getattr(impl, "kv_sharing_target_layer_name", None) is None
+            and kv_cache is not None
+            and len(kv_cache) >= 2
+            and not getattr(attn_metadata, "uses_pcp_sharded_layout", False)
+            and getattr(attn_metadata, "model_runner_type", "") != "pooling"
+        ):
+            key_cache, value_cache = kv_cache[0], kv_cache[1]
+            slot_mapping = getattr(attn_metadata, "slot_mapping", None)
+            if slot_mapping is None:
+                slot_mapping = fc_slot_mapping
+            q_heads = q_hidden_size // head_dim
+            kv_heads = kv_hidden_size // head_dim
+            total_hidden = q_hidden_size + 2 * kv_hidden_size
+            rope_dim = head_dim
+            half_rope = head_dim // 2
+            block_size = int(key_cache.shape[1]) if key_cache.ndim == 4 else 0
+            if (
+                key_cache.ndim == 4
+                and key_cache.shape == value_cache.shape
+                and key_cache.shape[0] > 0
+                and block_size > 0
+                and key_cache.shape[2] == kv_heads
+                and key_cache.shape[3] == head_dim
+                and key_cache.stride()[1:] == (kv_hidden_size, head_dim, 1)
+                and value_cache.stride()[1:] == (kv_hidden_size, head_dim, 1)
+                and key_cache.dtype == torch.bfloat16
+                and value_cache.dtype == torch.bfloat16
+                and slot_mapping is not None
+                and slot_mapping.ndim == 1
+                and slot_mapping.stride(0) == 1
+                and slot_mapping.numel() > 0
+            ):
+                if getattr(impl, "key_cache", None) is None:
+                    impl.key_cache, impl.value_cache = key_cache, value_cache
+                write_kv_tensors = False
+                if not is_full_capture:
+                    write_kv_tensors = (
+                        attn_metadata.attn_state == attn_state_cls.PrefillNoCache
+                        or getattr(attn_metadata, "block_tables", None) is None
+                        or _is_pure_chunked_pfa_step(attn_metadata, attn_state_cls, batch_size)
+                    )
+                num_vectorcore = _get_safe_vec_cores()
+                q_output = torch.empty(batch_size, q_hidden_size, device=input.device, dtype=input.dtype)
+                k_output = torch.empty(batch_size, kv_hidden_size, device=input.device, dtype=input.dtype)
+                v_output = torch.empty(batch_size, kv_hidden_size, device=input.device, dtype=input.dtype)
+                total_slots = int(key_cache.shape[0]) * block_size
+                n_slots = min(int(slot_mapping.shape[0]), batch_size)
+                if not is_full_capture:
+                    n_actual = getattr(attn_metadata, "num_actual_tokens", None)
+                    if n_actual is not None:
+                        n_slots = min(n_slots, int(n_actual))
+                kc_bs = int(key_cache.stride(0))
+                vc_bs = int(value_cache.stride(0))
+                feps = float(eps)
+                if _get_raw_stream is None or is_full_capture or is_capturing:
+                    fused_qkv_cache_bs1_kernel[(num_vectorcore,)](
+                        input,
+                        q_output,
+                        k_output,
+                        v_output,
+                        key_cache,
+                        value_cache,
+                        slot_mapping,
+                        cos_sin_cache,
+                        positions,
+                        q_weight,
+                        k_weight,
+                        batch_size,
+                        n_slots,
+                        total_slots,
+                        kc_bs,
+                        vc_bs,
+                        feps,
+                        q_hidden_size,
+                        kv_hidden_size,
+                        total_hidden,
+                        q_heads,
+                        kv_heads,
+                        head_dim,
+                        rope_dim,
+                        half_rope,
+                        block_size,
+                        num_vectorcore,
+                        write_kv_tensors,
+                    )
+                else:
+                    dev_idx = input.device.index if input.device.index is not None else 0
+                    key = (
+                        dev_idx,
+                        feps,
+                        num_vectorcore,
+                        positions.dtype,
+                        slot_mapping.dtype,
+                        write_kv_tensors,
+                        q_hidden_size,
+                        kv_hidden_size,
+                        head_dim,
+                        block_size,
+                    )
+                    k = _FUSED_QKV_CACHE_KERNELS.get(key)
+                    if k is None:
+                        k = fused_qkv_cache_bs1_kernel[(num_vectorcore,)](
+                            input,
+                            q_output,
+                            k_output,
+                            v_output,
+                            key_cache,
+                            value_cache,
+                            slot_mapping,
+                            cos_sin_cache,
+                            positions,
+                            q_weight,
+                            k_weight,
+                            batch_size,
+                            n_slots,
+                            total_slots,
+                            kc_bs,
+                            vc_bs,
+                            feps,
+                            q_hidden_size,
+                            kv_hidden_size,
+                            total_hidden,
+                            q_heads,
+                            kv_heads,
+                            head_dim,
+                            rope_dim,
+                            half_rope,
+                            block_size,
+                            num_vectorcore,
+                            write_kv_tensors,
+                        )
+                        _FUSED_QKV_CACHE_KERNELS[key] = k
+                    else:
+                        st = _get_raw_stream(dev_idx)
+                        k.run(  # type: ignore[attr-defined]
+                            num_vectorcore,
+                            1,
+                            1,
+                            st,
+                            k.function,  # type: ignore[attr-defined]
+                            k.packed_metadata,  # type: ignore[attr-defined]
+                            None,
+                            None,
+                            None,
+                            input,
+                            q_output,
+                            k_output,
+                            v_output,
+                            key_cache,
+                            value_cache,
+                            slot_mapping,
+                            cos_sin_cache,
+                            positions,
+                            q_weight,
+                            k_weight,
+                            batch_size,
+                            n_slots,
+                            total_slots,
+                            kc_bs,
+                            vc_bs,
+                            feps,
+                            q_hidden_size,
+                            kv_hidden_size,
+                            total_hidden,
+                            q_heads,
+                            kv_heads,
+                            head_dim,
+                            rope_dim,
+                            half_rope,
+                            block_size,
+                            num_vectorcore,
+                            write_kv_tensors,
+                        )
+                done_layers = getattr(attn_metadata, "_m19_kv_done_layers", None)
+                if done_layers is None:
+                    done_layers = set()
+                    attn_metadata._m19_kv_done_layers = done_layers
+                done_layers.add(resolved_name)
+                return q_output, k_output, v_output
+
+    return split_qkv_rmsnorm_rope_impl(
+        input=input,
+        cos_sin_cache=cos_sin_cache,
+        positions=positions,
+        q_weight=q_weight,
+        k_weight=k_weight,
+        q_hidden_size=q_hidden_size,
+        kv_hidden_size=kv_hidden_size,
+        head_dim=head_dim,
+        eps=eps,
+        q_bias=None,
+        k_bias=None,
+    )
+
+
+def qkv_rmsnorm_rope_cache_fake(
+    input: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    layer_name: LayerNameType,
+    q_hidden_size: int,
+    kv_hidden_size: int,
+    head_dim: int,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return split_qkv_rmsnorm_rope_impl_fake(
+        input=input,
+        cos_sin_cache=cos_sin_cache,
+        positions=positions,
+        q_weight=q_weight,
+        k_weight=k_weight,
+        q_hidden_size=q_hidden_size,
+        kv_hidden_size=kv_hidden_size,
+        head_dim=head_dim,
+        eps=eps,
+    )
+
+
+direct_register_custom_op(
+    op_name="qkv_rmsnorm_rope_cache",
+    op_func=qkv_rmsnorm_rope_cache_impl,
+    fake_impl=qkv_rmsnorm_rope_cache_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )

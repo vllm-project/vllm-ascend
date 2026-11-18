@@ -295,6 +295,23 @@ class BaseDeviceAdaptor:
             )
             return
 
+        if (
+            key_cache.is_contiguous()
+            and value_cache.is_contiguous()
+            and key.dtype == key_cache.dtype
+            and value.dtype == value_cache.dtype
+            and key_cache.ndim == 4
+            and slot_mapping.dtype == torch.int32
+        ):
+            torch_npu._npu_reshape_and_cache(
+                key=key.contiguous(),
+                value=value.contiguous(),
+                key_cache=key_cache,
+                value_cache=value_cache,
+                slot_indices=slot_mapping.contiguous(),
+            )
+            return
+
         torch_npu.npu_scatter_pa_kv_cache(
             key=key.contiguous(),
             value=value.contiguous(),

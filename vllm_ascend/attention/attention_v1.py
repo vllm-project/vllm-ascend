@@ -23,7 +23,9 @@ import torch
 import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (  # type: ignore
@@ -47,10 +49,13 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.suffix_bsh_attention import capture_bsh
+from vllm_ascend.attention.suffix_bsh_attention import eligible as suffix_bsh_eligible
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     _select_seq_lens,
     is_dcp_enabled,
+    is_suffix_fia_cache_enabled,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -58,10 +63,11 @@ from vllm_ascend.attention.utils import (
     using_paged_attention,
 )
 from vllm_ascend.compilation.updatable_graph import (
+    _ACTIVE_GRAPH,
     get_capture_resource,
     register_task,
 )
-from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.device_op import BaseDeviceAdaptor, DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 
@@ -70,6 +76,21 @@ SWA_INT_MAX = 2147483647
 _FIA_WORKSPACE_KEY = "npu_fused_infer_attention_score.workspace"
 _FIA_V2_WORKSPACE_KEY = "npu_fused_infer_attention_score_v2.workspace"
 _PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
+_FIA_LSE_DUMMY_BY_DEV: dict[torch.device, torch.Tensor] = {}
+
+
+def _uses_base_fia_op() -> bool:
+    return getattr(DeviceOperator.npu_fused_infer_attention_score, "__func__", None) is getattr(
+        BaseDeviceAdaptor.npu_fused_infer_attention_score, "__func__", object()
+    )
+
+
+def _get_fia_lse_dummy(device: torch.device) -> torch.Tensor:
+    dummy = _FIA_LSE_DUMMY_BY_DEV.get(device)
+    if dummy is None:
+        dummy = torch.empty(0, dtype=torch.float32, device=device)
+        _FIA_LSE_DUMMY_BY_DEV[device] = dummy
+    return dummy
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -274,11 +295,9 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.decode_threshold += spec_token_num
-            assert self.decode_threshold <= 16, (
-                f"decode_threshold exceeded \
+            assert self.decode_threshold <= 16, f"decode_threshold exceeded \
                 npu_fused_infer_attention_score TND layout's limit of 16, \
                 got {self.decode_threshold}"
-            )
 
         self.reorder_batch_threshold = self.decode_threshold
 
@@ -336,10 +355,22 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
-
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = self._split_decodes_and_prefills(
-            common_attn_metadata
-        )
+        is_prefilling = common_attn_metadata.is_prefilling
+        has_prefill_flag = bool(is_prefilling.numpy().any()) if is_prefilling is not None else None
+        if (
+            not self.use_pcp
+            and common_attn_metadata.context_parallel_metadata is None
+            and has_prefill_flag is False
+            and (common_attn_metadata.max_query_len or 0) <= self.decode_threshold
+        ):
+            num_decodes = num_reqs
+            num_prefills = 0
+            num_decode_tokens = num_actual_tokens
+            num_prefill_tokens = 0
+        else:
+            num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = self._split_decodes_and_prefills(
+                common_attn_metadata
+            )
 
         block_table = common_attn_metadata.block_table_tensor
 
@@ -381,14 +412,13 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # ChunkedPrefill, so decide from the per-request is_prefilling flags
         # (falling back to the state when they are unavailable).
         if self.vllm_config.use_v2_model_runner:
-            is_prefilling = common_attn_metadata.is_prefilling
-            if is_prefilling is None:
+            if has_prefill_flag is None:
                 decode_like = common_attn_metadata.attn_state in (
                     AscendAttentionState.DecodeOnly,
                     AscendAttentionState.SpecDecoding,
                 )
             else:
-                decode_like = not bool(is_prefilling.any())
+                decode_like = not has_prefill_flag
             if (
                 decode_like
                 and (common_attn_metadata.max_query_len or 0) > 1
@@ -431,14 +461,17 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 dim=0,
             )
 
-        backend_metadata = self._build_backend_metadata(
-            common_attn_metadata,
-            block_table=block_table,
-            query_lens=query_start_loc_cpu[1:] - query_start_loc_cpu[:-1],
-            seq_lens=seq_lens,
-            num_decodes=num_decodes,
-            num_prefills=num_prefills,
-        )
+        if type(self)._build_backend_metadata is AscendAttentionMetadataBuilder._build_backend_metadata:
+            backend_metadata = {}
+        else:
+            backend_metadata = self._build_backend_metadata(
+                common_attn_metadata,
+                block_table=block_table,
+                query_lens=query_start_loc_cpu[1:] - query_start_loc_cpu[:-1],
+                seq_lens=seq_lens,
+                num_decodes=num_decodes,
+                num_prefills=num_prefills,
+            )
         attn_metadata = self.metadata_cls(
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
@@ -688,6 +721,26 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
         layer=None,
     ) -> torch.Tensor:
+        if (
+            _EXTRA_CTX.capturing
+            and not _EXTRA_CTX.is_draft_model
+            and _ACTIVE_GRAPH.get() is not None
+            and get_forward_context().cudagraph_runtime_mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL)
+            and suffix_bsh_eligible(self, query, attn_metadata)
+            and output.shape == query.shape
+            and output.dtype == query.dtype
+            and output.device == query.device
+        ):
+            return capture_bsh(
+                self,
+                query,
+                key,
+                value,
+                attn_metadata,
+                output,
+                layer_name=self._graph_metadata_layer_name(layer),
+            )
+
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
 
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
@@ -955,6 +1008,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
+        passed_key = key
         passed_value = value
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata, kv_cache
@@ -1058,45 +1112,152 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # decode to be processed separately, regardless of the device
                 # generation or attention state. Outside batch-invariant mode,
                 # preserve the existing A5 behavior for performance optimization.
-                if (
-                    (
-                        envs_vllm.VLLM_BATCH_INVARIANT
-                        or (
-                            get_current_hardware_profile().supports(HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT)
-                            and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
-                        )
-                    )
-                    and attn_metadata.num_decodes > 0
-                    and attn_metadata.num_prefills > 0
-                ):
-                    return self._forward_fia_chunked_prefill_split(
-                        query, key, value, key, passed_value, block_size, block_table, attn_metadata, output
-                    )
-                attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(
-                    query=query,
-                    key=key,
-                    value=value,
-                    atten_mask=attn_metadata.attn_mask,
-                    block_table=block_table,
-                    input_layout="TND",
-                    block_size=block_size,
-                    actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
-                    actual_seq_lengths_kv=actual_seq_lengths_kv,
-                    num_key_value_heads=self.num_kv_heads,
-                    num_heads=self.num_heads,
-                    head_size=self.head_size,
-                    scale=self.scale,
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    current_key=key,
-                    current_value=passed_value,
-                    attn_metadata=attn_metadata,
-                    is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,
-                    sparse_mode=3,
+                hw_split = envs_vllm.VLLM_BATCH_INVARIANT or (
+                    get_current_hardware_profile().supports(HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT)
+                    and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
                 )
+                pfa_eligible = (
+                    self.attn_type != AttentionType.ENCODER_DECODER
+                    and not self.enable_c8_quant
+                    and self.head_size != 512
+                    and attn_metadata.attn_mask is not None
+                    and query.device.type == "npu"
+                )
+                if hw_split and attn_metadata.num_decodes > 0 and attn_metadata.num_prefills > 0:
+                    return self._forward_fia_chunked_prefill_split(
+                        query,
+                        key,
+                        value,
+                        passed_key,
+                        passed_value,
+                        block_size,
+                        block_table,
+                        attn_metadata,
+                        output,
+                        use_pfa_prefill=False,
+                    )
+                pure_no_cache_pfa = (
+                    pfa_eligible
+                    and attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+                    and block_table is None
+                    and num_tokens >= 1152
+                )
+                pure_chunked_pfa = False
+                if (
+                    not pure_no_cache_pfa
+                    and pfa_eligible
+                    and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
+                    and attn_metadata.num_decodes == 0
+                    and attn_metadata.num_prefills > 0
+                    and passed_key is not None
+                    and passed_value is not None
+                    and num_tokens >= 1152
+                ):
+                    cached_pure = getattr(attn_metadata, "_can_pure_pfa", None)
+                    if cached_pure is None:
+                        aq = attn_metadata.actual_seq_lengths_q
+                        skv = actual_seq_lengths_kv
+                        can = len(aq) > 0 and len(aq) == len(skv)
+                        if can:
+                            prev_q = 0
+                            for idx_q in range(len(aq)):
+                                cur_q = int(aq[idx_q])
+                                if cur_q - prev_q != int(skv[idx_q]):
+                                    can = False
+                                    break
+                                prev_q = cur_q
+                        cached_pure = can
+                        attn_metadata._can_pure_pfa = cached_pure  # type: ignore[attr-defined]
+                    pure_chunked_pfa = bool(cached_pure)
+                if pure_no_cache_pfa or pure_chunked_pfa:
+                    if pure_chunked_pfa:
+                        pfa_k = passed_key[:num_tokens]
+                        pfa_v = passed_value[:num_tokens]
+                        if not pfa_k.is_contiguous():
+                            pfa_k = pfa_k.contiguous()
+                        if not pfa_v.is_contiguous():
+                            pfa_v = pfa_v.contiguous()
+                        pfa_skv = attn_metadata.actual_seq_lengths_q
+                    else:
+                        pfa_k = key
+                        pfa_v = value
+                        pfa_skv = actual_seq_lengths_kv
+                    attn_output = torch_npu.npu_prompt_flash_attention(
+                        query=query,
+                        key=pfa_k,
+                        value=pfa_v,
+                        atten_mask=attn_metadata.attn_mask,
+                        input_layout="TND",
+                        actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
+                        actual_seq_lengths_kv=pfa_skv,
+                        num_key_value_heads=self.num_kv_heads,
+                        num_heads=self.num_heads,
+                        scale_value=self.scale,
+                        sparse_mode=3,
+                        pre_tokens=SWA_INT_MAX,
+                        next_tokens=0,
+                    )
+                elif (
+                    query.device.type == "npu"
+                    and _uses_base_fia_op()
+                    and self.head_size != 512
+                    and not self.enable_c8_quant
+                    and num_tokens > 0
+                    and output[:num_tokens].is_contiguous()
+                ):
+                    out_view = output[:num_tokens].view(num_tokens, self.num_heads, self.head_size)
+                    torch_npu.npu_fused_infer_attention_score.out(
+                        query=query,
+                        key=key,
+                        value=value,
+                        atten_mask=attn_metadata.attn_mask,
+                        block_table=block_table,
+                        input_layout="TND",
+                        block_size=block_size,
+                        actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
+                        actual_seq_lengths_kv=actual_seq_lengths_kv,
+                        num_key_value_heads=self.num_kv_heads,
+                        num_heads=self.num_heads,
+                        scale=self.scale,
+                        pre_tokens=SWA_INT_MAX,
+                        next_tokens=SWA_INT_MAX,
+                        sparse_mode=3,
+                        inner_precise=1 if (key.is_contiguous() and value.is_contiguous()) else 0,
+                        out=[out_view, _get_fia_lse_dummy(query.device)],
+                    )
+                    attn_output = out_view
+                else:
+                    attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(
+                        query=query,
+                        key=key,
+                        value=value,
+                        atten_mask=attn_metadata.attn_mask,
+                        block_table=block_table,
+                        input_layout="TND",
+                        block_size=block_size,
+                        actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
+                        actual_seq_lengths_kv=actual_seq_lengths_kv,
+                        num_key_value_heads=self.num_kv_heads,
+                        num_heads=self.num_heads,
+                        head_size=self.head_size,
+                        scale=self.scale,
+                        key_cache=self.key_cache,
+                        value_cache=self.value_cache,
+                        current_key=passed_key,
+                        current_value=passed_value,
+                        attn_metadata=attn_metadata,
+                        is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,
+                        sparse_mode=3,
+                        **(
+                            {"inner_precise": 1}
+                            if (self.head_size != 512 and key.is_contiguous() and value.is_contiguous())
+                            else {}
+                        ),
+                    )
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
-        output[:num_tokens] = attn_output[:num_tokens]
+        if attn_output is not output and attn_output.data_ptr() != output.data_ptr():
+            output[:num_tokens] = attn_output[:num_tokens]
         return output
 
     def _forward_fia_chunked_prefill_split(
@@ -1110,6 +1271,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         block_table: torch.Tensor,
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
+        use_pfa_prefill: bool = False,
     ) -> torch.Tensor:
         """ChunkedPrefill with mixed prefill/decode: run decode and prefill in
         separate FIA calls. split_decodes_and_prefills has reordered the batch
@@ -1123,59 +1285,110 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # decode part
         if num_decode_tokens > 0:
-            decode_out, _ = DeviceOperator.npu_fused_infer_attention_score(
-                query=query[:num_decode_tokens],
-                key=key,
-                value=value,
-                atten_mask=attn_metadata.attn_mask,
-                block_table=block_table[:num_decodes],
-                input_layout="TND",
-                block_size=block_size,
-                # cumulative offset from 0; leading num_decodes entries used as-is
-                actual_seq_lengths=actual_seq_qlen[:num_decodes],
-                actual_seq_lengths_kv=seq_lens_list[:num_decodes],
-                num_key_value_heads=self.num_kv_heads,
-                num_heads=self.num_heads,
-                head_size=self.head_size,
-                scale=self.scale,
-                key_cache=self.key_cache,
-                value_cache=self.value_cache,
-                current_key=key,
-                current_value=value,
-                attn_metadata=attn_metadata,
-                is_prefill_no_cache=False,
-                sparse_mode=3,
-            )
-            output[:num_decode_tokens] = decode_out.view(num_decode_tokens, self.num_heads, self.head_size)
+            if (
+                query.device.type == "npu"
+                and _uses_base_fia_op()
+                and self.head_size != 512
+                and not self.enable_c8_quant
+                and output[:num_decode_tokens].is_contiguous()
+            ):
+                dec_view = output[:num_decode_tokens].view(num_decode_tokens, self.num_heads, self.head_size)
+                torch_npu.npu_fused_infer_attention_score.out(
+                    query=query[:num_decode_tokens],
+                    key=key,
+                    value=value,
+                    atten_mask=attn_metadata.attn_mask,
+                    block_table=block_table[:num_decodes],
+                    input_layout="TND",
+                    block_size=block_size,
+                    actual_seq_lengths=actual_seq_qlen[:num_decodes],
+                    actual_seq_lengths_kv=seq_lens_list[:num_decodes],
+                    num_key_value_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    scale=self.scale,
+                    pre_tokens=SWA_INT_MAX,
+                    next_tokens=SWA_INT_MAX,
+                    sparse_mode=3,
+                    inner_precise=1 if (key.is_contiguous() and value.is_contiguous()) else 0,
+                    out=[dec_view, _get_fia_lse_dummy(query.device)],
+                )
+            else:
+                decode_out, _ = DeviceOperator.npu_fused_infer_attention_score(
+                    query=query[:num_decode_tokens],
+                    key=key,
+                    value=value,
+                    atten_mask=attn_metadata.attn_mask,
+                    block_table=block_table[:num_decodes],
+                    input_layout="TND",
+                    block_size=block_size,
+                    # cumulative offset from 0; leading num_decodes entries used as-is
+                    actual_seq_lengths=actual_seq_qlen[:num_decodes],
+                    actual_seq_lengths_kv=seq_lens_list[:num_decodes],
+                    num_key_value_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    head_size=self.head_size,
+                    scale=self.scale,
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    current_key=current_key,
+                    current_value=current_value,
+                    attn_metadata=attn_metadata,
+                    is_prefill_no_cache=False,
+                    sparse_mode=3,
+                )
+                output[:num_decode_tokens] = decode_out.view(num_decode_tokens, self.num_heads, self.head_size)
 
         # prefill part
         if attn_metadata.num_prefills > 0:
             # rebase cumulative q offsets to start at 0 for the prefill slice
             prefill_seq_qlen = [
-                actual_seq_qlen[i] - num_decode_tokens for i in range(num_decodes, len(actual_seq_qlen))
+                int(actual_seq_qlen[i]) - num_decode_tokens for i in range(num_decodes, len(actual_seq_qlen))
             ]
-            prefill_out, _ = DeviceOperator.npu_fused_infer_attention_score(
-                query=query[num_decode_tokens:num_tokens],
-                key=key,
-                value=value,
-                atten_mask=attn_metadata.attn_mask,
-                block_table=block_table[num_decodes:],
-                input_layout="TND",
-                block_size=block_size,
-                actual_seq_lengths=prefill_seq_qlen,
-                actual_seq_lengths_kv=seq_lens_list[num_decodes:],
-                num_key_value_heads=self.num_kv_heads,
-                num_heads=self.num_heads,
-                head_size=self.head_size,
-                scale=self.scale,
-                key_cache=self.key_cache,
-                value_cache=self.value_cache,
-                current_key=key,
-                current_value=value,
-                attn_metadata=attn_metadata,
-                is_prefill_no_cache=False,
-                sparse_mode=3,
-            )
+            if use_pfa_prefill:
+                p_k = current_key[num_decode_tokens:num_tokens]
+                p_v = current_value[num_decode_tokens:num_tokens]
+                if not p_k.is_contiguous():
+                    p_k = p_k.contiguous()
+                if not p_v.is_contiguous():
+                    p_v = p_v.contiguous()
+                prefill_out = torch_npu.npu_prompt_flash_attention(
+                    query=query[num_decode_tokens:num_tokens],
+                    key=p_k,
+                    value=p_v,
+                    atten_mask=attn_metadata.attn_mask,
+                    input_layout="TND",
+                    actual_seq_lengths=prefill_seq_qlen,
+                    actual_seq_lengths_kv=prefill_seq_qlen,
+                    num_key_value_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    scale_value=self.scale,
+                    sparse_mode=3,
+                    pre_tokens=SWA_INT_MAX,
+                    next_tokens=0,
+                )
+            else:
+                prefill_out, _ = DeviceOperator.npu_fused_infer_attention_score(
+                    query=query[num_decode_tokens:num_tokens],
+                    key=key,
+                    value=value,
+                    atten_mask=attn_metadata.attn_mask,
+                    block_table=block_table[num_decodes:],
+                    input_layout="TND",
+                    block_size=block_size,
+                    actual_seq_lengths=prefill_seq_qlen,
+                    actual_seq_lengths_kv=seq_lens_list[num_decodes:],
+                    num_key_value_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    head_size=self.head_size,
+                    scale=self.scale,
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    current_key=current_key,
+                    current_value=current_value,
+                    attn_metadata=attn_metadata,
+                    is_prefill_no_cache=False,
+                    sparse_mode=3,
+                )
             n_prefill = num_tokens - num_decode_tokens
             output[num_decode_tokens:num_tokens] = prefill_out.view(n_prefill, self.num_heads, self.head_size)
         return output
@@ -1273,14 +1486,37 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # quick fix to make sure slots is int32 for cross attention case.
             # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
             slots_to_cache = slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32)
-            DeviceOperator.reshape_and_cache(
-                key=key_to_cache,
-                value=value_to_cache,
-                key_cache=self.key_cache,
-                value_cache=self.value_cache,
-                slot_mapping=slots_to_cache,
-                use_bnsd=self.use_bnsd_kv_cache,
-            )
+            if (
+                self.use_bnsd_kv_cache
+                and is_suffix_fia_cache_enabled(self.vllm_config, self)
+                and self.key_cache.ndim == 4
+                and self.key_cache.shape[0] > 0
+                and tuple(self.key_cache.shape[1:]) == (8, 128, 128)
+                and self.key_cache.shape == self.value_cache.shape
+                and self.key_cache.is_contiguous()
+                and self.value_cache.is_contiguous()
+                and slots_to_cache.ndim == 1
+                and slots_to_cache.stride(0) == 1
+            ):
+                from vllm_ascend.ops.triton.spec_decode.suffix_kv_cache import scatter
+
+                scatter(
+                    key_to_cache,
+                    value_to_cache,
+                    self.key_cache,
+                    self.value_cache,
+                    slots_to_cache,
+                    head_major=True,
+                )
+            else:
+                DeviceOperator.reshape_and_cache(
+                    key=key_to_cache,
+                    value=value_to_cache,
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    slot_mapping=slots_to_cache,
+                    use_bnsd=self.use_bnsd_kv_cache,
+                )
             notify_kv_cache_written()
         return query, key, value, output
 
@@ -1397,7 +1633,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
         output_padded = None
-        if key is not None and value is not None:
+        _m19_done_layers = getattr(attn_metadata, "_m19_kv_done_layers", None)
+        if _m19_done_layers is not None and layer.layer_name in _m19_done_layers:
+            _m19_done_layers.discard(layer.layer_name)
+            output_padded = output
+            notify_kv_cache_written()
+        elif key is not None and value is not None:
             output_padded = output
             # Only PCP-context metadata expands the slot mapping to every
             # rank's tokens; a replicated draft decode writes its local slots.
@@ -1422,7 +1663,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
         else:
             attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
-        output[:num_tokens] = attn_output[:num_tokens]
+        if attn_output is not output and attn_output.data_ptr() != output.data_ptr():
+            output[:num_tokens] = attn_output[:num_tokens]
         return output
 
 
@@ -1693,9 +1935,9 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
 
         if num_decode_tokens > 0:
             num_block, block_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
-            assert block_size % 32 == 0, (
-                f"C8 INT8 KV cache requires block_size to be a multiple of 32, got {block_size}"
-            )
+            assert (
+                block_size % 32 == 0
+            ), f"C8 INT8 KV cache requires block_size to be a multiple of 32, got {block_size}"
             kv_k = self._nz_5d_view(self.key_cache, block_size)
             kv_v = self._nz_5d_view(self.value_cache, block_size)
 

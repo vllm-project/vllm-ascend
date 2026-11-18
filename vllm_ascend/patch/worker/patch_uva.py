@@ -269,3 +269,89 @@ if not vllm_version_is("0.33.0"):
         return buf.uva(n)
 
     vllm.v1.worker.gpu.buffer_utils.UvaBufferPool.copy_chunks_to_uva = _copy_chunks_to_uva  # type: ignore
+
+
+_StagedWriteTensor = vllm.v1.worker.gpu.buffer_utils.StagedWriteTensor
+_UvaBufferPool = vllm.v1.worker.gpu.buffer_utils.UvaBufferPool
+
+
+def _copy_chunks_to_cpu(pool, chunks: Sequence, n: int) -> torch.Tensor:
+    buf = pool._next_buf(n)
+    raw_np = getattr(buf, "_np", buf.np)
+    if n == 1 and len(chunks) == 1:
+        raw_np[0] = chunks[0][0]
+    elif len(chunks) == 1:
+        raw_np[:n] = chunks[0]
+    else:
+        np.concatenate(chunks, out=raw_np[:n], casting="unsafe")
+    raw_cpu = getattr(buf, "_cpu", buf.cpu)
+    return raw_cpu[:n]
+
+
+if not hasattr(_StagedWriteTensor, "_ascend_non_uva_patched"):
+    _orig_staged_apply_write = _StagedWriteTensor.apply_write
+
+    def _patched_staged_apply_write(self) -> None:
+        if vllm.v1.worker.gpu.buffer_utils.is_uva_available():
+            return _orig_staged_apply_write(self)
+        n = len(self._staged_write_indices)
+        if n == 0:
+            return
+        if n == 1:
+            idx = self._staged_write_indices[0]
+            start = self._staged_write_starts[0]
+            length = self._staged_write_len
+            if length > 0:
+                cpu_slice = _copy_chunks_to_cpu(self.write_contents, self._staged_chunks(), length)
+                if self.gpu.ndim == 2:
+                    self.gpu[idx, start : start + length].copy_(cpu_slice, non_blocking=True)
+                else:
+                    self.gpu[idx + start : idx + start + length].copy_(cpu_slice, non_blocking=True)
+            self.clear_staged_writes()
+            return
+
+        if self.dtype == torch.int32:
+            stride = (n + 15) & ~15
+            total_elems = self._staged_write_len
+            pack_len = 3 * stride + total_elems
+            pool = getattr(self, "_packed_pool", None)
+            if pool is None:
+                pool = _UvaBufferPool(
+                    max(self.num_rows * 4, 1024),
+                    torch.int32,
+                    max_concurrency=self.write_indices.max_concurrency,
+                )
+                self._packed_pool = pool
+            buf = pool._next_buf(pack_len)
+            raw_np = getattr(buf, "_np", buf.np)
+            raw_np[0:n] = self._staged_write_indices
+            raw_np[stride : stride + n] = self._staged_write_starts
+            raw_np[2 * stride : 2 * stride + n] = self._staged_write_cu_lens
+            chunks = self._staged_chunks()
+            if len(chunks) == 1:
+                raw_np[3 * stride : pack_len] = chunks[0]
+            elif chunks:
+                np.concatenate(chunks, out=raw_np[3 * stride : pack_len], casting="unsafe")
+            if isinstance(buf, UvaBufferWrapper):
+                buf._mark_prefix_modified(pack_len)
+            packed_dev = buf.uva(pack_len)
+            vllm.v1.worker.gpu.buffer_utils._apply_write_kernel[
+                (n, vllm.v1.worker.gpu.buffer_utils._num_write_chunks(self._staged_write_max_len))
+            ](
+                self.gpu,
+                self.gpu.stride(0),
+                packed_dev[0:n],
+                packed_dev[stride : stride + n],
+                packed_dev[3 * stride : pack_len],
+                packed_dev[2 * stride : 2 * stride + n],
+                None,
+                BLOCK_SIZE=vllm.v1.worker.gpu.buffer_utils._WRITE_BLOCK_SIZE,
+                MULTI_GROUP=False,
+            )
+            self.clear_staged_writes()
+            return
+
+        return _orig_staged_apply_write(self)
+
+    _StagedWriteTensor._ascend_non_uva_patched = True  # type: ignore[attr-defined]
+    _StagedWriteTensor.apply_write = _patched_staged_apply_write  # type: ignore[method-assign]

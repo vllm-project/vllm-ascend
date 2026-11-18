@@ -1,0 +1,19 @@
+pr: 19394
+entries:
+  - category: feature
+    text: >-
+      Added opt-in Ascend Model Runner V2 suffix decoding with native
+      request-history and completed-response corpus drafting. A compatible
+      upstream vLLM revision containing the full MRV2 suffix protocol is required.
+  - category: bugfix
+    text: >-
+      Replaced suffix corpus atomic index ingestion with bounded record sorting
+      and exact segmented integer reduction to mitigate the observed ingestion
+      timeout path while preserving newest-occurrence ordering.
+  - category: performance
+    text: >-
+      Added bounded suffix scan early-exit and qualified A3 Qwen3 BF16 K4
+      contiguous-KV BSH graph verification, with NHD as the default layout and
+      explicit HND cache writes as an alternative.
+    model: qwen3
+    hardware: [A3]

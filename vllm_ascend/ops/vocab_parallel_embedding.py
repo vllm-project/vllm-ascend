@@ -52,6 +52,7 @@ from vllm_ascend.utils import (
     enable_pcp_embedding_lmhead_weight_sharding,
     get_potential_max_tokens,
     lmhead_tp_enable,
+    maybe_trans_nz,
 )
 
 
@@ -373,7 +374,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             self.shard_indices.added_vocab_start_index,
             self.shard_indices.added_vocab_end_index,
         )
-        output_parallel = self.quant_method.embedding(self, masked_input.long())
+        output_parallel = self.quant_method.embedding(self, masked_input)
         output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
         reduce_scatter_output = exchange_group.reduce_scatter(output_parallel, dim=0)
 
@@ -401,7 +402,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         else:
             masked_input = input_
         # Get the embeddings.
-        output_parallel = self.quant_method.embedding(self, masked_input.long())
+        output_parallel = self.quant_method.embedding(self, masked_input)
         # Mask the output embedding.
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
@@ -415,6 +416,56 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         # rank. Sum the vocabulary-shard contributions without scattering the
         # token dimension; the first decoder layer expects the complete sequence.
         return torch.ops.vllm.all_reduce(output_parallel, reduce_group.unique_name)
+
+
+class AscendUnquantizedLMHeadMethod(UnquantizedEmbeddingMethod):
+    """LM head method enabling FRACTAL_NZ conversion when untied."""
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        if getattr(layer, "skip_weight_nz_conversion", False):
+            return
+        if getattr(layer, "_is_weight_tied", False):
+            return
+        try:
+            hf_config = get_current_vllm_config().model_config.hf_config
+            if getattr(hf_config, "tie_word_embeddings", False):
+                return
+        except Exception:
+            pass
+        if isinstance(getattr(layer, "weight", None), torch.Tensor) and layer.weight.data.ndim == 2:
+            w = layer.weight.data
+            from vllm_ascend.utils import _should_trans_nz
+
+            if (
+                getattr(layer, "bias", None) is None
+                and w.dtype == torch.bfloat16
+                and w.device.type == "npu"
+                and w.shape[0] > w.shape[1]
+                and w.shape[0] % 16 == 0
+                and w.shape[1] % 16 == 0
+                and _should_trans_nz(w)
+            ):
+                import vllm_ascend.ops.linear  # noqa: F401
+
+                layer.weight.data = maybe_trans_nz(w.t().contiguous())
+                layer._use_kn_matmul = True
+            else:
+                layer.weight.data = maybe_trans_nz(w)
+
+    def tie_weights(self, layer: torch.nn.Module, embed_tokens: VocabParallelEmbedding):
+        layer._is_weight_tied = True
+        return super().tie_weights(layer, embed_tokens)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if getattr(layer, "_use_kn_matmul", False):
+            return torch.ops.vllm.unquantized_gemm_kn(x, layer.weight, bias)
+        return torch.ops.vllm.unquantized_gemm(x, layer.weight, bias)
 
 
 class AscendParallelLMHead(ParallelLMHead):
@@ -457,6 +508,11 @@ class AscendParallelLMHead(ParallelLMHead):
             )
         else:
             self.register_parameter("bias", None)
+        if (
+            type(self) is AscendParallelLMHead
+            and type(getattr(self, "quant_method", None)) is UnquantizedEmbeddingMethod
+        ):
+            self.quant_method = AscendUnquantizedLMHeadMethod()
 
 
 def lmhead_all_to_all(

@@ -30,6 +30,7 @@ if HAS_TRITON:
 
 # Apply before model construction on every device, including 310P.
 
+import vllm_ascend.patch.worker.patch_async_utils  # noqa
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa

@@ -42,7 +42,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.utils import maybe_trans_nz
+from vllm_ascend.utils import _should_trans_nz, maybe_trans_nz
 from vllm_ascend.weight_switch import WeightSwitchGatherSpec, WeightSwitchMixin
 
 
@@ -66,6 +66,32 @@ direct_register_custom_op(
     op_name="unquantized_gemm",
     op_func=unquantized_gemm,
     fake_impl=unquantized_gemm_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+
+def unquantized_gemm_kn(
+    x: torch.Tensor,
+    weight_kn: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    out = torch.matmul(x, weight_kn)
+    return out if bias is None else out + bias
+
+
+def unquantized_gemm_kn_fake(
+    x: torch.Tensor,
+    weight_kn: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return x.new_empty((*x.shape[:-1], weight_kn.shape[1]))
+
+
+direct_register_custom_op(
+    op_name="unquantized_gemm_kn",
+    op_func=unquantized_gemm_kn,
+    fake_impl=unquantized_gemm_kn_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
@@ -116,7 +142,27 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
             # during RL weight updates. vLLM main (#62326) dropped `prefer_copy`
             # and keeps the parameter object by default.
             replace_parameter(layer, "weight_fp32", new_fp32)
-        if "conv1d" not in layer.prefix and not skip_weight_nz_conversion:
+        prefix = getattr(layer, "prefix", "")
+        w_data = layer.weight.data
+        use_kn_matmul = (
+            "gate_up_proj" in prefix
+            and "conv1d" not in prefix
+            and not skip_weight_nz_conversion
+            and not keep_nd_weight
+            and not getattr(layer, "precast_fp32_weight", False)
+            and getattr(layer, "bias", None) is None
+            and w_data.ndim == 2
+            and w_data.shape[0] > w_data.shape[1]
+            and w_data.shape[0] % 16 == 0
+            and w_data.shape[1] % 16 == 0
+            and w_data.dtype == torch.bfloat16
+            and w_data.device.type == "npu"
+            and _should_trans_nz(w_data)
+        )
+        if use_kn_matmul:
+            layer.weight.data = maybe_trans_nz(w_data.t().contiguous())
+            layer._use_kn_matmul = True
+        elif "conv1d" not in prefix and not skip_weight_nz_conversion:
             # 310P torch_npu rejects FRACTAL_NZ matmul when the weight-side
             # matrix has n=1 or k=1. Keep scalar gates such as Qwen MoE's
             # shared_expert_gate in ND format, leaving non-310P policy intact.
@@ -137,6 +183,8 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if getattr(layer, "_use_kn_matmul", False):
+            return torch.ops.vllm.unquantized_gemm_kn(x, layer.weight, bias)
         return torch.ops.vllm.unquantized_gemm(x, layer.weight, bias)
 
 

@@ -72,6 +72,7 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     requires_contiguous_pa_kv_cache,
+    requires_contiguous_suffix_kv_cache,
     supports_strided_mla_cache,
 )
 from vllm_ascend.core.kv_cache_interface import (
@@ -1039,7 +1040,8 @@ def _allocate_kv_cache(
     reshaped to the desired shape before being used by the models.
 
     FullAttention caches use a combined allocation for block-strided K/V
-    views. Specialized caches keep their existing allocation layouts.
+    views unless PA or qualified suffix FIA requires split contiguous K/V.
+    Specialized caches keep their existing allocation layouts.
     KV transfer aligns each raw allocation to 2 MiB.
 
     Args:
@@ -1433,6 +1435,7 @@ def _allocate_kv_cache(
                     (backend is None or not backend.is_sparse())
                     and not use_dcp
                     and not requires_contiguous_pa_kv_cache(layer, vllm_config, layer_spec)
+                    and not (not shared_layers and requires_contiguous_suffix_kv_cache(layer, vllm_config, layer_spec))
                 ):
                     kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
                     continue
@@ -1470,9 +1473,9 @@ def _allocate_kv_cache(
         kv_cache_raw_tensors[layer_name] = kv_cache_raw_tensors[owner_name]
 
     layer_names = {layer_name for group in kv_cache_config.kv_cache_groups for layer_name in group.layer_names}
-    assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
-        "Some layers are not correctly initialized"
-    )
+    assert layer_names == (
+        kv_cache_raw_tensors.keys() | shared_layers.keys()
+    ), "Some layers are not correctly initialized"
     return kv_cache_raw_tensors
 
 
