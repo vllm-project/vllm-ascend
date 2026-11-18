@@ -17,7 +17,6 @@ from vllm_ascend.ops.fused_moe import prepare_finalize
 @pytest.fixture
 def mc2_context(monkeypatch):
     config = SimpleNamespace(
-        use_v2_model_runner=True,
         parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
     )
     reserved = torch.zeros(8, dtype=torch.bool)

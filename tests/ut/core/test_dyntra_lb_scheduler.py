@@ -85,7 +85,7 @@ def create_dyntra_lb_scheduler(
     scheduler_cls: type[SchedulerT],
     num_blocks: int = 10000,
 ) -> SchedulerT:
-    """Create a V1 scheduler subclass for DyntraLB unit tests."""
+    """Create a scheduler subclass for DyntraLB unit tests."""
     block_size = vllm_config.cache_config.block_size
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
@@ -111,9 +111,6 @@ def create_dyntra_lb_scheduler(
         block_size=block_size,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
-    # These fixtures assert legacy V1 scheduler output structures. Tests that
-    # exercise V2 opt in explicitly after construction.
-    scheduler.use_v2_model_runner = False
     return scheduler
 
 
@@ -1018,7 +1015,6 @@ def test_dyntra_lb_async_v2_sets_pp_decode_cadence():
         vllm_config,
         scheduler_cls=AsyncDyntraLBScheduler,
     )
-    scheduler.use_v2_model_runner = True
     request = create_request(
         request_id=1,
         block_size=vllm_config.cache_config.block_size,
@@ -1076,7 +1072,7 @@ def test_dyntra_lb_async_reclaims_placeholder_for_lb_paused_request():
     assert request.num_output_tokens == 1
 
 
-def test_dyntra_lb_paused_request_resumes_as_cached():
+def test_dyntra_lb_paused_request_resumes_into_scheduled_new_reqs():
     vllm_config, scheduler = _create_dyntra_lb_scheduler(async_scheduling=False)
     request = create_request(
         request_id=1,
@@ -1117,8 +1113,9 @@ def test_dyntra_lb_paused_request_resumes_as_cached():
 
     assert request.status == RequestStatus.RUNNING
     assert request.request_id not in scheduler._lb_paused_req_ids
-    assert request.request_id in resumed_output.scheduled_cached_reqs.resumed_req_ids
-    assert not resumed_output.scheduled_new_reqs
+    # Model Runner V2 folds resumed requests into scheduled_new_reqs.
+    assert request.request_id in {req.req_id for req in resumed_output.scheduled_new_reqs}
+    assert not resumed_output.scheduled_cached_reqs.req_ids
 
 
 def test_dyntra_lb_paused_request_keeps_watermark_enabled(monkeypatch):

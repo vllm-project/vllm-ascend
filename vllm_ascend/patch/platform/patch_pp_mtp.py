@@ -26,8 +26,11 @@ from __future__ import annotations
 
 import copy
 from functools import wraps
+from itertools import chain
 
 from vllm.logger import logger
+
+from vllm_ascend.utils import vllm_version_is
 
 _PATCHED = False
 _PP_IN_FLIGHT_STEP = 1 << 60
@@ -55,9 +58,8 @@ def _use_pp_mtp_runtime_patch(vllm_config, use_pp: bool) -> bool:
 
 
 def _use_pp_ipc_runtime_patch(vllm_config, use_pp: bool) -> bool:
-    if not use_pp or _is_pd_prefill_node(vllm_config):
-        return False
-    return not getattr(vllm_config, "use_v2_model_runner", False)
+    # The PP IPC runtime patch only applied to Model Runner V1, which was removed.
+    return False
 
 
 def _patch_model_runner_output() -> None:
@@ -148,6 +150,63 @@ def _patch_scheduler_update_after_schedule() -> None:
     Scheduler._update_after_schedule = _patched_update_after_schedule
 
 
+def _patch_scheduler_make_cached_request_data() -> None:
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    if getattr(
+        Scheduler._make_cached_request_data,
+        "_vllm_ascend_pp_mtp_cached_data_patched",
+        False,
+    ):
+        return
+
+    original_make_cached = Scheduler._make_cached_request_data
+
+    @wraps(original_make_cached)
+    def _patched_make_cached_request_data(
+        self,
+        running_reqs,
+        resumed_reqs,
+        num_scheduled_tokens,
+        spec_decode_tokens,
+        req_to_new_blocks,
+    ):
+        saved_async = self.scheduler_config.async_scheduling
+        use_pp_ipc_runtime_patch = _use_pp_ipc_runtime_patch(
+            getattr(self, "vllm_config", None),
+            getattr(self, "use_pp", False),
+        )
+        try:
+            if use_pp_ipc_runtime_patch:
+                self.scheduler_config.async_scheduling = False
+            cached_reqs_data = original_make_cached(
+                self,
+                running_reqs,
+                resumed_reqs,
+                num_scheduled_tokens,
+                spec_decode_tokens,
+                req_to_new_blocks,
+            )
+        finally:
+            self.scheduler_config.async_scheduling = saved_async
+
+        if not saved_async or not use_pp_ipc_runtime_patch or not cached_reqs_data.new_token_ids:
+            return cached_reqs_data
+
+        for req_index, req in enumerate(chain(running_reqs, resumed_reqs)):
+            if req_index >= len(cached_reqs_data.new_token_ids):
+                break
+            if cached_reqs_data.new_token_ids[req_index]:
+                continue
+            if req.num_output_tokens <= 0 or not req.all_token_ids:
+                continue
+            cached_reqs_data.new_token_ids[req_index] = [req.all_token_ids[-1]]
+        return cached_reqs_data
+
+    _patched_make_cached_request_data._vllm_ascend_pp_mtp_cached_data_patched = True  # type: ignore[attr-defined]
+    Scheduler._make_cached_request_data = _patched_make_cached_request_data
+
+
 def _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, model_runner_output) -> None:
     spec_token_ids = getattr(model_runner_output, "spec_token_ids", None)
     if spec_token_ids is None:
@@ -168,7 +227,10 @@ def _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, model_runner_outp
             request.spec_token_ids = []
             continue
 
-        validated = scheduler.structured_output_manager.trim_spec_tokens(request, spec_token_ids[req_index])
+        if vllm_version_is("0.33.0"):
+            validated = scheduler.structured_output_manager.validate_tokens(request, spec_token_ids[req_index])
+        else:
+            validated = scheduler.structured_output_manager.trim_spec_tokens(request, spec_token_ids[req_index])
         request.spec_token_ids = validated
 
 
@@ -279,9 +341,8 @@ def _apply_patch() -> None:
         return
     _PATCHED = True
     _patch_model_runner_output()
-    # The patch for engine core has been moved to patch_engine_core.py
-    _patch_scheduler_update_after_schedule()
-    _patch_scheduler_update_from_output()
+    # The patch for engine core has been moved to patch_engine_core.py.
+    # The V1-only scheduler update hooks are not installed any more.
     _patch_model_config_validation()
 
 

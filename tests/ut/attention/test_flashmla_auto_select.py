@@ -71,7 +71,6 @@ def test_flashmla_module_precheck_skips_absent_cann_import(monkeypatch):
 
 def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypatch):
     config = SimpleNamespace(
-        use_v2_model_runner=True,
         speculative_config=None,
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v3")),
@@ -102,10 +101,8 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
     assert not AscendMLAImpl._can_use_flashmla(impl)
 
     monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (lambda: None, lambda: None))
-    config.use_v2_model_runner = False
-    assert not AscendMLAImpl._can_use_flashmla(impl)
+    assert AscendMLAImpl._can_use_flashmla(impl)
 
-    config.use_v2_model_runner = True
     impl.num_heads = 48
     assert not AscendMLAImpl._can_use_flashmla(impl)
 
@@ -214,7 +211,6 @@ def test_quant_flashmla_selection_supports_k31_dspark_draft_c8(monkeypatch):
 )
 def test_flashmla_dspark_target_model_gate(monkeypatch, dcp_size, pcp_size, model_type, expected_flashmla):
     config = SimpleNamespace(
-        use_v2_model_runner=True,
         speculative_config=SimpleNamespace(method="dspark"),
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size),
         model_config=SimpleNamespace(

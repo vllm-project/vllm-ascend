@@ -46,7 +46,6 @@ class TestPrepareAndFinalize(unittest.TestCase):
         # instead of falling back to F.pad outside a worker context.
         mock_vllm_config = MagicMock()
         mock_vllm_config.parallel_config.tensor_parallel_size = 1
-        mock_vllm_config.use_v2_model_runner = False
         config_context = set_current_vllm_config(mock_vllm_config)
         config_context.__enter__()
         self.addCleanup(config_context.__exit__, None, None, None)
