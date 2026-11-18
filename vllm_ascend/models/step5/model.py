@@ -33,6 +33,7 @@ from vllm.distributed import (
     get_dp_group,
     get_ep_group,
     get_pp_group,
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.forward_context import get_forward_context
@@ -41,8 +42,11 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    LinearBase,
+    MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -96,6 +100,9 @@ from vllm_ascend.models.step5.sparse_attention import (
 )
 from vllm_ascend.ops.triton.step5.fused_qknorm_rope import (
     fused_qknorm_rope,
+)
+from vllm_ascend.ops.triton.step5.gated_scale import (
+    gated_scale,
 )
 from vllm_ascend.utils import vllm_version_is
 
@@ -522,9 +529,16 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
         maybe_save_kv_layer_to_connector(self.layer_name, list(self.kv_cache))
         attn_output = output.view(num_tokens, self.num_heads * self.head_dim)
         if gate is not None:
-            attn_output = (
-                attn_output.view(num_tokens, self.num_heads, self.head_dim) * gate.unsqueeze(-1).sigmoid()
-            ).view(num_tokens, -1)
+            # The gate is the tail of the fused qkv+indexer GEMM row. Address
+            # it through the offset-0 qkv view of the same storage so no
+            # mid-storage view crosses the op boundary (the dispatch layer
+            # would materialize it first: TensorMove).
+            attn_output = gated_scale(
+                attn_output,
+                qkv,
+                gate.storage_offset(),
+                gate.shape[-1],
+            )
         output_tensor, _ = self.o_proj(attn_output)
         return output_tensor
 
@@ -594,16 +608,68 @@ class AscendStep5Attention(nn.Module):
         if norm_dtype is None:
             norm_dtype = get_step5_norm_dtype(vllm_config.model_config.hf_config)
 
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=qkv_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
+        # Pack Q/K/V and the per-head gate into one column-parallel GEMM when
+        # KV heads are partitioned (not replicated) across TP ranks, mirroring
+        # the upstream ``Step5Attention`` construction. The local output layout
+        # is [Q, K, V, gate]. ``MergedColumnParallelLinear`` cannot replicate
+        # KV heads, so packing stays off when ``total_num_kv_heads < tp_size``
+        # and the layer falls back to ``qkv_proj`` + ``g_proj``.
+        tp_rank = get_tensor_model_parallel_rank()
+        self.fuse_qkv_gate = (
+            use_head_wise_attn_gate
+            and self.total_num_kv_heads >= tp_size
+            and (
+                quant_config is None
+                or all(
+                    isinstance(
+                        LinearBase(
+                            hidden_size,
+                            width,
+                            quant_config=quant_config,
+                            prefix=f"{prefix}.{name}",
+                            tp_rank=tp_rank,
+                            tp_size=tp_size,
+                        ).quant_method,
+                        UnquantizedLinearMethod,
+                    )
+                    for name, width in (
+                        (
+                            "qkv_proj",
+                            (self.total_num_heads + 2 * num_kv_heads) * self.head_dim,
+                        ),
+                        ("g_proj", self.total_num_heads),
+                    )
+                )
+            )
         )
-        self.params_dtype = self.qkv_proj.params_dtype
+        if self.fuse_qkv_gate:
+            # Keep the qkv_proj prefix so quantization configuration and
+            # checkpoint weight remapping that target qkv_proj continue to
+            # apply to the fused module (same contract as upstream).
+            self.qkvg_proj = MergedColumnParallelLinear(
+                hidden_size,
+                [
+                    self.total_num_heads * self.head_dim,
+                    self.total_num_kv_heads * self.head_dim,
+                    self.total_num_kv_heads * self.head_dim,
+                    self.total_num_heads,
+                ],
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+            self.params_dtype = self.qkvg_proj.params_dtype
+        else:
+            self.qkv_proj = QKVParallelLinear(
+                hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                bias=qkv_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+            self.params_dtype = self.qkv_proj.params_dtype
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -611,7 +677,7 @@ class AscendStep5Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        if use_head_wise_attn_gate:
+        if use_head_wise_attn_gate and not self.fuse_qkv_gate:
             self.g_proj = ColumnParallelLinear(
                 hidden_size,
                 self.total_num_heads,
@@ -672,7 +738,22 @@ class AscendStep5Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
+        qkvg = None
+        extra_dims = None
+        if self.fuse_qkv_gate:
+            qkvg, _ = self.qkvg_proj(hidden_states)
+            qkv, extra_dims = qkvg.split(
+                [self.q_size + 2 * self.kv_size, self.num_heads], dim=-1
+            )
+            # Materialize the qkv prefix before the fused norm+rope kernel:
+            # handing the wider packed qkvg row directly changed the kernel's
+            # row stride and corrupted the q/k/v outputs on 950DT, cascading
+            # into a CSA allocation assert on the tailring deployment. The
+            # gate tail keeps its base+offset addressing through qkvg, so no
+            # extra copy is added for the gate.
+            qkv = qkv.contiguous()
+        else:
+            qkv, _ = self.qkv_proj(hidden_states)
         if self.use_fused_qknorm_rope:
             q, k, v = fused_qknorm_rope(
                 qkv,
@@ -698,13 +779,22 @@ class AscendStep5Attention(nn.Module):
                 q, k = self.rotary_emb(positions, q, k)
 
         attn_output = self.attn(q, k, v)
-        extra_dims = None
-        if self.use_head_wise_attn_gate:
+        if extra_dims is None and self.use_head_wise_attn_gate:
             extra_dims, _ = self.g_proj(hidden_states)
-            attn_output = (
-                attn_output.view(*attn_output.shape[:-1], self.num_heads, self.head_dim)
-                * extra_dims.unsqueeze(-1).sigmoid()
-            ).view(*attn_output.shape)
+        if extra_dims is not None:
+            # Packed layout: the gate is the tail of the qkvg row and anchors
+            # at the packed GEMM output. Standalone layout: the g_proj output
+            # anchors itself with offset 0. Either way no mid-storage view
+            # crosses the op boundary (the dispatch layer would materialize
+            # it first: TensorMove).
+            gate_base = qkvg if qkvg is not None else extra_dims
+            gate_col_offset = extra_dims.storage_offset() - gate_base.storage_offset()
+            attn_output = gated_scale(
+                attn_output,
+                gate_base,
+                gate_col_offset,
+                extra_dims.shape[-1],
+            )
         output, _ = self.o_proj(attn_output)
         return output
 
