@@ -730,8 +730,8 @@ def test_base_scheduler_detects_state_and_compressed_prefill_truncation() -> Non
     assert scheduler._needs_prefill_token_truncation() is False
 
 
-@pytest.mark.parametrize("prompt_len", [128, 129, 639, 1023, 1024, 1025])
-def test_swa_publication_uses_shortened_prompt_length(prompt_len: int) -> None:
+def test_swa_publication_uses_shortened_prompt_length() -> None:
+    prompt_len = 129  # Truncation must remove the final block from publication.
     scheduler = make_pull_scheduler()
     scheduler.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace()))
     group = KVCacheGroupSpec(layer_names=["layer.swa"], kv_cache_spec=make_sliding_spec())

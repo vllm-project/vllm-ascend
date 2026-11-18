@@ -182,6 +182,10 @@ def test_base_scheduler_expands_unique_uniform_specs_in_layer_order() -> None:
     )
 
     assert MooncakeBaseConnectorScheduler._get_group_unique_specs(group) == [full, sliding]
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace()))
+    scheduler.group_unique_specs = [scheduler._get_group_unique_specs(group)]
+    assert scheduler._needs_prefill_token_truncation() is True
 
 
 def test_base_scheduler_transfer_blocks_handles_empty_and_state_without_speculation() -> None:

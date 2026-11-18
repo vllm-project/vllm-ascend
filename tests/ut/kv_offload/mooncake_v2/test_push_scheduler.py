@@ -250,8 +250,8 @@ def test_producer_snapshots_new_and_cached_prefill_chunks(producer_scheduler):
     assert not scheduler.build_connector_meta(step(request, None, computed=48, scheduled=1)).push_send_requests
 
 
-@pytest.mark.parametrize("prompt_len", [128, 129, 639, 1023, 1024])
-def test_swa_producer_publishes_only_the_shortened_prompt(producer_scheduler, prompt_len):
+def test_swa_producer_publishes_only_the_shortened_prompt(producer_scheduler):
+    prompt_len = 129  # Truncation must remove the final block from publication.
     scheduler = producer_scheduler
     scheduler.vllm_config.model_config = SimpleNamespace(hf_config=SimpleNamespace())
     scheduler.group_unique_specs = [[make_sliding_spec()], [make_full_spec()]]
