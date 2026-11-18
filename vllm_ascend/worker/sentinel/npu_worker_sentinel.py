@@ -141,10 +141,7 @@ class WorkerSentinel(GPUWorkerSentinel):
         num_local_experts = eplb_model_state.physical_to_logical_map.shape[1] // get_ep_group().world_size
         get_ep_all2all_manager().set_num_local_physical_experts(num_local_experts)
         # The MC2 capacity exists only now; surface a config scale_down will reject.
-        try:
-            self._validate_mc2_only_execution()
-        except ValueError as exc:
-            logger.warning("[FT] scale_down will be rejected at recovery time: %s", exc)
+        self._check_mc2_only_execution(raise_on_error=False)
 
     def scale_down(self, ft_request: FaultToleranceRequest):
         """Scale down over the surviving DP ranks, reusing the upstream flow.
@@ -188,7 +185,7 @@ class WorkerSentinel(GPUWorkerSentinel):
             raise ValueError(
                 "[FT] scale_down (elastic_info) is mutually exclusive with mc2 hierarchy comm (comm_alg='hierarchy')."
             )
-        self._validate_mc2_only_execution()
+        self._check_mc2_only_execution(raise_on_error=True)
         if not hasattr(torch_npu, "npu_moe_distribute_dispatch_v2"):
             raise ValueError(
                 "[FT] scale_down requires npu_moe_distribute_dispatch_v2 "
@@ -200,23 +197,28 @@ class WorkerSentinel(GPUWorkerSentinel):
         capture_sizes = self.worker.vllm_config.compilation_config.cudagraph_capture_sizes or [0]
         return max(self.worker.vllm_config.scheduler_config.max_num_batched_tokens, max(capture_sizes))
 
-    def _validate_mc2_only_execution(self) -> None:
-        """Require MC2 for every batch the scheduler can produce.
+    def _check_mc2_only_execution(self, *, raise_on_error: bool) -> None:
+        """Require MC2 for every reachable batch; warn or raise when it fails.
 
         Dead ranks stay in the device EP group; only MC2 excludes them via
         elastic_info, so AllToAll/AllGather would target the stopped rank.
         """
         capacity = get_mc2_tokens_capacity()
         if capacity is None:
-            raise ValueError("[FT] scale_down requires the MC2 token capacity to be initialized.")
-        max_tokens = self._max_reachable_num_tokens()
-        comm_type = select_moe_comm_method(max_tokens, self.worker.vllm_config)
-        if comm_type is not MoECommType.MC2:
-            raise ValueError(
+            message = "[FT] scale_down requires the MC2 token capacity to be initialized."
+        else:
+            max_tokens = self._max_reachable_num_tokens()
+            comm_type = select_moe_comm_method(max_tokens, self.worker.vllm_config)
+            if comm_type is MoECommType.MC2:
+                return
+            message = (
                 f"[FT] scale_down requires MC2 for every reachable batch, but a "
                 f"{max_tokens}-token batch selects {comm_type} (MC2 capacity: {capacity}); "
                 f"lower --max-num-batched-tokens."
             )
+        if raise_on_error:
+            raise ValueError(message)
+        logger.warning("[FT] scale_down will be rejected at recovery time: %s", message)
 
     def _redistribute_experts(self, dead_ep_ranks: set[int]) -> None:
         """Redistribute experts onto the surviving slots after scale-down.
