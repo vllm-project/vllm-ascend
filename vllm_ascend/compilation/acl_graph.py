@@ -294,7 +294,7 @@ class ACLGraphWrapper:
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
         if not self.enable_enpu and need_sync:
             torch.npu.current_stream().synchronize()
-        if self.runtime_mode == CUDAGraphMode.FULL and use_updatable_graph(self.attn_backend):
+        if self.runtime_mode == CUDAGraphMode.FULL and (use_updatable_graph(self.attn_backend) or entry.aclgraph.tasks):
             self._updatable_graph_replay(forward_context, entry.aclgraph)
         else:
             entry.aclgraph.replay()

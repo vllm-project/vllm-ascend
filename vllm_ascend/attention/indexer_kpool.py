@@ -21,7 +21,9 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.context_parallel.common_cp import get_cp_local_query_key_lens
+from vllm_ascend.compilation.kpool_buckets import KPoolBucketProvider
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     get_kv_cache_compression_ratio,
@@ -61,6 +63,7 @@ class AscendIndexerKPoolMetadata:
     raw_seq_lens: torch.Tensor | None = None
     num_actual_tokens: int = 0
     query_metadata: AscendIndexerKPoolQueryMetadata | None = None
+    max_pool_seq_len: int | None = None
 
 
 class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
@@ -252,6 +255,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             raw_seq_lens=raw_seq_lens,
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
             query_metadata=self._build_query_metadata(common_attn_metadata, positions),
+            max_pool_seq_len=common_attn_metadata.max_seq_len // self.compress_ratio,
         )
 
     def build_for_graph_capture(
@@ -596,5 +600,17 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             # dispatch. Keep paged reads independent of the live query count.
             allow_cache_packing=context.cudagraph_runtime_mode != CUDAGraphMode.FULL,
             query_metadata=indexer_metadata.query_metadata,
+            score_provider=(
+                KPoolBucketProvider(
+                    self.k_cache.prefix,
+                    indexer_metadata.block_table.shape[1] * indexer_cache.shape[1],
+                    min(
+                        self.topk_tokens // self.index_kpool,
+                        indexer_metadata.block_table.shape[1] * indexer_cache.shape[1],
+                    ),
+                )
+                if context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.is_draft_model
+                else None
+            ),
         )
         return result

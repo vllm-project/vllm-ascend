@@ -221,11 +221,14 @@ class _RecordingKPool(nn.Module):
 
 @pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
 @pytest.mark.parametrize("dsa_cp", [False, True])
+@pytest.mark.parametrize("is_draft", [False, True])
 def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     monkeypatch,
     graph_mode,
     dsa_cp,
+    is_draft,
 ) -> None:
+    monkeypatch.setattr(backend_module, "_EXTRA_CTX", SimpleNamespace(is_draft_model=is_draft))
     backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(backend)
     backend.n_head = 2
@@ -317,6 +320,9 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     assert backend.indexer_op.kwargs["output_buffer"] is backend.topk_indices_buffer
     assert backend.indexer_op.kwargs["allow_cache_packing"] is (graph_mode != CUDAGraphMode.FULL)
     assert backend.indexer_op.kwargs["query_metadata"] is metadata.query_metadata
+    assert (backend.indexer_op.kwargs["score_provider"] is not None) == (
+        graph_mode == CUDAGraphMode.FULL and not is_draft
+    )
 
 
 def test_dsacp_kpool_compresses_global_tokens_and_selects_local_queries(monkeypatch):

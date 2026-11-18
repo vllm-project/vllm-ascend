@@ -1,0 +1,6 @@
+pr: 22227
+entries:
+  - category: performance
+    text: GLM-5.3-Flash target-model decode graphs now select KPool score and TopK context buckets using host metadata, avoiding full-capacity scans for short requests while retaining million-token context support.
+    model: GLM-5.3-Flash
+    hardware: [A3]
