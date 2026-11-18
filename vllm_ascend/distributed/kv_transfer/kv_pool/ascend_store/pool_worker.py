@@ -160,6 +160,9 @@ class BaseKVPoolWorker(ABC):
         self.total_layers = None
         if self.pp_size > 1 and self.pcp_size > 1:
             # vLLM 0.33.0 derives the PP stage without the PCP rank dimension.
+            # Fixed upstream: https://github.com/vllm-project/vllm/pull/65539
+            # TODO: Remove once vLLM 0.33.0 support is dropped and PP/PCP
+            # layer-range regression tests pass with the v0.34.0 baseline.
             self.total_layers = model_config.get_total_num_hidden_layers()
             start, end = get_pp_indices(self.total_layers, self.pp_rank, self.pp_size)
             self.pp_layer_offset = start
