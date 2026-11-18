@@ -7,10 +7,11 @@ from vllm.model_executor.layers.linear import RowParallelLinear
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import (
-    create_mock_ascend_config,
     create_mock_vllm_config,
     create_mxfp_moe_layer,
 )
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoETokenDispatchOutput
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DSDynamicLinearMethod,
@@ -382,10 +383,8 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
     intermediate_size = 256
 
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config")
-    def setUp(self, mock_ascend, mock_vllm):
+    def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
-        mock_ascend.return_value = create_mock_ascend_config()
         mx_profile = allow_mx_weight_format()
         mx_profile.start()
         self.addCleanup(mx_profile.stop)
@@ -401,27 +400,16 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.addCleanup(mega_moe.stop)
         mega_moe.start()
 
-    def test_expert_lists_follow_v1_and_v2_eplb_configuration(self):
-        for use_v2, dynamic_eplb, enable_eplb, expected in (
-            (False, False, False, False),
-            (False, True, False, True),
-            (True, False, True, True),
-            (True, True, False, False),
-        ):
-            with self.subTest(use_v2=use_v2, dynamic_eplb=dynamic_eplb, enable_eplb=enable_eplb):
+    def test_expert_lists_follow_upstream_eplb_configuration(self):
+        for enable_eplb in (False, True):
+            expected = enable_eplb
+            with self.subTest(enable_eplb=enable_eplb):
                 config = create_mock_vllm_config()
-                config.use_v2_model_runner = use_v2
                 config.parallel_config.enable_eplb = enable_eplb
-                ascend_config = create_mock_ascend_config()
-                ascend_config.eplb_config.dynamic_eplb = dynamic_eplb
                 with (
                     patch(
                         "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
                         return_value=config,
-                    ),
-                    patch(
-                        "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config",
-                        return_value=ascend_config,
                     ),
                     allow_mx_weight_format(),
                 ):
@@ -509,10 +497,6 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
             patch(
                 "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
                 return_value=vllm_config,
-            ),
-            patch(
-                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config",
-                return_value=create_mock_ascend_config(),
             ),
             allow_mx_weight_format(),
         ):
@@ -712,7 +696,6 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         layer.apply_router_weight_on_input = True
         layer.ascend_expert_map = None
         layer.global_redundant_expert_num = 0
-        layer.log2phy = None
         layer.ascend_mc2_mask = None
         layer.swiglu_alpha = 1.0
         layer.swiglu_beta = 0.0
@@ -729,6 +712,36 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
             shared_experts_input=None,
         )
         mock_comm.fused_experts.assert_called_once()
+        fused_input = mock_comm.fused_experts.call_args.kwargs["fused_experts_input"]
+        expanded_x = x.repeat_interleave(topk_ids.shape[1], dim=0)
+        mlp_input = build_mlp_compute_input(
+            fused_experts_input=fused_input,
+            token_dispatch_output=MoETokenDispatchOutput(
+                hidden_states=expanded_x,
+                group_list=torch.ones(self.num_experts, dtype=torch.int64),
+                group_list_type=1,
+                dynamic_scale=None,
+                topk_scales=None,
+                combine_metadata=SimpleNamespace(),
+            ),
+            use_fusion_ops=False,
+        )
+        output = torch.randn(expanded_x.shape[0], 2 * self.intermediate_size, dtype=torch.bfloat16)
+        with (
+            patch.object(
+                self.scheme, "_quant_hidden_states", return_value=(expanded_x, torch.ones(expanded_x.shape[0]))
+            ),
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.torch_npu.npu_grouped_matmul",
+                return_value=[output],
+                create=True,
+            ) as grouped_matmul,
+        ):
+            result = self.scheme.apply_gmm1(mlp_input)
+
+        self.assertIs(result, output)
+        self.assertIs(grouped_matmul.call_args.kwargs["weight"], layer.w13_weight_list)
+        self.assertIs(grouped_matmul.call_args.kwargs["scale"], layer.w13_weight_scale_list)
 
 
 class TestDSMXFP8OProjLayout(TestBase):

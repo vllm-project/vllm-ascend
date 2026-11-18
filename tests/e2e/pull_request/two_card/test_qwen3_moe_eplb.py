@@ -26,7 +26,7 @@ from tests.e2e.conftest import RemoteOpenAIServer
 
 
 @pytest.mark.asyncio
-async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
+async def test_qwen3_moe_w8a8_distributed_tp2_ep_eplb():
     model = "vllm-ascend/Qwen3-30B-A3B-W8A8"
     port = get_open_port()
     compilation_config = json.dumps({"cudagraph_capture_sizes": [8]})

@@ -25,9 +25,9 @@ msgid "| W8A8 dynamic quantization | Supported | Supported |"
 msgstr "| W8A8 动态量化 | 支持 | 支持 |"
 
 msgid ""
-"Other MoE quantization methods, Fused MC2, and dynamic EPLB are not "
+"Other MoE quantization methods, Fused MC2, and EPLB are not "
 "supported with LoRA."
-msgstr "其他 MoE 量化方法、Fused MC2 和动态 EPLB 不支持与 LoRA 一起使用。"
+msgstr "其他 MoE 量化方法、Fused MC2 和 EPLB 不支持与 LoRA 一起使用。"
 
 msgid "# LoRA Adapters"
 msgstr "# LoRA 适配器"

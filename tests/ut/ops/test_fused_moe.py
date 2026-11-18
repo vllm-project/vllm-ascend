@@ -32,8 +32,6 @@ from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
 from vllm_ascend.ops.fused_moe.routed_experts import (
     AscendRoutedExperts,
     AscendUnquantizedFusedMoEMethod,
-    make_eplb_placement_config,
-    use_multistage_eplb_load,
 )
 from vllm_ascend.ops.fused_moe.router import fused_topk_router as fused_topk_router_module
 from vllm_ascend.ops.fused_moe.router.fused_topk_router import (
@@ -113,42 +111,16 @@ def _build_apply_layer():
         apply_router_weight_on_input=True,
         ascend_expert_map=None,
         global_redundant_expert_num=0,
-        log2phy=None,
         ascend_pertoken_scale=None,
         ascend_mc2_mask=None,
     )
 
 
-def _build_unquantized_method(*, dynamic_eplb: bool = False):
+def _build_unquantized_method():
     method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
-    method.dynamic_eplb = dynamic_eplb
     method.moe = SimpleNamespace(has_bias=False)
     method._maybe_pad_weight = MagicMock(side_effect=lambda weight: weight)
     return method
-
-
-@pytest.mark.parametrize(
-    ("dynamic_eplb", "policy_type", "collection_interval", "expected"),
-    [
-        (True, 2, 600, False),
-        (True, 3, 600, True),
-        (True, 3, 1, False),
-        (False, 3, 600, False),
-    ],
-)
-def test_use_multistage_eplb_load(dynamic_eplb, policy_type, collection_interval, expected):
-    assert use_multistage_eplb_load(dynamic_eplb, policy_type, collection_interval) is expected
-
-
-def test_make_eplb_placement_config_does_not_copy_source():
-    source = SimpleNamespace(expert_map_path=None, dynamic_eplb=True, num_redundant_experts=0)
-
-    placement_config = make_eplb_placement_config(source, num_redundant_experts=8)
-
-    assert placement_config.expert_map_path is None
-    assert placement_config.dynamic_eplb is True
-    assert placement_config.num_redundant_experts == 8
-    assert source.num_redundant_experts == 0
 
 
 def test_ascend_unquantized_skips_upstream_modular_kernel_init():
@@ -190,7 +162,6 @@ def test_ascend_routed_experts_replaces_only_unquantized_method_after_parent_ini
         "AscendUnquantizedFusedMoEMethod",
         ascend_method_factory,
     )
-    monkeypatch.setattr(AscendRoutedExperts, "init_eplb", lambda self, n_shared_experts: None)
     monkeypatch.setattr(
         routed_experts_module,
         "get_ascend_config",
@@ -203,7 +174,6 @@ def test_ascend_routed_experts_replaces_only_unquantized_method_after_parent_ini
         routed_experts_module,
         "get_current_vllm_config",
         lambda: SimpleNamespace(
-            use_v2_model_runner=False,
             model_config=SimpleNamespace(is_deepseek_mla=False),
         ),
     )
@@ -217,44 +187,6 @@ def test_ascend_routed_experts_replaces_only_unquantized_method_after_parent_ini
     else:
         assert routed_experts.quant_method is parent_method
         ascend_method_factory.assert_not_called()
-
-
-@pytest.mark.parametrize(("use_v2_model_runner", "legacy_init_calls"), [(True, 0), (False, 1)])
-def test_ascend_routed_experts_initializes_only_matching_eplb_path(
-    monkeypatch,
-    use_v2_model_runner,
-    legacy_init_calls,
-):
-    def parent_init(instance, *args, **kwargs):
-        nn.Module.__init__(instance)
-        instance.quant_config = object()
-        instance.custom_routing_function = None
-        instance.e_score_correction_bias = None
-
-    init_eplb = MagicMock()
-    monkeypatch.setattr(routed_experts_module.RoutedExperts, "__init__", parent_init)
-    monkeypatch.setattr(AscendRoutedExperts, "init_eplb", init_eplb)
-    monkeypatch.setattr(
-        routed_experts_module,
-        "get_ascend_config",
-        lambda: SimpleNamespace(
-            ascend_compilation_config=SimpleNamespace(enable_static_kernel=False),
-            enable_shared_expert_dp=False,
-        ),
-    )
-    monkeypatch.setattr(
-        routed_experts_module,
-        "get_current_vllm_config",
-        lambda: SimpleNamespace(
-            use_v2_model_runner=use_v2_model_runner,
-            model_config=SimpleNamespace(is_deepseek_mla=False),
-        ),
-    )
-
-    routed_experts = AscendRoutedExperts(n_shared_experts=2)
-
-    assert routed_experts._use_v2_model_runner is use_v2_model_runner
-    assert init_eplb.call_count == legacy_init_calls
 
 
 def test_process_weights_after_loading_uses_version_specific_layout(
@@ -288,47 +220,6 @@ def test_process_weights_after_loading_uses_version_specific_layout(
     assert layer.w2_weight.is_contiguous() is True
     assert layer.w13_weight.weight_loader is w13_loader
     assert layer.w2_weight.weight_loader is w2_loader
-
-
-def test_process_weights_after_loading_splits_lists_for_dynamic_eplb(monkeypatch):
-    method = _build_unquantized_method(dynamic_eplb=True)
-    layer = _build_weight_layer()
-    num_experts = layer.w13_weight.shape[0]
-    ascend_config = SimpleNamespace(enable_fused_mc2=1)
-
-    monkeypatch.setattr(routed_experts_module, "use_cann_megamoe", lambda _: False)
-    monkeypatch.setattr(routed_experts_module, "get_current_vllm_config", lambda: None)
-    monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: ascend_config)
-    monkeypatch.setattr(routed_experts_module.torch_npu, "npu_format_cast", lambda weight, _: weight)
-    monkeypatch.setattr(routed_experts_module.torch.npu, "empty_cache", lambda: None)
-    upstream_method_base = AscendUnquantizedFusedMoEMethod.__mro__[2]
-    monkeypatch.setattr(
-        upstream_method_base,
-        "process_weights_after_loading",
-        lambda self, layer: None,
-        raising=False,
-    )
-
-    method.process_weights_after_loading(layer)
-
-    assert not hasattr(layer, "w13_weight")
-    assert not hasattr(layer, "w2_weight")
-    assert len(layer.w13_weight_list) == num_experts
-    assert len(layer.w2_weight_list) == num_experts
-
-
-def test_update_expert_map_updates_routed_experts_and_manager():
-    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
-    nn.Module.__init__(routed_experts)
-    manager = SimpleNamespace(_expert_map=torch.tensor([0, 1, 2, -1], dtype=torch.int32))
-    routed_experts.expert_map_manager = manager
-    routed_experts.ascend_expert_map = torch.tensor([0, -1, 1], dtype=torch.int32)
-
-    new_map = torch.tensor([0, 1, -1], dtype=torch.int32)
-    routed_experts.update_expert_map(new_map)
-
-    assert routed_experts.ascend_expert_map is new_map
-    assert manager._expert_map is new_map
 
 
 @pytest.mark.parametrize("moe_comm_type", [MoECommType.ALLGATHER, MoECommType.FUSED_MC2])
@@ -558,7 +449,6 @@ def test_routed_experts_select_experts_validates_router_logits(monkeypatch):
     routed_experts.moe_config = SimpleNamespace(num_experts=4)
     routed_experts.global_redundant_expert_num = 0
     routed_experts.n_shared_experts = 0
-    routed_experts.log2phy = None
     monkeypatch.setattr(routed_experts_module, "get_forward_context", lambda: SimpleNamespace(input_ids=None))
     monkeypatch.setattr(routed_experts_module, "get_current_vllm_config", lambda: None)
     monkeypatch.setattr(routed_experts_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 3)
@@ -597,17 +487,16 @@ def test_grouped_topk_router_preserves_routing_weight_dtype():
     assert topk_ids.dtype == torch.int32
 
 
-def _build_routing_replay_experts(router, log2phy):
+def _build_routing_replay_experts(router):
     routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
     routed_experts.router = router
     routed_experts.moe_config = SimpleNamespace(num_experts=4)
     routed_experts.global_redundant_expert_num = 0
     routed_experts.n_shared_experts = 0
-    routed_experts.log2phy = log2phy
     return routed_experts
 
 
-def test_routing_replay_captures_logical_ids_before_ascend_mapping(monkeypatch):
+def test_routing_replay_captures_selected_expert_ids(monkeypatch):
     _disable_force_eplb(monkeypatch)
     router = AscendGroupedTopKRouter(
         top_k=2,
@@ -617,8 +506,7 @@ def test_routing_replay_captures_logical_ids_before_ascend_mapping(monkeypatch):
     )
     capturer = MagicMock()
     router.set_capture_fn(lambda topk_ids: capturer.capture(2, topk_ids))
-    log2phy = torch.tensor([10, 11, 12, 13], dtype=torch.int64)
-    routed_experts = _build_routing_replay_experts(router, log2phy)
+    routed_experts = _build_routing_replay_experts(router)
     monkeypatch.setattr(
         routed_experts_module,
         "get_moe_num_logical_experts",
@@ -639,8 +527,8 @@ def test_routing_replay_captures_logical_ids_before_ascend_mapping(monkeypatch):
 
     logical_ids = capturer.capture.call_args.args[1]
     capturer.capture.assert_called_once()
-    torch.testing.assert_close(physical_ids, log2phy[logical_ids])
-    assert torch.all(logical_ids < log2phy.numel())
+    torch.testing.assert_close(physical_ids, logical_ids)
+    assert torch.all(logical_ids < 4)
 
 
 def test_routing_replay_disabled_keeps_ascend_routing_unchanged(monkeypatch):
@@ -651,8 +539,7 @@ def test_routing_replay_disabled_keeps_ascend_routing_unchanged(monkeypatch):
         num_expert_group=None,
         topk_group=None,
     )
-    log2phy = torch.tensor([10, 11, 12, 13], dtype=torch.int64)
-    routed_experts = _build_routing_replay_experts(router, log2phy)
+    routed_experts = _build_routing_replay_experts(router)
     monkeypatch.setattr(
         routed_experts_module,
         "get_moe_num_logical_experts",
@@ -672,8 +559,8 @@ def test_routing_replay_disabled_keeps_ascend_routing_unchanged(monkeypatch):
     )
 
     assert router.capture_fn is None
-    expected_logical_ids = torch.tensor([[1, 3], [0, 2]], dtype=torch.int64)
-    torch.testing.assert_close(physical_ids, log2phy[expected_logical_ids])
+    expected_logical_ids = torch.tensor([[1, 3], [0, 2]], dtype=torch.int32)
+    torch.testing.assert_close(physical_ids, expected_logical_ids)
 
 
 @pytest.mark.parametrize("hidden_dtype", [torch.float16, torch.bfloat16])
@@ -710,7 +597,7 @@ def test_hash_router_preserves_fp32_weights_and_explicit_input_ids(monkeypatch, 
         tid2eid=torch.ones(32, 4, dtype=torch.int32),
     )
 
-    routed_experts = _build_routing_replay_experts(router, None)
+    routed_experts = _build_routing_replay_experts(router)
     routed_experts.n_shared_experts = 0
     monkeypatch.setattr(routed_experts_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 4)
     monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: SimpleNamespace(enable_force_eplb=False))
@@ -909,11 +796,9 @@ def test_hash_router_chunks_unaligned_input_ids_for_sequence_parallel(monkeypatc
 
 
 @pytest.mark.parametrize("return_with_event", [False, True])
-@pytest.mark.parametrize("use_v2,v2_eplb", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("v2_eplb", [False, True])
 @pytest.mark.parametrize("is_sequence_parallel", [False, True])
-def test_routed_experts_forward_impl_runs_current_flow(
-    monkeypatch, return_with_event, use_v2, v2_eplb, is_sequence_parallel
-):
+def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_event, v2_eplb, is_sequence_parallel):
     """Verify routed-expert forward preserves the current dispatch flow."""
     _disable_force_eplb(monkeypatch)
     routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
@@ -961,7 +846,7 @@ def test_routed_experts_forward_impl_runs_current_flow(
         ep_size=2,
         is_sequence_parallel=is_sequence_parallel,
     )
-    routed_experts.ascend_expert_map = None
+    routed_experts._expert_map = None
     routed_experts.topk_group = None
     routed_experts.num_expert_group = None
     routed_experts.custom_routing_function = None
@@ -970,11 +855,8 @@ def test_routed_experts_forward_impl_runs_current_flow(
     routed_experts.e_score_correction_bias = None
     routed_experts.activation = "gelu"
     routed_experts.apply_router_weight_on_input = True
-    routed_experts.log2phy = None
     routed_experts.global_redundant_expert_num = 0
     routed_experts.n_shared_experts = 0
-    routed_experts._use_v2_model_runner = use_v2
-    routed_experts.dynamic_eplb = False
     routed_experts.return_with_event = return_with_event
     moe_comm_method = MagicMock()
     moe_comm_method.prepare.return_value = SimpleNamespace(
@@ -992,7 +874,6 @@ def test_routed_experts_forward_impl_runs_current_flow(
             in_profile_run=False,
             moe_comm_type=MoECommType.MC2,
             moe_comm_method=moe_comm_method,
-            eplb_heat_collection_status=False,
         ),
     )
     monkeypatch.setattr(routed_experts_module, "get_forward_context", lambda: SimpleNamespace(all_moe_layers=None))

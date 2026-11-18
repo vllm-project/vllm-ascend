@@ -26,9 +26,6 @@ asynchronous worker, and rearrangement lifecycle. Ascend adds the STAIR policy
 (the default policy on Ascend), the HIXL and Gloo movement adapters, and the
 `load_collection_phase` extension.
 
-The legacy vLLM Ascend dynamic, recording, and static EPLB modes belonged to
-Model Runner V1 and have been removed.
-
 ### Constraints and Limitations
 
 #### Models
@@ -42,7 +39,7 @@ traffic before production deployment.
 
 !!!IMPORTANT
 
-    A2 does not support redundant experts. On A2, `num_redundant_experts` must be set to `0` in both runners. Examples in this page that use a non-zero `num_redundant_experts` apply only to hardware that supports redundant experts, such as A3 or 950PR&950DT Products.
+    A2 does not support redundant experts. On A2, `num_redundant_experts` must be set to `0`. Examples in this page that use a non-zero `num_redundant_experts` apply only to hardware that supports redundant experts, such as A3 or 950PR&950DT Products.
 
 #### Weight Formats
 
@@ -201,9 +198,6 @@ MRv2 supports asynchronous EPLB only and normalizes `use_async=false` to
 asynchronous movement. It rejects:
 
 - elastic expert parallelism,
-- legacy `dynamic_eplb`, recording/static-map fields, and the `DYNAMIC_EPLB`
-  and `EXPERT_MAP_RECORD` environment variables, all of which belonged to the
-  removed Model Runner V1 EPLB implementation,
 - communicators other than Gloo and HIXL,
 - weight offload and prefetch: enabling EPLB with `cpu_offload_gb > 0` or
   `offload_group_size > 0` raises a configuration error.
@@ -227,7 +221,6 @@ under ideal load balance.
 
 - Enable it through `additional_config`: `--additional-config '{"enable_force_eplb": true}'`.
 - It requires expert parallelism and a MoE model; `num_logical_experts` must be divisible by the expert-parallel size.
-- It cannot be combined with `eplb_config.dynamic_eplb`.
 - See [`enable_force_eplb`](../configuration/additional_config.md) for the full parameter reference.
 
 ## Tuning Suggestions

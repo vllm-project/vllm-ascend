@@ -352,18 +352,18 @@ def test_mc2_stays_isolated_from_ep_even_when_pg_options_match(module_env):
     assert first.device_group is not second.device_group
 
 
-def test_dynamic_eplb_stays_separate_from_ep_when_pg_options_differ(module_env):
+def test_groups_stay_separate_from_ep_when_pg_options_differ(module_env):
     default_hccl_pg_options = module_env.utils_module.create_hccl_pg_options.return_value
 
     def fake_create_hccl_pg_options(group_name: str):
-        if group_name == "dynamic_eplb":
+        if group_name == "custom_group":
             return {"hccl_config": {"hccl_buffer_size": 512}}
         return default_hccl_pg_options
 
     module_env.utils_module.create_hccl_pg_options.side_effect = fake_create_hccl_pg_options
 
     first = _make_group(module_env, group_name="ep")
-    second = _make_group(module_env, group_name="dynamic_eplb")
+    second = _make_group(module_env, group_name="custom_group")
 
     hccl_calls = _calls_with_backend(module_env, "hccl")
 

@@ -386,12 +386,10 @@ def test_eplb_recording_preserves_order_and_source_eligibility(
     )
     layer = AscendRoutedExperts.__new__(AscendRoutedExperts)
     layer.router = SimpleNamespace(eplb_state=state)
-    layer._use_v2_model_runner = True
     layer.enable_npugraph_ex_static_kernel = False
     layer.moe_config = config
     layer._select_experts = select_experts
     object.__setattr__(layer, "quant_method", SimpleNamespace(apply=apply_experts))
-    layer.dynamic_eplb = False
     layer.return_with_event = False
     context = SimpleNamespace(
         is_padding=torch.zeros(4, dtype=torch.bool),

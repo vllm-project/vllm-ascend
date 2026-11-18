@@ -285,23 +285,8 @@ class AscendWarmupConfig:
 
 @config
 class EplbConfig:
-    """Configuration Object for ``additional_config["eplb_config"]``.
+    """Ascend extensions to the upstream Model Runner V2 EPLB configuration."""
 
-    Migrated to ``@config`` (pydantic dataclass). Unknown-key detection is now
-    handled by ``extra="forbid"`` (replaces the hand-written ``unknown`` check);
-    int/range/enum checks moved to an ``after`` model_validator. The
-    ``__getattr__`` proxy over the internal ``self.config`` dict is removed —
-    fields are accessed directly (``self.dynamic_eplb`` etc.).
-    """
-
-    dynamic_eplb: bool = False
-    expert_map_path: str | None = None
-    expert_heat_collection_interval: int = 600
-    algorithm_execution_interval: int = 50
-    expert_map_record_path: str | None = None
-    num_redundant_experts: int = 0
-    eplb_policy_type: int = 2
-    eplb_heat_collection_stage: str = "all"
     # Model Runner V2 only. Restricts which batch phase contributes to the
     # upstream EPLB expert-load window; any prefill request marks the batch
     # as prefill.
@@ -310,38 +295,9 @@ class EplbConfig:
 
     @model_validator(mode="after")
     def _validate_config(self):
-        if self.expert_map_path is not None:
-            logger.info("The expert_map is %s", self.expert_map_path)
-            if self.expert_map_path[-5:] != ".json":
-                raise TypeError("The expert_map is not json.")
-            if not (os.path.exists(self.expert_map_path) and os.access(self.expert_map_path, os.R_OK)):
-                raise ValueError("The expert_map is not exist.")
-        if self.expert_map_record_path is not None:
-            self.dynamic_eplb = True
-            if self.expert_map_record_path[-5:] != ".json":
-                raise TypeError("The expert_map_record_path is not json.")
-            dirname = os.path.dirname(self.expert_map_record_path)
-            os.makedirs(dirname, exist_ok=True)
-        for key in ["expert_heat_collection_interval", "algorithm_execution_interval", "num_redundant_experts"]:
-            value = getattr(self, key)
-            if not isinstance(value, int):
-                raise TypeError(f"{key} must be an integer")
-            if value < 0:
-                raise ValueError(f"{key} must greater than 0; got {value} instead")
-        if self.eplb_policy_type not in [0, 1, 2, 3]:
-            raise ValueError("eplb_policy_type must in [0, 1, 2, 3]")
-        if self.dynamic_eplb:
-            assert (
-                os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1")
-                or os.getenv("EXPERT_MAP_RECORD", "false") == "true"
-            ), "The environment variable DYNAMIC_EPLB or EXPERT_MAP_RECORD of the EPLB must be set to true."
-        if self.eplb_heat_collection_stage not in ["all", "prefill", "decode"]:
-            raise ValueError('eplb_heat_collection_stage must be one of ["all", "prefill", "decode"]')
         if self.load_collection_phase not in ["all", "prefill", "decode"]:
             raise ValueError('load_collection_phase must be one of ["all", "prefill", "decode"]')
 
-        logger.info("Dynamic EPLB is %s", self.dynamic_eplb)
-        logger.info("The number of redundant experts is %s", self.num_redundant_experts)
         return self
 
 
@@ -559,14 +515,6 @@ class AscendConfig:
                 "enable_early_nz_warmup": false
             },
             "eplb_config": {
-                "dynamic_eplb": false,
-                "expert_map_path": null,
-                "expert_heat_collection_interval": 600,
-                "algorithm_execution_interval": 50,
-                "expert_map_record_path": null,
-                "num_redundant_experts": 0,
-                "eplb_policy_type": 2,
-                "eplb_heat_collection_stage": "all",
                 "load_collection_phase": "all",
                 "stair_config": {}
             },
@@ -824,13 +772,6 @@ class AscendConfig:
                 "switch for measuring the EPLB performance ceiling and must not be "
                 "used in production."
             )
-        if (
-            self.enable_force_eplb
-            and self.eplb_config.dynamic_eplb
-            and vc.model_config is not None
-            and vc.model_config.is_moe
-        ):
-            raise ValueError("enable_force_eplb cannot be mixed with dynamic_eplb.")
         self._check_mooncake_c8_kv_cache_quant(vc)
 
         # enable_shared_expert_dp = val and ep and tp>1
@@ -1080,14 +1021,10 @@ class AscendConfig:
         if not hardware_profile.supports(HardwareCapability.MC2_HIERARCHY_COMM):
             raise NotImplementedError("mc2_comm_alg == 'hierarchy' is not supported by the current hardware profile.")
 
-        num_logical_experts = vllm_config.model_config.get_num_experts()
-        num_redundant_experts = self.eplb_config.num_redundant_experts if self.eplb_config.dynamic_eplb else 0
-        num_experts = num_logical_experts + num_redundant_experts
+        num_experts = vllm_config.model_config.get_num_experts()
         if num_experts > 512:
             raise ValueError(
-                "mc2_comm_alg == 'hierarchy' supports at most 512 experts, "
-                f"but got {num_experts} experts "
-                f"({num_logical_experts} logical experts + {num_redundant_experts} EPLB redundant experts)."
+                f"mc2_comm_alg == 'hierarchy' supports at most 512 experts, but got {num_experts} experts."
             )
 
         # Fused MC2 and hierarchy communication are mutually exclusive.

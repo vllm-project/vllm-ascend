@@ -179,7 +179,7 @@ def test_dynamic_int8_lora_reads_weights_from_layer_via_quant_method() -> None:
     ("comm_type", "mlp_input", "message"),
     [
         (MoECommType.FUSED_MC2, _make_input(), "AllGather TP"),
-        (MoECommType.ALLGATHER, _make_input(dynamic_eplb=True), "dynamic EPLB"),
+        (MoECommType.ALLGATHER, _make_input(use_expert_weight_list=True), "per-expert weight lists"),
     ],
 )
 def test_dynamic_int8_lora_rejects_unsupported_modes(comm_type, mlp_input, message) -> None:

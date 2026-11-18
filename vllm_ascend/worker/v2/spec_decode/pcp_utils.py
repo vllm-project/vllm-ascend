@@ -17,7 +17,7 @@ def build_dspark_draft_config(
     Upstream ``DFlashSpeculator.__init__`` copies the config and forces PCP=1
     (keeping DCP only for MLA drafts). This copies the same way, without
     re-validating the target config, and only adjusts the Ascend features
-    tied to that topology: static EPLB when PCP was the only parallel
+    tied to that topology: EPLB when PCP was the only parallel
     dimension, and Engram DP sharing, which belongs to the target.
     """
     target_parallel_config = vllm_config.parallel_config

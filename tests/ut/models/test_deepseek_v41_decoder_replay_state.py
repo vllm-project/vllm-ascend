@@ -374,7 +374,6 @@ def test_replay_context_preserves_layout_masks_and_restores_mc2(state, monkeypat
         attn_metadata={"original": object()},
         slot_mapping={"original": torch.arange(4)},
         is_padding=original_padding[:2] if sequence_parallel else original_padding,
-        additional_kwargs={"eplb_heat_collection_status": True},
     )
     state.num_tokens = 4
     state.num_actual_tokens = 2 if compact else 3
@@ -409,7 +408,6 @@ def test_replay_context_preserves_layout_masks_and_restores_mc2(state, monkeypat
             assert mask.tolist() == (
                 [True, True, False, False, False, False] if compact else [True, False, True, False, False, False]
             )
-            assert inner.additional_kwargs["eplb_heat_collection_status"] is True
             if fail:
                 raise RuntimeError("decoder failure")
     except RuntimeError:

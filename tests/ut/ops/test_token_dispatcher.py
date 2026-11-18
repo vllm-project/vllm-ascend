@@ -139,7 +139,6 @@ class TestTokenDispatcherWithMC2(TestBase):
         mock_ascend_config = MagicMock()
         mock_ascend_config.mc2_comm_alg = ""
         mock_ascend_config.eplb_config = MagicMock()
-        mock_ascend_config.eplb_config.dynamic_eplb = False
         mock_ascend_config.combine_quant_mode = 0
         self.ascend_config_patch = patch(
             "vllm_ascend.ops.fused_moe.token_dispatcher.get_ascend_config", return_value=mock_ascend_config

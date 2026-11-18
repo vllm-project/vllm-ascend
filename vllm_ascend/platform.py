@@ -1126,73 +1126,51 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
     if not isinstance(eplb_config, dict):
         raise TypeError("additional_config.eplb_config must be a dictionary.")
 
-    use_v2_model_runner = bool(getattr(vllm_config, "use_v2_model_runner", False))
-    if use_v2_model_runner:
-        unsupported_eplb_fields = sorted(set(eplb_config) - _V2_EPLB_CONFIG_FIELDS)
-        stair_config = eplb_config.get("stair_config")
-        unsupported_stair_fields = (
-            sorted(set(stair_config) - _V2_STAIR_CONFIG_FIELDS) if isinstance(stair_config, dict) else []
+    unsupported_eplb_fields = sorted(set(eplb_config) - _V2_EPLB_CONFIG_FIELDS)
+    stair_config = eplb_config.get("stair_config")
+    unsupported_stair_fields = (
+        sorted(set(stair_config) - _V2_STAIR_CONFIG_FIELDS) if isinstance(stair_config, dict) else []
+    )
+    if unsupported_eplb_fields or unsupported_stair_fields:
+        ignored_fields = unsupported_eplb_fields + [f"stair_config.{field}" for field in unsupported_stair_fields]
+        logger.warning(
+            "Model Runner V2 EPLB currently supports only these parameters: "
+            "additional_config.eplb_config fields %s; stair_config fields %s. "
+            "The following parameters are unsupported and will be ignored: %s.",
+            sorted(_V2_EPLB_CONFIG_FIELDS),
+            sorted(_V2_STAIR_CONFIG_FIELDS),
+            ignored_fields,
         )
-        if unsupported_eplb_fields or unsupported_stair_fields:
-            ignored_fields = unsupported_eplb_fields + [f"stair_config.{field}" for field in unsupported_stair_fields]
-            logger.warning(
-                "Model Runner V2 EPLB currently supports only these parameters: "
-                "additional_config.eplb_config fields %s; stair_config fields %s. "
-                "The following parameters are unsupported and will be ignored: %s.",
-                sorted(_V2_EPLB_CONFIG_FIELDS),
-                sorted(_V2_STAIR_CONFIG_FIELDS),
-                ignored_fields,
+        eplb_config = {key: value for key, value in eplb_config.items() if key in _V2_EPLB_CONFIG_FIELDS}
+        if isinstance(stair_config, dict):
+            eplb_config["stair_config"] = {
+                key: value for key, value in stair_config.items() if key in _V2_STAIR_CONFIG_FIELDS
+            }
+        additional_config = dict(additional_config)
+        additional_config["eplb_config"] = eplb_config
+        vllm_config.additional_config = additional_config
+    load_collection_phase = eplb_config.get("load_collection_phase", "all")
+    # Disabled drafts inherit this target-only setting but never collect
+    # EPLB load. Keep target validation strict and preserve other checks.
+    if load_collection_phase != "all" and not vllm_config.parallel_config.enable_eplb and not is_draft_config_context():
+        raise ValueError("additional_config.eplb_config.load_collection_phase requires --enable-eplb.")
+    if vllm_config.parallel_config.enable_eplb:
+        upstream_eplb_config = vllm_config.parallel_config.eplb_config
+        if upstream_eplb_config.communicator not in (None, "torch_gloo", "hixl"):
+            raise ValueError(
+                "Async EPLB on Ascend requires the torch_gloo or hixl communicator "
+                f"but got {upstream_eplb_config.communicator!r}. "
+                "Set eplb_config.communicator to 'torch_gloo' or 'hixl'."
             )
-            eplb_config = {key: value for key, value in eplb_config.items() if key in _V2_EPLB_CONFIG_FIELDS}
-            if isinstance(stair_config, dict):
-                eplb_config["stair_config"] = {
-                    key: value for key, value in stair_config.items() if key in _V2_STAIR_CONFIG_FIELDS
-                }
-            additional_config = dict(additional_config)
-            additional_config["eplb_config"] = eplb_config
-            vllm_config.additional_config = additional_config
-        if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
-            "EXPERT_MAP_RECORD", "false"
-        ).lower() in ("true", "1"):
+        if not upstream_eplb_config.use_async:
             logger.warning(
-                "DYNAMIC_EPLB and EXPERT_MAP_RECORD are Model Runner V1 controls and are ignored by "
-                "Model Runner V2. Use --enable-eplb and --eplb-config for MRv2; "
-                "additional_config.eplb_config supports only %s.",
-                sorted(_V2_EPLB_CONFIG_FIELDS),
+                "Synchronous EPLB is not supported on Ascend; "
+                "parameter=eplb_config.use_async, value=False, "
+                "action: forcing asynchronous EPLB."
             )
-        load_collection_phase = eplb_config.get("load_collection_phase", "all")
-        # Disabled drafts inherit this target-only setting but never collect
-        # EPLB load. Keep target validation strict and preserve other checks.
-        if (
-            load_collection_phase != "all"
-            and not vllm_config.parallel_config.enable_eplb
-            and not is_draft_config_context()
-        ):
-            raise ValueError("additional_config.eplb_config.load_collection_phase requires --enable-eplb.")
-        if vllm_config.parallel_config.enable_eplb:
-            upstream_eplb_config = vllm_config.parallel_config.eplb_config
-            if upstream_eplb_config.communicator not in (None, "torch_gloo", "hixl"):
-                raise ValueError(
-                    "Async EPLB on Ascend requires the torch_gloo or hixl communicator "
-                    f"but got {upstream_eplb_config.communicator!r}. "
-                    "Set eplb_config.communicator to 'torch_gloo' or 'hixl'."
-                )
-            if not upstream_eplb_config.use_async:
-                logger.warning(
-                    "Synchronous EPLB is not supported on Ascend; "
-                    "parameter=eplb_config.use_async, value=False, "
-                    "action: forcing asynchronous EPLB."
-                )
-                upstream_eplb_config.use_async = True
-            if vllm_config.parallel_config.enable_elastic_ep:
-                raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
-    elif {"load_collection_phase", "stair_config"} & eplb_config.keys():
-        raise ValueError(
-            "stair_config and load_collection_phase are only supported by Model Runner V2; "
-            "use eplb_heat_collection_stage with Model Runner V1."
-        )
-    elif vllm_config.parallel_config.enable_eplb:
-        raise ValueError("Upstream EPLB is only supported by Model Runner V2 on Ascend.")
+            upstream_eplb_config.use_async = True
+        if vllm_config.parallel_config.enable_elastic_ep:
+            raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
 
 
 def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:

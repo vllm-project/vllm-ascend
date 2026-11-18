@@ -129,7 +129,6 @@ def set_ascend_forward_context(
     draft_attn_metadatas=None,
     device_metadata_executor=None,
     has_sinks=False,
-    eplb_heat_collection_status: bool = False,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -232,8 +231,6 @@ def set_ascend_forward_context(
             if max_tokens_across_dp is not None
             else None
         )
-
-        forward_context.eplb_heat_collection_status = eplb_heat_collection_status
 
         if num_tokens is not None:
             if num_actual_tokens is None:
@@ -499,7 +496,6 @@ class _ExtraForwardContextProxy:
         "in_profile_run",
         "padded_num_tokens",
         "sinks",
-        "eplb_heat_collection_status",
     )
 
     def check_extra_attr(self, name: str):

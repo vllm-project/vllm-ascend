@@ -216,7 +216,7 @@ You can run tests with `pytest` as well. Typical examples:
     VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py
 
     # Run a certain case in test script
-    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py::test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py::test_qwen3_moe_w8a8_distributed_tp2_ep_eplb
     ```
 
 This will reproduce the E2E test behavior.
