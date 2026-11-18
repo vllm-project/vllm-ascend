@@ -186,6 +186,13 @@ class BalanceScheduler(Scheduler):
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
 
+        iteration_details = None
+        if not vllm_version_is("0.33.0") and (
+            (self.log_stats and self.observability_config.enable_logging_iteration_details)
+            or self.vllm_config.profiler_config.profiler is not None
+        ):
+            iteration_details = IterationDetails()
+
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
@@ -195,6 +202,7 @@ class BalanceScheduler(Scheduler):
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
+        num_scheduled_encoder_inputs = 0
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
@@ -342,6 +350,8 @@ class BalanceScheduler(Scheduler):
                                     preempted_req.get_num_encoder_embeds(i) for i in preempted_encoder_inputs
                                 )
                                 encoder_compute_budget += num_embeds_to_restore
+                                if iteration_details is not None:
+                                    num_scheduled_encoder_inputs -= len(preempted_encoder_inputs)
                             req_index -= 1
                     else:
                         preempted_req = self.running.pop()
@@ -388,6 +398,8 @@ class BalanceScheduler(Scheduler):
             # Encoder-related.
             if encoder_inputs_to_schedule:
                 scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
+                if iteration_details is not None:
+                    num_scheduled_encoder_inputs += len(encoder_inputs_to_schedule)
                 # Allocate the encoder cache.
                 for i in encoder_inputs_to_schedule:
                     self.encoder_cache_manager.allocate(request, i)
@@ -732,6 +744,8 @@ class BalanceScheduler(Scheduler):
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
+                    if iteration_details is not None:
+                        num_scheduled_encoder_inputs += len(encoder_inputs_to_schedule)
                     # Allocate the encoder cache.
                     for i in encoder_inputs_to_schedule:
                         self.encoder_cache_manager.allocate(request, i)
@@ -791,13 +805,6 @@ class BalanceScheduler(Scheduler):
                 for req in scheduled_new_reqs
             ]
 
-        iteration_details = None
-        if not vllm_version_is("0.33.0") and (
-            (self.log_stats and self.observability_config.enable_logging_iteration_details)
-            or self.vllm_config.profiler_config.profiler is not None
-        ):
-            iteration_details = IterationDetails()
-
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = make_cached_request_data(
                 self,
@@ -816,7 +823,7 @@ class BalanceScheduler(Scheduler):
                     len(num_scheduled_tokens) - iteration_details.num_decode_requests
                 )
                 iteration_details.num_prefill_tokens = total_num_scheduled_tokens - iteration_details.num_decode_tokens
-                iteration_details.num_encoder_inputs = sum(len(inputs) for inputs in scheduled_encoder_inputs.values())
+                iteration_details.num_encoder_inputs = num_scheduled_encoder_inputs
                 iteration_details.num_encoder_output_tokens = self.max_num_encoder_input_tokens - encoder_compute_budget
             schedule_metadata = {
                 "iteration_details": iteration_details,

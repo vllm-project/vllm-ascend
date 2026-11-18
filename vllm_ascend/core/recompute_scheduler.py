@@ -219,6 +219,13 @@ class RecomputeScheduler(Scheduler):
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
+
+        iteration_details = None
+        if not vllm_version_is("0.33.0") and (
+            (self.log_stats and self.observability_config.enable_logging_iteration_details)
+            or self.vllm_config.profiler_config.profiler is not None
+        ):
+            iteration_details = IterationDetails()
         self._recomputed_reqs: list[RecomputeReqInfo] = []
 
         self._apply_load_balance_modifications()
@@ -235,6 +242,7 @@ class RecomputeScheduler(Scheduler):
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
+        num_scheduled_encoder_inputs = 0
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
@@ -422,6 +430,8 @@ class RecomputeScheduler(Scheduler):
                                     preempted_req.get_num_encoder_embeds(i) for i in preempted_encoder_inputs
                                 )
                                 encoder_compute_budget += num_embeds_to_restore
+                                if iteration_details is not None:
+                                    num_scheduled_encoder_inputs -= len(preempted_encoder_inputs)
                     else:
                         preempted_req = self.running.pop()
 
@@ -474,6 +484,8 @@ class RecomputeScheduler(Scheduler):
             # Encoder-related.
             if encoder_inputs_to_schedule:
                 scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
+                if iteration_details is not None:
+                    num_scheduled_encoder_inputs += len(encoder_inputs_to_schedule)
                 encoder_compute_budget = new_encoder_compute_budget
             if encoder_inputs_to_schedule or external_load_encoder_input:
                 self._allocate_encoder_inputs(
@@ -874,6 +886,8 @@ class RecomputeScheduler(Scheduler):
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
+                    if iteration_details is not None:
+                        num_scheduled_encoder_inputs += len(encoder_inputs_to_schedule)
                     encoder_compute_budget = new_encoder_compute_budget
                 if encoder_inputs_to_schedule or external_load_encoder_input:
                     self._allocate_encoder_inputs(
@@ -932,13 +946,6 @@ class RecomputeScheduler(Scheduler):
                 for req in scheduled_new_reqs
             ]
 
-        iteration_details = None
-        if not vllm_version_is("0.33.0") and (
-            (self.log_stats and self.observability_config.enable_logging_iteration_details)
-            or self.vllm_config.profiler_config.profiler is not None
-        ):
-            iteration_details = IterationDetails()
-
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = make_cached_request_data(
                 self,
@@ -957,7 +964,7 @@ class RecomputeScheduler(Scheduler):
                     len(num_scheduled_tokens) - iteration_details.num_decode_requests
                 )
                 iteration_details.num_prefill_tokens = total_num_scheduled_tokens - iteration_details.num_decode_tokens
-                iteration_details.num_encoder_inputs = sum(len(inputs) for inputs in scheduled_encoder_inputs.values())
+                iteration_details.num_encoder_inputs = num_scheduled_encoder_inputs
                 iteration_details.num_encoder_output_tokens = self.max_num_encoder_input_tokens - encoder_compute_budget
             schedule_metadata = {
                 "iteration_details": iteration_details,
