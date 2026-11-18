@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 
 import vllm_ascend.ops.triton.layernorm_gated as layernorm_gated
+from tests.accuracy_utils import assert_reference_accuracy
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
@@ -12,11 +13,6 @@ DEVICE = "npu"
 pytestmark = pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
 )
-TOLERANCES = {
-    torch.float16: (2**-9, 2**-9, 0.1),
-    torch.bfloat16: (2**-6, 2**-6, 1.0),
-    torch.float32: (2**-10, 2**-16, 0.01),
-}
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -24,21 +20,6 @@ def init_triton_device_properties():
     if get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3):
         pytest.skip("Requires Ascend A2/A3")
     init_device_properties_triton()
-
-
-def assert_reference_accuracy(actual, expected):
-    """Apply both contribution-guide bounds using the output tensor's dtype."""
-    assert actual.shape == expected.shape
-    assert actual.dtype == expected.dtype
-    rtol, atol, max_error = TOLERANCES[actual.dtype]
-    actual = actual.cpu().float()
-    expected = expected.cpu().float()
-    assert torch.isfinite(actual).all(), "Non-finite actual output"
-    assert torch.isfinite(expected).all(), "Non-finite reference output"
-    error = (actual - expected).abs()
-    within_tolerance = error <= atol + rtol * expected.abs()
-    assert within_tolerance.sum().item() >= 0.99 * error.numel()
-    assert error.max().item() <= max_error
 
 
 def layer_norm_gated_ref(

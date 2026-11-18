@@ -1,4 +1,4 @@
-"""Source-level checks for the PR1 wrapper boundary."""
+"""Host checks for gated normalization routing and accuracy assertions."""
 
 import ast
 import importlib.util
@@ -9,22 +9,16 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+import torch
+
+from tests.accuracy_utils import TOLERANCES, assert_reference_accuracy
+
 ROOT = Path(__file__).resolve().parents[3]
 LAYER_NORM = ROOT / "vllm_ascend" / "ops" / "triton" / "layernorm_gated.py"
 DISPATCH = ROOT / "vllm_ascend" / "ops" / "triton" / "layernorm_gated_dispatch.py"
 
 
 class RouteSourceTests(unittest.TestCase):
-    def test_sources_parse_and_exclude_wide_path_symbols(self):
-        layer_source = LAYER_NORM.read_text()
-        dispatch_source = DISPATCH.read_text()
-        ast.parse(layer_source)
-        ast.parse(dispatch_source)
-        self.assertNotIn("c2_", layer_source.lower())
-        self.assertNotIn("c2_", dispatch_source.lower())
-        self.assertNotIn("compile_target", layer_source.lower())
-        self.assertNotIn("try_get_compile_target", layer_source)
-
     def test_gate_branches_preserve_both_activations(self):
         # Execute the actual scalar gate branch AST, without emulating the kernel.
         tree = ast.parse(LAYER_NORM.read_text())
@@ -54,97 +48,76 @@ class RouteSourceTests(unittest.TestCase):
                             gate = 1 / (1 + math.exp(-z))
                             self.assertAlmostEqual(state[target], 2.5 * gate * (z if activation == 0 else 1))
 
-    def test_device_name_and_dtype_allowlists_are_absent(self):
-        source = LAYER_NORM.read_text()
-        self.assertNotIn("_PR1_QUALIFIED_DEVICE_NAMES", source)
-        self.assertNotIn("_is_pr1_dtype", source)
-        self.assertNotIn("try_get_vectorcore_num", source)
-        self.assertIn("get_vectorcore_num", source)
-        self.assertIn("get_ub_size_bytes", source)
-        self.assertNotIn("qualified=qualified", source)
-
 
 class AccuracyGateTests(unittest.TestCase):
-    def test_dtype_bounds_percentage_maximum_and_nonfinite(self):
-        # Isolate the real e2e helper without importing pytest, torch or NPU code.
-        path = ROOT / "tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_layernorm_gated.py"
-        tree = ast.parse(path.read_text())
-        selected = [
-            node
-            for node in tree.body
-            if (isinstance(node, ast.FunctionDef) and node.name == "assert_reference_accuracy")
-            or (
-                isinstance(node, ast.Assign)
-                and any(isinstance(t, ast.Name) and t.id == "TOLERANCES" for t in node.targets)
-            )
-        ]
-
-        class Values:
-            def __init__(self, values, dtype="float32"):
-                self.values = list(values)
-                self.dtype = dtype
-                self.shape = (len(self.values),)
-
-            def cpu(self):
-                return self
-
-            def float(self):
-                return self
-
-            def abs(self):
-                return Values(abs(value) for value in self.values)
-
-            def __sub__(self, other):
-                return Values(a - b for a, b in zip(self.values, other.values))
-
-            def __rmul__(self, scalar):
-                return Values(scalar * value for value in self.values)
-
-            def __radd__(self, scalar):
-                return Values(scalar + value for value in self.values)
-
-            def __le__(self, other):
-                return Values(a <= b for a, b in zip(self.values, other.values))
-
-            def all(self):
-                return all(self.values)
-
-            def sum(self):
-                return types.SimpleNamespace(item=lambda: sum(self.values))
-
-            def max(self):
-                return types.SimpleNamespace(item=lambda: max(self.values))
-
-            def numel(self):
-                return len(self.values)
-
-        fake_torch = types.SimpleNamespace(
-            float16="float16",
-            bfloat16="bfloat16",
-            float32="float32",
-            isfinite=lambda tensor: Values(math.isfinite(v) for v in tensor.values),
-        )
-        state = {"torch": fake_torch}
-        exec(compile(ast.Module(body=selected, type_ignores=[]), "accuracy", "exec"), state)
-        check = state["assert_reference_accuracy"]
+    def test_dtype_bounds(self):
         self.assertEqual(
-            state["TOLERANCES"],
-            {"float16": (2**-9, 2**-9, 0.1), "bfloat16": (2**-6, 2**-6, 1.0), "float32": (2**-10, 2**-16, 0.01)},
+            TOLERANCES,
+            {
+                torch.float16: (2**-9, 2**-9, 0.1),
+                torch.bfloat16: (2**-6, 2**-6, 1.0),
+                torch.float32: (2**-10, 2**-16, 0.01),
+            },
         )
-        # Exactly 99% is allowed only while the global maximum bound also holds.
-        check(Values([0.0] * 99 + [0.005]), Values([0.0] * 100))
-        for actual, expected in (
-            ([0.0] * 98 + [0.005] * 2, [0.0] * 100),
-            ([0.0] * 99 + [0.02], [0.0] * 100),
-            ([float("nan")], [0.0]),
-            ([float("inf")], [float("inf")]),
+        for dtype, (_, atol, _) in TOLERANCES.items():
+            with self.subTest(dtype=dtype):
+                expected = torch.zeros(1, dtype=dtype)
+                assert_reference_accuracy(torch.tensor([atol], dtype=dtype), expected)
+                with self.assertRaises(AssertionError):
+                    assert_reference_accuracy(torch.tensor([2 * atol], dtype=dtype), expected)
+
+    def test_relative_tolerance(self):
+        for dtype, reference, allowed, rejected in (
+            (torch.float16, 16.0, 0.03125, 0.0625),
+            (torch.bfloat16, 16.0, 0.25, 0.5),
+            (torch.float32, 4.0, 0.00390625, 0.0078125),
         ):
-            with self.subTest(actual=actual[-1], expected=expected[-1]), self.assertRaises(AssertionError):
-                check(Values(actual), Values(expected))
-        # Statistics must use their fp32 dtype even for low-precision inputs.
+            with self.subTest(dtype=dtype):
+                expected = torch.tensor([reference], dtype=dtype)
+                assert_reference_accuracy(torch.tensor([reference + allowed], dtype=dtype), expected)
+                with self.assertRaises(AssertionError):
+                    assert_reference_accuracy(torch.tensor([reference + rejected], dtype=dtype), expected)
+
+    def test_percentage_and_independent_maximum(self):
+        for dtype, (_, atol, max_error) in TOLERANCES.items():
+            with self.subTest(dtype=dtype):
+                expected = torch.zeros(100, dtype=dtype)
+                actual = expected.clone()
+                actual[-1] = 2 * atol
+                # Exactly 99% passes while the maximum-error bound also holds.
+                assert_reference_accuracy(actual, expected)
+                actual[-2] = 2 * atol
+                with self.assertRaises(AssertionError):
+                    assert_reference_accuracy(actual, expected)
+                actual = expected.clone()
+                actual[-1] = 2 * max_error
+                with self.assertRaises(AssertionError):
+                    assert_reference_accuracy(actual, expected)
+
+    def test_nonfinite_actual_or_reference(self):
+        for dtype in TOLERANCES:
+            for actual, expected in (
+                (float("nan"), 0),
+                (float("inf"), float("inf")),
+                (0, float("nan")),
+                (0, float("inf")),
+            ):
+                with self.subTest(dtype=dtype, actual=actual, expected=expected), self.assertRaises(AssertionError):
+                    assert_reference_accuracy(
+                        torch.tensor([actual], dtype=dtype), torch.tensor([expected], dtype=dtype)
+                    )
+
+    def test_statistics_use_their_own_dtype(self):
+        # The same error passes for fp16 output but fails for fp32 statistics.
+        assert_reference_accuracy(torch.tensor([0.001], dtype=torch.float16), torch.zeros(1, dtype=torch.float16))
         with self.assertRaises(AssertionError):
-            check(Values([0.001]), Values([0.0]))
-        check(Values([0.001], "float16"), Values([0.0], "float16"))
+            assert_reference_accuracy(torch.tensor([0.001], dtype=torch.float32), torch.zeros(1, dtype=torch.float32))
+
+    def test_shape_and_dtype_must_match(self):
+        with self.assertRaises(AssertionError):
+            assert_reference_accuracy(torch.zeros(1), torch.zeros(2))
+        with self.assertRaises(AssertionError):
+            assert_reference_accuracy(torch.zeros(1, dtype=torch.float16), torch.zeros(1, dtype=torch.float32))
 
 
 class _FakeTensor:

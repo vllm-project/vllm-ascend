@@ -11,7 +11,7 @@
   1. Validate the two-dimensional input layout, allocate output/statistics, and select a BASE row tile or HOIST32 execution.
   2. BASE processes BM16 or BM64 row tiles. HOIST32 uses BM32 tiles in a grid-stride loop with the grid capped at the vector-core count; weight and optional bias are loaded before the loop.
   3. Normalize and apply the affine transform and optional gate in fp32, then store masked outputs and group-major statistics.
-- **Supported modes**: Ascend NPU inference with LayerNorm or RMSNorm, optional bias, and pre/post gate. The single-card test retains the upstream Atlas A2/A3 device guard. Compatibility on other applicable products (including 950PR/950DT) remains unvalidated; the runtime selector introduces no product-name or dtype allowlist. Historical single-operator device evidence is limited to Ascend910B4 and does not qualify the current merged source.
+- **Supported modes**: Ascend NPU inference with LayerNorm or RMSNorm, optional bias, and pre/post gate. The single-card test uses the Atlas A2/A3 device guard; the runtime selector introduces no product-name or dtype allowlist. Hardware and runtime coverage are reported with the source version in the PR test results.
 
 ## Parameters
 
@@ -35,7 +35,7 @@
 - `G=N/N_group` counts normalization groups within each row. For GDN output normalization, `[T,H_local,D_v]` is flattened to `[M,N]` with `M=T*H_local` and `N=D_v`: each row is one token/value-head pair, and model heads do not become normalization groups. `group_size=None` gives `G=1`.
 - Statistics use group-major indexing `group*M+row`. Caller-provided `out` is reused and overwritten; input `x`, `weight`, `bias`, and `z` are otherwise read only. Allocate a separate `out`; overlapping output/input storage is not qualified. No caller-visible layout or dtype conversion is introduced by this wrapper. Device, dtype compatibility and non-overlapping storage remain caller preconditions inherited from the upstream wrapper.
 - Multi-group inputs retain BASE64. Single-group NPU inputs below width 128 use BASE16; width 128 uses HOIST32 when `4*ceil(M/32)>=P`, otherwise BASE16, where `P` is the initialized vector-core count. Widths 129–512 use BASE16 when the UB getter reports at least 192 KiB; other inputs retain BASE64.
-- Single-group NPU calls require device properties initialized through the existing `init_device_properties_triton()` contract. The UB getter may use its existing compatibility default or debugging override. Grouped calls do not query these properties.
+- Single-group NPU calls require device properties initialized through the existing `init_device_properties_triton()` contract. The UB getter uses the detected device property or its existing compatibility default. Grouped calls do not query these properties.
 - The single-group BASE16 resource envelope ends at `N_group=512` (`BLOCK_N<=512`). Wider groups retain BASE64 and may still overflow UB; this change does not make them resource-safe. The limit applies to per-group width, not total `N`. BASE's existing `65536 / element_size` feature-width guard is separate from the compiler's full-tile UB limit.
 - Forward inference only; positive finite `eps` and finite floating inputs are the intended domain. There is no backward implementation in this module. Graph replay and full-model qualification are not established by the recorded single-operator tests.
 
@@ -44,7 +44,7 @@
 - **Origin**: The existing vLLM-Ascend gated normalization implementation is adapted from Flash Linear Attention's gated LayerNorm and the Triton LayerNorm tutorial; see the source-file header.
 - **Differences**:
     - NPU adaptation for performance: selects smaller BASE row tiles for eligible single-group inputs and uses persistent execution with parameter reuse for suitable N128 workloads.
-    - The merged public signature, activation validation and BASE kernel match main. HOIST implements both upstream activation IDs without changing the default swish arithmetic, normalization, output aliasing or statistics layout. Grouped inputs keep the original BASE64 launch. This PR does not add adaptive tiling, wider HOIST routes or new resource getters.
+    - The public signature, activation validation and BASE kernel are preserved. HOIST implements both activation IDs without changing the default swish arithmetic, normalization, output aliasing or statistics layout. Grouped inputs keep the original BASE64 launch. No adaptive tiling, wider HOIST routes or new resource getters are introduced.
 
 ## Test Cases
 
@@ -58,14 +58,14 @@ For every compared tensor, both finite-value checks and both contribution-guide 
 | bf16 | 2^-6 | 2^-6 | 1 |
 | fp32 | 2^-10 | 2^-16 | 0.01 |
 
-Output uses its own dtype; `mean` and `rstd` always use the fp32 row of this table, independently of input dtype. These are the current test criteria, not retroactive reinterpretations of historical measurements.
+Output uses its own dtype; `mean` and `rstd` always use the fp32 row of this table, independently of input dtype. CPU unit tests and NPU tests share the assertion in `tests/accuracy_utils.py`.
 
 ```bash
-python3 -m unittest discover -s tests/ut/ops -p 'test_layernorm_gated_*.py' -v
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 python3 -m unittest discover -s tests/ut/ops -p 'test_layernorm_gated_*.py' -v
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_layernorm_gated.py
 ```
 
-The host suite exercises scalar dispatch, wrapper launch arguments and the actual pre/post gate branch AST for each kernel. It does not compile Triton or emulate its vector/reduction execution. The module-level A2/A3 skip guard covers every device test, and the autouse initialization fixture also skips unsupported devices before initializing properties.
+The host suite requires CPU PyTorch. It exercises scalar dispatch, wrapper launch arguments, accuracy-assertion boundaries using real CPU tensors, and the actual pre/post gate branch AST for each kernel. It does not compile Triton or emulate its vector/reduction execution. The module-level A2/A3 skip guard covers every device test, and the autouse initialization fixture also skips unsupported devices before initializing properties.
 
 ## Production integration and initialization
 
@@ -75,7 +75,7 @@ The production worker calls the existing `init_device_properties_triton()` durin
 
 ## JIT specialization and recompilation
 
-White-box analysis of the merged source:
+White-box analysis of the kernel arguments and launch configuration:
 
 | Argument/configuration | Domain and specialization behavior |
 | --- | --- |
@@ -87,17 +87,12 @@ White-box analysis of the merged source:
 | `ACTIVATION` | Compile-time branch ID: 0 for both `swish` and `silu`, 1 for `sigmoid`. The alias shares an ID; sigmoid introduces a necessary math variant in both kernels. Validation still applies when no gate is supplied. |
 | Compiler/target/source/cache | Effective compiler options, backend/target, source and cache state can require fresh compilation. No autotuning or new compiler option is introduced. |
 
-The bounded variant space is justified by algorithm/tile differences; this is a source analysis, not an observed compilation count. No specialization annotation is changed as part of conflict resolution. The persistent kernel's runtime control flow and activation variants still require compilation, accuracy and performance validation on the supported backend.
+The bounded variant space follows the algorithm and tile differences. This is a source analysis; observed compilation counts must be measured separately for startup and serving.
 
-## Validation status and remaining evidence
+## Validation and reporting
 
-- **Host validation**: stdlib dispatch/wrapper/gate-branch tests are available and executed for this local merge. They check host contracts only.
-- **Current merged-source operator compilation and NPU accuracy**: NOT_RUN, including sigmoid/silu propagation through HOIST, all output dtypes, fp32 statistics under the new bounds, and A2/A3 coverage. Historical default-swish single-operator results and older tolerances do not close these gaps.
-- **Current merged-source operator performance**: NOT_RUN. Recompare with matching baseline/source, device, toolchain, shape/dtype/flags and timing protocol. Historical route gains do not establish a sigmoid gain or current-tip performance.
-- **Model accuracy**: NOT_RUN. Record a baseline/candidate evaluation such as GPQA, model/revision, dtype, parallelism, dataset settings and score comparison for actual callers.
-- **Model performance**: NOT_RUN. Record a matched workload such as GSM8K, latency/throughput, versions, devices, model configuration and measurement method. No model-level speedup is claimed.
-- **Black-box specialization and compilation counts**: NOT_RUN. Capture reachable model shapes, scalar/optional/activation metadata, startup compile counts and serving compile counts separately; distinguish cache hits, recompilation and initial compilation.
-- **Warmup**: no registration added or claimed. Warmup execution/reuse validation is NOT_RUN; registration-window and runtime-coverage tests are N/A to this unchanged integration. If required variants are registered later, validate them through the same public wrapper and active component registry window after measuring specialization.
-- **Graph replay and other applicable hardware**: NOT_RUN. Functional compatibility and resource safety beyond the documented envelope remain open validation items.
+Report source commits, hardware, toolchain, shapes, dtypes, activation and gate order with each result. Keep host checks, operator accuracy/performance, and model evaluation separate, following the [Triton contribution guide](../../../../docs/source/developer_guide/contribution/triton_operators.md). Measure compilation counts for reachable model shapes and metadata, separating startup from serving and distinguishing compilation from cache hits.
 
-These pending device/model gates prevent treating the local host merge as complete Triton contribution qualification.
+No warmup registration is added. If variants are registered later, validate registration and reuse through the same public wrapper and the selected component's active registry window. Graph replay and additional hardware require their own validation.
+
+Source-specific results and outstanding validation items are maintained in the [PR testing section](https://github.com/vllm-project/vllm-ascend/pull/17602). Historical measurements remain attributed to their tested source and environment.
