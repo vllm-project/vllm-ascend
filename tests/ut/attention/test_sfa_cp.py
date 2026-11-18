@@ -7,6 +7,7 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, Mock, patch
 
+import numpy as np
 import pytest
 import torch
 import vllm.distributed as vllm_distributed
@@ -145,6 +146,10 @@ def _make_nope_pcp_impl(width, packed_cache=False):
 @pytest.mark.parametrize("first_block_id", [0, 3])
 def test_sfa_pcp_dcp_compact_kv_selects_only_allocated_blocks(first_block_id):
     builder = AscendSFAPCPDCPMetadataBuilder.__new__(AscendSFAPCPDCPMetadataBuilder)
+    builder.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace()),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2),
+    )
     builder.device = torch.device("cpu")
     builder.max_local_block_table_cols = 3
     builder.arange_buffer = torch.arange(3, dtype=torch.int32)
@@ -1029,6 +1034,10 @@ def test_sfa_pcp_packed_kv_store_matches_gathered_inputs(pcp_size, num_decode_to
 
 def _build_pcp_dcp_slot_metadata(metadata, group):
     builder = AscendSFAPCPDCPMetadataBuilder.__new__(AscendSFAPCPDCPMetadataBuilder)
+    builder.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace()),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2),
+    )
     context = SimpleNamespace(
         global_batch=SimpleNamespace(is_prefilling_np=torch.tensor([metadata.pcp_has_global_prefill]), num_reqs=1),
         global_block_tables=(torch.zeros(1, 1, dtype=torch.int32),),
@@ -2545,3 +2554,74 @@ def test_sfa_forward_orders_cache_writes_and_collectives(
             assert collective.call_count == int(dcp_enabled)
             assert metadata.dcp_context.gather_context is None
             torch.testing.assert_close(output, torch.full((2, 1), 3.0))
+
+
+@pytest.mark.parametrize("prefill", [False, True])
+def test_sharded_dcp_keeps_packed_addresses_local(monkeypatch, prefill):
+    from vllm_ascend.attention.context_parallel import sfa_cp
+
+    builder = AscendSFADCPMetadataBuilder.__new__(AscendSFADCPMetadataBuilder)
+    builder.vllm_config = object()
+    builder.device = torch.device("cpu")
+    builder.use_dcp = True
+    builder.decode_threshold = 4
+    builder.dcp_local_seq_lens_buf = torch.empty(1, dtype=torch.int32)
+    # These are hole-spanning physical IDs, deliberately not dense IDs.
+    table = torch.tensor([[48, 49, 16, 17]], dtype=torch.int32)
+    slots = torch.tensor([48 * 128 + 7, -1], dtype=torch.int32)
+    builder._get_dcp_local_block_table = Mock(return_value=table)
+    builder._build_block_table_replicated_view = Mock(side_effect=AssertionError("physical IDs expanded twice"))
+    builder._build_slot_mapping_replicated_view = Mock(side_effect=AssertionError("local slots reconstructed"))
+    builder._build_compact_kv_gather_metadata = Mock(side_effect=AssertionError("sharded KV gathered as replicas"))
+    common = SimpleNamespace(
+        slot_mapping=slots,
+        block_table_tensor=table,
+        num_reqs=1,
+        dcp_local_seq_lens=torch.tensor([256], dtype=torch.int32),
+    )
+    metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
+    metadata.pcp_has_global_prefill = prefill
+    metadata.seq_lens = torch.tensor([512], dtype=torch.int32)
+    monkeypatch.setattr(sfa_cp, "enable_sfa_dcp_sharded_indexer", lambda _: True)
+    monkeypatch.setattr(sfa_cp, "split_decodes_and_prefills", lambda *args, **kwargs: (1, 0, 2, 0))
+
+    def build():
+        assert common.block_table_tensor is table
+        assert common.slot_mapping is slots
+        metadata.block_table = common.block_table_tensor
+        metadata.slot_mapping = common.slot_mapping
+        return metadata
+
+    result = builder._build_with_metadata_view(common, build)
+    assert result.dcp_context.block_table is table
+    assert result.dcp_context.slot_mapping is slots
+    assert result.block_table is table
+    assert result.slot_mapping is slots
+    builder._build_compact_kv_gather_metadata.assert_not_called()
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_sharded_pcp_dcp_prolog_slots_keep_packed_rank_order(monkeypatch, rank):
+    from vllm_ascend.attention.context_parallel import sfa_cp
+
+    builder = AscendSFAPCPDCPMetadataBuilder.__new__(AscendSFAPCPDCPMetadataBuilder)
+    builder.vllm_config = object()
+    slots = torch.tensor([6144, -1, 2176, -1, 6273, -1], dtype=torch.int32)
+    metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
+    metadata.num_input_tokens = 3
+    metadata.num_decode_tokens = 1
+    metadata.num_prefills = 1
+    metadata.pcp_has_global_prefill = True
+    metadata.dcp_context = SimpleNamespace(slot_mapping=slots)
+    context = SimpleNamespace(global_batch=SimpleNamespace(is_prefilling_np=np.array([True])))
+    common = SimpleNamespace(pcp_context=context, pcp_cache_group_idx=None)
+    builder._build_with_metadata_view = Mock(return_value=metadata)
+    builder._build_pcp_ordered_indexer_slot_mapping = Mock(side_effect=AssertionError("replicated indexer used"))
+    monkeypatch.setattr(sfa_cp, "enable_sfa_dcp_sharded_indexer", lambda _: True)
+    monkeypatch.setattr(sfa_cp, "get_pcp_group", lambda: SimpleNamespace(world_size=2, rank_in_group=rank))
+    result = builder.build(0, common)
+    expected_local = slots.view(2, 3)[rank].clone()
+    expected_local[0] = slots[0]  # replicated decode prefix
+    torch.testing.assert_close(result.pcp_prolog_local_slots, expected_local)
+    torch.testing.assert_close(result.pcp_prolog_global_slots, torch.tensor([-1, 2176, 6273, -1], dtype=torch.int32))
+    torch.testing.assert_close(result.slot_mapping, torch.tensor([6144, -1, 2176, 6273, -1], dtype=torch.int32))

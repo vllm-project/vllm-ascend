@@ -39,11 +39,11 @@ from vllm_ascend.models.glm5next.cache_config import (
 )
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
 from vllm_ascend.models.kimi_k3.cache_config import _get_kimi_k3_dspark_mixed_kv_cache_groups
-from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
-    paired_sfa_cache_config,
-    paired_sfa_cache_groups,
-    paired_sfa_max_memory,
-    paired_sfa_pool_bytes,
+from vllm_ascend.models.kimi_k3.packed_sfa_cache import (
+    packed_sfa_cache_config,
+    packed_sfa_cache_groups,
+    packed_sfa_max_memory,
+    packed_sfa_row_bytes,
 )
 from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_kv_cache_config,
@@ -477,7 +477,7 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
     re-plan and leaves ranks inconsistent.
     """
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
-        return paired_sfa_pool_bytes(kv_cache_groups)
+        return packed_sfa_row_bytes(kv_cache_groups)
     pools = _get_replicated_draft_pools(kv_cache_groups)
     if pools is not None:
         return sum(_orig_pool_bytes_per_block(vllm_config, pool) for pool in pools)
@@ -504,7 +504,7 @@ def _ascend_max_memory_usage_bytes_from_groups(
 ) -> int:
     """Keep Ascend admission accounting with the upstream builder API."""
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
-        return paired_sfa_max_memory(vllm_config, kv_cache_groups)
+        return packed_sfa_max_memory(vllm_config, kv_cache_groups)
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
         return tq_cache.max_memory_usage(vllm_config, kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
@@ -536,7 +536,7 @@ def _get_ascend_kv_cache_groups(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
-        return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
+        return packed_sfa_cache_groups(vllm_config, kv_cache_spec)
     if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
         return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
     groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, _orig_get_kv_cache_groups)
@@ -567,7 +567,7 @@ def _ascend_get_kv_cache_config_from_groups(
     )
     pools = _get_replicated_draft_pools(kv_cache_groups)
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
-        kv_cache_config = paired_sfa_cache_config(vllm_config, kv_cache_groups, available_memory)
+        kv_cache_config = packed_sfa_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif pools is not None:
         # Every physical pool shares the scheduler's block count, but owns a
         # disjoint byte range. Use the same aggregate divisor as admission and

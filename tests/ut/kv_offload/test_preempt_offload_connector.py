@@ -35,7 +35,11 @@ for _module_name in list(sys.modules):
 for _module_name in _to_remove:
     _saved_modules[_module_name] = sys.modules.pop(_module_name)
 
-from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec  # noqa: E402
+from vllm_ascend.core.kv_cache_interface import (  # noqa: E402
+    AscendIndexerKPoolTailSpec,
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+)
 from vllm_ascend.core.recompute_scheduler import RecomputeScheduler  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload import (  # noqa: E402
     manager as preempt_manager,
@@ -58,9 +62,103 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.work
     MambaConvCacheBinding,
     PreemptOffloadWorker,
 )
+from vllm_ascend.models.kimi_k3.packed_sfa_cache import (  # noqa: E402
+    packed_sfa_cache_config,
+    packed_sfa_cache_groups,
+    packed_sfa_cache_views,
+    packed_sfa_row_bytes,
+)
 
 for _module_name, _module in _saved_modules.items():
     sys.modules[_module_name] = _module
+
+
+@pytest.mark.parametrize("draft_layers", [0, 3, 5])
+def test_preempt_packed_pool_budget_and_conv_restore(draft_layers):
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k31")),
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+        cache_config=SimpleNamespace(
+            prefix_cache_retention_interval=None, kv_cache_layout="BLNHC", num_gpu_blocks_override=None
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+    )
+    specs = {
+        "model.layers.0.attn": AscendMLAAttentionSpec(
+            block_size=128, num_kv_heads=1, head_size=8, dtype=torch.int8, cache_sparse_sfa_c8=True
+        ),
+        "model.layers.0.indexer.k_cache": AscendSFAIndexerCacheSpec(
+            block_size=128, num_kv_heads=1, head_size=4, dtype=torch.int8, scale_dim=1, scale_dtype=torch.float32
+        ),
+        "model.layers.1.linear_attn": MambaSpec(
+            block_size=128,
+            shapes=((6, 8), (2, 4)),
+            dtypes=(torch.bfloat16, torch.float32),
+            mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        ),
+    }
+    specs.update(
+        {
+            f"model.layers.{layer}.attn": AscendMLAAttentionSpec(
+                block_size=128, num_kv_heads=1, head_size=6, dtype=torch.bfloat16, is_draft=True
+            )
+            for layer in range(2, 2 + draft_layers)
+        }
+    )
+    groups = packed_sfa_cache_groups(config, specs)
+    row_bytes = packed_sfa_row_bytes(groups)
+    plan = packed_sfa_cache_config(config, groups, 3 * row_bytes)
+    rows = torch.zeros((3, row_bytes), dtype=torch.int8)
+    caches = {}
+    for desc in plan.kv_cache_tensors:
+        for index, name in enumerate(desc.layers):
+            offset = desc.offset + index * desc.layer_stride
+            raw = rows.view(-1)[offset : 2 * row_bytes + offset + specs[name].page_size_bytes]
+            parts = packed_sfa_cache_views(raw, specs[name], 3, row_bytes, (4, 2) if specs[name].is_draft else None)
+            for part in parts:
+                part._ascend_packed_copy_rows = rows
+            caches[name] = parts
+    worker = PreemptOffloadWorker(config, plan, 2 * row_bytes)
+    module = "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.worker"
+    zeros = torch.zeros
+
+    def unpinned_zeros(*args, **kwargs):
+        kwargs.pop("pin_memory", None)
+        return zeros(*args, **kwargs)
+
+    with (
+        patch(f"{module}.torch.zeros", side_effect=unpinned_zeros),
+        patch(f"{module}.torch.npu.Stream"),
+        patch(f"{module}.torch.npu.synchronize"),
+        patch(f"{module}.torch.npu.stream", side_effect=lambda _: nullcontext()),
+        patch(f"{module}.torch.npu.Event"),
+    ):
+        worker.register_kv_caches(caches)
+        assert worker.num_cpu_blocks == 2
+        cpu_plan = PreemptOffloadScheduler._derive_cpu_config(plan, 2 * row_bytes)
+        assert cpu_plan.num_blocks == 2
+        assert {d.size for d in cpu_plan.kv_cache_tensors} == {2 * row_bytes}
+        assert len({v.untyped_storage().data_ptr() for v in worker.cpu_kv_caches.values()}) == 1
+        rows[1].fill_(7)
+        conv, ssm = caches["model.layers.1.linear_attn"]
+        conv[1].copy_(torch.arange(48).view(6, 8))
+        expected_conv = conv[1].clone()
+        expected_ssm = ssm[1].clone()
+        worker._submit_transfer([1], [1], 1, is_store=True, sync=True)
+        rows[2].zero_()
+        worker._submit_transfer(
+            [1],
+            [2],
+            2,
+            is_store=False,
+            sync=True,
+            mamba_conv_loads=[MambaConvLoadMeta(gpu_block_id=2, cpu_block_id=1, source_offset=3)],
+        )
+        torch.testing.assert_close(conv[2, :3], expected_conv[3:])
+        torch.testing.assert_close(ssm[2], expected_ssm)
+        assert torch.all(rows[0] == 0)
 
 
 def test_preempt_offload_connector_worker_metadata_aggregate():
@@ -247,7 +345,7 @@ def test_preempt_offload_connector_cpu_config_uses_single_layer_tensor_layout():
     gpu_config = SimpleNamespace(
         num_blocks=8,
         kv_cache_tensors=[gpu_tensor],
-        kv_cache_groups=["group"],
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=None)],
     )
 
     with (
@@ -270,7 +368,7 @@ def test_preempt_offload_connector_cpu_config_uses_single_layer_tensor_layout():
         )
 
     assert cpu_config.num_blocks == 4
-    assert cpu_config.kv_cache_groups == ["group"]
+    assert cpu_config.kv_cache_groups == gpu_config.kv_cache_groups
     assert vars(cpu_config.kv_cache_tensors[0]) == {
         "size": 512,
         "layers": ["layer.0"],
@@ -291,7 +389,7 @@ def test_preempt_offload_connector_cpu_config_preserves_layer_stride():
     gpu_config = SimpleNamespace(
         num_blocks=8,
         kv_cache_tensors=[gpu_tensor],
-        kv_cache_groups=["group"],
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=None)],
     )
 
     with (
@@ -334,7 +432,7 @@ def test_preempt_offload_connector_cpu_config_uses_host_memory_ratio():
     gpu_config = SimpleNamespace(
         num_blocks=8,
         kv_cache_tensors=[gpu_tensor],
-        kv_cache_groups=["group"],
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=None)],
     )
 
     with (
@@ -468,6 +566,7 @@ def _make_ready_mamba_scheduler() -> PreemptOffloadScheduler:
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler.dcp_world_size = 1
     scheduler.num_spec_tokens = 3
+    scheduler.use_kda_recoverssm = False
     scheduler._group_is_mamba = [True]
     scheduler._group_has_mamba_conv = [True]
     scheduler._preempted_req_states = {
@@ -490,11 +589,92 @@ def _make_ready_mamba_scheduler() -> PreemptOffloadScheduler:
     scheduler.cpu_kv_cache_config = SimpleNamespace(
         kv_cache_groups=[
             SimpleNamespace(
-                kv_cache_spec=SimpleNamespace(block_size=16, dcp_sharded=False),
+                kv_cache_spec=SimpleNamespace(block_size=16, dcp_sharded=False, mamba_cache_mode="align"),
             )
         ]
     )
     return scheduler
+
+
+@pytest.mark.parametrize("num_tokens,expected_block", [(17, 10), (18, 11), (33, 11), (34, 12)])
+def test_recoverssm_preempt_saves_only_committed_page(num_tokens, expected_block):
+    scheduler = _make_ready_mamba_scheduler()
+    scheduler.use_kda_recoverssm = True
+    scheduler._preempted_req_states.clear()
+    scheduler._create_preempt_state = MagicMock(return_value=True)
+    request = SimpleNamespace(request_id="recover", num_tokens=num_tokens)
+    assert scheduler.update_state_before_preempt(request, ([10, 11, 12],), num_tokens + 2)
+    scheduler._create_preempt_state.assert_called_once_with("recover", ([expected_block],), num_tokens - 1)
+
+
+@pytest.mark.parametrize("num_tokens,gpu_ids,expected", [(17, [50, 0], 50), (18, [0, 51], 51), (33, [0, 51, 0], 51)])
+def test_recoverssm_preempt_restores_committed_state_without_conv_shift(num_tokens, gpu_ids, expected):
+    scheduler = _make_ready_mamba_scheduler()
+    scheduler.use_kda_recoverssm = True
+    state = scheduler._preempted_req_states["req-1"]
+    state.cpu_block_ids = ([101],)
+    state.num_computed_tokens = num_tokens - 1
+    scheduler._gpu_block_pool.blocks = {expected: object()}
+    assert scheduler._prepare_preempt_load_after_alloc(
+        SimpleNamespace(request_id="req-1", num_tokens=num_tokens), (gpu_ids,), num_tokens - 1
+    )
+    assert state.load_transfer_meta == TransferMeta([expected], [101])
+    assert state.load_mamba_conv_meta == []
+
+
+def test_recoverssm_preempt_caps_partial_prefill_at_computed_tokens():
+    scheduler = _make_ready_mamba_scheduler()
+    scheduler.use_kda_recoverssm = True
+    scheduler._preempted_req_states.clear()
+    scheduler._create_preempt_state = MagicMock(return_value=True)
+    assert scheduler.update_state_before_preempt(
+        SimpleNamespace(request_id="prefill", num_tokens=64), ([10, 0, 0, 0],), 16
+    )
+    scheduler._create_preempt_state.assert_called_once_with("prefill", ([10],), 16)
+
+
+def test_recoverssm_preempt_none_mode_uses_single_private_page():
+    scheduler = _make_ready_mamba_scheduler()
+    scheduler.use_kda_recoverssm = True
+    scheduler.cpu_kv_cache_config.kv_cache_groups[0].kv_cache_spec.mamba_cache_mode = "none"
+    state = scheduler._preempted_req_states["req-1"]
+    state.cpu_block_ids = ([101],)
+    state.num_computed_tokens = 100
+    assert scheduler._prepare_preempt_load_after_alloc(
+        SimpleNamespace(request_id="req-1", num_tokens=101), ([50],), 100
+    )
+    assert state.load_transfer_meta == TransferMeta([50], [101])
+    assert state.load_mamba_conv_meta == []
+
+
+@pytest.mark.parametrize("cpu_ids", [[0], [101, 102]])
+def test_recoverssm_preempt_rejects_invalid_cpu_checkpoint(cpu_ids):
+    scheduler = _make_ready_mamba_scheduler()
+    scheduler.use_kda_recoverssm = True
+    state = scheduler._preempted_req_states["req-1"]
+    state.cpu_block_ids = (cpu_ids,)
+    state.num_computed_tokens = 16
+    with pytest.raises(RuntimeError, match="Invalid RecoverSSM CPU checkpoint"):
+        scheduler._prepare_preempt_load_after_alloc(SimpleNamespace(request_id="req-1", num_tokens=17), ([50, 0],), 16)
+
+
+def test_recoverssm_preempt_rejects_null_committed_page():
+    scheduler = _make_ready_mamba_scheduler()
+    scheduler.use_kda_recoverssm = True
+    state = scheduler._preempted_req_states["req-1"]
+    state.cpu_block_ids = ([101],)
+    state.num_computed_tokens = 16
+    with pytest.raises(RuntimeError, match="Invalid committed RecoverSSM block"):
+        scheduler._prepare_preempt_load_after_alloc(SimpleNamespace(request_id="req-1", num_tokens=17), ([0, 51],), 16)
+
+
+def test_recoverssm_preempt_does_not_save_uncomputed_state():
+    scheduler = _make_ready_mamba_scheduler()
+    scheduler.use_kda_recoverssm = True
+    scheduler._preempted_req_states.clear()
+    scheduler._create_preempt_state = MagicMock()
+    assert not scheduler.update_state_before_preempt(SimpleNamespace(request_id="empty", num_tokens=1), ([0],), 0)
+    scheduler._create_preempt_state.assert_not_called()
 
 
 def test_preempt_offload_connector_scheduler_classifies_mamba_conv_groups():

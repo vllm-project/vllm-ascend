@@ -66,28 +66,28 @@ def test_kimi_k31_grouping_precedes_generic_hybrid_promotion(monkeypatch):
     runtime.model_config.hf_config.model_type = "kimi_k31"
     runtime.scheduler_config.disable_hybrid_kv_cache_manager = True
     specs = generic_specs()
-    paired = Mock(side_effect=ValueError("Paired SFA cache requires the hybrid KV cache manager."))
+    packed = Mock(side_effect=ValueError("Block-outermost Kimi cache requires the hybrid KV cache manager."))
     promote = Mock()
-    monkeypatch.setattr(builder_module, "paired_sfa_cache_groups", paired)
+    monkeypatch.setattr(builder_module, "packed_sfa_cache_groups", packed)
     monkeypatch.setattr(builder_module, "unify_hybrid_kv_cache_specs", promote)
     with pytest.raises(ValueError, match="requires the hybrid KV cache manager"):
         AscendKVCacheConfigBuilder().get_kv_cache_groups(runtime, specs)
-    paired.assert_called_once_with(runtime, specs)
+    packed.assert_called_once_with(runtime, specs)
     promote.assert_not_called()
 
 
-def test_kimi_k31_builder_uses_paired_grouping_and_pool_accounting(monkeypatch):
+def test_kimi_k31_builder_uses_packed_grouping_and_pool_accounting(monkeypatch):
     runtime = make_runtime()
     runtime.model_config.hf_config.model_type = "kimi_k31"
     specs, groups = generic_specs(), [Mock()]
-    paired = Mock(return_value=groups)
+    packed = Mock(return_value=groups)
     pool = Mock(return_value=14487552)
-    monkeypatch.setattr(builder_module, "paired_sfa_cache_groups", paired)
-    monkeypatch.setattr(builder_module, "paired_sfa_pool_bytes", pool)
+    monkeypatch.setattr(builder_module, "packed_sfa_cache_groups", packed)
+    monkeypatch.setattr(builder_module, "packed_sfa_row_bytes", pool)
     builder = AscendKVCacheConfigBuilder()
     assert builder.get_kv_cache_groups(runtime, specs) is groups
     assert builder._get_pool_bytes_per_block(runtime, groups) == 14487552
-    paired.assert_called_once_with(runtime, specs)
+    packed.assert_called_once_with(runtime, specs)
     pool.assert_called_once_with(groups)
 
 

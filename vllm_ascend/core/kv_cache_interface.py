@@ -219,6 +219,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # AttentionGroup replaces block_size with the kernel size for builders.
     # Keep the manager page size for DCP table expansion and address mapping.
     block_table_block_size: int | None = None
+    # Kimi pools map kernel IDs across complete per-block rows.
+    is_block_outermost: bool = False
 
     def copy_with_new_block_size(self, block_size: int) -> Self:
         return replace(
@@ -272,6 +274,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 get_kv_cache_compression_ratio(spec),
                 spec.indexes_kv_by_block_stride,
                 spec.dcp_sharded,
+                spec.is_block_outermost,
             )
             for spec in specs
         }
@@ -294,6 +297,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             cache_sparse_sfa_turboquant=first_spec.cache_sparse_sfa_turboquant,
             store_on_host=first_spec.store_on_host,
             indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
+            is_block_outermost=first_spec.is_block_outermost,
             # A merged mixed group must remain in the target lookup. Per-layer
             # draft ownership is retained by UniformTypeKVCacheSpecs where
             # target and draft have distinct physical layouts.
@@ -329,6 +333,8 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
     sfa_dcp_replicated_indexer_size: int = 1
 
     block_table_block_size: int | None = None
+    # Kimi pools map kernel IDs across complete per-block rows.
+    is_block_outermost: bool = False
 
     def copy_with_new_block_size(self, block_size: int) -> Self:
         return replace(
@@ -364,6 +370,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
         cache_sparse_li_c8_set = set(spec.cache_sparse_li_c8 for spec in specs)
         cache_sparse_li_c4_set = set(spec.cache_sparse_li_c4 for spec in specs)
         sfa_dcp_replicated_indexer_size_set = set(spec.sfa_dcp_replicated_indexer_size for spec in specs)
+        is_block_outermost_set = {spec.is_block_outermost for spec in specs}
         assert len({spec.dcp_sharded for spec in specs}) == 1
         assert (
             len(scale_dim_set) == 1
@@ -371,6 +378,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
             and len(cache_sparse_li_c8_set) == 1
             and len(cache_sparse_li_c4_set) == 1
             and len(sfa_dcp_replicated_indexer_size_set) == 1
+            and len(is_block_outermost_set) == 1
         ), (
             "All SFA indexer cache layers in the same KV cache group must use "
             "the same dtype, scale layout, quantization method, LI quant flags "
@@ -385,6 +393,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
             cache_sparse_li_c8=cache_sparse_li_c8_set.pop(),
             cache_sparse_li_c4=cache_sparse_li_c4_set.pop(),
             sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size_set.pop(),
+            is_block_outermost=is_block_outermost_set.pop(),
         )
 
 

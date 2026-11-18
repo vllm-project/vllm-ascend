@@ -4,6 +4,7 @@
 
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.kv_cache_planning import create_kv_cache_group_specs
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -11,15 +12,6 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
-
-from vllm_ascend.utils import vllm_version_is
-
-# vLLM main moved this helper to kv_cache_planning after v0.32.0.
-if vllm_version_is("0.32.0"):
-    from vllm.v1.core.kv_cache_utils import create_kv_cache_group_specs
-else:
-    from vllm.v1.core.kv_cache_planning import create_kv_cache_group_specs
-
 
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
@@ -36,11 +28,11 @@ def make_kimi_cache_groups(
 
     Callers validate roles and geometry, and supply specs in layer order with
     target attention first for scheduler conversion. The recurrent slot budget
-    is explicit: K3 uses target plus draft pages, whereas K3.1 overlays only
-    target MLA pages, excluding both indexer and draft storage.
+    is explicit: K3 uses target plus draft pages, whereas K3.1 derives the
+    recurrent group capacity from the entire packed history row.
 
     K3 retains per-layer recurrent specs for its shared-tuple allocation;
-    K3.1 keeps native merged Mamba specs for its paired-page allocation.
+    K3.1 keeps native merged Mamba specs for its packed-row allocation.
     """
     full_history = UniformTypeKVCacheSpecs.from_specs(full_history_specs)
     if full_history is None:

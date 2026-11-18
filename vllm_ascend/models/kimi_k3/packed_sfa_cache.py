@@ -1,0 +1,301 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Block-outermost K3.1 pools, sized from the layers that actually own KV.
+
+The scheduler still owns disjoint history and recurrent block IDs. One ID
+reserves a whole row; a recurrent group may reuse the entire history row.
+There is no dependency on a particular draft model or draft layer count.
+"""
+
+import math
+from dataclasses import replace
+
+import torch
+import vllm.envs as envs_vllm
+from vllm.model_executor.models.utils import extract_layer_index
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.core.kv_cache_planning import may_override_num_blocks
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
+
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.models.kimi_k3.cache_config import make_kimi_cache_groups
+
+# All three Ascend MLA/indexer backends consume 128-token kernel pages.
+KIMI_KERNEL_BLOCK_SIZE = 128
+
+
+def configure_packed_sfa_layout(config) -> bool:
+    """Select K3.1's packed layout before specs and engine layout resolution."""
+    if getattr(config.model_config.hf_config, "model_type", None) != "kimi_k31":
+        return False
+    layout = config.cache_config.kv_cache_layout
+    if layout is None:
+        layout = envs_vllm.VLLM_KV_CACHE_LAYOUT or "BLNHC"
+    if layout not in ("BLNHC", "BLHNC", "BHLNC"):
+        raise ValueError("Kimi K3.1 requires a block-outermost KV cache layout (BLNHC or BLHNC).")
+    config.cache_config.kv_cache_layout = layout
+    return True
+
+
+def _attention_specs(groups):
+    return {
+        name: group.kv_cache_spec.kv_cache_specs[name]
+        for group in groups
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        for name in group.layer_names
+    }
+
+
+def is_packed_sfa_groups(groups) -> bool:
+    return any(
+        getattr(spec, "is_block_outermost", False)
+        for group in groups
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        for spec in group.kv_cache_spec.kv_cache_specs.values()
+    )
+
+
+def packed_sfa_row_bytes(groups) -> int:
+    """LCM alignment permits a hole-spanning view for every kernel page type."""
+    attention = _attention_specs(groups)
+    payloads = [sum(spec.page_size_bytes for spec in attention.values())]
+    payloads.extend(
+        len(g.layer_names) * g.kv_cache_spec.page_size_bytes for g in groups if isinstance(g.kv_cache_spec, MambaSpec)
+    )
+    alignments = []
+    for spec in attention.values():
+        if spec.block_size % KIMI_KERNEL_BLOCK_SIZE:
+            raise ValueError("Block-outermost Kimi cache requires whole 128-token kernel pages.")
+        alignments.append(spec.page_size_bytes // (spec.block_size // KIMI_KERNEL_BLOCK_SIZE))
+    # A PP stage can own only recurrent layers. Their component views still
+    # need dtype alignment, even when no attention page is local.
+    alignments.extend(
+        get_dtype_size(dtype)
+        for g in groups
+        if isinstance(g.kv_cache_spec, MambaSpec)
+        for dtype in g.kv_cache_spec.dtypes
+    )
+    alignment = math.lcm(*alignments)
+    return cdiv(max(payloads), alignment) * alignment
+
+
+def packed_sfa_cache_groups(config, specs):
+    """Specialize upstream mixed-page packing for Kimi's full + KDA roles."""
+    configure_packed_sfa_layout(config)
+    if not config.use_v2_model_runner:
+        raise ValueError("Kimi K3.1 packed KV cache requires Model Runner V2.")
+    if config.scheduler_config.disable_hybrid_kv_cache_manager:
+        raise ValueError("Block-outermost Kimi cache requires the hybrid KV cache manager.")
+    main = sorted(
+        (n for n, s in specs.items() if isinstance(s, AscendMLAAttentionSpec) and not s.is_draft),
+        key=extract_layer_index,
+    )
+    indexer = sorted((n for n, s in specs.items() if isinstance(s, AscendSFAIndexerCacheSpec)), key=extract_layer_index)
+    full = {n: specs[n] for pair in zip(main, indexer) for n in pair}
+    full.update(sorted(((n, s) for n, s in specs.items() if s.is_draft), key=lambda item: extract_layer_index(item[0])))
+    full = {n: replace(s, is_block_outermost=True) for n, s in full.items()}
+    recurrent = {
+        n: s
+        for n, s in sorted(specs.items(), key=lambda item: extract_layer_index(item[0]))
+        if isinstance(s, MambaSpec)
+    }
+    if len(full) + len(recurrent) != len(specs):
+        raise ValueError("Unexpected cache role in block-outermost Kimi layout.")
+    # Every recurrent group can use the whole history row, regardless of
+    # draft presence or repeating page-size patterns.
+    anchor = sum(s.page_size_bytes for s in full.values())
+    state_bytes = next(iter(recurrent.values())).page_size_bytes
+    if anchor < state_bytes:
+        raise ValueError("The packed history row must cover one recurrent checkpoint; increase --block-size.")
+    max_group_size = anchor // state_bytes
+    # DCP-local target history and replicated draft history cannot share a
+    # scheduler block table. Their physical regions can still share one pool.
+    coverage = {}
+    for name, spec in full.items():
+        coverage.setdefault((spec.block_size, spec.dcp_sharded), {})[name] = spec
+    histories = list(coverage.values())
+    groups = make_kimi_cache_groups(
+        histories[0], recurrent, recurrent_group_size=max_group_size, uniform_recurrent=False
+    )
+    history_groups = [groups[0]]
+    for history in histories[1:]:
+        uniform = UniformTypeKVCacheSpecs.from_specs(history)
+        history_groups.append(KVCacheGroupSpec(list(history), uniform))
+    history_groups = [
+        replace(g, is_eagle_group=any(s.non_causal_multi_token_decode for s in g.kv_cache_spec.kv_cache_specs.values()))
+        for g in history_groups
+    ]
+    groups = history_groups + groups[1:]
+    specs.update(full)
+    return groups
+
+
+def packed_sfa_cache_config(config, groups, available_memory):
+    row_bytes = packed_sfa_row_bytes(groups)
+    num_blocks = may_override_num_blocks(config, available_memory // row_bytes)
+    tensors = []
+    offset = 0
+    for name, spec in _attention_specs(groups).items():
+        tensors.append(
+            KVCacheTensor(
+                size=num_blocks * row_bytes,
+                layers=[name],
+                offset=offset,
+                layer_stride=spec.page_size_bytes,
+                block_stride=row_bytes,
+            )
+        )
+        offset += spec.page_size_bytes
+    for group in groups:
+        if isinstance(group.kv_cache_spec, MambaSpec):
+            tensors.append(
+                KVCacheTensor(
+                    size=num_blocks * row_bytes,
+                    layers=group.layer_names,
+                    offset=0,
+                    layer_stride=group.kv_cache_spec.page_size_bytes,
+                    block_stride=row_bytes,
+                )
+            )
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=tensors,
+        kv_cache_groups=groups,
+        prefix_cache_retention_interval=config.cache_config.prefix_cache_retention_interval,
+    )
+
+
+def packed_sfa_max_memory(config, groups):
+    blocks = sum(cdiv(g.kv_cache_spec.max_memory_usage_bytes(config), g.kv_cache_spec.page_size_bytes) for g in groups)
+    return blocks * packed_sfa_row_bytes(groups)
+
+
+def packed_sfa_cache_views(raw, spec, num_blocks, row_bytes, mla_dims=None, fused_mla=False):
+    """Expose native kernel pages, with holes between manager blocks.
+
+    The KDA view uses raw state pages at a row stride. Attention views span
+    the intervening layers, but metadata never addresses those holes.
+    """
+    if isinstance(spec, MambaSpec):
+        result = []
+        offset = 0
+        for shape, dtype in zip(spec.shapes, spec.dtypes):
+            size = get_dtype_size(dtype)
+            typed = raw.view(dtype)
+            strides = torch.empty(shape, device="meta").stride()
+            result.append(
+                typed.as_strided(
+                    (num_blocks, *shape),
+                    (row_bytes // size, *strides),
+                    storage_offset=typed.storage_offset() + offset // size,
+                )
+            )
+            offset += math.prod(shape) * size
+        return result
+    pages_per_block = spec.block_size // KIMI_KERNEL_BLOCK_SIZE
+    page_bytes = spec.page_size_bytes // pages_per_block
+    page_stride = row_bytes // page_bytes
+    pages = (num_blocks - 1) * page_stride + pages_per_block
+    shape = (pages, KIMI_KERNEL_BLOCK_SIZE, 1)
+
+    def view(width, dtype, offset=0):
+        size = get_dtype_size(dtype)
+        typed = raw.view(dtype)
+        return typed.as_strided(
+            (*shape, width),
+            (page_bytes // size, width, width, 1),
+            storage_offset=typed.storage_offset() + offset // size,
+        )
+
+    if isinstance(spec, AscendSFAIndexerCacheSpec):
+        key_bytes = KIMI_KERNEL_BLOCK_SIZE * spec.head_size * get_dtype_size(spec.dtype)
+        key = view(spec.head_size, spec.dtype)
+        scale = view(spec.scale_dim, spec.scale_dtype, key_bytes)
+        return (key, scale)
+    if spec.uses_packed_sfa_main_cache:
+        return (view(spec.head_size, spec.dtype),)
+    if fused_mla:
+        return (view(spec.head_size, spec.dtype),)
+    # Native dense MLA keeps each kernel page's latent and RoPE planes.
+    # The model's spec records their combined width; split dimensions are
+    # supplied by the allocator, which has access to the actual draft layer.
+    if mla_dims is None or sum(mla_dims) != spec.head_size:
+        raise ValueError("Dense MLA cache requires its actual latent and RoPE dimensions.")
+    nope, rope = mla_dims
+    return (view(nope, spec.dtype), view(rope, spec.dtype, KIMI_KERNEL_BLOCK_SIZE * nope * get_dtype_size(spec.dtype)))
+
+
+def _map_packed_sfa_addresses(builder, key, table, slots, spec, row_bytes):
+    pages = spec.block_size // KIMI_KERNEL_BLOCK_SIZE
+    page_bytes = spec.page_size_bytes // pages
+    step = row_bytes // page_bytes
+    buffers_by_key = getattr(builder, "_packed_sfa_metadata_buffers", None)
+    if buffers_by_key is None:
+        buffers_by_key = builder._packed_sfa_metadata_buffers = {}
+    buffers = buffers_by_key.get(key)
+    if buffers is None:
+        cfg = builder.vllm_config
+        capture_sizes = cfg.compilation_config.cudagraph_capture_sizes or []
+        pcp_size = cfg.parallel_config.prefill_context_parallel_size
+        segments = 2 if pcp_size > 1 else 1
+        max_rows = max([segments * cfg.scheduler_config.max_num_seqs + 1, *capture_sizes])
+        lookahead = cfg.speculative_config.num_speculative_tokens if cfg.speculative_config is not None else 0
+        max_cols = cdiv(cfg.model_config.max_model_len + lookahead, spec.block_size) * pages
+        # PCP slots retain rank-major replicated/padded entries, so their
+        # length can exceed the global scheduled-token budget.
+        max_tokens = max([cfg.scheduler_config.max_num_batched_tokens, *capture_sizes]) * pcp_size
+        buffers = (
+            torch.empty((max_rows, max_cols), dtype=table.dtype, device=table.device),
+            torch.empty(max_tokens, dtype=slots.dtype, device=slots.device),
+            torch.empty((max_rows, max_cols), dtype=torch.bool, device=table.device),
+            torch.empty(max_tokens, dtype=torch.bool, device=slots.device),
+        )
+        buffers_by_key[key] = buffers
+    mapped_table, mapped_slots, table_mask, slot_mask = buffers
+    rows, cols = table.shape
+    if rows > mapped_table.shape[0] or cols > mapped_table.shape[1] or slots.numel() > mapped_slots.numel():
+        raise ValueError("Packed SFA metadata exceeds its persistent buffer capacity.")
+    mapped_table = mapped_table[:rows, :cols]
+    mapped_slots = mapped_slots[: slots.numel()]
+    table_mask = table_mask[:rows, :cols]
+    slot_mask = slot_mask[: slots.numel()]
+    torch.div(table, pages, rounding_mode="floor", out=mapped_table)
+    mapped_table.mul_(step - pages).add_(table)
+    torch.lt(table, 0, out=table_mask)
+    mapped_table.masked_fill_(table_mask, -1)
+    torch.div(slots, spec.block_size, rounding_mode="floor", out=mapped_slots)
+    mapped_slots.mul_(step * KIMI_KERNEL_BLOCK_SIZE - spec.block_size).add_(slots)
+    torch.lt(slots, 0, out=slot_mask)
+    mapped_slots.masked_fill_(slot_mask, -1)
+    return mapped_table, mapped_slots
+
+
+def map_packed_sfa_metadata(builder, common, spec, row_bytes):
+    """Translate addresses after BlockTable has resolved CP token ownership.
+
+    Keep token positions, sequence lengths and KDA state IDs logical. Each
+    role and draft step owns stable output buffers for graph replay. Dense
+    MLA's PCP context gather also reads the global table, independently of
+    the local request table; expose the same role-specific addresses there.
+    """
+    key = common.slot_mapping.data_ptr()
+    table, slots = _map_packed_sfa_addresses(
+        builder, (key, "local"), common.block_table_tensor, common.slot_mapping, spec, row_bytes
+    )
+    result = replace(common, block_table_tensor=table, slot_mapping=slots)
+    context = getattr(common, "pcp_context", None)
+    if context is not None:
+        idx = common.pcp_cache_group_idx
+        tables = list(context.global_block_tables)
+        tables[idx], _ = _map_packed_sfa_addresses(
+            builder, (key, "global"), tables[idx], context.global_slot_mappings[idx], spec, row_bytes
+        )
+        result.pcp_context = replace(context, global_block_tables=tuple(tables))
+    return result

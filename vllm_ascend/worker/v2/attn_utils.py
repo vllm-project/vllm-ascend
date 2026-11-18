@@ -95,6 +95,13 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
+from vllm_ascend.models.kimi_k3.packed_sfa_cache import (
+    KIMI_KERNEL_BLOCK_SIZE,
+    is_packed_sfa_groups,
+    map_packed_sfa_metadata,
+    packed_sfa_cache_views,
+    packed_sfa_row_bytes,
+)
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
     HIDDEN,
@@ -514,15 +521,23 @@ def build_attn_metadata(
                     common_attn_metadata,
                     query_start_loc_cpu=common_attn_metadata.query_start_loc_cpu[: num_actual_reqs + 1],
                 )
-            metadata_variants = [(attn_group.layer_names, common_attn_metadata)]
+            group_common_metadata = common_attn_metadata
+            if getattr(attn_group.kv_cache_spec, "is_block_outermost", False):
+                group_common_metadata = map_packed_sfa_metadata(
+                    attn_metadata_builder,
+                    common_attn_metadata,
+                    attn_group.kv_cache_spec,
+                    packed_sfa_row_bytes(kv_cache_groups),
+                )
+            metadata_variants = [(attn_group.layer_names, group_common_metadata)]
             if is_sfa_builder and draft_layer_names:
                 target_names = [name for name in attn_group.layer_names if name not in draft_layer_names]
                 draft_names = [name for name in attn_group.layer_names if name in draft_layer_names]
                 if draft_names:
-                    draft_common = copy(common_attn_metadata)
+                    draft_common = copy(group_common_metadata)
                     draft_common.copy_sfa_draft_index = 0
                     draft_common.copy_sfa_restore_tails = False
-                    metadata_variants = ([(target_names, common_attn_metadata)] if target_names else []) + [
+                    metadata_variants = ([(target_names, group_common_metadata)] if target_names else []) + [
                         (draft_names, draft_common)
                     ]
             attn_metadata_extra_kwargs = (
@@ -1108,6 +1123,7 @@ def _allocate_kv_cache(
             for name in get_kv_cache_tensor_layers(descriptor):
                 kv_cache_raw_tensors[name] = backing
         return kv_cache_raw_tensors
+    packed_sfa = is_packed_sfa_groups(kv_cache_config.kv_cache_groups)
     has_mamba = any(isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values())
     has_attention = any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
     use_hybrid_layout = has_mamba and has_attention
@@ -1192,12 +1208,8 @@ def _allocate_kv_cache(
     # Hybrid groups share one backing; descriptors carry per-layer offsets.
     hybrid_backing: torch.Tensor | None = None
     step_backing: torch.Tensor | None = None
-    # Match the paired planner's model scope. Generic DeepSeek/GLM SFA groups
-    # also contain MLA and indexer specs, but retain independent allocations.
-    # K3.1 PP ranks with only recurrent or draft layers still use paired backing.
-    hf_config = getattr(getattr(vllm_config, "model_config", None), "hf_config", None)
-    is_paired_sfa = getattr(hf_config, "model_type", None) == "kimi_k31"
-    if (use_hybrid_layout or is_paired_sfa) and not is_dsv4_model:
+    # Packed specs also retain shared storage on recurrent/draft-only PP stages.
+    if (packed_sfa or use_hybrid_layout) and not is_dsv4_model:
         hybrid_backing = _allocate_int8_cache_tensor(kv_cache_config.kv_cache_tensors[0].size, alignment, device)
 
     layerwise_reuse = get_layerwise_reuse_config(vllm_config.kv_transfer_config, vllm_config=vllm_config) is not None
@@ -1311,8 +1323,17 @@ def _allocate_kv_cache(
             for layer_idx, layer_name in enumerate(shared_names):
                 layer_spec = layer_kv_cache_spec[layer_name]
                 layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
+                if packed_sfa:
+                    layer_size = (
+                        kv_cache_config.num_blocks - 1
+                    ) * kv_cache_tensor.block_stride + layer_spec.page_size_bytes
                 start = kv_cache_tensor.offset + layer_idx * kv_cache_tensor.layer_stride
-                kv_cache_raw_tensors[layer_name] = hybrid_backing[start : start + layer_size]
+                if packed_sfa and (start < 0 or start + layer_size > hybrid_backing.numel()):
+                    raise ValueError(f"Hybrid KV cache view for {layer_name} exceeds the backing allocation.")
+                raw = hybrid_backing[start : start + layer_size]
+                if packed_sfa:
+                    raw._ascend_packed_copy_rows = hybrid_backing.view(kv_cache_config.num_blocks, -1)
+                kv_cache_raw_tensors[layer_name] = raw
             continue
 
         # Use one raw allocation for Mamba and hybrid caches. The reshape step
@@ -1578,6 +1599,24 @@ def _reshape_kv_cache_v2(
     is_dsv4_model = _is_dsv4_model(vllm_config)
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     kv_caches: dict[str, Any] = {}
+    if is_packed_sfa_groups(kv_cache_config.kv_cache_groups):
+        row_bytes = packed_sfa_row_bytes(kv_cache_config.kv_cache_groups)
+        for name, spec in layer_kv_cache_spec.items():
+            raw = kv_cache_raw_tensors[name]
+            dense_mla = isinstance(spec, AscendMLAAttentionSpec) and not spec.uses_packed_sfa_main_cache
+            fused_mla = dense_mla and _uses_single_raw_mla_cache(vllm_config, name, spec)
+            mla_dims = _get_attention_kv_cache_dims(name, spec) if dense_mla and not fused_mla else None
+            views = packed_sfa_cache_views(raw, spec, kv_cache_config.num_blocks, row_bytes, mla_dims, fused_mla)
+            # Copying a pool ID copies the physical row once, regardless of
+            # how many attention/state aliases expose it.
+            backing = raw._ascend_packed_copy_rows
+            for tensor in views:
+                tensor._ascend_packed_copy_rows = backing
+                if not isinstance(spec, MambaSpec):
+                    tensor._ascend_packed_kernel_pages = spec.block_size // KIMI_KERNEL_BLOCK_SIZE
+                    tensor._ascend_packed_row_bytes = row_bytes
+            kv_caches[name] = views[0] if fused_mla else views
+        return kv_caches
     # Qwen4 QSA hybrids (Qwen3.8 Flash Next) reconstruct every owner's
     # view from the same deterministic layout that _allocate_kv_cache used:
     # Shared slabs hold QSA/GDN slots and indexer regions; PLE/hidden banks are private.

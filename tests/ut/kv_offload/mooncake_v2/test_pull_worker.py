@@ -2344,7 +2344,9 @@ def test_interleaved_dcp_crosses_local_pages_using_full_block_table(computed, lo
     assert result == [(0, local_ids, remote_ids)]
 
 
-@pytest.mark.parametrize(("local_dcp", "remote_dcp"), [(1, 4), (4, 1), (2, 4), (4, 2), (8, 8)])
+@pytest.mark.parametrize(
+    ("local_dcp", "remote_dcp"), [(1, 4), (4, 1), (2, 4), (4, 2), (8, 8), (16, 1), (1, 16), (16, 4)]
+)
 @pytest.mark.parametrize(
     ("local_page", "remote_page", "local_interleave", "remote_interleave"),
     [
@@ -2352,6 +2354,8 @@ def test_interleaved_dcp_crosses_local_pages_using_full_block_table(computed, lo
         (768, 512, 384, 128),
         (512, 512, 256, 128),
         (768, 1536, 768, 1536),
+        (8448, 1536, 768, 1536),
+        (1536, 8448, 768, 768),
     ],
 )
 @pytest.mark.parametrize("computed", [0, 133, 1536])
@@ -2359,9 +2363,15 @@ def test_dcp_mapping_uses_each_peers_interleave(
     local_dcp, remote_dcp, local_page, remote_page, local_interleave, remote_interleave, computed
 ) -> None:
     kernel_size = 128
-    end_token = 3179
-    local_blocks = [10 + 3 * i for i in range(32)]
-    remote_blocks = [20 + 5 * i for i in range(32)]
+    end_token = (
+        2 * max(local_page * local_dcp, remote_page * remote_dcp) + 137
+        if {local_page, remote_page} == {1536, 8448}
+        else 3179
+    )
+    local_blocks = [10 + 3 * i for i in range((end_token + local_page * local_dcp - 1) // (local_page * local_dcp) + 1)]
+    remote_blocks = [
+        20 + 5 * i for i in range((end_token + remote_page * remote_dcp - 1) // (remote_page * remote_dcp) + 1)
+    ]
     # Two independent head pieces, each with two replicas of all P DCP shards.
     rank_groups = [list(range(2 * remote_dcp)), list(range(100, 100 + 2 * remote_dcp))]
     selection = 1

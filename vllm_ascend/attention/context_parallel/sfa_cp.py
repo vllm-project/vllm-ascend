@@ -317,14 +317,21 @@ class AscendSFADCPMetadataBuilder(
         full_dcp_block_table = common_attn_metadata.block_table_tensor
         num_reqs = common_attn_metadata.num_reqs
         dcp_block_table = self._get_dcp_local_block_table(full_dcp_block_table, num_reqs)
-        block_table_replicated_view = self._build_block_table_replicated_view(
-            dcp_block_table,
-            common_attn_metadata.seq_lens,
-        )
-        slot_mapping_replicated_view = self._build_slot_mapping_replicated_view(
-            common_attn_metadata,
-            block_table_replicated_view,
-        )
+        if enable_sfa_dcp_sharded_indexer(self.vllm_config):
+            # The indexer and MLA both consume rank-local KV. BlockTable has
+            # already selected the token owner; packed page IDs are physical
+            # addresses and must never be expanded as dense manager IDs.
+            block_table_replicated_view = dcp_block_table
+            slot_mapping_replicated_view = dcp_slot_mapping
+        else:
+            block_table_replicated_view = self._build_block_table_replicated_view(
+                dcp_block_table,
+                common_attn_metadata.seq_lens,
+            )
+            slot_mapping_replicated_view = self._build_slot_mapping_replicated_view(
+                common_attn_metadata,
+                block_table_replicated_view,
+            )
 
         common_attn_metadata.slot_mapping = slot_mapping_replicated_view
         common_attn_metadata.block_table_tensor = block_table_replicated_view
@@ -504,7 +511,9 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
                 **kwargs,
             )
         pcp_ordered_indexer_slot_mapping = None
-        if bool(pcp_context.global_batch.is_prefilling_np.any()):
+        if bool(pcp_context.global_batch.is_prefilling_np.any()) and not enable_sfa_dcp_sharded_indexer(
+            self.vllm_config
+        ):
             if pcp_cache_group_idx is None:
                 raise RuntimeError("PCP+DCP prefill requires the PCP cache-group index.")
             pcp_ordered_indexer_slot_mapping = self._build_pcp_ordered_indexer_slot_mapping(
@@ -849,7 +858,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         # softmax LSE so decode can merge partial results across CP ranks.
         dcp_context = attn_metadata.dcp_context
 
-        if self._has_prefill(attn_metadata):
+        if self._has_prefill(attn_metadata) and not self._sharded_indexer:
             # Prefill keeps Q local and attends over the gathered KV, so no LSE.
             gathered_kv_cache = self._finish_dcp_kv_gather(kv_cache, attn_metadata)
             block_table = dcp_context.kv_gather_block_table

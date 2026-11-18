@@ -59,6 +59,13 @@ class AscendV2KVBlockZeroer(KVBlockZeroer):
                 kv_cache = static_forward_context[layer_name].kv_cache
                 if cache_dtype == "mxfp8" and isinstance(kv_cache, tuple) and len(kv_cache) == 4:
                     kv_cache = kv_cache[:3]
+                first_component = kv_cache[0] if isinstance(kv_cache, (tuple, list)) and kv_cache else kv_cache
+                packed_rows = getattr(first_component, "_ascend_packed_copy_rows", None)
+                if packed_rows is not None:
+                    # One physical pool row owns all role aliases. The
+                    # zeroer must index manager IDs rather than count the
+                    # holes in a role's kernel view as extra blocks.
+                    kv_cache = packed_rows
                 layer_caches[layer_name] = kv_cache
         component_count = 1
         for kv_cache in layer_caches.values():
