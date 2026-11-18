@@ -260,6 +260,8 @@ class MooncakePullConnector(MooncakeBaseConnector):
 class MooncakePushConnector(MooncakeBaseConnector):
     """Layerwise Push facade with role-specific initialization."""
 
+    requires_full_blocks_on_update_after_alloc = True
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -268,6 +270,10 @@ class MooncakePushConnector(MooncakeBaseConnector):
     ) -> None:
         super().__init__(vllm_config, role, kv_cache_config)
 
+        transfer_config = vllm_config.kv_transfer_config
+        assert transfer_config is not None
+        self.is_producer = transfer_config.is_kv_producer
+        self.supports_layerwise_buffer_reuse = getattr(kv_cache_config, "layerwise_kv_cache_reuse", False)
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = MooncakePushConnectorScheduler(vllm_config, str(self.engine_id), kv_cache_config)
         elif role == KVConnectorRole.WORKER:
@@ -284,6 +290,10 @@ class MooncakePushConnector(MooncakeBaseConnector):
     def wait_for_save(self) -> None:
         assert isinstance(self.connector_worker, MooncakePushConnectorWorker)
         self.connector_worker.wait_for_save()
+
+    def wait_for_layer_reuse(self, layer_idx: int) -> None:
+        assert isinstance(self.connector_worker, MooncakePushConnectorWorker)
+        self.connector_worker.wait_for_layer_reuse(layer_idx)
 
     def shutdown(self) -> None:
         if self.connector_worker is not None:
