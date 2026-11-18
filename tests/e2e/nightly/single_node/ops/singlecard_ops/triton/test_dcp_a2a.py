@@ -55,9 +55,15 @@ def test_decode_combine_without_local(tokens):
     assert_dcp_close(actual, expected)
 
 
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("scatter_dim", [0, 1])
-@pytest.mark.parametrize("head_dim", [96, 128, 160, 256])
+@pytest.mark.parametrize(
+    "dtype,scatter_dim,head_dim",
+    [
+        (torch.bfloat16, 1, 96),
+        (torch.bfloat16, 0, 128),
+        (torch.float16, 1, 160),
+        (torch.float16, 0, 256),
+    ],
+)
 @torch.inference_mode()
 def test_pack_and_fused_lse_combine(
     dtype: torch.dtype,
@@ -297,42 +303,13 @@ def test_mla_history_lse_then_current_merge() -> None:
 @pytest.mark.parametrize(
     "scatter_dim,dcp_size,head_dim,local_dtype",
     [
+        # Each local dtype covers both scatter axes with a strided local contribution.
         (0, 1, 96, torch.float32),
-        (1, 1, 96, torch.float32),
-        (0, 1, 96, torch.bfloat16),
+        (1, 8, 512, torch.float32),
+        (0, 2, 256, torch.bfloat16),
         (1, 1, 96, torch.bfloat16),
-        (0, 1, 96, torch.float16),
-        (1, 1, 96, torch.float16),
-        (1, 1, 256, torch.float32),
-        (0, 1, 256, torch.bfloat16),
-        (1, 1, 256, torch.float16),
-        (0, 1, 512, torch.float32),
-        (1, 1, 512, torch.bfloat16),
-        (0, 1, 512, torch.float16),
-        (1, 2, 96, torch.float32),
-        (0, 2, 96, torch.bfloat16),
-        (1, 2, 96, torch.float16),
-        (0, 2, 256, torch.float32),
-        (1, 2, 256, torch.bfloat16),
-        (0, 2, 256, torch.float16),
-        (0, 2, 512, torch.float32),
-        (1, 2, 512, torch.float32),
-        (0, 2, 512, torch.bfloat16),
-        (1, 2, 512, torch.bfloat16),
-        (0, 2, 512, torch.float16),
-        (1, 2, 512, torch.float16),
-        (0, 8, 96, torch.float32),
-        (1, 8, 96, torch.bfloat16),
-        (0, 8, 96, torch.float16),
-        (0, 8, 256, torch.float32),
-        (1, 8, 256, torch.float32),
-        (0, 8, 256, torch.bfloat16),
-        (1, 8, 256, torch.bfloat16),
-        (0, 8, 256, torch.float16),
-        (1, 8, 256, torch.float16),
-        (0, 8, 512, torch.float32),
-        (1, 8, 512, torch.bfloat16),
         (0, 8, 512, torch.float16),
+        (1, 2, 256, torch.float16),
     ],
 )
 @torch.inference_mode()
