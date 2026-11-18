@@ -1,0 +1,5 @@
+pr: 22233
+entries:
+  - category: bugfix
+    text: Fixed native Qwen4Exp MTP draft initialization by forwarding the configured MTP layer count through the current vLLM draft-config interface.
+    model: qwen4-exp
