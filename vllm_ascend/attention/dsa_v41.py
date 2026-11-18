@@ -1542,7 +1542,9 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
             # Produce on DeviceMetadataExecutor's stream, never inside qsmla.
             # Index identities are score-dependent; their cardinality is not
             # for dense causal TopK (or a candidate pool with enough coverage).
-            ratios = tuple(dict.fromkeys((0, *(_config_value(text_config, "compress_ratios", ()) or ()))))
+            ratios = kwargs.get("smla_plan_ratios")
+            if ratios is None:
+                ratios = tuple(dict.fromkeys((0, *(_config_value(text_config, "compress_ratios", ()) or ()))))
             noncausal = not bool(getattr(common, "causal", True))
             if noncausal:
                 ratios = (0,)  # DSpark uses noncausal SWA, no compressed KV.
@@ -1647,7 +1649,7 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                     DeviceMetadataStage.ATTENTION,
                     build_a5_smla_metadata,
                 )
-            req.smla_metadata = req.a5_smla_plans[0]
+            req.smla_metadata = req.a5_smla_plans.get(0)
 
         if self._supports_device_ops and not self._uses_a5_packed_cache and req.cache_kind in {"swa", "long_kv"}:
             has_compressed = operator_ratio in (1, 2)

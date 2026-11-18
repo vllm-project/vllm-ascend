@@ -17,11 +17,11 @@ builders = pcp_builders
 
 @pytest.mark.parametrize("different_floor", [False, True])
 @pytest.mark.parametrize("isolated_override", [False, True])
+@pytest.mark.parametrize("plan_ratios", [(0, 2, 1), (2, 1)])
 @pytest.mark.parametrize("sparse_windows", [False, True])
 def test_replay_plans_follow_visibility_not_physical_cache_group(
-    builders, monkeypatch, different_floor, isolated_override, sparse_windows
+    builders, monkeypatch, different_floor, isolated_override, plan_ratios, sparse_windows
 ):
-    plan_ratios = (0, 2, 1)
     template = builders(world=1, max_seqs=4)["swa"]
     template.vllm_config.model_config.hf_text_config.compress_ratios = [0, 2, 1]
     owners = [
@@ -70,6 +70,7 @@ def test_replay_plans_follow_visibility_not_physical_cache_group(
                 common_v41_metadata={},
                 common_v41_batch_metadata=batch_cache,
                 v41_smla_override=isolated_override,
+                smla_plan_ratios=plan_ratios,
             )
         )
         tasks.extend(owner.take_device_metadata_tasks())

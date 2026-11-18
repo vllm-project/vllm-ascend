@@ -114,6 +114,7 @@ def test_factory_trims_cut_source_outputs_that_replay_regenerates():
             kv_source_layer_ids=[1],
             index_source_layer_ids=[1],
             candidate_source_layer_id=1,
+            compress_ratios=[0, 2, 1, 1],
             engram_layer_ids=[],
             sliding_window=2,
         ),
@@ -154,6 +155,8 @@ def test_factory_trims_cut_source_outputs_that_replay_regenerates():
     assert model.decoder_replay_start == 1
     assert replay.write_batch_kv is cut_writer
     assert replay.first_swa_prefix == first_swa_prefix
+    assert replay.first_swa_plan_ratios == (2,)
+    assert replay.smla_plan_ratios == (1,)
     assert replay.row_buffers == []
 
 
@@ -239,7 +242,7 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch, num_layers, rep
         def __init__(self, index):
             self.layer_idx = index
 
-        def __call__(self, positions, hidden, mix, unused, input_ids):
+        def __call__(self, positions, hidden, mix, unused, input_ids, image_mask=None):
             seen.append((self.layer_idx, positions.tolist()))
             return hidden + 1, mix
 
@@ -252,6 +255,7 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch, num_layers, rep
 
     model = DeepseekV41Model.__new__(DeepseekV41Model)
     torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace()
     model.hc_mult = 1
     model.use_sequence_parallel = False
     model._mtp_hidden_buffer = None

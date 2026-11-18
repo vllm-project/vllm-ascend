@@ -444,6 +444,7 @@ class DecoderReplayState:
                 common_v41_batch_metadata=batch_shared,
                 common_v41_metadata=group_shared.setdefault(group_id, {}),
                 rope_views=rope,
+                smla_plan_ratios=self.layers.smla_plan_ratios,
             )
             build_tasks = builder.take_device_metadata_tasks()
             if tasks is None:
@@ -468,6 +469,7 @@ class DecoderReplayState:
                         common_v41_batch_metadata={},
                         common_v41_metadata={},
                         rope_views=rope,
+                        smla_plan_ratios=self.layers.first_swa_plan_ratios,
                     )
                     build_tasks = first_builder.take_device_metadata_tasks()
                     if tasks is None:
