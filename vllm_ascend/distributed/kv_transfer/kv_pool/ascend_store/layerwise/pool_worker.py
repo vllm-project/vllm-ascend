@@ -2397,18 +2397,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.current_layer += 1
 
     def _wait_for_final_layer_save(self, num_local: int) -> None:
-        """Drain step transfers before rearming save completion for the next step."""
+        """Drain step saves before rearming completion events for the next step."""
         assert self.layer_save_finished_events is not None
         save_finished_events = self.layer_save_finished_events
-        # Keep save completion latched for every reader in this step. Drain
-        # writers first so their failures cannot strand receivers waiting on them.
         self._drain_attention_transfers(drain_recv=False, full=True)
         if getattr(self, "layerwise_offload", False):
             self._check_hybrid_load_errors()
-        if self.prefetch_layer_map:
-            # Even a task with no data can still be waiting on a reuse save.
-            # All readers must finish before the next step rearms these events.
-            self._drain_attention_transfers(full=True)
         for event in save_finished_events[:num_local]:
             event.clear()
 
