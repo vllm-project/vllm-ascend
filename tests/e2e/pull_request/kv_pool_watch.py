@@ -355,8 +355,12 @@ def run_pool_hit_sequence(
 
 AB_TTFT_LIMIT = 1.10
 AB_THROUGHPUT_LIMIT = 0.90
-# Trial run: concurrency 2 (matches max_num_seqs), 6 warmups + 1s settle + 3 samples.
+# Trial run: concurrency 2 (matches max_num_seqs), 6 warmups + 1s settle, then
+# 5 timed samples of which only the last 3 gate: warm-up drift decays
+# monotonically (dsv4_cp observed 568 -> 550 -> 540 ms), so the head of the
+# timed block is recorded but discarded from the stability gate and A/B stats.
 AB_SAMPLES = 3
+AB_DRIFT_SAMPLES = 2
 AB_WARMUP = 6
 AB_CONCURRENCY = 2
 AB_PERF_SETTLE_SECONDS = 1.0
@@ -463,18 +467,25 @@ def _collect_perf(
     concurrency: int = AB_CONCURRENCY,
     sample_count: int = AB_SAMPLES,
     warmup_count: int = AB_WARMUP,
+    drift_count: int = AB_DRIFT_SAMPLES,
     stability_policy: str = "fail",
 ) -> tuple[float, float, float, float, float, float]:
-    """Sample the 90% hit state; max_tokens=1 batch latency is the TTFT proxy."""
+    """Sample the 90% hit state; max_tokens=1 batch latency is the TTFT proxy.
+
+    Runs ``warmup_count`` untimed warmups plus ``drift_count + sample_count``
+    timed runs, and only the last ``sample_count`` timed runs feed the
+    stability gate and the A/B stats: warm-up drift decays monotonically
+    (dsv4_cp observed 568 -> 550 -> 540 ms), so dropping the head of the timed
+    block keeps the gate honest without weakening it.
+    """
     prompt, _ = build_pool_prompts(prompt_tokens)
-    ttft: list[float] = []
-    produced = 0
-    started = time.perf_counter()
-    if sample_count < 1 or warmup_count < 0:
-        raise ValueError("sample_count must be positive and warmup_count non-negative")
+    timed: list[float] = []
+    kept_started = 0.0
+    if sample_count < 1 or warmup_count < 0 or drift_count < 0:
+        raise ValueError("sample_count must be positive; warmup_count and drift_count non-negative")
     if stability_policy not in {"fail", "record"}:
         raise ValueError("stability_policy must be 'fail' or 'record'")
-    for index in range(warmup_count + sample_count):
+    for index in range(warmup_count + drift_count + sample_count):
         if index == warmup_count:
             # Let scheduling and in-flight async writes settle before timing.
             time.sleep(AB_PERF_SETTLE_SECONDS)
@@ -486,18 +497,23 @@ def _collect_perf(
         runner.generate_greedy([prompt] * concurrency, 1)
         elapsed = (time.perf_counter() - begin) * 1000.0
         if index >= warmup_count:
-            ttft.append(elapsed)
-            produced += prompt_tokens * concurrency
-    wall = time.perf_counter() - started
+            if index == warmup_count + drift_count:
+                # Throughput wall-clock starts at the first kept sample.
+                kept_started = begin
+            timed.append(elapsed)
+    ttft = timed[drift_count:]
+    produced = prompt_tokens * concurrency * len(ttft)
+    wall = time.perf_counter() - kept_started
     mean = sum(ttft) / len(ttft) if ttft else 0.0
     minimum = min(ttft) if ttft else 0.0
     maximum = max(ttft) if ttft else 0.0
     stability_ratio = (maximum - minimum) / mean if mean else 0.0
+    drift = ", ".join(f"{value:.1f}" for value in timed[:drift_count])
     samples = ", ".join(f"{value:.1f}" for value in ttft)
     print(
-        f"[kv_pool_perf] sample_count={len(ttft)} concurrency={concurrency} "
+        f"[kv_pool_perf] timed={len(timed)} kept={len(ttft)} concurrency={concurrency} "
         f"mean_ms={mean:.2f} min_ms={minimum:.2f} max_ms={maximum:.2f} "
-        f"range_ratio={stability_ratio:.2%} samples_ms=[{samples}]",
+        f"range_ratio={stability_ratio:.2%} drift_ms=[{drift}] samples_ms=[{samples}]",
         flush=True,
     )
     if mean and stability_ratio > AB_STABILITY_LIMIT:
@@ -594,6 +610,7 @@ def run_pool_ab(
     perf_gate: bool = True,
     perf_sample_count: int = AB_SAMPLES,
     perf_warmup_count: int = AB_WARMUP,
+    perf_drift_count: int = AB_DRIFT_SAMPLES,
     perf_concurrency: int = AB_CONCURRENCY,
     perf_stability_policy: str = "fail",
 ) -> PoolABReport:
@@ -629,6 +646,7 @@ def run_pool_ab(
                     concurrency=perf_concurrency,
                     sample_count=perf_sample_count,
                     warmup_count=perf_warmup_count,
+                    drift_count=perf_drift_count,
                     stability_policy=perf_stability_policy,
                 )
                 result = LegResult(
@@ -688,7 +706,8 @@ def run_pool_ab(
         _dump_ab_token_diff(a_result.outputs, b_result.outputs, case_name)
     report = PoolABReport(case_name, a_result, b_result, "PASS" if label == "PASS" else "FAIL", label)
     print(
-        f"[kv_pool_ab] perf_samples={perf_sample_count} "
+        f"[kv_pool_ab] perf_timed={perf_sample_count + perf_drift_count} "
+        f"perf_samples={perf_sample_count} perf_drift={perf_drift_count} "
         f"perf_concurrency={perf_concurrency} perf_gate={int(perf_gate)} "
         f"stability_policy={perf_stability_policy}",
         flush=True,

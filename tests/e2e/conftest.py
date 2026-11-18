@@ -2121,7 +2121,7 @@ def pytest_collection_modifyitems(config, items):
 
         loc = item.nodeid
         detail = "; ".join(problems)
-        raise pytest.CollectError(
+        raise pytest.Collector.CollectError(
             f"\n[e2e_coverage marker invalid] {loc}\n  {detail}\n"
             "  Values must come from tests/e2e/coverage_taxonomy.py "
             "(ALLOWED_VALUES). Fix the marker or update the taxonomy."

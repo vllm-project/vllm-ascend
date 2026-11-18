@@ -178,7 +178,7 @@ def _dsv4_mooncake_leg(use_pool: bool, case_name: str):
 @pytest.mark.e2e_model(DSV4_MTP_MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
-    feature="mtp,kv_pool,multi_prefix",
+    feature="mtp,prefix_caching,chunked_prefill,mixed_lengths",
     parallel="DP,TP,EP",
     deploy="pd_mix",
     hardware="A3",
@@ -300,7 +300,7 @@ def _dsv4_leg(use_pool: bool, case_name: str):
 @pytest.mark.e2e_model(DSV4_DSPARK_MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
-    feature="dsa_pcp,dspark,kv_pool",
+    feature="dsa_pcp,dspark",
     parallel="TP,EP,PCP",
     deploy="pd_mix",
     hardware="A3",
@@ -401,7 +401,7 @@ def _qwen_leg(use_pool: bool, case_name: str):
 @pytest.mark.e2e_model(QWEN38_MODEL)
 @pytest.mark.e2e_coverage(
     arch="dense",
-    feature="mtp,align,prefix_caching,kv_pool",
+    feature="mtp,aclgraph,prefix_caching,chunked_prefill,mixed_lengths",
     parallel="PP,TP",
     deploy="pd_mix",
     hardware="A3",
