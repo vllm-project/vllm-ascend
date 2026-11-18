@@ -40,10 +40,7 @@ import os
 import sys
 import types
 import weakref
-from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import replace
-from importlib import import_module
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -55,7 +52,6 @@ from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
     NPUIPCTrainerWeightTransferEngine,
     NPUIPCWeightTransferEngine,
 )
-from vllm_ascend.utils import vllm_version_is
 
 _MODULE = "vllm_ascend.distributed.weight_transfer.npu_ipc_engine"
 
@@ -211,10 +207,7 @@ def test_finish_weight_update():
     with _patch_reload_module(finalize=mock_finalize):
         engine.finish_weight_update()
 
-    if vllm_version_is("0.33.0"):
-        mock_finalize.assert_called_once_with(engine.model, engine.model_config)
-    else:
-        mock_finalize.assert_called_once_with(engine.model, engine.model_config, engine.device)
+    mock_finalize.assert_called_once_with(engine.model, engine.model_config, engine.device)
     engine._packed_importer.close.assert_called_once_with()
 
 
@@ -350,58 +343,6 @@ def test_packed_receive_rejects_missing_sizes():
     ):
         engine.receive_weights(types.SimpleNamespace(tensor_sizes=None))
     engine.model.load_weights.assert_not_called()
-
-
-def _legacy_mtp_validation_fixture():
-    """Supply the removed release API when testing its engine branch on main."""
-    enabled = ContextVar("test_mtp_completeness_check_enabled", default=True)
-
-    @contextmanager
-    def disable_mtp_completeness_check():
-        token = enabled.set(False)
-        try:
-            yield
-        finally:
-            enabled.reset(token)
-
-    return types.SimpleNamespace(
-        is_mtp_completeness_check_enabled=enabled.get,
-        disable_mtp_completeness_check=disable_mtp_completeness_check,
-    )
-
-
-def test_receive_scopes_mtp_completeness_check_to_loading():
-    # This test targets the release-only engine branch on both CPU lanes.
-    # The main branch (no legacy import) is covered by Nov10 contract tests.
-    mtp_validation = (
-        import_module("vllm.model_executor.model_loader.mtp_validation")
-        if vllm_version_is("0.33.0")
-        else _legacy_mtp_validation_fixture()
-    )
-    is_mtp_completeness_check_enabled = mtp_validation.is_mtp_completeness_check_enabled
-
-    engine = object.__new__(NPUIPCWeightTransferEngine)
-    engine.device = types.SimpleNamespace(index=1)
-    engine.packed = False
-    engine.model = MagicMock()
-    info = engine.parse_update_info(
-        dict(names=["w"], dtype_names=["float32"], shapes=[[1]], ipc_handles=[{"node-1": (None,) * 6 + (9,)}])
-    )
-
-    def load(weights):
-        assert not is_mtp_completeness_check_enabled()
-        raise RuntimeError("load failed")
-
-    engine.model.load_weights.side_effect = load
-    with (
-        patch(f"{_MODULE}.vllm_version_is", return_value=True),
-        patch(f"{_MODULE}.import_module", return_value=mtp_validation),
-        _patch_rebuild_npu_tensor(lambda *args: torch.ones(1)),
-        patch(f"{_MODULE}.npu_generate_uuid", return_value="node-1"),
-        pytest.raises(RuntimeError, match="load failed"),
-    ):
-        engine.receive_weights(info)
-    assert is_mtp_completeness_check_enabled()
 
 
 def test_uuid_uses_assigned_device_with_visibility_mapping():

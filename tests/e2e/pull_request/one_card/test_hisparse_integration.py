@@ -12,13 +12,8 @@ from vllm_ascend.hisparse.cache_ops import (
     pack_attention_rows,
     scatter_packed_kv,
 )
+from vllm_ascend.hisparse.backend import AscendHiSparseBackend
 from vllm_ascend.hisparse.host_pool import MappedHostTensor, allocate_mapped_host
-from vllm_ascend.utils import vllm_version_is
-
-if not vllm_version_is("0.33.0"):
-    from vllm_ascend.hisparse.backend import AscendHiSparseBackend
-
-pytestmark = pytest.mark.skipif(vllm_version_is("0.33.0"), reason="HiSparse e2e is not supported on vLLM v0.33.0")
 
 
 @pytest.fixture(autouse=True)
