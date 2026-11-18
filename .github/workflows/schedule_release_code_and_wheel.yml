@@ -545,8 +545,8 @@ jobs:
           from obs import ObsClient
           OBS_BUCKET = 'ascend-artifcat-packages'
           # Plain (non-variant) wheels consumed by plain pip, e.g.
-          #   --index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/platforms/a3
-          #   --find-links https://mirrors.huaweicloud.com/ascend/repos/pypi/platforms/a3/vllm-ascend/
+          #   --index-url https://repo.huaweicloud.com/ascend/repos/pypi/platforms/a3
+          #   --find-links https://repo.huaweicloud.com/ascend/repos/pypi/platforms/a3/vllm-ascend/
           OBS_PLATFORM_ROOT = 'pypi/packages/ascend/repos/pypi/platforms'
           platform_wheels = sorted(glob.glob('all-wheels/platforms/*/*.whl'))
           if not platform_wheels:
