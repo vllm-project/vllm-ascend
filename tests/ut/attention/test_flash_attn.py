@@ -289,7 +289,6 @@ def qwen_dflash2_fa3(monkeypatch, dflash2_config):
         parallel=config.parallel_config,
         hardware="A2",
         installed=True,
-        ops=SimpleNamespace(get_scheduler_metadata=Mock(), flash_attn_with_kvcache=Mock()),
         selector=AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto"),
     )
     monkeypatch.setattr(
@@ -303,7 +302,6 @@ def qwen_dflash2_fa3(monkeypatch, dflash2_config):
         "find_spec",
         lambda name: (object() if runtime.installed else None) if name == "flash_attn_npu_3" else find_spec(name),
     )
-    monkeypatch.setitem(sys.modules, "flash_attn_npu_3", runtime.ops)
 
     def select(tag="dflash_head"):
         monkeypatch.setattr("vllm.compilation.backends.model_tag", tag)
@@ -335,6 +333,16 @@ def test_qwen_dflash2_selects_target_and_draft(qwen_dflash2_fa3, hardware, tag, 
     assert r.select(tag) == expected
 
 
+@pytest.mark.parametrize("tag", ["backbone", "dflash_head"])
+def test_qwen_dflash2_fa3_selection_does_not_import_operator(qwen_dflash2_fa3, monkeypatch, tag):
+    # Importing the extension can initialize a device; defer it to the worker.
+    monkeypatch.setattr(
+        "vllm_ascend.platform.import_module",
+        Mock(side_effect=AssertionError("Backend selection must not import the FA3 operator")),
+    )
+    assert qwen_dflash2_fa3.select(tag) == "AscendFlashAttentionBackend"
+
+
 @pytest.mark.parametrize(
     "section,field,value",
     [
@@ -353,8 +361,6 @@ def test_qwen_dflash2_selects_target_and_draft(qwen_dflash2_fa3, hardware, tag, 
         ("selector", "dtype", torch.float32),
         ("selector", "has_sink", True),
         ("selector", "use_batch_invariant", True),
-        ("ops", "get_scheduler_metadata", None),
-        ("ops", "flash_attn_with_kvcache", None),
         (None, "installed", False),
     ],
 )

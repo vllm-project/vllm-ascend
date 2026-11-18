@@ -390,7 +390,7 @@ A few important things to consider when using DFlash2 draft models:
 6. **A2/A3 FA3 for DFlash2 targets and drafts**: model runner V2
    automatically selects FA3 for both `DFlash2DraftModel` and its dense
    `Qwen3_5ForConditionalGeneration` target when the optional `flash_attn_npu`
-   package provides the `flash_attn_npu_3` scheduler API.
+   package installs the `flash_attn_npu_3` module.
    The verified Qwen3.8-27B checkpoint declares this target architecture.
    Other architectures, including Qwen MoE, keep their existing backend.
    The Qwen target uses FA3 for full attention and keeps GDN for linear attention.
@@ -407,8 +407,11 @@ A few important things to consider when using DFlash2 draft models:
    capacity. No artificial window is added for the target.
 
    This path requires FP16/BF16 queries with matching unquantized KV, head size
-   <=256, and PP/PCP/DCP sizes of 1. Unsupported attention features or missing
-   APIs retain the existing backend. Skipping the runner Event additionally
+   <=256, and PP/PCP/DCP sizes of 1. Unsupported attention features or an absent
+   `flash_attn_npu_3` module retain the existing backend. An installed package
+   must provide `get_scheduler_metadata` and `flash_attn_with_kvcache`; missing
+   interfaces raise an error when the worker uses FA3 instead of falling back.
+   Skipping the runner Event additionally
    requires KV parallel size 1, without KV transfer, sparse KV offload or adaptive
    verification. Output-completion events remain.
    A5 and MiniMax keep their existing selection and synchronization behavior.

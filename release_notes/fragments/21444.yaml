@@ -4,7 +4,7 @@ entries:
     text: >-
       DFlash2 drafts paired with Qwen3.5 dense targets on Model Runner V2
       automatically use device-length attention on A2/A3 when the optional
-      flash_attn_npu package provides the flash_attn_npu_3 scheduler API. This
+      flash_attn_npu package installs the flash_attn_npu_3 module. This
       avoids draft attention length copies on the supported sliding-window
       path and the runner's post-sampling length snapshot and Event wait for
       supported single-stage configurations with unquantized draft KV caches.

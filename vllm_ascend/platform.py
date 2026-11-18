@@ -1897,7 +1897,7 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
         return False
 
     parallel = config.parallel_config
-    if (
+    return not (
         selector.attn_type != AttentionType.DECODER
         or selector.dtype not in (torch.float16, torch.bfloat16)
         or selector.kv_cache_dtype not in (None, "auto", "float16", "bfloat16")
@@ -1919,17 +1919,7 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
             )
         )
         or util.find_spec("flash_attn_npu_3") is None
-    ):
-        return False
-
-    if is_dflash:
-        # This is a different ABI from training-consistency flash_attn_npu_v3.
-        module = import_module("flash_attn_npu_3")
-        if not callable(getattr(module, "get_scheduler_metadata", None)) or not callable(
-            getattr(module, "flash_attn_with_kvcache", None)
-        ):
-            return False
-    return True
+    )
 
 
 def _uses_minimax_fa3(config) -> bool:
