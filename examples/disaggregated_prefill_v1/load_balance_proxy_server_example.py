@@ -1211,7 +1211,14 @@ async def handle_cloze_shortcut(api: str, req_data: dict, request_id: str):
     prefiller_score = calculate_prefill_score(request_length)
     # reserve_prefill_kv (not begin_request): no active-request counting;
     # paired with release_prefill_kv below, so the counter stays balanced.
-    prefiller = await runtime.schedule("reserve_prefill_kv", prefiller_score)
+    if args.enable_prefill_affinity:
+        prefiller = await runtime.schedule(
+            "reserve_prefill_kv",
+            prefiller_score,
+            conversation_affinity_key(req_data),
+        )
+    else:
+        prefiller = await runtime.schedule("reserve_prefill_kv", prefiller_score)
     prefiller_key = prefiller["key"]
     try:
         response = await send_cloze_request_to_service(
