@@ -242,6 +242,7 @@ class BaseKVPoolScheduler(ABC):
             use_eagle=self.use_eagle,
             retention_interval=self.retention_interval,
             enable_partial_hash_hits=self.enable_partial_hash_hits,
+            use_boundary_state=not self.use_layerwise,
         )
 
     def _floor_to_cache_transfer_granularity(self, token_len: int) -> int:
@@ -747,7 +748,7 @@ class BaseKVPoolScheduler(ABC):
                     if req_meta is not None:
                         meta.add_request(req_meta)
 
-        if self.enable_partial_hash_hits:
+        if not self.use_layerwise and self.num_mamba_speculative_blocks_by_group:
             self._prepare_boundary_saves(meta, scheduler_output)
         for req_meta in meta.requests:
             self.retain_blocks_for_save(req_meta)
@@ -854,11 +855,12 @@ class KVPoolScheduler(BaseKVPoolScheduler):
 
     def retain_blocks_for_save(self, req_meta: ReqMeta) -> None:
         """Keep Mamba source blocks alive until bulk save completes."""
+        if not self.num_mamba_speculative_blocks_by_group and not req_meta.boundary_puts:
+            return
         self._in_flight_save_blocks.retain(
             req_meta,
-            self.num_mamba_speculative_blocks_by_group,
+            set(self.num_mamba_speculative_blocks_by_group),
             self._block_pool,
-            retain_all=self.enable_partial_hash_hits,
         )
 
     def _partial_tail_non_mamba_puts(self, req_meta: ReqMeta) -> list[BoundaryPut]:
@@ -932,7 +934,7 @@ class KVPoolScheduler(BaseKVPoolScheduler):
     def _prepare_boundary_saves(self, meta: AscendConnectorMetadata, output: SchedulerOutput) -> None:
         """Use Core's current tables and exact checkpoint offloads, never a positional Mamba mirror."""
         state = output.kv_connector_block_state
-        assert state is not None, "Hash recovery requires Core boundary-state handoff"
+        assert state is not None, "Bulk Mamba saves require Core boundary-state handoff"
         save_metas = {req.req_id: req for req in meta.requests if req.can_save}
         for req_id, entries in state.boundary_state_offloads.items():
             tracker = self._request_trackers.get(req_id)
@@ -1013,9 +1015,8 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         )
         req_meta.boundary_puts = [*self._partial_tail_non_mamba_puts(req_meta), *mamba_puts]
         assert request.request_id not in self._finished_partial_tail_metas
-        # This job has no normal save range. Pin only its exact boundary sources;
-        # an empty group map excludes ordinary tables from the shared tracker.
-        self._in_flight_save_blocks.retain(req_meta, {}, self._block_pool)
+        # This job has no normal save range. Pin only its exact boundary sources.
+        self._in_flight_save_blocks.retain(req_meta, set(self.num_mamba_speculative_blocks_by_group), self._block_pool)
         self._finished_partial_tail_metas[request.request_id] = req_meta
         # The store job owns exact block refs, so request cleanup need not wait.
         return False

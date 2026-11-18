@@ -207,6 +207,7 @@ def test_cache_coordinator_uses_kv_cache_config_retention_interval(retention_int
         kv_cache_groups=[object()], prefix_cache_retention_interval=retention_interval
     )
     worker.use_hybrid = True
+    worker.use_layerwise = False
     worker.enable_partial_hash_hits = partial_hits
     worker.use_eagle = False
     worker.cache_transfer_granularity = 16

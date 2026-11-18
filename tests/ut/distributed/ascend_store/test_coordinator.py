@@ -343,6 +343,8 @@ class TestAscendStoreCoordinator(unittest.TestCase):
                     group_cache_families=["default", "default"],
                     retention_interval=interval,
                 )
+                self.assertEqual(coord.store_mask(1024, num_prompt_tokens=769)[1], [False] * 4)
+                coord.use_boundary_state = False
                 self.assertEqual(coord.store_mask(1024, num_prompt_tokens=769)[1], expected)
                 hashes = _hashes(4)
 

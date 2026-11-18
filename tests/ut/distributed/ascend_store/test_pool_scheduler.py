@@ -48,6 +48,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blo
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import LayerwiseKVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import get_zmq_rpc_path_lookup
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    BoundaryPut,
     LoadSpec,
     ReqMeta,
     RequestTracker,
@@ -409,13 +410,7 @@ class TestKVPoolScheduler(unittest.TestCase):
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_retain_mamba_blocks_for_save_excludes_speculative_tail(self, mock_client_cls):
-        """Speculative scratch blocks must never be pinned for async sends.
-
-        The allocator relocates speculative scratch blocks in place and
-        requires them exclusively owned (vllm PR #51358); the touch here keeps
-        blocks alive only until the send ack, so it must cover the saved state
-        blocks but not the speculative tail of the mamba block table.
-        """
+        """Pin only explicit Mamba checkpoints, never positional scratch slots."""
         # Cover the UniformType wrapper path handled by _infer_mamba_groups.
         wrapped_mamba_spec = UniformTypeKVCacheSpecs.from_specs(
             {
@@ -457,11 +452,12 @@ class TestKVPoolScheduler(unittest.TestCase):
             req_id="r1",
             block_ids_by_group=[[13], [1, 2, 3, 4, 5, 6, 7, 8, 9], [10, 11, 12]],
             can_save=True,
+            boundary_puts=[BoundaryPut(1, 6, 16), BoundaryPut(2, 12, 16)],
         )
         scheduler.retain_blocks_for_save(req_meta)
 
         touched = [block.block_id for block in scheduler._block_pool.touch.call_args[0][0]]
-        self.assertEqual(touched, [1, 2, 3, 4, 5, 6, 10, 11, 12])
+        self.assertEqual(touched, [6, 12])
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_swa_group_selected_for_save_retention(self, mock_client_cls):
@@ -1201,6 +1197,8 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
 def test_connector_metadata_preserves_unscheduled_request_order(unfinished_ids, new_ids, cached_ids, expected_ids):
     scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
     scheduler.enable_partial_hash_hits = False
+    scheduler.use_layerwise = False
+    scheduler.num_mamba_speculative_blocks_by_group = {}
     scheduler.kv_role = "kv_both"
     scheduler.consumer_is_to_put = scheduler.can_put = False
     scheduler._request_trackers = {}
@@ -1232,6 +1230,8 @@ def test_connector_metadata_without_pending_requests_does_not_scan_cached_ids(cl
 
     scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
     scheduler.enable_partial_hash_hits = False
+    scheduler.use_layerwise = False
+    scheduler.num_mamba_speculative_blocks_by_group = {}
     scheduler.kv_role = "kv_both"
     scheduler.consumer_is_to_put = scheduler.can_put = False
     scheduler._request_trackers = {}
@@ -1274,6 +1274,8 @@ def test_connector_metadata_filter_has_linear_key_lookup_work():
     pending_ids = ["pending-b", "pending-a"]
     scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
     scheduler.enable_partial_hash_hits = False
+    scheduler.use_layerwise = False
+    scheduler.num_mamba_speculative_blocks_by_group = {}
     scheduler.kv_role = "kv_both"
     scheduler.consumer_is_to_put = scheduler.can_put = False
     scheduler._request_trackers = {}
@@ -1590,11 +1592,13 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         scheduler.enable_partial_hash_hits = False
         scheduler.num_mamba_speculative_blocks_by_group = {0: 1}
         scheduler._block_pool.blocks = [MagicMock() for _ in range(4)]
-        req_meta = ReqMeta("r1", block_ids_by_group=[[0, 1, 2, 3]], can_save=True)
+        req_meta = ReqMeta(
+            "r1", block_ids_by_group=[[0, 1, 2, 3]], can_save=True, boundary_puts=[BoundaryPut(0, 2, 16)]
+        )
 
         scheduler.retain_blocks_for_save(req_meta)
 
-        scheduler._block_pool.touch.assert_called_once_with(scheduler._block_pool.blocks[1:3])
+        scheduler._block_pool.touch.assert_called_once_with(scheduler._block_pool.blocks[2:3])
 
     def test_store_job_pins_mamba_blocks_until_all_workers_finish(self):
         scheduler = self._make_scheduler()
@@ -1602,16 +1606,21 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         scheduler.num_mamba_speculative_blocks_by_group = {0: 1}
         scheduler._block_pool.blocks = [MagicMock() for _ in range(4)]
         req_meta = ReqMeta(
-            "r1", token_len_chunk=16, block_ids_by_group=[[0, 1, 2, 3]], block_hashes=[b"h0"], can_save=True
+            "r1",
+            token_len_chunk=16,
+            block_ids_by_group=[[0, 1, 2, 3]],
+            block_hashes=[b"h0"],
+            can_save=True,
+            boundary_puts=[BoundaryPut(0, 2, 16)],
         )
 
         scheduler.retain_blocks_for_save(req_meta)
 
         self.assertEqual(req_meta.event_id, 0)
         # Neither the null block nor speculative scratch may be pinned.
-        pinned_blocks = scheduler._block_pool.blocks[1:3]
+        pinned_blocks = scheduler._block_pool.blocks[2:3]
         scheduler._block_pool.touch.assert_called_once_with(pinned_blocks)
-        self.assertEqual(scheduler._in_flight_save_blocks.sending_blocks, {0: [1, 2]})
+        self.assertEqual(scheduler._in_flight_save_blocks.sending_blocks, {0: [2]})
         self.assertTrue(scheduler.has_pending_push_work())
 
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (

@@ -446,6 +446,7 @@ class BaseKVPoolWorker(ABC):
             use_eagle=self.use_eagle if self.enable_partial_hash_hits else use_eagle,
             retention_interval=retention_interval,
             enable_partial_hash_hits=self.enable_partial_hash_hits,
+            use_boundary_state=not self.use_layerwise,
         )
 
     def _infer_group_uses_align_state(self) -> list[bool]:

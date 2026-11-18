@@ -24,13 +24,14 @@ def test_boundary_and_ordinary_source_take_one_reference():
     pool = _pool()
     meta = ReqMeta(
         "r",
+        token_len_chunk=48,
         block_ids_by_group=[[0, 1, 2], [3, 4]],
         can_save=True,
         boundary_puts=[BoundaryPut(0, 2, 48), BoundaryPut(1, 5, 48)],
     )
-    tracker.retain(meta, {1: 1}, pool, retain_all=True)
+    tracker.retain(meta, {1}, pool)
     pool.touch.assert_called_once_with([2, 5, 1])
-    tracker.retain(meta, {1: 1}, pool, retain_all=True)
+    tracker.retain(meta, {1}, pool)
     assert pool.touch.call_count == 1
     tracker.complete({meta.event_id: 1}, pool)
     pool.free_blocks.assert_not_called()
@@ -40,13 +41,37 @@ def test_boundary_and_ordinary_source_take_one_reference():
     assert not tracker.has_pending_work()
 
 
+def test_boundary_only_save_pins_exact_sources_with_real_mamba_groups():
+    tracker = InFlightSaveBlockTracker(1)
+    pool = _pool()
+    meta = ReqMeta(
+        "r",
+        token_len_chunk=0,
+        can_save=True,
+        block_ids_by_group=[[1, 2], [3, 4]],
+        boundary_puts=[BoundaryPut(0, 2, 16), BoundaryPut(1, 5, 16)],
+    )
+    tracker.retain(meta, {1}, pool)
+    pool.touch.assert_called_once_with([2, 5])
+    tracker.complete({meta.event_id: 1}, pool)
+    pool.free_blocks.assert_called_once_with([5, 2])
+
+
+def test_normal_partial_save_without_boundary_puts_pins_non_mamba_sources():
+    tracker = InFlightSaveBlockTracker(1)
+    pool = _pool()
+    meta = ReqMeta("r", token_len_chunk=16, can_save=True, block_ids_by_group=[[0, 1, 2], [3, 4]])
+    tracker.retain(meta, {1}, pool)
+    pool.touch.assert_called_once_with([1, 2])
+
+
 def test_out_of_order_completion_does_not_release_another_job():
     tracker = InFlightSaveBlockTracker(1)
     pool = _pool()
     first = ReqMeta("r", can_save=True, boundary_puts=[BoundaryPut(0, 1, 16)])
     second = ReqMeta("r", can_save=True, boundary_puts=[BoundaryPut(0, 2, 32)])
-    tracker.retain(first, {}, pool)
-    tracker.retain(second, {}, pool)
+    tracker.retain(first, set(), pool)
+    tracker.retain(second, set(), pool)
     tracker.complete({second.event_id: 1}, pool)
     assert tracker.sending_blocks == {first.event_id: [1]}
     tracker.complete({first.event_id: 1}, pool)
@@ -57,7 +82,7 @@ def test_aggregated_worker_counts_release_source():
     tracker = InFlightSaveBlockTracker(2)
     pool = _pool()
     meta = ReqMeta("r", can_save=True, boundary_puts=[BoundaryPut(0, 1, 16)])
-    tracker.retain(meta, {}, pool)
+    tracker.retain(meta, set(), pool)
     first = AscendStoreKVConnectorWorkerMetadata({meta.event_id: 1})
     second = AscendStoreKVConnectorWorkerMetadata({meta.event_id: 1})
 
@@ -69,11 +94,17 @@ def test_aggregated_worker_counts_release_source():
     assert not tracker.has_pending_work()
 
 
-def test_full_page_legacy_path_pins_only_recurrent_non_scratch_sources():
+def test_full_page_save_uses_exact_mamba_checkpoint_and_ordinary_attention_sources():
     tracker = InFlightSaveBlockTracker(1)
     pool = _pool()
-    meta = ReqMeta("r", block_ids_by_group=[[1, 2], [3, 4]], can_save=True)
-    tracker.retain(meta, {1: 1}, pool)
-    pool.touch.assert_called_once_with([3])
+    meta = ReqMeta(
+        "r",
+        token_len_chunk=16,
+        block_ids_by_group=[[1, 2], [3, 4]],
+        can_save=True,
+        boundary_puts=[BoundaryPut(1, 5, 16)],
+    )
+    tracker.retain(meta, {1}, pool)
+    pool.touch.assert_called_once_with([5, 1, 2])
     tracker.complete({meta.event_id: 1}, pool)
-    pool.free_blocks.assert_called_once_with([3])
+    pool.free_blocks.assert_called_once_with([2, 1, 5])

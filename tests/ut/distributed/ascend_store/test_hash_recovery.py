@@ -58,6 +58,8 @@ def test_same_group_hits_as_upstream(seed, eagle):
 
 
 class ByteStore:
+    requires_exists_before_put = True
+
     def __init__(self):
         self.values = {}
 
@@ -114,7 +116,7 @@ def test_boundary_save_lookup_and_physical_page_replay(seed, store_job_id):
     )
     tracker = InFlightSaveBlockTracker(1)
     pool = SimpleNamespace(blocks=list(range(4)), touch=Mock(), free_blocks=Mock())
-    tracker.retain(req, {1: 0}, pool, retain_all=True)
+    tracker.retain(req, {1}, pool)
     assert req.store_job_id == store_job_id
     req.current_event = Mock()
     send.add_save_batch([req])
@@ -148,7 +150,7 @@ def test_boundary_save_lookup_and_physical_page_replay(seed, store_job_id):
 @pytest.mark.parametrize("tail_key_boundary, tail_hash_index", [(None, 4), (20, 4), (24, 5)])
 def test_partial_chunks_do_not_fold_hashes_into_page_keys(tail_key_boundary, tail_hash_index):
     db = metadata.ChunkedTokenDatabase([metadata.KeyMetadata("model", 0, 0, 0, 0)], [16], None, hash_block_size=4)
-    db.cache_coordinator = Mock(cacheable_group_ids=[0], enable_partial_hash_hits=True)
+    db.cache_coordinator = Mock(cacheable_group_ids=[0])
     hashes = [BlockHash(bytes([i + 1]) * 8) for i in range(6)]
     with patch.object(metadata, "get_block_hashes", side_effect=AssertionError("unused page hash folding")):
         chunks = list(db._iter_token_chunks(20, hashes, tail_key_boundary=tail_key_boundary))
@@ -247,8 +249,10 @@ def finishing_tail():
     return scheduler, request
 
 
-def test_finished_partial_tail_pins_exact_sources_through_next_step(finishing_tail):
+@pytest.mark.parametrize("partial_hits", [False, True])
+def test_finished_partial_tail_pins_exact_sources_through_next_step(finishing_tail, partial_hits):
     scheduler, request = finishing_tail
+    scheduler.enable_partial_hash_hits = partial_hits
     tables = ([1, 2, 3, 4], [50])
     # Duplicate entries must not take duplicate source references.
     assert scheduler.register_finished_partial_tail(request, tables, [(1, 50, 44), (1, 50, 44)]) is False
@@ -294,16 +298,17 @@ def test_finished_partial_tail_requires_common_boundary(finishing_tail):
     scheduler._block_pool.touch.assert_not_called()
 
 
-def test_core_boundary_offload_is_not_positional_recurrent_table():
+@pytest.mark.parametrize("partial_hits", [False, True])
+def test_core_boundary_offload_is_not_positional_recurrent_table(partial_hits):
     scheduler = object.__new__(KVPoolScheduler)
-    scheduler.enable_partial_hash_hits = True
+    scheduler.enable_partial_hash_hits = partial_hits
     scheduler.cache_coordinator = coordinator.AscendStoreCoordinator(
         groups(),
         16,
         4,
         group_block_sizes=[16, 16],
         group_cache_families=["default", "default"],
-        enable_partial_hash_hits=True,
+        enable_partial_hash_hits=partial_hits,
     )
     scheduler.can_put = True
     scheduler._request_trackers = {"r": SimpleNamespace(prefill_end_tokens=12, num_prompt_tokens=12, token_len=12)}
@@ -320,8 +325,8 @@ def test_core_boundary_offload_is_not_positional_recurrent_table():
     assert meta.requests[0].block_ids_by_group == [[1], [2]]
     tracker = InFlightSaveBlockTracker(1)
     pool = SimpleNamespace(blocks=list(range(20)), touch=Mock(), free_blocks=Mock())
-    tracker.retain(meta.requests[0], {1: 1}, pool, retain_all=True)
-    pool.touch.assert_called_once_with([9, 1])
+    tracker.retain(meta.requests[0], {1}, pool)
+    pool.touch.assert_called_once_with([9])
 
 
 def test_failed_save_acknowledges_without_advancing_saved_offset():
@@ -333,3 +338,48 @@ def test_failed_save_acknowledges_without_advancing_saved_offset():
     send._handle_request(send.request_queue.get())
     assert send.get_completed_events() == {3: 1}
     assert send.get_saved_offset("failed") == 0
+
+
+@pytest.mark.parametrize("partial_hits", [False, True])
+def test_aligned_boundary_put_uses_exact_state_without_positional_mamba_save(partial_hits):
+    coord = coordinator.AscendStoreCoordinator(
+        groups(),
+        16,
+        4,
+        group_block_sizes=[16, 16],
+        group_cache_families=["default", "default"],
+        enable_partial_hash_hits=partial_hits,
+    )
+    sources = [
+        torch.arange(64, dtype=torch.float32).reshape(4, 16, 1),
+        torch.arange(8, dtype=torch.float32).reshape(4, 2),
+    ]
+    db = metadata.ChunkedTokenDatabase(
+        [metadata.KeyMetadata("model", 0, 0, 0, g) for g in range(2)],
+        [16, 16],
+        None,
+        hash_block_size=4,
+    )
+    db.cache_coordinator = coord
+    db.set_group_buffers(
+        {g: [source.data_ptr()] for g, source in enumerate(sources)},
+        {g: [source[0].numel() * 4] for g, source in enumerate(sources)},
+        {g: [source.stride(0) * 4] for g, source in enumerate(sources)},
+    )
+    store = ByteStore()
+    send = KVCacheStoreSendingThread(store, db, [16, 16], tp_rank=0)
+    hashes = [BlockHash(bytes([i + 1]) * 8) for i in range(4)]
+    req = metadata.ReqMeta(
+        "aligned",
+        token_len_chunk=16,
+        can_save=True,
+        block_hashes=hashes,
+        block_ids_by_group=[[1], [2]],
+        kv_cache_group_ids=[0, 1],
+        num_prompt_tokens=16,
+        boundary_puts=[metadata.BoundaryPut(1, 3, 16)],
+    )
+    assert send._handle_stored_request(req) is True
+    state_key = db._get_key_prefix(1) + hashes[-1].hex()
+    assert store.values[state_key] == sources[1][3].numpy().tobytes()
+    assert coord.store_mask(16, 16)[1] == [False]

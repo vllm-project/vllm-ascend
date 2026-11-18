@@ -127,6 +127,7 @@ class AscendStoreCoordinator:
         use_eagle: bool = False,
         retention_interval: int | None = None,
         enable_partial_hash_hits: bool = False,
+        use_boundary_state: bool = True,
     ) -> None:
         assert len(kv_cache_groups) == len(group_block_sizes)
         assert len(kv_cache_groups) == len(group_cache_families)
@@ -142,6 +143,8 @@ class AscendStoreCoordinator:
         # Internal capability resolved from Core's cache plan, never an extra
         # connector option. IO still addresses physical pages.
         self.enable_partial_hash_hits = enable_partial_hash_hits
+        # Bulk saves use exact Core checkpoints; layerwise keeps its own snapshots.
+        self.use_boundary_state = use_boundary_state
         self.mamba_group_ids = {
             group_id
             for group_id, group in enumerate(kv_cache_groups)
@@ -297,7 +300,7 @@ class AscendStoreCoordinator:
         masks = self._cached_reachable_masks(aligned_token_len, self.retention_interval, num_prompt_tokens)
         result = []
         for group_id, (num_chunks, mask) in enumerate(masks):
-            if self.enable_partial_hash_hits and group_id in self.mamba_group_ids:
+            if self.use_boundary_state and group_id in self.mamba_group_ids:
                 # Align-mode recurrent tables are not append-only. Only Core's
                 # pinned boundary-state handoff can identify a saveable state.
                 result.append([False] * num_chunks)

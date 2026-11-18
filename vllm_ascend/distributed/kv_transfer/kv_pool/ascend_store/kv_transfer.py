@@ -761,8 +761,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         token_len = req_meta.token_len_chunk
         req_id = req_meta.req_id
         current_event = req_meta.current_event
-        coord = self.token_database.cache_coordinator
-        if coord is not None and coord.enable_partial_hash_hits and req_meta.boundary_puts:
+        if req_meta.boundary_puts:
             # A boundary value is a complete physical page/checkpoint, keyed by
             # its logical hash boundary. Never slice a head-major page by bytes.
             if current_event is not None:
