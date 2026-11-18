@@ -101,12 +101,7 @@ from vllm_ascend.quantization.configs.modelslim_config import AscendModelSlimCon
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from vllm_ascend.utils import get_rotation_path, is_950, vllm_version_is
-from vllm_ascend.worker.v2.pp_transport import (
-    PPTransportDataType,
-    add_pp_transport_tensors,
-    get_pp_transport_tensors,
-)
+from vllm_ascend.utils import get_rotation_path, is_950
 from vllm_ascend.worker.v2.pp_transport import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
@@ -1050,23 +1045,19 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             # A materialized state at start_layer belongs to this stage,
             # unlike the raw state emitted by the preceding stage.
             self._aux_slot_base_cached = bisect_left(self.aux_hidden_state_layers, self.start_layer)
-        if vllm_version_is("0.33.0") and pp.is_last_rank:
-            self._aux_upstream_total_cached = self._aux_slot_base_cached
 
-    if not vllm_version_is("0.33.0"):
-
-        def aux_hidden_state_slot_keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
-            if self.config.attn_res_block_size is None or not self.dspark_aux_capture_materialized:
-                return super().aux_hidden_state_slot_keys()
-            pp = get_pp_group()
-            if pp.world_size < 2:
-                return (), ()
-            # Materialized DSpark captures before layer L. A cut at L belongs
-            # to the receiving stage, unlike raw post-layer capture.
-            base = self._aux_slot_base_cached
-            end = base if pp.is_last_rank else bisect_left(self.aux_hidden_state_layers, self.end_layer)
-            key = self.AUX_HIDDEN_STATE_KEY
-            return tuple(f"{key}{i}" for i in range(base)), tuple(f"{key}{i}" for i in range(base, end))
+    def aux_hidden_state_slot_keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        if self.config.attn_res_block_size is None or not self.dspark_aux_capture_materialized:
+            return super().aux_hidden_state_slot_keys()
+        pp = get_pp_group()
+        if pp.world_size < 2:
+            return (), ()
+        # Materialized DSpark captures before layer L. A cut at L belongs
+        # to the receiving stage, unlike raw post-layer capture.
+        base = self._aux_slot_base_cached
+        end = base if pp.is_last_rank else bisect_left(self.aux_hidden_state_layers, self.end_layer)
+        key = self.AUX_HIDDEN_STATE_KEY
+        return tuple(f"{key}{i}" for i in range(base)), tuple(f"{key}{i}" for i in range(base, end))
 
     def make_empty_intermediate_tensors(
         self,
@@ -1164,13 +1155,9 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             residual = intermediate_tensors["residual"]
 
         materialized_aux = self.dspark_aux_capture_materialized
-        # Main's runner relays upstream slots and merges them once on the last
-        # stage. The release model still carries the cumulative payload.
-        aux_hidden_states = (
-            get_pp_transport_tensors(intermediate_tensors, PPTransportDataType.AUX_HIDDEN_STATES)
-            if vllm_version_is("0.33.0")
-            else []
-        )
+        # The runner relays upstream slots and merges them once on the last
+        # stage.
+        aux_hidden_states: list[torch.Tensor] = []
         if self.use_sequence_parallel:
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
@@ -1254,13 +1241,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 residual = sp_all_gather(residual)[:full_num_tokens]
                 aux_hidden_states = [sp_all_gather(aux)[:full_num_tokens] for aux in aux_hidden_states]
             output = IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
-            if not vllm_version_is("0.33.0"):
-                return IntermediateTensors({**output.tensors, **self.pack_local_aux_hidden_states(aux_hidden_states)})
-            return add_pp_transport_tensors(
-                output,
-                PPTransportDataType.AUX_HIDDEN_STATES,
-                aux_hidden_states,
-            )
+            return IntermediateTensors({**output.tensors, **self.pack_local_aux_hidden_states(aux_hidden_states)})
 
         # The loop above already captured aux for every ``(layer_idx + 1)``
         # in ``aux_hidden_state_layers``, including ``end_layer``; upstream

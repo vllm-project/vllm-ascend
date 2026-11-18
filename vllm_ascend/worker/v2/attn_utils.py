@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
+import vllm.models.qwen4_exp.common.qsa_indexer as qsa_indexer  # type: ignore[import-not-found]
 import vllm.v1.worker.gpu.spec_decode.speculator as _speculator
 from vllm.config import (
     ParallelConfig,
@@ -115,7 +116,6 @@ from vllm_ascend.utils import (
     is_c8_mxfp_kv_quant,
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_packed_sfa_main_cache,
-    vllm_version_is,
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.utils import (
@@ -126,14 +126,7 @@ from vllm_ascend.worker.utils import (
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
-if vllm_version_is("0.33.0"):
-    import vllm.models.qwen4_exp.common.qsa_cache as qsa_cache  # type: ignore[import-not-found]
-
-    QSAMetadataBuilder = qsa_cache.QSAMetadataBuilder
-else:
-    import vllm.models.qwen4_exp.common.qsa_indexer as qsa_indexer  # type: ignore[import-not-found]
-
-    QSAMetadataBuilder = qsa_indexer.QSAIndexerMetadataBuilder
+QSAMetadataBuilder = qsa_indexer.QSAIndexerMetadataBuilder
 
 
 # MRV2's upstream _dummy_run drops runner-specific kwargs such as``skip_gdn_state_update``
