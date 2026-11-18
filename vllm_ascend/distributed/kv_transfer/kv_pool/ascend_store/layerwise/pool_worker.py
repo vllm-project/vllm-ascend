@@ -313,7 +313,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 self.num_prefetch_layers = layerwise_settings.num_prefetch_layers
             else:
                 self.prefetch_layer_map = self._remap_layout_to_stage_local(
-                    self._layerwise_reuse_layout.prefetch_layer_map, tuple(self._global_to_local_layer)
+                    self._layerwise_reuse_layout.prefetch_layer_map, self._global_to_local_layer
                 )
                 self.layerwise_offload = self._layerwise_reuse_layout.has_layer_reuse
                 self.num_prefetch_layers = self._layerwise_reuse_layout.num_prefetch_layers
@@ -349,10 +349,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
     @staticmethod
     def _remap_layout_to_stage_local(
         prefetch_layer_map: dict[int, tuple[int, ...]],
-        stage_globals: Sequence[int],
+        global_to_local: dict[int, int],
     ) -> dict[int, tuple[int, ...]]:
         """Translate a global-indexed reuse layout to stage-local indices."""
-        global_to_local = {global_idx: local_idx for local_idx, global_idx in enumerate(stage_globals)}
         return {
             global_to_local[layer]: tuple(global_to_local[source] for source in sources)
             for layer, sources in prefetch_layer_map.items()
