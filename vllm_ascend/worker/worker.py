@@ -1013,6 +1013,10 @@ class NPUWorker(WorkerBase):
             )
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
+        from vllm_ascend.model_executor.warmup.deepseek_v41 import warmup_deepseek_v41_eager
+
+        warmup_deepseek_v41_eager(self)
+
         # Note: need to adapt for graph mode.
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes or []).copy()
         if not self.model_config.enforce_eager:
