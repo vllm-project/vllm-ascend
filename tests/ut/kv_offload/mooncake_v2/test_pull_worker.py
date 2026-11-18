@@ -70,6 +70,8 @@ def make_thread(**overrides: object) -> MooncakePullRecvingThread:
     thread.request_queue = queue.Queue()
     for name, value in overrides.items():
         setattr(thread, name, value)
+    if "_kimi_c8_enabled" not in overrides:
+        thread._kimi_c8_enabled = any(getattr(spec, "static_fp8_pa_nz", False) for spec in thread.kv_cache_specs)
     return thread
 
 
@@ -232,6 +234,94 @@ def test_pcp2_tp4_full_dcp_block_order_matches_vllm_rank_order() -> None:
         physical_ranks.append(pcp_rank * 4 + tp_rank)
 
     assert physical_ranks == [0, 4, 1, 5, 2, 6, 3, 7]
+
+
+def test_shared_spec_layers_do_not_reuse_group_local_block_ids() -> None:
+    thread = make_thread(
+        layer_names=["model.layers.0.self_attn", "model.layers.1.self_attn"],
+        group_indices=[0, 1],
+        spec_indices=[0, 0],
+        layer_block_sizes=[16, 16],
+        kv_cache_specs=[make_full_spec()],
+        block_shapes=[[(1, 16, 4)], [(1, 16, 4)]],
+        block_strides=[[128], [128]],
+        block_lens=[[128], [128]],
+        block_size_scales=[[1], [1]],
+    )
+    thread._kimi_c8_enabled = True
+    remote = make_pp_metadata(
+        layer_names=["model.layers.0.self_attn", "model.layers.1.self_attn"],
+    )
+    remote = replace(remote, group_indices=[0, 1])
+    requests = {"request": make_req_meta(local=([10], [11]), remote=([20], [21]))}
+    buckets, _ = thread._build_transfer_block_buckets(
+        remote,
+        [(0, 0), (1, 1)],
+        {(0, 0): [[0]], (1, 1): [[0]]},
+        1,
+        1,
+        requests,
+        {},
+    )
+
+    entries = buckets[(0, 0)][0]
+    assert entries[(0, 0)][0][1:] == ([10], [20])
+    assert entries[(1, 1)][0][1:] == ([11], [21])
+
+
+def test_compute_aligned_mamba_state_uses_normalized_local_block() -> None:
+    thread = make_thread(num_speculative_tokens=3)
+    thread._kimi_c8_enabled = True
+    spec = replace(make_mamba_spec(), mamba_cache_mode="align", num_speculative_blocks=3)
+
+    result = thread._compute_group_block_ids(
+        "aligned",
+        [[0]],
+        1,
+        0,
+        1536,
+        1536,
+        [77],
+        [70, 77],
+        [99],
+        1537,
+        1536,
+        0,
+        1,
+        1,
+        spec,
+        0,
+    )
+
+    assert result == [(0, [77], [99])]
+
+
+def test_dcp_unequal_page_sizes_include_partial_prompt_tail() -> None:
+    """A 1537-token prompt must transfer its token-1536 kernel block."""
+    thread = make_thread()
+    thread._kimi_c8_enabled = True
+    result = thread._compute_group_block_ids(
+        request_id="tail",
+        remote_tp_rank_groups=[[0]],
+        remote_dcp_size=1,
+        spec_index=0,
+        local_block_size=768,
+        remote_block_size=1536,
+        local_group_block_ids=[10, 11, 12],
+        local_full_group_block_ids=[10, 11, 12],
+        remote_group_block_ids=[20, 21],
+        local_num_prompt_tokens=1537,
+        remote_num_prompt_tokens=1537,
+        num_computed_tokens=0,
+        local_block_size_scale=6,
+        remote_block_size_scale=12,
+        spec=make_full_spec(),
+        selection_index=0,
+    )
+
+    assert result == [
+        (0, list(range(60, 78)), list(range(240, 258))),
+    ]
 
 
 def test_mamba_tp_groups_follow_non_replicated_tp_ratio() -> None:
@@ -686,7 +776,7 @@ def test_compute_mamba_state_selects_pre_speculative_local_block() -> None:
         0,
         1,
         1,
-        make_mamba_spec(),
+        replace(make_mamba_spec(), num_speculative_blocks=2),
         0,
     )
 
@@ -1920,3 +2010,29 @@ def test_compute_block_ids_across_unequal_block_size_dcp_matrix(
     )
 
     assert result == expected
+
+
+@pytest.mark.parametrize("mode", ["none", "align"])
+@pytest.mark.parametrize("tail,expected", [(0, 25), (1, 24), (3, 22)])
+def test_c16_mamba_receiver_uses_spec_reservation(mode, tail, expected):
+    thread = make_thread(num_speculative_tokens=3, _kimi_c8_enabled=False)
+    state = replace(make_mamba_spec(), mamba_cache_mode=mode, num_speculative_blocks=tail)
+    result = thread._compute_group_block_ids(
+        "c16",
+        [[0]],
+        1,
+        0,
+        16,
+        16,
+        [20, 21, 22, 23, 24, 25],
+        [20, 21, 22, 23, 24, 25],
+        [99],
+        33,
+        32,
+        0,
+        1,
+        1,
+        state,
+        0,
+    )
+    assert result == [(0, [expected], [99])]

@@ -269,6 +269,7 @@ class AscendMlaDCPMetadataBuilder(
         return DCPChunkedContextMetadata(
             cu_seq_lens=chunked_context_metadata.cu_seq_lens,
             starts=local_chunk_starts.pin_memory().to(self.device, non_blocking=True),
+            starts_cpu=local_chunk_starts,
             seq_tot=seq_tot,
             max_seq_lens=chunked_context_metadata.max_seq_lens,
             chunk_seq_lens=self.chunk_seq_lens,
@@ -328,6 +329,8 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
+        if getattr(self, "kimi_c8_static_fp8", False):
+            return
         # PCP cannot consume the RoPE PROLOG_V3 workspaces. The legacy no-rope
         # MLAPO decode buffer still has a consumer with PCP enabled.
         if self.dcp_enabled and (
@@ -360,7 +363,11 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         max_tokens: int,
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        block_size = self.vllm_config.cache_config.block_size
+        block_size = (
+            MLA_KERNEL_BLOCK_SIZE
+            if getattr(self, "is_draft_cache", False)
+            else self.vllm_config.cache_config.block_size
+        )
         cache_shape = (cdiv(max_tokens, block_size), block_size, self.num_kv_heads)
         return (
             torch.empty((*cache_shape, self.kv_lora_rank), dtype=self.dtype, device=device),
@@ -431,6 +438,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 for key, metadata in attn_metadata[0].items()
                 if getattr(metadata, "decode", None) is not None
                 and getattr(metadata, "external_flashmla", None) is None
+                and getattr(metadata, "c8_static_fp8", False) is not True
             ]
         else:
             graph_params = get_graph_params()
@@ -440,6 +448,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 for key, metadata in attn_metadata.items()
                 if getattr(metadata, "decode", None) is not None
                 and getattr(metadata, "external_flashmla", None) is None
+                and getattr(metadata, "c8_static_fp8", False) is not True
             ]
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.

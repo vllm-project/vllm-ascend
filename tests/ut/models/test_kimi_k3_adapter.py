@@ -410,6 +410,7 @@ def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
     model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
     nn.Module.__init__(model)
     model.config = SimpleNamespace(
+        attn_res_block_size=None,
         is_moe=False,
         is_linear_attn=True,
         linear_attn_config={},
@@ -589,6 +590,7 @@ def test_kimi_model_allocates_attention_residual_after_sp_shard(monkeypatch):
 
     model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
     nn.Module.__init__(model)
+    model.do_not_compile = True
     model.config = SimpleNamespace(attn_res_block_size=12)
     model.attn_res_mode = "native"
     model.start_layer = 0
@@ -670,6 +672,7 @@ def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
 
     model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
     nn.Module.__init__(model)
+    model.do_not_compile = True
     model.config = SimpleNamespace(attn_res_block_size=1)
     model.attn_res_mode = "native"
     model.start_layer = 0
@@ -844,3 +847,22 @@ def test_k3_dspark_pp_mapper_keeps_frozen_embed_but_drops_heads(monkeypatch):
         "context_proj.weight",
     ):
         assert pp_mapper._map_name(name) == upstream_mapper._map_name(name)
+
+
+@pytest.mark.parametrize("order", [("kda", "c8"), ("c8", "kda"), ("kda", "c16")])
+def test_c8_metadata_binds_to_preceding_kda_only(order):
+    model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
+    nn.Module.__init__(model)
+    kda = kimi_k3.AscendKimiK3DeltaAttention.__new__(kimi_k3.AscendKimiK3DeltaAttention)
+    nn.Module.__init__(kda)
+    launch = MagicMock()
+    model.layers = [
+        SimpleNamespace(
+            self_attn=kda
+            if kind == "kda"
+            else SimpleNamespace(impl=SimpleNamespace(kimi_c8_mode=kind == "c8", _prelaunch_kimi_c8_metadata=launch))
+        )
+        for kind in order
+    ]
+    model._bind_c8_metadata_prelaunch()
+    assert getattr(kda, "_kimi_c8_metadata_prelaunch", None) is (launch if order == ("kda", "c8") else None)

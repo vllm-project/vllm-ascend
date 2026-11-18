@@ -53,6 +53,8 @@ def test_native_backend_exposes_unsplit_manager_page(page):
     assert layer.get_attn_backend() is native
     assert native.get_supported_kernel_block_sizes(SimpleNamespace(block_size=page)) == [page]
     assert page in native.get_supported_kernel_block_sizes()
+    layer.impl.is_draft_cache = True
+    assert layer.get_attn_backend() is base
     layer.impl.use_flashmla = False
     assert layer.get_attn_backend() is base
     assert base.get_supported_kernel_block_sizes() == [128]
@@ -84,22 +86,27 @@ def test_native_pages_preserve_target_fia_prefill_detection(draft_only):
 
 
 @pytest.mark.parametrize(
-    "page,interleave,dcp,expected",
+    "page,interleave,dcp,draft,noncausal,expected",
     [
-        (128, 128, 8, True),
-        (512, 512, 8, True),
-        (768, 768, 8, True),
-        (896, 896, 8, True),
-        (896, 128, 8, False),
-        (896, 896, 1, True),
-        (2048, 2048, 8, False),
-        (900, 900, 8, False),
+        (128, 128, 8, False, False, True),
+        (512, 512, 8, False, False, True),
+        (768, 768, 8, False, False, True),
+        (896, 896, 8, False, False, True),
+        (896, 128, 8, False, False, False),
+        (896, 896, 1, False, False, True),
+        (2048, 2048, 8, False, False, False),
+        (900, 900, 8, False, False, False),
+        (1664, 1664, 1, False, False, False),
+        (1664, 1664, 1, True, False, True),
+        (1664, 1664, 8, True, False, False),
+        (1664, 1664, 8, True, True, True),
     ],
 )
-def test_selection_keeps_reader_page_and_interleave_consistent(page, interleave, dcp, expected):
+def test_selection_keeps_reader_page_and_interleave_consistent(page, interleave, dcp, draft, noncausal, expected):
     scope = {
         "torch": torch,
         "FLASHMLA_SUPPORTED_BLOCK_SIZES": SIZES,
+        "MLA_KERNEL_BLOCK_SIZE": 128,
         "FLASHMLA_V_DIM": 512,
         "FLASHMLA_QK_DIM": 576,
         "MLA_FLASH_SUPPORTED_Q_HEADS": frozenset((8, 12, 64, 96)),
@@ -111,6 +118,8 @@ def test_selection_keeps_reader_page_and_interleave_consistent(page, interleave,
     }
     select = load(MLA, "_can_use_flashmla", scope, "AscendMLAImpl")
     impl = SimpleNamespace(
+        is_draft_cache=draft,
+        non_causal_multi_token_decode=noncausal,
         num_heads=12,
         num_kv_heads=1,
         kv_lora_rank=512,
@@ -129,23 +138,26 @@ def test_selection_keeps_reader_page_and_interleave_consistent(page, interleave,
     assert select(impl) is expected
 
 
-def allocate(page, kernel_page):
+def allocate(page, kernel_page, *, draft=False, padding_elements=32):
     # Real allocation/reshape functions; unrelated cache families are stubs.
     class Spec:
         pass
 
     spec = Spec()
     spec.block_size, spec.num_kv_heads, spec.dtype = page, 1, torch.bfloat16
-    spec.page_size_bytes = (page * 576 + 32) * 2
+    spec.page_size_bytes = (page * 576 + padding_elements) * 2
     raw = torch.full((3 * spec.page_size_bytes,), 0xA5, dtype=torch.uint8)
     config = SimpleNamespace(
         compilation_config=SimpleNamespace(
-            static_forward_context={"mla": SimpleNamespace(impl=SimpleNamespace(use_flashmla=True))}
+            static_forward_context={
+                "mla": SimpleNamespace(impl=SimpleNamespace(use_flashmla=True, is_draft_cache=draft))
+            }
         )
     )
     scope = {
         "torch": torch,
         "math": math,
+        "MLA_KERNEL_BLOCK_SIZE": 128,
         "get_dtype_size": lambda dtype: torch.empty((), dtype=dtype).element_size(),
         "get_current_vllm_config": lambda: config,
         "_is_dsv4_model": lambda _: False,
@@ -178,6 +190,16 @@ def allocate(page, kernel_page):
     return cache, raw
 
 
+def test_c8_draft_exposes_native_128_pages_from_shared_manager_blocks():
+    cache, raw = allocate(1664, 128, draft=True, padding_elements=0)
+    assert cache.shape == (39, 128, 1, 576)
+    assert cache.stride(0) == 128 * 576 and cache.data_ptr() == raw.data_ptr()
+    manager = raw.view(torch.bfloat16).view(3, 1664, 1, 576)
+    for slot in (0, 127, 128, 1663, 1664, 3327, 4991):
+        cache[slot // 128, slot % 128].fill_(slot)
+        torch.testing.assert_close(manager[slot // 1664, slot % 1664], torch.full((1, 576), slot, dtype=torch.bfloat16))
+
+
 @pytest.mark.parametrize("page", [512, 768, 896])
 def test_allocator_rejects_128_split_of_native_flashmla_page(page):
     with pytest.raises(ValueError, match="requires its native"):
@@ -201,6 +223,7 @@ def test_current_rows_scatter_from_128_workspace_to_native_page(page):
         "torch": torch,
         "FLASHMLA_BLOCK_SIZE": 128,
         "MLAPO_MAX_SUPPORTED_TOKENS": 1024,
+        "MLAPO_MAX_CACHE_BLOCK_SIZE": 1024,
         "cdiv": lambda a, b: (a + b - 1) // b,
     }
     impl = SimpleNamespace(

@@ -11,6 +11,7 @@ from vllm.logger import logger
 from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.kimi_c8_static import pa_nz_storage_view
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_graph_params,
@@ -81,6 +82,8 @@ class AscendV2KVBlockZeroer(KVBlockZeroer):
                     elif isinstance(kv_cache, (tuple, list)) and component_id < len(kv_cache):
                         component = kv_cache[component_id]
                     if component is not None:
+                        if getattr(group.kv_cache_spec, "static_fp8_pa_nz", False):
+                            component = pa_nz_storage_view(component)
                         layer_names.append(layer_name)
                         component_context[layer_name] = SimpleNamespace(kv_cache=component)
                 if layer_names:

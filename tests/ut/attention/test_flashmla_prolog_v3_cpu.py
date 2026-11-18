@@ -21,7 +21,9 @@ def load(path, name, scope, owner=None):
         for node in nodes
         if isinstance(node, ast.Assign)
         and any(
-            isinstance(target, ast.Name) and target.id == "PROLOG_V3_SUPPORTED_INPUT_SIZES" for target in node.targets
+            isinstance(target, ast.Name)
+            and target.id in ("PROLOG_V3_SUPPORTED_INPUT_SIZES", "MLA_KERNEL_BLOCK_SIZE", "MLAPO_MAX_CACHE_BLOCK_SIZE")
+            for target in node.targets
         )
     ]
     if owner:

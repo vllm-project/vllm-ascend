@@ -114,3 +114,35 @@ def test_qfa_strided_scales_match_contiguous_reference(query_tokens, ratio):
     for cache in caches[:3]:
         assert (cache[2 * ratio :].view(torch.uint8) == 0).all()
     assert (backing[:128] == 91).all() and (backing[-256:] == 91).all()
+
+
+def test_mla_prolog_private_split_preserves_loaded_nz_projection():
+    from vllm_ascend.attention.mla_v1 import AscendMLAImpl
+    from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+
+    device = torch.device("npu")
+    source = (
+        torch.arange(128 * 192, device=device).remainder(13).to(torch.uint8).view(torch.float8_e4m3fn).reshape(128, 192)
+    )
+    loaded = torch_npu.npu_format_cast(source, 29, customize_dtype=torch_npu.float8_e4m3fn)
+    quant = SimpleNamespace(quant_method=object.__new__(AscendW8A8MXFP8DynamicLinearMethod))
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl._kimi_c8_enabled = True
+    impl.q_lora_rank, impl.num_heads, impl.head_padding = 64, 1, 0
+    impl.q_a_layernorm = impl.kv_a_layernorm = object()
+    impl.fused_qkv_a_proj = SimpleNamespace(
+        weight=loaded, weight_scale=torch.full((2, 192, 2), 127, device=device, dtype=torch.uint8), quant_method=quant
+    )
+    impl.q_proj = SimpleNamespace(
+        weight=torch.zeros(64, 192, device=device, dtype=torch.float8_e4m3fn),
+        weight_scale=torch.full((1, 192, 2), 127, device=device, dtype=torch.uint8),
+        quant_method=quant,
+        _chunk_size=0,
+    )
+    impl.mlapo_W_UK_T = torch.ones(1, 128, 64, device=device, dtype=torch.bfloat16)
+    address = loaded.data_ptr()
+    prepared = impl._build_prolog_v3_weights()
+    for key, expected in (("weight_dq", source[:, :64]), ("weight_dkv_kr", source[:, 64:])):
+        actual = torch_npu.npu_format_cast(prepared[key], 2, customize_dtype=torch_npu.float8_e4m3fn)
+        assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+    assert loaded.data_ptr() == address and torch_npu.get_npu_format(loaded) == 29

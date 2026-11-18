@@ -232,6 +232,9 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                             worker_metadata.block_lens[local_layer_index],
                             worker_metadata.block_shapes[local_layer_index],
                             worker_metadata.block_size_scales[local_layer_index],
+                            worker_metadata.kimi_c8_contracts[local_layer_index]
+                            if worker_metadata.kimi_c8_contracts
+                            else None,
                         )
                         previous_signature = layer_signature_by_name.get(layer_name)
                         if previous_signature is not None and previous_signature != layer_signature:
@@ -242,6 +245,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                                 "block_lens",
                                 "block_shapes",
                                 "block_size_scales",
+                                "kimi_c8_contracts",
                             )
                             mismatched_layer_fields = [
                                 field_name
@@ -264,6 +268,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             block_lens: list[list[int]] = []
             block_shapes: list[list[tuple[int, ...]]] = []
             block_size_scales: list[list[int]] = []
+            kimi_c8_contracts: list[tuple[str, float] | None] = []
             for layer_name in layer_names:
                 worker_metadata, local_layer_index = layer_source_by_name[layer_name]
                 layer_block_sizes.append(worker_metadata.layer_block_sizes[local_layer_index])
@@ -272,6 +277,9 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 block_lens.append(worker_metadata.block_lens[local_layer_index])
                 block_shapes.append(worker_metadata.block_shapes[local_layer_index])
                 block_size_scales.append(worker_metadata.block_size_scales[local_layer_index])
+                kimi_c8_contracts.append(
+                    worker_metadata.kimi_c8_contracts[local_layer_index] if worker_metadata.kimi_c8_contracts else None
+                )
 
             layer_index_by_name = {layer_name: layer_index for layer_index, layer_name in enumerate(layer_names)}
             metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata] = {}
@@ -307,6 +315,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 block_shapes=block_shapes,
                 block_size_scales=block_size_scales,
                 metadata_by_pcp_rank=metadata_by_pcp_rank,
+                kimi_c8_contracts=kimi_c8_contracts,
             )
         return merged
 
@@ -588,6 +597,13 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         if params is not None and params.get("do_remote_prefill"):
             token_ids = request.prompt_token_ids or []
             actual = self._state_prefill_token_count(len(token_ids))
+            remote_tokens = params.get("remote_num_prompt_tokens")
+            if getattr(self, "_kimi_c8_enabled", False) and remote_tokens is not None:
+                if not isinstance(remote_tokens, int) or remote_tokens < 0:
+                    raise ValueError("Mooncake remote_num_prompt_tokens must be a non-negative integer")
+                # A consumer must never claim positions absent from the
+                # published producer state, including mixed-version handoffs.
+                actual = min(actual, remote_tokens)
             params["num_computed_tokens"] = num_computed_tokens
             count = max(actual - num_computed_tokens, 0)
             if count > 0:

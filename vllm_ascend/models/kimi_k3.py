@@ -86,7 +86,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend import envs as ascend_envs
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, is_kimi_c8_config
 from vllm_ascend.ascend_forward_context import register_kimi_moe_quant_type
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -588,6 +588,9 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
         attention_layer.impl.scale = float(self.scaling)
         attention_layer.impl.rotary_emb = rotary_emb
         attention_layer.impl.use_mla_rope = use_rope
+        if getattr(attention_layer.impl, "is_draft_cache", False):
+            attention_layer.impl.non_causal_multi_token_decode = non_causal_multi_token_decode
+            attention_layer.impl.use_flashmla = attention_layer.impl._can_use_flashmla()
 
     @property
     def _attention_layer(self):
@@ -608,6 +611,10 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
     @property
     def kv_cache(self):
         return self._attention_layer.kv_cache
+
+    @kv_cache.setter
+    def kv_cache(self, value):
+        self._attention_layer.kv_cache = value
 
     @property
     def kv_cache_dtype(self):
@@ -1006,6 +1013,21 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
 
         world_size = get_tensor_model_parallel_world_size()
         assert config.num_attention_heads % world_size == 0, "num_attention_heads must be divisible by world_size"
+        if is_kimi_c8_config(vllm_config):
+            self._bind_c8_metadata_prelaunch()
+
+    def _bind_c8_metadata_prelaunch(self) -> None:
+        # Bind once; launch inside KDA's existing eager-break, never traced Python.
+        first_kda = None
+        for layer in self.layers:
+            attention = getattr(layer, "self_attn", None)
+            if isinstance(attention, AscendKimiK3DeltaAttention) and first_kda is None:
+                first_kda = attention
+            impl = getattr(attention, "impl", None)
+            if getattr(impl, "kimi_c8_mode", False):
+                if first_kda is not None:
+                    first_kda._kimi_c8_metadata_prelaunch = impl._prelaunch_kimi_c8_metadata
+                return
 
     def _cache_aux_pp_layout(self) -> None:
         super()._cache_aux_pp_layout()
@@ -1312,7 +1334,6 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfEx
         CUDA RecoverSSM records). ReplaySSM is an Ascend-only ABI, so its
         three page records must be included here before KV cache allocation.
         """
-        hf_config = vllm_config.model_config.hf_config
         base = MambaStateDtypeCalculator.kda_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
@@ -1328,11 +1349,7 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfEx
     def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
         hf_config = vllm_config.model_config.hf_config
         tp_size = vllm_config.parallel_config.tensor_parallel_size
-        num_spec = (
-            vllm_config.speculative_config.num_speculative_tokens
-            if vllm_config.speculative_config
-            else 0
-        )
+        num_spec = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
         base = MambaStateShapeCalculator.kda_state_shape(
             tp_size,
             hf_config.linear_attn_config["num_heads"],
@@ -1515,17 +1532,13 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
         page-size assertion would fire.
         """
         text_config = vllm_config.model_config.hf_config.text_config
-        return AscendKimiLinearForCausalLM.get_mamba_state_dtype_from_config(
-            vllm_config.with_hf_config(text_config)
-        )
+        return AscendKimiLinearForCausalLM.get_mamba_state_dtype_from_config(vllm_config.with_hf_config(text_config))
 
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
         """Delegate to the Ascend text model; see the dtype hook above."""
         text_config = vllm_config.model_config.hf_config.text_config
-        return AscendKimiLinearForCausalLM.get_mamba_state_shape_from_config(
-            vllm_config.with_hf_config(text_config)
-        )
+        return AscendKimiLinearForCausalLM.get_mamba_state_shape_from_config(vllm_config.with_hf_config(text_config))
 
     def process_weights_after_loading(self) -> None:
         # The loader invokes only the outer model-level hook for VL models.

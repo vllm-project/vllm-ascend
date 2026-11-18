@@ -3,7 +3,7 @@
 """Metadata types for Mooncake KV transfer connectors."""
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
@@ -35,9 +35,12 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     block_size_scales: list[list[int]]
     local_ip: str = ""
     handshake_port: int = 0
+    kimi_c8_contracts: list[tuple[str, float] | None] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         num_layers = len(self.layer_names)
+        if self.kimi_c8_contracts and len(self.kimi_c8_contracts) != num_layers:
+            raise ValueError("Mooncake kimi_c8_contracts must contain one contract per layer")
         per_layer_fields: tuple[tuple[str, Sequence[object]], ...] = (
             ("layer_block_sizes", self.layer_block_sizes),
             ("group_indices", self.group_indices),
@@ -105,6 +108,7 @@ class MooncakePPTransferMetadata:
     block_shapes: list[list[tuple[int, ...]]]
     block_size_scales: list[list[int]]
     metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata]
+    kimi_c8_contracts: list[tuple[str, float] | None] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

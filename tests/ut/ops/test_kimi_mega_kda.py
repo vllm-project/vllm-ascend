@@ -11,7 +11,7 @@ import __future__
 
 import ast
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from inspect import Parameter, signature
 from pathlib import Path
 from types import SimpleNamespace
@@ -123,6 +123,7 @@ def runtime():
     methods = {
         "forward",
         "_plan_mega_kda",
+        "_get_kda_forward_metadata",
         "_mega_cache_supported",
         "_build_mega_weights",
         "_prepare_mega_weights",
@@ -318,10 +319,19 @@ def test_replay_inputs_are_prepared_once_per_metadata(runtime, monkeypatch):
     assert first.accepted_tokens.data_ptr() == second.accepted_tokens.data_ptr()
 
 
-@pytest.mark.parametrize("gather_input,fallback", [(False, False), (True, False), (True, True)])
-def test_commit_and_all_gather_event_order(runtime, monkeypatch, gather_input, fallback):
+@pytest.mark.parametrize(
+    "entry,gather_input,fallback",
+    [
+        ("op", False, False),
+        ("op", True, False),
+        ("op", True, True),
+        ("eager", False, False),
+        ("output_op", False, False),
+    ],
+)
+def test_commit_and_all_gather_event_order(runtime, monkeypatch, entry, gather_input, fallback):
     """Commit must run once after KV readiness and join before MegaKDA."""
-    _definitions("vllm_ascend/ops/kimi_kda.py", {"_kimi_kda"}, runtime)
+    _definitions("vllm_ascend/ops/kimi_kda.py", {"_kimi_kda", "_kimi_kda_with_output"}, runtime)
     timeline = MagicMock()
     main, auxiliary = timeline.main, timeline.auxiliary
     main.record_event.return_value = "ready"
@@ -335,6 +345,7 @@ def test_commit_and_all_gather_event_order(runtime, monkeypatch, gather_input, f
     _, hidden = _plan(runtime, layer, metadata)
     metadata.num_prefills = int(fallback)
     runtime["get_forward_context"].return_value.no_compile_layers = {layer.prefix: layer}
+    layer._kimi_c8_metadata_prelaunch = timeline.prelaunch
     timeline.attach_mock(runtime["wait_for_kv_layer_from_connector"], "kv_ready")
     timeline.attach_mock(layer._commit_operator, "commit")
     timeline.attach_mock(layer._mega_operator, "mega")
@@ -342,23 +353,36 @@ def test_commit_and_all_gather_event_order(runtime, monkeypatch, gather_input, f
     runtime["sp_all_gather"] = timeline.gather
     timeline.gather.return_value = hidden
     layer._mega_operator.return_value = torch.zeros_like(hidden)
-    runtime["_kimi_kda"](hidden[:16] if gather_input else hidden, torch.arange(32), layer.prefix, 32, gather_input)
+    if entry == "eager":
+        layer.forward(hidden, torch.arange(32))
+    elif entry == "output_op":
+        runtime["_kimi_kda_with_output"](hidden, torch.arange(32), torch.empty_like(hidden), layer.prefix)
+    else:
+        runtime["_kimi_kda"](hidden[:16] if gather_input else hidden, torch.arange(32), layer.prefix, 32, gather_input)
     names = [entry[0] for entry in timeline.mock_calls]
     if fallback:
-        assert names == ["gather", "fallback"]
+        assert names == ["prelaunch", "gather", "fallback"]
         runtime["npu_stream_switch"].assert_not_called()
         return
     if gather_input:
         assert names == [
-            "kv_ready", "main.record_event", "auxiliary.wait_event", "commit",
-            "auxiliary.record_event", "gather", "main.wait_event", "mega",
+            "prelaunch",
+            "kv_ready",
+            "main.record_event",
+            "auxiliary.wait_event",
+            "commit",
+            "auxiliary.record_event",
+            "gather",
+            "main.wait_event",
+            "mega",
         ]
         auxiliary.wait_event.assert_called_once_with("ready")
         main.wait_event.assert_called_once_with("done")
         runtime["npu_stream_switch"].assert_called_once_with(auxiliary, enabled=True)
     else:
-        assert names == ["kv_ready", "commit", "mega"]
+        assert names == ["prelaunch", "kv_ready", "commit", "mega"]
         runtime["npu_stream_switch"].assert_called_once_with(None, enabled=False)
+    timeline.prelaunch.assert_called_once_with({layer.prefix: metadata})
     assert layer._commit_operator.call_args.kwargs["num_accepted_tokens"].tolist() == [0, 2, 2, 2]
     assert layer._mega_operator.call_args.kwargs["conv_num_accepted_tokens"].tolist() == [1, 2, 2, 2]
 
@@ -623,3 +647,66 @@ def test_pd_prefill_worker_skips_mega_operand_build(runtime):
     assert layer.in_proj_qkvgfab.weight.numel() > 0
     assert layer.o_proj.weight.numel() > 0
     assert not layer._mega_nd_released
+
+
+@pytest.mark.parametrize(
+    "mode,enabled,producer,consumer,prepared,expected",
+    [
+        ("C8", True, True, False, False, 0),
+        ("C16", True, True, False, False, 0),
+        ("C8", True, False, True, True, 0),
+        ("C16", True, False, True, True, 0),
+        ("C8", True, False, True, False, 3),
+        ("C16", True, False, True, False, 3),
+        ("C8", False, False, True, True, 3),
+        ("C16", False, False, True, True, 3),
+        ("C8", True, False, False, True, 3),
+        ("C16", True, True, True, True, 3),
+    ],
+)
+def test_mega_spec_reservation_matches_existing_execution(mode, enabled, producer, consumer, prepared, expected):
+    @dataclass(frozen=True)
+    class Spec:
+        num_speculative_blocks: int = 3
+        layout: tuple = ("conv", "checkpoint", "replay_u", "replay_k", "replay_decay")
+
+    original = Spec()
+
+    class Base:
+        def get_kv_cache_spec(self, config):
+            return original
+
+    scope = {"Base": Base, "replace": replace}
+    _definitions(
+        "vllm_ascend/ops/kimi_kda.py",
+        {"AscendKimiK3DeltaAttention"},
+        scope,
+        methods={"get_kv_cache_spec", "get_state_shape"},
+        bases="Base",
+    )
+    kind = scope["AscendKimiK3DeltaAttention"]
+    layer, peer = kind(), kind()
+    layer.use_mega_kda_replayssm = enabled
+    layer._mega_pd_prefill_worker, layer._mega_pd_decode_worker = producer, consumer
+    layer._mega_weights = object()
+    peer._mega_weights = object() if prepared else None
+    config = SimpleNamespace(
+        additional_config={"mla_cache_mode": mode},
+        num_speculative_tokens=3,
+        compilation_config=SimpleNamespace(static_forward_context={"layer": layer, "peer": peer}),
+    )
+    actual = layer.get_kv_cache_spec(config)
+    assert actual.num_speculative_blocks == expected
+    assert actual.layout is original.layout and original.num_speculative_blocks == config.num_speculative_tokens == 3
+    if expected == 3:
+        assert actual is original
+
+
+def test_mega_plan_accepts_one_external_state_column(runtime):
+    layer = _attention(runtime, batch=8, spec_len=4)
+    layer.kv_cache = tuple(state[:9] for state in layer.kv_cache)
+    metadata = _metadata(batch=8, spec_len=4)
+    metadata.spec_state_indices_tensor = torch.arange(1, 9, dtype=torch.int32).reshape(8, 1)
+    plan, _ = _plan(runtime, layer, metadata)
+    assert plan is not None and plan.batch == 8 and plan.spec_len == 4
+    assert plan.conv_state_block_ids.tolist() == list(range(1, 9))

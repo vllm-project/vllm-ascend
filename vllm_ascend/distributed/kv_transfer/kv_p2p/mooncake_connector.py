@@ -2622,6 +2622,11 @@ class MooncakeConnectorWorker:
         self.num_blocks = self.kv_cache_config.num_blocks
         logger.info("num_blocks: %s", self.num_blocks)
         self.kv_caches = kv_caches
+        if any(getattr(self._get_layer_spec(name), "static_fp8_pa_nz", False) is True for name in kv_caches):
+            raise ValueError(
+                "Kimi static C8 requires MooncakeConnectorV2 or MooncakePullConnector; "
+                "V1 does not support padded PA_NZ pages"
+            )
         # Maps each KV cache group to its serialized group spec and physical
         # layer indices: {group_id: (group_spec, [layer_idx0, layer_idx1, ...])}.
         self.kv_group2layeridx = self._build_kv_group2layeridx()

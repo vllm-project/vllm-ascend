@@ -1,5 +1,5 @@
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import lcm
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, TypeVar
 
@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group
 from vllm.distributed.parallel_state import get_pcp_group
 from vllm.logger import logger
@@ -162,7 +163,7 @@ class AscendMLAAttention(MLAAttention):
     supports_pcp_dcp: ClassVar[bool] = True
 
     def get_attn_backend(self) -> type[AttentionBackend]:
-        if getattr(self.impl, "use_flashmla", False):
+        if getattr(self.impl, "use_flashmla", False) and not getattr(self.impl, "is_draft_cache", False):
             return AscendFlashMLABackend
         return super().get_attn_backend()
 
@@ -200,6 +201,7 @@ class ChunkedContextMetadata:
     chunk_seq_lens: torch.Tensor
     chunk_seq_lens_npu: torch.Tensor
     chunk_actual_seq_lengths_kv_list: list[list[int]]
+    starts_cpu: torch.Tensor | None = None
 
 
 @dataclass
@@ -290,6 +292,13 @@ class AscendMLAMetadata:
     pcp_cos: torch.Tensor | None = None
     pcp_sin: torch.Tensor | None = None
     external_flashmla: FlashMLADecode | None = None
+    # Preserve V2's persistent device inputs for C8 capture/replay. The
+    # existing seq_lens fields intentionally remain host metadata for FIA.
+    c8_global_seq_lens: torch.Tensor | None = None
+    c8_input_positions: torch.Tensor | None = None
+    c8_step_cache: dict = field(default_factory=dict)
+    c8_static_fp8: bool = False
+    c8_query_start_loc_cpu: torch.Tensor | None = None
 
     def __post_init__(self):
         pass
@@ -329,6 +338,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             metadata_cls if metadata_cls is not None else AscendMLAMetadata,
             supports_dcp_with_varlen,
         )
+        self.kimi_c8_static_fp8 = getattr(kv_cache_spec, "static_fp8_pa_nz", False) is True
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.pcp_enabled = self.pcp_size > 1
         self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
@@ -383,14 +393,18 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.seq_lens: torch.Tensor = None
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
         self.flashmla_state = None
-        flashmla_choices = {static_forward_context[name].impl.use_flashmla for name in layer_names}
+        flashmla_choices = (
+            {False}
+            if self.kimi_c8_static_fp8
+            else {static_forward_context[name].impl.use_flashmla for name in layer_names}
+        )
         if len(flashmla_choices) > 1:
             raise ValueError("MLA layers in one attention group must use the same decode backend")
         if layer_names:
             logger.info(
                 "MLA decode backend for group starting at %s: %s",
                 layer_names[0],
-                "FlashMLA" if True in flashmla_choices else "FIA",
+                "QuantFlashMLA" if self.kimi_c8_static_fp8 else "FlashMLA" if True in flashmla_choices else "FIA",
             )
         if True in flashmla_choices:
             impl = static_forward_context[layer_names[0]].impl
@@ -399,7 +413,9 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 device,
                 scheduler_config.max_num_seqs,
                 self.attn_mask_builder.get_splitfuse_attn_mask(),
-                cache_block_size=kv_cache_spec.block_size,
+                cache_block_size=MLA_KERNEL_BLOCK_SIZE
+                if getattr(impl, "is_draft_cache", False)
+                else kv_cache_spec.block_size,
             )
 
     def _build_external_flashmla(self, common_prefix_len, common, *, retain_for_graph: bool = False):
@@ -689,6 +705,18 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             block_tables=self.block_table,
             seq_lens=self.seq_lens,
             seq_lens_cpu=self.seq_lens,
+            c8_global_seq_lens=(
+                None
+                if not self.kimi_c8_static_fp8 or common_attn_metadata.seq_lens is None
+                else common_attn_metadata.seq_lens[: self.num_decodes]
+            ),
+            c8_input_positions=(
+                common_attn_metadata.positions[: common_attn_metadata.num_input_tokens]
+                if self.kimi_c8_static_fp8
+                else None
+            ),
+            c8_static_fp8=getattr(self, "kimi_c8_static_fp8", False),
+            c8_query_start_loc_cpu=query_start_loc_cpu if self.kimi_c8_static_fp8 else None,
         )
         if self.pcp_enabled:
             assert expanded_slot_mapping is not None
@@ -780,6 +808,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         return ChunkedContextMetadata(
             cu_seq_lens=self.cu_seq_lens_cpu.pin_memory().to(self.device, non_blocking=True),
             starts=chunk_starts.pin_memory().to(self.device, non_blocking=True),
+            starts_cpu=chunk_starts,
             seq_tot=self.chunk_seq_lens.sum(dim=1).tolist(),
             max_seq_lens=self.chunk_seq_lens.max(dim=1).values.tolist(),
             chunk_seq_lens=self.chunk_seq_lens,
@@ -969,6 +998,22 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         return attn_metadata
 
 
+def _get_c8_prefill_chunk_lengths_and_starts(chunked_context: "ChunkedContextMetadata", index: int):
+    """Return matching length/start vectors for the C8 history reader.
+
+    DCP stores global planning lengths separately from the rank-local padded
+    rows gathered into the local cache. The reader must consume the latter.
+    """
+    local_lengths = getattr(chunked_context, "padded_local_chunk_seq_lens", None)
+    if local_lengths is not None:
+        lengths = torch.as_tensor(local_lengths[index], dtype=torch.int64)
+    else:
+        lengths = torch.as_tensor(chunked_context.chunk_seq_lens[index], dtype=torch.int64)
+    starts_cpu = getattr(chunked_context, "starts_cpu", None)
+    starts = starts_cpu[index] if starts_cpu is not None else chunked_context.starts[index]
+    return lengths, starts
+
+
 class DecodeMLAPreprocessResult(NamedTuple):
     ql_nope: torch.Tensor | None = None
     q_pe: torch.Tensor | None = None
@@ -1071,14 +1116,30 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.is_draft_model = self.vllm_config.model_config.runner_type == "draft"
         self.enable_mlapo = not self.is_draft_model and enabling_mlapo(self.vllm_config)
 
+        self._kimi_c8_enabled = getattr(ascend_config, "mla_cache_mode", "C16") == "C8"
         self.layer_name = kwargs.get("layer_name")
-        self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
+        draft_prefixes = getattr(self.vllm_config, "_kimi_c8_draft_layer_prefixes", ())
+        is_draft_cache = any(
+            self.layer_name == prefix or (self.layer_name or "").startswith(prefix + ".") for prefix in draft_prefixes
+        )
+        is_draft_cache = self._kimi_c8_enabled and is_draft_cache
+        self.is_draft_cache = is_draft_cache
+        self.kimi_c8_mode = self._kimi_c8_enabled and not is_draft_cache
+        self.kimi_c8_static_fp8 = self.kimi_c8_mode
+        if self.kimi_c8_mode:
+            # Recipe C8 uses W8A8_MXFP8 projection weights plus a separate
+            # runtime MLA KV descale. It does not require the legacy FAKQuant
+            # fa_q/fa_k/fa_v checkpoint scheme.
+            self.fa_quant_layer = False
+        else:
+            self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
         self.dtype = kv_cache_dtype_str_to_dtype(
             self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
         )
         # may be a quantization rollback layer.
         if not self.fa_quant_layer:
             self.dtype = self.vllm_config.model_config.dtype
+        self._validate_kimi_c8_layer()
         # For models whose num_heads is not a power of 2 (e.g., GLM-4.7-Flash
         # with 20 heads), ascend attention ops require padding heads to the
         # next power of 2.
@@ -1090,8 +1151,27 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.use_flashmla: bool = self._can_use_flashmla()
         self._flashmla_writer_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
+    def _validate_kimi_c8_layer(self):
+        if not getattr(self, "kimi_c8_mode", False):
+            return
+        if (self.kv_lora_rank, self.qk_rope_head_dim, self.num_kv_heads) != (512, 64, 1) or self.use_mla_rope:
+            raise ValueError("Kimi static C8 requires no-RoPE MLA geometry 512/64 with one KV head")
+        from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+
+        if self.fused_qkv_a_proj is None or self.q_proj is None:
+            raise ValueError("Kimi static C8 requires q/kv projection modules")
+        for name, projection in (("fused_qkv_a_proj", self.fused_qkv_a_proj), ("q_proj", self.q_proj)):
+            scheme = getattr(getattr(projection, "quant_method", None), "quant_method", None)
+            if type(scheme) is not AscendW8A8MXFP8DynamicLinearMethod:
+                raise ValueError(
+                    "Kimi static C8 requires W8A8_MXFP8 projection weights; "
+                    f"{name} has {type(scheme).__name__ if scheme is not None else None}"
+                )
+
     def _can_use_flashmla(self) -> bool:
         config = self.vllm_config
+        if getattr(self, "kimi_c8_mode", False):
+            return False
         if not getattr(config, "use_v2_model_runner", False):
             return False
         if config.speculative_config is not None and config.speculative_config.method != "dspark":
@@ -1112,12 +1192,21 @@ class AscendMLAImpl(MLAAttentionImpl):
         # group width is what the operator must support under DCP.
         if self.pcp_enabled or self.num_heads * dcp_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
             return False
-        # The native reader uses the configured manager page. DCP metadata
-        # must describe that same page size (128-aligned, up to 1024).
-        cache_block_size = config.cache_config.block_size
+        # C8 draft keeps its 128-token reader under the shared manager table.
+        # Causal DCP metadata still requires a matching native page/interleave.
+        cache_block_size = (
+            MLA_KERNEL_BLOCK_SIZE if getattr(self, "is_draft_cache", False) else config.cache_config.block_size
+        )
         if cache_block_size not in FLASHMLA_SUPPORTED_BLOCK_SIZES:
             return False
-        if dcp_size > 1 and config.parallel_config.cp_kv_cache_interleave_size != cache_block_size:
+        noncausal_draft = getattr(self, "is_draft_cache", False) and getattr(
+            self, "non_causal_multi_token_decode", False
+        )
+        if (
+            dcp_size > 1
+            and config.parallel_config.cp_kv_cache_interleave_size != cache_block_size
+            and not noncausal_draft
+        ):
             return False
         # Only connectors implementing the shared-page contract are eligible;
         # producer and consumer must still select matching cache layouts.
@@ -1150,6 +1239,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 for k in attn_metadata[0]
                 if getattr(attn_metadata[0][k], "decode", None) is not None
                 and getattr(attn_metadata[0][k], "external_flashmla", None) is None
+                and getattr(attn_metadata[0][k], "c8_static_fp8", False) is not True
             ]
         else:
             graph_params = get_graph_params()
@@ -1159,6 +1249,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 for k in attn_metadata
                 if getattr(attn_metadata[k], "decode", None) is not None
                 and getattr(attn_metadata[k], "external_flashmla", None) is None
+                and getattr(attn_metadata[k], "c8_static_fp8", False) is not True
             ]
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.
@@ -1304,6 +1395,10 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def _fused_preprocess_type(self) -> PreprocessType | None:
         """Defer MXFP8 projection NZ conversion to the enabled FP8 prolog."""
+        if getattr(self, "kimi_c8_mode", False):
+            # TP-local C8 projections use native Linear kernels. Their normal
+            # NZ preparation must remain active, rather than being deferred.
+            return None
         if not self.support_fp8_attention or not (self.enable_mlapo or self.fa_quant_layer):
             return None
         if self.fused_qkv_a_proj is None or self.q_proj is None:
@@ -1358,6 +1453,41 @@ class AscendMLAImpl(MLAAttentionImpl):
             W_UK.permute(1, 2, 0).contiguous(),  # (L, N, P) -> (N, P, L)
             prefer_copy=True,
         )
+        if self.fa_quant_layer and hasattr(self, "vllm_config"):
+            self._load_fa_quant_scales()
+        if getattr(self, "kimi_c8_mode", False):
+            self.use_flashmla = False
+            graph_mode = getattr(self.vllm_config.compilation_config, "cudagraph_mode", None)
+            if graph_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY):
+                raise ValueError("Kimi C8 supports eager or FULL_DECODE_ONLY Graph mode")
+            if self.pcp_enabled:
+                raise ValueError("Kimi C8 requires PCP=1")
+            self.kimi_c8_graph = graph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+            # The Kimi recipe uses a fixed per-tensor KV descale of one.
+            scale = torch.ones(1, dtype=torch.float32, device=self.W_UV.device)
+            # Preserve the captured scale address across weight reloads.
+            current_scale = getattr(self, "fak_descale_float", None)
+            if current_scale is not None:
+                current_scale.copy_(scale)
+                scale = current_scale
+            self.fak_descale_float = scale
+            self.fak_descale_reciprocal = scale.reciprocal()
+            self.quant_kscale = scale.reciprocal().expand(1, self.kv_lora_rank)
+            self.kimi_c8_static_fp8 = True
+        if getattr(self, "kimi_c8_static_fp8", False):
+            from vllm_ascend.attention.kimi_c8_graph import C8MetadataEvents
+
+            self.mlapo_W_UK_T = self.W_UK_T
+            self.enable_mlapo = False
+            # Refresh native inputs; TP-local Prolog repacks into persistent
+            # captured buffers during same-geometry weight reloads.
+            self._prolog_v3_weights = None
+            from vllm_ascend.attention.kimi_c8_decode import prepare_kimi_c8_prolog_runtime
+
+            prepare_kimi_c8_prolog_runtime(self)
+            if getattr(self, "_kimi_c8_metadata_events", None) is None:
+                self._kimi_c8_metadata_events = C8MetadataEvents.for_model(self.vllm_config, self.W_UV.device)
+            return
         if self.enable_mlapo:
             layer_quant_method = None if self.fused_qkv_a_proj is None else self.fused_qkv_a_proj.quant_method
             if layer_quant_method is None or isinstance(layer_quant_method, UnquantizedLinearMethod):
@@ -1470,6 +1600,303 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.quant_kscale = layer.quant_kscale
         self.fak_descale_float = layer.fak_descale_float
         self.fak_descale_reciprocal = layer.fak_descale_reciprocal
+        self.kimi_c8_static_fp8 = getattr(layer, "kimi_c8_static_fp8", False) is True
+        self.kimi_c8_graph = self.kimi_c8_static_fp8 and (
+            getattr(self.vllm_config.compilation_config, "cudagraph_mode", None) == CUDAGraphMode.FULL_DECODE_ONLY
+        )
+
+    def _kimi_c8_physical_slots(self, slots):
+        from vllm_ascend.attention.kimi_c8_static import map_pa_nz_slots
+
+        manager_size = getattr(self, "kimi_c8_manager_block_size", None)
+        if manager_size is None:
+            return slots
+        return map_pa_nz_slots(slots, manager_size, self.kimi_c8_page_stride_bytes)
+
+    def _kimi_c8_physical_table(self, table):
+        from vllm_ascend.attention.kimi_c8_static import map_pa_nz_kernel_block_table
+
+        manager_size = getattr(self, "kimi_c8_manager_block_size", None)
+        if manager_size is None:
+            return table
+        return map_pa_nz_kernel_block_table(table, manager_size, self.kimi_c8_page_stride_bytes)
+
+    def _prelaunch_kimi_c8_metadata(self, per_layer_metadata):
+        metadata = per_layer_metadata.get(self.layer_name)
+        if metadata is None or metadata.num_prefills or not 0 < metadata.num_decode_tokens <= 16 * metadata.num_decodes:
+            return
+        if getattr(metadata, "_c8_metadata_prelaunched", None) == self.layer_name:
+            return
+        self._prepare_kimi_c8_step(metadata, start_step=True)
+        metadata._c8_metadata_prelaunched = self.layer_name
+
+    def _prepare_kimi_c8_step(self, attn_metadata, *, start_step=False):
+        """Launch one schedule per matching MLA geometry in a model step."""
+        from cann_ops_transformer.ops import quant_flash_mla_metadata
+
+        from vllm_ascend.attention.kimi_c8_dcp import build_c8_dcp_query_plan
+        from vllm_ascend.attention.kimi_c8_graph import build_c8_graph_query_plan, prepare_c8_graph_metadata
+
+        if start_step:
+            layer_name = self.layer_name
+            if getattr(attn_metadata, "_c8_first_layer", None) == layer_name:
+                attn_metadata.c8_step_cache.clear()
+            elif not hasattr(attn_metadata, "_c8_first_layer"):
+                attn_metadata._c8_first_layer = layer_name
+        decode = attn_metadata.decode
+        is_graph = getattr(self, "kimi_c8_graph", False) and getattr(attn_metadata, "num_prefills", 0) == 0
+        world, rank = (self.dcp_size, self.dcp_rank) if self.dcp_enabled else (1, 0)
+        interleave = self.vllm_config.parallel_config.cp_kv_cache_interleave_size if self.dcp_enabled else 128
+        heads = self.num_heads * world
+        tokens = attn_metadata.num_decode_tokens
+        requests = attn_metadata.num_decodes
+        table = decode.block_table
+        if is_graph:
+            host_identity = ()
+        else:
+            seq_lens_list = decode.seq_lens_list
+            if seq_lens_list is None or len(seq_lens_list) < requests:
+                seq_lens_list = getattr(attn_metadata, "seq_lens_cpu", None)
+                if seq_lens_list is None:
+                    seq_lens_list = getattr(attn_metadata, "seq_lens", None)
+            if seq_lens_list is None or len(seq_lens_list) < requests:
+                raise ValueError("C8 sequence lengths must cover every decode request")
+            if isinstance(seq_lens_list, torch.Tensor):
+                seq_lens_list = seq_lens_list[:requests].detach().cpu().tolist()
+            starts_cpu = getattr(attn_metadata, "c8_query_start_loc_cpu", None)
+            if starts_cpu is not None:
+                query_ends = starts_cpu[1 : requests + 1].tolist()
+            else:
+                query_ends = decode.actual_seq_lengths_q
+                if query_ends is None or len(query_ends) < requests:
+                    starts = attn_metadata.query_start_loc
+                    query_ends = starts[1 : requests + 1].detach().cpu().tolist()
+                else:
+                    query_ends = query_ends[:requests]
+            if len(query_ends) != requests:
+                raise ValueError("C8 query offsets must cover every decode request")
+            host_identity = (tuple(seq_lens_list[:requests]), tuple(query_ends[:requests]))
+        cache = getattr(attn_metadata, "c8_step_cache", None)
+        if cache is None:
+            cache = attn_metadata.c8_step_cache = {}
+        identity = (is_graph, host_identity)
+        if getattr(attn_metadata, "_c8_step_identity", None) != identity:
+            cache.clear()
+            attn_metadata._c8_step_identity = identity
+        key = (
+            tokens,
+            requests,
+            heads,
+            world,
+            rank,
+            interleave,
+            table.data_ptr(),
+            tuple(table.shape),
+            getattr(self, "kimi_c8_manager_block_size", None),
+            getattr(self, "kimi_c8_page_stride_bytes", None),
+        )
+        if key in cache:
+            return cache[key]
+        physical_table = self._kimi_c8_physical_table(table)
+        if is_graph:
+            positions = attn_metadata.c8_input_positions
+            seq_lens = attn_metadata.c8_global_seq_lens
+            if positions is None:
+                positions = getattr(decode, "input_positions", None)
+            if positions is None or positions.numel() < tokens:
+                raise RuntimeError("C8 decode Graph requires runner device positions for every token")
+            # Buffer capacity and padded table rows are not the request count.
+            # All inputs must describe exactly the same B decode requests.
+            query_starts = attn_metadata.query_start_loc[: requests + 1]
+            if query_starts.numel() != requests + 1:
+                raise ValueError("C8 Graph runner query offsets do not cover the decode requests")
+            if seq_lens is None or seq_lens.numel() < requests:
+                # Derive exact lengths from runner-owned device inputs. These
+                # operations execute on every replay, including padding rows.
+                ends = query_starts[1:].long()
+                begins = query_starts[:-1]
+                last = (ends - 1).clamp(0, positions.numel() - 1)
+                seq_lens = torch.where(ends > begins, positions[last] + 1, 0).to(torch.int32)
+            plan = build_c8_graph_query_plan(
+                query_starts,
+                seq_lens[:requests],
+                physical_table[:requests],
+                world_size=world,
+                rank=rank,
+                interleave_size=interleave,
+            )
+        else:
+            plan = build_c8_dcp_query_plan(
+                host_identity[0],
+                [0, *host_identity[1]],
+                physical_table,
+                world_size=world,
+                rank=rank,
+                interleave_size=interleave,
+            )
+        producer = getattr(self, "_kimi_c8_metadata_events", None)
+        metadata = (
+            producer.start(plan, quant_flash_mla_metadata, num_heads_q=heads)
+            if producer is not None
+            else prepare_c8_graph_metadata(plan, quant_flash_mla_metadata, num_heads_q=heads)
+        )
+        result = (plan, metadata, producer)
+        cache[key] = result
+        return result
+
+    def _run_kimi_c8_decode(self, hidden_states, kv_cache, attn_metadata, *, projection):
+        """Quantized rank-local attention; merge DCP contributions before V up-projection."""
+        from vllm_ascend.attention.kimi_c8_quant import run_quant_mla
+        from vllm_ascend.attention.kimi_c8_static import pa_nz_prolog_view
+
+        if not getattr(self, "kimi_c8_static_fp8", False):
+            raise RuntimeError("Kimi C8 decode requested without static C8 marker")
+        if not isinstance(kv_cache, tuple) or len(kv_cache) != 1:
+            raise RuntimeError("Kimi C8 decode requires one raw PA_NZ cache tensor")
+        raw = kv_cache[0]
+        pa_nz_prolog_view(raw)  # Validate the shared physical geometry without copying.
+        decode = attn_metadata.decode
+        if decode is None:
+            raise RuntimeError("Kimi C8 decode requires query offsets and sequence lengths")
+        plan, metadata, producer = self._prepare_kimi_c8_step(attn_metadata)
+        if projection is None:
+            raise RuntimeError("C8 decode requires a prepared projection")
+        q, q_descale = projection if isinstance(projection, tuple) else (projection.q, projection.q_descale)
+        if q is None or q_descale is None:
+            raise RuntimeError("C8 decode projections must contain Q and its descale")
+        if self.dcp_enabled:
+            # HCCL exchanges bytes rather than relying on float8 collective support.
+            q = self._dcp_all_gather_fragments(q.view(torch.uint8), dim=1)[0].view(torch.float8_e4m3fn)
+            q_descale = self._dcp_all_gather_fragments(q_descale.unsqueeze(-1), dim=1)[0].squeeze(-1)
+
+        if producer is not None:
+            metadata = producer.wait(metadata)
+        record_attention_compute_start()
+        out, lse = run_quant_mla(
+            q,
+            raw.view(torch.float8_e4m3fn),
+            q_descale,
+            self.fak_descale_float,
+            plan.block_table,
+            plan.cache_seqlens,
+            plan.cu_seqlens_q,
+            plan.seqused_q,
+            metadata,
+            max_seqlen_q=-1,
+            max_seqlen_kv=plan.max_seqlen_kv,
+            softmax_scale=self.scale,
+            mask_mode=0 if self.dcp_enabled else 3,
+            attn_mask=None if self.dcp_enabled else decode.attn_mask,
+        )
+        if self.dcp_enabled:
+            out = self._merge_dcp_attention_output(out, lse.transpose(0, 1).unsqueeze(-1).contiguous())
+        return self._v_up_proj_batch_major(out), lse
+
+    def _forward_kimi_c8(self, layer_name, hidden_states, kv_cache, attn_metadata, output):
+        from vllm_ascend.attention.kimi_c8_decode import project_and_write_kimi_c8
+        from vllm_ascend.attention.kimi_c8_static import pa_nz_prolog_view
+
+        if not isinstance(kv_cache, tuple) or len(kv_cache) != 1:
+            raise RuntimeError("Kimi C8 requires one raw PA_NZ cache tensor")
+        if self.pcp_enabled:
+            raise RuntimeError("Kimi C8 currently supports PCP=1; use DCP for decode KV sharding")
+        raw = kv_cache[0]
+        pa_nz_prolog_view(raw)
+        actual, num_decode = attn_metadata.num_actual_tokens, attn_metadata.num_decode_tokens
+        if actual == 0:
+            return output.zero_()
+        cos = sin = None
+        if self.use_mla_rope:
+            rows = []
+            if num_decode:
+                rows.append((attn_metadata.decode, num_decode))
+            if actual > num_decode:
+                rows.append((attn_metadata.prefill, actual - num_decode))
+            cos = torch.cat([metadata.cos[:length] for metadata, length in rows])
+            sin = torch.cat([metadata.sin[:length] for metadata, length in rows])
+        wait_for_kv_layer_from_connector(layer_name)
+        hook = getattr(self, "layerwise_kv_cache_hook", None)
+        if hook is not None:
+            hook.wait_for_layer(layer_name)
+        if num_decode:
+            prelaunched = getattr(attn_metadata, "_c8_metadata_prelaunched", None) == layer_name
+            self._prepare_kimi_c8_step(attn_metadata, start_step=not prelaunched)
+            if prelaunched:
+                attn_metadata._c8_metadata_prelaunched = None
+        is_graph = getattr(self, "kimi_c8_graph", False) and actual == num_decode
+        from vllm_ascend.attention.kimi_c8_decode import project_and_write_kimi_c8_prolog
+
+        slots = self._kimi_c8_physical_slots(attn_metadata.slot_mapping[:actual])
+        projection = project_and_write_kimi_c8_prolog(
+            self,
+            hidden_states[:actual],
+            raw,
+            slots,
+            num_decode_tokens=num_decode,
+            is_graph=is_graph,
+        )
+        if projection is None:
+            writer = None
+            if is_graph:
+                from vllm_ascend.device.kimi_c8_cache_write import write_static_fp8_cache_graph
+
+                writer = write_static_fp8_cache_graph
+            projection = project_and_write_kimi_c8(
+                self,
+                hidden_states[:actual],
+                raw,
+                slots,
+                self.fak_descale_float,
+                num_decode_tokens=num_decode,
+                cos=cos,
+                sin=sin,
+                cache_writer=writer,
+            )
+        # Match the native writer's event: advertise writes before attention,
+        # so transfers may overlap BF16 prefill computation.
+        notify_kv_cache_written(layer_name)
+        decode_output = None
+        if num_decode:
+            decode_output, _ = self._run_kimi_c8_decode(
+                hidden_states[:num_decode],
+                kv_cache,
+                attn_metadata,
+                projection=projection,
+            )
+        if (
+            decode_output is not None
+            and num_decode == hidden_states.shape[0]
+            and decode_output.dtype == hidden_states.dtype
+        ):
+            projected = decode_output
+        else:
+            projected = hidden_states.new_zeros(hidden_states.shape[0], self.num_heads * self.v_head_dim)
+            if decode_output is not None:
+                projected[:num_decode] = decode_output
+        has_prefill = actual > num_decode
+        if has_prefill:
+            prefill = self.mla_preprocess_prefill(
+                projection.q_c,
+                projection.kv_no_split,
+                kv_cache,
+                attn_metadata,
+                written_kv=projection.written_kv,
+            )
+            projected[num_decode:actual] = self._forward_prefill(
+                prefill.q_nope,
+                prefill.q_pe,
+                prefill.k_nope,
+                prefill.k_pe,
+                prefill.value,
+                kv_cache,
+                attn_metadata,
+            )
+        if self.use_output_gate:
+            assert self.g_proj is not None
+            projected.mul_(torch.sigmoid(self.g_proj(hidden_states.contiguous())[0]))
+        output[...] = self.o_proj(projected, is_prefill=has_prefill)[0]
+        maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+        return output
 
     def _process_weights_for_fused(self, act_dtype: torch.dtype):
         if self.fa_quant_layer:
@@ -1603,7 +2030,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         prefix_output: torch.Tensor,
         prefix_lse: torch.Tensor,
     ):
-        assert len(kv_c_and_k_pe_cache) > 1
+        assert len(kv_c_and_k_pe_cache) > 1 or getattr(self, "kimi_c8_static_fp8", False)
         prefill_metadata = attn_metadata.prefill
         if prefill_metadata is None or prefill_metadata.chunked_context is None:
             return prefix_output, prefix_lse
@@ -1611,10 +2038,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         context_table = self.get_context_block_table(attn_metadata)
         current_attn_result = prefix_output, prefix_lse
         iters = len(prefill_metadata.chunked_context.seq_tot)
+        is_c8 = getattr(self, "kimi_c8_static_fp8", False)
         cache_kv_c = kv_c_and_k_pe_cache[0]
-        cache_k_pe = kv_c_and_k_pe_cache[1]
-        num_heads = cache_k_pe.size(2)
-        latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
+        cache_k_pe = cache_kv_c if is_c8 else kv_c_and_k_pe_cache[1]
+        num_heads = 1 if is_c8 else cache_k_pe.size(2)
+        latent_kv_dim = self.kv_lora_rank if is_c8 else cache_kv_c.size(-1)
 
         actual_seq_lengths_q = prefill_metadata.actual_seq_lengths_q
 
@@ -1653,29 +2081,47 @@ class AscendMLAImpl(MLAAttentionImpl):
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
             context_seq_len_npu = self.get_context_seq_len_npu(i, attn_metadata)
-            kv_c_normed = torch.empty(toks, num_heads, latent_kv_dim, dtype=cache_kv_c.dtype, device=cache_kv_c.device)
-            # mla_nope_chunked_load: with qk_rope_head_dim == 0 the rope cache
-            # and its output buffer are both zero-width, and the fused paged
-            # gather silently leaves the latent output unfilled. Hand it the
-            # latent cache twice and drop the duplicate.
-            if rope_dim == 0:
-                pe_cache = cache_kv_c
-                k_pe = torch.empty_like(kv_c_normed)
-            else:
-                pe_cache = cache_k_pe
-                k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_pe.dtype, device=q_pe.device)
+            if is_c8:
+                from vllm_ascend.attention.kimi_c8_static import read_static_fp8_cache
 
-            DeviceOperator.kv_cache_load(
-                cache_kv_c,
-                pe_cache,
-                context_table,
-                context_seq_len_npu,
-                prefill_metadata.chunked_context.starts[i],
-                key=kv_c_normed,
-                value=k_pe,
-            )
-            if rope_dim == 0:
-                k_pe = kv_c_normed.new_empty(toks, num_heads, 0)
+                c8_chunk_lengths, c8_chunk_starts = _get_c8_prefill_chunk_lengths_and_starts(
+                    prefill_metadata.chunked_context, i
+                )
+                history = read_static_fp8_cache(
+                    cache_kv_c,
+                    self._kimi_c8_physical_table(context_table),
+                    c8_chunk_lengths,
+                    self.fak_descale_float,
+                    starts=c8_chunk_starts,
+                    dtype=q_nope.dtype,
+                )
+                kv_c_normed, k_pe = history.split([self.kv_lora_rank, rope_dim], dim=-1)
+            else:
+                kv_c_normed = torch.empty(
+                    toks, num_heads, latent_kv_dim, dtype=cache_kv_c.dtype, device=cache_kv_c.device
+                )
+                # mla_nope_chunked_load: with qk_rope_head_dim == 0 the rope cache
+                # and its output buffer are both zero-width, and the fused paged
+                # gather silently leaves the latent output unfilled. Hand it the
+                # latent cache twice and drop the duplicate.
+                if rope_dim == 0:
+                    pe_cache = cache_kv_c
+                    k_pe = torch.empty_like(kv_c_normed)
+                else:
+                    pe_cache = cache_k_pe
+                    k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_pe.dtype, device=q_pe.device)
+
+                DeviceOperator.kv_cache_load(
+                    cache_kv_c,
+                    pe_cache,
+                    context_table,
+                    context_seq_len_npu,
+                    prefill_metadata.chunked_context.starts[i],
+                    key=kv_c_normed,
+                    value=k_pe,
+                )
+                if rope_dim == 0:
+                    k_pe = kv_c_normed.new_empty(toks, num_heads, 0)
             kv_c_normed, k_pe = self._reorg_kvcache(
                 kv_c_normed,
                 k_pe,
@@ -1685,8 +2131,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
             if kv_c_normed.numel() == 0:
                 continue
-            kv_c_normed = kv_c_normed.squeeze()
-            if self.fa_quant_layer and self.support_fp8_attention:
+            kv_c_normed = kv_c_normed.reshape(-1, latent_kv_dim) if is_c8 else kv_c_normed.squeeze()
+            if self.fa_quant_layer and self.support_fp8_attention and not is_c8:
                 kv_c_normed = torch.mul(kv_c_normed.to(self.fak_descale_float.dtype), self.fak_descale_float).to(
                     torch.bfloat16
                 )
@@ -1747,7 +2193,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         attn_metadata: AscendMLAMetadata,
     ) -> torch.Tensor:
         assert attn_metadata.prefill is not None
-        assert len(kv_c_and_k_pe_cache) > 1
+        assert len(kv_c_and_k_pe_cache) > 1 or getattr(self, "kimi_c8_static_fp8", False)
         num_tokens = q_nope.size(0)
         prefill_meta = attn_metadata.prefill
 
@@ -2186,6 +2632,18 @@ class AscendMLAImpl(MLAAttentionImpl):
         fused_weight = self.fused_qkv_a_proj.weight.data
         weight_uq_qr = self.q_proj.weight.data
         weight_uk = self.mlapo_W_UK_T
+        # MXFP8 Linear may already own an NZ allocation. A5 cannot clone an
+        # internal-format slice; split a private ND view/copy before repacking.
+        # Keep the source Linear's NZ buffer unchanged for native projections.
+        if (
+            getattr(self, "_kimi_c8_enabled", False)
+            and quant_type is AscendW8A8MXFP8DynamicLinearMethod
+            and fused_weight.device.type in ("npu", "privateuseone")
+            and torch_npu.get_npu_format(fused_weight) == ACL_FORMAT_FRACTAL_NZ
+        ):
+            fused_weight = torch_npu.npu_format_cast(
+                fused_weight, ACL_FORMAT_FRACTAL_ND, customize_dtype=torch_npu.float8_e4m3fn
+            )
         prolog_num_heads = getattr(self, "num_heads", weight_uk.shape[0])
         if quant_type is None:
             # Native Linear stores [out, in], while PROLOG_V3 consumes [in, out].
@@ -3495,6 +3953,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
 
         num_decode_tokens = attn_metadata.num_decode_tokens
+        if getattr(self, "kimi_c8_static_fp8", False):
+            return self._forward_kimi_c8(layer_name, hidden_states, kv_cache, attn_metadata, output)
         # The runner stores a fused MLA cache as one tensor, while the legacy
         # MLA implementation still expects separate NoPE/RoPE logical tensors.
         # Split it here as zero-copy views.

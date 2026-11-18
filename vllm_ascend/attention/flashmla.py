@@ -364,21 +364,24 @@ class FlashMLAMetadataBuilder:
             if self.dcp_size > 1
             else FLASHMLA_BLOCK_SIZE
         )
-        dcp = self.dcp_size > 1
+        noncausal_draft = getattr(impl, "is_draft_cache", False) and getattr(
+            impl, "non_causal_multi_token_decode", False
+        )
+        dcp = self.dcp_size > 1 and not noncausal_draft
         adapter = FlashMLAImpl.load(
             FlashMLAConfig(
                 # Q is gathered across the DCP group before attending each KV
                 # shard. The output exchange restores this rank's local heads.
                 impl.num_heads * self.dcp_size,
                 impl.scale,
-                mask_mode=0 if dcp else 3,
+                mask_mode=0 if dcp or noncausal_draft else 3,
                 # DCP produces only the local attention and local statistics; the
                 # caller owns the inter-rank reduction.
-                return_softmax_lse=dcp,
+                return_softmax_lse=self.dcp_size > 1,
                 enable_dcp=dcp,
                 cp_world=self.dcp_size if dcp else 1,
                 cp_rank=self.dcp_rank if dcp else 0,
-                cp_kv_cache_interleave_size=self.cp_interleave,
+                cp_kv_cache_interleave_size=self.cp_interleave if dcp else FLASHMLA_BLOCK_SIZE,
                 cache_block_size=cache_block_size,
             )
         )
@@ -396,7 +399,9 @@ class FlashMLAMetadataBuilder:
                 cp_kv_cache_interleave_size=FLASHMLA_BLOCK_SIZE,
             ),
         )
-        self.adapters = {True: adapter, False: noncausal_adapter}
+        self.adapters = {False: noncausal_adapter}
+        if not noncausal_draft:
+            self.adapters[True] = adapter
         self.device = device
         self.dtype = impl.dtype
         self.use_rope = impl.use_mla_rope

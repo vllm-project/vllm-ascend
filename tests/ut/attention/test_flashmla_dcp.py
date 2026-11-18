@@ -233,9 +233,13 @@ def runtime(monkeypatch):
         classmethod(lambda cls, config: cls(config, attention_op, metadata_op)),
     )
 
-    def builder(*, size=8, rank=0, interleave=128, heads=8, dtype=torch.float16, use_rope=False, speculative=True):
+    def builder(
+        *, size=8, rank=0, interleave=128, heads=8, dtype=torch.float16, use_rope=False, speculative=True, draft=False
+    ):
         impl = SimpleNamespace(
             num_heads=heads,
+            is_draft_cache=draft,
+            non_causal_multi_token_decode=draft,
             scale=0.125,
             dtype=dtype,
             use_mla_rope=use_rope,
@@ -251,7 +255,7 @@ def runtime(monkeypatch):
             torch.device("cpu"),
             8,
             torch.triu(torch.ones(2048, 2048, dtype=torch.int8), diagonal=1),
-            cache_block_size=interleave,
+            cache_block_size=128 if draft else interleave,
         )
 
     class AttentionKind(Enum):
@@ -808,3 +812,17 @@ def test_dcp8_rejection_refresh_ignores_optimistic_cpu_lengths(runtime, monkeypa
             assert flash.global_cache_lens is None
         check_schedule(flash)
         assert inputs.seq_lens_cpu is stale_host_lengths
+
+
+@pytest.mark.parametrize("rank", [0, 1, 7])
+def test_c8_noncausal_draft_keeps_dcp_interleave_and_128_reader(runtime, rank):
+    builder = runtime.builder(rank=rank, interleave=1664, draft=True)
+    inputs = common([1665, 13313], [4, 2], causal=False)
+    flash = builder.build(inputs, 2, 6, False, retain_for_graph=True)
+    expected = [sum(token // 1664 % 8 == rank for token in range(length)) for length in (1665, 13313)]
+    assert flash.cache_lens[:2].tolist() == expected
+    assert builder.dcp_size == 8 and builder.cp_interleave == 1664
+    assert flash.adapter.config.cache_block_size == 128
+    assert flash.adapter.config.num_heads == 64 and flash.adapter.config.return_softmax_lse
+    assert not flash.adapter.config.enable_dcp and flash.global_cache_lens is None
+    assert not check_schedule(flash).enable_dcp

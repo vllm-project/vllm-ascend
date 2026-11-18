@@ -194,10 +194,19 @@ class DCPImplMixin:
             # distinct TP heads when DCP spans the full TP x PCP domain.
             if self.dcp_size == pcp_group.world_size:
                 return tensors
-            gathered = self.tp_group.all_gather(torch.cat(tensors, dim=-1).contiguous(), dim=dim)
+            gathered = self.tp_group.all_gather(
+                (
+                    tensors[0]
+                    if getattr(self, "_kimi_c8_enabled", False) and len(tensors) == 1
+                    else torch.cat(tensors, dim=-1)
+                ).contiguous(),
+                dim=dim,
+            )
         else:
             gathered = self._dcp_all_gather(
-                torch.cat(tensors, dim=-1),
+                tensors[0]
+                if getattr(self, "_kimi_c8_enabled", False) and len(tensors) == 1
+                else torch.cat(tensors, dim=-1),
                 dim,
             )
         return torch.split(gathered, split_sizes, dim=-1)
