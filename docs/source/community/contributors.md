@@ -25,6 +25,7 @@
 | XiaoShuang Wang | [@wxsIcey](https://github.com/wxsIcey) | 2026/11 |
 | Rong Liu | [@Ronald1995](https://github.com/Ronald1995) | 2026/11 |
 | ChunShuo Qiu | [@pisceskkk](https://github.com/pisceskkk) | 2026/11 |
+| YingCong Wang | [@drslark](https://github.com/drslark) | 2026/11 |
 
 ## Emeritus Committers
 
