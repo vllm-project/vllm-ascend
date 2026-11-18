@@ -12,7 +12,7 @@ env_common: &env_common
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   VLLM_ENGINE_READY_TIMEOUT_S: "3000"
-  SERVER_PORT: 8077
+  SERVER_PORT: 8089
 
 # TODO: need to identify why TP and mtp+1 divisibility rules break on dual-node case
 
