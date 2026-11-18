@@ -164,8 +164,16 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
     ) -> None:
         kv_cache_config = self.kv_cache_config
 
+        # The scheduler only builds GPULoadStoreSpec.group_sizes / block_indices
+        # for the offload-eligible groups, and SingleDirectionNPUOffloadingHandler
+        # zips them positionally against CanonicalKVCaches.group_data_refs.
+        # Use the same groups for layout detection and registration: excluded
+        # caches may be absent or have layouts that do not need offloading.
+        selected_group_ids = get_offloading_group_ids(kv_cache_config)
+        selected_groups = tuple(kv_cache_config.kv_cache_groups[group_id] for group_id in selected_group_ids)
+
         requires_layout_adaptation = False
-        for group in kv_cache_config.kv_cache_groups:
+        for group in selected_groups:
             group_spec = group.kv_cache_spec
             per_layer_specs = group_spec.kv_cache_specs if isinstance(group_spec, UniformTypeKVCacheSpecs) else {}
             for layer_name in group.layer_names:
@@ -225,17 +233,6 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                     mapping=mapping,
                 )
             )
-
-        # The scheduler only builds GPULoadStoreSpec.group_sizes / block_indices
-        # for the offload-eligible groups, and SingleDirectionNPUOffloadingHandler
-        # zips them positionally against CanonicalKVCaches.group_data_refs.
-        # Register exactly those groups, in that order, so hybrid caches with a
-        # group that cannot be prefix cached (e.g. CircularBufferSpec state
-        # groups, or SWA groups under bounded replay) stay aligned with the
-        # scheduler instead of producing refs the scheduler never addresses.
-        # Upstream applies the same filter in OffloadingConnectorWorker.
-        selected_group_ids = get_offloading_group_ids(kv_cache_config)
-        selected_groups = tuple(kv_cache_config.kv_cache_groups[group_id] for group_id in selected_group_ids)
 
         for group in selected_groups:
             group_spec = group.kv_cache_spec

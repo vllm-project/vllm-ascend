@@ -11,7 +11,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
 from vllm.utils.math_utils import round_up
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupRole,
+    KVCacheGroupSpec,
+    MambaSpec,
+)
 from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingWorker
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -317,34 +323,56 @@ def test_ascend_connector_worker_accepts_aligned_mamba_states(
     assert canonical.tensors[1].tensor.data_ptr() == second_state.data_ptr()
 
 
+@pytest.mark.parametrize("selection", ["non_cacheable", "transfer_disabled", "hisparse"])
+@pytest.mark.parametrize("excluded_group_index", [0, 1])
+@pytest.mark.parametrize("include_excluded_cache", [False, True])
+@pytest.mark.parametrize("split_selected_cache", [False, True])
 def test_ascend_connector_worker_skips_non_offload_groups(
     monkeypatch: pytest.MonkeyPatch,
+    selection: str,
+    excluded_group_index: int,
+    include_excluded_cache: bool,
+    split_selected_cache: bool,
 ) -> None:
-    """Only offloadable groups may contribute canonical refs.
+    """Excluded caches must not affect layout detection or canonical refs."""
 
-    The scheduler emits ``group_sizes`` / ``block_indices`` for
-    ``get_offloading_group_ids()`` only, and the handler zips both sequences
-    positionally. A non-offloadable group (e.g. a CircularBufferSpec state
-    group) must therefore not register refs: its layers are left out of
-    ``kv_caches`` here, so registering it anyway raises instead of silently
-    shifting every later group.
-    """
-    layer_names = [f"model.layers.{idx}.self_attn" for idx in range(3)]
-    skipped_layer = layer_names[1]
-    spec = FullAttentionSpec(
-        block_size=2,
-        num_kv_heads=1,
-        head_size=3,
-        dtype=torch.bfloat16,
+    class ScratchSpec(FullAttentionSpec):
+        @property
+        def prefix_cacheable(self) -> bool:
+            return False
+
+    spec_kwargs = dict(block_size=2, num_kv_heads=1, head_size=3, dtype=torch.bfloat16)
+    spec = FullAttentionSpec(**spec_kwargs)
+    selected_role = KVCacheGroupRole.HISPARSE_INDEXER if selection == "hisparse" else KVCacheGroupRole.DEFAULT
+    groups = [
+        KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec, role=selected_role) for name in ("first", "last")
+    ]
+    groups.insert(
+        excluded_group_index,
+        KVCacheGroupSpec(
+            layer_names=["excluded"],
+            kv_cache_spec=ScratchSpec(**spec_kwargs) if selection == "non_cacheable" else spec,
+            enable_kv_transfer=selection != "transfer_disabled",
+        ),
     )
-    kv_cache_config = SimpleNamespace(
+    kv_cache_config = KVCacheConfig(
         num_blocks=4,
-        kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec) for layer_name in layer_names],
+        kv_cache_groups=groups,
         kv_cache_tensors=[],
-        hisparse_host_num_blocks=None,
-        # Group 1 is not offloadable, groups 0 and 2 are.
-        prefix_cacheable_group_ids=(0, 2),
+        hisparse_host_num_blocks=8 if selection == "hisparse" else None,
     )
+    kv_caches = {
+        name: (
+            tuple(torch.empty((4, 2, 1, 3), dtype=torch.bfloat16) for _ in range(2))
+            if split_selected_cache
+            else torch.empty((4, 2, 2, 1, 3), dtype=torch.bfloat16)
+        )
+        for name in ("first", "last")
+    }
+    if include_excluded_cache:
+        # This split cache must not force adaptation of packed selected caches.
+        kv_caches["excluded"] = tuple(torch.empty((4, 2, 1, 3), dtype=torch.bfloat16) for _ in range(2))
+
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
     worker.kv_cache_config = kv_cache_config
     worker.vllm_config = object()
@@ -352,25 +380,31 @@ def test_ascend_connector_worker_skips_non_offload_groups(
     worker._init_worker = captured.append
     monkeypatch.setattr(connector_mod, "derive_canonical_mappings", lambda *args: {})
 
-    worker.register_kv_caches(
-        {
-            layer_name: (
-                torch.empty((4, 2, 1, 3), dtype=torch.bfloat16),
-                torch.empty((4, 2, 1, 3), dtype=torch.bfloat16),
-            )
-            for layer_name in layer_names
-            if layer_name != skipped_layer
-        }
+    upstream_calls = []
+    monkeypatch.setattr(
+        connector_mod.OffloadingConnectorWorker,
+        "register_kv_caches",
+        lambda self, caches: upstream_calls.append((self, caches)),
     )
+    worker.register_kv_caches(kv_caches)
 
+    if not split_selected_cache:
+        assert len(upstream_calls) == 1
+        assert upstream_calls[0][0] is worker
+        assert upstream_calls[0][1] is kv_caches
+        assert not captured
+        return
+
+    assert not upstream_calls
     assert len(captured) == 1
     canonical = captured[0]
-    group_refs = canonical.group_data_refs
-    # One split K/V pair per offloadable group, and no ref for the skipped group.
-    assert [len(refs) for refs in group_refs] == [2, 2]
-    assert {ref.tensor_idx for refs in group_refs for ref in refs} == {0, 1, 2, 3}
-    # Group order follows prefix_cacheable_group_ids: layer 0 registers before layer 2.
-    assert max(ref.tensor_idx for ref in group_refs[0]) < min(ref.tensor_idx for ref in group_refs[1])
+    assert len(canonical.tensors) == 4
+    assert len(canonical.group_data_refs) == 2
+    for group_refs, layer_name in zip(canonical.group_data_refs, ("first", "last")):
+        assert len(group_refs) == 2
+        for ref, cache in zip(group_refs, kv_caches[layer_name]):
+            assert ref.page_size_bytes == 12
+            assert canonical.tensors[ref.tensor_idx].tensor.data_ptr() == cache.data_ptr()
 
 
 def test_offloading_connector_is_registered_with_ascend_adapter(

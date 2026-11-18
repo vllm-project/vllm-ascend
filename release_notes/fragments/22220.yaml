@@ -1,0 +1,7 @@
+pr: 22220
+entries:
+  - category: bugfix
+    text: >-
+      Fixed native CPU KV offloading layout detection accessing excluded cache
+      groups, which could cause a missing-cache error or select unnecessary
+      Ascend layout adaptation.
