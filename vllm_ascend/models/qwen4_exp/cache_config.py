@@ -11,7 +11,7 @@ import regex as re
 import torch
 from vllm.config import VllmConfig
 from vllm.logger import logger
-from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import get_dtype_size
 
 try:
@@ -602,21 +602,6 @@ def get_qwen4_exp_pool_bytes_per_block(
         return None
     private_bytes = sum(_private_page_bytes(owner) for owner in layout.owners if owner.role in (HIDDEN, PLE))
     return layout.slot_count * layout.slot_backing_size + private_bytes
-
-
-def get_qwen4_exp_max_memory_usage(
-    vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroupSpec],
-) -> int | None:
-    """Use the allocation divisor for admission across all group lifetimes."""
-    bytes_per_block = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)
-    if bytes_per_block is None:
-        return None
-    required_blocks = sum(
-        cdiv(group.kv_cache_spec.max_memory_usage_bytes(vllm_config), group.kv_cache_spec.page_size_bytes)
-        for group in kv_cache_groups
-    )
-    return required_blocks * bytes_per_block
 
 
 def get_qwen4_exp_kv_cache_groups(

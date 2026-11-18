@@ -1086,6 +1086,7 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
         model_config=SimpleNamespace(max_model_len=4096, hf_config=SimpleNamespace(model_type="deepseek_v4")),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         max_in_flight_tokens=1,
+        attention_config=SimpleNamespace(hisparse_config=None),
     )
 
     planner = MagicMock(return_value=(7, [planned_tensor]))
@@ -1101,8 +1102,8 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
     assert result.num_blocks == 7
     assert result.kv_cache_tensors == [planned_tensor]
 
-    needed_memory = kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(
-        MagicMock(),
+    needed_memory = kv_cache_utils_patch._kv_cache_planning._max_memory_usage_bytes_from_groups(
+        AscendKVCacheConfigBuilder(),
         vllm_config,
         kv_cache_config.kv_cache_groups,
     )
@@ -1110,7 +1111,7 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
     assert isinstance(full_spec, UniformTypeKVCacheSpecs)
     layer_tuple_bytes = sum(spec.page_size_bytes for spec in full_spec.kv_cache_specs.values())
     num_layer_tuples = max(
-        kv_cache_utils_patch._get_max_layers_per_page_size(group.kv_cache_spec)
+        group.kv_cache_spec.get_max_layers_per_page_size()
         for group in kv_cache_config.kv_cache_groups
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
     )
@@ -1241,10 +1242,10 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
 def test_deepseek_v4_admission_matches_generic_divisor_accounting() -> None:
     """DSV4 admission must use the divisor the planner materializes with.
 
-    The Ascend branch scales each group's page count by the widest page-size
-    bucket, while the generic path scales the builder's divisor by the same
-    page counts. They have to agree, otherwise Core derives `num_blocks` from
-    one divisor while the tensors are laid out with another.
+    The generic planner scales the builder's shared-tuple divisor by the same
+    page counts the tensors are laid out with. They have to agree, otherwise
+    Core derives `num_blocks` from one divisor while the tensors are laid out
+    with another.
     """
     c4_spec = MLAAttentionSpec(
         block_size=128 * 4,
@@ -1286,18 +1287,19 @@ def test_deepseek_v4_admission_matches_generic_divisor_accounting() -> None:
     )
 
     builder = AscendKVCacheConfigBuilder()
-    ascend_bytes = kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(
+    generic_bytes = kv_cache_utils_patch._kv_cache_planning._max_memory_usage_bytes_from_groups(
         builder,
         vllm_config,
         kv_cache_groups,
     )
-    generic_bytes = kv_cache_utils_patch._orig_max_memory_usage_bytes_from_groups(
-        builder,
-        vllm_config,
-        kv_cache_groups,
+    layer_tuple_bytes = sum(spec.page_size_bytes for spec in c4_group.kv_cache_specs.values())
+    num_layer_tuples = max(group.kv_cache_spec.get_max_layers_per_page_size() for group in kv_cache_groups)
+    expected_bytes = sum(
+        num_layer_tuples * group.kv_cache_spec.max_memory_usage_pages(vllm_config) * layer_tuple_bytes
+        for group in kv_cache_groups
     )
 
-    assert ascend_bytes == generic_bytes
+    assert generic_bytes == expected_bytes
 
 
 @pytest.mark.parametrize(

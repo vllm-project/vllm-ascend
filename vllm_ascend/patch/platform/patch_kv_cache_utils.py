@@ -1,45 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
-from typing import Any
-
 # Both supported versions use the KV-cache planner API from #61183/#42309.
 import vllm.v1.core.kv_cache_planning as _kv_cache_planning
 from vllm.config import VllmConfig
-from vllm.v1.kv_cache_interface import (
-    KVCacheGroupSpec,
-    KVCacheSpec,
-    UniformTypeKVCacheSpecs,
-)
-
-from vllm_ascend.core.kv_cache_config_builder import _is_deepseek_v4_groups
-from vllm_ascend.models.glm5next.cache_config import (
-    _get_glm5_next_cache_layout,
-    get_glm5_next_max_memory_usage,
-)
-from vllm_ascend.models.kimi_k3.paired_sfa_cache import paired_sfa_max_memory
-from vllm_ascend.models.qwen4_exp.cache_config import (
-    get_qwen4_exp_max_memory_usage,
-)
-from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cache
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
 
 _orig_annotate_eagle_groups = getattr(_kv_cache_planning, "_annotate_eagle_groups", None)
-_orig_max_memory_usage_bytes_from_groups = _kv_cache_planning._max_memory_usage_bytes_from_groups
-
-
-def _page_sizes(spec: UniformTypeKVCacheSpecs) -> set[int]:
-    """Distinct page sizes across a group's cache specs.
-
-    vLLM #51718 removed ``UniformTypeKVCacheSpecs.get_page_sizes()`` on main;
-    the underlying ``kv_cache_specs``/``page_size_bytes`` are unchanged on both
-    lanes, so compute it inline.
-    """
-    return {s.page_size_bytes for s in spec.kv_cache_specs.values()}
-
-
-def _get_max_layers_per_page_size(spec: UniformTypeKVCacheSpecs) -> int:
-    """Bridge the UniformTypeKVCacheSpecs helper renamed by vLLM #53896."""
-    return spec.get_max_layers_per_page_size()
 
 
 def _uses_qwen4_exp_mtp(vllm_config: VllmConfig) -> bool:
@@ -118,40 +85,5 @@ def _ascend_annotate_eagle_groups(
         raise ValueError(f"Qwen4Exp MTP is enabled, but no KV cache group contains its draft layer(s) {draft_markers}.")
 
 
-def _ascend_max_memory_usage_bytes_from_groups(
-    builder: Any,
-    vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroupSpec],
-) -> int:
-    """Keep Ascend admission accounting with the upstream builder API."""
-    if vllm_config.model_config.hf_config.model_type == "kimi_k31":
-        return paired_sfa_max_memory(vllm_config, kv_cache_groups)
-    if tq_cache.uses_turboquant_groups(kv_cache_groups):
-        return tq_cache.max_memory_usage(vllm_config, kv_cache_groups)
-    if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
-        return get_glm5_next_max_memory_usage(vllm_config, kv_cache_groups)
-    qwen_bytes = get_qwen4_exp_max_memory_usage(vllm_config, kv_cache_groups)
-    if qwen_bytes is not None:
-        return qwen_bytes
-    if not _is_deepseek_v4_groups(kv_cache_groups):
-        return _orig_max_memory_usage_bytes_from_groups(builder, vllm_config, kv_cache_groups)
-
-    assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups)
-    full_mla_spec = kv_cache_groups[0].kv_cache_spec
-    assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
-    layer_tuple_bytes = sum(_page_sizes(full_mla_spec))
-    num_layer_tuples = max(
-        _get_max_layers_per_page_size(group.kv_cache_spec)
-        for group in kv_cache_groups
-        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-    )
-    return sum(
-        num_layer_tuples * group.kv_cache_spec.max_memory_usage_pages(vllm_config) * layer_tuple_bytes
-        for group in kv_cache_groups
-        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-    )
-
-
 if _orig_annotate_eagle_groups is not None:
     _kv_cache_planning._annotate_eagle_groups = _ascend_annotate_eagle_groups
-_kv_cache_planning._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
