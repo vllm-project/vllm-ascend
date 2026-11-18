@@ -25,6 +25,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC128Backend,
     AscendDSASWABackend,
 )
+from vllm_ascend.attention.kv_cache_page import KVCachePageBinding
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.quantization.methods.kv_cache.turboquant import SLOT_BYTES, is_turboquant
@@ -65,7 +66,7 @@ def dsv4_block_sizes(vllm_config: VllmConfig):
     return DSV4_BLOCK_SIZES
 
 
-class DSAAttention(nn.Module, AttentionLayerBase):
+class DSAAttention(KVCachePageBinding, nn.Module, AttentionLayerBase):
     """Multi-Head Latent Attention layer.
 
     This class takes query, and compressed key/value tensors as input.

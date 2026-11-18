@@ -40,6 +40,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
+from vllm_ascend.attention.kv_cache_page import KVCachePageBinding
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata, Compressor
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
@@ -126,7 +127,7 @@ def get_indexer_k_dtype(vllm_config: VllmConfig) -> torch.dtype:
     return expected_dtype
 
 
-class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
+class AscendDeepseekV4IndexerCache(KVCachePageBinding, DeepseekV4IndexerCache):
     def __init__(
         self,
         head_dim: int,

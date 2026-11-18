@@ -1511,8 +1511,8 @@
 #      `vllm.v1.worker.gpu.model_runner.init_kv_cache.__globals__`
 #      (`allocate_kv_cache`, `bind_kv_cache`)
 #    Why:
-#       Ascend allocates per-layer (k, v) KV caches and needs its own
-#       allocate/reshape/bind path; the upstream symbols are GPU-specific.
+#       Ascend needs to bind legacy cache components and interpret unified
+#       manager page views according to each layer's backend layout.
 #       Upstream has two live variants across versions: vLLM #51718 made
 #       `allocate_kv_cache` the live symbol, and vLLM main (#53781) routes
 #       `init_kv_cache` through `bind_kv_cache_to_layers`, so rebinding both
@@ -1682,10 +1682,9 @@
 #       allocates K/V tuples and Conv/SSM lists. Returning only the first tensor
 #       avoids that error but drops V/SSM from the dictionary given to connectors.
 #    How:
-#       Adapt the upstream initializer to flatten only the runner's cache list
-#       before device filtering. Preserve the original dictionary and container
-#       types for model bindings and connector registration; remove the old
-#       first-tensor wrapper in patch_attn_utils.py.
+#       Read the component views from the bound layers for unified allocations.
+#       Pass the per-layer component containers to connector registration and
+#       flatten the runner's cache list before device filtering.
 #       Preserve #55688's ReplaySSM tracker collection for inherited scheduler
 #       block copies when the supported upstream exports that collector.
 #    Related PR (if no, explain why):

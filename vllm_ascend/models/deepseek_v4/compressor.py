@@ -38,12 +38,13 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.compressor import CompressorStateCache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
+from vllm_ascend.attention.kv_cache_page import KVCachePageBinding
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
 
-class AscendCompressorStateCache(CompressorStateCache):
+class AscendCompressorStateCache(KVCachePageBinding, CompressorStateCache):
     def __init__(
         self,
         state_dim: int,

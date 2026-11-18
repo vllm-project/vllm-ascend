@@ -8,6 +8,7 @@ from vllm.v1.worker.gpu import model_runner as upstream
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp as _dispatch_cg_and_sync_dp
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
+from vllm_ascend.attention.kv_cache_page import KVCachePage
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 
@@ -203,6 +204,13 @@ def initialize_kv_cache(
             kv_cache_allocation_context=kv_cache_allocation_context,
             block_tables=self.block_tables,
         )
+    # Unified allocations return manager pages. Block copy and KV transfer
+    # consume the component views already constructed by the layer bind.
+    forward_context = self.compilation_config.static_forward_context
+    kv_caches_dict = {
+        name: forward_context[name].kv_cache if isinstance(cache, KVCachePage) else cache
+        for name, cache in kv_caches_dict.items()
+    }
     register_sparse_kv_caches = getattr(self, "_register_sparse_kv_caches", None)
     if register_sparse_kv_caches is not None:
         register_sparse_kv_caches(kv_caches_dict)

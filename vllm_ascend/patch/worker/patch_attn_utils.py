@@ -97,7 +97,7 @@ vllm.v1.worker.gpu.attn_utils.allocate_kv_cache = allocate_kv_cache_main
 vllm.v1.worker.gpu.attn_utils.prepare_kernel_block_sizes = prepare_ascend_kernel_block_sizes
 
 # vLLM main (#53781) routes init_kv_cache through bind_kv_cache_to_layers,
-# which Ascend overrides with direct raw-allocation binding.
+# which Ascend overrides for unified pages and legacy component layouts.
 vllm.v1.worker.gpu.attn_utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers
 
 # ``vllm.v1.worker.utils`` is the binding source for the 310P V2 model runner
