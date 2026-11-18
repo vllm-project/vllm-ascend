@@ -426,9 +426,9 @@ def uses_pcp_sharded_layout(common_attn_metadata: "AscendCommonAttentionMetadata
     if not use_pcp:
         return False
     if common_attn_metadata.pcp_context is None:
-        assert common_attn_metadata.slot_mapping.shape[0] <= common_attn_metadata.num_input_tokens, (
-            "PCP metadata without a PCP context must keep a rank-local slot mapping."
-        )
+        assert (
+            common_attn_metadata.slot_mapping.shape[0] <= common_attn_metadata.num_input_tokens
+        ), "PCP metadata without a PCP context must keep a rank-local slot mapping."
         return False
     return True
 

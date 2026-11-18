@@ -1473,9 +1473,9 @@ def _allocate_kv_cache(
         kv_cache_raw_tensors[layer_name] = kv_cache_raw_tensors[owner_name]
 
     layer_names = {layer_name for group in kv_cache_config.kv_cache_groups for layer_name in group.layer_names}
-    assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
-        "Some layers are not correctly initialized"
-    )
+    assert layer_names == (
+        kv_cache_raw_tensors.keys() | shared_layers.keys()
+    ), "Some layers are not correctly initialized"
     return kv_cache_raw_tensors
 
 
