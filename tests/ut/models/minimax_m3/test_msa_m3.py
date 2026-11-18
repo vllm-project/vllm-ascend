@@ -1544,7 +1544,6 @@ def test_ascendc_index_prefill_limits_score_width_for_topk(
         )
 
     assert actual is expected
-    # score 计算恒用 init_blocks=0/local_blocks=0；强制块只交给 TopK 阶段。
     mock_score.assert_called_once_with(
         idx_q,
         index_key_cache,
