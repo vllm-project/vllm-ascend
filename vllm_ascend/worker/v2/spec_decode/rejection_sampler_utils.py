@@ -422,6 +422,9 @@ def rejection_sample(
         if has_draft_logits:
             local_residual_mass = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
             if num_logits > 1:
+                # vLLM v0.32 uses tl.num_programs(0) to exclude the final
+                # bonus row. Trimming the grid would also skip the last
+                # draft row, leaving a residual mass read uninitialized.
                 _compute_local_residual_mass_kernel[(num_logits, vocab_num_blocks)](
                     local_residual_mass,
                     local_residual_mass.stride(0),
