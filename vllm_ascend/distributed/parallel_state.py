@@ -202,12 +202,7 @@ def init_ascend_model_parallel(
             group_ranks, get_world_group().local_rank, backend, group_name="dynamic_eplb"
         )
 
-    # Initialize fine-grained TP process groups on Ascend for model components:
-    # 1. LM Head: output logits projection (`lmhead_tensor_parallel_size`)
-    # 2. O Proj: attention output projection (`oproj_tensor_parallel_size`)
-    # 3. Embedding: The token embedding table at the input of the model (`embedding_tensor_parallel_size`)
-    # 4. MLP: feed-forward network in transformer blocks (`mlp_tensor_parallel_size`)
-    # 5. Shared experts: independent DP-axis MLP weight sharding.
+    # Components with the same local TP size reuse the same group along the DP axis.
     _group_cache = {}
 
     def _create_or_get_group(group_size: int, group_name: str) -> GroupCoordinator:
@@ -232,6 +227,9 @@ def init_ascend_model_parallel(
     lmhead_tp_size = get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size
     embedding_tp_size = get_ascend_config().finegrained_tp_config.embedding_tensor_parallel_size
     mlp_tp_size = get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size
+    shared_tp_size = get_ascend_config().finegrained_tp_config.shared_expert_tensor_parallel_size
+    qkv_iproj_tp_size = get_ascend_config().finegrained_tp_config.qkv_iproj_tensor_parallel_size
+    gproj_tp_size = get_ascend_config().finegrained_tp_config.gproj_tensor_parallel_size
 
     global _OTP, _LMTP, _EMBED_TP, _MLP_TP, _QKV_IPROJ_TP, _GPROJ_TP, _SHARED_EXPERT_TP
 
@@ -243,19 +241,12 @@ def init_ascend_model_parallel(
         _EMBED_TP = _create_or_get_group(embedding_tp_size, "emtp")
     if mlp_tp_size > 1:
         _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
-    shared_tp_size = get_ascend_config().finegrained_tp_config.shared_expert_tensor_parallel_size
     if shared_tp_size > 1:
         _SHARED_EXPERT_TP = _create_or_get_group(shared_tp_size, "shared_expert_tp")
-    config = get_ascend_config().finegrained_tp_config
-    if config.qkv_iproj_tensor_parallel_size > 1:
-        _QKV_IPROJ_TP = _create_or_get_group(config.qkv_iproj_tensor_parallel_size, "qkv_iproj_tp")
-    if config.gproj_tensor_parallel_size > 1:
-        _GPROJ_TP = _create_or_get_group(config.gproj_tensor_parallel_size, "gproj_tp")
-
-
-def get_gproj_tp_group() -> GroupCoordinator:
-    assert _GPROJ_TP is not None, "G projection TP group is not initialized"
-    return _GPROJ_TP
+    if qkv_iproj_tp_size > 1:
+        _QKV_IPROJ_TP = _create_or_get_group(qkv_iproj_tp_size, "qkv_iproj_tp")
+    if gproj_tp_size > 1:
+        _GPROJ_TP = _create_or_get_group(gproj_tp_size, "gproj_tp")
 
 
 def model_parallel_initialized():
@@ -295,6 +286,11 @@ def get_embed_tp_group() -> GroupCoordinator:
 def get_qkv_iproj_tp_group() -> GroupCoordinator:
     assert _QKV_IPROJ_TP is not None, "QKV input projection tensor parallel group is not initialized"
     return _QKV_IPROJ_TP
+
+
+def get_gproj_tp_group() -> GroupCoordinator:
+    assert _GPROJ_TP is not None, "G projection TP group is not initialized"
+    return _GPROJ_TP
 
 
 def get_replicated_group() -> ReplicatedGroup:
