@@ -127,6 +127,11 @@ def _make_draft_vllm_config(
         draft_input.cache_config.use_replayssm = False
         draft_input.cache_config.use_kda_recoverssm = False
     draft_vllm_config = _upstream_make_draft_vllm_config(draft_input, mtp_start_layer_idx, num_mtp_layers)
+    if draft_input is not vllm_config:
+        # QSA cache owners are built from both configs. Keep the shared cache
+        # object so the runner's later block-size negotiation reaches both.
+        # The draft architecture is excluded by the GDN backend selector.
+        draft_vllm_config.cache_config = vllm_config.cache_config
     _remap_modelslim_mtp_layer_ids(
         draft_vllm_config.quant_config,
         mtp_start_layer_idx,

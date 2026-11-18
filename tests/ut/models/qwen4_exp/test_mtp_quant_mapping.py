@@ -25,6 +25,7 @@ def test_qwen4_exp_mtp_does_not_inherit_target_recoverssm(monkeypatch) -> None:
     monkeypatch.setattr(mtp, "_upstream_make_draft_vllm_config", make_draft)
     assert mtp._make_draft_vllm_config(cast(VllmConfig, target), 4, 1) is draft
     assert cache.use_replayssm and cache.use_kda_recoverssm
+    assert draft.cache_config is cache
 
 
 def _make_long_context_config(
