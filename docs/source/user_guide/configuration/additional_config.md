@@ -331,15 +331,9 @@ PCP gathers prefill KV before cache writes. KVPP layer broadcasts restore prior-
 
 ### Quantized all-reduce
 
-!!! warning "Accuracy trade-off"
+Quantized communication is lossy and may reduce model accuracy; it is not a lossless speedup. The feature is disabled by default. If accuracy degradation is unacceptable, explicitly set `quantized_all_reduce_config.enable=false` or omit `quantized_all_reduce_config` from `--additional-config` on every worker.
 
-    Quantized communication is lossy, not a lossless speedup. Both INT8 and MXFP8
-    introduce quantization error and may reduce model accuracy. Evaluate accuracy
-    on your target model and workload before deployment. If the accuracy
-    degradation is unacceptable, set `quantized_all_reduce_config.enable=false`
-    on every worker to disable quantized communication.
-
-Configure `quantized_all_reduce_config` to enable quantized communication for large BF16 inputs. The feature is disabled by default. A2 supports INT8; A5 supports INT8 and MXFP8. A3 is unsupported.
+Configure `quantized_all_reduce_config` to enable quantized communication for large BF16 inputs. A2 supports INT8; A5 supports INT8 and MXFP8. A3 is unsupported.
 
 #### Recommended parameter values
 
