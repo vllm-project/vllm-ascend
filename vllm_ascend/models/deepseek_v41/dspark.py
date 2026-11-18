@@ -113,7 +113,9 @@ class DeepseekV41DSparkAttention(DeepseekV41SWAAttention):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.packed_cache_ops = DeviceOperator.get_dsv41_packed_cache_ops()
+        self.packed_cache_ops = DeviceOperator.get_dsv41_packed_cache_ops(
+            kwargs["vllm_config"].cache_config.cache_dtype
+        )
         self.softmax_scale = self.scale
         self.shared_state = None
         prefix = kwargs["prefix"]
@@ -220,7 +222,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         model_quant_config = getattr(checkpoint_config, "quantization_config", None)
         main_proj_quant_config = (
             vllm_config.quant_config
-            if DeviceOperator.get_dsv41_packed_cache_ops() is not None
+            if DeviceOperator.get_dsv41_packed_cache_ops(vllm_config.cache_config.cache_dtype) is not None
             and model_quant_config is not None
             and model_quant_config.get("quant_method") == "fp8"
             else None
@@ -261,12 +263,24 @@ class DeepseekV41DSparkModel(torch.nn.Module):
             return
         cache = attn.dsa_attn.swa_cache_layer
         values = shared_kv.squeeze(1)
-        if attn.packed_cache_ops is not None:
+        cache_tensor = cache.kv_cache[0]
+        backend = attn.packed_cache_ops
+        use_packed_backend = backend is not None and (
+            getattr(backend, "uses_a5_packed_cache", False)
+            or (
+                getattr(backend, "uses_a3_int8_packed_cache", False)
+                and cache_tensor.dtype == torch.int8
+                and cache_tensor.shape[-1] == 608
+            )
+        )
+        if use_packed_backend:
             # A5's cache is physically packed and must be updated through the
             # device-routed writer.  The draft proposer already supplies linear
             # physical slots, so keep them in that form for the native kernel.
-            attn.packed_cache_ops.write_attention_cache(
-                cache.kv_cache[0],
+            # A3's draft SWA cache stays standard BF16, so only its packed
+            # 608-byte target caches take this branch.
+            backend.write_attention_cache(
+                cache_tensor,
                 slot_mapping,
                 values,
                 kind="win",

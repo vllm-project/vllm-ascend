@@ -53,7 +53,10 @@ class DeepseekV41Indexer(nn.Module):
     ):
         super().__init__()
         self.owns_k = owns_k
-        self.packed_cache_ops = DeviceOperator.get_dsv41_packed_cache_ops()
+        backend = DeviceOperator.get_dsv41_packed_cache_ops(vllm_config.cache_config.cache_dtype)
+        # A3 INT8 CSA changes the main KV cache ABI only; its index cache
+        # keeps the existing INT8 + FP16-scale producer.
+        self.packed_cache_ops = backend if getattr(backend, "uses_a5_packed_cache", False) else None
         self.compress_ratio = compress_ratio
         self.n_heads = int(config.index_n_heads)
         self.width = int(config.index_head_dim)

@@ -271,6 +271,8 @@ def qsmla(
     sinks,
     softmax_scale,
     compressed_lengths=None,
+    compress_ratio=None,
+    index_topk=None,
 ):
     ori_indices, ori_lengths = _resolve_window_indices(q, metadata, window_size)
     has_cmp = cmp_kv is not None
