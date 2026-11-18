@@ -782,7 +782,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             assert current_k_nope is not None and current_k_pe is not None
             current_q_nope, current_q_pe = self._local_decode_query(q_nope, q_pe, num_heads=self.num_heads)
             current_q_descale = (
-                self._local_decode_query(q_descale, num_heads=self.num_heads)[0] if q_descale is not None else None
+                self._local_decode_query(q_descale, num_heads=self.num_heads)[0] if self.use_quant_flashmla else None
             )
             current_k_nope = current_k_nope.view(num_tokens, self.num_kv_heads, self.kv_lora_rank).contiguous()
             current_k_pe = current_k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim).contiguous()

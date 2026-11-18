@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
@@ -1265,6 +1266,7 @@ def test_k31_dspark_mla_cache_spec_uses_layer_dtype(monkeypatch, quantized):
         num_kv_heads=1,
         head_size=576,
         dtype=torch.bfloat16 if quantized else torch.float8_e4m3fn,
+        kv_quant_mode=KVQuantMode.NONE if quantized else KVQuantMode.FP8_PER_TENSOR,
         non_causal_multi_token_decode=True,
     )
     layer = AscendMLAAttention.__new__(AscendMLAAttention)
@@ -1324,6 +1326,8 @@ def test_k31_dspark_mla_cache_spec_uses_layer_dtype(monkeypatch, quantized):
     assert spec.num_heads == 1
     assert spec.head_size == 576
     assert spec.dtype == (torch.float8_e4m3fn if quantized else torch.bfloat16)
+    if not quantized:
+        assert spec.kv_quant_mode == KVQuantMode.NONE
     assert not spec.cache_sparse_sfa_c8
     assert not spec.store_on_host
     assert spec.page_size_bytes == 1536 * 576 * torch.empty((), dtype=spec.dtype).element_size()
