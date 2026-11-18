@@ -146,44 +146,9 @@ and architecture, loaded SDK/SHMEM/device libraries, and their hashes in a
 fresh process before any device validation. Build compatible candidates
 inside the new workspace if necessary; preserve the old installed artifacts.
 
-The generic launchers require the intended interpreter and check source
-origins before starting. They do not install anything, select physical cards,
-or choose network interfaces. Load the CANN environment and configure the
-authorized devices/network before use.
-
-```bash
-MODEL=/path/to/model \
-VLLM_PYTHON=/path/to/independent/env/bin/python \
-bash scripts/dsv4flash_service/service/start_service_mode.sh slot
-```
-
-Use `off` for the baseline. The DP4 wrapper uses DP_SIZE=4; the generic
-launcher defaults to DP_SIZE=8 and TP_SIZE=1. Pass additional vLLM arguments
-after the mode, including official profiler configuration when needed.
-Use unique output locations for diagnostics.
-
 ## Validation handoff
 
-Dependency-free source-contract checks can run without torch or NPU imports:
-
-```bash
-/path/to/python -I -B tests/ut/ops/test_moonep_v030_contract.py -v
-bash -n scripts/dsv4flash_service/service/start_service_mode.sh
-bash -n scripts/dsv4flash_service/service/start_service_mode_dp4.sh
-git diff --check
-```
-
-Run the MoonEP CPU regressions with the validation interpreter:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 /usr/local/python3.12.13/bin/python -m unittest discover \
-  -s tests/ut/ops -p 'test_moonep*.py' -v
-```
-
-These tests use CPU tensors and mocked device/framework boundaries; they cover
-native quant metadata, activation limits, Home/Slot aliases, token/count bounds,
-cache/prefetch ordering and conditional shared-expert events. They do not prove
-NPU execution. Device validation must additionally cover BF16 and MXFP8 operators,
+Device validation on the current main2main pair should cover BF16 and MXFP8 operators,
 multiple ranks with empty/uneven batches and changing capacities, prefetch/cache
 event ordering, shared experts, Model Runner V2, model correctness, and
 matched Off/On performance. Preserve raw evidence and report unsupported
