@@ -1731,3 +1731,92 @@ Note the following when enabling KV Pool for DSv4. Other historical known issues
 ### Issue 7: AscendStore KV Pool Known Issues (v0.23.0)
 
 For the v0.23.0 AscendStore KV Pool known issues, see [vllm-ascend issue #12390](https://github.com/vllm-project/vllm-ascend/issues/12390).
+
+## Native Mooncake Store on Ascend
+
+Use `MooncakeStoreConnector` for upstream Store scheduling and transfer
+lifecycle with Ascend device bindings. Cache support follows the native
+`AttentionSpec` and `MambaSpec` contracts rather than a model-name whitelist.
+`AscendStoreConnector` retains its existing multi-backend and layerwise modes.
+
+The adapter reuses native lookup, asynchronous queues, save progress,
+capacity-pressure handling, block references and layout descriptors. It binds
+Ascend's separate K/V planes, packed MLA pages and typed recurrent states to
+those layouts without packing copies. Shared typed Mamba pages are exposed as
+zero-copy byte views; separately allocated GDN states use their real strides.
+Full native recurrent states are saved, including speculative records.
+
+This route requires vLLM with connector lookahead hashing (upstream #64096)
+and the device/layout extensions in [vLLM #66294](https://github.com/vllm-project/vllm/pull/66294).
+For PD composition, Ascend forwards completion notifications through native
+worker results before request blocks are released.
+Install the compatible source pairing before enabling the connector. The separate Mamba partial-checkpoint
+scheduling fix is platform-wide: it restores native partial-hit splitting for
+legacy Store and P2P connectors as well as this route.
+
+```json
+{
+  "kv_connector": "MooncakeStoreConnector",
+  "kv_role": "kv_both",
+  "kv_load_failure_policy": "fail",
+  "kv_connector_extra_config": {
+    "store_tp_size": 4,
+    "save_decode_cache": true,
+    "load_async": true,
+    "cache_prefix": "native-store-v1"
+  }
+}
+```
+
+Use the same `store_tp_size` and native `prefix-match-unit` across peers for
+cross-TP reuse. Without Store TP sharing, native rank-local registration is
+used. A decode writer can set `enable_lookup: false` while keeping
+`save_decode_cache: true`. GET does not delete stored objects.
+
+For full-attention backends that support head-major KV caches, set
+`VLLM_KV_CACHE_LAYOUT=HND` before starting each peer. This uses Ascend's existing
+cache layout and reduces scattered transfer segments when TP sharing splits
+an attention cache across Store shards. It does not add per-request packing
+copies. Token-major and
+head-major attention objects use different Store namespaces; use a fresh
+`cache_prefix` when changing the layout for an experiment or deployment.
+
+Cache identity, MTP lookahead dependencies and checkpoint backoff follow vLLM.
+The connector uses native request block hashes, including the committed
+successor tokens required by the drafter. No Ascend-specific hash format or
+model whitelist is added. MultiConnector enables lookahead hashing only when
+all configured children support it; otherwise vLLM retains legacy matching
+and backoff.
+
+Cache layouts and state shapes must agree at each logical Store shard. Use a
+fresh `cache_prefix` when migrating from the earlier accepted-history format:
+this implementation stores full native states and has no private GLM schema.
+The planar K/V path accepts FP16/BF16 caches; separate quantization-scale views
+need an explicit compatible layout. Model weight quantization is independent
+of KV dtype.
+
+KV events use the native `BlockStored.lookahead_token_ids` contract. Event
+consumers must include those tokens when reconstructing lookahead hashes.
+In a MultiConnector, native Store must be the only event producer.
+
+### Recorded decode-reuse performance checks
+
+The paired Qwen3.8-27B-W8A8 measurements are retained under
+`benchmarks/data/mooncake_store_reuse_qwen38_27b.json`. Check those records with:
+
+```bash
+python benchmarks/check_mooncake_store_reuse.py \
+    benchmarks/data/mooncake_store_reuse_qwen38_27b.json
+```
+
+The checker requires real external Store hits, a decode-origin checkpoint
+and nonzero MTP acceptance. It applies the recorded ten-pair gates: median
+paired restore TTFT must improve; source or restore TPOT is a regression
+when B is slower in at least nine pairs. It returns a nonzero status when
+a gate fails. This checks supplied measurements; it does not run inference.
+
+The recorded TP1 runs use serial requests, 1,536 source output tokens and
+1,815-input/32-output-token continuations with fixed output lengths. A/B
+use separate devices without crossover. Source/restore timing, layout
+fixtures and the later completion-polling validation retain their original
+version labels. New runs should record the same fields in a separate file.

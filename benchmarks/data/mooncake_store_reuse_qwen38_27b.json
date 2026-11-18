@@ -1,0 +1,819 @@
+{
+  "metadata": {
+    "measured_at": "2026-11-07",
+    "model": "Qwen3.8-27B-W8A8",
+    "tensor_parallel_size": 1,
+    "kv_layout": "HND",
+    "mtp_tokens": 3,
+    "store_tp_size": 4,
+    "prefix_match_unit": 128,
+    "physical_block_size": 896,
+    "kv_budget_bytes_per_rank": 4294967296,
+    "concurrency": 1,
+    "A_save_decode_cache": false,
+    "B_save_decode_cache": true,
+    "A_physical_device": 15,
+    "B_physical_device": 8,
+    "device_crossover": false,
+    "ascend_base": "1bf75989c152c353ae0254b3e2aefa717d74f982",
+    "vllm_base": "24420b7a341af37a9bc3186e6fc6062512e0aa58",
+    "pairing": "Ascend native Store adapter plus vLLM lookahead/device extensions; before final completion-poll correction",
+    "ignore_eos": true,
+    "source_output_tokens": 1536,
+    "restore_input_tokens": 1815,
+    "restore_output_tokens": 32,
+    "sampled_hbm": {
+      "8": {
+        "sample_count": 284,
+        "observed_peak_mb": 41141
+      },
+      "15": {
+        "sample_count": 284,
+        "observed_peak_mb": 40832
+      }
+    },
+    "sample_interval_median_seconds": 3.7551867961883545
+  },
+  "pairs": [
+    {
+      "order": [
+        "A",
+        "B"
+      ],
+      "A": {
+        "source": {
+          "prompt_tokens": 279,
+          "generated_tokens": 1536,
+          "ttft_seconds": 0.37627482414245605,
+          "mtp_accepted": 1080,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 0,
+            "get_calls": 0,
+            "get_bytes": 0,
+            "put_bytes": 174718976,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03244395236543862,
+          "wall_seconds": 50.17806981294416
+        },
+        "restore": {
+          "prompt_tokens": 1815,
+          "generated_tokens": 32,
+          "ttft_seconds": 0.7875893115997314,
+          "mtp_accepted": 23,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 256,
+            "get_calls": 1,
+            "get_bytes": 174718976,
+            "put_bytes": 263847936,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03428683351469977,
+          "wall_seconds": 1.8505186130059883
+        }
+      },
+      "B": {
+        "source": {
+          "prompt_tokens": 279,
+          "generated_tokens": 1536,
+          "ttft_seconds": 0.379833459854126,
+          "mtp_accepted": 1080,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 0,
+            "get_calls": 0,
+            "get_bytes": 0,
+            "put_bytes": 595460096,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03305025779542055,
+          "wall_seconds": 51.11255178996362
+        },
+        "restore": {
+          "prompt_tokens": 1815,
+          "generated_tokens": 32,
+          "ttft_seconds": 0.32660388946533203,
+          "mtp_accepted": 24,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 1792,
+            "get_calls": 1,
+            "get_bytes": 281673728,
+            "put_bytes": 0,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03271738854762647,
+          "wall_seconds": 1.3407921419711784
+        }
+      }
+    },
+    {
+      "order": [
+        "B",
+        "A"
+      ],
+      "A": {
+        "source": {
+          "prompt_tokens": 279,
+          "generated_tokens": 1536,
+          "ttft_seconds": 0.37983107566833496,
+          "mtp_accepted": 1080,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 0,
+            "get_calls": 0,
+            "get_bytes": 0,
+            "put_bytes": 174718976,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03394299232247756,
+          "wall_seconds": 52.48284266702831
+        },
+        "restore": {
+          "prompt_tokens": 1815,
+          "generated_tokens": 32,
+          "ttft_seconds": 0.8249871730804443,
+          "mtp_accepted": 23,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 256,
+            "get_calls": 1,
+            "get_bytes": 174718976,
+            "put_bytes": 263847936,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03379709161292281,
+          "wall_seconds": 1.8730216559488326
+        }
+      },
+      "B": {
+        "source": {
+          "prompt_tokens": 279,
+          "generated_tokens": 1536,
+          "ttft_seconds": 0.37578320503234863,
+          "mtp_accepted": 1080,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 0,
+            "get_calls": 0,
+            "get_bytes": 0,
+            "put_bytes": 595460096,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03222410257000185,
+          "wall_seconds": 49.8405867369147
+        },
+        "restore": {
+          "prompt_tokens": 1815,
+          "generated_tokens": 32,
+          "ttft_seconds": 0.3234519958496094,
+          "mtp_accepted": 24,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 1792,
+            "get_calls": 1,
+            "get_bytes": 281673728,
+            "put_bytes": 0,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03185236132553508,
+          "wall_seconds": 1.3111977940425277
+        }
+      }
+    },
+    {
+      "order": [
+        "A",
+        "B"
+      ],
+      "A": {
+        "source": {
+          "prompt_tokens": 279,
+          "generated_tokens": 1536,
+          "ttft_seconds": 0.3997628688812256,
+          "mtp_accepted": 1080,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 0,
+            "get_calls": 0,
+            "get_bytes": 0,
+            "put_bytes": 174718976,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.033838479878860205,
+          "wall_seconds": 52.342047172016464
+        },
+        "restore": {
+          "prompt_tokens": 1815,
+          "generated_tokens": 32,
+          "ttft_seconds": 0.7779922485351562,
+          "mtp_accepted": 23,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 256,
+            "get_calls": 1,
+            "get_bytes": 174718976,
+            "put_bytes": 263847936,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03121820335546809,
+          "wall_seconds": 1.746201844071038
+        }
+      },
+      "B": {
+        "source": {
+          "prompt_tokens": 279,
+          "generated_tokens": 1536,
+          "ttft_seconds": 0.408855676651001,
+          "mtp_accepted": 1080,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 0,
+            "get_calls": 0,
+            "get_bytes": 0,
+            "put_bytes": 595460096,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03238317722739828,
+          "wall_seconds": 50.11769959097728
+        },
+        "restore": {
+          "prompt_tokens": 1815,
+          "generated_tokens": 32,
+          "ttft_seconds": 0.31458592414855957,
+          "mtp_accepted": 24,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 1792,
+            "get_calls": 1,
+            "get_bytes": 281673728,
+            "put_bytes": 0,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03205781222336115,
+          "wall_seconds": 1.3086873498978093
+        }
+      }
+    },
+    {
+      "order": [
+        "B",
+        "A"
+      ],
+      "A": {
+        "source": {
+          "prompt_tokens": 279,
+          "generated_tokens": 1536,
+          "ttft_seconds": 0.3784298896789551,
+          "mtp_accepted": 1080,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 0,
+            "get_calls": 0,
+            "get_bytes": 0,
+            "put_bytes": 174718976,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.033697025783068775,
+          "wall_seconds": 52.10391681804322
+        },
+        "restore": {
+          "prompt_tokens": 1815,
+          "generated_tokens": 32,
+          "ttft_seconds": 0.801018238067627,
+          "mtp_accepted": 23,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 256,
+            "get_calls": 1,
+            "get_bytes": 174718976,
+            "put_bytes": 263847936,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03283514974323372,
+          "wall_seconds": 1.8195406820159405
+        }
+      },
+      "B": {
+        "source": {
+          "prompt_tokens": 279,
+          "generated_tokens": 1536,
+          "ttft_seconds": 0.37458157539367676,
+          "mtp_accepted": 1080,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 0,
+            "get_calls": 0,
+            "get_bytes": 0,
+            "put_bytes": 595460096,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.032222877155704245,
+          "wall_seconds": 49.83711318601854
+        },
+        "restore": {
+          "prompt_tokens": 1815,
+          "generated_tokens": 32,
+          "ttft_seconds": 0.3238704204559326,
+          "mtp_accepted": 24,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 1792,
+            "get_calls": 1,
+            "get_bytes": 281673728,
+            "put_bytes": 0,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.031968290804915374,
+          "wall_seconds": 1.3152003729483113
+        }
+      }
+    },
+    {
+      "order": [
+        "A",
+        "B"
+      ],
+      "A": {
+        "source": {
+          "prompt_tokens": 279,
+          "generated_tokens": 1536,
+          "ttft_seconds": 0.3851909637451172,
+          "mtp_accepted": 1080,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 0,
+            "get_calls": 0,
+            "get_bytes": 0,
+            "put_bytes": 174718976,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03337043761040603,
+          "wall_seconds": 51.609094475978054
+        },
+        "restore": {
+          "prompt_tokens": 1815,
+          "generated_tokens": 32,
+          "ttft_seconds": 0.8804936408996582,
+          "mtp_accepted": 23,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 256,
+            "get_calls": 1,
+            "get_bytes": 174718976,
+            "put_bytes": 263847936,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03563654377320481,
+          "wall_seconds": 1.985502760973759
+        }
+      },
+      "B": {
+        "source": {
+          "prompt_tokens": 279,
+          "generated_tokens": 1536,
+          "ttft_seconds": 0.3797757625579834,
+          "mtp_accepted": 1080,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 0,
+            "get_calls": 0,
+            "get_bytes": 0,
+            "put_bytes": 595460096,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.0322154959537095,
+          "wall_seconds": 49.83100802695844
+        },
+        "restore": {
+          "prompt_tokens": 1815,
+          "generated_tokens": 32,
+          "ttft_seconds": 0.31451988220214844,
+          "mtp_accepted": 24,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 1792,
+            "get_calls": 1,
+            "get_bytes": 281673728,
+            "put_bytes": 0,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.031997643546351505,
+          "wall_seconds": 1.3068184490548447
+        }
+      }
+    },
+    {
+      "order": [
+        "B",
+        "A"
+      ],
+      "A": {
+        "source": {
+          "prompt_tokens": 279,
+          "generated_tokens": 1536,
+          "ttft_seconds": 0.3859286308288574,
+          "mtp_accepted": 1080,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 0,
+            "get_calls": 0,
+            "get_bytes": 0,
+            "put_bytes": 174718976,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03281052818632584,
+          "wall_seconds": 50.750719350995496
+        },
+        "restore": {
+          "prompt_tokens": 1815,
+          "generated_tokens": 32,
+          "ttft_seconds": 0.786461591720581,
+          "mtp_accepted": 23,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 256,
+            "get_calls": 1,
+            "get_bytes": 174718976,
+            "put_bytes": 263847936,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03163268725808349,
+          "wall_seconds": 1.767636967008002
+        }
+      },
+      "B": {
+        "source": {
+          "prompt_tokens": 279,
+          "generated_tokens": 1536,
+          "ttft_seconds": 0.3797338008880615,
+          "mtp_accepted": 1080,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 0,
+            "get_calls": 0,
+            "get_bytes": 0,
+            "put_bytes": 595460096,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.033331582734151974,
+          "wall_seconds": 51.54416388296522
+        },
+        "restore": {
+          "prompt_tokens": 1815,
+          "generated_tokens": 32,
+          "ttft_seconds": 0.3208951950073242,
+          "mtp_accepted": 24,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 1792,
+            "get_calls": 1,
+            "get_bytes": 281673728,
+            "put_bytes": 0,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.033144577804412094,
+          "wall_seconds": 1.3486519169528037
+        }
+      }
+    },
+    {
+      "order": [
+        "A",
+        "B"
+      ],
+      "A": {
+        "source": {
+          "prompt_tokens": 279,
+          "generated_tokens": 1536,
+          "ttft_seconds": 0.3768343925476074,
+          "mtp_accepted": 1080,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 0,
+            "get_calls": 0,
+            "get_bytes": 0,
+            "put_bytes": 174718976,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.033434047407761874,
+          "wall_seconds": 51.698700543958694
+        },
+        "restore": {
+          "prompt_tokens": 1815,
+          "generated_tokens": 32,
+          "ttft_seconds": 0.7986094951629639,
+          "mtp_accepted": 23,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 256,
+            "get_calls": 1,
+            "get_bytes": 174718976,
+            "put_bytes": 263847936,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03484113945160061,
+          "wall_seconds": 1.8793004010803998
+        }
+      },
+      "B": {
+        "source": {
+          "prompt_tokens": 279,
+          "generated_tokens": 1536,
+          "ttft_seconds": 0.37615346908569336,
+          "mtp_accepted": 1080,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 0,
+            "get_calls": 0,
+            "get_bytes": 0,
+            "put_bytes": 595460096,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.034162224778459566,
+          "wall_seconds": 52.815446611028165
+        },
+        "restore": {
+          "prompt_tokens": 1815,
+          "generated_tokens": 32,
+          "ttft_seconds": 0.3281412124633789,
+          "mtp_accepted": 24,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 1792,
+            "get_calls": 1,
+            "get_bytes": 281673728,
+            "put_bytes": 0,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.0318859641950938,
+          "wall_seconds": 1.3166977100772783
+        }
+      }
+    },
+    {
+      "order": [
+        "B",
+        "A"
+      ],
+      "A": {
+        "source": {
+          "prompt_tokens": 279,
+          "generated_tokens": 1536,
+          "ttft_seconds": 0.3913455009460449,
+          "mtp_accepted": 1080,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 0,
+            "get_calls": 0,
+            "get_bytes": 0,
+            "put_bytes": 174718976,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03308695243392443,
+          "wall_seconds": 51.18023559602443
+        },
+        "restore": {
+          "prompt_tokens": 1815,
+          "generated_tokens": 32,
+          "ttft_seconds": 0.7879598140716553,
+          "mtp_accepted": 23,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 256,
+            "get_calls": 1,
+            "get_bytes": 174718976,
+            "put_bytes": 263847936,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03180040096894147,
+          "wall_seconds": 1.774337847949937
+        }
+      },
+      "B": {
+        "source": {
+          "prompt_tokens": 279,
+          "generated_tokens": 1536,
+          "ttft_seconds": 0.37399840354919434,
+          "mtp_accepted": 1080,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 0,
+            "get_calls": 0,
+            "get_bytes": 0,
+            "put_bytes": 595460096,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.032200121938733305,
+          "wall_seconds": 49.80151520203799
+        },
+        "restore": {
+          "prompt_tokens": 1815,
+          "generated_tokens": 32,
+          "ttft_seconds": 0.3342463970184326,
+          "mtp_accepted": 24,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 1792,
+            "get_calls": 1,
+            "get_bytes": 281673728,
+            "put_bytes": 0,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03599302616015437,
+          "wall_seconds": 1.4503149560187012
+        }
+      }
+    },
+    {
+      "order": [
+        "A",
+        "B"
+      ],
+      "A": {
+        "source": {
+          "prompt_tokens": 279,
+          "generated_tokens": 1536,
+          "ttft_seconds": 0.37401604652404785,
+          "mtp_accepted": 1080,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 0,
+            "get_calls": 0,
+            "get_bytes": 0,
+            "put_bytes": 174718976,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03261454437331506,
+          "wall_seconds": 50.437989601981826
+        },
+        "restore": {
+          "prompt_tokens": 1815,
+          "generated_tokens": 32,
+          "ttft_seconds": 0.7961413860321045,
+          "mtp_accepted": 23,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 256,
+            "get_calls": 1,
+            "get_bytes": 174718976,
+            "put_bytes": 263847936,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.032108761869641324,
+          "wall_seconds": 1.792167225969024
+        }
+      },
+      "B": {
+        "source": {
+          "prompt_tokens": 279,
+          "generated_tokens": 1536,
+          "ttft_seconds": 0.3805866241455078,
+          "mtp_accepted": 1080,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 0,
+            "get_calls": 0,
+            "get_bytes": 0,
+            "put_bytes": 595460096,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03389326596347439,
+          "wall_seconds": 52.40739724098239
+        },
+        "restore": {
+          "prompt_tokens": 1815,
+          "generated_tokens": 32,
+          "ttft_seconds": 0.32114481925964355,
+          "mtp_accepted": 24,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 1792,
+            "get_calls": 1,
+            "get_bytes": 281673728,
+            "put_bytes": 0,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.032173798870175116,
+          "wall_seconds": 1.3193463089410216
+        }
+      }
+    },
+    {
+      "order": [
+        "B",
+        "A"
+      ],
+      "A": {
+        "source": {
+          "prompt_tokens": 279,
+          "generated_tokens": 1536,
+          "ttft_seconds": 0.3884704113006592,
+          "mtp_accepted": 1080,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 0,
+            "get_calls": 0,
+            "get_bytes": 0,
+            "put_bytes": 174718976,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03259794823127626,
+          "wall_seconds": 50.426518479012884
+        },
+        "restore": {
+          "prompt_tokens": 1815,
+          "generated_tokens": 32,
+          "ttft_seconds": 0.7943527698516846,
+          "mtp_accepted": 23,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 256,
+            "get_calls": 1,
+            "get_bytes": 174718976,
+            "put_bytes": 263847936,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03205736280764423,
+          "wall_seconds": 1.7886556209996343
+        }
+      },
+      "B": {
+        "source": {
+          "prompt_tokens": 279,
+          "generated_tokens": 1536,
+          "ttft_seconds": 0.37668299674987793,
+          "mtp_accepted": 1080,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 0,
+            "get_calls": 0,
+            "get_bytes": 0,
+            "put_bytes": 595460096,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03237003157330914,
+          "wall_seconds": 50.065283232950605
+        },
+        "restore": {
+          "prompt_tokens": 1815,
+          "generated_tokens": 32,
+          "ttft_seconds": 0.3372199535369873,
+          "mtp_accepted": 24,
+          "evidence": {
+            "completed": 1,
+            "local": 0,
+            "external": 1792,
+            "get_calls": 1,
+            "get_bytes": 281673728,
+            "put_bytes": 0,
+            "get_failed": 0
+          },
+          "tpot_seconds": 0.03219084199818392,
+          "wall_seconds": 1.3356946180574596
+        }
+      }
+    }
+  ]
+}
