@@ -16,7 +16,6 @@ class InFlightSaveBlockTracker:
     def retain(
         self,
         req_meta: ReqMeta,
-        mamba_group_ids: set[int],
         block_pool: BlockPool | None,
     ) -> None:
         if not req_meta.can_save:
@@ -29,16 +28,6 @@ class InFlightSaveBlockTracker:
 
         block_ids = [put.block_id for put in req_meta.boundary_puts or []]
         assert all(block_id > 0 for block_id in block_ids), "Null block cannot back a boundary save"
-        if req_meta.token_len_chunk:
-            # Normal prefix save: pin all non-Mamba sources for retries.
-            block_ids.extend(
-                block_id
-                for group_id, group in enumerate(req_meta.block_ids_by_group)
-                if group_id not in mamba_group_ids
-                for block_id in group
-                if block_id > 0
-            )
-
         block_ids = list(dict.fromkeys(block_ids))
         if not block_ids:
             return

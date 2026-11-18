@@ -116,7 +116,7 @@ def test_boundary_save_lookup_and_physical_page_replay(seed, store_job_id):
     )
     tracker = InFlightSaveBlockTracker(1)
     pool = SimpleNamespace(blocks=list(range(4)), touch=Mock(), free_blocks=Mock())
-    tracker.retain(req, {1}, pool)
+    tracker.retain(req, pool)
     assert req.store_job_id == store_job_id
     req.current_event = Mock()
     send.add_save_batch([req])
@@ -325,7 +325,7 @@ def test_core_boundary_offload_is_not_positional_recurrent_table(partial_hits):
     assert meta.requests[0].block_ids_by_group == [[1], [2]]
     tracker = InFlightSaveBlockTracker(1)
     pool = SimpleNamespace(blocks=list(range(20)), touch=Mock(), free_blocks=Mock())
-    tracker.retain(meta.requests[0], {1}, pool)
+    tracker.retain(meta.requests[0], pool)
     pool.touch.assert_called_once_with([9])
 
 

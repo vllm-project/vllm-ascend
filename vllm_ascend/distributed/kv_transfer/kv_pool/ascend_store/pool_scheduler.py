@@ -855,11 +855,8 @@ class KVPoolScheduler(BaseKVPoolScheduler):
 
     def retain_blocks_for_save(self, req_meta: ReqMeta) -> None:
         """Keep Mamba source blocks alive until bulk save completes."""
-        if not self.num_mamba_speculative_blocks_by_group and not req_meta.boundary_puts:
-            return
         self._in_flight_save_blocks.retain(
             req_meta,
-            set(self.num_mamba_speculative_blocks_by_group),
             self._block_pool,
         )
 
@@ -1016,7 +1013,7 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         req_meta.boundary_puts = [*self._partial_tail_non_mamba_puts(req_meta), *mamba_puts]
         assert request.request_id not in self._finished_partial_tail_metas
         # This job has no normal save range. Pin only its exact boundary sources.
-        self._in_flight_save_blocks.retain(req_meta, set(self.num_mamba_speculative_blocks_by_group), self._block_pool)
+        self._in_flight_save_blocks.retain(req_meta, self._block_pool)
         self._finished_partial_tail_metas[request.request_id] = req_meta
         # The store job owns exact block refs, so request cleanup need not wait.
         return False
