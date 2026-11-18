@@ -47,7 +47,7 @@ def test_platform_builder_accounts_for_both_glm_page_classes(pool, speculative_b
         for name, spec in make_specs(pool).items()
     }
     groups = get_glm5_next_kv_cache_groups(config, specs)
-    physical = get_glm5_next_kv_cache_config(config, groups, get_glm5_next_pool_bytes_per_block(groups))
+    physical = get_glm5_next_kv_cache_config(config, groups, num_blocks=1)
     assert len({tensor.size for tensor in physical.kv_cache_tensors}) == 2
     expected = sum(tensor.size for tensor in physical.kv_cache_tensors)
     builder = resolve_obj_by_qualname(NPUPlatform.get_kv_cache_config_builder_cls(config))()
@@ -94,8 +94,7 @@ def test_kv_cache_config_preserves_retention_interval(retention_interval):
     groups = get_glm5_next_kv_cache_groups(config, make_specs())
     layout = _get_glm5_next_cache_layout(groups)
     assert layout is not None
-    budget = 10 * (layout.main_page_size + layout.small_page_size)
-    plan = get_glm5_next_kv_cache_config(config, groups, budget)
+    plan = get_glm5_next_kv_cache_config(config, groups, num_blocks=10)
     assert plan.prefix_cache_retention_interval == retention_interval
 
 
@@ -162,8 +161,8 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     assert layout.main_slot_count == layout.small_slot_count == 1
 
     bytes_per_block = layout.main_page_size + layout.small_page_size
-    budget = 20 * bytes_per_block
-    plan = get_glm5_next_kv_cache_config(config, groups, budget)
+    config.cache_config.num_gpu_blocks_override = 99
+    plan = get_glm5_next_kv_cache_config(config, groups, num_blocks=20)
     assert plan.num_blocks == 20
     assert len(plan.kv_cache_tensors) == 2
     assert all(isinstance(tensor, KVCacheTensor) for tensor in plan.kv_cache_tensors)
@@ -231,7 +230,7 @@ def test_fp8_shared_pages_preserve_tail_rows_and_kernel_scale_alignment():
         tokens_per_state=4,
     )
     groups = get_glm5_next_kv_cache_groups(make_config(), specs)
-    plan = get_glm5_next_kv_cache_config(make_config(), groups, 3 * get_glm5_next_pool_bytes_per_block(groups))
+    plan = get_glm5_next_kv_cache_config(make_config(), groups, num_blocks=3)
     descriptor = next(tensor for tensor in plan.kv_cache_tensors if indexer_name in get_kv_cache_tensor_layers(tensor))
     raw = torch.zeros(descriptor.size, dtype=torch.uint8)
     (tail,) = view_kpool_tail_cache(tail_name, specs[tail_name], raw, plan.num_blocks)
@@ -275,7 +274,9 @@ def test_fp8_cache_budget_accounts_for_scales_tail_and_padding(block_size, looka
         groups = get_glm5_next_kv_cache_groups(config, specs)
         layout = _get_glm5_next_cache_layout(groups)
         assert layout is not None and layout.small_page_size == expected_page_bytes
-        plan = get_glm5_next_kv_cache_config(config, groups, budget)
+        plan = get_glm5_next_kv_cache_config(
+            config, groups, num_blocks=budget // get_glm5_next_pool_bytes_per_block(groups)
+        )
         block_bytes = get_glm5_next_pool_bytes_per_block(groups)
         assert sum(tensor.size for tensor in plan.kv_cache_tensors) == plan.num_blocks * block_bytes <= budget
         bytes_per_block.append(block_bytes)
@@ -306,8 +307,7 @@ def test_pipeline_projection_supports_a_mamba_only_worker():
     assert layout.main_slot_count == 1
     assert layout.small_slot_count == 0
 
-    budget = 10 * layout.main_page_size
-    plan = get_glm5_next_kv_cache_config(config, projected_groups, available_memory=budget)
+    plan = get_glm5_next_kv_cache_config(config, projected_groups, num_blocks=10)
     assert plan.num_blocks == 10
     assert len(plan.kv_cache_tensors) == 1
     assert get_kv_cache_tensor_layers(plan.kv_cache_tensors[0]) == [local_mamba_name]
@@ -342,7 +342,9 @@ def test_sliding_window_draft_caches_use_independent_physical_tensors():
     assert {name for group in layout.draft_groups for name in group.layer_names} == set(draft_names)
 
     budget = 1024 * 1024
-    plan = get_glm5_next_kv_cache_config(config, groups, budget)
+    plan = get_glm5_next_kv_cache_config(
+        config, groups, num_blocks=budget // get_glm5_next_pool_bytes_per_block(groups)
+    )
     assert plan.num_blocks * get_glm5_next_pool_bytes_per_block(groups) == sum(
         tensor.size for tensor in plan.kv_cache_tensors
     )
@@ -403,6 +405,8 @@ def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse
     budget = worker._scale_kv_cache_memory_for_multi_group(required)
 
     assert budget == required
-    plan = get_glm5_next_kv_cache_config(config, groups, budget)
+    plan = get_glm5_next_kv_cache_config(
+        config, groups, num_blocks=budget // get_glm5_next_pool_bytes_per_block(groups)
+    )
     assert plan.num_blocks * get_glm5_next_pool_bytes_per_block(groups) == required
     assert sum(tensor.size for tensor in plan.kv_cache_tensors) == required

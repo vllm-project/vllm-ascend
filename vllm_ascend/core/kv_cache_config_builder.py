@@ -62,7 +62,6 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
 )
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cache
-from vllm_ascend.utils import vllm_version_is
 
 
 class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
@@ -114,22 +113,12 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         kv_cache_groups: list[KVCacheGroupSpec],
         num_blocks: int,
     ) -> KVCacheConfig:
-        """Materialize the Ascend layouts for exactly ``num_blocks`` blocks.
-
-        The default implementation derives the pool size from a one-block
-        placement, which the shared-slot layouts here violate. Converting the
-        block count with ``_get_pool_bytes_per_block`` reproduces the memory
-        budget the model planners consume exactly, so the cell split, offsets,
-        and page strides stay identical to the block-count-based sizing.
-        """
-        bytes_per_block = self._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
-        if bytes_per_block is None:
+        """Materialize Core's block count; Qwen4 retains its budget planner."""
+        # Preserve the default fallback from #21345. Metadata propagation for
+        # ordinary/empty layouts is handled by a separate follow-up.
+        if self._get_pool_bytes_per_block(vllm_config, kv_cache_groups) is None:
             return super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks)
-        return get_ascend_kv_cache_config_from_groups(
-            vllm_config,
-            kv_cache_groups,
-            num_blocks * bytes_per_block,
-        )
+        return get_ascend_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks)
 
     def _get_pool_bytes_per_block(
         self,
@@ -391,12 +380,11 @@ def _deepseek_v4_pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -
 
 
 def _get_kv_cache_config_deepseek_v4_main(
-    vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
-    available_memory: int,
+    num_blocks: int,
 ) -> tuple[int, list[KVCacheTensor]]:
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
-        return tq_cache.cache_config(vllm_config, kv_cache_groups, available_memory)
+        return tq_cache.cache_config(kv_cache_groups, num_blocks)
     (
         page_sizes,
         bucketed,
@@ -406,8 +394,6 @@ def _get_kv_cache_config_deepseek_v4_main(
     ) = _get_deepseek_v4_cache_layout(kv_cache_groups)
 
     bytes_per_tuple = sum(page_sizes)
-    num_blocks = available_memory // (bytes_per_tuple * num_tuple_slots)
-    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
 
     tuple_stride = bytes_per_tuple * num_blocks
     backing_size = tuple_stride * num_tuple_slots
@@ -460,34 +446,28 @@ def _get_kv_cache_config_deepseek_v4_main(
 def get_ascend_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
-    available_memory: int,
+    num_blocks: int,
 ) -> KVCacheConfig:
-    """Materialize an Ascend layout from the memory budget Core resolved.
+    """Describe Core's block count and preserve scheduler transfer metadata.
 
-    Attach ``kv_transfer_config`` onto the built config: ``KVCacheConfig`` has
-    no native field, and the PD prefill-producer role read back by the kv-cache
-    coordinator (see ``patch_kv_cache_coordinator.py``) must ride on the config
-    object - the coordinator factory receives ``KVCacheConfig`` but not
-    ``VllmConfig``. The attribute survives the scheduler-side ``copy.deepcopy``
-    in ``generate_scheduler_kv_cache_config`` and is dropped by worker pickle
-    IPC, which never reads it.
+    Qwen4 keeps its existing budget-based planner until its kernel/storage
+    layout can be revisited. Other model planners do not reselect capacity.
+    Independent generic draft pools retain their pre-existing override
+    behavior in this change.
     """
-    qwen_config = (
-        None
-        if vllm_version_is("0.28.0")
-        else get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
-    )
     pools = _get_replicated_draft_pools(kv_cache_groups)
-    if vllm_config.model_config.hf_config.model_type == "kimi_k31":
-        kv_cache_config = paired_sfa_cache_config(vllm_config, kv_cache_groups, available_memory)
+    if not kv_cache_groups:
+        kv_cache_config = DefaultKVCacheConfigBuilder().get_kv_cache_config_from_groups(
+            vllm_config, kv_cache_groups, num_blocks
+        )
+    elif vllm_config.model_config.hf_config.model_type == "kimi_k31":
+        kv_cache_config = paired_sfa_cache_config(vllm_config, kv_cache_groups, num_blocks)
     elif pools is not None:
-        # Every physical pool shares the scheduler's block count, but owns a
-        # disjoint byte range. Use the same aggregate divisor as admission and
-        # rank re-planning, then retain upstream's per-pool stride descriptors.
+        # Preserve #21345's independent-pool override and placement behavior;
+        # this path is separate from the model-planner API migration.
         pool_bytes = [_upstream_pool_bytes_per_block(vllm_config, pool) for pool in pools]
-        bytes_per_block = sum(pool_bytes)
-        num_blocks = may_override_num_blocks(vllm_config, available_memory // bytes_per_block)
-        total_size = num_blocks * bytes_per_block
+        num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+        total_size = num_blocks * sum(pool_bytes)
         kv_cache_tensors: list[KVCacheTensor] = []
         offset = 0
         for pool, pool_bytes_per_block in zip(pools, pool_bytes):
@@ -505,20 +485,19 @@ def get_ascend_kv_cache_config_from_groups(
             kv_cache_groups=kv_cache_groups,
             prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
         )
-    elif qwen_config is not None:
-        kv_cache_config = qwen_config
     elif is_deepseek_v41_cache(kv_cache_groups):
-        kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
+        kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, num_blocks)
     elif _get_glm5_next_cache_layout(kv_cache_groups) is not None:
-        kv_cache_config = get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
+        kv_cache_config = get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, num_blocks)
+    elif (qwen_pool_bytes := get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)) is not None:
+        kv_cache_config = get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, num_blocks * qwen_pool_bytes)
+        assert kv_cache_config is not None
     elif not _is_deepseek_v4_groups(kv_cache_groups):
-        kv_cache_config = _upstream_get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
-    else:
-        num_blocks, kv_cache_tensors = _get_kv_cache_config_deepseek_v4_main(
-            vllm_config,
-            kv_cache_groups,
-            available_memory,
+        kv_cache_config = DefaultKVCacheConfigBuilder().get_kv_cache_config_from_groups(
+            vllm_config, kv_cache_groups, num_blocks
         )
+    else:
+        _, kv_cache_tensors = _get_kv_cache_config_deepseek_v4_main(kv_cache_groups, num_blocks)
         kv_cache_config = KVCacheConfig(
             num_blocks=num_blocks,
             kv_cache_tensors=kv_cache_tensors,

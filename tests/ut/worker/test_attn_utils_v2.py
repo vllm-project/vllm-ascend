@@ -1005,15 +1005,8 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     num_blocks = 3
     tuple_stride = (small_spec.page_size_bytes + large_spec.page_size_bytes) * num_blocks
     backing_size = tuple_stride * 2
-    monkeypatch.setattr(
-        "vllm_ascend.core.kv_cache_config_builder.may_override_num_blocks",
-        lambda _config, value: value,
-    )
-    planned_num_blocks, descriptors = _get_kv_cache_config_deepseek_v4_main(
-        SimpleNamespace(),
-        groups,
-        backing_size,
-    )
+
+    planned_num_blocks, descriptors = _get_kv_cache_config_deepseek_v4_main(groups, num_blocks=num_blocks)
     assert planned_num_blocks == num_blocks
     kv_cache_config = KVCacheConfig(
         num_blocks=planned_num_blocks,

@@ -23,7 +23,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
-    get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.cache_views import view_kpool_tail_cache
 from vllm_ascend.utils import get_kv_cache_tensor_layers
@@ -131,12 +130,7 @@ def _make_plan(num_blocks=3, main_head_size=4):
     config = _make_config()
     specs = _make_specs(main_head_size)
     groups = get_glm5_next_kv_cache_groups(config, specs)
-    bytes_per_block = get_glm5_next_pool_bytes_per_block(groups)
-    plan = get_glm5_next_kv_cache_config(
-        config,
-        groups,
-        num_blocks * bytes_per_block,
-    )
+    plan = get_glm5_next_kv_cache_config(config, groups, num_blocks=num_blocks)
     return config, groups, plan
 
 
@@ -241,7 +235,7 @@ def test_glm_fp8_indexer_keys_and_scales_share_padded_pages_without_overlapping(
     )
     register_all_kvcache_specs(None)
     groups = get_glm5_next_kv_cache_groups(config, specs)
-    plan = get_glm5_next_kv_cache_config(config, groups, 3 * get_glm5_next_pool_bytes_per_block(groups))
+    plan = get_glm5_next_kv_cache_config(config, groups, num_blocks=3)
     config.model_config.get_num_layers = lambda _: 2
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))

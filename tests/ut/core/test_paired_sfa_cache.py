@@ -76,7 +76,7 @@ def test_token_blocks_unchanged_and_components_share_ids():
     assert {s.block_size for s in specs.values()} == {1536}
     assert {s.page_size_bytes for s in specs.values()} == {1007616, 202752}
     assert paired_sfa_pool_bytes(groups) == 29048832
-    plan = paired_sfa_cache_config(config, groups, 17556701184)
+    plan = paired_sfa_cache_config(config, groups, num_blocks=604)
     assert plan.num_blocks == 604
     backing_size = 29048832 * 604
     assert backing_size <= 17556701184
@@ -104,7 +104,7 @@ def test_paired_config_propagates_prefix_cache_retention_interval(interval):
     config = make_config()
     config.cache_config.prefix_cache_retention_interval = interval
     groups = paired_sfa_cache_groups(config, make_specs())
-    plan = paired_sfa_cache_config(config, groups, 17556701184)
+    plan = paired_sfa_cache_config(config, groups, num_blocks=604)
     assert plan.prefix_cache_retention_interval == interval
 
 
@@ -180,7 +180,7 @@ def test_dense_draft_retains_sharding_coverage_and_separate_storage(dcp_size, dc
     assert (draft_group is groups[0]) == dcp_sharded
     assert groups[1:4] == target_groups[1:]
     assert paired_sfa_pool_bytes(groups) == paired_sfa_pool_bytes(target_groups) + draft.page_size_bytes
-    plan = paired_sfa_cache_config(config, groups, 2**30)
+    plan = paired_sfa_cache_config(config, groups, num_blocks=(2**30) // paired_sfa_pool_bytes(groups))
     draft_tensor = next(tensor for tensor in plan.kv_cache_tensors if tensor.layers == [name])
     assert draft_tensor.block_stride == draft.page_size_bytes
     assert draft_tensor.offset + draft_tensor.layer_stride == draft_tensor.size
@@ -277,7 +277,7 @@ def test_a3_int8_fp16_pages_preserve_tp16_recurrent_ownership():
     assert {spec.page_size_bytes for spec in specs.values()} == {503808, 99840}
     assert {spec.block_size for spec in specs.values()} == {768}
     assert paired_sfa_pool_bytes(groups) == 14487552
-    plan = paired_sfa_cache_config(config, groups, 115900539)
+    plan = paired_sfa_cache_config(config, groups, num_blocks=8)
     assert plan.num_blocks == 8
     assert {tensor.size for tensor in plan.kv_cache_tensors} == {115900416}
     assert all(
@@ -285,3 +285,18 @@ def test_a3_int8_fp16_pages_preserve_tp16_recurrent_ownership():
         for spec in specs.values()
         if isinstance(spec, AscendSFAIndexerCacheSpec)
     )
+
+
+@pytest.mark.parametrize("num_blocks", [3, 7])
+def test_paired_materialization_uses_core_count_without_reapplying_override(num_blocks):
+    config = make_config()
+    config.cache_config.num_gpu_blocks_override = 99
+    groups = paired_sfa_cache_groups(config, make_specs())
+    plan = paired_sfa_cache_config(config, groups, num_blocks)
+    assert plan.num_blocks == num_blocks
+    assert {tensor.size for tensor in plan.kv_cache_tensors} == {num_blocks * paired_sfa_pool_bytes(groups)}
+    assert config.cache_config.num_gpu_blocks_override == 99
+    # The indexer region follows the complete main pool and moves with N.
+    main = plan.kv_cache_tensors[0]
+    indexer = plan.kv_cache_tensors[-1]
+    assert indexer.offset == len(main.layers) * main.layer_stride
