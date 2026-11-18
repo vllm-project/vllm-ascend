@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from vllm_ascend.models.qwen4_exp import mtp
 
 
@@ -144,10 +146,10 @@ def test_draft_config_remaps_modelslim_description(monkeypatch) -> None:
     monkeypatch.setattr(
         mtp,
         "_upstream_make_draft_vllm_config",
-        lambda _config, _start: draft_config,
+        lambda _config, _start, _layers: draft_config,
     )
 
-    actual = mtp._make_draft_vllm_config(target_config, mtp_start_layer_idx=48)
+    actual = mtp._make_draft_vllm_config(target_config, mtp_start_layer_idx=48, num_mtp_layers=1)
 
     assert actual is draft_config
     assert draft_config.quant_config.quant_description == {
@@ -155,12 +157,33 @@ def test_draft_config_remaps_modelslim_description(monkeypatch) -> None:
     }
 
 
+@pytest.mark.parametrize("configured_layers", [None, 2])
+def test_two_argument_draft_config_infers_layer_count(monkeypatch, configured_layers) -> None:
+    text_config = SimpleNamespace()
+    if configured_layers is not None:
+        text_config.mtp_num_hidden_layers = configured_layers
+    target_config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=text_config), speculative_config=None)
+    draft_config = SimpleNamespace(
+        quant_config=SimpleNamespace(quant_description={"mtp.layers.0.self_attn.q_proj.weight": "W8A8_DYNAMIC"})
+    )
+    calls = []
+
+    def upstream(config, start, layers):
+        calls.append((config, start, layers))
+        return draft_config
+
+    monkeypatch.setattr(mtp, "_upstream_make_draft_vllm_config", upstream)
+    assert mtp._make_draft_vllm_config(target_config, mtp_start_layer_idx=48) is draft_config
+    assert calls == [(target_config, 48, 1 if configured_layers is None else configured_layers)]
+    assert draft_config.quant_config.quant_description == {"mtp.layers.48.self_attn.q_proj.weight": "W8A8_DYNAMIC"}
+
+
 def test_position_cache_is_aligned_before_upstream_draft_config(monkeypatch) -> None:
     vllm_config, draft_model_config, _ = _make_long_context_config()
     draft_model_config.hf_text_config.mtp_num_hidden_layers = 1
     draft_config = SimpleNamespace(quant_config=None)
 
-    def make_draft_config(_config, _start):
+    def make_draft_config(_config, _start, _layers):
         assert draft_model_config.hf_text_config.max_position_embeddings == 1010000
         assert draft_model_config.max_model_len == 1010000
         return draft_config

@@ -108,18 +108,17 @@ _upstream_make_draft_vllm_config = upstream_mtp._make_draft_vllm_config
 def _make_draft_vllm_config(
     vllm_config: VllmConfig,
     mtp_start_layer_idx: int,
+    num_mtp_layers: int | None = None,
 ) -> VllmConfig:
-    # Run before the Qwen4Exp MTP layers construct their rotary embeddings so
-    # graph capture cannot retain an undersized cache.
+    # Keep main's position-cache alignment before upstream constructs MTP RoPE.
     _align_qwen4_exp_mtp_position_cache(vllm_config)
+    if num_mtp_layers is None:
+        hf_text_config = getattr(vllm_config.model_config, "hf_text_config", None)
+        num_mtp_layers = getattr(hf_text_config, "mtp_num_hidden_layers", 1)
     draft_vllm_config = _upstream_make_draft_vllm_config(
         vllm_config,
         mtp_start_layer_idx,
-    )
-    num_mtp_layers = getattr(
-        vllm_config.model_config.hf_text_config,
-        "mtp_num_hidden_layers",
-        1,
+        num_mtp_layers,
     )
     _remap_modelslim_mtp_layer_ids(
         draft_vllm_config.quant_config,

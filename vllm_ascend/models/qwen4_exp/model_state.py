@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from vllm.logger import logger
 from vllm.models.qwen4_exp.amd.model_state import Qwen4ExpModelState
 
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
@@ -36,6 +37,23 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
     """
 
     _skip_spec_cpu_length_sync: bool
+
+    def __init__(self, vllm_config, model, encoder_cache, device):
+        from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
+
+        from .recoverssm_config import use_qwen_gdn_recoverssm, validate_qwen_gdn_recoverssm
+
+        validate_qwen_gdn_recoverssm(vllm_config)
+        super().__init__(vllm_config, model, encoder_cache, device)
+        if use_qwen_gdn_recoverssm(vllm_config):
+            self.recoverssm = RecoverSSMState()
+            logger.info(
+                "Enabled Qwen GDN RecoverSSM: Q=%d, stock conv/SSM PD pages, private FP32 replay records; "
+                "use_replayssm=%s use_kda_recoverssm=%s",
+                vllm_config.speculative_config.num_speculative_tokens + 1,
+                vllm_config.cache_config.use_replayssm,
+                vllm_config.cache_config.use_kda_recoverssm,
+            )
 
     def initialize_spec_cpu_length_sync(self, runner: Any) -> None:
         """Bind length consumers once, after target and draft KV initialization."""

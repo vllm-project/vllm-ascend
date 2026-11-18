@@ -649,6 +649,9 @@ class AscendConfig:
       ``scheduler_config`` as shown above.
     """
 
+    qwen_gdn_recoverssm: bool = False
+    """Enable experimental Qwen4Exp GDN accepted-state recovery in MRV2."""
+
     model_config = ConfigDict(extra="forbid")
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----

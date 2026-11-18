@@ -118,19 +118,21 @@ def model_inputs(device, tokens, hk, hv, key, value):
 
 def cpu_reference(inputs, checkpoint, offsets, pages, *, normalize=True, scale=None, sp_beta=1.0, threshold=20.0):
     """Forward token recurrence with per-value-head GDN decay and GQA."""
+    beta_dtype, q_dtype, k_dtype = inputs[2].dtype, inputs[4].dtype, inputs[5].dtype
     a_log, a, b, bias, q, k, v = (tensor.detach().cpu().double() for tensor in inputs)
     initial = checkpoint.detach().cpu().double()
     ratio = v.shape[2] // k.shape[2]
     scale = q.shape[-1] ** -0.5 if scale is None else scale
     if normalize:
-        q = q / (q.square().sum(-1, keepdim=True) + 1e-6).sqrt()
-        k = k / (k.square().sum(-1, keepdim=True) + 1e-6).sqrt()
+        # Ordinary GDN materializes normalized Q/K and beta in activation dtype.
+        q = (q / (q.square().sum(-1, keepdim=True) + 1e-6).sqrt()).to(q_dtype).double()
+        k = (k / (k.square().sum(-1, keepdim=True) + 1e-6).sqrt()).to(k_dtype).double()
     q = (q[0] * scale).repeat_interleave(ratio, dim=1)
     k = k[0].repeat_interleave(ratio, dim=1)
     x = a.reshape_as(b[0]) + bias
     softplus = torch.nn.functional.softplus(x, beta=sp_beta, threshold=threshold)
     decay = (-a_log.exp() * softplus).exp()
-    beta = b[0].sigmoid()
+    beta = b[0].sigmoid().to(beta_dtype).double()
     output = torch.zeros_like(v)
     histories, records = {}, {}
     for row, page in enumerate(pages):
