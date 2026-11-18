@@ -60,6 +60,17 @@ on:
       - opened
       - synchronize
 
+concurrency:
+  # Key by head SHA (same pattern as bot_ci_gate_comment.yaml): a batch of
+  # PR updates (e.g. a mass rebase) fires one run per completed E2E run plus
+  # one per synchronize, and the comment only depends on the *latest* state
+  # of each commit, so stale-head runs collapse into the group and only the
+  # newest one posts. Do NOT key by workflow_run.id (no dedup, runs pile up
+  # in the runner queue) or by pull_requests[0].number (empty for fork PRs
+  # on workflow_run, which would collapse every PR into one group).
+  group: post-coverage-comment-${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
+  cancel-in-progress: true
+
 permissions:
   pull-requests: write
   actions: read
