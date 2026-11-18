@@ -829,7 +829,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             use_checkpoint_prefill = (
                 getattr(self, "_ascend_internal_checkpoint_enabled", False) and self._exports_checkpoints
             )
-            supports_fused_dtype = query_non_spec.dtype == torch.bfloat16
+            supports_fused_dtype = query_non_spec.dtype == torch.bfloat16 and (
+                not use_checkpoint_prefill or ssm_state.dtype == torch.float32
+            )
             use_fla_gdn_prefill = (
                 supports_fused_dtype
                 and get_pcp_group().world_size == 1
