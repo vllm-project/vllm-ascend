@@ -49,6 +49,7 @@ from vllm_ascend.ops.triton.fla.utils import (
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets as runtime_prepare_update_chunk_offsets,
 )
+from vllm_ascend.ops.triton.mamba import cached_decode as cached_decode_module
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 
 
@@ -185,6 +186,70 @@ def test_rebind_gdn_group_matches_full_build(
         if descriptor is not None:
             lengths = descriptor.actual_seq_lengths
             assert lengths is getattr(source, name).actual_seq_lengths
+
+
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_batched_update_preserves_spec_descriptor_policy(builder_cls, mamba_cache_mode, adaptive):
+    device = torch.device("cpu")
+    builder_kwargs = dict(
+        device=device,
+        num_heads=32,
+        num_speculative_tokens=3,
+        num_speculative_blocks=3,
+        builder_cls=builder_cls,
+        mamba_cache_mode=mamba_cache_mode,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        enable_adaptive_verification=adaptive,
+    )
+    source_builder, reuser, reference = (_make_builder(**builder_kwargs) for _ in range(3))
+    common = create_common_attn_metadata(BatchSpec([24, 48], [4, 4]), 16, device)
+    common.block_table_tensor = torch.arange(32, dtype=torch.int32).view(2, 16) + 1
+    other_table = common.block_table_tensor + 1000
+    other_common = common.replace(block_table_tensor=other_table)
+    accepted = torch.ones(2, dtype=torch.int32)
+    drafts = torch.full((2,), 3, dtype=torch.int32)
+
+    source = source_builder.build(0, common, accepted, drafts)
+    expected = reference.build(0, other_common, accepted, drafts)
+    updates: list = []
+    actual = reuser.update_block_table(source, other_table, graph_state_updates=updates)
+    reuser.graph_state_updater.apply(updates)
+
+    _assert_reused_gdn_metadata_matches(actual, expected)
+    assert actual.spec_decode_metadata.use_upstream_conv == expected.spec_decode_metadata.use_upstream_conv
+    assert actual.spec_decode_metadata.use_upstream_recurrent == expected.spec_decode_metadata.use_upstream_recurrent
+    if expected.spec_decode_metadata.actual_seq_lengths is None:
+        assert actual.spec_decode_metadata.actual_seq_lengths is None
+
+
+def test_materialize_cached_spec_decode_preserves_descriptor_policy(monkeypatch):
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        num_speculative_blocks=3,
+        enable_adaptive_verification=True,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    common = create_common_attn_metadata(BatchSpec([24, 48], [4, 4]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.arange(32, dtype=torch.int32).view(2, 16) + 1
+    accepted = torch.ones(2, dtype=torch.int32)
+    drafts = torch.full((2,), 3, dtype=torch.int32)
+    template = builder.build(0, common, accepted, drafts)
+    assert template.spec_decode_metadata.use_upstream_conv
+    assert template.spec_decode_metadata.use_upstream_recurrent
+    assert template.spec_decode_metadata.actual_seq_lengths is None
+
+    monkeypatch.setattr(cached_decode_module, "materialize_cached_gdn_decode", lambda *args, **kwargs: None)
+    builder._materialize_cached_spec_decode(template, graph_request_count=2)
+
+    spec = template.spec_decode_metadata
+    assert spec.use_upstream_conv and spec.use_upstream_recurrent
+    assert spec.actual_seq_lengths is None
+    assert spec.spec_causal_conv1d.query_start_loc.data_ptr() == builder.spec_query_start_loc.data_ptr()
+    assert spec.spec_causal_conv1d.cache_indices.data_ptr() == builder.spec_state_indices_tensor.data_ptr()
 
 
 @pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
@@ -727,7 +792,7 @@ def _make_vllm_config(
             use_eagle_block_drop=lambda: False,
         )
 
-    model_config = SimpleNamespace(max_model_len=max_model_len, hf_text_config=SimpleNamespace())
+    model_config = SimpleNamespace(max_model_len=max_model_len, hf_text_config=SimpleNamespace(), dtype=torch.float32)
     model_config.get_num_attention_heads = lambda parallel_config: num_heads
 
     return SimpleNamespace(
@@ -784,7 +849,8 @@ def _make_builder(
 
 @pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
 @pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
-def test_decode_layout_reuse_refreshes_offsets_lengths_and_physical_states(builder_cls, mamba_cache_mode):
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_decode_layout_reuse_refreshes_offsets_lengths_and_physical_states(builder_cls, mamba_cache_mode, adaptive):
     draft_count = 3
     kwargs = dict(
         device=torch.device("cpu"),
@@ -794,6 +860,7 @@ def test_decode_layout_reuse_refreshes_offsets_lengths_and_physical_states(build
         builder_cls=builder_cls,
         mamba_cache_mode=mamba_cache_mode,
         cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        enable_adaptive_verification=adaptive,
     )
     builder = _make_builder(**kwargs)
     reference = _make_builder(**kwargs)
@@ -898,6 +965,46 @@ def test_host_layout_cache_hit_keeps_conv_buffers_bound():
         assert builder._spec_conv_indices[: len(expected_blocks)].tolist() == expected_blocks
         assert conv.cache_indices[: len(expected_blocks)].tolist() == expected_blocks
         assert torch.count_nonzero(builder._conv_output_buffer) == 0
+
+
+def test_host_update_block_table_refreshes_conv_bindings_after_queued_writes():
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        num_speculative_blocks=3,
+        builder_cls=AscendGDNHostMetadataBuilder,
+        mamba_cache_mode="none",
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    builder.compilation_config.static_forward_context = {
+        "layer0": SimpleNamespace(
+            use_contiguous_conv_indices=True, use_shared_conv_output=True, local_projection_size=8
+        )
+    }
+    common = create_common_attn_metadata(BatchSpec([24, 48], [4, 4]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.arange(32, dtype=torch.int32).view(2, 16) + 1
+    accepted = torch.ones(2, dtype=torch.int32)
+    drafts = torch.full((2,), 3, dtype=torch.int32)
+    source = builder.build(0, common, accepted, drafts)
+    assert builder._conv_output_buffer is not None
+    assert builder._spec_conv_indices is not None
+
+    new_table = common.block_table_tensor + 1000
+    builder._conv_output_buffer.fill_(7)
+    builder._spec_conv_indices.fill_(-1)
+    updates: list = []
+    updated = builder.update_block_table(source, new_table, graph_state_updates=updates)
+    # The refresh is queued; execute the batched writes and the finalizer.
+    builder.graph_state_updater.apply(updates)
+
+    conv = updated.spec_decode_metadata.spec_causal_conv1d
+    assert conv.output_buffer is builder._conv_output_buffer
+    assert conv.cache_indices.data_ptr() == builder._spec_conv_indices.data_ptr()
+    assert builder._spec_conv_indices[:2].tolist() == new_table[:2, 0].tolist()
+    assert torch.count_nonzero(builder._conv_output_buffer) == 0
+    assert updated.spec_decode_metadata.use_upstream_conv == source.spec_decode_metadata.use_upstream_conv
+    assert updated.spec_decode_metadata.use_upstream_recurrent == source.spec_decode_metadata.use_upstream_recurrent
 
 
 @pytest.mark.parametrize("use_v2", [False, True])

@@ -55,15 +55,23 @@ class GDNGraphStateUpdater:
     def apply(self, updates):
         if not updates:
             return
-        source, destination, actual_rows, graph_rows, padding, clear = updates[0]
+        # Post-write finalizers keep caller-visible descriptors tied to the
+        # captured destination buffers; they must run after every queued write.
+        finalizers = [item for item in updates if callable(item)]
+        writes = [item for item in updates if not callable(item)]
+        if not writes:
+            for finalize in finalizers:
+                finalize()
+            return
+        source, destination, actual_rows, graph_rows, padding, clear = writes[0]
         width = destination.size(1) if destination.ndim == 2 else 1
         source_row_stride = source.stride(0)
         source_col_stride = source.stride(1) if source.ndim == 2 else 1
         clear_width = 0 if clear is None else clear.size(1)
         device = destination.device
         # Validate every group before any writes are submitted.
-        assert len({dst.data_ptr() for _, dst, *_ in updates}) == len(updates)
-        for src, dst, actual, graph, pad, reset in updates:
+        assert len({dst.data_ptr() for _, dst, *_ in writes}) == len(writes)
+        for src, dst, actual, graph, pad, reset in writes:
             assert src.ndim in (1, 2) and src.ndim == dst.ndim
             assert src.dtype == dst.dtype == torch.int32
             assert src.device == dst.device == device and dst.is_contiguous()
@@ -78,25 +86,27 @@ class GDNGraphStateUpdater:
                 assert reset.device == device and reset.dtype == torch.int32 and reset.is_contiguous()
                 assert reset.size(1) == clear_width and graph <= reset.size(0)
         if device.type == "cpu":
-            for src, dst, actual, graph, pad, reset in updates:
+            for src, dst, actual, graph, pad, reset in writes:
                 values = src[:actual, :width] if src.ndim == 2 else src[:actual]
                 dst[:actual].copy_(values)
                 dst[actual:graph].fill_(pad)
                 if reset is not None:
                     reset[:graph].fill_(PAD_SLOT_ID)
+            for finalize in finalizers:
+                finalize()
             return
         signature = tuple(
             (src.data_ptr(), dst.data_ptr(), 0 if reset is None else reset.data_ptr())
-            for src, dst, _, _, _, reset in updates
+            for src, dst, _, _, _, reset in writes
         )
         if self._signature != signature:
             host = torch.tensor(signature, dtype=torch.int64, pin_memory=True)
             self._pointers = host.to(device, non_blocking=True)
             # Retain allocations referenced by the cached pointer table.
-            self._buffers = tuple((src, dst, reset) for src, dst, _, _, _, reset in updates)
+            self._buffers = tuple((src, dst, reset) for src, dst, _, _, _, reset in writes)
             self._signature = signature
         if graph_rows:
-            _graph_state_kernel[(len(updates),)](
+            _graph_state_kernel[(len(writes),)](
                 self._pointers,
                 actual_rows,
                 graph_rows,
@@ -110,3 +120,5 @@ class GDNGraphStateUpdater:
                 multibuffer=False,
                 unit_flag=False,
             )
+        for finalize in finalizers:
+            finalize()

@@ -768,14 +768,28 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         metadata.spec_sequence_masks = self.spec_sequence_masks[:graph_request_count]
         metadata.spec_token_indx = self.spec_token_indx[:token_count]
         metadata.non_spec_token_indx = self.non_spec_token_indx[:0]
-        metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
-            spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
-                query_start_loc=metadata.spec_query_start_loc,
-                cache_indices=metadata.spec_state_indices_tensor,
-                num_accepted_tokens=metadata.num_accepted_tokens,
-            ),
-            actual_seq_lengths=self.spec_actual_seq_lengths[: graph_request_count + 1],
-        )
+        if metadata.spec_decode_metadata is None:
+            metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
+                spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
+                    query_start_loc=metadata.spec_query_start_loc,
+                    cache_indices=metadata.spec_state_indices_tensor,
+                    num_accepted_tokens=metadata.num_accepted_tokens,
+                ),
+                actual_seq_lengths=self.spec_actual_seq_lengths[: graph_request_count + 1],
+            )
+        else:
+            # Keep the descriptor's adaptive policy fields and the
+            # actual_seq_lengths=None contract; only the refreshed buffers move.
+            spec = metadata.spec_decode_metadata
+            metadata.spec_decode_metadata = replace(
+                spec,
+                spec_causal_conv1d=replace(
+                    spec.spec_causal_conv1d,
+                    query_start_loc=metadata.spec_query_start_loc,
+                    cache_indices=metadata.spec_state_indices_tensor,
+                    num_accepted_tokens=metadata.num_accepted_tokens,
+                ),
+            )
 
     def _pad_decode_metadata(
         self,
@@ -1274,6 +1288,15 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
     def _finalize_metadata(self, metadata: GDNAttentionMetadata, fused: bool = False) -> GDNAttentionMetadata:
         return metadata
 
+    def _requires_post_update_finalize(self) -> bool:
+        """Whether update_block_table() must rebuild caller-visible descriptors."""
+        return False
+
+    def _finalize_updated_metadata(self, metadata: GDNAttentionMetadata) -> GDNAttentionMetadata:
+        if self._requires_post_update_finalize():
+            return self._finalize_metadata(metadata)
+        return metadata
+
     def update_block_table(
         self,
         metadata: GDNAttentionMetadata,
@@ -1333,15 +1356,16 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             result.non_spec_state_indices_tensor = result.prefill_state_indices = None
             if m.spec_decode_metadata is not None:
                 spec = m.spec_decode_metadata
-                conv = spec.spec_causal_conv1d
-                result.spec_decode_metadata = GDNSpecDecodeMetadata(
-                    spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
-                        query_start_loc=conv.query_start_loc,
-                        cache_indices=view,
-                        num_accepted_tokens=conv.num_accepted_tokens,
-                    ),
-                    actual_seq_lengths=spec.actual_seq_lengths,
+                # Preserve the adaptive/fixed-length policy flags and the
+                # actual_seq_lengths contract; only the state view changes.
+                result.spec_decode_metadata = replace(
+                    spec,
+                    spec_causal_conv1d=replace(spec.spec_causal_conv1d, cache_indices=view),
                 )
+            if self._requires_post_update_finalize():
+                # Indices must be refreshed only after the batched state writes
+                # below reach the captured destination buffer.
+                graph_state_updates.append(lambda result=result: self._finalize_updated_metadata(result))
             return result
         block_table = blk_table[: m.gdn_num_reqs]
         # vLLM #58737 derives num_reqs from the block table and asserts that
@@ -1483,7 +1507,11 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     decode.causal_conv1d, cache_indices=conv_cache_indices[: m.non_spec_query_start_loc.size(0) - 1]
                 ),
             )
-        return result
+        if graph_state_updates is not None:
+            if self._requires_post_update_finalize():
+                graph_state_updates.append(lambda result=result: self._finalize_updated_metadata(result))
+            return result
+        return self._finalize_updated_metadata(result)
 
     def _build_prefill_has_initial_state(
         self,
@@ -1757,6 +1785,22 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         )
         metadata.pcp_context = getattr(common_attn_metadata, "pcp_context", None)
         return metadata
+
+    def _requires_post_update_finalize(self) -> bool:
+        return self._conv_output_buffer is not None or self._spec_conv_indices is not None
+
+    def update_block_table(
+        self,
+        metadata: GDNAttentionMetadata,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor | None = None,
+        graph_state_updates: list | None = None,
+    ) -> GDNAttentionMetadata:
+        # Reused groups reach update_block_table() without a local build, so
+        # allocate the opt-in convolution buffers before finalizing the result.
+        self._ensure_conv_index_buffers()
+        self._ensure_conv_output_buffer()
+        return super().update_block_table(metadata, blk_table, slot_mapping, graph_state_updates)
 
     def _finalize_metadata(self, metadata: GDNAttentionMetadata, fused: bool = False) -> GDNAttentionMetadata:
         if self._conv_output_buffer is not None:
