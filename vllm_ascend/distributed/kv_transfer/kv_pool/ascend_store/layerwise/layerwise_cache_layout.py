@@ -267,6 +267,16 @@ class LayerwiseCacheConfig:
         )
 
 
+def has_shared_kv_sources(vllm_config: Any) -> bool:
+    """Identify source sharing from the text-model structure, not its name."""
+    model = vllm_config.model_config
+    config = getattr(model, "hf_text_config", None) or model.hf_config
+    sources = getattr(config, "kv_source_layer_ids", None)
+    if not isinstance(sources, (list, tuple)) or not sources:
+        return False
+    return len(sources) < config.num_hidden_layers
+
+
 def _parse_int_config(value: Any, name: str) -> int:
     if isinstance(value, bool):
         raise TypeError(f"{name} must be an integer, got bool")

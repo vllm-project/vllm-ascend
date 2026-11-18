@@ -76,6 +76,9 @@ class HardwareCapability(Enum):
     CHUNKED_PREFILL_PHASE_SPLIT = auto()
     # CANN device-side FlashAttn metadata with strided paged GQA K/V.
     DEVICE_LENGTH_FLASH_ATTN = auto()
+    # Optional flash_attn_npu_3 device-tiling ABI for ordinary MiniMax target/draft
+    # attention. Restricted to A2/A3; A5 uses the CANN backend instead.
+    FLASH_ATTN_NPU_3 = auto()
     # Build CPU-affinity pools from the cluster-aware CPU topology.
     CLUSTER_CPU_TOPOLOGY = auto()
     # Legacy implementation selector: install the 310P-specific operator overrides.
@@ -92,6 +95,8 @@ class HardwareCapability(Enum):
     ENGRAM_UNROTATED_GATE = auto()
     # Decode native FP8 codes and E8M0 group scales in Engram table lookups.
     ENGRAM_MXFP8 = auto()
+    # Node-local shared INT8 Engram tables can use the A3 Host VMM backend.
+    ENGRAM_LOCAL_HOST_VMM = auto()
     # Enable dynamic-MX norm fusion and the associated ``wo_a`` weight-layout contract.
     DYNAMIC_MX_QUANT_FUSION = auto()
     # Select DynamicMxQuantV3 ``scale_alg=1`` for model paths that require it.
@@ -359,6 +364,7 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
     HardwareCapability.KDA_INT8_QUANT_OVERLAP,
     HardwareCapability.NATIVE_INT8_SPARSE,
     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
@@ -386,7 +392,11 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
             native_weight_formats=_INT4_WEIGHT_FORMATS,
             capabilities=_STANDARD_CAPABILITIES
-            | {HardwareCapability.RMS_NORM_CAST, HardwareCapability.NPU_TOP_K_TOP_P},
+            | {
+                HardwareCapability.RMS_NORM_CAST,
+                HardwareCapability.NPU_TOP_K_TOP_P,
+                HardwareCapability.FLASH_ATTN_NPU_3,
+            },
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
@@ -402,6 +412,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             capabilities=_A3_CAPABILITIES
             | {
                 HardwareCapability.CANN_MEGAMOE,
+                HardwareCapability.FLASH_ATTN_NPU_3,
                 HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                 HardwareCapability.NPU_TOP_K_TOP_P,
             },
