@@ -1507,6 +1507,13 @@ __aicore__ inline bool QSFAVectorService<QSFAT>::PrepareQueryAddresses(int64_t t
     if (valid <= 0 || valid > sparseBlockCount_) {
         return false;
     }
+    // Cache by batch: use the full KV length so later causal queries can
+    // safely reuse this table when their visible page range grows.
+    const int64_t kvPages = CeilDiv(static_cast<int64_t>(info.curActualSeqLenOri), 128L);
+    const int64_t tableCount = kvPages < constInfo.maxBlockNumPerBatch ? kvPages : constInfo.maxBlockNumPerBatch;
+    if (tableCount <= 0) {
+        return false;
+    }
     int32_t blocks = valid / 512;
     int32_t tail = valid % 512;
     int32_t count = blocks * 256 + tail;
@@ -1523,12 +1530,12 @@ __aicore__ inline bool QSFAVectorService<QSFAT>::PrepareQueryAddresses(int64_t t
     params.dstStride = 0;
     DataCopyPadExtParams<int32_t> padding{false, 0, 0, 0};
     if (addressTableBatch_ != static_cast<int32_t>(info.bIdx)) {
-        params.blockLen = constInfo.maxBlockNumPerBatch * sizeof(int32_t);
+        params.blockLen = tableCount * sizeof(int32_t);
         DataCopyPad(table, blkTableGm_[info.bIdx * constInfo.maxBlockNumPerBatch], params, padding);
         SetFlag<HardEvent::MTE2_S>(6);
         WaitFlag<HardEvent::MTE2_S>(6);
         addressTableValid_ = true;
-        for (int32_t i = 0; i < constInfo.maxBlockNumPerBatch; ++i) {
+        for (int32_t i = 0; i < tableCount; ++i) {
             int32_t physicalPage = table.GetValue(i);
             // Keep the cached physical token offset within signed int32.
             if (physicalPage < 0 || physicalPage > (INT32_MAX - 127) / 128) {
@@ -1568,9 +1575,9 @@ __aicore__ inline bool QSFAVectorService<QSFAT>::PrepareQueryAddresses(int64_t t
         ReduceMax(bounds[8], values, reduceWork, full, false);
         SetFlag<HardEvent::V_S>(6);
         WaitFlag<HardEvent::V_S>(6);
-        int64_t indexLimit = s2IdLimit < constInfo.maxBlockNumPerBatch * 128L ?
+        int64_t indexLimit = s2IdLimit < tableCount * 128L ?
                                  s2IdLimit :
-                                 constInfo.maxBlockNumPerBatch * 128L;
+                                 tableCount * 128L;
         if (bounds.GetValue(0) < 0 || bounds.GetValue(8) >= indexLimit) {
             return false;
         }
@@ -1591,7 +1598,7 @@ __aicore__ inline bool QSFAVectorService<QSFAT>::PrepareQueryAddresses(int64_t t
     WaitFlag<HardEvent::V_S>(6);
     for (int32_t j = full; j < count; ++j) {
         int32_t idx = topkGm_.GetValue(topkBase + blocks * 512 + (j - blocks * 256));
-        if (idx < 0 || idx >= s2IdLimit || (idx >> 7) >= constInfo.maxBlockNumPerBatch) {
+        if (idx < 0 || idx >= s2IdLimit || (idx >> 7) >= tableCount) {
             return false;
         }
         int32_t physicalPage = table.GetValue(idx >> 7);
@@ -1651,7 +1658,7 @@ __aicore__ inline void QSFAVectorService<QSFAT>::MergeKvOptimized(const RunInfo&
                      (lastTopkIdx + 1 < sparseBlockCount_);
     bool useQueryAddresses = false;
     bool useAddressSegments = false;
-    if constexpr (QSFAT::noRope && PAGE_ATTENTION && TEMPLATE_MODE == V_TEMPLATE) {
+    if constexpr (PAGE_ATTENTION && TEMPLATE_MODE == V_TEMPLATE) {
         // The cache occupies the unused upper 6KB of v0ValidSizeBuff.
         // Capacity is ADDRESS_RESULT_CAPACITY INT32 row addresses per AIV.
         if (sparseBlockSize_ == 1 && kvCacheBlockShift_ == 7 && s2BaseSize_ == 512 && sparseBlockCount_ > 0 &&
@@ -1686,7 +1693,7 @@ __aicore__ inline void QSFAVectorService<QSFAT>::MergeKvOptimized(const RunInfo&
             }
             DataCopyExtParams kvParams;
             kvParams.blockCount = 2;
-            kvParams.blockLen = 528;
+            kvParams.blockLen = combineBytes_;
             kvParams.srcStride = 0;
             kvParams.dstStride = 0;
             DataCopyPadExtParams<KV_T> kvPadding{true, 0, 16, 0};
@@ -1700,19 +1707,19 @@ __aicore__ inline void QSFAVectorService<QSFAT>::MergeKvOptimized(const RunInfo&
                     p1 = j + 1 < rows ? v0ValidSizeUb_.GetValue(512 + queryCacheBase + row + j + 1) : -1;
                     int64_t lo = p0 < p1 ? p0 : p1;
                     int64_t gap = p0 > p1 ? p0 - p1 : p1 - p0;
-                    int64_t stride = (gap - 1) * 528;
+                    int64_t stride = (gap - 1) * combineBytes_;
                     if (j + 1 < rows && p0 >= 0 && p1 >= 0 && stride >= 0 && stride < INT32_MAX) {
                         kvParams.blockCount = 2;
                         kvParams.srcStride = stride;
-                        DataCopyPad(kvMergUb_[ubBase + j * 544], keyGm_[lo * 528], kvParams, kvPadding);
+                        DataCopyPad(kvMergUb_[ubBase + j * combineDimAlign_], keyGm_[lo * combineBytes_], kvParams, kvPadding);
                     } else {
                         kvParams.blockCount = 1;
                         kvParams.srcStride = 0;
                         if (p0 >= 0) {
-                            DataCopyPad(kvMergUb_[ubBase + j * 544], keyGm_[p0 * 528], kvParams, kvPadding);
+                            DataCopyPad(kvMergUb_[ubBase + j * combineDimAlign_], keyGm_[p0 * combineBytes_], kvParams, kvPadding);
                         }
                         if (j + 1 < rows && p1 >= 0) {
-                            DataCopyPad(kvMergUb_[ubBase + (j + 1) * 544], keyGm_[p1 * 528], kvParams, kvPadding);
+                            DataCopyPad(kvMergUb_[ubBase + (j + 1) * combineDimAlign_], keyGm_[p1 * combineBytes_], kvParams, kvPadding);
                         }
                     }
                 }
