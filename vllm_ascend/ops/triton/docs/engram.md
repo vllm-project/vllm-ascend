@@ -31,6 +31,17 @@ offset arithmetic across the whole allocation. The model must keep registrations
 alive until the consuming stream finishes. Kernel execution does not register or
 release host memory.
 
+For host lookup, `vocab_start` and `vocab_end` define the global ID range
+owned by the caller. `ROW_OFFSET` is the row offset from the first registered
+chunk in the pointer tables to the beginning of that range. For an owned ID,
+the kernel indexes row `ID - vocab_start + ROW_OFFSET`, then divides by
+`CHUNK` to select the pointer and row within the chunk. Codes and scales must
+use matching chunk boundaries and row offsets. An out-of-range ID reads the
+row at `ROW_OFFSET` and writes zeros. The caller must ensure that row is valid.
+The host lookup wrapper passes `codes.row_offset`, defaulting to zero when it
+is absent. `ROW_OFFSET` is a `tl.constexpr`, so different offsets produce
+different JIT specializations.
+
 Output has shape `[tokens * pad_heads, width]`. Only `local_heads` rows per token
 are written, starting at output head zero; `head_start` selects the corresponding
 input ID columns. These two offsets must not be confused.
