@@ -258,7 +258,7 @@ jobs:
 
           {
             echo "LWS_NAME=${LWS_NAME}"
-            echo "LEADER_POD=${LWS_NAME}-0"
+            echo "LEADER_POD=${leader_pod}"
             echo "LOG_PREFIX=${{ inputs.ascend_log_prefix }}/${LWS_NAME}"
           } >> $GITHUB_ENV
 
