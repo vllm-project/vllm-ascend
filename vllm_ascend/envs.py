@@ -82,14 +82,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # cache scheme (fa_v.scale weights); other attention states keep the
     # inherited C8 FIA path. Valid values: "0" (default) or "1".
     "VLLM_ASCEND_QFA_A3_DECODE": lambda: bool(int(os.getenv("VLLM_ASCEND_QFA_A3_DECODE", "0"))),
-    # Write the int8_qfa packet cache's K/V payloads through the fused AIV
-    # kernel torch_npu.npu_scatter_pa_kv_cache (PA_NZ scenario) instead of
-    # index_put_, whose strided-view materialization copies the whole
-    # per-layer pool per write (~8.5 ms/layer, 58.5% of decode device time,
-    # profile 2026-11-18). "1" (default) uses the fused scatter; "0"
-    # restores the index_put reference path for A/B measurement or
-    # rollback. Not sensitive.
-    "VLLM_ASCEND_QFA_SCATTER_WRITE": lambda: bool(int(os.getenv("VLLM_ASCEND_QFA_SCATTER_WRITE", "1"))),
     # Output directory for per-head V amax calibration (QFA INT8 static
     # fa_v.scale weight generation). When set to a writable directory, each
     # worker wraps Attention.forward and dumps per-layer per-head value amax

@@ -32,7 +32,6 @@ import torch
 import torch_npu
 from vllm.v1.attention.backend import AttentionType  # type: ignore[import-not-found]
 
-from vllm_ascend import envs
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionState,
@@ -187,126 +186,6 @@ def qfa_int8_paged_cache_views(
     )
 
 
-def scatter_qfa_pa_nz_payloads(
-    k_int8: torch.Tensor,
-    v_int8: torch.Tensor,
-    k_nz: torch.Tensor,
-    v_nz: torch.Tensor,
-    slot_mapping: torch.Tensor,
-) -> None:
-    """Fused scatter of quantized K/V payloads into the sectioned PA_NZ cache.
-
-    ``index_put_`` on the per-page packet views made torch_npu materialize
-    the whole per-layer pool per write (AsStrided + ViewCopy, ~1.14 GB per
-    call; 8.47 ms/layer, 58.5% of decode device time -- profile
-    2026-11-18). The fused ScatterPaKvCache kernel writes only the
-    addressed slots (the BF16 side runs the same operator at ~5.5 us per
-    step).
-
-    On-device contract (probe 2026-11-18): the operator computes every
-    address from the data pointer plus the shape's inner product -- it
-    ignores the cache view's dim0 stride, so a strided cache target is
-    silently miswritten (its doc declares non-contiguous inputs
-    unsupported). The sectioned cache layout
-    (:func:`qfa_int8_sectioned_cache_views`) provides contiguous K/V
-    views; this helper then hands the operator the 4-D scenario-1 form
-    ``[num_blocks, num_head * head_size // 32, block_size, 32]`` -- a
-    zero-copy reshape of the contiguous 5-D PA_NZ view, so the bytes land
-    in the layout the QFA read path expects. ``head_size`` bytes per head
-    is a multiple of 32 as the scenario requires; negative (PAD) slots
-    are outside the documented value range but the service never passes
-    them (the ``num_actual_tokens`` slice excludes padding). Field-by-field
-    verification against the index_put golden: ``probe_scatter_qfa*.py``.
-    """
-    if not (k_nz.is_contiguous() and v_nz.is_contiguous()):
-        raise RuntimeError(
-            "ScatterPaKvCache requires contiguous K/V cache views "
-            "(sectioned layout); strided per-page packet views are not "
-            "writable by the operator (probe 2026-11-18)."
-        )
-    num_blocks, num_heads, num_frags, block_size, _ = k_nz.shape
-    torch_npu.npu_scatter_pa_kv_cache(
-        key=k_int8,
-        value=v_int8,
-        key_cache=k_nz.reshape(
-            num_blocks, num_heads * num_frags, block_size, QFA_INT8_NZ_DIM_FRAG
-        ),
-        value_cache=v_nz.reshape(
-            num_blocks, num_heads * num_frags, block_size, QFA_INT8_NZ_DIM_FRAG
-        ),
-        slot_mapping=slot_mapping,
-        cache_mode="PA_NZ",
-    )
-
-
-def qfa_int8_sectioned_cache_views(
-    raw_tensor: torch.Tensor,
-    num_kernel_blocks: int,
-    num_kv_heads: int,
-    head_dim: int,
-    block_size: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Three contiguous views over one raw INT8 allocation, sectioned layout.
-
-    The write path's fused ScatterPaKvCache kernel derives every address as
-    ``data_ptr + page * inner_product(shape[1:])`` and ignores the cache
-    view's dim0 stride, so the per-page packet layout (``[K|kd|V]`` per
-    page, dim0 stride = packet pitch) is not writable by the operator
-    (probe 2026-11-18: 5D and 4D targets, cache_mode notwithstanding; the
-    op doc declares non-contiguous inputs unsupported). This layout keeps
-    the single per-layer allocation but places the three sections
-    globally, each internally contiguous::
-
-        [ K blocks (Bn,N,Df,Bs,32) INT8 | K descale (Bn,N,Bs) FP32
-        | V blocks (Bn,N,Df,Bs,32) INT8 ]
-
-    Consequences:
-    - ScatterPaKvCache writes correctly (dim0 stride == inner product).
-    - The index_put_ reference path (``VLLM_ASCEND_QFA_SCATTER_WRITE=0``)
-      loses its whole-view materialization penalty (that needed a strided
-      target), so the A/B comparison stays fair.
-    - The QFA read path is unaffected: PA_NZ reading honors the view's
-      dim0 stride and contiguous is the canonical paged layout.
-    - Per-layer bytes are unchanged from the packet layout (the scheduler
-      sees the same ``state_content_bytes``); a padded physical pitch just
-      leaves its tail bytes unused.
-    """
-    if raw_tensor.ndim != 1 or raw_tensor.dtype != torch.int8 or raw_tensor.stride(0) != 1:
-        raise ValueError("QFA INT8 raw cache must be a contiguous 1-D int8 view.")
-    if num_kernel_blocks <= 0:
-        raise ValueError("QFA INT8 cache requires at least one kernel block.")
-    k_elems, kd_elems, v_elems = qfa_int8_packet_section_sizes(
-        num_kv_heads, block_size, head_dim
-    )
-    total_elems = num_kernel_blocks * (k_elems + 4 * kd_elems + v_elems)
-    if raw_tensor.numel() < total_elems:
-        raise ValueError(
-            f"QFA INT8 raw cache holds {raw_tensor.numel()} bytes, "
-            f"sectioned layout needs {total_elems}."
-        )
-    # The FP32 descale section reinterprets bytes from the group-packed
-    # storage, so the base offset (narrow strip, vLLM #51718) must stay
-    # 4-byte aligned -- same requirement as the packet layout.
-    if raw_tensor.storage_offset() % 4:
-        raise ValueError("QFA INT8 raw cache base offset must be 4-byte aligned for the FP32 descale view.")
-
-    nz_shape = (
-        num_kernel_blocks,
-        num_kv_heads,
-        head_dim // QFA_INT8_NZ_DIM_FRAG,
-        block_size,
-        QFA_INT8_NZ_DIM_FRAG,
-    )
-    kd_shape = (num_kernel_blocks, num_kv_heads, block_size)
-    k_bytes = num_kernel_blocks * k_elems
-    kd_bytes = 4 * num_kernel_blocks * kd_elems
-    return (
-        raw_tensor[:k_bytes].view(nz_shape),                                            # K payload
-        raw_tensor[k_bytes : k_bytes + kd_bytes].view(torch.float32).view(kd_shape),   # K descale
-        raw_tensor[k_bytes + kd_bytes : k_bytes + kd_bytes + num_kernel_blocks * v_elems].view(nz_shape),  # V payload
-    )
-
-
 def _build_int8_cu_seqlens(attn_metadata) -> torch.Tensor:
     """Real per-request cumulative query lengths into the operator's INT32 [B+1].
 
@@ -419,18 +298,13 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
     mxfp8 precedent). Structure mirrors the C8-MXFP backend with INT8
     semantics:
 
-    - Cache: one raw INT8 allocation per layer, sectioned
-      ``[K blocks | K_descale(FP32, (Bn,N,Bs)) | V blocks]`` by
-      :func:`qfa_int8_sectioned_cache_views` (each section contiguous so
-      the fused scatter can write; per-layer bytes identical to the
-      retired per-page packet layout).
+    - Cache: one raw INT8 allocation per layer, packet-packed
+      ``[K(PA_NZ) | K_descale(FP32, (Bn,N,Bs)) | V(PA_NZ)]`` built by
+      :func:`qfa_int8_paged_cache_views`.
     - Write path (reshape_and_cache): Q/K per-token-head dynamic
       quantization (``npu_dynamic_quant``), V static per-head
       (layer.v_cache_scale, the fa_v.scale calibration channel);
-      payloads written via the fused PA_NZ scatter kernel
-      (``VLLM_ASCEND_QFA_SCATTER_WRITE``, default on) or index_put
-      (env 0: A/B reference -- strided index_put_ materializes the whole
-      per-layer pool per call, 8.47 ms/layer).
+      payloads scattered via index_put over the packet views.
     - Read path: one QFA call per step for the whole batch (decode and
       prefill alike; the causal mask covers decode rows too).
 
@@ -554,45 +428,35 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
             QFA_INT8_SCALE_LEVEL,
         ).to(torch.int8)
 
-        slot_mapping = attn_metadata.slot_mapping[:num_actual_tokens]
-        pages, pos = self._step_slot_index(attn_metadata, slot_mapping)
+        pages, pos = self._step_slot_index(
+            attn_metadata, attn_metadata.slot_mapping[:num_actual_tokens]
+        )
         num_tokens = pages.shape[0]
         n_heads = self.num_kv_heads
-        _, idx_n, idx_df = self._capture_safe_constants(pages.device)
+        head_dim = self.head_size
+        nz_last = QFA_INT8_NZ_DIM_FRAG
 
-        if envs.VLLM_ASCEND_QFA_SCATTER_WRITE:
-            # Fused AIV scatter (default): one kernel writes both payloads
-            # into the packet views, addressing only the target slots.
-            scatter_qfa_pa_nz_payloads(k_int8, v_int8, k_nz, v_nz, slot_mapping)
-        else:
-            # Reference path (A/B measurement / rollback,
-            # VLLM_ASCEND_QFA_SCATTER_WRITE=0). A token's K/V payload is
-            # the [Df, 32] tail at (page, n, :, pos, :): index the leading
-            # four dims with (page, n, df, pos) tensors broadcast to
-            # [T, N, Df] and leave the 32-wide fragment axis implicit. The
-            # 3-index form leaves (Bs, 32) as the trailing dims and
-            # mismatches the [T, N, Df, 32] payload (probe v2 verified
-            # index_put on the 4-D BNBD layout, not this 5-D NZ one). The
-            # index constants come from the cached capture-safe set
-            # (torch.arange inside capture may host-generate). This
-            # strided index_put_ materializes the whole per-layer pool per
-            # call (AsStrided + ViewCopy, ~1.14 GB, 8.47 ms/layer =
-            # 58.5% of decode device time, profile 2026-11-18).
-            nz_last = QFA_INT8_NZ_DIM_FRAG
-            num_frags = idx_df.numel()  # head_dim // 32, kept in the cached set
-            nz_index = (
-                pages.view(num_tokens, 1, 1).expand(num_tokens, n_heads, num_frags),
-                idx_n.expand(num_tokens, n_heads, num_frags),
-                idx_df.expand(num_tokens, n_heads, num_frags),
-                pos.view(num_tokens, 1, 1).expand(num_tokens, n_heads, num_frags),
-            )
-            payload_src = k_int8.view(num_tokens, n_heads, num_frags, nz_last)
-            k_nz.index_put_(nz_index, payload_src)
-            payload_src_v = v_int8.view(num_tokens, n_heads, num_frags, nz_last)
-            v_nz.index_put_(nz_index, payload_src_v)
-        # K descale [T, N] -> (Bn, N, Bs): the 3-D write stays on index_put
-        # in both modes -- its strided materialization touches only the
-        # ~18 MB descale view (~24 us per step, profile 2026-11-18).
+        # Scatter payloads into the NZ views. A token's K/V payload is the
+        # [Df, 32] tail at (page, n, :, pos, :): index the leading four dims
+        # with (page, n, df, pos) tensors broadcast to [T, N, Df] and leave
+        # the 32-wide fragment axis implicit. The 3-index form leaves
+        # (Bs, 32) as the trailing dims and mismatches the [T, N, Df, 32]
+        # payload (probe v2 verified index_put on the 4-D BNBD layout, not
+        # this 5-D NZ one). The index constants come from the cached
+        # capture-safe set (torch.arange inside capture may host-generate).
+        _, idx_n, idx_df = self._capture_safe_constants(pages.device)
+        num_frags = idx_df.numel()  # head_dim // 32, kept in the cached set
+        nz_index = (
+            pages.view(num_tokens, 1, 1).expand(num_tokens, n_heads, num_frags),
+            idx_n.expand(num_tokens, n_heads, num_frags),
+            idx_df.expand(num_tokens, n_heads, num_frags),
+            pos.view(num_tokens, 1, 1).expand(num_tokens, n_heads, num_frags),
+        )
+        payload_src = k_int8.view(num_tokens, n_heads, num_frags, nz_last)
+        k_nz.index_put_(nz_index, payload_src)
+        payload_src_v = v_int8.view(num_tokens, n_heads, num_frags, nz_last)
+        v_nz.index_put_(nz_index, payload_src_v)
+        # K descale [T, N] -> (Bn, N, Bs): the 3-D view is fully indexed.
         idx_page = pages.view(num_tokens, 1).expand(num_tokens, n_heads)
         idx_n_2d = idx_n.view(1, n_heads).expand(num_tokens, n_heads)
         idx_pos = pos.view(num_tokens, 1).expand(num_tokens, n_heads)
