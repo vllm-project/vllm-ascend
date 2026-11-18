@@ -1604,7 +1604,6 @@ def _setup_worker_and_scheduler(
                 "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareScheduler"
             )
 
-    _validate_copied_scheduler_async_kv_limit(vllm_config, ascend_config)
     _downgrade_swa_bounded_replay(vllm_config, ascend_config)
 
 
@@ -1618,22 +1617,6 @@ def _copied_scheduler_mode(ascend_config) -> str | None:
     if scheduler_config.enable_balance_scheduling:
         return "enable_balance_scheduling"
     return None
-
-
-def _validate_copied_scheduler_async_kv_limit(vllm_config: VllmConfig, ascend_config) -> None:
-    """Reject the new async-queue opt-in until copied schedulers drain it."""
-    if vllm_version_is("0.33.0"):
-        return
-    if getattr(vllm_config.scheduler_config, "max_async_kv_loads_per_step", None) is None:
-        return
-    mode = _copied_scheduler_mode(ascend_config)
-    if mode is not None:
-        # vLLM #61725 routes these requests into async_kv_waiting. The copied
-        # schedulers only scan waiting/kv_holding_waiting, leaving them stranded.
-        raise ValueError(
-            f"max_async_kv_loads_per_step is not supported with {mode}. "
-            "Leave this limit unset or disable the Ascend scheduler extension."
-        )
 
 
 def _swa_bounded_replay_unsupported_mode(ascend_config) -> str | None:
