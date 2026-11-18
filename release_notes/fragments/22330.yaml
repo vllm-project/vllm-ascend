@@ -1,0 +1,7 @@
+pr: 22330
+entries:
+  - category: bugfix
+    text: >-
+      Fixed a startup layout validation error for GLM-5.3-Flash with DFlash2
+      and decode context parallelism when VLLM_KV_CACHE_LAYOUT is explicitly
+      set to HND, LBHNC, NHD, or LBNHC and the selected backends support it.
