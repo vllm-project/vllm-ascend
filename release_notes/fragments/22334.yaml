@@ -1,0 +1,8 @@
+pr: 22334
+entries:
+  - category: config
+    text: >-
+      Prefill/decode disaggregation and KV pooling preserve the environment's QoS settings
+      when `kv_connector_extra_config.qos_priority` is omitted. Set it to 1 to retain
+      the previous implicit P/D priority. Explicit priorities 0–7 are accepted, with
+      a warning for 5–7 to check the transfer backend and switch configuration.
