@@ -374,6 +374,10 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
 
         logger.info("Initializing Mooncake worker %s", engine_id)
 
+    def _register_transfer_buffers(self, ptrs: list[int], lengths: list[int]) -> None:
+        """Register the memory ranges collected for KV transfer."""
+        global_te.register_buffer(ptrs, lengths)
+
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """Return the registered cache descriptor for either transfer mode."""
         return self.xfer_handshake_metadata
@@ -613,7 +617,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
 
         register_regions = collect_configured_register_regions(self.kv_cache_config, kv_caches)
         validate_register_region_count(register_regions)
-        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+        self._register_transfer_buffers(register_regions.ptrs, register_regions.lengths)
 
         transfer_metadata = MooncakeTransferMetadata(
             engine_id=self.engine_id,
