@@ -24,7 +24,6 @@ from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
-    get_glm5_next_max_memory_usage,
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
@@ -146,7 +145,11 @@ def register_cache_specs():
 
 @pytest.mark.parametrize("pool", [4, 16])
 def test_groups_share_block_ids_and_pack_two_page_classes(pool):
+    planning = pytest.importorskip("vllm.v1.core.kv_cache_planning")
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+
     config = make_config()
+    config.attention_config = SimpleNamespace(hisparse_config=None)
     specs = make_specs(pool)
     groups = get_glm5_next_kv_cache_groups(config, dict(reversed(list(specs.items()))))
     layout = _get_glm5_next_cache_layout(groups)
@@ -198,7 +201,9 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
         for group in groups
     )
     assert get_glm5_next_pool_bytes_per_block(groups) == bytes_per_block
-    assert get_glm5_next_max_memory_usage(config, groups) == required_blocks * bytes_per_block
+    assert planning._max_memory_usage_bytes_from_groups(AscendKVCacheConfigBuilder(), config, groups) == (
+        required_blocks * bytes_per_block
+    )
 
 
 def test_standalone_mtp_layout_has_no_mamba_groups():
@@ -359,9 +364,12 @@ def test_misaligned_logical_block_is_rejected():
 @pytest.mark.parametrize("use_sparse", [False, True])
 @pytest.mark.parametrize("packed_main", [False, True])
 def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse, packed_main):
+    planning = pytest.importorskip("vllm.v1.core.kv_cache_planning")
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
     from vllm_ascend.worker.worker import NPUWorker
 
     config = make_config()
+    config.attention_config = SimpleNamespace(hisparse_config=None)
     config.model_config.max_model_len = 1048576
     config.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next", index_topk=2048, index_kpool=16)
     config.cache_config.get_resolved_kv_cache_layout = lambda: SimpleNamespace(
@@ -381,7 +389,7 @@ def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse
     groups = get_glm5_next_kv_cache_groups(config, specs)
     # Supply exactly enough physical memory for the configured context. The
     # generic discount incorrectly makes this valid shared pool fail admission.
-    required = get_glm5_next_max_memory_usage(config, groups)
+    required = planning._max_memory_usage_bytes_from_groups(AscendKVCacheConfigBuilder(), config, groups)
     worker = NPUWorker.__new__(NPUWorker)
     worker.vllm_config = config
     worker.model_config = config.model_config

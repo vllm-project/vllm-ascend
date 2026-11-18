@@ -229,6 +229,27 @@ def test_grouping_preserves_platform_aligned_specs():
     assert paired_sfa_pool_bytes(first) == paired_sfa_pool_bytes(second) == 29048832
 
 
+def test_generic_planner_reproduces_paired_sfa_pool_accounting():
+    planning = pytest.importorskip("vllm.v1.core.kv_cache_planning")
+
+    specs, config = make_specs(), make_config()
+    config.model_config.max_model_len = 4096
+    config.parallel_config = SimpleNamespace(decode_context_parallel_size=1)
+    config.attention_config = SimpleNamespace(hisparse_config=None)
+    groups = paired_sfa_cache_groups(config, specs)
+
+    # Admission must derive from the same per-group page counts and the same
+    # paired-SFA pool divisor the tensors are materialized with.
+    request_blocks = sum(
+        (group.kv_cache_spec.max_memory_usage_bytes(config) + group.kv_cache_spec.page_size_bytes - 1)
+        // group.kv_cache_spec.page_size_bytes
+        for group in groups
+    )
+    assert planning._max_memory_usage_bytes_from_groups(AscendKVCacheConfigBuilder(), config, groups) == (
+        request_blocks * paired_sfa_pool_bytes(groups)
+    )
+
+
 def test_grouping_rejects_obsolete_state_padding():
     specs = {
         n: replace(s, page_size_padded=66502656) if isinstance(s, MambaSpec) else s for n, s in make_specs().items()

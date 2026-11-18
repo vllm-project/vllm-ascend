@@ -294,13 +294,12 @@
 #
 # ** 10. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.kv_cache_planning._max_memory_usage_bytes_from_groups`,
-#      `..._annotate_eagle_groups`
+#   1. `vllm.v1.core.kv_cache_planning._annotate_eagle_groups`
 #    Why:
-#       Ascend cache layouts keep their own admission accounting and EAGLE draft
-#       group marking, neither of which has a builder or platform hook upstream.
+#       Qwen4Exp's MTP draft group marking has no builder or platform hook
+#       upstream.
 #    How:
-#       Monkey-patch only the module-level helpers the builder cannot express.
+#       Monkey-patch only the module-level helper the builder cannot express.
 #       Grouping, pool accounting, and materialization live in
 #       `AscendKVCacheConfigBuilder`, selected through NPUPlatform. That
 #       includes splitting replicated dense draft pools (vLLM PR #56723) so
@@ -308,8 +307,8 @@
 #    Related PR:
 #       https://github.com/vllm-project/vllm/pull/53558
 #    Future Plan:
-#       Fold the remaining helpers into the builder once upstream exposes hooks
-#       for them.
+#       Fold the EAGLE marking into the builder once upstream exposes a hook
+#       for it.
 #
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

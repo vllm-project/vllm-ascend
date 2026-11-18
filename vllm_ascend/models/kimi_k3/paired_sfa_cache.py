@@ -237,11 +237,3 @@ def paired_sfa_cache_config(
         prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
     )
 
-
-def paired_sfa_max_memory(config, groups):
-    blocks = sum(
-        (g.kv_cache_spec.max_memory_usage_bytes(config) + g.kv_cache_spec.page_size_bytes - 1)
-        // g.kv_cache_spec.page_size_bytes
-        for g in groups
-    )
-    return blocks * paired_sfa_pool_bytes(groups)
