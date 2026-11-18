@@ -2053,9 +2053,7 @@ def _want_b1_paged_verify(attn_selector_config) -> bool:
         or getattr(attn_selector_config, "use_hisparse", False)
     ):
         return False
-    if is_950():
-        return False
-    return True
+    return not is_950()
 
 
 def _get_reduced_cg_cap(vllm_config: VllmConfig) -> int | None:

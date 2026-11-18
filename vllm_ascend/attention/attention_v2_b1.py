@@ -303,9 +303,8 @@ class AscendB1AttentionMetadataBuilder(AscendAttentionMetadataBuilder):
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
         )
-        if getattr(self.kv_cache_spec, "head_size", None) == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE and in_full_cudagraph_mode(
-            self.vllm_config
-        ):
+        uses_large_head = getattr(self.kv_cache_spec, "head_size", None) == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+        if uses_large_head and in_full_cudagraph_mode(self.vllm_config):
             # FULL captures this group through full_graph_pa; the decode-only
             # PA op needs the same one-query-per-row layout as at runtime.
             metadata.b1_pa_graph = True
@@ -414,8 +413,7 @@ class AscendB1AttentionBackendImpl(AscendAttentionBackendImpl):
         value = self.value_cache
         if not (key.is_contiguous() and value.is_contiguous()):  # type: ignore
             raise RuntimeError(
-                "B1 paged verify requires contiguous K/V buffers, but the runner "
-                "allocated block-interleaved views."
+                "B1 paged verify requires contiguous K/V buffers, but the runner allocated block-interleaved views."
             )
         # [num_tokens, Hq*D] -> [B, Hq, qlen, D]; contiguous() is a captured op
         # that re-reads the static query buffer on every replay.
