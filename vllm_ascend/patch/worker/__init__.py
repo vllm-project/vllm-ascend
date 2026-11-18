@@ -87,3 +87,10 @@ if _V2_MODEL_RUNNER_SUPPORTED:
 # only patch routed experts capture in main2main.
 if _V2_MODEL_RUNNER_SUPPORTED:
     import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+
+# Qwen3-ASR audio tower NPU graph capture. Needs torch_npu, so skip it where
+# that is missing (CPU and unit-test environments still import this package).
+try:  # noqa: SIM105
+    import vllm_ascend.patch.worker.patch_qwen3_asr  # noqa
+except ImportError:
+    pass
