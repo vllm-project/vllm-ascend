@@ -1,0 +1,74 @@
+# Ascend 950DT single-node colocated deployment from the model tutorial, section 5.1.
+test_cases:
+  - name: DeepSeek-V4.1-Flash-A5-128k-1k
+    model: deepseek-ai/DeepSeek-V4.1-Flash-1017
+    envs:
+      SERVER_PORT: DEFAULT_PORT
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      HCCL_OP_EXPANSION_MODE: CCU_SCHED
+      HCCL_BUFFSIZE: "1600"
+      HCCL_CONNECT_TIMEOUT: "1200"
+      HCCL_EXEC_TIMEOUT: "2040"
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "3000"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "10"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+    server_cmd:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - "8"
+      - --tensor-parallel-size
+      - "1"
+      - --enable-expert-parallel
+      - --max-model-len
+      - "1048576"
+      - --max-num-batched-tokens
+      - "4096"
+      - --max-num-seqs
+      - "64"
+      - --gpu-memory-utilization
+      - "0.90"
+      - --block-size
+      - "128"
+      - --quantization
+      - deepseek_v4_fp8
+      - --engram-config
+      - '{"cpu_offload":true,"dp_shared_memory":true}'
+      - --tokenizer-mode
+      - deepseek_v41
+      - --tool-call-parser
+      - deepseek_v41
+      - --reasoning-parser
+      - deepseek_v41
+      - --enable-auto-tool-choice
+      - --trust-remote-code
+      - --no-swa-bounded-replay
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - --speculative-config
+      - '{"method":"dspark","num_speculative_tokens":5}'
+      - --additional-config
+      - '{"multistream_overlap_shared_expert":true,"combine_quant_mode":4}'
+    test_content: [ ]
+    benchmarks:
+      perf_128k_1k_prefix90_warmup:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 8
+        max_out_len: 1
+        batch_size: 8
+        request_rate: 0
+      perf_128k_1k_prefix90:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 128
+        max_out_len: 1024
+        batch_size: 32
+        request_rate: 0

@@ -390,3 +390,7 @@ a3-560t:
           os: linux-aarch64-a5-8
           config_file_path: DeepSeek_V4_Flash_A5_weekly.yaml
           config_base_path: tests/SIT/cases/models/configs/DeepSeek
+        - name: DeepSeek-V4.1-Flash-A5-128k-1k
+          os: linux-aarch64-a5-8
+          config_file_path: DeepSeek-V4.1-Flash-A5-128k-1k.yaml
+          config_base_path: tests/SIT/cases/models/configs/DeepSeek
