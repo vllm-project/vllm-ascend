@@ -335,8 +335,9 @@ We can run the following scripts to launch a server on the prefiller/decoder nod
 
 Set `qos_priority` in the transfer initiator's `kv_connector_extra_config`.
 This option is supported by `MooncakeConnectorV1`, `MooncakeHybridConnector`,
-and `MooncakeLayerwiseConnector`. The default P/D QoS is **1**; accepted values
-are integers in **[0, 4]** (booleans are not accepted).
+and `MooncakeLayerwiseConnector`. Accepted values are integers in **[0, 7]**
+(booleans are excluded). Values **5-7** emit a warning to verify that the
+transfer backend and switch are configured for that priority.
 
 With the HIXL Client/Server transport, the endpoint initiating the connection
 supplies the channel QoS. The peer creates its corresponding channel using
@@ -370,12 +371,12 @@ Use `kv_producer` for the prefiller and retain the other deployment-specific
 fields in your `--kv-transfer-config`.
 
 No manual QoS environment export is required. Before initializing the transfer
-engine, the connector merges its QoS into the literal top-level JSON key
+engine, the connector merges an explicitly configured QoS into the literal top-level JSON key
 `"comm_resource_config.qos"` in `ASCEND_GLOBAL_RESOURCE_CONFIG`, creating the
 environment variable if absent. Other resource settings and the `store`
-configuration are preserved. An explicit QoS value, or the default **1** when
-omitted, replaces the existing top-level QoS. Invalid QoS values or malformed
-resource JSON fail before the environment is modified.
+configuration are preserved. If `qos_priority` is omitted, the connector
+leaves the environment as configured. When `qos_priority` is set, invalid QoS
+values or malformed resource JSON fail before the environment is modified.
 
 The `Injected comm_resource_config.qos=...` log confirms that the local
 environment configuration was written successfully. It does not by itself

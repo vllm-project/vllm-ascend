@@ -35,7 +35,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mem
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_backend as mooncake_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     Backend,
-    parse_qos_from_extra_config,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
     MemcacheBackend,
@@ -60,6 +59,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend import (
     YuanrongConfig,
 )
+from vllm_ascend.distributed.kv_transfer.utils.qos import parse_qos_from_extra_config
 
 
 def _format_log_call(call):
@@ -701,11 +701,11 @@ class TestMooncakeStoreQosValidation(unittest.TestCase):
                 _validate_store_qos()
 
     def test_out_of_range_qos_rejected(self):
-        for qos in (5, 6, 7, -1):
+        for qos in (8, -1):
             with (
                 self.subTest(qos=qos),
                 patch.dict(os.environ, self._store_qos_env(qos)),
-                self.assertRaisesRegex(ValueError, r"\[0, 4\]"),
+                self.assertRaisesRegex(ValueError, r"\[0, 7\]"),
             ):
                 _validate_store_qos()
 
@@ -743,12 +743,12 @@ class TestMooncakeStoreQosValidation(unittest.TestCase):
         try:
             env = {
                 "MOONCAKE_CONFIG_PATH": path,
-                "ASCEND_GLOBAL_RESOURCE_CONFIG": json.dumps({"store": {"comm_resource_config": {"qos": 6}}}),
+                "ASCEND_GLOBAL_RESOURCE_CONFIG": json.dumps({"store": {"comm_resource_config": {"qos": 8}}}),
             }
             with (
                 patch.dict(os.environ, env),
                 patch.object(MooncakeBackend, "_setup_store"),
-                self.assertRaisesRegex(ValueError, r"\[0, 4\]"),
+                self.assertRaisesRegex(ValueError, r"\[0, 7\]"),
             ):
                 MooncakeBackend(MagicMock())
         finally:
@@ -768,7 +768,7 @@ class TestExtraConfigQos(unittest.TestCase):
                 self.assertEqual(parse_qos_from_extra_config({"qos_priority": qos}), qos)
 
     def test_parse_qos_from_extra_config_rejects_invalid(self):
-        for qos in (5, -1, "3", 2.5, True, None, [3]):
+        for qos in (8, -1, "3", 2.5, True, None, [3]):
             with (
                 self.subTest(qos=qos),
                 self.assertRaisesRegex(ValueError, "kv_connector_extra_config"),
@@ -862,11 +862,11 @@ class TestMooncakeStoreQosInjection(unittest.TestCase):
                 patch.dict(os.environ, {"MOONCAKE_CONFIG_PATH": path}, clear=True),
                 patch.object(MooncakeBackend, "_setup_store"),
             ):
-                MooncakeBackend(MagicMock(), extra_config={"qos_priority": 3})
-                self.assertEqual(
-                    json.loads(os.environ[self._ENV])["store"]["comm_resource_config"]["qos"],
-                    3,
-                )
+                with self.assertLogs("vllm", level="WARNING") as logs:
+                    MooncakeBackend(MagicMock(), extra_config={"qos_priority": 7})
+                self.assertEqual(json.loads(os.environ[self._ENV])["store"]["comm_resource_config"]["qos"], 7)
+                self.assertEqual(len(logs.output), 1)
+                self.assertIn("QoS 7", logs.output[0])
         finally:
             os.unlink(path)
 
@@ -927,8 +927,11 @@ class TestMemcacheQosInjection(unittest.TestCase):
             patch.dict(os.environ, {}, clear=True),
             patch.object(MemcacheBackend, "_setup_store"),
         ):
-            MemcacheBackend(SimpleNamespace(data_parallel_size=1), device_id=0, extra_config={"qos_priority": 2})
-            self.assertEqual(os.environ.get(self._ENV), "2")
+            with self.assertLogs("vllm", level="WARNING") as logs:
+                MemcacheBackend(SimpleNamespace(data_parallel_size=1), device_id=0, extra_config={"qos_priority": 5})
+            self.assertEqual(os.environ[self._ENV], "5")
+            self.assertEqual(len(logs.output), 1)
+            self.assertIn("QoS 5", logs.output[0])
 
 
 # =========================================================================
@@ -1638,11 +1641,11 @@ class TestMemcacheQosValidation(unittest.TestCase):
                 _validate_device_ub_qos()
 
     def test_out_of_range_qos_rejected(self):
-        for qos in ("5", "7", "-1", "100"):
+        for qos in ("8", "-1", "100"):
             with (
                 self.subTest(qos=qos),
                 patch.dict(os.environ, {self._ENV: qos}),
-                self.assertRaisesRegex(ValueError, r"\[0, 4\]"),
+                self.assertRaisesRegex(ValueError, r"\[0, 7\]"),
             ):
                 _validate_device_ub_qos()
 
@@ -1656,7 +1659,7 @@ class TestMemcacheQosValidation(unittest.TestCase):
                 _validate_device_ub_qos()
 
     def test_init_rejects_invalid_qos(self):
-        with patch.dict(os.environ, {self._ENV: "7"}), self.assertRaisesRegex(ValueError, r"\[0, 4\]"):
+        with patch.dict(os.environ, {self._ENV: "8"}), self.assertRaisesRegex(ValueError, r"\[0, 7\]"):
             MemcacheBackend(MagicMock())
 
 

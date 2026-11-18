@@ -17,15 +17,17 @@ from vllm.utils.network_utils import get_ip
 
 from vllm_ascend import envs
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
-    QOS_VALUE_MAX,
-    QOS_VALUE_MIN,
     Backend,
     BatchResultShapeError,
-    parse_qos_from_extra_config,
     require_aligned_batch_results,
     set_scheduler_device,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
+from vllm_ascend.distributed.kv_transfer.utils.qos import (
+    parse_qos_from_extra_config,
+    validate_qos,
+    warn_high_qos,
+)
 from vllm_ascend.distributed.parallel_state import get_global_rank
 
 DEFAULT_GLOBAL_SEGMENT_SIZE = 1073741824  # 1.0 GiB
@@ -98,9 +100,7 @@ def _validate_store_qos() -> None:
     KV pool transfers go through the Mooncake store, whose HIXL QoS comes from
     the ``store.comm_resource_config.qos`` field. The top-level
     ``comm_resource_config.qos`` belongs to other HIXL users and is not
-    validated here. Only integers in [QOS_VALUE_MIN, QOS_VALUE_MAX] are
-    supported; an invalid value fails fast with a clear error instead of an
-    obscure failure inside the transfer engine.
+    validated here.
     """
     config_str = os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG")
     if not config_str:
@@ -120,13 +120,9 @@ def _validate_store_qos() -> None:
     comm_resource_config = store_config.get("comm_resource_config")
     if not isinstance(comm_resource_config, dict) or "qos" not in comm_resource_config:
         return
-    qos = comm_resource_config["qos"]
-    if isinstance(qos, bool) or not isinstance(qos, int) or not (QOS_VALUE_MIN <= qos <= QOS_VALUE_MAX):
-        raise ValueError(
-            f"Invalid store QoS {qos!r} in ASCEND_GLOBAL_RESOURCE_CONFIG "
-            f"(store.comm_resource_config.qos): QoS must be an integer in "
-            f"[{QOS_VALUE_MIN}, {QOS_VALUE_MAX}]."
-        )
+    source = "ASCEND_GLOBAL_RESOURCE_CONFIG (store.comm_resource_config.qos)"
+    qos = validate_qos(comm_resource_config["qos"], source)
+    warn_high_qos(qos, source)
 
 
 def _inject_store_qos(extra_config: dict[str, Any] | None) -> None:

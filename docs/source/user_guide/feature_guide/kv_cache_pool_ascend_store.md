@@ -1566,7 +1566,7 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 | `use_layerwise` | bool | false | No | true / false | Layer-by-layer KV save/load, supported by both Mooncake and Memcache backends. Only supported on the Prefill node. |
 | `prefill_pp_size` | int | 1 | Required when PP + `consumer_is_to_put` | Positive integer | Prefill PP size. |
 | `prefill_pp_layer_partition` | str | No default | No | Comma-separated layer numbers, e.g., "30,31" | Prefill PP layer partition. If not configured, layers are evenly divided by `prefill_pp_size`. |
-| `qos_priority` | int | 0 | No | [0, 4] (integer, larger = higher priority) | KV Pool transfer QoS priority. |
+| `qos_priority` | int | Unset | No | [0, 7] (integer, larger = higher priority) | KV Pool transfer QoS priority. |
 
 ### ASCEND_GLOBAL_RESOURCE_CONFIG
 
@@ -1589,7 +1589,7 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 
 ### QoS Configuration
 
-Both the Mooncake and Memcache backends support configuring the transfer QoS. The valid range is **0-4 (integers only)**, and the default value is 0 when not configured. A larger value means a higher transfer priority. Invalid values (non-integer, out of range) cause startup to fail fast with a validation error.
+Both the Mooncake and Memcache backends support configuring the transfer QoS. The valid range is **0-7 (integers only)**. If `qos_priority` is omitted, the connector leaves the backend environment as configured. Values **5-7** emit a warning to verify that the transfer backend and switch are configured for that priority. Invalid values (non-integer or out of range) cause startup to fail with a validation error.
 
 QoS can be configured through `kv_connector_extra_config`, which is injected into the backend-specific configuration automatically:
 
@@ -1608,9 +1608,9 @@ QoS can be configured through `kv_connector_extra_config`, which is injected int
 
 | Parameter | Type | Default | Required | Value Range | Description |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `qos_priority` | int | 0 | No | [0, 4] (integer, larger = higher priority) | Supported by both Mooncake and Memcache backends. Invalid values (non-integer, out of range) cause fast startup failure. |
+| `qos_priority` | int | Unset | No | [0, 7] (integer, larger = higher priority) | Supported by both Mooncake and Memcache backends. Invalid values (non-integer, out of range) cause fast startup failure. |
 
-Values in `kv_connector_extra_config` take precedence over environment variables; a WARN log is emitted on override. For the Mooncake backend, `qos_priority` is merged into existing `ASCEND_GLOBAL_RESOURCE_CONFIG` (other fields preserved). When `ASCEND_GLOBAL_RESOURCE_CONFIG` was not set, configuring `qos_priority` also creates it.
+Values in `kv_connector_extra_config` take precedence over environment variables; a WARN log is emitted on override. For the Mooncake backend, `qos_priority` is merged into existing `ASCEND_GLOBAL_RESOURCE_CONFIG` (other fields preserved). Configuring `qos_priority` creates `ASCEND_GLOBAL_RESOURCE_CONFIG` if it is absent. For Memcache, an explicit `qos_priority` sets `MF_DEVICE_UB_QOS`.
 
 ## FAQ
 
