@@ -1,0 +1,5 @@
+pr: 22094
+entries:
+  - category: feature
+    text: Added optional FlashAttention NPU MLA decode on A3 with device-generated scheduler metadata and separate NoPE/RoPE KV caches. Prefill continues to use FIA.
+    hardware: [A3]

@@ -121,6 +121,27 @@ def get_flashmla_ops() -> tuple[Callable, Callable] | None:
     return None
 
 
+def get_flash_attn_npu_ops() -> tuple[Callable, Callable] | None:
+    """Load the optional A3 FA3 APIs after selecting the worker device.
+
+    Missing APIs select FIA before cache allocation. An installed package with
+    a broken dependency must fail visibly, as in the A5 FlashMLA loader.
+    """
+    if find_spec("flash_attn_npu_3") is None:
+        return None
+    try:
+        ops = import_module("flash_attn_npu_3")
+    except ModuleNotFoundError as exc:
+        if exc.name == "flash_attn_npu_3":
+            return None
+        raise
+    attention_op = getattr(ops, "flash_attn_with_kvcache", None)
+    metadata_op = getattr(ops, "get_scheduler_metadata", None)
+    if callable(attention_op) and callable(metadata_op):
+        return attention_op, metadata_op
+    return None
+
+
 class PreprocessType(enum.Enum):
     NATIVE = "native"
     PROLOG_V3 = "prolog_v3"

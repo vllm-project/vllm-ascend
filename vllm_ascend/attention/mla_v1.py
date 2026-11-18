@@ -37,6 +37,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.flash_attn_npu import FlashAttnNPUMetadataBuilder
 from vllm_ascend.attention.flashmla import (
     FLASHMLA_QK_DIM,
     FLASHMLA_V_DIM,
@@ -53,6 +54,7 @@ from vllm_ascend.attention.utils import (
     PreprocessType,
     ascend_chunked_prefill_workspace_size,
     enabling_mlapo,
+    get_flash_attn_npu_ops,
     is_dcp_enabled,
     maybe_save_kv_layer_to_connector,
     merge_prefill_chunks,
@@ -419,18 +421,31 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.seq_lens: torch.Tensor = None
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
         self.flashmla_state = None
-        flashmla_choices = {static_forward_context[name].impl.use_flashmla for name in layer_names}
+        flashmla_choices = {
+            (
+                static_forward_context[name].impl.use_flashmla,
+                getattr(static_forward_context[name].impl, "use_flash_attn_npu", False),
+            )
+            for name in layer_names
+        }
         if len(flashmla_choices) > 1:
             raise ValueError("MLA layers in one attention group must use the same decode backend")
         if layer_names:
             logger.info(
                 "MLA decode backend for group starting at %s: %s",
                 layer_names[0],
-                "FlashMLA" if True in flashmla_choices else "FIA",
+                "FlashAttention NPU"
+                if (False, True) in flashmla_choices
+                else "FlashMLA"
+                if (True, False) in flashmla_choices
+                else "FIA",
             )
-        if True in flashmla_choices:
+        if (True, False) in flashmla_choices or (False, True) in flashmla_choices:
             impl = static_forward_context[layer_names[0]].impl
-            self.flashmla_state = FlashMLAMetadataBuilder(
+            builder_cls = (
+                FlashAttnNPUMetadataBuilder if getattr(impl, "use_flash_attn_npu", False) else FlashMLAMetadataBuilder
+            )
+            self.flashmla_state = builder_cls(
                 impl, device, scheduler_config.max_num_seqs, self.attn_mask_builder.get_splitfuse_attn_mask()
             )
 
@@ -1085,17 +1100,21 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.mlapo_weight_quant_mode = 3
         self._mlapo_uses_native_weights = False
         self.use_flashmla: bool = self._can_use_flashmla()
+        self.use_flash_attn_npu: bool = self._can_use_flashmla(flash_attn_npu=True)
         self._flashmla_writer_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
-    def _can_use_flashmla(self) -> bool:
+    def _can_use_flashmla(self, *, flash_attn_npu: bool = False) -> bool:
         config = self.vllm_config
         if not getattr(config, "use_v2_model_runner", False):
             return False
         if config.speculative_config is not None and config.speculative_config.method != "dspark":
             return False
-        if not get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH):
+        capability = HardwareCapability.MLA_FLASH_ATTN_NPU if flash_attn_npu else HardwareCapability.MLA_FLASH
+        if not get_current_hardware_profile().supports(capability):
             return False
-        if self.num_heads not in MLA_FLASH_SUPPORTED_Q_HEADS or self.num_kv_heads != 1:
+        if self.num_heads <= 0 or self.num_kv_heads != 1:
+            return False
+        if not flash_attn_npu and self.num_heads not in MLA_FLASH_SUPPORTED_Q_HEADS:
             return False
         if self.kv_lora_rank != FLASHMLA_V_DIM or self.qk_rope_head_dim != FLASHMLA_QK_DIM - FLASHMLA_V_DIM:
             return False
@@ -1103,11 +1122,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             return False
         dcp_size = config.parallel_config.decode_context_parallel_size
         # History sees all Q heads in the DCP group; current uses local heads.
-        if self.use_pcp or self.num_heads * dcp_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
+        if self.use_pcp or (not flash_attn_npu and self.num_heads * dcp_size not in MLA_FLASH_SUPPORTED_Q_HEADS):
             return False
         if not supports_component_major_mla_pd(config):
             return False
-        return get_flashmla_ops() is not None
+        return (get_flash_attn_npu_ops() if flash_attn_npu else get_flashmla_ops()) is not None
 
     @staticmethod
     def update_graph_params(
@@ -3021,7 +3040,7 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _forward_external_flashmla(self, preprocessed, fused_cache, metadata):
         flash = metadata.external_flashmla
         assert flash is not None
-        if not isinstance(fused_cache, torch.Tensor):
+        if not getattr(self, "use_flash_attn_npu", False) and not isinstance(fused_cache, torch.Tensor):
             raise RuntimeError(
                 "External FlashMLA requires the original fused BBND cache; component-major tuples are invalid"
             )
@@ -3041,6 +3060,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             metadata=flash.schedule,
             attn_mask=flash.attn_mask,
         )
+        if getattr(self, "use_flash_attn_npu", False):
+            # FA3 returns TND storage. Preserve it for the existing fused
+            # batch-major projection instead of materializing NTD output.
+            return self._v_up_proj_batch_major(latent.transpose(0, 1))
         return self._v_up_proj(latent)
 
     def mla_preprocess_only_decode(self, hidden_states, kv_cache, attn_metadata):
@@ -3409,7 +3432,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # MLA implementation still expects separate NoPE/RoPE logical tensors.
         # Split it here as zero-copy views.
         fused_mla_cache = isinstance(kv_cache, torch.Tensor)
-        external_flash_cache = kv_cache if fused_mla_cache else None
+        external_flash_cache = kv_cache if fused_mla_cache or getattr(self, "use_flash_attn_npu", False) else None
         if isinstance(kv_cache, torch.Tensor):
             kv_cache = (
                 kv_cache[..., : self.kv_lora_rank],

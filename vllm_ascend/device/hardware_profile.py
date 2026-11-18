@@ -143,6 +143,8 @@ class HardwareCapability(Enum):
     LORA_CUSTOM_OPS = auto()
     # Use the token-fused MLA cache protocol for eligible FlashMLA models.
     MLA_FLASH = auto()
+    # Optional FA3 MLA reader with separate NoPE/RoPE paged caches on A3.
+    MLA_FLASH_ATTN_NPU = auto()
     # Allow MLAPO with native floating-point projection weights, not only quantized weights.
     MLAPO_NATIVE_WEIGHTS = auto()
     # Accept ``fullmesh_v2`` as the MC2 communication algorithm.
@@ -362,6 +364,7 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.MLA_FLASH_ATTN_NPU,
     HardwareCapability.KDA_INT8_QUANT_OVERLAP,
     HardwareCapability.NATIVE_INT8_SPARSE,
     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,

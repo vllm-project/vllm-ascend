@@ -279,7 +279,7 @@ class FlashMLACurrent:
     adapter: FlashMLAImpl
     query: torch.Tensor
     schedule: torch.Tensor
-    cache: torch.Tensor
+    cache: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
     block_table: torch.Tensor
     slots: torch.Tensor
     attn_mask: torch.Tensor
@@ -305,6 +305,12 @@ class FlashMLADecode:
 
 
 class FlashMLAMetadataBuilder:
+    @staticmethod
+    def _load_adapter(impl):
+        return FlashMLAImpl.load(
+            FlashMLAConfig(impl.num_heads, impl.scale, return_softmax_lse=getattr(impl, "dcp_size", 1) > 1)
+        )
+
     def __init__(self, impl, device: torch.device, max_num_reqs: int, attn_mask: torch.Tensor):
         self.dcp_size = getattr(impl, "dcp_size", 1)
         self.dcp_rank = getattr(impl, "dcp_rank", 0)
@@ -318,7 +324,7 @@ class FlashMLAMetadataBuilder:
         # speculative causal queries need the replicated current chunk.
         self.use_spec_decode = impl.vllm_config.speculative_config is not None
         self.cp_interleave = impl.vllm_config.parallel_config.cp_kv_cache_interleave_size if self.dcp_size > 1 else 1
-        adapter = FlashMLAImpl.load(FlashMLAConfig(impl.num_heads, impl.scale, return_softmax_lse=self.dcp_size > 1))
+        adapter = self._load_adapter(impl)
         self.current_adapter = adapter
         history_adapter = replace(
             adapter,
@@ -332,9 +338,12 @@ class FlashMLAMetadataBuilder:
         self.buffers: dict[tuple, FlashMLADecode] = {}
         self.attn_mask = attn_mask
 
+    def _get_adapter(self, causal: bool, tokens: int, columns: int, *, current: bool = False):
+        return self.current_adapter if current else self.adapters[causal]
+
     def _allocate(self, tokens: int, rows: int, columns: int, causal: bool) -> FlashMLADecode:
         ints = {"dtype": torch.int32, "device": self.device}
-        adapter = self.adapters[causal]
+        adapter = self._get_adapter(causal, tokens, columns)
         cu = torch.zeros(rows + 1, **ints)
         used = torch.zeros(rows, **ints)
         lengths = torch.zeros(rows, **ints)
@@ -366,13 +375,14 @@ class FlashMLAMetadataBuilder:
             # As in split DCP attention, each rank retains every current row.
             # Only persistent history writes use the runner's rank-owned slots.
             block_columns = (tokens + FLASHMLA_BLOCK_SIZE - 1) // FLASHMLA_BLOCK_SIZE
-            current_schedule = self.current_adapter.build_metadata(
+            current_adapter = self._get_adapter(causal, tokens, block_columns, current=True)
+            current_schedule = current_adapter.build_metadata(
                 torch.empty_like(used, device="meta"),
                 torch.empty_like(cu, device="meta"),
                 torch.empty_like(used, device="meta"),
             )
             flash.current = FlashMLACurrent(
-                adapter=self.current_adapter,
+                adapter=current_adapter,
                 query=torch.empty(
                     (tokens, self.current_adapter.config.num_heads, FLASHMLA_QK_DIM),
                     dtype=self.dtype,
