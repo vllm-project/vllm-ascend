@@ -28,8 +28,6 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.gpu_worker import compute_sub_block_ptrs
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
-from vllm_ascend.utils import vllm_version_is
-
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import DevicePointers
 
@@ -161,16 +159,11 @@ class SingleDirectionNPUOffloadingHandler:
         src_spec: LoadStoreSpec,
         dst_spec: LoadStoreSpec,
     ) -> bool:
-        if vllm_version_is("0.33.0"):
-            batch_src, batch_dst, batch_sizes, num_copy_ops, num_transfer_bytes = self._legacy_descriptors(
-                src_spec, dst_spec
-            )
-        else:
-            device_ptrs = src_spec if self.npu_to_cpu else dst_spec
-            cpu_spec = dst_spec if self.npu_to_cpu else src_spec
-            batch_src, batch_dst, batch_sizes, num_copy_ops, num_transfer_bytes = self._pointer_descriptors(
-                device_ptrs, cpu_spec
-            )
+        device_ptrs = src_spec if self.npu_to_cpu else dst_spec
+        cpu_spec = dst_spec if self.npu_to_cpu else src_spec
+        batch_src, batch_dst, batch_sizes, num_copy_ops, num_transfer_bytes = self._pointer_descriptors(
+            device_ptrs, cpu_spec
+        )
         src = batch_src[:num_copy_ops]
         dst = batch_dst[:num_copy_ops]
         sizes = batch_sizes[:num_copy_ops]
@@ -211,95 +204,6 @@ class SingleDirectionNPUOffloadingHandler:
             )
         )
         return True
-
-    def _legacy_descriptors(self, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec):
-        assert isinstance(src_spec, BlockIDsLoadStoreSpec)
-        assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
-
-        src_blocks = src_spec.block_ids
-        dst_blocks = dst_spec.block_ids
-        assert src_blocks.ndim == 1
-        assert dst_blocks.ndim == 1
-
-        npu_spec = src_spec if self.npu_to_cpu else dst_spec
-        assert isinstance(npu_spec, GPULoadStoreSpec)
-        group_sizes = npu_spec.group_sizes
-        block_indices = npu_spec.block_indices
-        assert len(group_sizes) == len(self.kv_cache_groups_data_refs)
-        assert len(block_indices) == len(self.kv_cache_groups_data_refs)
-
-        num_copy_ops = sum(
-            group_size * len(group_data_refs)
-            for group_size, group_data_refs in zip(group_sizes, self.kv_cache_groups_data_refs)
-        )
-        batch_src, batch_dst, batch_sizes = (
-            self._buffer_pool.pop() if self._buffer_pool else _new_descriptor_buffers(num_copy_ops)
-        )
-        if batch_src.numel() < num_copy_ops:
-            batch_src, batch_dst, batch_sizes = _new_descriptor_buffers(num_copy_ops)
-
-        src = batch_src[:num_copy_ops]
-        dst = batch_dst[:num_copy_ops]
-        sizes = batch_sizes[:num_copy_ops]
-        all_src = src.numpy()
-        all_dst = dst.numpy()
-        all_sizes = sizes.numpy()
-
-        src_offset = 0
-        dst_offset = 0
-        op_idx = 0
-        num_transfer_bytes = 0
-        for group_size, block_idx, group_data_refs in zip(
-            group_sizes,
-            block_indices,
-            self.kv_cache_groups_data_refs,
-        ):
-            if group_size == 0:
-                continue
-
-            src_blocks_to_skip = block_idx % self.src_blocks_per_chunk
-            dst_blocks_to_skip = block_idx % self.dst_blocks_per_chunk
-            src_logical_block_count = group_size + src_blocks_to_skip
-            dst_logical_block_count = group_size + dst_blocks_to_skip
-
-            src_block_count = cdiv(src_logical_block_count, self.src_blocks_per_chunk)
-            dst_block_count = cdiv(dst_logical_block_count, self.dst_blocks_per_chunk)
-            src_end_offset = src_offset + src_block_count
-            dst_end_offset = dst_offset + dst_block_count
-            assert src_end_offset <= len(src_blocks)
-            assert dst_end_offset <= len(dst_blocks)
-
-            group_src = src_blocks[src_offset:src_end_offset]
-            group_dst = dst_blocks[dst_offset:dst_end_offset]
-            for data_ref in group_data_refs:
-                tensor_idx = data_ref.tensor_idx
-                end_idx = op_idx + group_size
-                compute_sub_block_ptrs(
-                    group_src,
-                    self.src_blocks_per_chunk,
-                    all_src[op_idx:end_idx],
-                    self.src_tensors[tensor_idx],
-                    skip_count=src_blocks_to_skip,
-                )
-                compute_sub_block_ptrs(
-                    group_dst,
-                    self.dst_blocks_per_chunk,
-                    all_dst[op_idx:end_idx],
-                    self.dst_tensors[tensor_idx],
-                    skip_count=dst_blocks_to_skip,
-                )
-                all_sizes[op_idx:end_idx] = data_ref.page_size_bytes
-                num_transfer_bytes += group_size * data_ref.page_size_bytes
-                op_idx = end_idx
-
-            src_offset = src_end_offset
-            dst_offset = dst_end_offset
-
-        assert src_offset == len(src_blocks)
-        assert dst_offset == len(dst_blocks)
-        assert op_idx == num_copy_ops
-
-        return batch_src, batch_dst, batch_sizes, num_copy_ops, num_transfer_bytes
 
     def _pointer_descriptors(self, device_ptrs: DevicePointers, cpu_spec: LoadStoreSpec):
         """Translate #56076's resolved device addresses into NPU DMA descriptors.

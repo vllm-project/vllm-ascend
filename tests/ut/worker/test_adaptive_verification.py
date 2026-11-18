@@ -23,7 +23,6 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend, AscendDSAMetadataBuil
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend, AscendSFAIndexerMetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadataBuilder
 from vllm_ascend.patch.worker import patch_model_runner
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import AscendDFlash2Speculator
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
@@ -162,13 +161,12 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
     # agreement, before dispatch can enter graph/device/collective execution.
     dispatch = Mock(side_effect=InputsPrepared)
     monkeypatch.setattr(upstream, "dispatch_cg_and_sync_dp", dispatch)
-    sync_kwargs = {} if vllm_version_is("0.33.0") else {"max_query_len": None}
     target_sync = DPSyncState(
         num_tokens_across_dp=torch.full((3,), target_capacity),
         uniform_token_count=None,
         eager=False,
         num_reqs=dp_reqs,
-        **sync_kwargs,
+        max_query_len=None,
     )
     with pytest.raises(InputsPrepared):
         spec.propose(

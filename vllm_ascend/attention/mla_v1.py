@@ -90,9 +90,8 @@ BUILD_METADATA_STEP_DECODE = 1
 
 
 def _uses_unpadded_drafter_batch(speculative_config) -> bool:
-    if vllm_version_is("0.33.0"):
-        return speculative_config.disable_padded_drafter_batch
-    # MRv1's optional unpadded drafter was removed in native #63373.
+    # The optional unpadded drafter was removed in native #63373 and is absent
+    # from v0.34.0 as well, so no supported vLLM lane sets it.
     return False
 
 

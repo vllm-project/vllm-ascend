@@ -7,7 +7,6 @@ import pytest
 import torch
 
 from vllm_ascend.models.qwen4_exp import qsa
-from vllm_ascend.utils import vllm_version_is
 
 
 def test_main_and_draft_qkv_projection_use_upstream_path() -> None:
@@ -15,7 +14,6 @@ def test_main_and_draft_qkv_projection_use_upstream_path() -> None:
     assert qsa.AscendQwen4ExpQSAAttention._project_qkv_gate is qsa.upstream_qsa.Qwen4ExpQSAAttention._project_qkv_gate
 
 
-@pytest.mark.skipif(vllm_version_is("0.33.0"), reason="Packed Indexer arguments are part of the main ABI")
 def test_indexer_accepts_main_packed_inputs_without_fused_preparation() -> None:
     layer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
     torch.nn.Module.__init__(layer)
@@ -170,7 +168,7 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> No
 
     selected = torch.zeros((2, 3), dtype=torch.int32)
     # Main's indexer returns (selection, prepared main outputs).
-    indexer = Mock(return_value=selected if vllm_version_is("0.33.0") else (selected, None))
+    indexer = Mock(return_value=(selected, None))
     indexer.output_width = 3
     indexer.raw_key_cache = SimpleNamespace(prefix=side_prefix)
     layer.indexer = indexer
@@ -206,7 +204,7 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> No
     torch.testing.assert_close(update_args[1], projected_k.view(2, 1, 4))
     torch.testing.assert_close(update_args[2], projected_v.view(2, 1, 4))
     assert layer.impl.forward_qsa.call_count + layer.impl.forward.call_count == 1
-    forward_call = layer.impl.forward_qsa if vllm_version_is("0.33.0") else layer.impl.forward
+    forward_call = layer.impl.forward
     forward_args = forward_call.call_args.args
     torch.testing.assert_close(forward_args[1], projected_q.view(2, 2, 4))
 

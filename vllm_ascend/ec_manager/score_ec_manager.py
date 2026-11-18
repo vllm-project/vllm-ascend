@@ -5,14 +5,9 @@ from typing import TYPE_CHECKING, Any
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.request import Request
 
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.33.0"):
-    from vllm.config.ec_manager_config import EncoderCacheManagerMetadata as _ScoreMetadataBase
-else:
-    # Native #63373 removed the empty MRv1 marker. This is Ascend's local
-    # policy payload; inheriting object does not add native MRv2 transport.
-    _ScoreMetadataBase = object
+# This is Ascend's local policy payload; inheriting object does not add
+# native MRv2 transport.
+_ScoreMetadataBase = object
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

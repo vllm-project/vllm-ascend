@@ -59,7 +59,6 @@ from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     get_kv_cache_tensor_layers,
     shared_experts_calculation_stream,
-    vllm_version_is,
 )
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -840,18 +839,14 @@ class NPUModelRunner310V2(NPUModelRunner):
             attn_cg_support.min_cg_support,
             attn_cg_support.min_cg_attn_backend,
             self.decode_query_len,
-            **({"use_v2_model_runner": True} if vllm_version_is("0.33.0") else {}),
             kv_cache_config=kv_cache_config,
             max_num_reqs=self.max_num_reqs,
-            **{},
         )
         self.cudagraph_manager = ModelAclGraphManager310(
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            self.decode_query_len
-            if vllm_version_is("0.33.0")
-            else self.vllm_config.get_decode_cudagraph_query_lens(self.decode_query_len),
+            self.vllm_config.get_decode_cudagraph_query_lens(self.decode_query_len),
             self,
             lora_capture_cases=self.lora_capture_cases,
         )

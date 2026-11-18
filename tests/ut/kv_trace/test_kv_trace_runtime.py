@@ -12,21 +12,19 @@ from types import SimpleNamespace as NS
 import pytest
 import torch
 
-from vllm_ascend.utils import vllm_version_is
-
 ROOT = Path(__file__).parents[3]
 
 
 @pytest.fixture(name="runtime")
 def runtime_fixture(monkeypatch):
-    release = vllm_version_is("0.33.0")
     for name in ("vllm_ascend", "vllm_ascend.kv_trace", "vllm"):
         package = ModuleType(name)
         package.__path__ = []
         monkeypatch.setitem(sys.modules, name, package)
 
     utils = ModuleType("vllm_ascend.utils")
-    monkeypatch.setattr(utils, "vllm_version_is", lambda version: release and version == "0.33.0", raising=False)
+    # kv_trace_state imports the helper; no supported lane takes a legacy path.
+    monkeypatch.setattr(utils, "vllm_version_is", lambda version: False, raising=False)
     monkeypatch.setitem(sys.modules, "vllm_ascend.utils", utils)
 
     def load(name, path):

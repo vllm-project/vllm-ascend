@@ -102,8 +102,6 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
     draft_model = SimpleNamespace(model=object(), config=draft_config.hf_config)
     target_model = SimpleNamespace(model=object())
     monkeypatch.setattr(loader, "get_draft_load_config", lambda _: config.load_config)
-    if dflash_module.vllm_version_is("0.33.0"):
-        monkeypatch.setattr(loader, "get_pp_safe_draft_load_config", lambda value: value)
     monkeypatch.setattr(loader, "maybe_share_target_embed", lambda *_: None)
     monkeypatch.setattr(loader, "get_target_lm_head", lambda *_: None)
     monkeypatch.setattr(
@@ -650,8 +648,6 @@ def test_dflash_attention_uses_only_draft_layers_and_int32_slots(monkeypatch, ac
 
 
 def _native_dflash_inputs(inputs, block_stride=None):
-    if dflash_module.vllm_version_is("0.33.0"):
-        return inputs
     stride = inputs[17] if block_stride is None else block_stride
     return [*inputs[:18], stride, *inputs[18:]]
 

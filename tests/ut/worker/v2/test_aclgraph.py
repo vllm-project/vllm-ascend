@@ -11,7 +11,6 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
     AutoRegressiveAclGraphManager,
     CudaGraphManager,
@@ -24,7 +23,7 @@ def _parent_init(
     vllm_config,
     device,
     cudagraph_mode,
-    decode_query_len,
+    decode_query_lens,
     lora_capture_cases=None,
     varlen_decode=False,
     **kwargs,
@@ -39,8 +38,6 @@ def _graph_config(pcp_size: int = 1) -> SimpleNamespace:
 
 
 def _query_shape(query_len):
-    if vllm_version_is("0.33.0"):
-        return {"decode_query_len": query_len}
     return {"decode_query_lens": {query_len: 8}}
 
 
@@ -112,7 +109,6 @@ def test_init_draft_decode_graph():
     set_prefill.assert_not_called()
 
 
-@pytest.mark.skipif(vllm_version_is("0.33.0"), reason="Independent draft request grids require main's graph API")
 @pytest.mark.parametrize(
     "draft_moe,method,query_len,mode,limit,expected_max_requests",
     [

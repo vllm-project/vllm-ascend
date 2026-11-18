@@ -22,7 +22,6 @@ from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import AscendTargetDependentARSpeculator
@@ -225,11 +224,6 @@ def test_dispatch_tail_canary_matches_upstream_sample(with_grammar, with_draft, 
     expected_calls = 2 if with_grammar else 1
     assert len(upstream_calls) == expected_calls
     assert override_calls == upstream_calls
-    if with_grammar and with_draft and vllm_version_is("0.33.0"):
-        # 0.33.0 exposes the permissive-row mask as the fourth sampler argument;
-        # main feeds it through the scheduler/draft-token handler instead.
-        invalid_drafts = runner.rejection_sampler.call_args.args[3]
-        assert invalid_drafts.tolist() == [False, False, True]
 
 
 @pytest.mark.parametrize(

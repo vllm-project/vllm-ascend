@@ -22,7 +22,7 @@ from vllm.platforms import current_platform
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
-from ..utils import super_kernel_scope, use_updatable_graph, vllm_version_is, weak_ref_tensors
+from ..utils import super_kernel_scope, use_updatable_graph, weak_ref_tensors
 from .updatable_graph import (
     ContextSource,
     SharedSource,
@@ -30,10 +30,6 @@ from .updatable_graph import (
 )
 
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
-
-if vllm_version_is("0.33.0"):
-    # Removed from upstream main by #63373; retained until v0.33.0 support ends.
-    from vllm.compilation.monitor import validate_cudagraph_capturing_enabled  # type: ignore[attr-defined]
 
 
 _STREAM_RESOURCE_ERROR_CODE = "207008"
@@ -193,10 +189,6 @@ class ACLGraphWrapper:
                 # shape. E.g. we only log it for the first subgraph in
                 # piecewise mode.
                 logger.debug("Capturing ACL graph (%s, %s)", self.runtime_mode.name, entry.batch_descriptor)
-            # validate that aclgraph capturing is legal at this point.
-            if vllm_version_is("0.33.0"):
-                validate_cudagraph_capturing_enabled()
-
             input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
             entry.input_addresses = input_addresses
             aclgraph = UpdatableGraph()

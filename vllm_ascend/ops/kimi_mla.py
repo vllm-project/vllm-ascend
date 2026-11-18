@@ -5,7 +5,6 @@
 from vllm.models.kimi_k3.amd.mla import KimiK3MultiHeadLatentAttentionWrapper
 
 from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
-from vllm_ascend.utils import vllm_version_is
 
 
 class AscendKimiK3MultiHeadLatentAttention(AscendMultiHeadLatentAttention, KimiK3MultiHeadLatentAttentionWrapper):
@@ -15,8 +14,7 @@ class AscendKimiK3MultiHeadLatentAttention(AscendMultiHeadLatentAttention, KimiK
     so Python runs the Ascend initializer on the replacement instance.
     """
 
-    if not vllm_version_is("0.33.0"):
-        # vLLM #60110 added this flag and reads it in the upstream
-        # process_weights_after_loading hook. The AMD initializer never runs on
-        # Ascend, so expose the fold as disabled.
-        _fold_qb_uk = False
+    # vLLM #60110 added this flag and reads it in the upstream
+    # process_weights_after_loading hook. The AMD initializer never runs on
+    # Ascend, so expose the fold as disabled.
+    _fold_qb_uk = False

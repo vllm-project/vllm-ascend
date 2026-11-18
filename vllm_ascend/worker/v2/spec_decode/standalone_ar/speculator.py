@@ -11,7 +11,6 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator import StandaloneARSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
@@ -19,11 +18,9 @@ from vllm_ascend.worker.v2.attn_utils import (
 
 
 class AscendStandaloneARSpeculator(StandaloneARSpeculator):
-    if not vllm_version_is("0.33.0"):
-
-        def supports_batch_sharded_draft_logits(self) -> bool:
-            # NPU draft-logits kernels index the cache by request state.
-            return False
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # NPU draft-logits kernels index the cache by request state.
+        return False
 
     def _build_attn_metadata(
         self,
@@ -36,13 +33,6 @@ class AscendStandaloneARSpeculator(StandaloneARSpeculator):
         dcp_local_seq_lens: torch.Tensor | None = None,
         slot_mappings: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
-        draft_seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound
-        if step == 0 and vllm_version_is("0.33.0"):
-            # #60989 includes the correction token before calling this builder
-            # on main. Only release still needs the extra prefill token here.
-            # Keep the input batch's bounds unchanged.
-            draft_seq_lens_cpu_upper_bound = (seq_lens_cpu_upper_bound[:num_reqs] + 1).clamp(max=self.max_model_len)
-
         num_tokens = int(query_start_loc_np[-1])
         positions = self.expanded_positions if step == 0 else self.input_buffers.positions
         attn_state = AscendAttentionState.DecodeOnly
@@ -61,7 +51,7 @@ class AscendStandaloneARSpeculator(StandaloneARSpeculator):
                 num_reqs,
                 batch_desc,
                 query_start_loc_np,
-                draft_seq_lens_cpu_upper_bound,
+                seq_lens_cpu_upper_bound,
                 step,
                 causal,
                 dcp_local_seq_lens,

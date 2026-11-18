@@ -1473,18 +1473,18 @@ def _setup_compile_backend(
             set(compilation_config.cudagraph_capture_sizes or []) | {reduced_cg_cap}
         )
         compilation_config.max_cudagraph_capture_size = None
-        # Main resolves separate prefill/decode sizes on the first pass. They
-        # were derived from the truncated grid, so regenerate them alongside
-        # the restored off-stride default rather than mixing two size sets.
-        # Explicit split sizes never receive reduced_cg_cap (see below).
-        if not vllm_version_is("0.33.0"):
-            for name in (
-                "prefill_cudagraph_capture_token_sizes",
-                "max_prefill_cudagraph_capture_tokens",
-                "decode_cudagraph_capture_request_sizes",
-                "max_decode_cudagraph_capture_requests",
-            ):
-                setattr(compilation_config, name, None)
+        # Upstream resolves separate prefill/decode sizes on the first pass.
+        # They were derived from the truncated grid, so regenerate them
+        # alongside the restored off-stride default rather than mixing two
+        # size sets. Explicit split sizes never receive reduced_cg_cap (see
+        # below).
+        for name in (
+            "prefill_cudagraph_capture_token_sizes",
+            "max_prefill_cudagraph_capture_tokens",
+            "decode_cudagraph_capture_request_sizes",
+            "max_decode_cudagraph_capture_requests",
+        ):
+            setattr(compilation_config, name, None)
         delattr(compilation_config, "reduced_cg_cap")
 
     # Recompute cudagraph sizes before extending splitting_ops (honors the
@@ -1499,12 +1499,10 @@ def _setup_compile_backend(
         and not vllm_config.model_config.enforce_eager
         and requires_tp_aligned_capture_sizes
     ):
-        # Main V2 resolves prefill tokens and decode requests separately.
+        # Upstream resolves prefill tokens and decode requests separately.
         # The TP token-layout restriction applies to the prefill grid; keep
         # the resolved decode request grid used by the graph managers intact.
-        prefill_sizes = None
-        if not vllm_version_is("0.33.0"):
-            prefill_sizes = compilation_config.prefill_cudagraph_capture_token_sizes
+        prefill_sizes = compilation_config.prefill_cudagraph_capture_token_sizes
         original_sizes = prefill_sizes if prefill_sizes is not None else compilation_config.cudagraph_capture_sizes
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         sp_aclgraph_sizes = [size for size in original_sizes if size % tp_size == 0]
@@ -2042,7 +2040,7 @@ def _get_reduced_cg_cap(vllm_config: VllmConfig) -> int | None:
         return None
     if compilation_config.cudagraph_capture_sizes is not None:
         return None
-    if not vllm_version_is("0.33.0") and any(
+    if any(
         getattr(compilation_config, name) is not None
         for name in (
             "prefill_cudagraph_capture_token_sizes",
