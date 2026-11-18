@@ -33,7 +33,8 @@ The fastest way to set up a test environment is to use the main branch's contain
     pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
 
     # For TorchNPU dev version or x86 machine
-    export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
+    export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi https://ascend.devcloud.huaweicloud.com/pypi/simple"
+    export PIP_TRUSTED_HOST="ascend.devcloud.huaweicloud.com"
 
     # src path
     export SRC_WORKSPACE=/vllm-workspace

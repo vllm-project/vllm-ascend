@@ -255,7 +255,8 @@ jobs:
       - name: Install vllm-ascend dev (conditional)
         if: steps.filter.outputs.lint_tracker == 'true'
         env:
-          UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu"
+          UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu https://ascend.devcloud.huaweicloud.com/pypi/simple"
+          UV_INSECURE_HOST: ascend.devcloud.huaweicloud.com
           UV_INDEX_STRATEGY: unsafe-best-match
           UV_NO_CACHE: 1
           UV_SYSTEM_PYTHON: 1

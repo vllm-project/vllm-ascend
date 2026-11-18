@@ -34,7 +34,7 @@ WORKDIR /workspace
 COPY . /workspace/vllm-ascend/
 
 # Install req
-RUN python3 -m pip install -r vllm-ascend/requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly && \
+RUN python3 -m pip install -r vllm-ascend/requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly --extra-index-url https://ascend.devcloud.huaweicloud.com/pypi/simple --trusted-host ascend.devcloud.huaweicloud.com && \
     python3 -m pip install twine attrs psutil
 
 # Install vllm-ascend

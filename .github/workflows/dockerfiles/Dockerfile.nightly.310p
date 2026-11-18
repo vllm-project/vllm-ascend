@@ -23,7 +23,8 @@ FROM ${BASE_IMAGE}:nightly-${VLLM_ASCEND_BRANCH}-310p${OS_MARK}${TAG_SUFFIX}
 
 # Build-time configuration. Defaults are the public community mirrors so this
 # Dockerfile can be built standalone.
-ARG PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
+ARG PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi https://ascend.devcloud.huaweicloud.com/pypi/simple"
+ARG PIP_TRUSTED_HOST="ascend.devcloud.huaweicloud.com"
 ARG AIS_BENCH_TAG="v3.1-20261113-master"
 ARG AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 
@@ -34,6 +35,7 @@ WORKDIR /workspace
 
 # Install requirements-nightly.txt for tests
 RUN export PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL}" && \
+    export PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST}" && \
     cd /vllm-workspace/vllm-ascend && \
     python3 -m pip install -r requirements-nightly.txt && \
     python3 -m pip cache purge

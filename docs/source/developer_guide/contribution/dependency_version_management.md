@@ -12,7 +12,7 @@ stack.
 | torch | 2.10.0 | `requirements.txt`<br>`pyproject.toml` `[build-system]` | PyTorch CPU index <https://download.pytorch.org/whl/cpu/> (images), PyPI <https://pypi.org/simple/> (CI) |
 | torch-npu | 2.10.0.post7 | `requirements.txt`<br>`pyproject.toml` `[build-system]` | Ascend mirror (stable) <https://mirrors.huaweicloud.com/ascend/repos/pypi> |
 | triton-ascend | 3.6.0.post2 | `requirements.txt`<br>`pyproject.toml` `[build-system]`<br>`.github/workflows/_selected_tests.yaml`<br>`.github/workflows/schedule_main2main.yaml` | Ascend mirror (stable) <https://mirrors.huaweicloud.com/ascend/repos/pypi> |
-| memfabric-hybrid / memcache-hybrid | 1.3.0 | `requirements.txt`<br>`pyproject.toml` `[build-system]` | Ascend mirror (stable) <https://mirrors.huaweicloud.com/ascend/repos/pypi> |
+| memfabric-hybrid / memcache-hybrid | 1.5.0+b013 | `requirements.txt`<br>`pyproject.toml` `[build-system]` | Ascend mirror (stable) <https://mirrors.huaweicloud.com/ascend/repos/pypi> and Ascend DevCloud <https://ascend.devcloud.huaweicloud.com/pypi/simple> (`--trusted-host ascend.devcloud.huaweicloud.com`) |
 | flash-linear-attention-npu (FLA) | 26.10.0+feature | Image build —<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler`<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler`<br>PR —<br>`.github/workflows/_selected_tests.yaml`<br>`_selected_tests_upstream.yaml`<br>`schedule_e2e_upstream_test.yaml`<br>main2main —<br>`.github/workflows/schedule_main2main.yaml` | Ascend mirror (stable) <https://mirrors.huaweicloud.com/ascend/repos/pypi>; the `v26.10.0-feature` release is published as `26.10.0+feature` for both x86_64 and aarch64, and pip selects the matching wheel |
 | flash_attn_npu | 0.5.0 | Image build —<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler` | PyPI <https://pypi.org/simple/> (sdist only) |
 | mooncake-transfer-engine-npu | 0.3.14rc3 | Image build —<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler`<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler`<br>PR / main2main —<br>`.github/workflows/_selected_tests.yaml`<br>`.github/workflows/schedule_main2main.yaml` | Ascend mirror (nightly) <https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly> only; `manylinux_2_35` wheels, never in `requirements.txt` |
@@ -33,8 +33,8 @@ file. The `-` lines use the example versions from the table; replace
 -torch==2.10.0
 -torch-npu==2.10.0.post7
 -triton-ascend===3.6.0.post2
--memfabric-hybrid===1.3.0
--memcache-hybrid===1.3.0
+-memfabric-hybrid===1.5.0+b013
+-memcache-hybrid===1.5.0+b013
 +torch==<new-version>
 +torch-npu==<new-version>
 +triton-ascend===<new-version>
@@ -47,8 +47,8 @@ file. The `-` lines use the example versions from the table; replace
 ```diff
 -    "torch-npu==2.10.0.post7",
 -    "torch==2.10.0",
--    "memfabric-hybrid===1.3.0",
--    "memcache-hybrid===1.3.0",
+-    "memfabric-hybrid===1.5.0+b013",
+-    "memcache-hybrid===1.5.0+b013",
 -    "triton-ascend===3.6.0.post2"
 +    "torch-npu==<new-version>",
 +    "torch==<new-version>",

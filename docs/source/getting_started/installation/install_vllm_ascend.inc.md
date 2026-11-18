@@ -43,6 +43,7 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
     pip install \
         --extra-index-url https://download.pytorch.org/whl/cpu/ \
         --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+        --extra-index-url https://ascend.devcloud.huaweicloud.com/pypi/simple --trusted-host ascend.devcloud.huaweicloud.com \
         "vllm-ascend=={{ release_vllm_ascend_version }}"
     ```
 
@@ -130,7 +131,8 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
     pip install -e . \
         --extra-index-url https://download.pytorch.org/whl/cpu/ \
         --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
-        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly
+        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly \
+        --extra-index-url https://ascend.devcloud.huaweicloud.com/pypi/simple --trusted-host ascend.devcloud.huaweicloud.com
     cd ..
     ```
 
@@ -151,7 +153,8 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
         pip install -e . \
             --extra-index-url https://download.pytorch.org/whl/cpu/ \
             --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
-            --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly
+            --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly \
+            --extra-index-url https://ascend.devcloud.huaweicloud.com/pypi/simple --trusted-host ascend.devcloud.huaweicloud.com
         ```
 
         **Note:** If `VLLM_ASCEND_BUILD_CACHE_DIR` is set, the build cache

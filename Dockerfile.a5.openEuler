@@ -73,7 +73,11 @@ ENV SOC_VERSION=$SOC_VERSION \
 COPY . /vllm-workspace/vllm-ascend/
 
 ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi \
-    https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly"
+    https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly \
+    https://ascend.devcloud.huaweicloud.com/pypi/simple"
+# memfabric/memcache 1.5.0+b013 is published on the Ascend DevCloud index,
+# whose certificate is not trusted by the base image.
+ENV PIP_TRUSTED_HOST="ascend.devcloud.huaweicloud.com"
 ARG COMPILE_CUSTOM_KERNELS=1
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \

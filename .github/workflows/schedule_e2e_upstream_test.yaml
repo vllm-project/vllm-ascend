@@ -34,7 +34,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu/"
+  UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu/ https://ascend.devcloud.huaweicloud.com/pypi/simple"
+  UV_INSECURE_HOST: ascend.devcloud.huaweicloud.com
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_HTTP_TIMEOUT: 120
   UV_NO_CACHE: 1
