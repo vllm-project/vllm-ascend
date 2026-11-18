@@ -25,9 +25,7 @@ matching the LLM full-graph pattern in :mod:`vllm_ascend.attention.attention_v1`
 from __future__ import annotations
 
 import threading
-import weakref
 from collections import Counter
-from collections.abc import Sequence
 
 import einops
 import numpy as np
@@ -56,63 +54,8 @@ FIA_BLOCK_SIZE: int = 128
 
 _FUSION_STATS_LOG_INTERVAL: int = 1000
 
-# Host-side FIA ``actual_seq_lengths`` per ``cu_seqlens`` tensor. The vision
-# encoder passes the same tensor to every attention layer of one forward, so
-# one device-to-host conversion (or an entry-point prime) is shared by all
-# layers instead of repeating the per-layer ``.cpu()`` sync of the generic
-# eager path. Window-attention and full-attention tensors are cached
-# independently because they are distinct tensor objects.
-#
-# torch.Tensor cannot key a WeakKeyDictionary (weakref equality delegates to
-# the element-wise tensor ``__eq__``), so the cache is keyed by ``id`` with a
-# weakref guard and a GC callback that evicts entries when the tensor dies.
-_CU_SEQLENS_HOST_CACHE: dict[int, tuple[weakref.ref, tuple[int, ...]]] = {}
-_CACHE_LOCK = threading.RLock()
-
 _FUSION_STATS_LOCK = threading.Lock()
 _FUSION_STATS: Counter[str] = Counter()
-
-
-def _cu_seqlens_cache_evictor(cache_key: int):
-    def evict(_ref) -> None:
-        try:
-            with _CACHE_LOCK:
-                _CU_SEQLENS_HOST_CACHE.pop(cache_key, None)
-        except Exception:  # pragma: no cover - never fail during GC
-            pass
-
-    return evict
-
-
-def prime_cu_seqlens_host_lengths(cu_seqlens: torch.Tensor, lengths: Sequence[int]) -> None:
-    """Pre-populate the shared host-length cache for ``cu_seqlens``.
-
-    The vision-encoder entry point knows the sequence boundaries on the host
-    (e.g. from the numpy metadata), so it can prime the cache without the
-    device-to-host sync the lazy conversion would pay on the first layer.
-    """
-    try:
-        tensor_ref = weakref.ref(cu_seqlens, _cu_seqlens_cache_evictor(id(cu_seqlens)))
-    except TypeError:
-        # Non-weakref-able tensor: fall back to lazy conversion.
-        return
-    with _CACHE_LOCK:
-        _CU_SEQLENS_HOST_CACHE[id(cu_seqlens)] = (
-            tensor_ref,
-            tuple(int(v) for v in lengths),
-        )
-
-
-def peek_cu_seqlens_host_lengths(cu_seqlens: torch.Tensor) -> tuple[int, ...] | None:
-    """Return the cached host lengths for ``cu_seqlens`` without converting."""
-    with _CACHE_LOCK:
-        entry = _CU_SEQLENS_HOST_CACHE.get(id(cu_seqlens))
-    if entry is None:
-        return None
-    tensor_ref, lengths = entry
-    if tensor_ref() is not cu_seqlens:
-        return None
-    return lengths
 
 
 def reset_vit_fusion_stats() -> Counter[str]:
@@ -124,7 +67,8 @@ def reset_vit_fusion_stats() -> Counter[str]:
 
 
 def _record_vit_fusion_stat(reason: str | None) -> None:
-    enabled = envs.VLLM_ASCEND_VIT_FUSED_QKV_ROPE_PAD_STATS
+    if not envs.VLLM_ASCEND_VIT_FUSED_QKV_ROPE_PAD_STATS:
+        return
     with _FUSION_STATS_LOCK:
         _FUSION_STATS["calls"] += 1
         if reason is None:
@@ -132,7 +76,7 @@ def _record_vit_fusion_stat(reason: str | None) -> None:
         else:
             _FUSION_STATS[f"fallback:{reason}"] += 1
         total = _FUSION_STATS["calls"]
-        if enabled and total % _FUSION_STATS_LOG_INTERVAL == 0:
+        if total % _FUSION_STATS_LOG_INTERVAL == 0:
             snapshot = _FUSION_STATS.copy()
         else:
             snapshot = None
@@ -147,32 +91,19 @@ def _record_vit_fusion_stat(reason: str | None) -> None:
         )
 
 
-def _get_or_convert_cu_seqlens_host_lengths(
+def _get_fused_fia_seq_lengths(
     cu_seqlens: torch.Tensor,
     token_count: int,
-) -> tuple[int, ...] | None:
-    """Return FIA host lengths for ``cu_seqlens`` or ``None`` if unusable.
-
-    Mirrors the generic eager conversion (``flat[1:]`` without filtering) and
-    additionally validates that the boundaries cover ``token_count``. The
-    result is cached on the tensor so the remaining layers of the same vision
-    forward reuse it without another device-to-host sync.
-    """
-    cached = peek_cu_seqlens_host_lengths(cu_seqlens)
-    if cached is not None:
-        return cached
-
-    flat = cu_seqlens.detach().cpu().view(-1).tolist()
-    lengths = tuple(flat[1:]) if flat else ()
-    if not lengths or lengths[-1] != token_count:
+) -> list[int] | None:
+    """Read the current CPU boundaries without a device synchronization."""
+    if cu_seqlens.device.type != "cpu" or cu_seqlens.dtype not in (torch.int32, torch.int64):
         return None
-    previous = 0
-    for end in lengths:
-        if end < previous:
-            return None
-        previous = end
-
-    prime_cu_seqlens_host_lengths(cu_seqlens, lengths)
+    boundaries = cu_seqlens.tolist()
+    if token_count <= 0 or len(boundaries) < 2 or boundaries[0] != 0 or boundaries[-1] != token_count:
+        return None
+    lengths = boundaries[1:]
+    if any(end < start for start, end in zip(boundaries, lengths)):
+        return None
     return lengths
 
 
@@ -195,14 +126,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         # synchronously copying it back in every vision attention block.
         # Own the storage so later mutation of the NumPy input cannot change
         # metadata retained by the encoder graph manager.
-        result = torch.as_tensor(cu_seqlens, dtype=torch.int32, device="cpu").clone()
-        if (
-            attn_backend != AttentionBackendEnum.FLASHINFER
-            and isinstance(cu_seqlens, np.ndarray)
-            and len(cu_seqlens) >= 2
-        ):
-            prime_cu_seqlens_host_lengths(result, result[1:].tolist())
-        return result
+        return torch.as_tensor(cu_seqlens, dtype=torch.int32, device="cpu").clone()
 
     def __init__(
         self,
@@ -361,7 +285,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         rotary_pos_emb_sin: torch.Tensor | None,
         cu_seqlens: torch.Tensor | None,
     ) -> str | None:
-        """Validate the specialized Qwen3.5-VL eager preprocessing contract.
+        """Validate the specialized Qwen vision eager preprocessing contract.
 
         Returns ``None`` when the fused producer accepts the input, otherwise a
         short fallback reason for the hit-rate statistics.
@@ -403,24 +327,6 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             return "contiguity"
         return None
 
-    def _can_use_fused_qkv_rope_pad_fia(
-        self,
-        qkv_proj: torch.Tensor,
-        rotary_pos_emb_cos: torch.Tensor | None,
-        rotary_pos_emb_sin: torch.Tensor | None,
-        cu_seqlens: torch.Tensor | None,
-    ) -> bool:
-        """Check the specialized Qwen3.5-VL eager preprocessing contract."""
-        return (
-            self._check_fused_qkv_rope_pad_fia(
-                qkv_proj,
-                rotary_pos_emb_cos,
-                rotary_pos_emb_sin,
-                cu_seqlens,
-            )
-            is None
-        )
-
     def forward_qkv_rope_pad_fia(
         self,
         qkv_proj: torch.Tensor,
@@ -428,7 +334,6 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         rotary_pos_emb_sin: torch.Tensor | None,
         *,
         cu_seqlens: torch.Tensor | None,
-        sequence_lengths: torch.Tensor | None,
     ) -> torch.Tensor | None:
         """Return fused eager FIA output as ``[1, T, H, 72]``, or ``None``.
 
@@ -436,28 +341,21 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         three pad-to-128 operations. Unsupported inputs deliberately return
         ``None`` so that the vLLM model keeps its existing implementation.
         """
-        del sequence_lengths  # The existing FIA eager path also consumes cu_seqlens.
         reason = self._check_fused_qkv_rope_pad_fia(qkv_proj, rotary_pos_emb_cos, rotary_pos_emb_sin, cu_seqlens)
         if reason is not None:
             _record_vit_fusion_stat(reason)
             return None
 
-        token_count = qkv_proj.shape[0]
         assert cu_seqlens is not None  # guaranteed by _check_fused_qkv_rope_pad_fia
-        if cu_seqlens.numel() == 2:
-            # A single packed sequence [0, T] needs no host conversion.
-            actual_seq_lengths: Sequence[int] = (token_count,)
-        else:
-            converted_lengths = _get_or_convert_cu_seqlens_host_lengths(cu_seqlens, token_count)
-            if converted_lengths is None:
-                _record_vit_fusion_stat("cu_seqlens_values")
-                return None
-            actual_seq_lengths = converted_lengths
+        actual_seq_lengths = _get_fused_fia_seq_lengths(cu_seqlens, qkv_proj.shape[0])
+        if actual_seq_lengths is None:
+            _record_vit_fusion_stat("cu_seqlens_values")
+            return None
 
         from vllm_ascend.ops.triton.vision_qkv_rope_pad import vision_qkv_rope_pad
 
         q_pad, k_pad, v_pad = vision_qkv_rope_pad(qkv_proj[:, 0, :], rotary_pos_emb_cos, rotary_pos_emb_sin)
-        context = self._run_vit_fia(q_pad, k_pad, v_pad, list(actual_seq_lengths), list(actual_seq_lengths))
+        context = self._run_vit_fia(q_pad, k_pad, v_pad, actual_seq_lengths, actual_seq_lengths)
         _record_vit_fusion_stat(None)
         return self._maybe_unpad_output(context, self.head_size).unsqueeze(0)
 

@@ -456,6 +456,32 @@ class TestAscendAttentionBackendImpl(TestBase):
             self.assertFalse(self.impl._use_interleaved_fia_cache())
             setattr(self.impl, attr, previous)
 
+    def test_draft_graph_capture_keeps_logical_block_addressing(self):
+        raw = torch.empty((4, 2, 8, 2, 4), dtype=torch.float16)
+        self.impl.key_cache, self.impl.value_cache = raw.unbind(dim=1)
+        self.impl.use_bnsd_kv_cache = self.impl.enable_c8_quant = False
+        self.impl.sinks = self.impl.sliding_window = None
+        table = torch.tensor([[3, 0]], dtype=torch.int32)
+        metadata = AscendMetadata(
+            attn_state=AscendAttentionState.DecodeOnly,
+            block_tables=table,
+            actual_seq_lengths_q=[1],
+            seq_lens_list=[8],
+            num_actual_tokens=1,
+        )
+        query = torch.empty((1, 2, 4), dtype=torch.float16)
+        with (
+            patch.object(attn_module, "_EXTRA_CTX", SimpleNamespace(is_draft_model=True)),
+            patch.object(attn_module, "get_capture_resource"),
+            patch.object(attn_module, "register_task") as register_task,
+        ):
+            self.impl.full_graph_fia(query, query, query, metadata, torch.empty_like(query))
+
+        _, kwargs, provider = register_task.call_args.args
+        self.assertIs(kwargs["block_table"], table)
+        self.assertEqual(kwargs["key"].shape, (4, 8, 8))
+        self.assertFalse(provider.is_interleaved_kv)
+
     def setUp(self):
         self.mock_event = MagicMock()
         self.mock_event.record.return_value = None

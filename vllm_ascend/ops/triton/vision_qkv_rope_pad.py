@@ -309,10 +309,7 @@ def vision_qkv_rope_pad(
     qkv_proj: torch.Tensor,
     cos_half: torch.Tensor,
     sin_half: torch.Tensor,
-    q_out: torch.Tensor = None,
-    k_out: torch.Tensor = None,
-    v_out: torch.Tensor = None,
-):
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Generate padded TND Q/K/V tensors consumed directly by FIA.
 
     Expected production shapes are qkv_proj=[T, 1728] and
@@ -344,31 +341,20 @@ def vision_qkv_rope_pad(
         raise ValueError("all inputs must be torch.bfloat16")
     if not (qkv_proj.device == cos_half.device == sin_half.device):
         raise ValueError("all inputs must be on the same device")
+    if qkv_proj.device.type != "npu":
+        raise ValueError("all inputs must be on an Ascend NPU")
 
     token_count = qkv_proj.shape[0]
     out_shape = (token_count, 8, 128)
     block_t, core_mode, store_mode, alloc_mode = _resolve_launch_options()
-    provided = (q_out is not None, k_out is not None, v_out is not None)
-    if any(provided) and not all(provided):
-        raise ValueError("q_out, k_out and v_out must be provided together")
-    if not any(provided):
-        if alloc_mode == "split":
-            q_out = torch.empty(out_shape, dtype=qkv_proj.dtype, device=qkv_proj.device)
-            k_out = torch.empty(out_shape, dtype=qkv_proj.dtype, device=qkv_proj.device)
-            v_out = torch.empty(out_shape, dtype=qkv_proj.dtype, device=qkv_proj.device)
-        else:
-            # Keep Q/K/V as contiguous non-overlapping views of one allocation.
-            # This reduces allocator calls on the hot eager path.
-            fused_out = torch.empty((3, *out_shape), dtype=qkv_proj.dtype, device=qkv_proj.device)
-            q_out, k_out, v_out = fused_out.unbind(0)
+    if alloc_mode == "split":
+        q_out = torch.empty(out_shape, dtype=qkv_proj.dtype, device=qkv_proj.device)
+        k_out = torch.empty(out_shape, dtype=qkv_proj.dtype, device=qkv_proj.device)
+        v_out = torch.empty(out_shape, dtype=qkv_proj.dtype, device=qkv_proj.device)
     else:
-        for name, out in (("q_out", q_out), ("k_out", k_out), ("v_out", v_out)):
-            if out.shape != out_shape:
-                raise ValueError(f"{name} must have shape {out_shape}")
-            if out.dtype != qkv_proj.dtype or out.device != qkv_proj.device:
-                raise ValueError(f"{name} must match the input dtype and device")
-            if not out.is_contiguous():
-                raise ValueError(f"{name} must be contiguous")
+        # Keep Q/K/V as contiguous non-overlapping views of one allocation.
+        fused_out = torch.empty((3, *out_shape), dtype=qkv_proj.dtype, device=qkv_proj.device)
+        q_out, k_out, v_out = fused_out.unbind(0)
 
     num_cores = _get_num_cores(token_count, block_t, core_mode)
     token_block_count = max(1, (token_count + block_t - 1) // block_t)

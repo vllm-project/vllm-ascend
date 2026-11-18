@@ -42,7 +42,6 @@ def qwen2_5_vision_attention_forward(
             rotary_pos_emb_cos,
             rotary_pos_emb_sin,
             cu_seqlens=cu_seqlens,
-            sequence_lengths=sequence_lengths,
         )
         if context_layer is not None:
             context_layer = einops.rearrange(

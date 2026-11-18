@@ -179,10 +179,8 @@ LAUNCH_MODE_MATRIX = [
 @pytest.mark.parametrize("mode", LAUNCH_MODE_MATRIX)
 @pytest.mark.parametrize("token_count", [1, 41, 257])
 @torch.inference_mode()
-def test_vision_qkv_rope_pad_launch_modes(mode: dict, token_count: int):
-    """Every launch option combination matches the reference producer."""
-    from vllm_ascend import envs
-
+def test_vision_qkv_rope_pad_launch_modes(mode: dict, token_count: int, monkeypatch: pytest.MonkeyPatch):
+    """The selected launch configurations match the reference producer."""
     torch.manual_seed(20260914)
     device = torch.device("npu:0")
     qkv_proj = torch.randn(token_count, 3 * NUM_HEADS * HEAD_DIM, dtype=torch.bfloat16, device=device)
@@ -190,21 +188,14 @@ def test_vision_qkv_rope_pad_launch_modes(mode: dict, token_count: int):
     sin_half = torch.randn_like(cos_half)
     expected = reference(qkv_proj, cos_half, sin_half)
 
-    saved = {}
     for key, value in (
         ("VLLM_ASCEND_VIT_ROPE_PAD_CORE_MODE", mode["core_mode"]),
         ("VLLM_ASCEND_VIT_ROPE_PAD_BLOCK_T", mode["block_t"]),
         ("VLLM_ASCEND_VIT_ROPE_PAD_STORE_MODE", mode["store_mode"]),
         ("VLLM_ASCEND_VIT_ROPE_PAD_ALLOC_MODE", mode["alloc_mode"]),
     ):
-        saved[key] = getattr(envs, key, None)
-        setattr(envs, key, value)
-
-    try:
-        actual = vision_qkv_rope_pad(qkv_proj, cos_half, sin_half)
-    finally:
-        for key, value in saved.items():
-            setattr(envs, key, value)
+        monkeypatch.setenv(key, value)
+    actual = vision_qkv_rope_pad(qkv_proj, cos_half, sin_half)
 
     for output, golden in zip(actual, expected):
         torch.testing.assert_close(output, golden, atol=1e-2, rtol=1e-2)
@@ -217,10 +208,10 @@ def test_vision_qkv_rope_pad_launch_modes(mode: dict, token_count: int):
 )
 @pytest.mark.parametrize("store_mode", ["block", "masked", "single"])
 @torch.inference_mode()
-def test_vision_qkv_rope_pad_multi_sequence_launch_modes(boundaries: list[int], store_mode: str):
+def test_vision_qkv_rope_pad_multi_sequence_launch_modes(
+    boundaries: list[int], store_mode: str, monkeypatch: pytest.MonkeyPatch
+):
     """Multi-sequence FIA equivalence holds for every store layout."""
-    from vllm_ascend import envs
-
     token_count = boundaries[-1]
     torch.manual_seed(20260914)
     device = torch.device("npu:0")
@@ -229,12 +220,8 @@ def test_vision_qkv_rope_pad_multi_sequence_launch_modes(boundaries: list[int], 
     sin_half = torch.randn_like(cos_half)
     expected = reference(qkv_proj, cos_half, sin_half)
 
-    saved = getattr(envs, "VLLM_ASCEND_VIT_ROPE_PAD_STORE_MODE", None)
-    envs.VLLM_ASCEND_VIT_ROPE_PAD_STORE_MODE = store_mode
-    try:
-        actual = vision_qkv_rope_pad(qkv_proj, cos_half, sin_half)
-    finally:
-        envs.VLLM_ASCEND_VIT_ROPE_PAD_STORE_MODE = saved
+    monkeypatch.setenv("VLLM_ASCEND_VIT_ROPE_PAD_STORE_MODE", store_mode)
+    actual = vision_qkv_rope_pad(qkv_proj, cos_half, sin_half)
 
     lengths = boundaries[1:]
     fused_output = _fia(actual[0], actual[1], actual[2], lengths)

@@ -706,7 +706,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
         layer=None,
     ) -> torch.Tensor:
-        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+        is_draft_model = _EXTRA_CTX.is_draft_model
+        # Draft graphs can replay via SharedSource, which supplies logical
+        # block IDs directly and bypasses FIAParamProvider.resolve().
+        allow_interleaved = not is_draft_model
+        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
+            key, value, attn_metadata, allow_interleaved=allow_interleaved
+        )
 
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
@@ -789,9 +795,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             FIAParamProvider(
                 self._layer_name,
                 self.sliding_window,
-                _EXTRA_CTX.is_draft_model,
+                is_draft_model,
                 is_non_pa=block_table is None,
-                is_interleaved_kv=self._use_interleaved_fia_cache(),
+                is_interleaved_kv=allow_interleaved and block_table is not None and self._use_interleaved_fia_cache(),
             ),
         )
         return output, num_tokens
@@ -924,7 +930,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
             and _is_block_interleaved_kv_cache(self.key_cache, self.value_cache)
         )
 
-    def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):
+    def _get_fia_params(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        kv_cache=None,
+        *,
+        allow_interleaved: bool = True,
+    ):
         # PrefillNoCache doesn't need key_cache, but other modes do
         # Only initialize/require cache for modes that actually use it
         if attn_metadata.attn_state != AscendAttentionState.PrefillNoCache:
@@ -965,7 +979,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key, value, block_size = self._get_kv_cache_view(self.key_cache, self.value_cache)
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
-        if block_table is not None and self._use_interleaved_fia_cache():
+        if allow_interleaved and block_table is not None and self._use_interleaved_fia_cache():
             assert self.key_cache is not None and self.value_cache is not None
             # Storage is K0,V0,K1,V1,... . Expose two overlapping dense read
             # aliases, starting at K0 and V0, and address logical block b at

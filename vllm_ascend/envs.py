@@ -89,9 +89,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
-    # Log fused vision hit-rate/fallback counters every 1000 attention calls.
-    "VLLM_ASCEND_VIT_FUSED_QKV_ROPE_PAD_STATS": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_VIT_FUSED_QKV_ROPE_PAD_STATS", "1"))
+    # "1" (default) collects and logs fused vision counters every 1000 calls.
+    "VLLM_ASCEND_VIT_FUSED_QKV_ROPE_PAD_STATS": lambda: (
+        os.getenv("VLLM_ASCEND_VIT_FUSED_QKV_ROPE_PAD_STATS", "1") == "1"
     ),
     # Triton fused producer tuning: core strategy, token tile, store, allocation.
     "VLLM_ASCEND_VIT_ROPE_PAD_CORE_MODE": lambda: os.getenv("VLLM_ASCEND_VIT_ROPE_PAD_CORE_MODE", "dynamic"),
