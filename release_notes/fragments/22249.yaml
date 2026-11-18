@@ -1,0 +1,5 @@
+pr: 22249
+entries:
+  - category: performance
+    text: Avoid rebuilding draft-only attention metadata during Kimi K3.1 target decoding with DSpark.
+    model: kimi-k3.1
