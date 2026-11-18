@@ -184,9 +184,10 @@ def _speculative_config():
 
 @pytest.fixture
 def b1_enabled(monkeypatch):
-    import vllm_ascend.envs as ascend_envs
-
-    monkeypatch.setattr(ascend_envs, "VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY", True)
+    # Drive the switch through os.environ: monkeypatching the module attribute
+    # writes a plain global on undo, which then shadows envs.__getattr__ for
+    # the rest of the session and breaks tests/ut/test_envs.py.
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY", "1")
 
 
 def test_want_b1_paged_verify_accepts_gemma4_mtp_geometry(b1_enabled):
@@ -200,10 +201,9 @@ def test_want_b1_paged_verify_accepts_gemma4_mtp_geometry(b1_enabled):
 
 
 def test_want_b1_paged_verify_requires_explicit_opt_in(monkeypatch):
-    import vllm_ascend.envs as ascend_envs
     import vllm_ascend.platform as platform
 
-    monkeypatch.setattr(ascend_envs, "VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY", False)
+    monkeypatch.delenv("VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY", raising=False)
     with patch("vllm.config.get_current_vllm_config_or_none", return_value=_speculative_config()):
         assert platform._want_b1_paged_verify(_gemma4_selector()) is False
 
