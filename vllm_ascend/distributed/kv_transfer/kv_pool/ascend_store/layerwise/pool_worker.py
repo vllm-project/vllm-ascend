@@ -805,13 +805,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
 
         def get_saved_key(block_idx: int) -> tuple[str, bool] | None:
             """Return the pool key and whether it is public."""
-            private_key = snapshot.get(block_idx)
-            if private_key is not None:
-                # A hash can become available after the preceding save.
-                return private_key, False
             if block_idx < full_blocks and block_idx < len(block_hashes):
                 block_hash = block_hash_to_str(block_hashes[block_idx])
                 return self._make_layerwise_full_key(group_id, block_hash), True
+            private_key = snapshot.get(block_idx)
+            if private_key is not None:
+                return private_key, False
             logger.error("No saved KV page for request %s group %d block %d", request.req_id, group_id, block_idx)
             return None
 
@@ -1886,6 +1885,22 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 key_infos = self.m_store.batch_get_key_info(keys, for_load=True)
                 if key_infos is None or len(key_infos) != len(keys):
                     return False
+                if restore_previous_step and any(info is None for info in key_infos):
+                    private_snapshot = self._snapshot_keys.get(request.req_id, {}).get(group_id, {})
+                    fallback_by_index = {
+                        index: private_snapshot[block_idx]
+                        for index, (info, block_idx) in enumerate(zip(key_infos, block_indices, strict=True))
+                        if info is None and keys[index] not in private_keys and block_idx in private_snapshot
+                    }
+                    if fallback_by_index:
+                        fallback_keys = list(fallback_by_index.values())
+                        fallback_infos = self.m_store.batch_get_key_info(fallback_keys, for_load=True)
+                        if fallback_infos is None or len(fallback_infos) != len(fallback_keys):
+                            return False
+                        for index, info in zip(fallback_by_index, fallback_infos, strict=True):
+                            keys[index] = fallback_by_index[index]
+                            key_infos[index] = info
+                        private_keys.update(fallback_keys)
                 gvas = []
                 valid_gva_indices = []
                 invalid_block_ids: list[int] = []
