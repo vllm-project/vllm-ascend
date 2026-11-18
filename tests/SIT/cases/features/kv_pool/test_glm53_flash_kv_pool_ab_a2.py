@@ -78,7 +78,7 @@ rather than a pool defect, retune ``GLM53_POOL_GPU_MEM_UTIL`` /
 ``GLM53_POOL_MAX_MODEL_LEN`` (or move the case to TP8 x DP2 hardware) before
 suspecting the connector.
 
-Model-runner choice: ``VLLM_USE_V2_MODEL_RUNNER=0`` per
+Model-runner choice: ``VLLM_USE_V2_MODEL_RUNNER=1`` (V2 is now required after
 ``GLM5.3-Flash.md:25-26`` ("GLM-5.3-Flash model currently supports only model
 runner V1 on Ascend"). The Qwen3.8 A2 precedent runs V2 (=1); the difference
 is model-specific and intentional, not drift.
@@ -775,7 +775,7 @@ def _leg_stats(p50: float, p95: float, throughput: float, state: dict[str, Any])
         # V1 model runner: GLM5.3-Flash.md:25-26 (only V1 is supported for
         # this model; the Qwen3.8 A2 precedent runs V2 - intentional,
         # model-specific difference, see module docstring).
-        "VLLM_USE_V2_MODEL_RUNNER": "0",
+        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         # Fixed interpreter hash seed: memcache keys are content hashes and
         # every worker must compute them identically (GLM5.3-Flash.md:1449/
