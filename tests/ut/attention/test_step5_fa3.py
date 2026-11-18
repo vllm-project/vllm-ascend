@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU routing tests for A5 Step5 ecosystem attention."""
 
+from dataclasses import replace
 from types import SimpleNamespace as NS
 
 import pytest
@@ -12,6 +13,22 @@ from tests.ut.attention import test_minimax_fa3
 fa3 = test_minimax_fa3.fa3
 profiles = test_minimax_fa3.profiles
 selection = test_minimax_fa3.selection
+
+
+@pytest.mark.parametrize("arch,method", [("DSparkMiniMaxDraftModel", "dspark"), ("Step5MTP", "mtp")])
+def test_fa3_profile_can_enable_multiple_model_families(selection, monkeypatch, arch, method):
+    r = selection
+    r.device = r.profiles.AscendDeviceType.A5
+    model = r.profiles.FlashAttentionNpu3Model
+    # Exercise a future profile without changing the registered A5 support.
+    profile = replace(
+        r.profiles.get_hardware_profile(r.device),
+        flash_attn_npu_3_models=frozenset({model.MINIMAX, model.STEP5}),
+    )
+    monkeypatch.setattr(r.profiles, "get_hardware_profile", lambda _: profile)
+    r.config.model_config = NS(hf_config=NS(architectures=[arch]))
+    r.config.speculative_config.method = method
+    assert "flash_attention_v3" in r.select()
 
 
 @pytest.mark.parametrize("device", ["A2", "A3", "A5", "_310P"])

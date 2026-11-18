@@ -71,8 +71,8 @@ def selection(monkeypatch, profiles):
         "torch": torch,
         "HardwareCapability": profiles.HardwareCapability,
         "AttentionBackendFamily": profiles.AttentionBackendFamily,
+        "FlashAttentionNpu3Model": profiles.FlashAttentionNpu3Model,
         "get_current_hardware_profile": lambda: profiles.get_hardware_profile(runtime.device),
-        "is_950": lambda: runtime.device == profiles.AscendDeviceType.A5,
         "util": NS(find_spec=lambda _: object() if runtime.installed else None),
         "_MINIMAX_M3_ARCHITECTURES": frozenset(
             {"MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration"}

@@ -223,6 +223,16 @@ class AttentionBackendFamily(Enum):
     COMPATIBILITY = auto()
 
 
+class FlashAttentionNpu3Model(Enum):
+    """Model families eligible for the optional flash-attention-npu backend.
+
+    Model architectures and runtime configuration are checked by the selector.
+    """
+
+    MINIMAX = auto()
+    STEP5 = auto()
+
+
 class CPUBindingMode(Enum):
     """CPU binding policies selected for worker processes."""
 
@@ -291,6 +301,9 @@ class HardwareProfile:
     native_weight_formats: frozenset[WeightFormat]
     # Independent, additive contracts queried with ``supports``.
     capabilities: frozenset[HardwareCapability]
+
+    # Operator availability alone does not determine which model route to use.
+    flash_attn_npu_3_models: frozenset[FlashAttentionNpu3Model] = frozenset()
 
     # NZ mm/addmm is supported, but batched matmul rejects NZ weights.
     requires_2d_nz_linear_input: bool = False
@@ -374,6 +387,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
     {
         AscendDeviceType.A2: HardwareProfile(
             _device_type=AscendDeviceType.A2,
+            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX}),
             # A2 BF16 native verification produced NaNs with 8 drafts (9 queries).
             # Nine is the first observed failing configuration, not a proven
             # universal kernel bound. Remove after native recurrent parity is
@@ -397,6 +411,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
+            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX}),
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,
             default_worker_cls=_DEFAULT_WORKER_CLS,
@@ -440,6 +455,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A5: HardwareProfile(
             _device_type=AscendDeviceType.A5,
+            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.STEP5}),
             requires_2d_nz_linear_input=True,
             minimax_m3_gbsa_bf16_softmax_precision=1,
             attention_backend_family=AttentionBackendFamily.STANDARD,

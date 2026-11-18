@@ -39,10 +39,10 @@ from vllm_ascend.ascend_config import (
     init_ascend_config,
     is_draft_config_context,
 )
-from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
     DeviceAdaptorFamily,
+    FlashAttentionNpu3Model,
     HardwareCapability,
     QuantizationBackendFamily,
     get_current_hardware_profile,
@@ -1909,9 +1909,9 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
 
 
 def _uses_step5_fa3(config) -> bool:
-    """Select Step5 attention only on A5."""
+    """Select Step5 attention on hardware profiles that enable this model family."""
     architectures = config.model_config.hf_config.architectures or ()
-    return is_950() and bool(
+    return FlashAttentionNpu3Model.STEP5 in get_current_hardware_profile().flash_attn_npu_3_models and bool(
         {"Step5ForCausalLM", "Step5ForConditionalGeneration", "Step5MTP"}.intersection(architectures)
     )
 
@@ -1929,8 +1929,7 @@ def _uses_minimax_fa3(config) -> bool:
         "Qwen3OmniDSparkModel",
     }
     return (
-        # A5 keeps its existing CANN route; the shared FA3 capability also covers Step5.
-        not is_950()
+        FlashAttentionNpu3Model.MINIMAX in get_current_hardware_profile().flash_attn_npu_3_models
         and getattr(spec, "method", None) in ("dspark",)
         and bool(draft_architectures.intersection(architectures))
         and bool(_MINIMAX_M3_ARCHITECTURES.intersection(getattr(target_hf, "architectures", None) or ()))
