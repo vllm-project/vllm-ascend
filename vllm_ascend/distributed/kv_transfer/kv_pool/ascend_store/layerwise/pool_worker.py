@@ -2139,16 +2139,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.layer_load_tasks = [[] for _ in range(self.num_layers)]
         if not requests:
             return
-        if (
-            self.layerwise_offload
-            and any(self.group_uses_align_state[group_id] for group_id in self._reused_layers_by_group)
-            and self.vllm_config.speculative_config is not None
-        ):
-            for request in requests:
-                # A prefill endpoint is final at the layer save hook, including
-                # with MTP enabled. Decode state may commit after sampling.
-                if request.num_prompt_tokens is not None and request.target_token_len > request.num_prompt_tokens:
-                    raise NotImplementedError("Shared recurrent state supports speculative prefill, not decode commits")
         # Mooncake uses the projected stage-local cache layout, including any
         # draft layers. The GVA/key planes retain their existing PP key count.
         if not self.use_block_key_layerwise and getattr(self, "pp_size", 1) > 1:
