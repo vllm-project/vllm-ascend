@@ -334,27 +334,6 @@ def test_layerwise_reuse_without_sink_keeps_provider_layer_entry_wait():
     assert call_order == ["provider", "sibling"]
 
 
-def test_mamba_state_copy_runs_after_all_connector_loads():
-    call_order = []
-    first = SimpleNamespace(wait_for_layer_load=MagicMock(side_effect=lambda *_: call_order.append("first-load")))
-    second = SimpleNamespace(wait_for_layer_load=MagicMock(side_effect=lambda *_: call_order.append("second-load")))
-    connector = AscendMultiConnector.__new__(AscendMultiConnector)
-    connector._connectors = [first, second]
-    connector._layerwise_slot_release_providers = []
-    connector._non_slot_release_connectors = [first, second]
-    connector._external_slot_release_sink_configured = False
-    connector._mamba_copy_bufs = object()
-
-    with patch(
-        "vllm_ascend.distributed.kv_transfer.ascend_multi_connector.mamba_utils.do_mamba_copy_block_for_layer",
-        side_effect=lambda *_: call_order.append("copy"),
-        create=True,
-    ):
-        connector.wait_for_layer_load("model.layers.7.linear_attn")
-
-    assert call_order == ["first-load", "second-load", "copy"]
-
-
 def test_v2_mamba_state_copy_runs_after_all_connector_loads():
     call_order = []
     first = SimpleNamespace(wait_for_layer_load=MagicMock(side_effect=lambda *_: call_order.append("first-load")))
@@ -371,6 +350,14 @@ def test_v2_mamba_state_copy_runs_after_all_connector_loads():
     connector.wait_for_layer_load("model.layers.7.linear_attn")
 
     assert call_order == ["first-load", "second-load", "copy:model.layers.7.linear_attn"]
+
+
+def test_mamba_state_copy_rejects_non_model_state():
+    connector = AscendMultiConnector.__new__(AscendMultiConnector)
+    connector.requires_mamba_state_copy_after_layer_load = True
+
+    with pytest.raises(TypeError, match="expects a mamba hybrid model state"):
+        connector.prepare_mamba_state_copy(object())
 
 
 def test_mamba_state_copy_skipped_without_deferral():

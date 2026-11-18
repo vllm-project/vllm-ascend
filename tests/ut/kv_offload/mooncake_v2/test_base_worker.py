@@ -33,6 +33,7 @@ def test_kvpp_publishes_owned_layers_and_mtp(monkeypatch, pcp_rank, tp_rank, tar
     caches = {name: torch.zeros((2, 16, 1, 8), dtype=torch.float16) for name in names}
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
     worker.vllm_config = make_kvpp_config(tp=2, pcp=2)
+    worker.vllm_config.parallel_config.cp_kv_cache_interleave_size = 16
     worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=4))
     worker.pcp_rank, worker.pcp_size = pcp_rank, 2
     worker.tp_rank, worker.tp_size = tp_rank, 2
@@ -103,6 +104,7 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16))
     worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
     worker.kv_cache_config = config
@@ -190,6 +192,7 @@ def test_register_kv_caches_merges_only_full_pages(
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16))
     worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
     worker.kv_cache_config = config
@@ -279,6 +282,7 @@ def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(mon
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16))
     worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
     worker.kv_cache_config = config
@@ -299,6 +303,8 @@ def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(mon
     assert metadata.block_strides == [[slot_elems * raw_cache.element_size()]]
     assert metadata.block_lens == [[slot_elems * raw_cache.element_size()]]
     assert metadata.block_shapes == [[(slot_elems,)]]
+    assert metadata.indexer_replication_sizes == [0]
+    assert metadata.cp_kv_cache_interleave_size == 16
     assert metadata.block_size_scales == [[1]]
 
 
@@ -341,6 +347,7 @@ def test_register_kv_caches_publishes_sfa_indexer_virtual_block_size(
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0.indexer"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16))
     worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
     worker.kv_cache_config = config
@@ -365,6 +372,7 @@ def test_register_kv_caches_publishes_sfa_indexer_virtual_block_size(
 
     metadata = worker.xfer_handshake_metadata
     assert metadata is not None
+    assert metadata.indexer_replication_sizes == [replication_size]
     assert metadata.layer_block_sizes == [16 * replication_size]
     assert metadata.block_size_scales == [[replication_size]]
     assert metadata.layer_block_sizes[0] // metadata.block_size_scales[0][0] == spec.block_size
@@ -385,6 +393,7 @@ def test_register_kv_caches_rejects_missing_and_unconfigured_layers() -> None:
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16))
     worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
     worker.kv_cache_config = config

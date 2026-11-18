@@ -11,6 +11,8 @@ indices are different coordinate systems; callers must not interchange them.
 | `packed_cache_slot_mapping.py`: `build_packed_cache_slot_mapping` | INT64 physical slots and positions, INT32 query boundaries; coordinate `[T,2]` and flat `[T]` output buffers | Convert physical slots to page/row coordinates. Ratio 2 writes only completed pairs. Mask negative slots, graph padding and skipped state updates to `-1`. |
 | `build_window_indices.py`: `build_window_indices_triton` | Positions `[T]`; INT32 indices `[T,1,W]` and lengths `[T,1]` | Enumerate visible positions within each query's sliding window; unused entries are `-1`. Optional output buffers retain their addresses for graph replay. |
 | `c2_ring_metadata.py`: `build_c2_ring_metadata` | Request boundaries, positions, block tables and ring controls | Derive compressor state addresses and request controls on device, avoiding per-request host synchronization. |
+| `compressor/compressor_triton.py`: [compressor_from_projected](#c2-pooling) | FP32 KV/gate projections and ring controls; token-aligned BF16 output | Pool C2 pairs, reading leading predecessors from gathered rows or the persistent ring. |
+| `compressor/compressor_triton.py`: [write_pcp_ring_rows](#pcp-ring-writes) | Gathered FP32 KV/gate rows and request-relative offsets; persistent ring | Write canonical PCP request tails after local pooling reads complete. |
 | `quantize_mxfp4_indexer.py`: `quantize_mxfp4_indexer` | BF16 query with final dimension 128; UINT8 packed data and scales | Quantize groups of 32 to FP4, packing two values per byte. Store power-of-two scales in E8M0. |
 | `quantize_mxfp4_indexer.py`: `write_mxfp4_indexer_cache` | BF16 `[T,128]`, page/row slots `[T,2]`, strided UINT8 cache planes | Fuse quantization with cache writes. Invalid slots leave the cache unchanged. Preserve 64-bit address arithmetic for large physical page strides. |
 | `fold_indexer_cache.py`: `fold_indexer_cache_rows` | K `[N,B,1,64]`, scales `[N,B,1,4]`, slots; folded `[N,B/8,1,544]` | Copy only updated rows into eight-row groups: 512 key bytes followed by 32 scale bytes. This is a layout conversion, with no requantization. |
@@ -55,3 +57,35 @@ and request lengths may change between steps.
 `compressor/compressor_triton.py` reads and updates ring pages with 64-bit
 physical page offsets. Each FP32 page contains `32 * 2 * head_dim` elements;
 with head dimension 512, page 65536 crosses INT32_MAX in element coordinates.
+
+## C2 pooling
+
+`DeepseekV41Compressor.pool_projected` calls `compressor_from_projected` to
+softmax-pool complete token pairs into BF16 output, then applies RMSNorm.
+
+- `kv` / `scores`: FP32 `[T,D]`; `out`: BF16 `[T,D]`, zeroed and written at
+  completion-token rows. V4.1 uses `D=128` for the indexer and `D=512` for attention.
+- `state_cache`: FP32 `[B,32,2D]`, storing KV followed by gate scores.
+  INT32 `metadata[5,R]` holds start positions, used lengths, reserved output
+  bases, input row bases and ring block IDs; `R` counts local segments.
+- `prev_rows`: FP32 `[M,2D]`; `prev_row_indices`: INT64 `[R]`. Supply both or
+  neither. Index `-1` reads the persistent ring; otherwise, read the gathered
+  predecessor. Without gathered rows, pooling also updates ring tails.
+- `max_query_len` bounds segment length; `num_cores` bounds launch parallelism.
+  Inputs must be contiguous on the same NPU, with valid extents and
+  rejection-corrected start positions. Inactive segments use block zero.
+
+## PCP ring writes
+
+After local pooling, `AscendDSAV41PCPImpl._compress_local_c2` calls
+`write_pcp_ring_rows` on every PCP rank to update the replicated request rings.
+It copies gathered FP32 `[M,2D]` rows into FP32 `ring_state[B,32,2D]`, using global
+INT32 `ring_metadata[5,R]` and INT64 `[W]` arrays `source_row_indices`,
+`request_indices` and request-relative `token_offsets`:
+`ring_state[block,(start+offset)%32] = gathered_kv_scores[source]`.
+
+Inputs must be contiguous on the same NPU, sources in bounds and active
+destinations unique. Invalid requests/blocks, zero used lengths and empty writes
+are skipped. Pooling must finish before ring writes; graph replay retains buffers
+and compatible launch extents. `num_writes` / `num_requests` use
+`do_not_specialize`; width, ring geometry and allocation bounds remain specialized.

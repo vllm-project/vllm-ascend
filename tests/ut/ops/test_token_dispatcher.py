@@ -90,6 +90,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.mock_get_config = self.config_patcher.start()
 
         mock_config = MagicMock()
+        mock_config.use_v2_model_runner = False
 
         mock_config.scheduler_config.max_num_seqs = 256
 
@@ -172,6 +173,47 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertEqual(self.dispatcher.ep_world_size, 8)
         self.assertTrue(self.dispatcher.need_extra_args)
         self.assertEqual(self.dispatcher.global_bs, 0)
+
+    def test_lmhead_sync_keeps_dispatch_and_combine_masks_paired(self):
+        for v2 in (False, True):
+            for lmhead in (False, True):
+                for dcp in (1, 2):
+                    for base_skip in (False, True):
+                        with self.subTest(v2=v2, lmhead=lmhead, dcp=dcp, base_skip=base_skip):
+                            config = self.mock_get_config.return_value
+                            config.use_v2_model_runner = v2
+                            config.parallel_config.decode_context_parallel_size = dcp
+                            self.mock_skip_allreduce.return_value = base_skip
+                            with patch("vllm_ascend.utils.lmhead_tp_enable", return_value=lmhead):
+                                dispatcher = TokenDispatcherWithMC2(with_quant=False, top_k=1, num_experts=8)
+                            uniform = not base_skip or (v2 and lmhead and dcp == 1)
+                            self.assertEqual(dispatcher.global_bs, 0 if uniform else 1024)
+                            mask = torch.tensor([True, True, False, False])
+                            dispatch_input = build_token_dispatch_input_fixture(
+                                hidden_states=torch.randn(4, 8),
+                                topk_weights=torch.ones(4, 1),
+                                topk_ids=torch.zeros(4, 1, dtype=torch.int32),
+                                expert_map=torch.arange(8),
+                                mc2_mask=mask,
+                            )
+                            with patch(
+                                "torch_npu.npu_moe_distribute_dispatch_v2",
+                                return_value=(torch.randn(4, 8),) * 5 + (None, None),
+                                create=True,
+                            ) as dispatch:
+                                output = dispatcher.token_dispatch(dispatch_input)
+                            dispatch_kwargs = dispatch.call_args.kwargs
+                            metadata = output.combine_metadata
+                            combine_kwargs = dispatcher.get_combine_mc_kwargs(output.hidden_states, metadata)
+                            if uniform:
+                                self.assertIs(dispatch_kwargs["x_active_mask"], mask)
+                                self.assertIs(metadata.mc2_mask, mask)
+                                self.assertIs(combine_kwargs["x_active_mask"], mask)
+                            else:
+                                self.assertNotIn("x_active_mask", dispatch_kwargs)
+                                self.assertIsNone(metadata.mc2_mask)
+                                self.assertNotIn("x_active_mask", combine_kwargs)
+                            self.assertEqual(dispatch_kwargs["global_bs"], combine_kwargs["global_bs"])
 
     def test_init_uses_mc2_capacity_for_non_uniform_global_bs(self):
         self.mock_get_config.return_value.parallel_config.tensor_parallel_size = 4

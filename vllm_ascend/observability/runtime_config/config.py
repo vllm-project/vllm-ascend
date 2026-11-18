@@ -63,6 +63,7 @@ from vllm_ascend.observability.runtime_config._defaults import (
     DUMP_KEYS,
     HOT_RELOAD_INTERVAL_SECONDS,
     MANUAL_TRIGGER_SECTION_KEYS,
+    METRICS_KEYS,
     REPORT_KEYS,
     TOP_LEVEL_KEYS,
 )
@@ -244,12 +245,17 @@ def _normalize_ascend_log_section_into(ascend: dict[str, Any]) -> None:
     ascend["modules"] = normalized_modules
 
 
-def _normalize_config_sections_into(data: dict[str, Any]) -> None:
-    """Normalize ``ascend_log`` shape in place (coerce debug/modules).
+def _normalize_metrics_section_into(metrics: dict[str, Any]) -> None:
+    """Normalize ``metrics.level`` to ``basic`` or ``detail``."""
+    from vllm_ascend.observability.ms_metrics.level import canonical_metric_level
 
-    Despite the plural name this only touches ``ascend_log`` today; other
-    sections are validated / coerced by :func:`validate_runtime_config`.
-    """
+    if "level" not in metrics:
+        metrics["level"] = "basic"
+    metrics["level"] = canonical_metric_level(metrics.get("level", "basic"))
+
+
+def _normalize_config_sections_into(data: dict[str, Any]) -> None:
+    """Normalize ``ascend_log`` and ``metrics`` in place."""
     if not isinstance(data, dict):
         return
     ascend = data.get("ascend_log")
@@ -257,13 +263,20 @@ def _normalize_config_sections_into(data: dict[str, Any]) -> None:
         ascend = {}
         data["ascend_log"] = ascend
     _normalize_ascend_log_section_into(ascend)
+    metrics = data.get("metrics")
+    if not isinstance(metrics, dict):
+        metrics = {}
+        data["metrics"] = metrics
+    _normalize_metrics_section_into(metrics)
 
 
 def _normalize_config_sections(data: dict[str, Any]) -> dict[str, Any]:
-    """Shallow-copy top level, deep-copy ``ascend_log``, then normalize in place."""
+    """Shallow-copy top level, copy ``ascend_log`` and ``metrics``, then normalize."""
     out = dict(data)
     ascend = out.get("ascend_log")
     out["ascend_log"] = dict(ascend) if isinstance(ascend, dict) else {}
+    metrics = out.get("metrics")
+    out["metrics"] = dict(metrics) if isinstance(metrics, dict) else {}
     _normalize_config_sections_into(out)
     return out
 
@@ -320,6 +333,7 @@ def validate_runtime_config(data: dict[str, Any]) -> None:
     for section in (
         "dump",
         "ascend_log",
+        "metrics",
         "detector",
         "report",
         "actions",
@@ -370,6 +384,9 @@ def validate_runtime_config(data: dict[str, Any]) -> None:
     unknown_ascend = sorted(set(data["ascend_log"]) - ASCEND_LOG_KEYS)
     if unknown_ascend:
         raise ValueError(f"ascend_log has unknown key(s) {unknown_ascend}; allowed={sorted(ASCEND_LOG_KEYS)}")
+    unknown_metrics = sorted(set(data["metrics"]) - METRICS_KEYS)
+    if unknown_metrics:
+        raise ValueError(f"metrics has unknown key(s) {unknown_metrics}; allowed={sorted(METRICS_KEYS)}")
     debug = data["ascend_log"].get("debug", [])
     if not isinstance(debug, list):
         raise ValueError("ascend_log.debug must be a list of module name strings")
@@ -801,10 +818,10 @@ class RuntimeConfig:
         return bool(self._hot_path_gates_cached()["needs_cumulative_io"])
 
     def needs_sample_phase_hooks(self) -> bool:
-        """True when post-sample runtime_guard hooks must run (not a pure sample fast-path).
+        """True when at least one auto detector is enabled.
 
-        Covers detectors and finish-output logging.
-        Dump-only / hot-reload-only does not need the sample-phase hook chain.
+        Sample-phase hooks follow detectors only. Dump and hot-reload do not
+        set this flag.
         """
         return bool(self._hot_path_gates_cached()["needs_sample_phase_hooks"])
 
@@ -812,8 +829,8 @@ class RuntimeConfig:
         """True when observability is fully off (default-off cold path).
 
         Requires: hot-reload off, no detectors, no dump, no manual trigger.
-        Distinct from dump-only (detectors off but dump still active) — that
-        path still runs wave advance / claim / end-of-wave.
+        Distinct from detectors off with dump still configured — that path
+        still runs wave advance / claim / end-of-wave.
 
         When True, hooks skip sync/sample shells entirely. Enabling any axis
         needs restart if hot-reload is off; with hot-reload on this is always
@@ -854,7 +871,7 @@ class RuntimeConfig:
                 names.append(_DISPLAY.get(section, section))
         dump_on = self.dump_enabled()
         auto_on = self.auto_dump_on()
-        max_times = self.dump_max_times()
+        max_times = self.auto_dump_max_times()
         if names and dump_on and auto_on:
             mode = "detect+auto_dump"
         elif names and dump_on:
@@ -887,10 +904,12 @@ class RuntimeConfig:
                 _process_role_tag(),
             )
 
-    def dump_max_times(self) -> int:
+    def auto_dump_max_times(self) -> int:
+        """``dump.auto_max_times``. Manual watermark does not use this quota."""
         return int(self.dump.get("auto_max_times", 0))
 
-    def dump_cooldown_seconds(self) -> int:
+    def auto_dump_cooldown_seconds(self) -> int:
+        """``dump.auto_cooldown_seconds`` between auto-dump arms."""
         return int(self.dump.get("auto_cooldown_seconds", 300))
 
     def manual_trigger_continuous(self) -> bool:
@@ -1034,6 +1053,18 @@ class RuntimeConfig:
         """Read ``detector.<section>.<key>``."""
         return self.detector_section(section).get(key, default)
 
+    def metrics_level(self) -> str:
+        """Canonical ``metrics.level`` (``basic`` or ``detail``)."""
+        metrics = self._data.get("metrics") or {}
+        level = metrics.get("level", "basic")
+        return str(level)
+
+    def apply_metric_level(self) -> None:
+        """Write ``metrics.level`` into this process's metric level variable."""
+        from vllm_ascend.observability.ms_metrics.level import set_metric_level
+
+        set_metric_level(self.metrics_level())
+
     def apply_ascend_log_level(self) -> None:
         """Apply live ``ascend_log`` (root default + per-module overrides)."""
         from vllm_ascend.logger import apply_ascend_log_level as _apply
@@ -1101,6 +1132,7 @@ class RuntimeConfig:
                     # Content diffs are logged inside ``_apply_loaded``.
                     if self._maybe_reload_local():
                         self.apply_ascend_log_level()
+                        self.apply_metric_level()
                         if self.manual_trigger():
                             logger.info(
                                 "[runtime_config] dump.manual_dump=true seen on "

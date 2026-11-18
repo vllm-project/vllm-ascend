@@ -96,9 +96,6 @@ msgstr ""
 "`--additional-config` "
 "传递的昇腾特定选项，请参考[附加配置](../../user_guide/configuration/additional_config.md)。有关昇腾特定的环境变量，请参考[环境变量](../../user_guide/configuration/env_vars.md)。"
 
-msgid "### 5.1 Single-Node Deployment"
-msgstr "### 5.1 单节点部署"
-
 msgid "### 5.2 Multi-Node Deployment"
 msgstr "### 5.2 多节点部署"
 
@@ -143,12 +140,6 @@ msgstr ""
 "如果未指定采样的视频帧数，vLLM 将使用其默认的视频采样策略，默认采样 32 帧。对于快速功能冒烟测试，可以在请求或评估配置中设置较小的帧数，例如 8"
 " 或 16。对于基准测试运行，请遵循数据集协议。"
 
-msgid "## 6 Thinking and Parser Configuration"
-msgstr "## 6 思考与解析器配置"
-
-msgid "### 6.1 Thinking Mode"
-msgstr "### 6.1 思考模式"
-
 msgid ""
 "MiniMax-M3 supports three thinking modes, controlled via `thinking_mode` in "
 "`chat_template_kwargs`:"
@@ -172,9 +163,6 @@ msgid ""
 " when unset) | General use |"
 msgstr "| `adaptive` | 模型根据任务决定是否思考（未设置时的默认值） | 一般用途 |"
 
-msgid "#### 6.1.1 Request Examples"
-msgstr "#### 6.1.1 请求示例"
-
 msgid "**With thinking disabled (curl):**"
 msgstr "**禁用思考（curl）：**"
 
@@ -189,9 +177,6 @@ msgstr ""
 msgid "**With thinking enabled (Python SDK):**"
 msgstr "**启用思考（Python SDK）：**"
 
-msgid "### 6.2 Reasoning Parser"
-msgstr "### 6.2 推理解析器"
-
 msgid ""
 "The MiniMax-M3 reasoning parser (`--reasoning-parser minimax_m3`) extracts "
 "the thinking block `<mm:think>...</mm:think>` from model output and exposes "
@@ -199,9 +184,6 @@ msgid ""
 msgstr ""
 "MiniMax-M3 推理解析器（`--reasoning-parser minimax_m3`）从模型输出中提取思考块 "
 "`<mm:think>...</mm:think>`，并将其作为 `reasoning` 字段暴露。其余文本作为 `content` 返回。"
-
-msgid "#### 6.2.1 Server Configuration"
-msgstr "#### 6.2.1 服务器配置"
 
 msgid ""
 "The `--reasoning-parser minimax_m3` flag enables the MiniMax-M3 reasoning "
@@ -211,14 +193,8 @@ msgstr ""
 "`--reasoning-parser minimax_m3` 标志启用 MiniMax-M3 推理解析器，该解析器使用 "
 "`<mm:think>...</mm:think>` 分隔符将模型输出拆分为推理和内容："
 
-msgid "#### 6.2.2 Output Format"
-msgstr "#### 6.2.2 输出格式"
-
 msgid "MiniMax-M3 uses explicit thinking delimiters:"
 msgstr "MiniMax-M3 使用显式的思考分隔符："
-
-msgid "#### 6.2.3 Parser Behavior"
-msgstr "#### 6.2.3 解析器行为"
 
 msgid ""
 "- **`thinking_mode=\"enabled\"`**: The chat template pre-fills `<mm:think>` in the prompt. Generated text starts inside the reasoning block and transitions to content after `</mm:think>`.\n"
@@ -231,12 +207,6 @@ msgstr ""
 "- **流式输出**：推理和内容通过 `DeltaMessage.reasoning` 和 `DeltaMessage.content` 逐 token 增量流式传输。\n"
 "- **Token 计数**：`<mm:think>` 块内的推理 token 会被正确计数。"
 
-msgid "### 6.3 Tool Call Parser"
-msgstr "### 6.3 工具调用解析器"
-
-msgid "#### 6.3.1 Server Configuration"
-msgstr "#### 6.3.1 服务器配置"
-
 msgid ""
 "When both `--reasoning-parser minimax_m3` and `--tool-call-parser "
 "minimax_m3` are specified, the parsers work together automatically to handle"
@@ -245,15 +215,9 @@ msgstr ""
 "当同时指定 `--reasoning-parser minimax_m3` 和 `--tool-call-parser minimax_m3` "
 "时，解析器会自动协同工作，处理同时包含推理块和工具调用的响应："
 
-msgid "#### 6.3.2 Tool Call Format"
-msgstr "#### 6.3.2 工具调用格式"
-
 msgid ""
 "Each structural tag is preceded by the `]<]minimax[>[` namespace marker:"
 msgstr "每个结构标签前都有 `]<]minimax[>[` 命名空间标记："
-
-msgid "#### 6.3.3 Key Features"
-msgstr "#### 6.3.3 主要特性"
 
 msgid ""
 "- **Recursive parameter parsing**: Supports nested objects and arrays (e.g., `shipping` containing `city`/`zip`).\n"
@@ -266,26 +230,8 @@ msgstr ""
 "- **多次调用**：单个 `<tool_call>` 块可以包含多个 `<invoke>` 块。\n"
 "- **流式输出**：工具名称和参数片段在接收 `<invoke>` 块时增量流式传输。"
 
-msgid "#### 6.3.4 Request Example (curl)"
-msgstr "#### 6.3.4 请求示例（curl）"
-
-msgid "## 7 Functional Verification"
-msgstr "## 7 功能验证"
-
-msgid "### 7.1 Text"
-msgstr "### 7.1 文本"
-
 msgid "Expected result: the answer is C."
 msgstr "预期结果：答案为 C。"
-
-msgid "### 7.2 Single Image"
-msgstr "### 7.2 单张图片"
-
-msgid "### 7.3 Single Video"
-msgstr "### 7.3 单个视频"
-
-msgid "### 7.4 Mixed Image and Video Request"
-msgstr "### 7.4 图像和视频混合请求"
 
 msgid ""
 "Start the service with both image and video input enabled. For the following"
@@ -297,9 +243,6 @@ msgstr ""
 "'{\"image\":1,\"video\":1}'`。如果请求使用 `file://` 本地视频路径，还需添加 `--allowed-local-"
 "media-path /` 或更窄的允许目录。"
 
-msgid "## 8 Accuracy Evaluation"
-msgstr "## 8 精度评估"
-
 msgid "### 8.1 Using AISBench"
 msgstr "### 8.1 使用 AISBench"
 
@@ -310,18 +253,12 @@ msgstr ""
 "详细说明请参阅 [使用 AISBench "
 "进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
 
-msgid "### 8.2 Text Evaluation"
-msgstr "### 8.2 文本评估"
-
 msgid ""
 "| Dataset | Hardware | Score | max-model-len | max-num-seqs | max_out_len | "
 "batch_size | generation_kwargs |"
 msgstr ""
 "| 数据集 | 硬件 | 分数 | max-model-len | max-num-seqs | max_out_len | batch_size | "
 "generation_kwargs |"
-
-msgid "### 8.3 Multimodal Evaluation"
-msgstr "### 8.3 多模态评估"
 
 msgid ""
 "MiniMax-M3 multimodal accuracy is evaluated with AISBench. The ViT DP path "
@@ -480,13 +417,6 @@ msgid ""
 "feature descriptions."
 msgstr ""
 "请参阅[特性矩阵](../../user_guide/support_matrix/feature_matrix.md)获取详细的特性描述。"
-
-msgid ""
-"This document covers supported features, environment and model preparation, "
-"single-node deployment, multi-node deployment, PD separation, thinking and "
-"parser configuration, functional verification, accuracy evaluation, and "
-"troubleshooting."
-msgstr "本文档涵盖支持的特性、环境与模型准备、单节点部署、多节点部署、PD 分离、思考与解析器配置、功能验证、精度评估以及故障排查。"
 
 msgid ""
 "It is recommended to place the model weight in a shared cache directory."
@@ -1457,25 +1387,6 @@ msgstr ""
 "`15,15,15,15`。`1049600` 的上下文限制为 1,048,576 个输入 Token 和最多 1024 个生成 Token "
 "留出空间。当配置的限制超过 checkpoint 声明的最大值时，`VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` 允许使用该限制。"
 
-msgid ""
-"`--long-prefill-token-threshold 8192` sets the long-prefill threshold used "
-"with chunked prefill. The scheduler uses this threshold to limit the prefill"
-" tokens scheduled for a long request in one iteration, while `--max-num-"
-"batched-tokens 8192` bounds the total token budget for the iteration. In "
-"this single-request example both values are 8192, so the 1M prompt is "
-"processed in chunks within that budget. This parameter does not reduce the "
-"total context limit configured by `--max-model-len`. See the [vLLM scheduler"
-" "
-"arguments](https://docs.vllm.ai/en/latest/configuration/engine_args/#--long-"
-"prefill-token-threshold) for details."
-msgstr ""
-"`--long-prefill-token-threshold 8192` "
-"设置与分块预填充配合使用的长预填充阈值。调度器使用该阈值限制单次迭代中为长请求调度的预填充 token 数量，而 `--max-num-batched-"
-"tokens 8192` 则限定该次迭代的总 token 预算。在这个单请求示例中，两个值均为 8192，因此 1M "
-"的提示词会在该预算内分块处理。该参数不会降低由 `--max-model-len` 配置的总上下文限制。详情请参阅 [vLLM "
-"调度器参数](https://docs.vllm.ai/en/latest/configuration/engine_args/#--long-"
-"prefill-token-threshold)。"
-
 msgid "=== \"950DT Products (MXFP8)\""
 msgstr "=== \"Ascend 950DT系列产品 (MXFP8)\""
 
@@ -1517,13 +1428,6 @@ msgstr ""
 "节](#54-1m-token-context-deployment) 中的 A3 1M 上下文示例。通过 "
 "`additional_config.enable_flashcomm1` 启用 FLASHCOMM1。`--language-model-only` "
 "标志为可选项，对于多模态输入必须省略。"
-
-msgid ""
-"The context-limit entries below use the unified serving setting `max-model-"
-"len=133000`. Accuracy scores are retained from the existing evaluations and "
-"have not been remeasured with this documentation update."
-msgstr ""
-"下表中的上下文限制条目使用统一的服务设置 `max-model-len=133000`。精度分数沿用现有评测结果，未随本次文档更新重新测量。"
 
 msgid ""
 "| GSM8K   | 8 Atlas 800I A3 (64GB × 16)      | 96.36 | 133000 | 16"
@@ -2090,13 +1994,6 @@ msgstr ""
 "`minimax-m3`。如果启动失败或任一检查失败，请先检查两个节点的日志，再发送推理请求。"
 
 msgid ""
-"The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, "
-"use this proxy endpoint in [Section 7](#7-functional-verification)."
-msgstr ""
-"随后可通过 `<proxy_ip>:8009` 访问服务。对于 PD 分离，请在[第 7 节](#7-functional-"
-"verification)中使用此代理端点。"
-
-msgid ""
 "To use MindIE PyMotor instead of the example proxy, follow [Deploy vLLM "
 "Ascend with MindIE-"
 "Motor](../../user_guide/deployment_guide/using_mindie_motor.md) and register"
@@ -2175,14 +2072,6 @@ msgstr ""
 "参数表](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-2-configure-"
 "mooncakejson-and-start-mooncake_master)。对于此 SSD 卸载部署，请保持 "
 "`enable_offload=true`。"
-
-msgid ""
-"On 950DT, use the Section 5.3.1 two-node proxy command (two P and two D "
-"endpoints). The service is accessible at `<proxy_ip>:8009`; use this "
-"endpoint in [Section 7](#7-functional-verification)."
-msgstr ""
-"在 Ascend 950DT系列产品上，使用第 5.3.1 节的双节点代理命令（两个 P 和两个 D 端点）。服务可通过 "
-"`<proxy_ip>:8009` 访问；请在[第 7 节](#7-functional-verification)中使用此端点。"
 
 msgid ""
 "The recorded A3 run used vLLM `0.30.0+empty` and vLLM Ascend "
@@ -2271,3 +2160,240 @@ msgid ""
 "The recommended configurations are the same as those specified in Chapter 5 "
 "[Online Service Deployment](#5-online-service-deployment)."
 msgstr "推荐配置与第 5 章 [在线服务部署](#5-online-service-deployment) 中指定的配置相同。"
+
+msgid ""
+"This document covers supported features, environment and model preparation, "
+"single-node deployment, multi-node deployment, PD separation, thinking and "
+"parser configuration, functional verification, accuracy evaluation, "
+"performance evaluation, tuning, and troubleshooting. After following it, you"
+" can deploy the model and validate both accuracy and performance."
+msgstr ""
+"本文档涵盖支持的特性、环境与模型准备、单机部署、多机部署、PD "
+"分离、思考与解析器配置、功能验证、精度评估、性能评估、调优以及故障排查。按照本文档操作后，您可以完成模型部署并验证精度与性能。"
+
+msgid ""
+"| `MiniMax-M3` (BF16) | 2 Atlas 800I A3 nodes (64GB × 16 per node) | "
+"[Hugging Face](https://huggingface.co/MiniMaxAI/MiniMax-M3) \\| "
+"[ModelScope](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3) | / |"
+msgstr ""
+"| `MiniMax-M3` (BF16) | 2 个 Atlas 800I A3 节点（每节点 64GB × 16） | [Hugging "
+"Face](https://huggingface.co/MiniMaxAI/MiniMax-M3) \\| "
+"[ModelScope](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3) | / |"
+
+msgid ""
+"> The W8A8, MXFP8, and EAGLE3 weights above are Ascend-adapted releases "
+"published on ModelScope only; no Hugging Face mirror is provided for them."
+msgstr ""
+"> 上述 W8A8、MXFP8 和 EAGLE3 权重为昇腾适配版本，仅在 ModelScope 上发布；未提供对应的 Hugging Face 镜像。"
+
+msgid "### 4.2 Source Code Installation"
+msgstr "### 4.2 源码安装"
+
+msgid ""
+"If you prefer not to use the Docker image, build both packages from source. "
+"MiniMax-M3 support is available on the vLLM Ascend main branch (see [Section"
+" 1](#1-introduction)), so install that branch rather than an older release."
+msgstr ""
+"如果您不想使用 Docker 镜像，可以从源码构建这两个软件包。MiniMax-M3 支持已在 vLLM Ascend main 分支上提供（参见[第 "
+"1 节](#1-introduction)），因此请安装该分支，而不是较旧的发布版本。"
+
+msgid "1. Clone and install vLLM:"
+msgstr "1. 克隆并安装 vLLM："
+
+msgid "2. Clone and install vLLM Ascend (main branch):"
+msgstr "2. 克隆并安装 vLLM Ascend（main 分支）："
+
+msgid "3. Verify the installation:"
+msgstr "3. 验证安装："
+
+msgid ""
+"Expected result: The version information for both packages is displayed, "
+"confirming a successful installation."
+msgstr "预期结果：显示两个软件包的版本信息，确认安装成功。"
+
+msgid ""
+"For a multi-node deployment, repeat the setup on every node and make sure "
+"both packages are built at the same commit."
+msgstr "对于多机部署，请在每个节点上重复上述设置，并确保两个软件包均基于同一提交构建。"
+
+msgid "### 5.1 Single-Node Online Deployment"
+msgstr "### 5.1 单机在线部署"
+
+msgid ""
+"**Common Issues Tip:** If the two nodes cannot form a DP group, check that "
+"`node0_ip`, `--data-parallel-address`, and `--data-parallel-rpc-port` match "
+"on both nodes, that `--data-parallel-start-rank` values do not overlap, and "
+"that `HCCL_SOCKET_IFNAME` names an interface reachable between the hosts. "
+"For other environment, installation, and parameter issues, refer to the "
+"[Public FAQs](../../faqs.md) and [Chapter 10 FAQ](#10-faq)."
+msgstr ""
+"**常见问题提示：** 如果两个节点无法组成 DP 组，请检查两个节点上的 `node0_ip`、`--data-parallel-address` 和"
+" `--data-parallel-rpc-port` 是否一致，`--data-parallel-start-rank` 的值是否不重叠，以及 "
+"`HCCL_SOCKET_IFNAME` 是否指定了主机之间可访问的网络接口。有关其他环境、安装和参数问题，请参阅[公共 "
+"FAQ](../../faqs.md) 和[第 10 章 FAQ](#10-faq)。"
+
+msgid ""
+"The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, "
+"use this proxy endpoint in [Section 6](#6-functional-verification)."
+msgstr ""
+"随后可通过 `<proxy_ip>:8009` 访问服务。对于 PD 分离，请在[第 6 节](#6-functional-"
+"verification)中使用此代理端点。"
+
+msgid ""
+"On 950DT, use the Section 5.3.1 two-node proxy command (two P and two D "
+"endpoints). The service is accessible at `<proxy_ip>:8009`; use this "
+"endpoint in [Section 6](#6-functional-verification)."
+msgstr ""
+"在 Ascend 950DT系列产品上，请使用第 5.3.1 节中的双节点代理命令（两个 P 端点和两个 D 端点）。服务可通过 "
+"`<proxy_ip>:8009` 访问；请在[第 6 节](#6-functional-verification)中使用此端点。"
+
+msgid ""
+"`--long-prefill-token-threshold 8192` sets the long-prefill threshold used "
+"with chunked prefill. The scheduler uses this threshold to limit the prefill"
+" tokens scheduled for a long request in one iteration, while `--max-num-"
+"batched-tokens 8192` bounds the total token budget for the iteration. In "
+"this single-request example both values are 8192, so the 1M prompt is "
+"processed in chunks within that budget. This parameter does not reduce the "
+"total context limit configured by `--max-model-len`. See the [vLLM scheduler"
+" arguments](https://docs.vllm.ai/en/latest/configuration/engine_args/#-long-"
+"prefill-token-threshold) for details."
+msgstr ""
+"`--long-prefill-token-threshold 8192` "
+"设置与分块预填充配合使用的长预填充阈值。调度器使用该阈值限制单次迭代中为长请求调度的预填充 token 数，而 `--max-num-batched-"
+"tokens 8192` 限制该次迭代的总 token 预算。在此单请求示例中，两个值均为 8192，因此 1M "
+"的提示词会在该预算内分块处理。此参数不会降低由 `--max-model-len` 配置的总上下文限制。详情请参阅 [vLLM "
+"调度器参数](https://docs.vllm.ai/en/latest/configuration/engine_args/#-long-"
+"prefill-token-threshold)。"
+
+msgid "### 5.6 Thinking and Parser Configuration"
+msgstr "### 5.6 思考与解析器配置"
+
+msgid "#### 5.6.1 Thinking Mode"
+msgstr "#### 5.6.1 思考模式"
+
+msgid "##### 5.6.1.1 Request Examples"
+msgstr "##### 5.6.1.1 请求示例"
+
+msgid "#### 5.6.2 Reasoning Parser"
+msgstr "#### 5.6.2 推理解析器"
+
+msgid "##### 5.6.2.1 Server Configuration"
+msgstr "##### 5.6.2.1 服务端配置"
+
+msgid "##### 5.6.2.2 Output Format"
+msgstr "##### 5.6.2.2 输出格式"
+
+msgid "##### 5.6.2.3 Parser Behavior"
+msgstr "##### 5.6.2.3 解析器行为"
+
+msgid "#### 5.6.3 Tool Call Parser"
+msgstr "#### 5.6.3 工具调用解析器"
+
+msgid "##### 5.6.3.1 Server Configuration"
+msgstr "##### 5.6.3.1 服务端配置"
+
+msgid "##### 5.6.3.2 Tool Call Format"
+msgstr "##### 5.6.3.2 工具调用格式"
+
+msgid "##### 5.6.3.3 Key Features"
+msgstr "##### 5.6.3.3 关键特性"
+
+msgid "##### 5.6.3.4 Request Example (curl)"
+msgstr "##### 5.6.3.4 请求示例（curl）"
+
+msgid "## 6 Functional Verification"
+msgstr "## 6 功能验证"
+
+msgid "### 6.1 Text"
+msgstr "### 6.1 文本"
+
+msgid "### 6.2 Single Image"
+msgstr "### 6.2 单张图片"
+
+msgid "### 6.3 Single Video"
+msgstr "### 6.3 单个视频"
+
+msgid "### 6.4 Mixed Image and Video Request"
+msgstr "### 6.4 图文与视频混合请求"
+
+msgid "## 7 Accuracy Evaluation"
+msgstr "## 7 精度评估"
+
+msgid ""
+"The context-limit entries below use the unified serving setting `max-model-"
+"len=133000`, except the GPQA-Diamond row for 8 Atlas 800I A3, which was "
+"measured with `263000`. Accuracy scores are retained from the existing "
+"evaluations and have not been remeasured with this documentation update."
+msgstr ""
+"下表中的上下文限制条目使用统一的服务配置 `max-model-len=133000`，但 8 个 Atlas 800I A3 的 GPQA-"
+"Diamond 行除外，该行使用 `263000` 测量。精度分数沿用现有评估结果，未随本次文档更新重新测量。"
+
+msgid "### 7.1 Using AISBench"
+msgstr "### 7.1 使用 AISBench"
+
+msgid "### 7.2 Text Evaluation"
+msgstr "### 7.2 文本评估"
+
+msgid "### 7.3 Multimodal Evaluation"
+msgstr "### 7.3 多模态评估"
+
+msgid "## 8 Performance Evaluation"
+msgstr "## 8 性能评估"
+
+msgid ""
+"For setup details, including installation, dataset download, and "
+"configuration, refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation)."
+msgstr ""
+"有关设置详情，包括安装、数据集下载和配置，请参阅[使用 "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation)。"
+
+msgid ""
+"Reuse the accuracy evaluation configuration from [Section 7](#7-accuracy-"
+"evaluation), but set `stream=True`, `ignore_eos=True`, and a `max_out_len` "
+"that matches your target output length, so that TPOT is measured "
+"consistently. Point `host_ip`/`host_port` at the endpoint you deployed: "
+"`127.0.0.1:11223` for the single-node service, or `<proxy_ip>:8009` for PD "
+"and KV-pool topologies."
+msgstr ""
+"复用[第 7 节](#7-accuracy-evaluation)中的精度评估配置，但需设置 "
+"`stream=True`、`ignore_eos=True`，并将 `max_out_len` 设置为您目标输出长度，以便一致地测量 TPOT。将 "
+"`host_ip`/`host_port` 指向您部署的端点：单机服务使用 `127.0.0.1:11223`，PD 和 KV 池拓扑使用 "
+"`<proxy_ip>:8009`。"
+
+msgid ""
+"**Run the performance evaluation using the GSM8K dataset as an example:**"
+msgstr "**以 GSM8K 数据集为例运行性能评估：**"
+
+msgid "**Expected result:**"
+msgstr "**预期结果：**"
+
+msgid ""
+"AISBench prints one line per finished request and then a summary table. "
+"Check the following fields; the exact values depend on hardware, "
+"concurrency, and input/output lengths:"
+msgstr "AISBench 会为每个完成的请求打印一行，然后打印汇总表。请检查以下字段；具体数值取决于硬件、并发数以及输入/输出长度："
+
+msgid ""
+"- `Request throughput (req/s)`: completed requests per second.\n"
+"- `Output token throughput (tok/s)`: generated tokens per second.\n"
+"- `Mean TTFT (ms)` / `P99 TTFT (ms)`: time to first token, average and 99th percentile.\n"
+"- `Mean TPOT (ms)` / `P99 TPOT (ms)`: time per output token, average and 99th percentile."
+msgstr ""
+"- `Request throughput (req/s)`：每秒完成的请求数。\n"
+"- `Output token throughput (tok/s)`：每秒生成的 token 数。\n"
+"- `Mean TTFT (ms)` / `P99 TTFT (ms)`：首 token 时间，平均值和 99 分位数。\n"
+"- `Mean TPOT (ms)` / `P99 TPOT (ms)`：每个输出 token 的时间，平均值和 99 分位数。"
+
+msgid ""
+"Detailed results are written under `outputs/` (or the directory given by "
+"`--work-dir`), including the per-request CSV and the summary JSON."
+msgstr "详细结果写入 `outputs/`（或由 `--work-dir` 指定的目录），包括逐请求 CSV 和汇总 JSON。"
+
+msgid ""
+"For common environment, installation, and general parameter issues, please "
+"refer to the [Public FAQs](../../faqs.md). This chapter only covers issues "
+"specific to MiniMax-M3."
+msgstr "有关常见环境、安装和通用参数问题，请参阅[公共 FAQ](../../faqs.md)。本章仅涵盖 MiniMax-M3 特有的问题。"

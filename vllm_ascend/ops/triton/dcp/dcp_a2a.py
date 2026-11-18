@@ -8,11 +8,13 @@ from vllm.distributed.parallel_state import GroupCoordinator, _groups
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.device.device_config import is_950
 from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
+    MAX_UNROLLED_COMBINE_ELEMENTS,
+    _encode_lse_fields,
     _fused_dcp_lse_combine_batched_kernel,
     _pack_dcp_output_lse_batched_kernel,
 )
+from vllm_ascend.ops.triton.dcp.dcp_jit import _launch_kernel
 from vllm_ascend.ops.triton.dcp.sfa_dcp_exchange import can_exchange, exchange
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
@@ -21,12 +23,15 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_
 def _pack_dcp_output_lse_kernel(
     output_ptr,
     lse_ptr,
+    sum_ptr,
     send_ptr,
     output_stride_t,
     output_stride_h,
     output_stride_d,
     lse_stride_t,
     lse_stride_h,
+    sum_stride_t,
+    sum_stride_h,
     send_stride_rank,
     send_stride_scatter,
     send_stride_replicated,
@@ -37,6 +42,7 @@ def _pack_dcp_output_lse_kernel(
     total_rows,
     SCATTER_TOKENS: tl.constexpr,
     LSE_PACK_DIM: tl.constexpr,
+    FROM_STATS: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
     program_idx = tl.program_id(0)
@@ -65,34 +71,16 @@ def _pack_dcp_output_lse_kernel(
         tl.store(send_ptr + send_base + d_offsets * send_stride_d, output, mask=d_mask)
 
         lse = tl.load(lse_ptr + token_idx * lse_stride_t + head_idx * lse_stride_h).to(tl.float32)
+        if FROM_STATS:
+            total = tl.load(sum_ptr + token_idx * sum_stride_t + head_idx * sum_stride_h).to(tl.float32)
+            lse = lse + tl.log(total)
         if LSE_PACK_DIM == 1:
             tl.store(
                 send_ptr + send_base + head_dim * send_stride_d,
                 lse.to(send_ptr.dtype.element_ty),
             )
         else:
-            # Store a finite FP32 LSE as a signed exponent code plus three
-            # base-256 significand digits. Every stored value is an integer in
-            # [-255, 255], so FP16 and BF16 preserve it exactly.
-            finite_lse = (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
-            abs_lse = tl.abs(lse)
-            nonzero_lse = abs_lse != 0.0
-            safe_abs_lse = tl.where(finite_lse & nonzero_lse, abs_lse, 1.0)
-            lse_exponent = tl.floor(tl.log2(safe_abs_lse))
-            lse_exponent = tl.maximum(-126.0, tl.minimum(lse_exponent, 127.0))
-            lse_exponent = tl.where(nonzero_lse, lse_exponent, 0.0)
-            significand = tl.where(
-                finite_lse & nonzero_lse,
-                abs_lse * tl.exp2(23.0 - lse_exponent),
-                0.0,
-            )
-            significand_hi = tl.floor(significand / 65536.0)
-            significand_remainder = significand - significand_hi * 65536.0
-            significand_mid = tl.floor(significand_remainder / 256.0)
-            significand_lo = significand_remainder - significand_mid * 256.0
-            exponent_code = lse_exponent + 128.0
-            exponent_code = tl.where(lse < 0.0, -exponent_code, exponent_code)
-            exponent_code = tl.where(finite_lse, exponent_code, 0.0)
+            exponent_code, significand_hi, significand_mid, significand_lo = _encode_lse_fields(lse)
             tl.store(
                 send_ptr + send_base + head_dim * send_stride_d,
                 exponent_code.to(send_ptr.dtype.element_ty),
@@ -301,39 +289,62 @@ def pack_dcp_output_lse(
     softmax_lse: torch.Tensor,
     dcp_size: int,
     scatter_dim: int,
+    softmax_sum: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Pack strided partial output and FP32 LSE into one HCCL payload."""
-    num_tokens, num_heads, head_dim, local_scatter_size, replicated_size = _validate_dcp_inputs(
+    """Pack output and LSE, or compute LSE from max/sum during packing."""
+    _, _, head_dim, local_scatter_size, replicated_size = _validate_dcp_inputs(
         partial_output, softmax_lse, dcp_size, scatter_dim
     )
+    if softmax_sum is not None:
+        if (
+            softmax_sum.shape != softmax_lse.shape
+            or softmax_sum.dtype != torch.float32
+            or softmax_sum.device != partial_output.device
+        ):
+            raise ValueError("softmax_sum must match the FP32 softmax_max shape and device")
     lse_pack_dim = _lse_pack_dim(partial_output.dtype)
     send = torch.empty(
         (dcp_size, local_scatter_size, replicated_size, head_dim + lse_pack_dim),
         dtype=partial_output.dtype,
         device=partial_output.device,
     )
-    total_rows = num_tokens * num_heads
     init_device_properties_triton()
-    vector_cores = get_vectorcore_num()
+    _launch_pack_dcp_output_lse(
+        partial_output, softmax_lse, softmax_sum, send, scatter_dim, get_vectorcore_num(), _launch_kernel
+    )
+    return send
+
+
+def _launch_pack_dcp_output_lse(partial_output, softmax_lse, softmax_sum, send, scatter_dim, vector_cores, launch):
+    """Shared runtime/warmup launch construction; no allocation or collective."""
+    num_tokens, num_heads, head_dim = partial_output.shape
+    local_scatter_size = send.shape[1]
+    sum_input = softmax_lse if softmax_sum is None else softmax_sum
+    lse_pack_dim = _lse_pack_dim(partial_output.dtype)
+    total_rows = num_tokens * num_heads
     grid_size = total_rows if total_rows < vector_cores else vector_cores
-    # Keep enough row tiles to occupy the A5 vector cores. Feature-strided
+    # Keep enough row tiles to occupy the vector cores. Feature-strided
     # loads can regress with batching, especially for wide heads.
     batched = (
-        is_950()
-        and partial_output.dtype == torch.bfloat16
+        partial_output.dtype == torch.bfloat16
         and scatter_dim == 1
         and head_dim <= 2048
         and total_rows >= 8 * vector_cores
-        and partial_output.stride(-1) == 1
+        and (partial_output.stride(-1) == 1 or (head_dim == 512 and num_tokens >= 128))
     )
     if batched:
-        _pack_dcp_output_lse_batched_kernel[(grid_size,)](
+        launch(
+            _pack_dcp_output_lse_batched_kernel,
+            (grid_size,),
             partial_output,
             softmax_lse,
+            sum_input,
             send,
             *partial_output.stride(),
             softmax_lse.stride(0),
             softmax_lse.stride(1),
+            sum_input.stride(0),
+            sum_input.stride(1),
             *send.stride(),
             local_scatter_size,
             head_dim,
@@ -341,17 +352,24 @@ def pack_dcp_output_lse(
             total_rows,
             SCATTER_TOKENS=scatter_dim == 0,
             LSE_PACK_DIM=lse_pack_dim,
+            FROM_STATS=softmax_sum is not None,
             BLOCK_D=triton.next_power_of_2(head_dim),
-            BLOCK_ROWS=8,
+            BLOCK_ROWS=32 if head_dim == 512 and num_tokens >= 128 and partial_output.stride(-1) == 1 else 8,
+            OUTPUT_HEAD_MAJOR=head_dim == 512,
         )
-        return send
-    _pack_dcp_output_lse_kernel[(grid_size,)](
+        return
+    launch(
+        _pack_dcp_output_lse_kernel,
+        (grid_size,),
         partial_output,
         softmax_lse,
+        sum_input,
         send,
         *partial_output.stride(),
         softmax_lse.stride(0),
         softmax_lse.stride(1),
+        sum_input.stride(0),
+        sum_input.stride(1),
         *send.stride(),
         local_scatter_size,
         head_dim,
@@ -359,9 +377,10 @@ def pack_dcp_output_lse(
         total_rows,
         SCATTER_TOKENS=scatter_dim == 0,
         LSE_PACK_DIM=lse_pack_dim,
+        FROM_STATS=softmax_sum is not None,
         BLOCK_D=triton.next_power_of_2(head_dim),
     )
-    return send
+    return
 
 
 def fused_dcp_lse_combine(
@@ -391,7 +410,7 @@ def fused_dcp_lse_combine(
     if not isinstance(head_dim, int) or isinstance(head_dim, bool) or head_dim <= 0:
         raise ValueError(f"DCP fused combine requires a positive integer head_dim, got {head_dim}.")
 
-    dcp_size, local_scatter_size, replicated_size, packed_dim = recv.shape
+    _, local_scatter_size, replicated_size, packed_dim = recv.shape
     lse_pack_dim = _lse_pack_dim(recv.dtype)
     if packed_dim != head_dim + lse_pack_dim:
         raise RuntimeError(
@@ -415,43 +434,72 @@ def fused_dcp_lse_combine(
         dtype=recv.dtype,
         device=recv.device,
     )
-    total_rows = num_tokens * num_heads
     init_device_properties_triton()
-    vector_cores = get_vectorcore_num()
+    _launch_fused_dcp_lse_combine(
+        recv, output, head_dim, scatter_dim, return_lse, local_output, local_lse, get_vectorcore_num(), _launch_kernel
+    )
+    return output
+
+
+def _launch_fused_dcp_lse_combine(
+    recv, output, head_dim, scatter_dim, return_lse, local_output, local_lse, vector_cores, launch
+):
+    """Shared runtime/warmup launch construction for the packed receive layout."""
+    num_tokens, num_heads = output.shape[:2]
+    dcp_size = recv.shape[0]
+    lse_pack_dim = _lse_pack_dim(recv.dtype)
+    total_rows = num_tokens * num_heads
     grid_size = total_rows if total_rows < vector_cores else vector_cores
-    # Wider tiles need a bounded DCP and more rows on small-DCP cases.
-    # Strided local features regress for DCP 1-2 when D > 256.
+    # Stream ranks so the live output accumulator is independent of DCP size.
+    # Four rows per core amortize the wider row tile; small workloads keep the
+    # scalar path. No chip model, token/head list or DCP whitelist is required.
     batched = (
-        is_950()
-        and recv.dtype == torch.bfloat16
-        and 1 <= dcp_size <= 8
+        recv.dtype == torch.bfloat16
         and scatter_dim == 1
         and head_dim <= 512
-        and total_rows >= (8 if dcp_size <= 2 and head_dim > 256 else 4) * vector_cores
-        and local_output is not None
-        and (dcp_size > 2 or head_dim <= 256 or local_output.stride(-1) == 1)
+        and total_rows >= 4 * vector_cores
+        # Feature-strided code exceeds 192 KiB UB on the measured A3;
+        # one-row coalesced loads produce invalid CANN 9.2 VEC parameters.
+        and (local_output is None or local_output.stride(-1) == 1)
         and not return_lse
     )
     if batched:
-        assert local_output is not None and local_lse is not None
-        _fused_dcp_lse_combine_batched_kernel[(grid_size,)](
+        block_rows = 8
+        block_d = triton.next_power_of_2(head_dim)
+        # Unrolling amortizes loop overhead when cores process multiple tiles.
+        # Bound its live output tiles; larger worlds use the same streaming math.
+        rank_unroll = (
+            dcp_size
+            if total_rows >= 2 * block_rows * vector_cores
+            and dcp_size * block_rows * block_d <= MAX_UNROLLED_COMBINE_ELEMENTS
+            else 1
+        )
+        grid_size = min(vector_cores, triton.cdiv(total_rows, block_rows))
+        launch(
+            _fused_dcp_lse_combine_batched_kernel,
+            (grid_size,),
             recv,
             output,
-            local_output,
-            local_lse,
-            *local_output.stride(),
-            *local_lse.stride()[:2],
+            local_output if local_output is not None else recv,
+            local_lse if local_lse is not None else recv,
+            *(local_output.stride() if local_output is not None else (0, 0, 0)),
+            *(local_lse.stride()[:2] if local_lse is not None else (0, 0)),
             *recv.stride(),
             *output.stride(),
             head_dim,
             num_heads,
             total_rows,
             DCP_SIZE=dcp_size,
-            BLOCK_D=triton.next_power_of_2(head_dim),
-            BLOCK_ROWS=8,
+            HAS_LOCAL=local_output is not None,
+            RANK_UNROLL=rank_unroll,
+            BLOCK_D=block_d,
+            BLOCK_ROWS=block_rows,
+            multibuffer=False,
         )
-        return output
-    _fused_dcp_lse_combine_kernel[(grid_size,)](
+        return
+    launch(
+        _fused_dcp_lse_combine_kernel,
+        (grid_size,),
         recv,
         output,
         local_output if local_output is not None else recv,
@@ -470,7 +518,17 @@ def fused_dcp_lse_combine(
         RETURN_LSE=return_lse,
         HAS_LOCAL=local_output is not None,
     )
-    return output
+    return
+
+
+def _use_fast_exchange(partial_output, softmax_lse, scatter_size, scatter_dim, pcp_group, return_lse, defer_combine):
+    return (
+        pcp_group is None
+        and not return_lse
+        and not defer_combine
+        and scatter_dim == 1
+        and can_exchange(partial_output, softmax_lse, scatter_size)
+    )
 
 
 def dcp_a2a_fused_combine(
@@ -482,6 +540,7 @@ def dcp_a2a_fused_combine(
     pcp_group: GroupCoordinator | None = None,
     return_lse: bool = False,
     defer_combine: bool = False,
+    softmax_sum: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Pack, scatter over DCP or TP, optionally gather over PCP, then merge.
 
@@ -489,22 +548,17 @@ def dcp_a2a_fused_combine(
     stacking PCP and DCP. Use 1 when Q heads were not gathered over TP.
     """
     # Keep PCP composition and token-scatter paths on the upstream implementation.
-    if (
-        pcp_group is None
-        and not return_lse
-        and not defer_combine
-        and scatter_dim == 1
-        and can_exchange(partial_output, softmax_lse, scatter_size)
-    ):
+    if _use_fast_exchange(partial_output, softmax_lse, scatter_size, scatter_dim, pcp_group, return_lse, defer_combine):
         if scatter_group is None:
             raise ValueError("SFA output scatter requires an explicit All2All group.")
-        return exchange(partial_output, softmax_lse, scatter_group).to(partial_output.dtype)
+        return exchange(partial_output, softmax_lse, scatter_group, softmax_sum=softmax_sum).to(partial_output.dtype)
 
     send = pack_dcp_output_lse(
         partial_output,
         softmax_lse,
         scatter_size,
         scatter_dim=scatter_dim,
+        softmax_sum=softmax_sum,
     )
     if scatter_size > 1:
         if scatter_group is None:
@@ -535,6 +589,7 @@ def dcp_a2a_fused(
     pcp_group_name: str | None = None,
     return_lse: bool = False,
     defer_combine: bool = False,
+    softmax_sum: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Fused DCP output merge, optionally gathering contributions across PCP.
 
@@ -578,6 +633,7 @@ def dcp_a2a_fused(
         pcp_group=pcp_group,
         return_lse=return_lse,
         defer_combine=defer_combine,
+        softmax_sum=softmax_sum,
     )
 
 
@@ -590,6 +646,7 @@ def dcp_a2a_fused_fake(
     pcp_group_name: str | None = None,
     return_lse: bool = False,
     defer_combine: bool = False,
+    softmax_sum: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Propagate output metadata for torch.compile without running HCCL.
 
