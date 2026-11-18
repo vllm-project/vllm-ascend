@@ -131,8 +131,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.use_block_key_layerwise = self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = self.layerwise_data_plane == "gva"
         self._step_load_keys: set[str] = set()
-        # Request ID -> cache group ID -> request block index -> (pool key, is public).
-        self._snapshot_keys: dict[str, dict[int, dict[int, tuple[str, bool]]]] = {}
+        # Request ID -> cache group ID -> request block index -> private pool key.
+        self._snapshot_keys: dict[str, dict[int, dict[int, str]]] = {}
         super()._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self._dspark_draft_layer_names = (
@@ -805,10 +805,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
 
         def get_saved_key(block_idx: int) -> tuple[str, bool] | None:
             """Return the pool key and whether it is public."""
-            saved = snapshot.get(block_idx)
-            if saved is not None:
+            private_key = snapshot.get(block_idx)
+            if private_key is not None:
                 # A hash can become available after the preceding save.
-                return saved
+                return private_key, False
             if block_idx < full_blocks and block_idx < len(block_hashes):
                 block_hash = block_hash_to_str(block_hashes[block_idx])
                 return self._make_layerwise_full_key(group_id, block_hash), True
@@ -1379,12 +1379,13 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     )
                 if self.layerwise_offload:
                     pages = self._snapshot_keys.setdefault(request.req_id, {}).setdefault(group_id, {})
-                    pages.update(
-                        (index, (key, index < len(group_block_hashes)))
-                        for index, key in zip(candidate_blocks, candidate_keys)
-                    )
+                    for block_idx, key in zip(candidate_blocks, candidate_keys):
+                        if block_idx < len(group_block_hashes):
+                            pages.pop(block_idx, None)
+                        else:
+                            pages[block_idx] = key
                     if partial_key is not None:
-                        pages[partial_block_index] = (partial_key, False)
+                        pages[partial_block_index] = partial_key
                 if not save_owner:
                     all_group_gvas.append(np.zeros(len(block_ids_by_group), dtype=np.int64))
                     all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
