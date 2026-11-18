@@ -145,6 +145,9 @@ def test_pp_target_embedding_uses_normal_weight_loader_before_dflash_sharing(mon
     monkeypatch.setattr(qwen3_dflash2, "get_rotation_path", lambda _: "/rotation" if rotated else None)
     monkeypatch.setattr(quarot_utils, "get_rotation_path", lambda _: "/rotation" if rotated else None)
     monkeypatch.setattr(quarot_utils, "get_rotation_matrix", lambda _: rotation)
+    # align_draft_weights() consults lmhead_tp_enable(), which reads the Ascend
+    # config; this CPU test never initializes it, so pin the TP-only default.
+    monkeypatch.setattr(quarot_utils, "lmhead_tp_enable", lambda: False)
     # Device-specific post-load packing is outside this CPU test.
     process_weights = Mock()
     monkeypatch.setattr(
