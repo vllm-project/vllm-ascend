@@ -5,57 +5,71 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.models.qwen4_exp.attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
-from vllm_ascend.models.qwen4_exp.gbsa_union import build_qsa_union_inputs, qsa_union_gbsa_attention
+from vllm_ascend.models.qwen4_exp.attention_dispatch import (
+    build_qsa_request_plan,
+    build_qsa_union_group_row_map,
+    dispatch_qsa_attention,
+    prepare_qsa_union_batches,
+)
+from vllm_ascend.models.qwen4_exp.gbsa_union import (
+    _build_qsa_union_inputs_torch,
+    build_qsa_union_inputs_from_compact,
+    qsa_union_gbsa_attention,
+)
 
 
-@pytest.mark.parametrize("rows,topk", [(1, 8), (7, 8), (8, 8), (9, 8), (17, 512)])
+def _reference_compact(compact, visible, row_map):
+    input_groups = compact.shape[1] - 3
+    topk = input_groups + int(input_groups < 512)
+    groups = row_map.shape[0]
+    sparse = torch.full((1, groups * 8, topk), -1, dtype=torch.int32)
+    counts = torch.zeros((1, groups * 8), dtype=torch.int32)
+    padded_visible = torch.zeros(groups * 8, dtype=torch.int32)
+    for group, rows in enumerate(row_map.tolist()):
+        for lane, row in enumerate(rows):
+            if row < 0:
+                continue
+            seen = int(visible[row])
+            selected = compact[row, :input_groups]
+            selected = selected[(selected >= 0) & (selected < seen // 4)]
+            has_tail = int(seen % 4 != 0)
+            selected = selected[: topk - has_tail]
+            if has_tail:
+                selected = torch.cat((selected, torch.tensor([seen // 4], dtype=torch.int32)))
+            destination = group * 8 + lane
+            sparse[0, destination, : selected.numel()] = selected
+            counts[0, destination] = selected.numel()
+            padded_visible[destination] = seen
+    return _build_qsa_union_inputs_torch(sparse, counts, padded_visible)
+
+
+@pytest.mark.parametrize("rows,input_groups", [(1, 7), (7, 7), (8, 7), (9, 7), (17, 512)])
 @pytest.mark.parametrize("base_group", [0, (1 << 21) - 1024])
-def test_union_preserves_exact_membership(rows, topk, base_group):
+def test_union_preserves_exact_membership(rows, input_groups, base_group):
     generator = torch.Generator().manual_seed(811)
-    indices = torch.randint(0, 1024, (1, rows, topk), generator=generator, dtype=torch.int32) + base_group
-    counts = torch.randint(0, topk + 1, (1, rows), generator=generator, dtype=torch.int32)
+    compact = torch.randint(0, 1024, (rows, input_groups + 3), generator=generator, dtype=torch.int32) + base_group
+    compact[0, :input_groups] = -1
     visible = torch.arange(rows, dtype=torch.int32) + 4000 + base_group * 4
-    # Include empty rows, duplicate selections, padding and partial final groups.
-    counts[0, 0] = 0
-    for row in range(rows):
-        indices[0, row, counts[0, row] :] = -1
-    actual = build_qsa_union_inputs(indices.npu(), counts.npu(), visible.npu())
-    union_idx, union_count, exact = [tensor.cpu() for tensor in actual]
-    for group in range((rows + 7) // 8):
-        start, end = group * 8, min(rows, group * 8 + 8)
-        selected = [set(indices[0, row, : counts[0, row]].tolist()) for row in range(start, end)]
-        expected_union = sorted(set().union(*selected))
-        count = int(union_count[0, group])
-        assert count == len(expected_union)
-        assert union_idx[0, group, :count].tolist() == expected_union
-        assert (union_idx[0, group, count:] == -1).all()
-        for rank, block in enumerate(expected_union):
-            for lane in range(4):
-                expected = sum(
-                    1 << query_lane
-                    for query_lane, blocks in enumerate(selected)
-                    if block in blocks and block * 4 + lane < int(visible[start + query_lane])
-                )
-                assert int(exact[0, group, rank * 4 + lane]) == expected
-        assert (exact[0, group, count * 4 :] == 0).all()
+    row_map = torch.tensor(build_qsa_union_group_row_map((0, rows)), dtype=torch.int32)
+    expected = _reference_compact(compact, visible, row_map)
+    actual = build_qsa_union_inputs_from_compact(compact.npu(), visible.npu(), row_map.npu())
+    for reference, candidate in zip(expected, actual):
+        torch.testing.assert_close(reference, candidate.cpu(), rtol=0, atol=0)
 
 
 def test_large_union_matches_cpu_reference():
-    # Exercise the expanded scatter index at the real chunk shape. Keeping that
-    # index contiguous is required by the current A3 backend at this size.
-    rows, topk = 4096, 512
-    indices = torch.empty((1, rows, topk), dtype=torch.int32)
-    indices[0, :, :384] = torch.arange(384, dtype=torch.int32)
-    indices[0, :, 384:] = (
+    rows = 4096
+    compact = torch.full((rows, 515), -1, dtype=torch.int32)
+    compact[:, :384] = torch.arange(384, dtype=torch.int32)
+    compact[:, 384:512] = (
         512 + torch.arange(rows, dtype=torch.int32).remainder(8)[:, None] * 128 + torch.arange(128, dtype=torch.int32)
     )
-    counts = torch.full((1, rows), topk, dtype=torch.int32)
     visible = torch.arange(rows, dtype=torch.int32) + 126977
-    expected = build_qsa_union_inputs(indices, counts, visible)
-    actual = build_qsa_union_inputs(indices.npu(), counts.npu(), visible.npu())
+    row_map = torch.tensor(build_qsa_union_group_row_map((0, rows)), dtype=torch.int32)
+    expected = _reference_compact(compact, visible, row_map)
+    actual = build_qsa_union_inputs_from_compact(compact.npu(), visible.npu(), row_map.npu())
     for reference, candidate in zip(expected, actual):
-        assert torch.equal(reference, candidate.cpu())
+        torch.testing.assert_close(reference, candidate.cpu(), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("query_lengths", [(1, 7, 8, 9, 15, 16, 17, 19), (512,) * 8])
@@ -82,6 +96,18 @@ def test_batched_prefill_dispatch_matches_single_request_launches(query_lengths)
     actual = torch.empty_like(query)
     for request, (start, end) in enumerate(zip(starts, starts[1:])):
         rows = slice(start, end)
+        single_plan = build_qsa_request_plan(
+            torch.tensor([0, end - start]),
+            lengths_cpu[request : request + 1],
+            end - start,
+            torch.tensor([True]),
+        )
+        single_plan = prepare_qsa_union_batches(
+            single_plan,
+            positions[rows] + 1,
+            lengths[request : request + 1],
+            table[request : request + 1],
+        )
         qsa_union_gbsa_attention(
             query[rows],
             key,
@@ -93,8 +119,10 @@ def test_batched_prefill_dispatch_matches_single_request_launches(query_lengths)
             lengths,
             expected[rows],
             request_index=request,
+            prepared=single_plan.prepared_union_batches[0],
         )
     plan = build_qsa_request_plan(torch.tensor(starts), lengths_cpu, total, torch.ones(8, dtype=torch.bool))
+    plan = prepare_qsa_union_batches(plan, positions + 1, lengths, table)
     assert len(plan.union_batches) == 1
     dispatch_qsa_attention(query, None, None, key, value, compact, table, requests, positions, lengths, actual, plan)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)

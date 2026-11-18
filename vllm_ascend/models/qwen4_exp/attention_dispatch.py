@@ -262,15 +262,10 @@ def dispatch_qsa_attention(
     # sentinel above unchanged, including graph capture and replay.
     for batch_index, batch in enumerate(request_plan.union_batches):
         rows = slice(batch.query_start, batch.query_end)
-        prepared = (
-            request_plan.prepared_union_batches[batch_index]
-            if batch_index < len(request_plan.prepared_union_batches)
-            else None
-        )
+        prepared = request_plan.prepared_union_batches[batch_index]
         if len(batch.request_indices) == 1:
             kwargs = dict(request_index=batch.request_indices[0])
-            if prepared is not None:
-                kwargs["prepared"] = prepared
+            kwargs["prepared"] = prepared
             qsa_union_gbsa_attention(
                 query[rows],
                 key_cache,
@@ -285,8 +280,7 @@ def dispatch_qsa_attention(
             )
         else:
             kwargs = dict(query_starts=batch.query_starts, request_indices=batch.request_indices)
-            if prepared is not None:
-                kwargs["prepared"] = prepared
+            kwargs["prepared"] = prepared
             qsa_union_gbsa_attention_batch(
                 query[rows],
                 key_cache,
