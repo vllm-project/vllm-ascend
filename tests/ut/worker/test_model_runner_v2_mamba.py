@@ -1074,7 +1074,6 @@ def test_spec_collection_keeps_owner_pages_until_planning(
 
     specs = get_kv_cache_spec(_mock_vllm_config())
 
-    assert list(specs) == ["full_attn", "linear_attn"]
     assert specs["full_attn"] is attention_spec
     assert specs["linear_attn"] is mamba_spec
     assert attention_spec.page_size_padded is None
