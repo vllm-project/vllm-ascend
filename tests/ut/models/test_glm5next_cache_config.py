@@ -17,6 +17,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendMLAAttentionSpec
@@ -232,14 +233,22 @@ def test_fp8_shared_pages_preserve_tail_rows_and_kernel_scale_alignment():
     )
     groups = get_glm5_next_kv_cache_groups(make_config(), specs)
     plan = get_glm5_next_kv_cache_config(make_config(), groups, 3 * get_glm5_next_pool_bytes_per_block(groups))
+    planned_specs = {
+        name: spec
+        for group in groups
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        for name, spec in group.kv_cache_spec.kv_cache_specs.items()
+    }
     descriptor = next(tensor for tensor in plan.kv_cache_tensors if indexer_name in get_kv_cache_tensor_layers(tensor))
     raw = torch.zeros(descriptor.size, dtype=torch.uint8)
-    (tail,) = view_kpool_tail_cache(tail_name, specs[tail_name], raw, plan.num_blocks)
-    page_rows = specs[tail_name].page_size_bytes // (2 * specs[tail_name].head_size * tail.element_size())
+    (tail,) = view_kpool_tail_cache(tail_name, planned_specs[tail_name], raw, plan.num_blocks)
+    page_rows = planned_specs[tail_name].page_size_bytes // (
+        2 * planned_specs[tail_name].head_size * tail.element_size()
+    )
     assert page_rows * tail.shape[-1] == tail.stride(0)
 
     backend = SimpleNamespace(get_kv_cache_shape=lambda n, b, h, d: (n, b, h, d))
-    keys, scales = view_compressed_indexer_cache(indexer_name, specs[indexer_name], raw, backend, 128)
+    keys, scales = view_compressed_indexer_cache(indexer_name, planned_specs[indexer_name], raw, backend, 128)
     page_bytes = descriptor.size // plan.num_blocks
     assert keys.shape == (15, 32, 1, 128)
     assert scales.shape == (15, 32, 1, 1)
