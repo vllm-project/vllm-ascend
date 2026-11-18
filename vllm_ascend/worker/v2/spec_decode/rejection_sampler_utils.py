@@ -17,6 +17,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+import threading
 from typing import Any, cast
 
 import torch
@@ -43,6 +44,335 @@ from vllm_ascend.ops.triton.spec_decode.resample import resample
 from vllm_ascend.utils import vllm_version_is
 
 _ENTROPY_EPSILON = 1e-10
+_GREEDY_LOCAL = threading.local()
+_NPU_RAW_STREAM_FN: Any = None
+
+
+@triton.jit
+def _greedy_rejection_kernel(
+    # [num_reqs, num_speculative_steps + 1]
+    sampled_ptr,
+    sampled_stride,
+    # [num_reqs]
+    num_sampled_ptr,
+    # [num_reqs]
+    num_rejected_ptr,
+    # [num_logits]
+    target_argmax_ptr,
+    # [num_logits]
+    draft_sampled_ptr,
+    # [num_reqs + 1]
+    cu_num_logits_ptr,
+    # [num_reqs]
+    seq_lens_ptr,
+    # [num_reqs]
+    idx_mapping_ptr,
+    # [max_num_reqs]
+    prefill_len_ptr,
+    # [max_num_reqs] (optional fused post_update)
+    num_computed_tokens_ptr,
+    # [max_num_reqs]
+    last_sampled_tokens_ptr,
+    # [max_num_reqs, vocab_size]
+    output_bin_counts_ptr,
+    output_bin_counts_stride,
+    # [max_num_reqs, max_model_len]
+    all_token_ids_ptr,
+    all_token_ids_stride,
+    # [max_num_reqs]
+    total_len_ptr,
+    HAS_FUSED_REJECT: tl.constexpr = False,
+    HAS_CHUNKED_PREFILL_CHECK: tl.constexpr = False,
+    HAS_FUSED_POST_UPDATE: tl.constexpr = False,
+    HAS_PENALTIES: tl.constexpr = False,
+):
+    req_idx = tl.program_id(0)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
+    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1).to(tl.int64)
+    num_tokens = end_idx - start_idx
+
+    req_state_idx = tl.zeros((), tl.int32)
+    is_chunked_prefilling = False
+    if HAS_CHUNKED_PREFILL_CHECK or HAS_FUSED_POST_UPDATE:
+        req_state_idx = tl.load(idx_mapping_ptr + req_idx)
+    if HAS_CHUNKED_PREFILL_CHECK:
+        seq_len = tl.load(seq_lens_ptr + req_idx)
+        prefill_len = tl.load(prefill_len_ptr + req_state_idx)
+        is_chunked_prefilling = seq_len < prefill_len
+
+    valid_state = req_state_idx >= 0
+    total_len = tl.zeros((), tl.int32)
+    if HAS_FUSED_POST_UPDATE:
+        total_len = tl.load(total_len_ptr + req_state_idx, mask=valid_state, other=0)
+
+    rejected_step = tl.full((), 0, tl.int32)
+    accepted = True
+    for i in range(num_tokens - 1):
+        if accepted:
+            logit_idx = start_idx + i
+            draft_tok = tl.load(draft_sampled_ptr + logit_idx + 1).to(tl.int64)
+            tgt_tok = tl.load(target_argmax_ptr + logit_idx).to(tl.int64)
+            tl.store(sampled_ptr + req_idx * sampled_stride + i, tgt_tok)
+            accepted &= tgt_tok == draft_tok
+            if HAS_FUSED_POST_UPDATE and valid_state and not is_chunked_prefilling and accepted:
+                tl.store(
+                    all_token_ids_ptr + req_state_idx.to(tl.int64) * all_token_ids_stride + total_len + i,
+                    tgt_tok.to(tl.int32),
+                )
+                if HAS_PENALTIES:
+                    t_ptr = output_bin_counts_ptr + req_state_idx.to(tl.int64) * output_bin_counts_stride + tgt_tok
+                    tl.store(t_ptr, tl.load(t_ptr) + 1)
+            rejected_step += accepted.to(tl.int32)
+
+    bonus_idx = start_idx + rejected_step
+    bonus_tok = tl.load(target_argmax_ptr + bonus_idx).to(tl.int64)
+    tl.store(sampled_ptr + req_idx * sampled_stride + rejected_step, bonus_tok)
+    n_sampled = rejected_step + 1
+    n_rejected = num_tokens.to(tl.int32) - n_sampled
+    if HAS_CHUNKED_PREFILL_CHECK:
+        n_sampled = tl.where(is_chunked_prefilling, 0, n_sampled)
+        n_rejected = tl.where(is_chunked_prefilling, 0, n_rejected)
+    if HAS_FUSED_REJECT:
+        tl.store(num_rejected_ptr + req_idx, n_rejected)
+    tl.store(num_sampled_ptr + req_idx, n_sampled)
+
+    if HAS_FUSED_POST_UPDATE and valid_state:
+        if n_sampled > 0:
+            tl.store(
+                all_token_ids_ptr + req_state_idx.to(tl.int64) * all_token_ids_stride + total_len + rejected_step,
+                bonus_tok.to(tl.int32),
+            )
+            if HAS_PENALTIES:
+                t_ptr = output_bin_counts_ptr + req_state_idx.to(tl.int64) * output_bin_counts_stride + bonus_tok
+                tl.store(t_ptr, tl.load(t_ptr) + 1)
+            tl.store(last_sampled_tokens_ptr + req_state_idx, bonus_tok)
+            tl.store(total_len_ptr + req_state_idx, total_len + n_sampled)
+        computed_delta = num_tokens.to(tl.int32) - n_rejected
+        if computed_delta != 0:
+            num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
+            tl.store(
+                num_computed_tokens_ptr + req_state_idx,
+                num_computed + computed_delta,
+            )
+
+
+def _get_greedy_ring_buffers(
+    device: torch.device,
+    num_reqs: int,
+    num_speculative_steps: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    cache = getattr(_GREEDY_LOCAL, "buf_cache", None)
+    if cache is None:
+        cache = {}
+        _GREEDY_LOCAL.buf_cache = cache
+    key = (device, num_speculative_steps)
+    state = cache.get(key)
+    cap = max(256, num_reqs)
+    if state is None or state[0] < num_reqs:
+        slots = [
+            (
+                torch.empty((cap, num_speculative_steps + 1), dtype=torch.int64, device=device),
+                torch.empty((cap,), dtype=torch.int32, device=device),
+                torch.empty((cap,), dtype=torch.int32, device=device),
+            )
+            for _ in range(4)
+        ]
+        state = [cap, 0, slots]
+        cache[key] = state
+    _, idx, slots = state
+    state[1] = (idx + 1) & 3
+    sampled_buf, num_sampled_buf, num_rejected_buf = slots[idx]
+    return sampled_buf[:num_reqs], num_sampled_buf[:num_reqs], num_rejected_buf[:num_reqs]
+
+
+def _greedy_rejection_sample(
+    target_logits: torch.Tensor,
+    draft_sampled: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    num_speculative_steps: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    global _NPU_RAW_STREAM_FN
+    num_reqs = cu_num_logits.shape[0] - 1
+    sampled, num_sampled, num_rejected = _get_greedy_ring_buffers(target_logits.device, num_reqs, num_speculative_steps)
+    if num_reqs == 0:
+        _GREEDY_LOCAL.last_num_rejected = None
+        return sampled, num_sampled
+    seq_lens_chunk = getattr(_GREEDY_LOCAL, "seq_lens", None)
+    idx_mapping_chunk = getattr(_GREEDY_LOCAL, "idx_mapping", None)
+    prefill_len = getattr(_GREEDY_LOCAL, "prefill_len", None)
+    use_fused_reject = (
+        seq_lens_chunk is not None
+        and idx_mapping_chunk is not None
+        and prefill_len is not None
+        and seq_lens_chunk.shape[0] >= num_reqs
+        and idx_mapping_chunk.shape[0] >= num_reqs
+    )
+    use_fused_post_update = False
+    has_penalties = False
+    num_computed_tokens_ptr = num_sampled
+    last_sampled_tokens_ptr = sampled
+    output_bin_counts_ptr = num_sampled
+    output_bin_counts_stride = 0
+    all_token_ids_ptr = num_sampled
+    all_token_ids_stride = 0
+    total_len_ptr = num_sampled
+    if use_fused_reject:
+        has_chunked_prefill_check = bool(getattr(_GREEDY_LOCAL, "has_prefill", True))
+        _GREEDY_LOCAL.last_num_rejected = num_rejected
+        req_states = getattr(_GREEDY_LOCAL, "req_states", None)
+        if (
+            getattr(_GREEDY_LOCAL, "can_fuse_post_update", False)
+            and req_states is not None
+            and not has_chunked_prefill_check
+        ):
+            use_fused_post_update = True
+            has_penalties = bool(getattr(_GREEDY_LOCAL, "has_penalties", False))
+            num_computed_tokens_ptr = req_states.num_computed_tokens.gpu
+            last_sampled_tokens_ptr = req_states.last_sampled_tokens
+            all_token_ids_ptr = req_states.all_token_ids.gpu
+            all_token_ids_stride = all_token_ids_ptr.stride(0)
+            total_len_ptr = req_states.total_len.gpu
+            if has_penalties:
+                bin_counts = _GREEDY_LOCAL.output_bin_counts
+                output_bin_counts_ptr = bin_counts
+                output_bin_counts_stride = bin_counts.stride(0)
+            _GREEDY_LOCAL.fused_post_update_done = True
+    else:
+        has_chunked_prefill_check = False
+        seq_lens_chunk = num_sampled
+        idx_mapping_chunk = num_sampled
+        prefill_len = num_sampled
+        _GREEDY_LOCAL.last_num_rejected = None
+    target_argmax = torch.argmax(target_logits, dim=-1)
+    s_stride = sampled.stride(0)
+    is_npu = target_argmax.device.type == "npu"
+    is_capturing = False
+    if is_npu:
+        import torch_npu
+
+        is_capturing = torch.npu.is_current_stream_capturing()
+        if _NPU_RAW_STREAM_FN is None:
+            _NPU_RAW_STREAM_FN = torch_npu._C._npu_getCurrentRawStream
+    if not is_npu or is_capturing:
+        _greedy_rejection_kernel[(num_reqs,)](
+            sampled,
+            s_stride,
+            num_sampled,
+            num_rejected,
+            target_argmax,
+            draft_sampled,
+            cu_num_logits,
+            seq_lens_chunk,
+            idx_mapping_chunk,
+            prefill_len,
+            num_computed_tokens_ptr,
+            last_sampled_tokens_ptr,
+            output_bin_counts_ptr,
+            output_bin_counts_stride,
+            all_token_ids_ptr,
+            all_token_ids_stride,
+            total_len_ptr,
+            HAS_FUSED_REJECT=use_fused_reject,
+            HAS_CHUNKED_PREFILL_CHECK=has_chunked_prefill_check,
+            HAS_FUSED_POST_UPDATE=use_fused_post_update,
+            HAS_PENALTIES=has_penalties,
+            num_warps=1,
+        )
+    else:
+        dev_idx = target_argmax.device.index if target_argmax.device.index is not None else 0
+        align_mask = (
+            (((sampled.data_ptr() & 15) == 0) << 0)
+            | (((num_sampled.data_ptr() & 15) == 0) << 1)
+            | (((num_rejected.data_ptr() & 15) == 0) << 2)
+            | (((target_argmax.data_ptr() & 15) == 0) << 3)
+            | (((draft_sampled.data_ptr() & 15) == 0) << 4)
+            | (((cu_num_logits.data_ptr() & 15) == 0) << 5)
+            | (((seq_lens_chunk.data_ptr() & 15) == 0) << 6)
+            | (((idx_mapping_chunk.data_ptr() & 15) == 0) << 7)
+            | (((prefill_len.data_ptr() & 15) == 0) << 8)
+            | (((num_computed_tokens_ptr.data_ptr() & 15) == 0) << 9)
+            | (((last_sampled_tokens_ptr.data_ptr() & 15) == 0) << 10)
+            | (((output_bin_counts_ptr.data_ptr() & 15) == 0) << 11)
+            | (((all_token_ids_ptr.data_ptr() & 15) == 0) << 12)
+            | (((total_len_ptr.data_ptr() & 15) == 0) << 13)
+        )
+        kcache = getattr(_GREEDY_LOCAL, "kernel_cache", None)
+        if kcache is None:
+            kcache = {}
+            _GREEDY_LOCAL.kernel_cache = kcache
+        kkey = (
+            dev_idx,
+            align_mask,
+            s_stride == 1,
+            output_bin_counts_stride == 1,
+            all_token_ids_stride == 1,
+            use_fused_reject,
+            has_chunked_prefill_check,
+            use_fused_post_update,
+            has_penalties,
+        )
+        k = kcache.get(kkey)
+        if k is None:
+            k = _greedy_rejection_kernel[(num_reqs,)](
+                sampled,
+                s_stride,
+                num_sampled,
+                num_rejected,
+                target_argmax,
+                draft_sampled,
+                cu_num_logits,
+                seq_lens_chunk,
+                idx_mapping_chunk,
+                prefill_len,
+                num_computed_tokens_ptr,
+                last_sampled_tokens_ptr,
+                output_bin_counts_ptr,
+                output_bin_counts_stride,
+                all_token_ids_ptr,
+                all_token_ids_stride,
+                total_len_ptr,
+                HAS_FUSED_REJECT=use_fused_reject,
+                HAS_CHUNKED_PREFILL_CHECK=has_chunked_prefill_check,
+                HAS_FUSED_POST_UPDATE=use_fused_post_update,
+                HAS_PENALTIES=has_penalties,
+                num_warps=1,
+            )
+            kcache[kkey] = k
+        else:
+            st = _NPU_RAW_STREAM_FN(dev_idx)
+            k.run(
+                num_reqs,
+                1,
+                1,
+                st,
+                k.function,
+                k.packed_metadata,
+                None,
+                None,
+                None,
+                sampled,
+                s_stride,
+                num_sampled,
+                num_rejected,
+                target_argmax,
+                draft_sampled,
+                cu_num_logits,
+                seq_lens_chunk,
+                idx_mapping_chunk,
+                prefill_len,
+                num_computed_tokens_ptr,
+                last_sampled_tokens_ptr,
+                output_bin_counts_ptr,
+                output_bin_counts_stride,
+                all_token_ids_ptr,
+                all_token_ids_stride,
+                total_len_ptr,
+                use_fused_reject,
+                has_chunked_prefill_check,
+                use_fused_post_update,
+                has_penalties,
+            )
+    return sampled, num_sampled
 
 
 @triton.jit
@@ -387,9 +717,9 @@ def rejection_sample(
     ):
         raise NotImplementedError("Watermarking is not supported in the NPU rejection sampler.")
     if use_block_verification:
-        assert synthetic_conditional_rates is None, (
-            "Block verification is incompatible with synthetic acceptance rates."
-        )
+        assert (
+            synthetic_conditional_rates is None
+        ), "Block verification is incompatible with synthetic acceptance rates."
 
     if use_entropy_verify is None:
         config = get_ascend_config().rejection_sampler_config
@@ -405,6 +735,21 @@ def rejection_sample(
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
     has_draft_logits = draft_logits is not None
+    if (
+        getattr(_GREEDY_LOCAL, "all_greedy", False)
+        and not has_draft_logits
+        and synthetic_conditional_rates is None
+        and not use_block_verification
+        and fly_window_size == 0
+        and watermark_key is None
+        and num_logits > 0
+    ):
+        return _greedy_rejection_sample(
+            target_logits,
+            draft_sampled,
+            cu_num_logits,
+            num_speculative_steps,
+        )
 
     # Both upstream kernels detect bonus rows using the total logit count.
     stats_num_logits = num_logits
@@ -697,3 +1042,6 @@ def rejection_sample(
         use_block_verification=use_block_verification,
     )
     return sampled, num_sampled
+
+
+rejection_sample._fused_ctx = _GREEDY_LOCAL  # type: ignore[attr-defined]

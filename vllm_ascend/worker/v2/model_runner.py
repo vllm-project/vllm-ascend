@@ -1181,73 +1181,92 @@ class NPUModelRunner(GPUModelRunner):
                 pad_size = min(pad_size, int(dp_sync.num_tokens_across_dp.max().item()))
         return pad_size
 
+    def _get_fused_rejection_ctx(self):
+        if self.rejection_sampler is None:
+            return None
+        fused_ctx = getattr(self.rejection_sampler, "_fused_ctx", None)
+        if fused_ctx is None:
+            from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import _GREEDY_LOCAL
+
+            fused_ctx = _GREEDY_LOCAL
+            self.rejection_sampler._fused_ctx = fused_ctx  # type: ignore[attr-defined]
+        return fused_ctx
+
     def sample(self, hidden_states, input_batch, grammar_output):
         """Override GPUModelRunner.sample for lmhead TP: every rank must feed
         compute_logits the same row count — pad up to ``_lmhead_tp_max_num_logits()``
         and trim back; prompt_logprobs stays unsupported (same as V1)."""
-        if not lmhead_tp_enable():
-            return super().sample(hidden_states, input_batch, grammar_output)
+        fused_ctx = self._get_fused_rejection_ctx()
+        if fused_ctx is not None:
+            fused_ctx.allow_post_update = self.is_last_pp_rank and getattr(self, "batch_sharder", None) is None
+            fused_ctx.fused_post_update_done = False
+        try:
+            if not lmhead_tp_enable():
+                return super().sample(hidden_states, input_batch, grammar_output)
 
-        num_logits = input_batch.logits_indices.shape[0]
-        capacity = getattr(self, "_lmhead_pad_size", None) or self._lmhead_tp_max_num_logits()
-        # V1-style index pad: pad a private copy of the indices (input_batch keeps
-        # the real ones; the V2 sampler gathers penalties by them) so one gather
-        # feeds compute_logits the capacity rows; zero entries gather row 0.
-        sample_indices = lmhead_tp_pad_rows(
-            input_batch.logits_indices,
-            capacity,
-            "max_num_reqs * decode_query_len",
-        )
-        logits = self.model.compute_logits(hidden_states[sample_indices])
-        logits = logits[:num_logits]
-
-        # Dispatch tail mirrors GPUModelRunner.sample; refresh it on main bumps.
-        invalid_drafts = None
-        # A diffusion prefill has no logit rows even when a bitmask row arrived.
-        if grammar_output is not None and logits.shape[0] > 0:
-            # Apply grammar bitmask to the logits in-place.
-            assert self.structured_outputs_worker is not None
-            self.structured_outputs_worker.apply_grammar_bitmask(
-                logits,
-                input_batch,
-                grammar_output.structured_output_request_ids,
-                grammar_output.grammar_bitmask,
+            num_logits = input_batch.logits_indices.shape[0]
+            capacity = getattr(self, "_lmhead_pad_size", None) or self._lmhead_tp_max_num_logits()
+            # V1-style index pad: pad a private copy of the indices (input_batch keeps
+            # the real ones; the V2 sampler gathers penalties by them) so one gather
+            # feeds compute_logits the capacity rows; zero entries gather row 0.
+            sample_indices = lmhead_tp_pad_rows(
+                input_batch.logits_indices,
+                capacity,
+                "max_num_reqs * decode_query_len",
             )
-            if vllm_version_is("0.33.0"):
-                # 0.33.0 rejects drafts verified against a permissive grammar
-                # row; main moved that bookkeeping into the scheduler and the
-                # draft-token handler.
-                import vllm.v1.worker.gpu.structured_outputs as structured_outputs  # type: ignore[import-not-found]
+            logits = self.model.compute_logits(hidden_states[sample_indices])
+            logits = logits[:num_logits]
 
-                invalid_drafts = structured_outputs.grammar_invalid_drafts(  # type: ignore[attr-defined]
+            # Dispatch tail mirrors GPUModelRunner.sample; refresh it on main bumps.
+            invalid_drafts = None
+            # A diffusion prefill has no logit rows even when a bitmask row arrived.
+            if grammar_output is not None and logits.shape[0] > 0:
+                # Apply grammar bitmask to the logits in-place.
+                assert self.structured_outputs_worker is not None
+                self.structured_outputs_worker.apply_grammar_bitmask(
+                    logits,
                     input_batch,
                     grammar_output.structured_output_request_ids,
-                    grammar_output.num_acceptable_drafts,  # type: ignore[attr-defined]
+                    grammar_output.grammar_bitmask,
                 )
+                if vllm_version_is("0.33.0"):
+                    # 0.33.0 rejects drafts verified against a permissive grammar
+                    # row; main moved that bookkeeping into the scheduler and the
+                    # draft-token handler.
+                    import vllm.v1.worker.gpu.structured_outputs as structured_outputs  # type: ignore[import-not-found]
 
-        if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
-            assert self.sampler is not None
-            sampler_output = self.sampler(logits, input_batch)
-        else:
-            # Rejection sampling for spec decoding.
-            assert self.rejection_sampler is not None
-            assert self.speculator is not None
-            if vllm_version_is("0.33.0"):
-                sampler_output = self.rejection_sampler(
-                    logits,
-                    input_batch,
-                    # Draft logits are needed for probabilistic rejection sampling.
-                    self.speculator.draft_logits,
-                    invalid_drafts,
-                )
+                    invalid_drafts = structured_outputs.grammar_invalid_drafts(  # type: ignore[attr-defined]
+                        input_batch,
+                        grammar_output.structured_output_request_ids,
+                        grammar_output.num_acceptable_drafts,  # type: ignore[attr-defined]
+                    )
+
+            if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
+                assert self.sampler is not None
+                sampler_output = self.sampler(logits, input_batch)
             else:
-                sampler_output = self.rejection_sampler(
-                    logits,
-                    input_batch,
-                    self.speculator.draft_logits,
-                )
+                # Rejection sampling for spec decoding.
+                assert self.rejection_sampler is not None
+                assert self.speculator is not None
+                if vllm_version_is("0.33.0"):
+                    sampler_output = self.rejection_sampler(
+                        logits,
+                        input_batch,
+                        # Draft logits are needed for probabilistic rejection sampling.
+                        self.speculator.draft_logits,
+                        invalid_drafts,
+                    )
+                else:
+                    sampler_output = self.rejection_sampler(
+                        logits,
+                        input_batch,
+                        self.speculator.draft_logits,
+                    )
 
-        return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
+            return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
+        finally:
+            if fused_ctx is not None:
+                fused_ctx.allow_post_update = False
 
     @contextmanager
     def _preserve_dummy_query_tokens(self, num_tokens: int, uniform_decode: bool):
@@ -1438,6 +1457,12 @@ class NPUModelRunner(GPUModelRunner):
         draft_tokens=None,
     ):
         """Update device state and refresh exact CPU counts when required."""
+        fused_ctx = self._get_fused_rejection_ctx()
+        fused_post_update_done = False
+        if fused_ctx is not None and getattr(fused_ctx, "fused_post_update_done", False):
+            fused_post_update_done = True
+            fused_ctx.fused_post_update_done = False
+
         if (
             self.use_pp
             and not self.is_last_pp_rank
@@ -1448,7 +1473,9 @@ class NPUModelRunner(GPUModelRunner):
             # Restore its rows before Mamba aligns the accepted recurrent state.
             # Postprocess skips -1 (freed/unsampled) rows; gather needs valid indices.
             self.block_tables.gather_block_tables(idx_mapping.clamp_min(0), idx_mapping.shape[0])
-        if draft_tokens is None:
+        if fused_post_update_done and draft_tokens is None:
+            self.model_state.postprocess_state(idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu)
+        elif draft_tokens is None:
             super().postprocess_sampled(
                 idx_mapping,
                 sampled_tokens,
