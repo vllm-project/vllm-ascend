@@ -1,8 +1,0 @@
-pr: 22062
-entries:
-  - category: hardware
-    text: >-
-      Added experimental A2/A3 support for HiSparse sparse MLA/SFA inference
-      with INT8 C8 KV caches. Enable it with Model Runner V2, HiSparseConnector
-      and hisparse_config, using int8 for kv_cache_dtype and indexer_kv_dtype.
-    hardware: [A2, A3]
