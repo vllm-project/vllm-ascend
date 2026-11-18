@@ -1,4 +1,4 @@
-# vLLM-Ascend KV Pool Environment Checker v1.0.0
+# vLLM-Ascend KV Pool Environment Checker v1.1.0
 
 This tool performs pre-deployment environment checks for vLLM-Ascend KV Pool deployments. It identifies dependency issues, reports blocking conditions and remediation guidance, and executes supported local repairs only after explicit authorization.
 
@@ -65,11 +65,12 @@ Run `python examples/kvpool_envcheck/kvpool_envcheck.py -h` to view complete hel
 
 | Parameter | Description |
 |---|---|
-| `--hardware` | Hardware platform. Currently supports A2 and A3, and must match the hardware detected in the current container |
+| `--hardware` | Hardware platform. Currently supports A2, A3, and 950PR&950DT Products, and must match the hardware detected in the current container |
 | `--backend` | KV Pool backend. Currently supports `memcache` and `mooncake` |
-| `--managed-memory-mb MB` | Total backend-managed memory in MB. Must be greater than 0 and is compared against global capacity |
+| `--managed-memory-mb MB` | Total backend-managed memory in MB. Must be greater than 0 and is compared against the hardware-specific capacity |
 | `--deployment-mode` | `single-node` or `multi-node` |
-| `--link-type` | `roce` or `hccs`. A2 supports only `roce`; A3 supports both |
+| `--link-type` | `roce`, `hccs`, or `ub`. A2 supports only `roce`; A3 supports `roce` and `hccs`; 950PR&950DT Products support only `ub` |
+| `--peer-eid EID` | Optional 950PR&950DT Products multi-node peer EID for `urma_ping`; requires A5, `ub`, and `multi-node` |
 
 Configuration constraints:
 
@@ -78,8 +79,39 @@ Configuration constraints:
 - A3 with `roce` runs static RoCE port checks and dynamic local NPU-to-NPU checks.
 - A3 with `hccs` runs static and dynamic intra-node SIO/HCCS checks. Multi-node deployments also require manual confirmation of the Lingqu CC version.
 - A3 Mooncake requires HDK `>=25.5.0` with Mooncake `>=0.3.11.post1`, or HDK `>=26.0.0` with no minimum Mooncake version. A2 Mooncake requires Mooncake `>=0.3.11.post1`.
+- 950PR&950DT Products use the `ub` link type. The checker validates the NPU `UB` topology, physical UB/UBOE ports, active URMA endpoints, and 950PR&950DT Products-specific container paths.
+- 950PR&950DT Products host memory uses `MemAvailable`. The requested target must not exceed it.
+- 950PR&950DT Products residual 1 GB and 2 MB huge pages produce a performance warning. Explicit `--fix` clears these pools and rechecks them.
+- Launch environment variables are not checked; configure them in the actual vLLM launch environment.
 - `KERNEL-001` applies only to multi-node deployments. Single-node deployments return `NOT_APPLICABLE` and are not blocked by this rule.
 - The `--hardware` value must be supported and must exactly match the detected hardware.
+
+### 950PR&950DT Products checks
+
+The 950PR&950DT Products path is intended for Ascend 950PR/950DT Products:
+
+```bash
+python kvpool_envcheck.py \
+  --hardware A5 \
+  --backend mooncake \
+  --managed-memory-mb 32768 \
+  --deployment-mode multi-node \
+  --link-type ub \
+  --peer-eid <remote-eid>
+```
+
+The container must expose:
+
+- `/dev/davinci*`, `/dev/davinci_manager`, and `/dev/hisi_hdc`
+- `/dev/ummu` and `/dev/uburma`
+- `npu-smi`, `hccn_tool`, `urma_admin`, and optionally `urma_ping`
+- `/usr/local/Ascend/driver`
+- `/etc/hccn.conf`, `/etc/hccl_rootinfo.json`, and `/etc/hixlep`
+- `/lib/route.conf`
+
+`--peer-eid` is optional. Without it, cross-node `urma_ping` is reported as `NOT_EXECUTED`; local UB and URMA topology checks still run. An actual multi-node preflight should provide the remote ACTIVE EID.
+
+Mooncake supports two A3 HDK paths: HDK `>=26.0.0` with any installed `mooncake-transfer-engine-npu` version, or HDK `>=25.5.0` with `mooncake-transfer-engine-npu >=0.3.11.post1`. A2 and 950PR&950DT Products require `mooncake-transfer-engine-npu >=0.3.11.post1`. All Mooncake deployments require glibc `>=2.35`. Memcache requires both `memfabric-hybrid >=1.3.0` and `memcache-hybrid >=1.3.0`.
 
 ## SSD Offload
 
@@ -116,9 +148,9 @@ python examples/kvpool_envcheck/kvpool_envcheck.py \
   --output-dir ./results
 ```
 
-Currently, only `MEM-001` on A3 supports automatic repair. When both 1 GB and 2 MB scans report insufficient global capacity, the tool attempts to drop caches inside the container and rescans. This action requires root privileges and a writable `/proc/sys/vm/drop_caches`, and may temporarily affect I/O.
+Currently, `MEM-001` on A3 supports cache-drop repair, and `A5-HUGEPAGE-001` supports clearing residual 950PR&950DT Products 1 GB and 2 MB huge pages. Both actions require root privileges and an explicit `--fix`.
 
-The tool does not drop caches when A2 static huge pages are insufficient. It also does not automatically upgrade HDK, CANN, the kernel, network devices, container mounts, or software packages. The result includes manual remediation guidance for these cases. Repair action states are `SUCCESS`, `NO_EFFECT`, `FAILED`, `SKIPPED`, and `MANUAL`.
+The tool does not drop caches when A2 static huge pages are insufficient. It also does not automatically upgrade HDK, CANN, the kernel, network devices, container mounts, security settings, or software packages. The result includes manual remediation guidance for these cases. Repair action states are `SUCCESS`, `NO_EFFECT`, `FAILED`, `SKIPPED`, and `MANUAL`.
 
 ## Output states and exit codes
 
