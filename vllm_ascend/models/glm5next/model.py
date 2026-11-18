@@ -972,6 +972,12 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, DeepseekV2Mixtur
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
+    def set_embedding_num_tokens_padded(self, num_tokens_padded: int) -> None:
+        # MRV2 prepares embeddings before ForwardContext is available.
+        # Use the current PCP batch span instead of the static token capacity.
+        if not isinstance(self.model.embed_tokens, PPMissingLayer):
+            self.model.embed_tokens.set_embedding_num_tokens_padded(num_tokens_padded)
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -1130,6 +1136,9 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
         # wrapper so PP ranks > 0 can materialize placeholder intermediate
         # tensors (the vision tower only executes on the first rank).
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+
+    def set_embedding_num_tokens_padded(self, num_tokens_padded: int) -> None:
+        self.language_model.set_embedding_num_tokens_padded(num_tokens_padded)
 
     def load_weights(self, weights: Iterable[tuple[Any, ...]]) -> set[str]:
         # The visual merger's down_proj already contains the exported rotation.
