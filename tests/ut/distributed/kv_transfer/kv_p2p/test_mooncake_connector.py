@@ -19,8 +19,7 @@ import zmq
 from vllm.config import KVTransferConfig
 from vllm.utils.network_utils import make_zmq_path
 
-# vLLM #61183 moved these KV-cache planning helpers to `kv_cache_planning` on
-# main; the v0.33.0 lane still ships them in `kv_cache_utils`.
+# vLLM #61183 moved these KV-cache planning helpers to `kv_cache_planning` on main.
 from vllm.v1.core.kv_cache_planning import (
     get_kv_cache_config_from_groups,
     is_kv_cache_spec_uniform,

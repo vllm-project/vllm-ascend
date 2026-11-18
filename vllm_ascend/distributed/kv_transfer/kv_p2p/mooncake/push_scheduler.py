@@ -145,10 +145,7 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                     continue
                 request, block_ids, num_external_tokens = self._reqs_need_send_layerwise[req_id]
                 if new_blocks is not None:
-                    if vllm_version_is("0.33.0") and req_id in cached_reqs.resumed_req_ids:
-                        block_ids = tuple(list(group) for group in new_blocks)
-                    else:
-                        block_ids = tuple(old + new for old, new in zip(block_ids, new_blocks, strict=True))
+                    block_ids = tuple(old + new for old, new in zip(block_ids, new_blocks, strict=True))
                     self._reqs_need_send_layerwise[req_id] = request, block_ids, num_external_tokens
             for req_id, num_scheduled_tokens in scheduler_output.num_scheduled_tokens.items():
                 if req_id not in self._reqs_need_send_layerwise or req_id in self._reqs_need_send:
