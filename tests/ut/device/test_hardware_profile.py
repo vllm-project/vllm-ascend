@@ -59,6 +59,7 @@ _EXPECTED_CAPABILITIES = {
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.NPU_TOP_K_TOP_P,
         HardwareCapability.FLASH_ATTN_NPU_3,
+        HardwareCapability.GROUPED_MATMUL_SITU_QUANT,
     },
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
@@ -66,6 +67,7 @@ _EXPECTED_CAPABILITIES = {
         HardwareCapability.NATIVE_INT8_SPARSE,
         HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
         HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
+        HardwareCapability.GROUPED_MATMUL_SITU_QUANT,
         HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
         HardwareCapability.RMS_NORM_CAST,

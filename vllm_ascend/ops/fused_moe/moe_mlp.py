@@ -67,6 +67,18 @@ def apply_moe_mlp(
                 quant_method=quant_method,
             )
 
+    fused_mlp = getattr(quant_method, "try_apply_fused_mlp", None)
+    if fused_mlp is not None:
+        try:
+            overlap = get_ascend_config().multistream_overlap_shared_expert
+        except RuntimeError:
+            # With no config, preserve the unfused path's event contract.
+            overlap = True
+        if not overlap:
+            fused_output = fused_mlp(mlp_compute_input)
+            if fused_output is not None:
+                return fused_output, None
+
     if quant_method.supports_fused_activation(mlp_compute_input.activation):
         hidden_states, act_out_scale = quant_method.apply_gmm1_act_quant(mlp_compute_input)
     else:

@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
@@ -46,6 +47,13 @@ _INT4_VALUES_PER_BYTE = 2
 _INT4_VALUES_PER_INT32 = 8
 _INT4_NZ_OUTPUT_ALIGNMENT = 64
 _INT4_NZ_INPUT_ALIGNMENT = 16
+_SITU_GMM_INPUT_ALIGNMENT = 64
+_SITU_GMM_OUTPUT_ALIGNMENT = 64
+ACL_FORMAT_FRACTAL_NZ_C0_16 = 50
+SITU_MLP_SHAPES = {(7, 3584): 6144, (14, 7168): 7168}
+# Route by graph capacity; the live count can change on replay. E14 large batches
+# benefit from the wider tiles and split-band overlap in the existing fusion.
+SITU_MLP_CAPACITY_LIMITS = {7: 2048, 14: 128}
 
 
 @register_scheme("W4A8_DYNAMIC", "moe")
@@ -142,6 +150,10 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else get_ascend_config().eplb_config.dynamic_eplb
         self.use_expert_weight_list = self.dynamic_eplb or (
             vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
+        )
+        # A2/A3 can fuse GMM1, SiTU, and per-token quantization.
+        self._fuse_gmm_situ_quant = get_current_hardware_profile().supports(
+            HardwareCapability.GROUPED_MATMUL_SITU_QUANT
         )
         if self.quant_method == ASCEND_QUANTIZATION_METHOD and self.tp_size > _MODELSLIM_SCALE_BIAS_PARTITIONS:
             raise ValueError(f"The current weight does not support moe part tp>{_MODELSLIM_SCALE_BIAS_PARTITIONS}.")
@@ -456,6 +468,140 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             w2_scale_bias=[layer.w2_scale_bias.detach()] if hasattr(layer, "w2_scale_bias") else None,
         )
 
+    def _fused_gmm1_situ_quant(
+        self,
+        *,
+        x: torch.Tensor,
+        weight,
+        weight_scale,
+        weight_assist_matrix,
+        x_scale: torch.Tensor,
+        group_list: torch.Tensor,
+        group_list_type: int,
+        beta: float,
+        linear_beta: float,
+    ):
+        """GMM1 + SiTU + per-token 量化的融合入口（A8W4 MSD，ND / NZ 两种权重排布）。
+
+        ND/NZ 入口由 NPU 存储格式决定，堆叠和逐专家列表由权重维数区分。
+        补偿矩阵直接复用加载时算好的 ``w13_scale_bias``（``8*Σw``）。
+
+        返回 ``(y, y_scale)``：``y`` 是 int8 ``[M, N/2]``，``y_scale`` 是 fp32 ``[M]``。
+        """
+        weights = weight if isinstance(weight, (list, tuple)) else [weight]
+        scales = weight_scale if isinstance(weight_scale, (list, tuple)) else [weight_scale]
+        assists = weight_assist_matrix if isinstance(weight_assist_matrix, (list, tuple)) else [weight_assist_matrix]
+        weight_dim = weights[0].dim()
+        if weight_dim not in (2, 3):
+            raise ValueError(f"SiTU fusion expects 2-D per-expert or 3-D stacked weights, got {weight_dim}-D")
+        weight_format = int(torch_npu.get_npu_format(weights[0]))
+        nz = weight_format in (ACL_FORMAT_FRACTAL_NZ, ACL_FORMAT_FRACTAL_NZ_C0_16)
+        op = (
+            torch.ops._C_ascend.grouped_matmul_situ_quant_weight_nz
+            if nz
+            else torch.ops._C_ascend.grouped_matmul_situ_quant
+        )
+        if weight_dim == 3:
+            # 堆叠形态：E 维在张量自身，走单张量入口；逐专家形态才走 .list 入口。
+            weights, scales, assists = weights[0], scales[0], assists[0]
+        else:
+            if len(weights) == 1:
+                # aclnn 用「list 长度 == 1」判定单张量形态（isSingle），此时三份逐专家输入
+                # 都要带 E 维；单专家（E == 1）的逐专家元素是 2 维，这里补一维。
+                weights = [weights[0].unsqueeze(0)]
+                scales = [scales[0].unsqueeze(0)]
+                assists = [assists[0].unsqueeze(0)]
+            op = op.list
+        return op(
+            x=x,
+            weight=weights,
+            weight_scale=scales,
+            weight_assist_matrix=assists,
+            bias=None,
+            x_scale=x_scale,
+            smooth_scale=None,
+            group_list=group_list,
+            dequant_mode=0,
+            dequant_dtype=0,
+            quant_mode=0,
+            group_list_type=group_list_type,
+            tuning_config=None,
+            beta=beta,
+            linear_beta=linear_beta,
+        )
+
+    @staticmethod
+    def _supports_fused_situ_shape(x: torch.Tensor, weight_scales: list[torch.Tensor]) -> bool:
+        """Keep unsupported shapes on the existing grouped-matmul path."""
+        return (
+            x.ndim == 2
+            and x.shape[1] > 0
+            and x.shape[1] % _SITU_GMM_INPUT_ALIGNMENT == 0
+            and bool(weight_scales)
+            and weight_scales[0].ndim > 0
+            and weight_scales[0].shape[-1] > 0
+            and weight_scales[0].shape[-1] % (2 * _SITU_GMM_OUTPUT_ALIGNMENT) == 0
+        )
+
+    def try_apply_fused_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor | None:
+        if (
+            not self._fuse_gmm_situ_quant
+            or self.use_expert_weight_list
+            or mlp_compute_input.dynamic_eplb
+            or mlp_compute_input.lora_context is not None
+            or mlp_compute_input.activation != MoEActivation.SITU
+            or mlp_compute_input.group_list_type not in (0, 1)
+        ):
+            return None
+
+        layer = mlp_compute_input.layer
+        x = mlp_compute_input.hidden_states
+        groups = mlp_compute_input.group_list
+        if layer is None or x.ndim != 2 or groups.ndim != 1:
+            return None
+        experts, width = groups.size(0), x.size(1)
+        up_width = SITU_MLP_SHAPES.get((experts, width))
+        if up_width is None or x.size(0) > SITU_MLP_CAPACITY_LIMITS[experts]:
+            return None
+        up_weight = getattr(layer, "w13_weight", None)
+        down_weight = getattr(layer, "w2_weight", None)
+        if up_weight is None or down_weight is None:
+            return None
+        if (
+            up_weight.shape != (experts, width, up_width // 8)
+            or down_weight.shape != (experts, up_width // 2, width // 8)
+            or up_weight.dtype != torch.int32
+            or down_weight.dtype != torch.int32
+            or int(torch_npu.get_npu_format(up_weight)) != ACL_FORMAT_FRACTAL_NZ
+            or int(torch_npu.get_npu_format(down_weight)) != ACL_FORMAT_FRACTAL_NZ
+        ):
+            return None
+        up_compensation = getattr(layer, "w13_scale_bias", None)
+        down_compensation = getattr(layer, "w2_scale_bias", None)
+        if up_compensation is None or down_compensation is None:
+            return None
+        op = getattr(torch.ops._C_ascend, "grouped_matmul_situ_quant_mlp", None)
+        if op is None:
+            return None
+        x, x_scale = self._quant_hidden_states(x, mlp_compute_input.dynamic_scale)
+        beta = mlp_compute_input.activation_situ_beta
+        output = op(
+            x,
+            x_scale.reshape(-1),
+            groups.to(torch.int64),
+            up_weight,
+            layer.w13_weight_scale,
+            up_compensation,
+            down_weight,
+            layer.w2_weight_scale,
+            down_compensation,
+            mlp_compute_input.group_list_type,
+            1.0 if beta is None else beta,
+            mlp_compute_input.activation_situ_linear_beta or 0.0,
+        )
+        dispose_tensor(mlp_compute_input.hidden_states)
+        return output
+
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
         hidden_states = mlp_compute_input.hidden_states
         hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
@@ -465,6 +611,28 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         group_list, group_list_type = self._maybe_convert_group_list(mlp_compute_input)
 
         if mlp_compute_input.activation == MoEActivation.SITU:
+            beta = 1.0 if mlp_compute_input.activation_situ_beta is None else mlp_compute_input.activation_situ_beta
+            linear_beta = mlp_compute_input.activation_situ_linear_beta or 0.0
+            if (
+                self._fuse_gmm_situ_quant
+                and bias1 is not None
+                and self._supports_fused_situ_shape(hidden_states, w1_scale)
+            ):
+                # GMM1、SiTU-GLU 与 per-token 量化合成一个算子；补偿矩阵复用 w13_scale_bias。
+                hidden_states, swiglu_out_scale = self._fused_gmm1_situ_quant(
+                    x=hidden_states,
+                    weight=w1,
+                    weight_scale=w1_scale,
+                    weight_assist_matrix=bias1,
+                    x_scale=pertoken_scale,
+                    # 融合算子按 INT64 读每个专家的行数；group_list 从路由过来是 int32。
+                    group_list=group_list.to(torch.int64),
+                    group_list_type=group_list_type,
+                    beta=beta,
+                    linear_beta=linear_beta,
+                )
+                dispose_tensor(mlp_compute_input.hidden_states)
+                return hidden_states, swiglu_out_scale
             # SituAndMul: run the dequantized gmm1 first, then fuse the situ
             # activation with dynamic output quantization (Kimi K3 W4A8).
             # W4A8 only supports per-channel weights (is_per_channel_weight is
@@ -496,8 +664,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 # skips the dead tail rows of the worst-case expanded
                 # buffer; group_list arrives as int32 from routing.
                 group_index=(group_list.to(torch.int64) if group_list is not None else None),
-                beta=1.0 if mlp_compute_input.activation_situ_beta is None else mlp_compute_input.activation_situ_beta,
-                linear_beta=mlp_compute_input.activation_situ_linear_beta or 0.0,
+                beta=beta,
+                linear_beta=linear_beta,
                 activate_left=True,
                 quant_mode="dynamic",
             )

@@ -59,6 +59,7 @@
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
 #include "moe/grouped_matmul_situ_quant/grouped_matmul_situ_quant_torch_adpt.h"
+#include "moe/grouped_matmul_situ_quant_mlp/grouped_matmul_situ_quant_mlp_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2936,6 +2937,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "int[]? tuning_config, float beta, float linear_beta) -> (Tensor output, Tensor output_scale)");
     ops.impl("grouped_matmul_situ_quant_weight_nz.list", torch::kPrivateUse1,
              &ascend_kernel::gmm_situ_quant_v2_nz_list);
+    ops.def(
+        "grouped_matmul_situ_quant_mlp(Tensor x, Tensor x_scale, Tensor group_list, "
+        "Tensor up_weight, Tensor up_scale, Tensor up_compensation, Tensor down_weight, "
+        "Tensor down_scale, Tensor down_compensation, int group_list_type, float beta, float linear_beta) -> Tensor");
+    ops.impl("grouped_matmul_situ_quant_mlp", torch::kPrivateUse1, &ascend_kernel::gmm_situ_quant_mlp);
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel custom ops
