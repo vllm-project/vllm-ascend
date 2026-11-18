@@ -138,6 +138,64 @@ def test_ascendc_segments_preserve_checkpoint_and_final_state(offset, length):
     torch.testing.assert_close(actual_final, final, rtol=0, atol=0)
 
 
+def test_cache_hit_prefill_exports_tail_in_one_model_step(monkeypatch, model_name="Qwen/Qwen3.5-35B-A3B"):
+    """Exercise private checkpoint pages through the real two-layer engine."""
+    from vllm import LLM, SamplingParams
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    steps = []
+    original_schedule = Scheduler.schedule
+
+    def record_schedule(self, *args, **kwargs):
+        output = original_schedule(self, *args, **kwargs)
+        steps.append(dict(output.num_scheduled_tokens))
+        return output
+
+    def two_layer_config(config):
+        text = getattr(config, "text_config", config)
+        text.num_hidden_layers = 2
+        text.layer_types = ["linear_attention", "full_attention"]
+        text.num_experts = 4
+        text.num_experts_per_tok = 2
+        return config
+
+    monkeypatch.setattr(Scheduler, "schedule", record_schedule)
+    engine = LLM(
+        model=model_name,
+        load_format="dummy",
+        hf_overrides=two_layer_config,
+        dtype="bfloat16",
+        tensor_parallel_size=1,
+        enable_prefix_caching=True,
+        prefix_match_unit=128,
+        block_size=2048,
+        max_model_len=8192,
+        max_num_batched_tokens=8192,
+        max_num_seqs=4,
+        gpu_memory_utilization=0.2,
+        enforce_eager=True,
+        limit_mm_per_prompt={"image": 0, "video": 0},
+        additional_config={"gdn_internal_prefill_checkpoints": True},
+    )
+    params = SamplingParams(max_tokens=1, ignore_eos=True, temperature=0)
+    for hit, end in [(2048, 3512), (2176, 3512), (896, 1211)]:
+        assert engine.reset_prefix_cache()
+        seed = [i % 1000 + 100 for i in range(hit + 1)]
+        engine.generate([{"prompt_token_ids": seed}], params, use_tqdm=False)
+        prompt = seed[:hit] + [2000 + i % 1000 for i in range(end - hit)]
+        steps.clear()
+        output = engine.generate([{"prompt_token_ids": prompt}], params, use_tqdm=False)[0]
+        assert output.num_cached_tokens == hit
+        assert [sum(row.values()) for row in steps if row] == [end - hit]
+        steps.clear()
+        replay = engine.generate([{"prompt_token_ids": prompt}], params, use_tqdm=False)[0]
+        boundary = (end - 1) // 128 * 128
+        assert replay.num_cached_tokens == boundary
+        assert [sum(row.values()) for row in steps if row] == [end - boundary]
+
+
 @pytest.mark.usefixtures("_init_checkpoint_prefill_ops")
 @pytest.mark.parametrize("layout", ["head_first", "token_slice"])
 @pytest.mark.parametrize("cache_dtype", [torch.float32, torch.bfloat16, torch.float16])

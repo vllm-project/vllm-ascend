@@ -143,6 +143,33 @@ def test_workspace_sharing_and_fallback():
     assert fallback._ascend_checkpoint_workspace is None
 
 
+@pytest.mark.parametrize(
+    "enabled,mrv2,speculative,expected",
+    [(True, True, False, True), (False, True, False, False), (True, False, False, False), (True, True, True, False)],
+)
+def test_private_checkpoint_spec_requires_supported_worker(monkeypatch, enabled, mrv2, speculative, expected):
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    spec = MambaSpec(block_size=2048, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
+    if not hasattr(spec, "separate_prefill_checkpoint_blocks"):
+        assert (
+            gdn_checkpoint.separate_gdn_checkpoint_spec(
+                SimpleNamespace(_ascend_internal_checkpoint_enabled=False), spec
+            )
+            is spec
+        )
+        return
+    monkeypatch.setattr(gdn_checkpoint.envs, "VLLM_USE_V2_MODEL_RUNNER", mrv2)
+    layer = SimpleNamespace(
+        _ascend_internal_checkpoint_enabled=enabled,
+        _exports_checkpoints=True,
+        vllm_config=SimpleNamespace(speculative_config=object() if speculative else None),
+    )
+    actual = gdn_checkpoint.separate_gdn_checkpoint_spec(layer, spec)
+    assert actual.separate_prefill_checkpoint_blocks is expected
+    assert not spec.separate_prefill_checkpoint_blocks
+
+
 @pytest.mark.parametrize("suppress_level", [0, 3])
 def test_chunk_forward_only_returns_converted_intermediates_when_requested(monkeypatch, suppress_level):
     q = torch.zeros(1, 4, 1, 8, dtype=torch.bfloat16)

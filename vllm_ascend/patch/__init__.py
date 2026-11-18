@@ -962,6 +962,19 @@
 #
 # ** 14. File: worker/patch_qwen3_5.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   `QwenGatedDeltaNetAttention.get_kv_cache_spec`
+#    Why:
+#       A cache-hit prefill may have no safe positional checkpoint slot.
+#    How:
+#       With internal checkpoints enabled, MRV2 and a compatible paired core,
+#       advertise private checkpoint pages carried in scheduler metadata.
+#       The existing block table continues to identify only running states.
+#    Related PR:
+#       vllm-project/vllm#60888 addresses positional slot reuse. This adapter
+#       also covers shared block-aligned hits and sub-block prompts.
+#    Future Plan:
+#       Remove the wrapper when upstream GDN backends advertise independent
+#       checkpoint destinations through their native cache-spec interface.
 #   1. `vllm.model_executor.models.qwen3_5.Qwen3_5GatedDeltaNet._forward_core`
 #    Why:
 #       The class Qwen3_5GatedDeltaNet reuse the `_forward_core` method of Qwen3NextGatedDeltaNet,

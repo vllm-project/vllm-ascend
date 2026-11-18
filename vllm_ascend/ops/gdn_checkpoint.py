@@ -2,7 +2,10 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """GDN checkpoint export from FP32 chunk-start recurrent states."""
 
+from dataclasses import replace
+
 import torch
+from vllm import envs
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -52,6 +55,19 @@ def initialize_gdn_checkpoints(layer) -> None:
     layer._checkpoint_alignment = GDN_CHECKPOINT_ALIGNMENT
     layer._max_num_batched_tokens = config.scheduler_config.max_num_batched_tokens
     layer._checkpoint_exporter = MambaPrefillCheckpointExporter(state_len=layer.conv_kernel_size - 1)
+
+
+def separate_gdn_checkpoint_spec(layer, spec):
+    """Opt in only when the worker and paired core carry private page IDs."""
+    if (
+        getattr(layer, "_ascend_internal_checkpoint_enabled", False)
+        and layer._exports_checkpoints
+        and envs.VLLM_USE_V2_MODEL_RUNNER
+        and layer.vllm_config.speculative_config is None
+        and hasattr(spec, "separate_prefill_checkpoint_blocks")
+    ):
+        return replace(spec, separate_prefill_checkpoint_blocks=True)
+    return spec
 
 
 def ensure_gdn_checkpoint_workspace(layer, tensor):

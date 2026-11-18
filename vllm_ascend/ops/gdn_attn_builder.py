@@ -409,6 +409,9 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         )
         if getattr(kv_cache_spec, "num_prefill_checkpoint_blocks", 0) and not self._ascend_gdn_checkpoints:
             raise ValueError("Internal GDN checkpoint specs require Ascend-owned checkpoint-capable layers")
+        if getattr(kv_cache_spec, "separate_prefill_checkpoint_blocks", False):
+            # Physical IDs belong to a KV group, independently of its token table.
+            self.supports_update_block_table = False
         sequence_index_capacity = max(
             self.vllm_config.scheduler_config.max_num_seqs,
             self.decode_cudagraph_max_bs,

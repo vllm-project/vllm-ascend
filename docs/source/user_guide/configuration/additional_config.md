@@ -406,6 +406,13 @@ net speedup. A persistent FP32 scratch buffer is allocated during profiling, of 
 with the same VllmConfig, device and state shape share it; ubatching is excluded.
 Checkpoint export retains a view of the pre-convolution input; the pinned FLA
 convolution allocates its output separately.
+With a paired vLLM core supporting separate prefill checkpoint blocks,
+Model Runner V2 with speculative decoding disabled reserves a private page for
+the checkpoint. Cache-hit
+prefills can then cross their tail boundary even when the positional
+checkpoint slot holds shared state or the prompt is shorter than one
+physical block. Each active checkpoint consumes an additional cache page
+until its request finishes. Older cores retain their existing split rules.
 Small prefix match units can increase checkpoint traffic.
 
 Validate correctness, quality and performance on the deployment hardware before deploying in production.

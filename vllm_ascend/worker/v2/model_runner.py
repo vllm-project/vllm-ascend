@@ -1128,6 +1128,7 @@ class NPUModelRunner(GPUModelRunner):
         pp_kwargs = {"max_seq_len_np": batch_req_state.max_seq_len_np}
         pp_kwargs.update(admitted_draft_kwargs)
         input_batch = AscendInputBatch(
+            mamba_prefill_checkpoints=getattr(scheduler_output, "mamba_prefill_checkpoints", {}),
             req_ids=req_ids,
             num_reqs=num_reqs,
             num_reqs_after_padding=num_reqs_padded,
