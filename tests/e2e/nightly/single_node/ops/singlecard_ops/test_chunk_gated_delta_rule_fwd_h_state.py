@@ -63,8 +63,15 @@ def _run_fwd_h(k, w, u, g, initial_state=None):
 def _cosine(actual, expected):
     actual = actual.float().flatten()
     expected = expected.float().flatten()
-    actual = actual / actual.norm().clamp_min(1e-12)
-    expected = expected / expected.norm().clamp_min(1e-12)
+    actual_norm = actual.norm()
+    expected_norm = expected.norm()
+    # Two exactly zero states are a perfect match, not a zero cosine: ``h[0]`` is compared
+    # against the zero initial state and normalising 0/0 would otherwise report 0.0. Matching
+    # only when *both* are zero keeps "one side is zero" a genuine mismatch.
+    if actual_norm < 1e-12 and expected_norm < 1e-12:
+        return 1.0
+    actual = actual / actual_norm.clamp_min(1e-12)
+    expected = expected / expected_norm.clamp_min(1e-12)
     return float(torch.dot(actual, expected))
 
 
@@ -144,5 +151,8 @@ def test_state_io_with_small_head_dim(key_dim, value_dim):
         initial_state=final_state_first,
     )
 
+    _assert_state_matches(
+        "h[0] vs zero initial state", h_full[:, 0], torch.zeros_like(h_full[:, 0]), BF16_REL_TOLERANCE
+    )
     _assert_state_matches("h[1] vs final state of chunk 0", h_full[:, 1], final_state_first, BF16_REL_TOLERANCE)
     _assert_state_matches("final_state vs chunked replay", final_state_full, final_state_second, FP32_REL_TOLERANCE)
