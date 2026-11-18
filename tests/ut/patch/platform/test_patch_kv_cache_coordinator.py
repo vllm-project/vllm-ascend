@@ -11,8 +11,8 @@ The patch ``0001-fix-mtp-prefix-cache-hit-hybrid-pd`` makes three changes to
    the PD prefill producer and on standalone instances. The role is derived
    from ``kv_transfer_config`` (``is_kv_producer and not is_kv_consumer``),
    attached onto ``KVCacheConfig`` by the ``get_kv_cache_config_from_groups``
-   builder in ``patch_kv_cache_utils``, and read back by the coordinator -
-   no role environment variable is involved.
+   builder in ``vllm_ascend.core.kv_cache_config_builder``, and read back by
+   the coordinator - no role environment variable is involved.
 3. ``find_longest_cache_hit_per_group`` applies the same drop gating and
    keeps the ``(block_hashes, max_cache_hit_length)`` call convention used by
    RecomputeScheduler / DyntraLB / BalanceScheduler.

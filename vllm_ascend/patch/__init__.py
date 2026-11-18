@@ -312,24 +312,6 @@
 #       Remove once upstream exposes the PD role to the coordinator or
 #       removes the EAGLE last-block drop for verified prompt blocks.
 #
-# ** 10. File: platform/patch_kv_cache_utils.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.kv_cache_planning._annotate_eagle_groups`
-#    Why:
-#       Qwen4Exp's MTP draft group marking has no builder or platform hook
-#       upstream.
-#    How:
-#       Monkey-patch only the module-level helper the builder cannot express.
-#       Grouping, pool accounting, and materialization live in
-#       `AscendKVCacheConfigBuilder`, selected through NPUPlatform. That
-#       includes splitting replicated dense draft pools (vLLM PR #56723) so
-#       their contiguous K/V pages do not alias the target/Mamba pool.
-#    Related PR:
-#       https://github.com/vllm-project/vllm/pull/53558
-#    Future Plan:
-#       Fold the EAGLE marking into the builder once upstream exposes a hook
-#       for it.
-#
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`

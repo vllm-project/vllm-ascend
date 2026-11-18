@@ -239,8 +239,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
         self.use_eagle = use_eagle
         # Roles are derived here, where they are used, from the kv-transfer
-        # config attached by the ``get_kv_cache_config_from_groups`` builder
-        # in ``patch_kv_cache_utils`` (``KVCacheConfig`` has no native field;
+        # config attached by the ``get_kv_cache_config_from_groups`` builder in
+        # ``vllm_ascend.core.kv_cache_config_builder`` (``KVCacheConfig`` has no
+        # native field;
         # the attach survives the scheduler-side deepcopy and is dropped by
         # worker pickle IPC, which never reads it). Configs built without it
         # (e.g. unit tests) read as standalone (``kv_transfer_config is
