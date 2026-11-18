@@ -2269,6 +2269,9 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
 
     # Upstream DFlashSpeculator runs non-MLA DFlash/DSpark drafts at DCP=1 and the
     # target runner marks their KV groups with dcp_sharded=False.
+    # TODO: Resolve the effective draft DCP size during configuration and
+    # share it between platform validation and the speculator. Remove this
+    # method-specific exemption once both use the same resolved topology.
     if (
         vllm_config.use_v2_model_runner
         and (speculative_config.use_dspark() or speculative_config.use_dflash())
