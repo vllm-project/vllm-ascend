@@ -30,7 +30,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 
 @dataclass(frozen=True, slots=True)
 class MegamoeSharedWeights:
-    """Shared-expert weights rebuilt for the A5 MegaMoe operator.
+    """Shared-expert weights rebuilt for the MegaMoe operator.
 
     Produced by ``AscendSharedExperts`` after weight loading and carried by
     ``MegamoeSharedExpertFusion`` on the routed-expert layer; quant methods
@@ -38,18 +38,19 @@ class MegamoeSharedWeights:
     Field names mirror the ``MoEWeights.shared_*`` fields: one tensor per
     shared expert, w1 (2*intermediate, hidden) + scale
     (2*intermediate, k//2, 2), w2 (hidden, intermediate) + scale
-    (hidden, k//2, 2).
+    (hidden, k//2, 2). The A16W16 (bf16) scenario carries no scales; the
+    operator infers the shared GMM dtype from the weights.
     """
 
     w1: list[torch.Tensor]
     w2: list[torch.Tensor]
-    w1_scale: list[torch.Tensor]
-    w2_scale: list[torch.Tensor]
+    w1_scale: list[torch.Tensor] | None
+    w2_scale: list[torch.Tensor] | None
 
 
 @dataclass(slots=True)
 class MegamoeSharedExpertFusion:
-    """Live handle for the shared expert fused into the A5 MegaMoe operator.
+    """Live handle for the shared expert fused into the MegaMoe operator.
 
     ``AscendSharedExperts.megamoe_shared_fusion()`` returns one instance and
     ``AscendMoERunner`` installs it on the routed-expert layer at
@@ -77,14 +78,35 @@ class MoEWeights:
     w2_scale_bias: torch.Tensor | list[torch.Tensor] | None = None
     w1_offset: torch.Tensor | None = None
     w2_offset: torch.Tensor | None = None
-    # Shared-expert weights in the A5 MegaMoe layout, one tensor per shared
+    # Shared-expert weights in the MegaMoe layout, one tensor per shared
     # expert: w1 (2*intermediate, hidden) + scale (2*intermediate, k//2, 2),
-    # w2 (hidden, intermediate) + scale (hidden, k//2, 2). Populated only when
-    # shared-expert fusion into the MegaMoe operator is active.
+    # w2 (hidden, intermediate) + scale (hidden, k//2, 2). The bf16 (A16W16)
+    # scenario has no scales. Populated only when shared-expert fusion into
+    # the MegaMoe operator is active.
     shared_w1: list[torch.Tensor] | None = None
     shared_w2: list[torch.Tensor] | None = None
     shared_w1_scale: list[torch.Tensor] | None = None
     shared_w2_scale: list[torch.Tensor] | None = None
+
+
+def megamoe_shared_weight_fields(layer: torch.nn.Module) -> dict[str, list[torch.Tensor]]:
+    """Shared-expert fusion payload of ``layer`` as ``MoEWeights`` kwargs.
+
+    Quant methods merge this into their MegaMoe ``MoEWeights`` so the
+    shared expert fused into the operator reaches the comm layer. Returns
+    an empty dict when the fusion is inactive (weights not yet rebuilt or
+    disabled), leaving the ``MoEWeights.shared_*`` defaults in place.
+    """
+    shared_fusion = getattr(layer, "ascend_megamoe_shared_fusion", None)
+    shared = shared_fusion.weights if shared_fusion is not None else None
+    if shared is None:
+        return {}
+    return {
+        "shared_w1": shared.w1,
+        "shared_w2": shared.w2,
+        "shared_w1_scale": shared.w1_scale,
+        "shared_w2_scale": shared.w2_scale,
+    }
 
 
 @dataclass(frozen=True, slots=True)

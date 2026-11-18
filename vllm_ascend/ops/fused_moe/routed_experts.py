@@ -35,7 +35,11 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
-from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import (
+    MoEWeights,
+    build_fused_experts_input,
+    megamoe_shared_weight_fields,
+)
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.eplb import use_allgather_eplb
@@ -188,6 +192,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_scale = None
             w1_scale_bias = None
             w2_scale_bias = None
+            shared_fields = megamoe_shared_weight_fields(layer)
         else:
             if self.dynamic_eplb and not has_split_weight_lists:
                 logger.warning_once(
@@ -200,6 +205,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_scale = [torch.tensor([], dtype=torch.int64)]
             w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
             w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
+            shared_fields = {}
         return MoEWeights(
             w1=w1,
             w2=w2,
@@ -207,6 +213,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_scale=w2_scale,
             w1_scale_bias=w1_scale_bias,
             w2_scale_bias=w2_scale_bias,
+            **shared_fields,
         )
 
     def get_mlp_weights(self, layer):
