@@ -188,7 +188,7 @@ def _fused_qknorm_rope_impl(
 
     BLOCK_M = 16
     grid = (triton.cdiv(tokens, BLOCK_M),)
-    
+
     _split_qkv_norm_rope_192_kernel[grid](
         qkv,
         q_out,
@@ -213,7 +213,7 @@ def _fused_qknorm_rope_impl(
         HEAD_DIM=HEAD_DIM,
         BLOCK_D=BLOCK_D,
         BLOCK_R=BLOCK_R,
-        BLOCK_M=BLOCK_M
+        BLOCK_M=BLOCK_M,
     )
     return q_out, k_out, v_out
 

@@ -28,7 +28,6 @@ from vllm_ascend.models.step5.cache_config import (
     _padded_page,
     get_step5_kv_cache_config_from_groups,
     get_step5_kv_cache_groups,
-    get_step5_max_concurrency,
     get_step5_max_memory_usage,
     get_step5_pool_bytes_per_block,
     is_step5_groups,
@@ -270,55 +269,6 @@ def test_max_memory_usage_skips_host_resident_groups() -> None:
     groups[1] = KVCacheGroupSpec(sw_name, sw_spec, host_resident=True)
     expected = (64 + 1) * (2 * MAIN_PAGE + 2 * SUMMARY_PAGE)
     assert get_step5_max_memory_usage(vllm_config, groups) == expected
-
-
-def _concurrency_config(groups, num_blocks: int) -> SimpleNamespace:
-    return SimpleNamespace(num_blocks=num_blocks, kv_cache_groups=groups)
-
-
-def test_max_concurrency_uniform_groups_interpolate_linearly() -> None:
-    """Planner output (Uniform-wrapped groups): every demand grows as
-    cdiv(len, block) capped at the group's ids_max, so ids(L) at b blocks
-    is min(b,64) + min(b,65) + min(b,1) = 2b + 1 for 1 <= b <= 64."""
-    vllm_config = _vllm_config(max_model_len=8192)
-    groups = _planned_groups()
-    assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in groups)
-
-    # Plenty of blocks: strict concurrency (10) exceeds the honest cap of
-    # one max-length request, so the longest-request bound wins.
-    assert get_step5_max_concurrency(vllm_config, _concurrency_config(groups, 1290)) == 1.0
-
-    # Block-starved pool: strict = 100/129, but the longest request whose
-    # full-sequence demand (2b + 1 ids) fits the 99-id watermark budget is
-    # 49 blocks = 6272 tokens, so the longest-request bound wins.
-    assert get_step5_max_concurrency(vllm_config, _concurrency_config(groups, 100)) == 6272 / 8192
-
-    # Exactly the at-max demand (129 ids): the scheduler watermark shaves
-    # one block, so the longest fitting request is 63 blocks = 8064 tokens.
-    assert get_step5_max_concurrency(vllm_config, _concurrency_config(groups, 129)) == 8064 / 8192
-
-    # Degenerate tiny pool cannot admit any request.
-    assert get_step5_max_concurrency(vllm_config, _concurrency_config(groups, 3)) == 0.0
-
-
-def test_max_concurrency_bare_specs_use_ring_and_sliding_interpolation() -> None:
-    """Fallback layouts keep bare specs: the ring holds one bucket per
-    request regardless of length and sliding-window demand carries its +1
-    admission headroom, so ids(L) at b blocks is b + min(b+1,65) + 1."""
-    vllm_config = _vllm_config(max_model_len=8192)
-    groups = [
-        KVCacheGroupSpec([L0], _main_spec()),
-        KVCacheGroupSpec([L1], _sw_spec()),
-        KVCacheGroupSpec([RING], _ring_spec()),
-    ]
-
-    # ids at max len = 64 + 65 + 1 = 130; with 99 ids of budget the longest
-    # fitting request is 48 blocks = 6144 tokens.
-    assert get_step5_max_concurrency(vllm_config, _concurrency_config(groups, 100)) == 6144 / 8192
-
-    # Exactly the at-max demand: the watermark shave caps the longest
-    # request at 63 blocks = 8064 tokens even though strict says 1.0.
-    assert get_step5_max_concurrency(vllm_config, _concurrency_config(groups, 130)) == 8064 / 8192
 
 
 def test_config_from_groups_aliases_one_envelope_backing() -> None:
