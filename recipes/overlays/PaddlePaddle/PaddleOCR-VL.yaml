@@ -164,9 +164,24 @@ guide_sections:
     leaked semaphore. Client logs passed the error/exception/traceback scan;
     the strict server-log check failed. These errors are retained and this
     stable-image result does not meet an error-free-log acceptance criterion.
-    Native Docker launch, stable-image full-dataset evaluation, 910B3 and 310P
-    replacement-image device checks remain unverified. Previous RC/main results
-    below retain their original image and platform identities.
+    Native Docker launch, stable-image full-dataset evaluation and stable 910B3
+    device checks remain unverified. Previous RC/main results below retain their
+    original image and platform identities.
+
+    On 2026-11-18, HiDevLab ran its native `v0.30.0-310p` container on 310P3 with
+    driver 25.5.0, CANN 9.2.1 and Python 3.12.16. The observed source commits
+    were the same `ced6857a` and `c09d3e20` listed above. HiDevLab reports the
+    stable tag without exposing the running container image ID. The original
+    0.9B weight hash matched the frozen baseline. ModelScope's
+    `modeling_paddleocr_vl.py` differed from that baseline, so the run records
+    the current download's own file manifest.
+
+    Both graph and eager passed 16 recognition requests each, covering both
+    aliases, all four tasks, a warmup and a measured round. Both frontends
+    exited with code 0 after SIGTERM. With timeout 0, the runtime process
+    manager logged force-killing EngineCore in both modes and Python reported
+    leaked semaphores. The graph run additionally logged an eight-line
+    `EngineDeadError` traceback. Strict shutdown validation failed.
 
     ## Ascend 310P: original PaddleOCR-VL-0.9B
 
@@ -489,7 +504,12 @@ guide_sections:
 
     #### Export and compile the OM layout model
 
-    This is the pinned ModelZoo conversion sequence. Verify Python/ACL wheel compatibility and the actual chip. Compilation can take about 1.5 hours in the reference environment; preserve its logs.
+    This is the pinned ModelZoo conversion sequence. Verify Python/ACL wheel
+    compatibility and compile the OM with the CANN installation that will load
+    it. An archived CANN 9.1 OM failed to load in the stable 310P container
+    because it referenced the CANN 9.1 AICPU kernel configuration path.
+    Compilation can take about 1.5 hours in the reference environment; preserve
+    its logs.
 
     ```bash
     source /usr/local/Ascend/ascend-toolkit/set_env.sh
