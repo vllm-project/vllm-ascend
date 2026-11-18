@@ -230,3 +230,14 @@ def test_request_split_rejects_decode_after_real_prefill():
     )
     with pytest.raises(RuntimeError, match="decode requests before prefill"):
         split_flashmla_requests(common)
+
+
+def test_request_split_requires_phase_for_each_active_row():
+    common = SimpleNamespace(
+        is_prefilling=torch.tensor([False]),
+        query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        num_reqs=2,
+        num_actual_tokens=2,
+    )
+    with pytest.raises(RuntimeError, match="is_prefilling does not cover the active request batch"):
+        split_flashmla_requests(common)
