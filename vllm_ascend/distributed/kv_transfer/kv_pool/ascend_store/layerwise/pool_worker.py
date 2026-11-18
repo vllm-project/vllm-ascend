@@ -1737,7 +1737,15 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             return cached_tokens // block_size
         return None
 
-    def _prepare_load_gvas(self, requests: list[ReqMeta]) -> bool | None:
+    def _prepare_load_gvas(self, requests: list[ReqMeta]) -> None:
+        for request in requests:
+            if self._prepare_load_gvas_for_request([request]) is False:
+                logger.error("Memcache load preparation failed for %s", request.req_id)
+                self._record_failed_request(request)
+                if request.load_spec is not None:
+                    request.load_spec.can_load = False
+
+    def _prepare_load_gvas_for_request(self, requests: list[ReqMeta]) -> bool | None:
         """Fetch per-rank GVA and acquire read lease for the load path.
 
         memcache requires batch_copy (read) to find the blob in the per-process
@@ -1750,8 +1758,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if not self.use_layerwise_transfer:
             return None
 
-        def prepare_request(request: ReqMeta) -> bool | None:
-            assert request.load_spec is not None
+        for request in requests:
+            if request.load_spec is None or not request.load_spec.can_load:
+                continue
             cached_tokens = request.load_spec.kvpool_cached_tokens
             if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
                 cached_tokens = request.load_spec.kvpool_store_skip_tokens
@@ -1977,18 +1986,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 request.load_block_gvas_np = all_group_load_gvas[0]
                 request.partial_load_gva_per_group = partial_load_gvas
                 request.load_gva_block_offset = 0
-            return None
-
-        failed = False
-        for request in requests:
-            if request.load_spec is None or not request.load_spec.can_load:
-                continue
-            if prepare_request(request) is False:
-                logger.error("Memcache load preparation failed for %s", request.req_id)
-                self._record_failed_request(request)
-                request.load_spec.can_load = False
-                failed = True
-        return False if failed else None
+        return None
 
     def _check_hybrid_load_errors(self) -> None:
         # Memcache reports invalid blocks through the existing scheduler policy.
