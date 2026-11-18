@@ -577,9 +577,20 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
 
         return input_ids
 
-    def all_gather_eplb_mask(self, token_mask: torch.Tensor) -> torch.Tensor:
+    def all_gather_valid_mask(self, valid_mask: torch.Tensor) -> torch.Tensor:
         # Match input-id row alignment with a supported collective dtype.
-        return self.all_gather_input_ids(token_mask.to(torch.int32)).to(torch.bool)
+        return self.all_gather_input_ids(valid_mask.to(torch.int32)).to(torch.bool)
+
+    def get_routing_padding_mask(self) -> torch.Tensor:
+        context = get_forward_context()
+        masks = context.additional_kwargs.setdefault("allgather_routing_padding_masks", {})
+        ubatch = dbo_current_ubatch_id()
+        if ubatch not in masks:
+            padding = context.is_padding
+            assert padding is not None
+            # Collective padding uses zero, so gather validity before inverting.
+            masks[ubatch] = ~self.all_gather_valid_mask(~padding)
+        return masks[ubatch]
 
     def finalize(
         self,

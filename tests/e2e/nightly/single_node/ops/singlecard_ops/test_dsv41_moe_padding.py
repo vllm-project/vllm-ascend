@@ -122,7 +122,7 @@ def test_moe_padding_zero_counts_graph_replay(allow_internal_format, monkeypatch
 
     class Backbone:
         use_sequence_parallel = True
-        skip_padding_tokens_in_moe = True
+        use_global_moe_padding_mask = True
 
         def __call__(self, *args, **kwargs):
             return run_moe(x, ids, probs, context.is_padding)

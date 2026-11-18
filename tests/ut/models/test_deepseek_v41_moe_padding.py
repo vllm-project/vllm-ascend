@@ -19,7 +19,6 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
         (None, None, None),
         ("env", "VLLM_MOE_SKIP_PADDING", False),
         ("runner", "v2", False),
-        ("parallel", "data_parallel_size", 2),
         ("parallel", "prefill_context_parallel_size", 2),
         ("parallel", "decode_context_parallel_size", 2),
         ("parallel", "pipeline_parallel_size", 2),
@@ -35,10 +34,11 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
     ],
 )
 @pytest.mark.parametrize("sequence_parallel", [False, True])
-def test_skip_moe_padding_requires_supported_layout(monkeypatch, section, option, value, sequence_parallel):
+@pytest.mark.parametrize("dp_size", [1, 2])
+def test_skip_moe_padding_requires_supported_layout(monkeypatch, section, option, value, sequence_parallel, dp_size):
     parallel = SimpleNamespace(
         use_sequence_parallel_moe=sequence_parallel,
-        data_parallel_size=1,
+        data_parallel_size=dp_size,
         prefill_context_parallel_size=1,
         decode_context_parallel_size=1,
         pipeline_parallel_size=1,
@@ -83,7 +83,7 @@ def test_forward_preserves_global_padding_layout(monkeypatch, rows, sequence_par
     context = SimpleNamespace(is_padding=mask)
     monkeypatch.setattr(model_module, "get_forward_context", lambda: context)
     monkeypatch.setattr(model_module, "get_tensor_model_parallel_world_size", lambda: 8)
-    model = Mock(use_sequence_parallel=sequence_parallel, skip_padding_tokens_in_moe=True)
+    model = Mock(use_sequence_parallel=sequence_parallel, use_global_moe_padding_mask=True)
     ids = torch.arange(rows, dtype=torch.int32)
     model_module.AscendDeepseekV41LLMForCausalLM.forward(
         SimpleNamespace(model=model),

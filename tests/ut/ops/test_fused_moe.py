@@ -600,7 +600,7 @@ def test_grouped_topk_router_preserves_routing_weight_dtype():
 def _build_routing_replay_experts(router, log2phy):
     routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
     routed_experts.router = router
-    routed_experts.moe_config = SimpleNamespace(num_experts=4)
+    routed_experts.moe_config = SimpleNamespace(num_experts=4, dp_size=1)
     routed_experts.global_redundant_expert_num = 0
     routed_experts.n_shared_experts = 0
     routed_experts.log2phy = log2phy

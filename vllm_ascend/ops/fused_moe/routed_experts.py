@@ -686,8 +686,14 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             )
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
         elif self.padding_token_expert_id is not None:
-            padding_mask = get_forward_context().is_padding
-            assert padding_mask is not None
+            if self.moe_config.dp_size > 1:
+                prepare_finalize = _EXTRA_CTX.moe_comm_method.prepare_finalize
+                assert isinstance(prepare_finalize, PrepareAndFinalizeWithAllGather)
+                padding_mask = prepare_finalize.get_routing_padding_mask()
+                assert padding_mask.shape[0] == topk_ids.shape[0]
+            else:
+                padding_mask = get_forward_context().is_padding
+                assert padding_mask is not None
             topk_ids = topk_ids.masked_fill(padding_mask[: topk_ids.shape[0], None], self.padding_token_expert_id)
         return topk_weights, topk_ids
 
@@ -762,7 +768,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 all_gather_mask = None
                 if use_allgather_eplb():
                     assert isinstance(moe_comm_method.prepare_finalize, PrepareAndFinalizeWithAllGather)
-                    all_gather_mask = moe_comm_method.prepare_finalize.all_gather_eplb_mask
+                    all_gather_mask = moe_comm_method.prepare_finalize.all_gather_valid_mask
                 eplb_state.record_load(
                     fused_experts_results.expert_tokens,
                     fused_experts_results.group_list_type,

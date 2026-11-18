@@ -192,7 +192,7 @@ def _run_a5_allgather_eplb(rank, port, graph_mode):
                     dispatched.group_list_type,
                     topk_ids=physical,
                     num_source_tokens=EPLB_ROWS,
-                    all_gather_mask=prepare.all_gather_eplb_mask,
+                    all_gather_mask=prepare.all_gather_valid_mask,
                 )
                 owners = ((physical >= start) & (physical < start + EPLB_LOCAL_EXPERTS)).to(torch.int32)
                 return output, owners, physical, prepared.hidden_states

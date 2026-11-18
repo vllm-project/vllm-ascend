@@ -96,7 +96,7 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch, num_layer
     torch.nn.Module.__init__(model)
     model.hc_mult = 4
     model.use_sequence_parallel = sequence_parallel
-    model.skip_padding_tokens_in_moe = False
+    model.use_global_moe_padding_mask = False
     model.decoder_replay_layers = None
     model.needs_moe_input_ids = False
     model._mtp_hidden_buffer = None

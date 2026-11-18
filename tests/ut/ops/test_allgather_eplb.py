@@ -113,9 +113,12 @@ def test_sp_mask_tracks_padding_and_source_phase(tp_size):
 def test_dp_mask_uses_same_padded_rows_as_logits(monkeypatch):
     from vllm_ascend.ops.fused_moe import prepare_finalize as prepare_module
 
-    monkeypatch.setattr(
-        afc, "get_forward_context", lambda: SimpleNamespace(additional_kwargs={"max_tokens_across_dp": 4})
+    context = SimpleNamespace(
+        additional_kwargs={"max_tokens_across_dp": 4}, is_padding=torch.tensor([False, False, True])
     )
+    monkeypatch.setattr(afc, "get_forward_context", lambda: context)
+    monkeypatch.setattr(prepare_module, "get_forward_context", lambda: context)
+    monkeypatch.setattr(prepare_module, "dbo_current_ubatch_id", lambda: 0)
     peer_logits = torch.tensor([[20.0], [21.0], [0.0], [0.0]])
     peer_mask = torch.tensor([1, 0, 0, 0], dtype=torch.int32)
 
@@ -129,9 +132,23 @@ def test_dp_mask_uses_same_padded_rows_as_logits(monkeypatch):
     prepare = PrepareAndFinalizeWithAllGather(config)
     logits = torch.tensor([[10.0], [11.0], [12.0]])
     prepared = prepare.prepare(logits, logits)
-    mask = prepare.all_gather_eplb_mask(torch.tensor([True, True, False]))
+    mask = prepare.all_gather_valid_mask(torch.tensor([True, True, False]))
     assert prepared.router_logits.flatten().tolist() == [10, 11, 12, 0, 20, 21, 0, 0]
     assert mask.tolist() == [True, True, False, False, True, False, False, False]
+
+    padding = prepare.get_routing_padding_mask()
+    torch.testing.assert_close(padding, ~mask)
+    assert prepare.get_routing_padding_mask() is padding
+    assert context.is_padding.tolist() == [False, False, True]
+
+    monkeypatch.setattr(prepare_module, "dbo_current_ubatch_id", lambda: 1)
+    context.is_padding = torch.tensor([True, True, True])
+    torch.testing.assert_close(prepare.get_routing_padding_mask(), torch.tensor([True] * 4 + [False, True, True, True]))
+
+    context = SimpleNamespace(additional_kwargs={"max_tokens_across_dp": 4}, is_padding=torch.tensor([False] * 3))
+    torch.testing.assert_close(
+        prepare.get_routing_padding_mask(), torch.tensor([False, False, False, True, False, True, True, True])
+    )
 
 
 @pytest.mark.parametrize(
@@ -179,7 +196,7 @@ def test_source_mask_preserves_ubatch_padding_and_tp_slice(monkeypatch, padding_
     monkeypatch.setattr(state_module, "get_tensor_model_parallel_rank", lambda: 1)
     monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
     prepare = MagicMock(spec=PrepareAndFinalizeWithAllGather)
-    prepare.all_gather_eplb_mask.side_effect = lambda mask: mask
+    prepare.all_gather_valid_mask.side_effect = lambda mask: mask
     expected = {
         (False, "draft"): [True, True],
         (False, "context"): [True, False],
@@ -196,20 +213,20 @@ def test_source_mask_preserves_ubatch_padding_and_tp_slice(monkeypatch, padding_
             topk_ids=torch.zeros(2, 1, dtype=torch.int32),
             num_source_tokens=2,
             is_sequence_parallel=sequence_parallel,
-            all_gather_mask=prepare.all_gather_eplb_mask,
+            all_gather_mask=prepare.all_gather_valid_mask,
         )
 
     record()
-    assert prepare.all_gather_eplb_mask.call_args.args[0].tolist() == expected
+    assert prepare.all_gather_valid_mask.call_args.args[0].tolist() == expected
     assert state.expert_load_view.item() == sum(expected)
     state.should_record_tensor.fill_(False)
     # The recording gate only changes between forwards, so the closed gate
     # arrives with a forward context of its own.
     context = SimpleNamespace(is_padding=context.is_padding, additional_kwargs={})
     record()
-    assert prepare.all_gather_eplb_mask.call_args.args[0].tolist() == [False, False]
+    assert prepare.all_gather_valid_mask.call_args.args[0].tolist() == [False, False]
     assert state.expert_load_view.item() == sum(expected)
-    assert prepare.all_gather_eplb_mask.call_count == 2
+    assert prepare.all_gather_valid_mask.call_count == 2
 
 
 def _mask_layer_state():
@@ -345,7 +362,7 @@ def test_eplb_recording_preserves_order_and_source_eligibility(
         dp_group=SimpleNamespace(all_gather=lambda rows, dim: torch.cat([rows, torch.zeros_like(rows)])),
     )
     prepare = PrepareAndFinalizeWithAllGather(config)
-    gather_mask = prepare.all_gather_eplb_mask
+    gather_mask = prepare.all_gather_valid_mask
 
     def source_mask(*args, **kwargs):
         events.append("source_mask")
@@ -406,7 +423,7 @@ def test_eplb_recording_preserves_order_and_source_eligibility(
         "vllm_ascend.ops.fused_moe.eplb.get_current_hardware_profile", lambda: get_hardware_profile(device)
     )
     monkeypatch.setattr(state_module, "make_allgather_mask", source_mask)
-    monkeypatch.setattr(prepare, "all_gather_eplb_mask", gather_source_mask)
+    monkeypatch.setattr(prepare, "all_gather_valid_mask", gather_source_mask)
     monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_load)
     AscendRoutedExperts.forward_impl(layer, hidden_states=torch.ones(4, 2), router_logits=torch.ones(4, 1))
     expected_events = ["prepare", "route", "ffn"]
