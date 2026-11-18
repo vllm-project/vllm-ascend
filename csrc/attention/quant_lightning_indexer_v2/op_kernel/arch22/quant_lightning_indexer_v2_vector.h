@@ -112,6 +112,65 @@ __aicore__ inline void InitSortOutBuf(const LocalTensor<float> &src, int64_t ele
  */
 __aicore__ inline void SortAll(LocalTensor<float> &src, LocalTensor<float> &tmp, int64_t logitsNum)
 {
+    if (logitsNum == 2048) {
+        // 固定展开快路径（参考 shape48 优化方案）: Sort32×64 + 三轮定长四路归并
+        // （元素长 32/128/512，repeat 16/4/1），消除动态循环与每轮参数重算；
+        // 归并树与原实现一致（三轮后结果落在 src，无需回拷），其余局部长度走原逻辑。
+        AscendC::Sort32(tmp, src, src[logitsNum].ReinterpretCast<uint32_t>(), 64);
+        AscendC::PipeBarrier<PIPE_V>();
+        {
+            AscendC::MrgSort4Info params;
+            params.elementLengths[0] = 32;
+            params.elementLengths[1] = 32;
+            params.elementLengths[2] = 32;
+            params.elementLengths[3] = 32;
+            params.ifExhaustedSuspension = false;
+            params.validBit = 0b1111;
+            params.repeatTimes = 16;
+            AscendC::MrgSortSrcList<float> srcList;
+            srcList.src1 = tmp[0];
+            srcList.src2 = tmp[64];
+            srcList.src3 = tmp[128];
+            srcList.src4 = tmp[192];
+            AscendC::MrgSort<float>(src, srcList, params);
+            AscendC::PipeBarrier<PIPE_V>();
+        }
+        {
+            AscendC::MrgSort4Info params;
+            params.elementLengths[0] = 128;
+            params.elementLengths[1] = 128;
+            params.elementLengths[2] = 128;
+            params.elementLengths[3] = 128;
+            params.ifExhaustedSuspension = false;
+            params.validBit = 0b1111;
+            params.repeatTimes = 4;
+            AscendC::MrgSortSrcList<float> srcList;
+            srcList.src1 = src[0];
+            srcList.src2 = src[256];
+            srcList.src3 = src[512];
+            srcList.src4 = src[768];
+            AscendC::MrgSort<float>(tmp, srcList, params);
+            AscendC::PipeBarrier<PIPE_V>();
+        }
+        {
+            AscendC::MrgSort4Info params;
+            params.elementLengths[0] = 512;
+            params.elementLengths[1] = 512;
+            params.elementLengths[2] = 512;
+            params.elementLengths[3] = 512;
+            params.ifExhaustedSuspension = false;
+            params.validBit = 0b1111;
+            params.repeatTimes = 1;
+            AscendC::MrgSortSrcList<float> srcList;
+            srcList.src1 = tmp[0];
+            srcList.src2 = tmp[1024];
+            srcList.src3 = tmp[2048];
+            srcList.src4 = tmp[3072];
+            AscendC::MrgSort<float>(src, srcList, params);
+            AscendC::PipeBarrier<PIPE_V>();
+        }
+        return;
+    }
     int64_t sort32Repeats = logitsNum / BLOCK_BYTES;
     AscendC::Sort32(tmp, src, src[logitsNum].ReinterpretCast<uint32_t>(), sort32Repeats);
     AscendC::PipeBarrier<PIPE_V>();
@@ -182,7 +241,10 @@ __aicore__ inline void MergeSort(const LocalTensor<float> &mrgDst, int32_t mrgDs
     AscendC::MrgSort4Info params;
     params.elementLengths[0] = mrgSrcNum;
     params.elementLengths[1] = mrgDstNum;
-    params.ifExhaustedSuspension = false;
+    // 归并早停（参考 shape48 优化方案）: 两路都至少有目标 K 项（mrgSrcNum >= mrgDstNum）时
+    // 开 ifExhaustedSuspension——任一路耗尽时已输出 ≥K 项，取前 K 项即可（回拷语义不变）；
+    // 输入短于 K（尾块）时保持完整归并。若触发 §16 所述 suspension 同 buffer 约束则回退。
+    params.ifExhaustedSuspension = (mrgSrcNum >= mrgDstNum);
     params.validBit = 0b0011;
     params.repeatTimes = 1;
 
