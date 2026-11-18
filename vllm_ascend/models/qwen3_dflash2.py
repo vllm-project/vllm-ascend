@@ -4,7 +4,7 @@ from torch import nn
 from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -312,6 +312,12 @@ def _gather_lm_head_candidates(
     else:
         values = gather_lm_head_outputs(values, parallel_mode)
         ids = gather_lm_head_outputs(ids, parallel_mode)
+    # With standard TP composed into the head, the fine-grained exchange
+    # covered only this TP column's candidates; join the other columns.
+    if getattr(lm_head, "composed_with_tp", False):
+        tp_group = get_tp_group()
+        values = tp_group.all_gather(values.contiguous(), dim=1 - values.ndim)
+        ids = tp_group.all_gather(ids.contiguous(), dim=1 - ids.ndim)
     if parallel_mode is VocabParallelMode.FINE_GRAINED:
         values, ids = values[:num_rows], ids[:num_rows]
     # Global TopK over the union of each resident vocabulary shard's TopK.

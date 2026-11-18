@@ -251,3 +251,73 @@ def test_completed_drafts_sync_once_across_runner_versions(monkeypatch, pcp_enab
         if needs_sync:
             initial_logits[batch.idx_mapping] = 0.5
         torch.testing.assert_close(logits_buffer, initial_logits)
+
+
+@pytest.mark.parametrize("rank", range(4))
+def test_candidate_topk_composes_standard_tp(monkeypatch, rank):
+    """With standard TP composed into the fine-grained head, the candidate
+    union must span all fine-grained x TP columns before the global TopK."""
+    fg_world, tp_world, capacity, hidden_size, shard_size, top_k = 4, 2, 3, 4, 5, 3
+    counts = [0, 1, 3, 2]
+    generator = torch.Generator().manual_seed(42)
+    hidden = torch.randn(fg_world, capacity, hidden_size, generator=generator)
+    for dp, count in enumerate(counts):
+        hidden[dp, count:] = 0
+    weight = torch.randn(fg_world * tp_world * shard_size, hidden_size, generator=generator)
+    all_hidden = hidden.flatten(0, 1)
+    full_logits = all_hidden @ weight.T
+    full_logits[:, -1] = -float("inf")
+    shard_values, shard_ids = [], []
+    for shard in range(fg_world * tp_world):
+        vals, ids = full_logits[:, shard * shard_size : (shard + 1) * shard_size].topk(top_k, dim=-1)
+        shard_values.append(vals)
+        shard_ids.append(ids + shard * shard_size)
+    group = SimpleNamespace(world_size=fg_world, device_group=object())
+
+    def gather(rows, dim):
+        assert dim == 0
+        torch.testing.assert_close(rows, hidden[rank])
+        return all_hidden
+
+    def all_to_all(output, input_, *, group):
+        candidates = [
+            torch.stack((v.float(), i.float()), dim=-1).flatten(1)
+            for v, i in zip(shard_values[:fg_world], shard_ids[:fg_world])
+        ]
+        torch.testing.assert_close(input_, candidates[rank].view(fg_world, capacity, -1))
+        for source in range(fg_world):
+            output[source].copy_(candidates[source][rank * capacity : (rank + 1) * capacity])
+
+    group.all_gather = gather
+    col_values = torch.cat(shard_values[fg_world:], dim=-1)
+    col_ids = torch.cat(shard_ids[fg_world:], dim=-1)
+    rows = slice(rank * capacity, (rank + 1) * capacity)
+
+    def tp_all_gather(t, *, dim):
+        col = col_ids[rows] if t.dtype == torch.int64 else col_values[rows]
+        return torch.cat((t, col), dim=dim)
+
+    monkeypatch.setattr(vocab_module, "get_lmhead_tp_group", lambda: group)
+    monkeypatch.setattr(vocab_module.dist, "all_to_all_single", all_to_all)
+    monkeypatch.setattr(
+        model_module, "get_tp_group", lambda: SimpleNamespace(world_size=tp_world, all_gather=tp_all_gather)
+    )
+    head = SimpleNamespace(
+        weight=weight[rank * shard_size : (rank + 1) * shard_size],
+        quant_method=UnquantizedEmbeddingMethod(),
+        parallel_mode=VocabParallelMode.FINE_GRAINED,
+        composed_with_tp=True,
+        num_embeddings_padded=fg_world * tp_world * shard_size,
+        shard_indices=SimpleNamespace(num_org_vocab_padding=0, org_vocab_start_index=rank * shard_size),
+    )
+    model = SimpleNamespace(
+        lm_head=head,
+        lmhead_tp_candidate_capacity=capacity,
+        model=SimpleNamespace(candidate_selector=SimpleNamespace(top_k=top_k)),
+        output_multiplier=1.25,
+        final_logit_softcapping=2.0,
+    )
+    ids, values = model_module.DFlash2Qwen3ForCausalLM.compute_candidates(model, hidden[rank, : counts[rank]])
+    expected_values, expected_ids = full_logits[rank * capacity : rank * capacity + counts[rank]].topk(top_k, dim=-1)
+    torch.testing.assert_close(ids, expected_ids)
+    torch.testing.assert_close(values, torch.tanh(expected_values.float() * 1.25 / 2.0) * 2.0)

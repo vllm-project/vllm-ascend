@@ -478,6 +478,7 @@ def test_composed_lmhead_shards_tile_padded_vocabulary(monkeypatch):
     assert sorted(h.tp_rank for h in heads) == list(range(4))
     for head in heads:
         assert head.tp_size == 4
+        assert head.composed_with_tp
         assert head.num_embeddings_per_partition == head.num_embeddings_padded // 4
         assert head.shard_indices.org_vocab_start_index == head.org_vocab_size_padded * head.tp_rank // head.tp_size
     # Org spans, concatenated in shard order, tile [0, org_vocab_size_padded).
@@ -499,9 +500,11 @@ def test_composed_lmhead_padding_covers_shard_count(monkeypatch, lmtp_world, tp_
     assert head.tp_size == lmtp_world * tp_world
     assert head.padding_size == expected_padding
     assert head.num_embeddings_padded % head.tp_size == 0
+    assert head.composed_with_tp
     # tp_world == 1 keeps the legacy padding untouched (backwards compatible).
     pure_dp = _composed_lmhead(monkeypatch, 1, lmtp_world, 0, 1)
     assert pure_dp.padding_size == 8
+    assert not pure_dp.composed_with_tp
 
 
 class TestVocabParallelPlan(unittest.TestCase):
@@ -625,6 +628,7 @@ class TestVocabParallelPlan(unittest.TestCase):
 
             self.assertIs(plan.mode, mode)
             self.assertEqual((plan.shard_rank, plan.shard_world_size), (rank, world_size))
+            self.assertEqual(plan.composed_with_tp, name.startswith("composed"))
             if name == "pcp embedding":
                 self.assertIs(plan.token_exchange_group, pcp_group)
                 self.assertIs(plan.output_reduce_group, tp_group)
@@ -762,6 +766,8 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_all_to_all_single.assert_called_once()
         # [N/P, V] after redistribution, then truncated to org_vocab_size.
         self.assertEqual(logits.shape, (1, self.vocab_size))
+        # Pure fine-grained TP (tp == 1) must not touch TP state at all.
+        self.mock_tp_group.all_gather.assert_not_called()
 
     def test_get_logits_replicated_head_takes_normal_path(self):
         """A replicated head (tp_size==1, e.g. the DSpark Markov w2) must not

@@ -90,6 +90,7 @@ class VocabParallelPlan:
     shard_world_size: int
     token_exchange_group: GroupCoordinator | None = None
     output_reduce_group: GroupCoordinator | None = None
+    composed_with_tp: bool = False
 
 
 def _resolve_vocab_parallel_plan(
@@ -149,6 +150,7 @@ def _resolve_vocab_parallel_plan(
             VocabParallelMode.FINE_GRAINED,
             shard_rank,
             shard_world_size,
+            composed_with_tp=tp_group.world_size > 1,
         )
 
     if is_token_embedding and embedding_tp_enable():
@@ -169,6 +171,7 @@ def _resolve_vocab_parallel_plan(
             shard_world_size,
             token_exchange_group=group,
             output_reduce_group=output_reduce_group,
+            composed_with_tp=tp_group.world_size > 1,
         )
 
     tp_group = get_tp_group()
@@ -215,6 +218,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         # layout spans two real communication groups rather than one TP group.
         self.tp_rank = plan.shard_rank
         self.tp_size = plan.shard_world_size
+        self.composed_with_tp = plan.composed_with_tp
 
         if self.token_exchange_group is not None:
             self.embedding_tp_capacity = max(
@@ -539,9 +543,8 @@ def gather_lm_head_outputs(output: torch.Tensor, parallel_mode: VocabParallelMod
     """
     if parallel_mode is VocabParallelMode.FINE_GRAINED:
         group = get_lmhead_tp_group()
-        # No early return: with standard TP composed in, the trailing
-        # TP all-gather joins the vocabulary spans this exchange misses.
-        output = lmhead_all_to_all(output.flatten(1), group).reshape(
+        exchanged = lmhead_all_to_all(output.flatten(1), group)
+        return exchanged.reshape(
             output.shape[0] // group.world_size, output.shape[1] * group.world_size, *output.shape[2:]
         )
     # Use the same vocabulary/candidate axis for [rows, vocab] logits and
@@ -616,6 +619,10 @@ class AscendLogitsProcessor(LogitsProcessor):
         logits = self._apply_head(lm_head, gathered_hidden_states, embedding_bias)
         # Gather logits for tensor parallel
         logits = gather_lm_head_outputs(logits, lm_head.parallel_mode)
+        # With standard TP composed in, the all-to-all leaves only this TP
+        # rank's vocabulary span; gather the remaining spans over TP.
+        if getattr(lm_head, "composed_with_tp", False):
+            logits = get_tp_group().all_gather(logits, dim=-1)
 
         # Remove paddings in vocab (if any)
         if logits is not None:
