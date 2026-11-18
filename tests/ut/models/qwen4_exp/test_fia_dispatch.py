@@ -2,7 +2,7 @@
 """Mask semantics and scheduler-shape coverage without requiring a native NPU."""
 
 import ast
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -22,7 +22,7 @@ def _load_source(filename, namespace):
 
 @pytest.fixture
 def implementation():
-    namespace = {"torch": torch, "dataclass": dataclass, "__name__": __name__}
+    namespace = {"torch": torch, "dataclass": dataclass, "replace": replace, "__name__": __name__}
     _load_source("gbsa.py", namespace)
     _load_source("fia.py", namespace)
     _load_source("attention_dispatch.py", namespace)
@@ -294,6 +294,38 @@ def test_union_batches_do_not_include_decode_or_fia_rows(implementation):
         ("union", list(range(26, 34))),
         ("gbsa", [12]),
     ]
+
+
+def test_union_group_row_map_pads_each_request_independently(implementation):
+    actual = implementation["build_qsa_union_group_row_map"]((0, 5, 12, 20))
+    assert actual == (
+        (0, 1, 2, 3, 4, -1, -1, -1),
+        (5, 6, 7, 8, 9, 10, 11, -1),
+        (12, 13, 14, 15, 16, 17, 18, 19),
+    )
+
+
+def test_prepare_union_batches_reuses_views_and_gathers_request_gaps(implementation):
+    plan = implementation["build_qsa_request_plan"](
+        torch.tensor([0, 5, 5, 12]),
+        torch.tensor([32768, 0, 65536]),
+        12,
+        torch.tensor([True, True, True]),
+    )
+    visible = torch.arange(12, dtype=torch.int32)
+    seq_lens = torch.tensor([32768, 0, 65536], dtype=torch.int32)
+    table = torch.arange(12, dtype=torch.int32).reshape(3, 4)
+    prepared_plan = implementation["prepare_qsa_union_batches"](plan, visible, seq_lens, table)
+    prepared = prepared_plan.prepared_union_batches[0]
+    assert prepared.visible_lengths.data_ptr() == visible.data_ptr()
+    assert prepared.cu_q.tolist() == [0, 5, 12]
+    assert prepared.seq_lens.tolist() == [32768, 65536]
+    assert prepared.block_table.tolist() == [table[0].tolist(), table[2].tolist()]
+    assert prepared.group_row_map.tolist() == [
+        [0, 1, 2, 3, 4, -1, -1, -1],
+        [5, 6, 7, 8, 9, 10, 11, -1],
+    ]
+    assert prepared.max_query_length == 7
 
 
 def test_mixed_batch_runs_prefill_first_then_contiguous_decode_spans(implementation):

@@ -33,6 +33,7 @@
 #include "aclnn_torch_adapter/op_api_common.h"
 #include "moe/add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
 #include "moe/rms_norm_cast/rms_norm_cast_torch_adpt.h"
+#include "attention/qsa_union_inputs/qsa_union_inputs_torch_adpt.h"
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
 #include "mla_preprocess/mla_preprocess_torch_adpt.h"
 #endif
@@ -3153,6 +3154,21 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
              &vllm_ascend::npu_generic_block_sparse_attention);
 
     ops.def(
+        "npu_generic_block_sparse_attention_out(Tensor q, Tensor k, Tensor v, Tensor sparse_block_idx, "
+        "Tensor sparse_block_count, int[] block_shape, Tensor(a!) attention_out, *, Tensor? metadata=None, "
+        "Tensor? attn_mask=None, Tensor? q_dequant_scale=None, Tensor? k_dequant_scale=None, "
+        "Tensor? v_dequant_scale=None, Tensor? p_quant_scale=None, Tensor? cu_seqlens_q=None, "
+        "Tensor? cu_seqlens_kv=None, Tensor? seqused_q=None, Tensor? seqused_kv=None, "
+        "Tensor? block_table=None, str layout_q='TND', str layout_kv='PA_BBND', "
+        "int layout_sparse_pattern=4, float softmax_scale=0.0, int mask_mode=1, int quant_mode=0, "
+        "float dst_type_max=0.0, int softmax_precision=1, int win_left=-1, int win_right=-1, "
+        "bool return_softmax_lse=False, int residual_block_mode=0, bool is_consistent_topk=False, "
+        "ScalarType? attention_out_dtype=None) -> Tensor"
+    );
+    ops.impl("npu_generic_block_sparse_attention_out", torch::kPrivateUse1,
+             &vllm_ascend::npu_generic_block_sparse_attention_out);
+
+    ops.def(
         "npu_quant_lightning_indexer_v2_metadata(int num_heads_q, int num_heads_k, int head_dim, int topk, "
         "int quant_mode, *, Tensor? cu_seqlens_q=None, Tensor? cu_seqlens_k=None, Tensor? seqused_q=None, "
         "Tensor? seqused_k=None, Tensor? cmp_residual_k=None, Tensor? causal_seqlens_kv_global=None, "
@@ -3263,6 +3279,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         " -> (Tensor y, Tensor y_fp32)"
     );
     ops.impl("npu_rms_norm_cast", torch::kPrivateUse1, &vllm_ascend::npu_rms_norm_cast);
+
+    ops.def(
+        "qsa_union_inputs(Tensor compact_indices, Tensor visible_lengths, "
+        "Tensor group_row_map) -> (Tensor union_idx, Tensor union_count, "
+        "Tensor exact_mask)"
+    );
+    ops.impl("qsa_union_inputs", torch::kPrivateUse1,
+             &vllm_ascend::npu_qsa_union_inputs);
 
     ops.def("npu_sign_bits_pack(Tensor input, int size) -> Tensor");
     ops.impl("npu_sign_bits_pack", torch::kPrivateUse1, &vllm_ascend::npu_sign_bits_pack);
