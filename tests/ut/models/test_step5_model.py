@@ -513,3 +513,79 @@ def test_update_physical_experts_metadata_updates_moe_layers():
         assert moe.n_local_physical_experts == 16
         assert moe.n_redundant_experts == 4
         moe.experts.update_expert_map.assert_called_once_with()
+
+
+@pytest.mark.parametrize("use_sequence_parallel", [False, True])
+@pytest.mark.parametrize("use_fused", [False, True])
+@pytest.mark.parametrize("has_residual", [False, True])
+def test_decoder_add_rms_norm(monkeypatch, use_sequence_parallel, use_fused, has_residual):
+    hidden_states = torch.ones((2, 3), dtype=torch.float32)
+    incoming_residual = torch.full_like(hidden_states, 3) if has_residual else None
+    attention_shard = torch.full((2, 3), 2, dtype=torch.bfloat16)
+    attention_output = torch.cat((attention_shard, attention_shard)) if use_sequence_parallel else attention_shard
+    positions = torch.arange(attention_output.shape[0])
+    input_weight = torch.ones(3)
+    post_attention_weight = torch.full((3,), 2.0)
+    input_norm = MagicMock(
+        weight=input_weight, variance_epsilon=1e-6, zero_centered=True, side_effect=lambda x: x * input_weight
+    )
+    post_attention_norm = MagicMock(
+        weight=post_attention_weight,
+        variance_epsilon=1e-6,
+        zero_centered=True,
+        side_effect=lambda x: x * post_attention_weight,
+    )
+
+    def fused_add_norm(x, residual, weight, eps, zero_centered):
+        updated = x if residual is None else x.float() + residual
+        return (updated * weight).bfloat16(), updated
+
+    fused_op = MagicMock(side_effect=fused_add_norm)
+    reduce_scatter = MagicMock(return_value=attention_shard)
+    monkeypatch.setattr(step5_model, "sp_all_gather", lambda x: torch.cat((x, x)))
+    monkeypatch.setattr(step5_model, "sp_reduce_scatter", reduce_scatter)
+    monkeypatch.setattr(step5_model, "fused_add_rms_norm_cast", fused_op)
+    if use_fused:
+        monkeypatch.setattr(step5_model, "can_use_fused_add_rms_norm_cast", lambda *args: True)
+
+    layer = SimpleNamespace(
+        use_sequence_parallel=use_sequence_parallel,
+        fp32_residual_connection=True,
+        input_layernorm=input_norm,
+        post_attention_layernorm=post_attention_norm,
+        self_attn=MagicMock(return_value=attention_output),
+        _add_for_residual=MagicMock(side_effect=lambda x, residual: x.float() + residual),
+        _cast_for_param_op=lambda x: x.bfloat16(),
+        _forward_ffn=lambda x, padding: x,
+    )
+    decoder = step5_model.AscendStep5DecoderLayer
+    layer._add_rms_norm = decoder._add_rms_norm.__get__(layer)
+    output, residual = decoder.forward(layer, positions, hidden_states, incoming_residual)
+
+    expected_attention_residual = hidden_states + incoming_residual if has_residual else hidden_states
+    expected_attention_input = (expected_attention_residual * input_weight).bfloat16()
+    if use_sequence_parallel:
+        expected_attention_input = torch.cat((expected_attention_input, expected_attention_input))
+    expected_residual = attention_shard.float() + expected_attention_residual
+    torch.testing.assert_close(layer.self_attn.call_args.kwargs["hidden_states"], expected_attention_input)
+    torch.testing.assert_close(output, (expected_residual * post_attention_weight).bfloat16())
+    torch.testing.assert_close(residual, expected_residual)
+    assert reduce_scatter.call_count == int(use_sequence_parallel)
+    if use_fused:
+        assert fused_op.call_count == 2
+        first_call, second_call = fused_op.call_args_list
+        assert first_call.args[0] is hidden_states
+        assert first_call.args[1] is incoming_residual
+        assert first_call.args[2] is input_weight
+        assert second_call.args[0] is attention_shard
+        if not has_residual:
+            assert second_call.args[1] is hidden_states
+        assert second_call.args[2] is post_attention_weight
+        input_norm.assert_not_called()
+        post_attention_norm.assert_not_called()
+        layer._add_for_residual.assert_not_called()
+    else:
+        fused_op.assert_not_called()
+        input_norm.assert_called_once()
+        post_attention_norm.assert_called_once()
+        assert layer._add_for_residual.call_count == 1 + int(has_residual)

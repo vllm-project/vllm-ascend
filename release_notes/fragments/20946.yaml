@@ -1,0 +1,6 @@
+pr: 20946
+entries:
+  - category: performance
+    text: Step-5-Preview inference on Ascend A5 uses fewer normalization kernel launches around attention with FP32 residuals and FP32 norm weights.
+    model: Step-5-Preview
+    hardware: [A5]
