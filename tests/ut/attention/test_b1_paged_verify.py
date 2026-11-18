@@ -128,6 +128,36 @@ def test_expand_pa_per_token_rows_is_idempotent():
     assert metadata.block_tables is block_tables
 
 
+def test_shared_metadata_builder_keeps_pa_row_expansion_out():
+    # Regression for the stock FIA path: with B1 disabled the 512-dim layer
+    # dispatches to FIA, and using_paged_attention() is False whenever
+    # speculative decoding is on, so every request must keep exactly one
+    # block-table row. The expansion belongs to the B1 builder only.
+    from vllm_ascend.attention import attention_v1
+
+    assert not hasattr(attention_v1, "expand_pa_per_token_rows")
+
+
+def test_b1_builder_expands_pa_rows_in_full_mode(monkeypatch):
+    builder = object.__new__(attention_v2_b1.AscendB1AttentionMetadataBuilder)
+    builder.kv_cache_spec = SimpleNamespace(head_size=512)
+    builder.vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL))
+    # Two requests with two queries each: the decode-only PA op needs one row
+    # per query, which the B1 builder must produce for FULL capture/replay.
+    metadata = _paged_metadata(torch.tensor([[10, 11], [20, 21]], dtype=torch.int32), [2, 4], [2, 4])
+    monkeypatch.setattr(
+        attention_v2_b1.AscendAttentionMetadataBuilder,
+        "build",
+        lambda *args, **kwargs: metadata,
+    )
+
+    built = builder.build(0, SimpleNamespace())
+
+    assert built.b1_pa_graph is True
+    assert built.block_tables.tolist() == [[10, 11], [10, 11], [20, 21], [20, 21]]
+    assert built.seq_lens.tolist() == [1, 2, 3, 4]
+
+
 def test_in_full_cudagraph_mode_only_matches_full():
     def config(mode):
         return SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mode=mode))
