@@ -3748,23 +3748,27 @@ class TestKVPoolWorkerResetStore(unittest.TestCase):
 
 
 class TestLazyInitGate(unittest.TestCase):
-    """lazy_init must also be requested for sparse-indexer models.
+    """lazy_init must be requested for models that run the packed C8 pool path.
 
-    Sparse models (use_sparse, e.g. GLM-5.x SFA) register their indexer KV
-    through the pool like compressed models do; deferring the store setup on
-    backends that support it (fabric memory / device_sdma) must not be limited
-    to use_compress models.
+    Compressed models keep the #9771 request. Sparse-indexer models get it
+    only when the packed C8 cache path is active (sparse + fp8/int8
+    cache_dtype, the dtype-derived successor of v0.26's c8_enable_reshape_optim
+    knob): that path plus an eager store setup is the fabric-memory hang, and
+    deferring the store setup to the first put() is the remedy. Sparse models
+    with other cache dtypes keep eager init, since the trigger does not
+    reproduce there (v0.26: c8_enable_reshape_optim off -> no failure).
     """
 
     PW = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
 
-    def _run_init_backend(self, use_compress: bool, use_sparse: bool) -> MagicMock:
+    def _run_init_backend(self, use_compress: bool, use_sparse: bool, cache_dtype: str) -> MagicMock:
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
         worker = KVPoolWorker.__new__(KVPoolWorker)
         worker.backend = "mooncake"
         worker.use_compress = use_compress
         worker.use_sparse = use_sparse
+        worker.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype=cache_dtype))
         backend_cls = MagicMock()
         fake_module = SimpleNamespace(Backend=backend_cls)
         with (
@@ -3775,16 +3779,26 @@ class TestLazyInitGate(unittest.TestCase):
         return backend_cls
 
     def test_dense_model_requests_eager_init(self):
-        backend_cls = self._run_init_backend(use_compress=False, use_sparse=False)
+        backend_cls = self._run_init_backend(use_compress=False, use_sparse=False, cache_dtype="auto")
         self.assertFalse(backend_cls.call_args.kwargs["lazy_init"])
 
-    def test_sparse_model_requests_lazy_init(self):
-        backend_cls = self._run_init_backend(use_compress=False, use_sparse=True)
+    def test_compress_model_requests_lazy_init(self):
+        backend_cls = self._run_init_backend(use_compress=True, use_sparse=False, cache_dtype="auto")
         self.assertTrue(backend_cls.call_args.kwargs["lazy_init"])
 
-    def test_compress_model_requests_lazy_init(self):
-        backend_cls = self._run_init_backend(use_compress=True, use_sparse=False)
+    def test_sparse_c8_model_requests_lazy_init(self):
+        backend_cls = self._run_init_backend(use_compress=False, use_sparse=True, cache_dtype="int8")
         self.assertTrue(backend_cls.call_args.kwargs["lazy_init"])
+
+    def test_sparse_fp8_model_requests_lazy_init(self):
+        backend_cls = self._run_init_backend(use_compress=False, use_sparse=True, cache_dtype="fp8")
+        self.assertTrue(backend_cls.call_args.kwargs["lazy_init"])
+
+    def test_sparse_non_c8_model_keeps_eager_init(self):
+        # Narrow gate: sparse alone (e.g. bf16 KV) does not reproduce the
+        # eager-setup failure, so it must not request the deferral.
+        backend_cls = self._run_init_backend(use_compress=False, use_sparse=True, cache_dtype="auto")
+        self.assertFalse(backend_cls.call_args.kwargs["lazy_init"])
 
 
 if __name__ == "__main__":
