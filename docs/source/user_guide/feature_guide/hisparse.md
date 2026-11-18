@@ -128,6 +128,8 @@ To use MemCache instead, set `backend` to `memcache` and use the
 `host_tcp` protocol in its local configuration. Keep `load_async=true` on
 either backend. This combination does not support external PD transport,
 layerwise transfer, or Mooncake FabricMem or SSD modes.
+If you enable `save_decode_cache`, keep `eager_host_mirror=true` so each
+completed Decode block reaches Host memory before AscendStore saves it.
 
 Pool keys use the `hisparse-v4` namespace and include the target and draft
 checkpoint identities, revisions and page layout. Upgrading from an earlier
