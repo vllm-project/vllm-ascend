@@ -412,10 +412,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         self.pcp_size = getattr(parallel_config, "prefill_context_parallel_size", 1)
         self.pcp_group = get_pcp_group() if self.pcp_size > 1 else None
         self.pcp_rank = self.pcp_group.rank_in_group if self.pcp_group is not None else 0
-        merged_linear = MergedColumnParallelLinear
         if self.pcp_size > 1:
             self._init_pcp_projections(vllm_config, prefix)
-            merged_linear = KDAMergedColumnParallelLinear
         self.uses_mixed_projection = uses_mixed_projection
         self._ascend_kda_state_copy = None
         self.projection_tp = None
@@ -484,7 +482,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             # QuaRot checkpoint instead stores q/k/v as W8A8 and keeps B/F/G
             # in floating point. Split those precision groups so DynamicQuant
             # can overlap the composed BFG projection.
-            self.in_proj_qkvgfab = merged_linear(
+            merged_linear_cls = KDAMergedColumnParallelLinear if self.pcp_size > 1 else MergedColumnParallelLinear
+            self.in_proj_qkvgfab = merged_linear_cls(
                 self.hidden_size,
                 [self.projection_size] * 3,
                 bias=False,
