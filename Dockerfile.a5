@@ -47,7 +47,8 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
 
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
 ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
-RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index-url ${PYTORCH_INDEX_URL} && \
+ARG VLLM_VERSION_OVERRIDE=""
+RUN VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE}" VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton && \
     python3 -m pip cache purge
 

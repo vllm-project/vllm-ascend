@@ -24,6 +24,7 @@ from vllm_ascend.ops.gdn_attn_builder import (
     AscendGDNHostMetadataBackend,
     AscendGDNHostMetadataBuilder,
 )
+from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend
 from vllm_ascend.ops.triton.fla import utils as fla_utils
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices as runtime_prepare_chunk_indices,
@@ -339,9 +340,13 @@ def test_ascend_gdn_attention_uses_ascend_backend():
     from vllm_ascend.models.glm5next.kda import Glm5NextLinearAttention
     from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
 
-    assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNFusedAttentionBackend
-    assert AscendKimiK3DeltaAttention.get_attn_backend(object()) is AscendGDNHostMetadataBackend
-    assert Glm5NextLinearAttention.get_attn_backend(object()) is AscendGDNHostMetadataBackend
+    fused_backend = AscendGatedDeltaNetAttention.get_attn_backend(object())  # type: ignore[arg-type]
+    kimi_backend = AscendKimiK3DeltaAttention.get_attn_backend(object())  # type: ignore[arg-type]
+    glm_backend = Glm5NextLinearAttention.get_attn_backend(object())  # type: ignore[arg-type]
+    assert fused_backend is AscendGDNFusedAttentionBackend
+    assert kimi_backend is KimiKDAHostMetadataBackend
+    assert issubclass(kimi_backend, AscendGDNHostMetadataBackend)
+    assert glm_backend is AscendGDNHostMetadataBackend
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
 
 

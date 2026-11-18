@@ -733,3 +733,20 @@ def merge_prefill_chunks(
     relative_lse, anchor = prepare_attention_update(lse_list, lse_anchor)
     output, lse = torch_npu.npu_attention_update(relative_lse, tuple(out_list), int(return_lse))
     return output, lse, anchor
+
+
+def uses_pcp_sharded_layout(common_attn_metadata: "AscendCommonAttentionMetadata", use_pcp: bool) -> bool:
+    """Return whether this step should use the PCP-sharded layout.
+
+    Under PCP, metadata built without a PCP context (e.g. a replicated draft
+    decode) runs replicated on every rank, so its slot mapping must not be
+    expanded to every rank's tokens.
+    """
+    if not use_pcp:
+        return False
+    if common_attn_metadata.pcp_context is None:
+        assert common_attn_metadata.slot_mapping.shape[0] <= common_attn_metadata.num_input_tokens, (
+            "PCP metadata without a PCP context must keep a rank-local slot mapping."
+        )
+        return False
+    return True

@@ -1,6 +1,6 @@
-# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/model_runner.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/model_runner.py
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -34,6 +34,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
+from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
@@ -58,6 +59,8 @@ class AscendPCPAttentionContext:
     local_to_global_req_indices: tuple[int, ...] | None = None
     # Actual local tokens in the unpartitioned batch, excluding padding.
     local_token_indices: torch.Tensor | None = None
+    # Padded tensor width consumed by each rank's model forward.
+    local_num_tokens: int | None = None
 
 
 class AscendPCPManager(PCPManager):
@@ -133,6 +136,24 @@ class AscendPCPManager(PCPManager):
         # piecewise/FULL graphs where each rank pads its local batch to the
         # same global padded length.
         self._sampling_hidden_restored = False
+
+    def bind_config(self, vllm_config: VllmConfig) -> None:
+        self.vllm_config = vllm_config
+        self.shard_decode_requests: bool = self.shard_decode_requests and self.is_decode_sharded
+
+    def is_target_attn_groups(self, attn_groups: list[list[AttentionGroup]]) -> bool:
+        """Draft-only groups run on the replicated global batch in v32.
+
+        v32 marks draft modules before cache planning. Read that ownership
+        from the shared forward context instead of main's speculator hook.
+        """
+        layers = self.vllm_config.compilation_config.static_forward_context
+        return any(
+            not getattr(layers.get(name), "is_draft_layer", False)
+            for groups in attn_groups
+            for group in groups
+            for name in group.layer_names
+        )
 
     @property
     def is_decode_sharded(self) -> bool:
@@ -480,7 +501,8 @@ class AscendPCPManager(PCPManager):
         if not self.is_last_pp_rank:
             return hidden_states
 
-        restored_hidden_states = super().restore_hidden_states(hidden_states)
+        # PP and draft states can be strided views; HCCL requires dense inputs.
+        restored_hidden_states = super().restore_hidden_states(hidden_states.contiguous())
         if self._global_batch is None:
             return restored_hidden_states
 
@@ -642,6 +664,7 @@ class AscendPCPManager(PCPManager):
         update_cos_sin(input_batch.positions)
         return AscendPCPAttentionContext(
             global_batch=global_batch,
+            local_num_tokens=input_batch.num_tokens_after_padding,
             global_block_tables=self._block_tables.get_dummy_block_tables(num_reqs),
             global_slot_mappings=self._global_batch_slot_mappings[:, :num_tokens].fill_(-1),
             hidden_restore_idx=torch.arange(num_tokens, device=self.device),
@@ -666,6 +689,7 @@ class AscendPCPManager(PCPManager):
             restore_start = self.pcp_rank * num_tokens
             return AscendPCPAttentionContext(
                 global_batch=input_batch,
+                local_num_tokens=num_tokens,
                 local_to_global_req_indices=tuple(range(input_batch.num_reqs)),
                 global_block_tables=block_tables,
                 global_slot_mappings=slot_mappings.view(slot_mappings.shape[0], self.pcp_world_size, num_tokens)[
@@ -697,6 +721,7 @@ class AscendPCPManager(PCPManager):
             )
         return AscendPCPAttentionContext(
             global_batch=global_batch,
+            local_num_tokens=local_batch.num_tokens_after_padding,
             local_to_global_req_indices=local_to_global_req_indices,
             local_token_indices=self._local_gather_idx[: local_batch.num_tokens],
             global_block_tables=self._block_tables.gather_block_tables(

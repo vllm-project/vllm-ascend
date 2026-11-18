@@ -67,6 +67,7 @@ def make_specs(pool: int = 16):
         ),
         "model.layers.3.indexer.tail_cache": AscendIndexerKPoolTailSpec(
             block_size=pool,
+            ring_capacity=pool,
             sliding_window=pool,
             compress_ratio=pool,
             num_kv_heads=1,

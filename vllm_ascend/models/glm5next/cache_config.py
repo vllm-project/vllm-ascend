@@ -161,7 +161,7 @@ def _create_glm5_next_attention_groups(
                 f"compression ratio: block_size={main_spec.block_size}, "
                 f"compress_ratio={compress_ratio}."
             )
-        if tail_spec.compress_ratio != compress_ratio or tail_spec.block_size < compress_ratio:
+        if tail_spec.compress_ratio != compress_ratio or tail_spec.ring_capacity < compress_ratio:
             raise ValueError(
                 f"GLM-Next tail must use compression ratio {compress_ratio} and have at least that ring capacity."
             )

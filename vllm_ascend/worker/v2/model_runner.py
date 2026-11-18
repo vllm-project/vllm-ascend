@@ -1,6 +1,6 @@
-# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/model_runner.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/model_runner.py
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -94,6 +94,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
+    enable_sfa_dcp_sharded_indexer,
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
     lmhead_tp_enable,
@@ -392,8 +393,10 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+        kv_cache_spec = super().get_kv_cache_spec()
+
         return apply_dspark_resident_kv_specs(
-            super().get_kv_cache_spec(),
+            kv_cache_spec,
             self.vllm_config,
             self.speculator,
             sparse_offload_enabled=self.ascend_config.sparse_kv_offload_config.enabled,
@@ -453,7 +456,7 @@ class NPUModelRunner(GPUModelRunner):
                 if sparse_cfg.use_fused_copy_sfa
                 else set()
             )
-        with graph_manager_wrapper(self):
+        with graph_manager_wrapper(self), self.jit_warmup_registry.activate():
             super().initialize_kv_cache(
                 kv_cache_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
@@ -493,7 +496,15 @@ class NPUModelRunner(GPUModelRunner):
         # throwaway model state and must not leak event/buffer bindings.
         self.model_state.device_metadata = (
             TargetDeviceMetadata()
-            if uses_a5_packed_cache() and self.model_config.architecture == "DeepseekV41ForCausalLM"
+            if uses_a5_packed_cache()
+            and (
+                self.model_config.architecture == "DeepseekV41ForCausalLM"
+                or (
+                    self.model_config.architecture == "KimiK31ForConditionalGeneration"
+                    and enable_sfa_dcp_sharded_indexer(self.vllm_config)
+                    and self.vllm_config.attention_config.indexer_kv_dtype == "fp8"
+                )
+            )
             else None
         )
 
@@ -501,10 +512,11 @@ class NPUModelRunner(GPUModelRunner):
         # the worker can warm up, capture graphs or execute prefill requests.
         from vllm_ascend.ops.kda_state_copy_plan import initialize_kda_state_copy
 
-        initialize_kda_state_copy(
-            self.vllm_config.compilation_config.static_forward_context,
-            self.vllm_config.scheduler_config.max_num_seqs,
-        )
+        with self.jit_warmup_registry.activate():
+            initialize_kda_state_copy(
+                self.vllm_config.compilation_config.static_forward_context,
+                self.vllm_config.scheduler_config.max_num_seqs,
+            )
 
         copy_mamba_state = getattr(self.model_state, "copy_state_after_kv_load", None)
         if (

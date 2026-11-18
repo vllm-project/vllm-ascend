@@ -74,6 +74,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.device.paged_mla_cache_read import load_mla_cache_rows_by_slots
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate, register_flash_attention_gate_warmup
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
@@ -86,6 +87,7 @@ from vllm_ascend.utils import (
     enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
+    vllm_version_is,
     weak_ref_tensors,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -307,8 +309,10 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         )
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.pcp_enabled = self.pcp_size > 1
+        self.use_pcp = self.pcp_enabled
         self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
         self.dcp_enabled = enable_dcp()
+        self.use_dcp = self.dcp_enabled
 
         scheduler_config = vllm_config.scheduler_config
 
@@ -1019,11 +1023,34 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.kv_b_proj = kwargs["kv_b_proj"]
         self.o_proj = kwargs["o_proj"]
         self.g_proj = kwargs.get("g_proj")
-        self.use_output_gate = self.g_proj is not None
+        # vLLM main fuses Kimi-K3's output gate into the QKV-A projection as a
+        # trailing shard, making its per-rank layout ``[q_a | kv_a | gate]`` and
+        # dropping the standalone ``g_proj``. Release v0.32.0 keeps the separate
+        # ``g_proj`` and a two-shard projection.
+        if vllm_version_is("0.30.0") or vllm_version_is("0.32.0"):
+            self.qkv_a_gate_fused = False
+            self.use_output_gate = self.g_proj is not None
+        else:
+            # The plain MLA projection also only has the two latent shards, so
+            # the shard count identifies the fused layout without importing the
+            # Kimi-specific linear class.
+            fused_output_sizes = getattr(self.fused_qkv_a_proj, "output_sizes", None)
+            self.qkv_a_gate_fused = fused_output_sizes is not None and len(fused_output_sizes) == 3
+            self.use_output_gate = self.g_proj is not None or self.qkv_a_gate_fused
+        if self.g_proj is not None:
+            register_flash_attention_gate_warmup(self.vllm_config.model_config.dtype, self.num_heads * self.v_head_dim)
+        if self.qkv_a_gate_fused:
+            register_flash_attention_gate_warmup(
+                self.vllm_config.model_config.dtype,
+                self.num_heads * self.v_head_dim,
+                gate_prefix=self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim,
+            )
         self.use_mla_rope = kwargs.get("use_mla_rope", True)
         self.vllm_config = get_current_vllm_config()
         self.pcp_enabled = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
         self.dcp_enabled = self.vllm_config.parallel_config.decode_context_parallel_size > 1
+        self.use_pcp = self.pcp_enabled
+        self.use_dcp = self.dcp_enabled
         self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(self.vllm_config)
         self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
@@ -1037,6 +1064,9 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         self.speculative_config = self.vllm_config.speculative_config
         self.is_draft_model = self.vllm_config.model_config.runner_type == "draft"
+        # Replicated MLA layers use ordinary, non-interleaved KV.
+        if not self.use_pcp and not self.use_dcp:
+            self.supports_mtp_with_cp_non_trivial_interleave_size = True
         self.enable_mlapo = not self.is_draft_model and enabling_mlapo(self.vllm_config)
 
         self.layer_name = kwargs.get("layer_name")
@@ -1060,6 +1090,9 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def _can_use_flashmla(self) -> bool:
         config = self.vllm_config
+        # Remove this restriction once the K3.1 draft model supports FlashMLA.
+        if config.model_config.hf_config.model_type == "kimi_k31":
+            return False
         if not getattr(config, "use_v2_model_runner", False):
             return False
         if config.speculative_config is not None and config.speculative_config.method != "dspark":
@@ -3553,7 +3586,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
             o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill
         if gate is not None:
-            o_proj_input.mul_(torch.sigmoid(gate))
+            flash_attention_gate(o_proj_input, gate)
         # O proj
         output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
 

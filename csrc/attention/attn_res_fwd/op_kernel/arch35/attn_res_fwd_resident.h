@@ -19,8 +19,10 @@
 
 #include "kernel_operator.h"
 #include "../attn_res_fwd_tiling_data.h"
+#include "../attn_res_fwd_ub_layout.h"
 #include "reduce_common.h"
 #include "attn_res_fwd_regbase_common.h"
+#include "attn_res_fwd_cooperative_regbase.h"
 #include "attn_res_fwd_reload.h" // AttnResFwdInitParams
 
 namespace AttnResFwd {
@@ -120,19 +122,26 @@ private:
     {
         pipe_->InitBuffer(inQue_, BUFFER_NUM_RESIDENT, hiddenSizeAlignBf16_ * sizeof(D_IN));
         pipe_->InitBuffer(outQue_, BUFFER_NUM_RESIDENT, hiddenSizeAlignBf16_ * sizeof(D_IN));
-        pipe_->InitBuffer(vBf16Buf_, blockCount_ * hiddenSizeAlignBf16_ * sizeof(D_IN));
+        const uint32_t residentRows = LegacyResidentRows(blockCount_, fuseAdd_ || tiling_->fusedChain != 0);
+        if (residentRows != 0) {
+            pipe_->InitBuffer(vBf16Buf_, residentRows * hiddenSizeAlignBf16_ * sizeof(D_IN));
+        }
         pipe_->InitBuffer(scoreWeightBuf_, hiddenSizeAlignFp32_ * sizeof(float));
         pipe_->InitBuffer(vRowBuf_, hiddenSizeAlignFp32_ * sizeof(float));
         pipe_->InitBuffer(outFp32Buf_, hiddenSizeAlignFp32_ * sizeof(float));
         // 与 arch22 一致：meta 按 32B block（8 fp32）对齐
         metaAlign_ = (blockCount_ + ELEM_PER_BLK_FP32 - 1U) / ELEM_PER_BLK_FP32 * ELEM_PER_BLK_FP32;
-        pipe_->InitBuffer(vecMetaBuf_, metaAlign_ * sizeof(float));
+        const uint32_t scoreElems = blockCount_ > 2U * RegBase::kVlFp32 ?
+            (metaAlign_ + RegBase::kVlFp32 - 1U) / RegBase::kVlFp32 * RegBase::kVlFp32 : metaAlign_;
+        pipe_->InitBuffer(vecMetaBuf_, scoreElems * sizeof(float));
         pipe_->InitBuffer(metaSoftmaxBuf_, metaAlign_ * sizeof(float));
         // Softmax 期间作 fold/Brcb scratch；Softmax 后 Brcb 成 metaBrc[n*8] 供 Weighted
         pipe_->InitBuffer(metaBrcBuf_, metaAlign_ * ELEM_PER_BLK_FP32 * sizeof(float));
         pipe_->InitBuffer(scalarBuf_, SCALAR_LOCAL_ELEMS * sizeof(float));
 
-        vBf16_ = vBf16Buf_.Get<D_IN>();
+        if (residentRows != 0) {
+            vBf16_ = vBf16Buf_.Get<D_IN>();
+        }
         scoreWeight_ = scoreWeightBuf_.Get<float>();
         vRow_ = vRowBuf_.Get<float>();
         outFp32_ = outFp32Buf_.Get<float>();
@@ -188,6 +197,9 @@ private:
 
     __aicore__ inline LocalTensor<D_IN> GetResidentRow(uint32_t n)
     {
+        if (n == numBlocks_ && (fuseAdd_ || tiling_->fusedChain != 0)) {
+            return fusedPrefix_;
+        }
         return vBf16_[n * hiddenSizeAlignBf16_];
     }
 
@@ -206,18 +218,22 @@ private:
             } else {
                 inLocal = CopyInRow(prefixSumGm_, static_cast<uint64_t>(tokenIdx) * hiddenSize_);
             }
-            LocalTensor<D_IN> dstRow = GetResidentRow(n);
-            if constexpr (FUSED_PREFIX) {
-                CopyB16Row(dstRow, inLocal);
-            } else {
-                // UB→UB：用 Vector Copy，勿用 DataCopy / DataCopyParams
-                constexpr uint32_t copyElemsPerRepeat = 256U / sizeof(D_IN);
-                for (uint32_t offset = 0; offset < hiddenSizeAlignBf16_; offset += copyElemsPerRepeat) {
-                    const uint32_t remaining = hiddenSizeAlignBf16_ - offset;
-                    const uint64_t mask = remaining < copyElemsPerRepeat ? remaining : copyElemsPerRepeat;
-                    Copy(dstRow[offset], inLocal[offset], mask, 1, {1, 1, 8, 8});
+            // Prefix storage remains live until weighted output has consumed it.
+            // Bank rows still need their own resident copy after the input queue is freed.
+            if (n < numBlocks_ || (!fuseAdd_ && tiling_->fusedChain == 0)) {
+                LocalTensor<D_IN> dstRow = GetResidentRow(n);
+                if constexpr (FUSED_PREFIX) {
+                    CopyB16Row(dstRow, inLocal);
+                } else {
+                    // UB→UB：用 Vector Copy，勿用 DataCopy / DataCopyParams
+                    constexpr uint32_t copyElemsPerRepeat = 256U / sizeof(D_IN);
+                    for (uint32_t offset = 0; offset < hiddenSizeAlignBf16_; offset += copyElemsPerRepeat) {
+                        const uint32_t remaining = hiddenSizeAlignBf16_ - offset;
+                        const uint64_t mask = remaining < copyElemsPerRepeat ? remaining : copyElemsPerRepeat;
+                        Copy(dstRow[offset], inLocal[offset], mask, 1, {1, 1, 8, 8});
+                    }
+                    PipeBarrier<PIPE_V>();
                 }
-                PipeBarrier<PIPE_V>();
             }
             RegBase::CastAndInvRms(vRow_, scalarLocal_, inLocal, hiddenSize_, invHiddenSize_, normEps_);
             if (n < numBlocks_ || (!fuseAdd_ && tiling_->fusedChain == 0)) {
@@ -244,13 +260,12 @@ private:
     {
         if (blockCount_ <= RegBase::kVlFp32) {
             RegBase::SoftmaxOneRegister(vecMeta_, blockCount_);
-        } else {
+        } else if (blockCount_ <= 2U * RegBase::kVlFp32) {
             RegBase::SoftmaxSmallRegBase(vecMeta_, blockCount_, metaAlign_, scalarLocal_, metaSoftmax_, metaBrc_);
+        } else {
+            CooperativeRegBase::Softmax(vecMeta_, scalarLocal_, blockCount_);
         }
-        const uint8_t brcRepeat =
-            static_cast<uint8_t>((blockCount_ + ELEM_PER_BLK_FP32 - 1U) / ELEM_PER_BLK_FP32);
-        Brcb(metaBrc_, vecMeta_, brcRepeat, {1, MOV_8});
-        PipeBarrier<PIPE_V>();
+        CooperativeRegBase::BroadcastScores(metaBrc_, vecMeta_, metaAlign_);
     }
 
     __aicore__ inline void WriteProbsQue(uint32_t tokenIdx)
@@ -267,11 +282,15 @@ private:
 
     __aicore__ inline void WeightedOutputResident()
     {
-        Duplicate(outFp32_, 0.0f, hiddenSize_);
-        PipeBarrier<PIPE_V>();
-        for (uint32_t n = 0; n < blockCount_; ++n) {
-            LocalTensor<D_IN> row = GetResidentRow(n);
-            RegBase::WeightedMulAddFromB16(outFp32_, row, metaBrc_[n * ELEM_PER_BLK_FP32], hiddenSize_);
+        if (blockCount_ == 0) {
+            Duplicate(outFp32_, 0.0f, hiddenSize_);
+            PipeBarrier<PIPE_V>();
+            return;
+        }
+        RegBase::WeightedMulAddFromB16<D_IN, true>(outFp32_, GetResidentRow(0), metaBrc_, hiddenSize_);
+        for (uint32_t n = 1; n < blockCount_; ++n) {
+            RegBase::WeightedMulAddFromB16(outFp32_, GetResidentRow(n),
+                metaBrc_[n * ELEM_PER_BLK_FP32], hiddenSize_);
         }
     }
 
