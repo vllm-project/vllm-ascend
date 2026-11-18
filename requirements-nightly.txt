@@ -21,6 +21,7 @@ scipy
 soundfile
 pytest_mock
 mindstudio-probe>=8.3.0
+ml_dtypes>=0.5.4,<0.7
 xlite==0.2.0rc1
 uc-manager
 ninja
