@@ -97,7 +97,9 @@ skips with provisioning steps when it is missing).
 import json
 import math
 import os
+import re
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -254,6 +256,14 @@ ENABLE_MEMCACHE = os.environ.get("QWEN38_POOL_ENABLE_MEMCACHE", "0") == "1"
 # "Invalid value for <ock.mmc.log_level>", which surfaces as
 # "service exited before becoming ready with code 0" - so validate it here.
 MEMCACHE_LOG_LEVEL = os.environ.get("QWEN38_POOL_MEMCACHE_LOG_LEVEL", "error")
+# V1: confine the test process (and therefore every subprocess it spawns, including
+# the pool master and the engine workers before vllm-ascend re-binds them) to one
+# CPU set. This is the only knob here that can *reduce* variance: on a shared A2 box
+# the container sees every core (Cpus_allowed_list 0-191), so concurrent CI jobs
+# plan the same per-NPU CPU sets and steal each other's cores. Setting affinity
+# needs no capability; "1" auto-discovers the NUMA-local core list of the card in
+# use, or pass an explicit list such as "144-167".
+CPU_ISOLATE = os.environ.get("QWEN38_POOL_CPU_ISOLATE", "0").strip()
 if MEMCACHE_LOG_LEVEL not in {"debug", "info", "warn", "error"}:
     raise ValueError(
         f"QWEN38_POOL_MEMCACHE_LOG_LEVEL={MEMCACHE_LOG_LEVEL!r} is rejected by the memcache "
@@ -273,6 +283,10 @@ def _driver_reports_mf_capable_driver() -> bool:
     except OSError:
         return False
 
+
+# Experiment hook: when KEEP_SAMPLES points at a JSON path, every perf phase
+# appends its p50/p80/p95/throughput there so a driver script can compare cells.
+PERF_SAMPLE_OUT: dict[str, Any] | None = {} if os.environ.get("QWEN38_POOL_KEEP_SAMPLES") else None
 
 AB_MODE = os.environ.get("KV_POOL_AB_MODE", "gate")
 # The mooncake-layerwise scenario runs without a version gate: the official
@@ -646,6 +660,37 @@ def _phase_accuracy(runner: VllmRunner, state: dict[str, Any], tag: str) -> None
     )
 
 
+def _print_round_hit(
+    tag: str,
+    name: str,
+    before: Any,
+    after: Any,
+    expected: int | None,
+    latency: float | None = None,
+) -> None:
+    """Log what one round actually hit, so each repeat can be checked on its own.
+
+    ``hits`` counts pool token hits and ``queries`` the pool lookups, so the
+    query-level rate is what the scheduler saw; ``expected`` is the number of
+    tokens a full hit should return, which makes the token-level rate explicit.
+    """
+    hits = after.hits - before.hits
+    queries = after.queries - before.queries
+    query_rate = hits / queries if queries else 0.0
+    parts = [
+        f"[kv_pool_a2] {tag} round={name}",
+        f"hits_delta={hits:.0f}",
+        f"queries_delta={queries:.0f}",
+        f"query_hit_rate={query_rate:.2%}",
+    ]
+    if expected is not None:
+        parts.append(f"expected_tokens={expected}")
+        parts.append(f"token_hit_rate={hits / expected:.2%}" if expected else "token_hit_rate=n/a")
+    if latency is not None:
+        parts.append(f"latency={latency:.2f}s")
+    print(" ".join(parts), flush=True)
+
+
 def _phase_hit(runner: VllmRunner, state: dict[str, Any], tag: str) -> None:
     """Phase 2: pool hit quality 鈥?R2/R3 exact hits, token identity, R4 isolation."""
     prompt_a, prompt_b, cold = state["prompt_a"], state["prompt_b"], state["cold"]
@@ -678,6 +723,7 @@ def _phase_hit(runner: VllmRunner, state: dict[str, Any], tag: str) -> None:
     before = snapshot_metrics(runner)
     r2_samples: list[float] = []
     r2_outputs: list[list[int]] = []
+    round_log: list[str] = []
     previous = before
     for _ in range(HIT_LATENCY_REPEATS):
         # Time the request alone: the metrics snapshot is an RPC and must not be
@@ -686,6 +732,19 @@ def _phase_hit(runner: VllmRunner, state: dict[str, Any], tag: str) -> None:
         r2_outputs.append(_generate(runner, prompt_a, POOL_MAX_TOKENS))
         r2_samples.append(time.perf_counter() - began)
         current = snapshot_metrics(runner)
+        _print_round_hit(
+            tag,
+            f"R2#{len(r2_samples)}",
+            previous,
+            current,
+            expected,
+            latency=r2_samples[-1],
+        )
+        round_log.append(
+            f"R2#{len(r2_samples)}:{(current.hits - previous.hits) / (current.queries - previous.queries):.2%}"
+            if current.queries - previous.queries
+            else f"R2#{len(r2_samples)}:n/a"
+        )
         assert_hit_tokens(previous, current, expected=expected, tag=f"{tag} R2")
         previous = current
     mid = previous
@@ -698,11 +757,20 @@ def _phase_hit(runner: VllmRunner, state: dict[str, Any], tag: str) -> None:
     hit2 = _generate(runner, prompt_a, POOL_MAX_TOKENS)
     after = snapshot_metrics(runner)
     r3_seconds = time.perf_counter() - began
+    _print_round_hit(tag, "R3", mid, after, expected, latency=r3_seconds)
+    if after.queries - mid.queries:
+        round_log.append(f"R3:{(after.hits - mid.hits) / (after.queries - mid.queries):.2%}")
     assert_hit_tokens(mid, after, expected=expected, tag=f"{tag} R3")
     assert_output_identical(cold, hit2, tag=f"{tag} R3")
 
     _generate(runner, prompt_b, POOL_MAX_TOKENS)
     final = snapshot_metrics(runner)
+    _print_round_hit(tag, "R4(disjoint prompt, must miss)", after, final, None)
+    round_log.append(
+        f"R4:{(final.hits - after.hits) / (final.queries - after.queries):.2%}"
+        if final.queries - after.queries
+        else "R4:n/a"
+    )
     assert_no_hit(after, final, tag=f"{tag} R4")
 
     state["hit"] = hit2
@@ -718,7 +786,7 @@ def _phase_hit(runner: VllmRunner, state: dict[str, Any], tag: str) -> None:
         f"prefix_hit_rate={prefix_hits / (expected * (HIT_LATENCY_REPEATS + 1)):.2%} "
         f"query_hit_rate={prefix_hits / prefix_queries:.2%} "
         f"overall_query_hit_rate={(final.hits - before.hits) / overall_queries:.2%} "
-        f"queries_delta={overall_queries:.0f}",
+        f"queries_delta={overall_queries:.0f} rounds=[{' '.join(round_log)}]",
         flush=True,
     )
 
@@ -739,7 +807,12 @@ def _phase_control(runner: VllmRunner, state: dict[str, Any], tag: str) -> None:
     state["cold"] = cold
     state["hit"] = hit
     print(
-        f"[kv_pool_a2] {tag} control: prefix_cache_hits_delta={after - before:.0f}",
+        f"[kv_pool_a2] {tag} control_round=1(priming) prefix_cache_hits_delta=0 "
+        f"note=the first request populates the local prefix cache",
+        flush=True,
+    )
+    print(
+        f"[kv_pool_a2] {tag} control_round=2(reuse) prefix_cache_hits_delta={after - before:.0f} hit=yes",
         flush=True,
     )
 
@@ -776,14 +849,137 @@ def _phase_perf(runner: VllmRunner, prompt_ids: list[int], tag: str) -> tuple[fl
         produced += len(prompt_ids)
         measured_seconds += elapsed
     p50 = _percentile(ttft, 0.50)
+    p80 = _percentile(ttft, 0.80)
     p95 = _percentile(ttft, 0.95)
     throughput = produced / measured_seconds
+    head = _percentile(ttft[: max(3, len(ttft) // 4)], 0.50)
+    tail = _percentile(ttft[-max(3, len(ttft) // 4) :], 0.50)
     print(
-        f"[kv_pool_a2] {tag} perf: ttft_p50={p50:.1f}ms ttft_p95={p95:.1f}ms "
-        f"input_throughput={throughput:.0f}tok/s samples={AB_SAMPLES} warmup={AB_WARMUP}",
+        f"[kv_pool_a2] {tag} perf: ttft_p50={p50:.1f}ms ttft_p80={p80:.1f}ms "
+        f"ttft_p95={p95:.1f}ms input_throughput={throughput:.0f}tok/s "
+        f"drift={tail / head if head else 1.0:.2f} samples={AB_SAMPLES} warmup={AB_WARMUP}",
         flush=True,
     )
+    if PERF_SAMPLE_OUT is not None:
+        PERF_SAMPLE_OUT[tag] = {"p50": p50, "p80": p80, "p95": p95, "throughput": throughput}
     return p50, p95, throughput
+
+
+def _parse_cpulist(spec: str) -> set[int]:
+    """Parse a Linux cpulist ("0-3,8,10-11") into a set of core ids."""
+    cores: set[int] = set()
+    for part in spec.replace(" ", "").split(","):
+        if not part:
+            continue
+        if "-" in part:
+            low, high = part.split("-", 1)
+            cores.update(range(int(low), int(high) + 1))
+        else:
+            cores.add(int(part))
+    return cores
+
+
+def _format_cpulist(cores: set[int]) -> str:
+    ordered = sorted(cores)
+    if not ordered:
+        return "-"
+    spans, start, prev = [], ordered[0], ordered[0]
+    for core in ordered[1:]:
+        if core == prev + 1:
+            prev = core
+            continue
+        spans.append(f"{start}-{prev}" if start != prev else str(start))
+        start = prev = core
+    spans.append(f"{start}-{prev}" if start != prev else str(start))
+    return ",".join(spans)
+
+
+def _allowed_cpus() -> set[int]:
+    """Cores this process may run on (cgroup cpuset aware)."""
+    with open("/proc/self/status", encoding="ascii") as handle:
+        for line in handle:
+            if line.startswith("Cpus_allowed_list:"):
+                return _parse_cpulist(line.split(":", 1)[1].strip())
+    return set()
+
+
+def _card_numa_cpus() -> tuple[int | None, set[int]]:
+    """NUMA node and its core list for the NPU this process is confined to.
+
+    Uses ``npu-smi info -t board`` for the PCI address (what vllm-ascend's own
+    cpu_binding reads) and falls back to no isolation when it cannot be resolved.
+    """
+    card = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "0").split(",")[0].strip() or "0"
+    try:
+        proc = subprocess.run(
+            ["npu-smi", "info", "-t", "board", "-i", card, "-c", "0"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None, set()
+    match = re.search(r"([0-9A-Fa-f]{4}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}\.[0-9A-Fa-f])", proc.stdout)
+    if not match:
+        return None, set()
+    try:
+        with open(f"/sys/bus/pci/devices/{match.group(1)}/numa_node", encoding="ascii") as handle:
+            numa = int(handle.read().strip())
+    except (OSError, ValueError):
+        return None, set()
+    try:
+        with open(f"/sys/devices/system/node/node{numa}/cpulist", encoding="ascii") as handle:
+            return numa, _parse_cpulist(handle.read().strip())
+    except OSError:
+        return numa, set()
+
+
+def _apply_cpu_isolation(case: str) -> None:
+    """V1: confine this process tree to the card's NUMA cores (opt-in)."""
+    spec = CPU_ISOLATE
+    if spec in ("", "0", "false", "no"):
+        return
+    allowed = _allowed_cpus()
+    numa: int | None = None
+    if spec in ("1", "true", "yes", "auto"):
+        numa, cores = _card_numa_cpus()
+        note = "auto"
+    else:
+        cores = _parse_cpulist(spec)
+        note = "explicit"
+    chosen = cores & allowed if allowed else cores
+    if not chosen:
+        print(
+            f"[kv_pool_a2] {case}: cpu-isolate skipped ({note} cores={_format_cpulist(cores)} "
+            f"allowed={_format_cpulist(allowed)})",
+            flush=True,
+        )
+        return
+    os.sched_setaffinity(0, chosen)
+    print(
+        f"[kv_pool_a2] {case}: cpu-isolate applied ({note} numa={numa} "
+        f"cpus={_format_cpulist(chosen)} of allowed={_format_cpulist(allowed)})",
+        flush=True,
+    )
+
+
+def _log_env_diagnostics(case: str) -> None:
+    """V4: record the CPU/NUMA knobs that decide whether the pool path is isolated."""
+    allowed = _allowed_cpus()
+    numa, numa_cores = _card_numa_cpus()
+    migratepages = shutil.which("migratepages") or "missing"
+    nice_ok = "unknown"
+    try:
+        probe = subprocess.run(["nice", "-n", "-5", "true"], capture_output=True, timeout=10)
+        nice_ok = "ok" if probe.returncode == 0 else "denied"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    print(
+        f"[kv_pool_a2] {case}: env cpus_allowed={_format_cpulist(allowed)} "
+        f"card_numa={numa} numa_cpus={_format_cpulist(numa_cores)} "
+        f"migratepages={migratepages} nice_minus5={nice_ok} cpu_isolate={CPU_ISOLATE}",
+        flush=True,
+    )
 
 
 def _install_case_watchdog(case: str) -> None:
@@ -860,6 +1056,8 @@ def test_qwen38_kv_pool_ab_a2(backend: str, use_layerwise: bool):
         )
 
     _install_case_watchdog(case)
+    _apply_cpu_isolation(case)
+    _log_env_diagnostics(case)
 
     if backend == "mooncake":
         # The official support matrix asks for mooncake >= 0.3.14 for
@@ -965,6 +1163,10 @@ def test_qwen38_kv_pool_ab_a2(backend: str, use_layerwise: bool):
                 f"the whole sampling window while the control leg stays flat",
                 flush=True,
             )
+
+    if PERF_SAMPLE_OUT is not None:
+        with open(os.environ["QWEN38_POOL_KEEP_SAMPLES"], "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"case": case, "attempts": attempts}) + "\n")
 
     best = min(
         attempts, key=lambda item: (item["a_p50"] / item["b_p50"], -(item["a_throughput"] / item["b_throughput"]))
