@@ -18,15 +18,10 @@ class TestSignature:
     def test_round_trip(self):
         state = ai.State(state="reviewing", round=2, total=6)
         sig = state.signature("abc123def456")
-        assert sig == (
-            "<!-- ai-review: state=reviewing | round=2/5 | total=6 | head=abc123def456 -->"
-        )
+        assert sig == ("<!-- ai-review: state=reviewing | round=2/5 | total=6 | head=abc123def456 -->")
 
     def test_parse(self):
-        comment = (
-            "some findings ...\n\n"
-            "<!-- ai-review: state=waiting-human | round=6/5 | total=7 | head=deadbeef -->"
-        )
+        comment = "some findings ...\n\n<!-- ai-review: state=waiting-human | round=6/5 | total=7 | head=deadbeef -->"
         m = ai.SIGNATURE_RE.search(comment)
         fields = dict(ai.FIELD_RE.findall(m.group(1)))
         assert fields["state"] == "waiting-human"
@@ -65,9 +60,7 @@ domains:
         assert [d["name"] for d in domains] == ["ci"]
 
     def test_first_match_wins_and_multiple_domains(self):
-        domains = ai.resolve_domains(
-            self.REGISTRY, ["vllm_ascend/patch/platform/foo.py", ".github/x.yml"]
-        )
+        domains = ai.resolve_domains(self.REGISTRY, ["vllm_ascend/patch/platform/foo.py", ".github/x.yml"])
         # returned in registry order, not file order
         assert [d["name"] for d in domains] == ["ci", "patch"]
 
@@ -86,9 +79,7 @@ class TestKnowledgeBaseMap:
         (kb / "L1" / "checklist.md").write_text(
             "# L1\n\n- `L1#no-item-sync`: avoid item()\n- `L1#top-level-imports`: imports\n"
         )
-        (kb / "L2" / "ci" / "checklist.md").write_text(
-            "# L2\n\n- `L2-ci#container-contract`: declare containers\n"
-        )
+        (kb / "L2" / "ci" / "checklist.md").write_text("# L2\n\n- `L2-ci#container-contract`: declare containers\n")
         (kb / "instructions.md").write_text("# instructions")
 
         orch = object.__new__(ai.Orchestrator)

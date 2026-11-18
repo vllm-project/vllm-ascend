@@ -37,7 +37,11 @@ jobs:
       - name: Orchestrate ai-review round
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          # Dedicated credentials for the ai-review agent (same DeepSeek
+          # channel as the doc-translate job, separate key so usage is
+          # attributable and revocable independently).
+          AI_REVIEW_KEY: ${{ secrets.AI_REVIEW_KEY }}
+          AI_REVIEW_API: ${{ secrets.AI_REVIEW_API }}
           AI_REVIEW_EVENT_NAME: ${{ github.event_name }}
           AI_REVIEW_EVENT_ACTION: ${{ github.event.action }}
           AI_REVIEW_ACTOR: ${{ github.actor }}
@@ -48,7 +52,6 @@ jobs:
           AI_REVIEW_DSH_CMD: ${{ vars.AI_REVIEW_DSH_CMD || 'dsh --profile headless' }}
           # Model for the review agent, passed through to dsh once its
           # config surface is confirmed in the smoke test (runner precheck).
-          # Same API endpoint/key as the doc-translate job (DEEPSEEK_API_KEY).
           AI_REVIEW_MODEL: deepseek-v4.1-flash
         run: |
           python3 .github/workflows/scripts/ai_review.py \
