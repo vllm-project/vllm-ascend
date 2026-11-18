@@ -325,6 +325,7 @@ def _require_a2_devices() -> None:
     npu = getattr(torch, "npu", None)
     if npu is None or not npu.is_available():
         pytest.skip("GLM-5.3-Flash A2 TP8 pool cases need Ascend NPUs (torch.npu), found none in this container")
+    assert npu is not None  # type narrowing for mypy
     if npu.device_count() < TP_SIZE:
         pytest.skip(
             f"case needs {TP_SIZE} visible NPUs, container exposes {npu.device_count()} "
