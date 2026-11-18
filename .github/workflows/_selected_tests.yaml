@@ -168,6 +168,8 @@ jobs:
       - name: Get csrc hash
         id: get_csrc_hash
         if: ${{ matrix.group.npu_type != 'cpu' }}
+        env:
+          NPU_TYPE: ${{ matrix.group.npu_type }}
         run: |
           # Fail closed so a git error cannot be converted into sha256(empty)
           # and then appear to be a legitimate cache miss.
@@ -176,7 +178,11 @@ jobs:
           cd "$GITHUB_WORKSPACE"
 
           # Match the cache producer's tracked csrc build inputs exactly.
-          CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
+          CSRC_INPUTS=(csrc setup.py CMakeLists.txt cmake)
+          if [ "$NPU_TYPE" = a5 ]; then
+            CSRC_INPUTS+=(pyproject.toml tools/deepgemm/build.py tools/deepgemm/install_build_deps.sh)
+          fi
+          CSRC_MANIFEST=$(git ls-files -s -- "${CSRC_INPUTS[@]}")
           if [ -z "$CSRC_MANIFEST" ]; then
             echo "::error::No tracked csrc inputs found."
             exit 1
@@ -206,6 +212,7 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
+            ${{ matrix.group.npu_type == 'a5' && 'vllm_ascend/third_party/deep_gemm' || '' }}
           key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
           # During the rollout, tolerate misses so CI can fall back to the
           # existing NPU build while CPU cache production proves stable.
@@ -241,6 +248,10 @@ jobs:
             libnuma1
           ldconfig
 
+      - name: Install DeepGEMM build dependencies (A5)
+        if: matrix.group.npu_type == 'a5'
+        run: bash tools/deepgemm/install_build_deps.sh
+
       - name: Install vllm-project/vllm-ascend with device
         if: ${{ matrix.group.npu_type != 'cpu' }}
         env:
@@ -261,6 +272,13 @@ jobs:
             echo "csrc cache miss: compile kernels on the NPU runner"
             uv pip install -e . --no-build-isolation
           fi
+
+      - name: Verify packaged DeepGEMM (A5)
+        if: matrix.group.npu_type == 'a5'
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          source /usr/local/Ascend/nnal/atb/set_env.sh
+          TORCH_DEVICE_BACKEND_AUTOLOAD=0 python3 tools/deepgemm/verify_install.py
 
       - name: Install FLA NPU for selected tests
         if: ${{ matrix.group.npu_type == 'a2' || matrix.group.npu_type == 'a3' || matrix.group.npu_type == 'a5' }}
