@@ -104,6 +104,9 @@ from vllm_ascend.ops.triton.step5.fused_qknorm_rope import (
 from vllm_ascend.ops.triton.step5.gated_scale import (
     gated_scale,
 )
+from vllm_ascend.ops.triton.step5.indexer_qkz_norm_rope import (
+    fused_indexer_qkz_norm_rope,
+)
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.33.0"):
@@ -330,6 +333,23 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
             eps=rms_norm_eps,
         )
 
+        # Fused indexer Q/K norm+RoPE (+ Z passthrough) in one Triton kernel.
+        # It reads the strided split_indexer views in place and quantizes
+        # index_q to e4m3 at the store, which the fused indexer scoring
+        # consumes directly. Active for the production partial-RoPE geometry
+        # only (0 < sparse_indexer_rope_dim < proxy_dim).
+        indexer_rope_dim = int(sparse_config.sparse_indexer_rope_dim)
+        self.use_fused_indexer_norm_rope = (
+            indexer_rope_dim > 0 and indexer_rope_dim < proxy_dim
+        )
+        if self.use_fused_indexer_norm_rope:
+            self._indexer_rotary_dim = indexer_rope_dim
+            self._indexer_zero_centered = zero_centered
+            indexer_rotary_cache = self.sparse_indexer_rotary_emb.cos_sin_cache
+            self._indexer_rope_cos, self._indexer_rope_sin = (
+                indexer_rotary_cache.chunk(2, dim=-1)
+            )
+
         self.layer_name = f"{prefix}.attn"
         self.kv_cache_dtype = cache_config.cache_dtype if cache_config is not None else "auto"
         self.kv_cache_torch_dtype = _kv_cache_torch_dtype(cache_config, vllm_config)
@@ -440,17 +460,50 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
         num_index_k_heads = int(index_k.shape[-1]) // proxy_dim
         heads_per_group = num_index_q_heads // self.num_kv_heads
 
-        index_k = self.sparse_indexer_k_norm(index_k.contiguous())
-        index_q = index_q.view(num_tokens, self.num_kv_heads, heads_per_group, proxy_dim).contiguous()
-        index_q = self.sparse_indexer_q_norm(index_q)
-        index_k = index_k.view(num_tokens, num_index_k_heads, proxy_dim).contiguous()
-        index_q, index_k = self._apply_sparse_indexer_rope(
-            positions,
-            index_q.reshape(num_tokens, -1, proxy_dim),
-            index_k,
-        )
-        index_q = index_q.reshape(num_tokens, self.num_kv_heads, heads_per_group, proxy_dim)
-        index_z = index_z.view(num_tokens, num_index_k_heads, proxy_dim).contiguous()
+        if self.use_fused_indexer_norm_rope:
+            # One kernel for the whole indexer chain: per-head RMSNorm on
+            # index_q, per-head LayerNorm on index_k, NeoX RoPE on both and
+            # the Z passthrough, reading the strided split_indexer views in
+            # place (no materializing copy on any of the three inputs) and
+            # quantizing index_q to e4m3 at the store.
+            index_q, index_k, index_z = fused_indexer_qkz_norm_rope(
+                index_q,
+                index_k,
+                index_z,
+                self.sparse_indexer_q_norm.weight,
+                self.sparse_indexer_k_norm.weight,
+                self._indexer_rope_cos,
+                self._indexer_rope_sin,
+                positions,
+                q_norm_bias=None,
+                k_norm_bias=self.sparse_indexer_k_norm.bias,
+                head_dim=proxy_dim,
+                num_q_heads=num_index_q_heads,
+                num_k_heads=num_index_k_heads,
+                rotary_dim=self._indexer_rotary_dim,
+                eps=self.sparse_indexer_q_norm.variance_epsilon,
+                q_norm_weight_bias=1.0 if self._indexer_zero_centered else 0.0,
+                k_norm_weight_bias=0.0,
+                subtract_mean_q=False,
+                subtract_mean_k=True,
+            )
+            index_q = index_q.reshape(
+                num_tokens, self.num_kv_heads, heads_per_group, proxy_dim
+            )
+            index_k = index_k.reshape(num_tokens, num_index_k_heads, proxy_dim)
+            index_z = index_z.reshape(num_tokens, num_index_k_heads, proxy_dim)
+        else:
+            index_k = self.sparse_indexer_k_norm(index_k.contiguous())
+            index_q = index_q.view(num_tokens, self.num_kv_heads, heads_per_group, proxy_dim).contiguous()
+            index_q = self.sparse_indexer_q_norm(index_q)
+            index_k = index_k.view(num_tokens, num_index_k_heads, proxy_dim).contiguous()
+            index_q, index_k = self._apply_sparse_indexer_rope(
+                positions,
+                index_q.reshape(num_tokens, -1, proxy_dim),
+                index_k,
+            )
+            index_q = index_q.reshape(num_tokens, self.num_kv_heads, heads_per_group, proxy_dim)
+            index_z = index_z.view(num_tokens, num_index_k_heads, proxy_dim).contiguous()
 
         weights = weights.to(dtype=torch.float32)
         weights = weights.view(num_tokens, self.num_kv_heads, heads_per_group)
