@@ -236,8 +236,7 @@ def get_acceptance_rate_per_pos(args):
 
     if args.method in ("eagle", "eagle3") and args.disable_padded_drafter_batch:
         raise ValueError(
-            "--disable-padded-drafter-batch is no longer supported: "
-            "vLLM removed the unpadded drafter batch option."
+            "--disable-padded-drafter-batch is no longer supported: vLLM removed the unpadded drafter batch option."
         )
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir)

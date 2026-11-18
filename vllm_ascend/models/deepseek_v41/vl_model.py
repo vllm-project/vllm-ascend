@@ -24,7 +24,6 @@ from vllm.models.deepseek_v41.common.mm_preprocess import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
-
 from .engram.shared_pool import rollback_shared_engram
 from .engram_lifecycle import close_engram_on_init_failure
 from .model import AscendDeepseekV41LLMForCausalLM

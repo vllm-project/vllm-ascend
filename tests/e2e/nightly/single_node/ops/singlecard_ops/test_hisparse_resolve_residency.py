@@ -35,7 +35,7 @@ pytestmark = [
 ]
 
 bootstrap_custom_op_env()
-import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
+import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: E402,F401
 
 resolve = torch.ops._C_ascend.hisparse_resolve_residency
 
