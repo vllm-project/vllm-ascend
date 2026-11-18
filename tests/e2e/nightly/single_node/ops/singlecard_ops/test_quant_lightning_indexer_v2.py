@@ -16,8 +16,8 @@ import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped] # noqa: E402,F4
 
 enable_custom_op()
 
-from vllm_ascend.device.device_op import A5DeviceAdaptor  # noqa: E402
-from vllm_ascend.ops.triton.sharded_indexer import build_local_key_lengths  # noqa: E402
+from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor  # noqa: E402
+from vllm_ascend.ops.triton.sharded_indexer import build_local_key_lengths, pack_local_candidates  # noqa: E402
 
 
 @torch.inference_mode()
@@ -458,7 +458,8 @@ def test_quant_lightning_indexer_v2_accuracy(arch, enable_dcp):
         pytest.skip("requires QLI v2 custom operators")
 
     generator = torch.Generator().manual_seed(20878)
-    rows, heads, width, page, topk = 2, 64, 128, 128, 64
+    rows, heads, width, page, topk = (3 if enable_dcp else 2), 64, 128, 128, 64
+    active_rows = 2
     world, rank, interleave = (2, 1, 8) if enable_dcp else (1, 0, 1)
     global_length = 1001 if enable_dcp else 1024
     local_positions = [index for index in range(global_length) if (index // interleave) % world == rank]
@@ -485,7 +486,7 @@ def test_quant_lightning_indexer_v2_accuracy(arch, enable_dcp):
     query, key = query_cpu.npu(), key_cpu.npu()
     weights, query_scale = weights_cpu.npu(), query_scale_cpu.npu()
     key_scale = key_scale_cpu.npu()
-    cu_seqlens_q = torch.tensor([0, rows], dtype=torch.int32, device="npu")
+    cu_seqlens_q = torch.tensor([0, active_rows], dtype=torch.int32, device="npu")
     seqused_k = torch.tensor([local_length], dtype=torch.int32, device="npu")
     block_table = block_table_cpu.to(torch.int32).unsqueeze(0).npu()
     dcp = (
@@ -520,20 +521,37 @@ def test_quant_lightning_indexer_v2_accuracy(arch, enable_dcp):
         **common,
         **dcp,
     )
-    indices, values = ops.npu_quant_lightning_indexer_v2(
-        query,
-        key,
-        weights,
-        query_scale,
-        key_scale,
-        topk,
-        quant_mode,
-        block_table=block_table,
-        metadata=metadata,
-        return_value=1,
-        **common,
-        **dcp,
-    )
+    if enable_dcp:
+        indices, values = BaseDeviceAdaptor.indexer_select_dcp_candidates(
+            query,
+            weights,
+            key,
+            key_scale.unsqueeze(-1),
+            block_table,
+            cu_seqlens_q,
+            seqused_k,
+            query_scale,
+            global_seq_lens=dcp["causal_seqlens_kv_global"],
+            cp_world=world,
+            cp_rank=rank,
+            cp_interleave=interleave,
+            qli_metadata=metadata,
+            topk=topk,
+        )
+    else:
+        indices, values = ops.npu_quant_lightning_indexer_v2(
+            query,
+            key,
+            weights,
+            query_scale,
+            key_scale,
+            topk,
+            quant_mode,
+            block_table=block_table,
+            metadata=metadata,
+            return_value=1,
+            **common,
+        )
 
     logical_keys = logical_key.reshape(-1, width)[:local_length].float()
     dots = torch.einsum("qhd,kd->qhk", query_cpu.float(), logical_keys)
@@ -548,15 +566,15 @@ def test_quant_lightning_indexer_v2_accuracy(arch, enable_dcp):
         scores = scores.bfloat16().float()
 
     assert values.dtype == torch.bfloat16
-    if enable_dcp:
-        from vllm_ascend.ops.triton.sharded_indexer import normalize_dcp_candidates
-
-        normalized_indices, normalized_values = normalize_dcp_candidates(indices, values, cu_seqlens_q)
-        assert normalized_indices is indices and normalized_values is values
     indices_cpu = indices.cpu().reshape(rows, topk).long()
     values_cpu = values.cpu().reshape(rows, topk).float()
-    for row in range(rows):
-        visible_end = global_length - rows + row + 1
+    if enable_dcp:
+        assert (indices_cpu[active_rows:] == -1).all()
+        assert torch.isneginf(values_cpu[active_rows:]).all()
+        packed = pack_local_candidates(indices, values, world, rank, interleave)
+        assert (packed[active_rows:, :, 0].cpu() == -1).all()
+    for row in range(active_rows):
+        visible_end = global_length - active_rows + row + 1
         visible = sum(position < visible_end for position in local_positions)
         expected = scores[row, :visible].topk(topk).values
         selected = indices_cpu[row]

@@ -21,7 +21,6 @@
 | out | Optional output | Destination `[T,1,topk]`; may be a contiguous row slice | INT32 | ND |
 | seq_lens, query_ends | Input | Global sequence lengths and cumulative query endpoints | INT32 | ND |
 | key_lengths, visible_lengths | Output | Per-request local length and per-query local causal prefix | INT32 | ND |
-| query_start_loc | Input | Cumulative query bounds including leading zero for native candidate normalization | INT32 | ND |
 
 ## Constraints
 
@@ -30,7 +29,7 @@
 - K2048 has fused preparation/merge. Other supported K values retain native stable sorting. Fused preparation uses one inline stable radix algorithm for BF16 and FP32, with 16 and 32 score-key bits respectively. The public wrapper rejects other score dtypes before allocation or launch; the kernel receives `SCORE_BITS` as a compile-time parameter. BF16 values widen exactly to FP32 for transport; FP32 scores retain all their bits.
 - Owner-prefix merge requires `presorted=True`, `owner_sharded=True`, `K_local=topk=2048`, and a valid local rank. Other calls use full selection.
 - Non-power-of-two rank tiles clamp padded peer addresses before masked loads; this prevents A3 GM faults without changing any valid peer or selection result.
-- Invalid/nonfinite candidates do not enter the valid output prefix. Empty requests and graph padding produce zero lengths or -1 IDs. Normalization accepts BF16 or FP32 QLI scores and writes only the native QLI-owned output buffers in place, preserving their dtype.
+- Invalid/nonfinite candidates do not enter the valid output prefix. The native DCP QLI entry pre-fills graph-padding rows with -1 IDs and -inf scores; candidate packing filters invalid IDs and nonfinite BF16/FP32 scores without a separate normalization kernel.
 - ROWS is runtime and does not specialize transport/merge kernels. K, topology, strides and sorting tiles are fixed compilation/layout parameters. Length kernels keep row/request counts dynamic; power-of-two tiles and binary-search step counts select compilation buckets. Input values update on replay. Black-box compilation counts and hardware/model validation belong in the PR evidence.
 
 ## Origin and Differences

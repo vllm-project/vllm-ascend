@@ -800,32 +800,3 @@ def build_local_key_lengths(seq_lens, key_lengths, world_size: int, rank: int, i
         _local_key_lengths[(triton.cdiv(requests, 128),)](
             seq_lens, key_lengths, requests, world_size, rank, interleave, 128
         )
-
-
-@triton.jit(do_not_specialize=["REQUESTS"])
-def _normalize_dcp_candidates(indices, scores, query_start_loc, REQUESTS, K: tl.constexpr, BLOCK: tl.constexpr):
-    row = tl.program_id(0)
-    col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    active_rows = tl.load(query_start_loc + REQUESTS)
-    active = (row < active_rows) & (col < K)
-    idx = tl.load(indices + row * K + col, active, -1)
-    score = tl.load(scores + row * K + col, active, -float("inf")).to(tl.float32)
-    valid = active & (idx >= 0) & (tl.abs(score) < float("inf"))
-    tl.store(indices + row * K + col, tl.where(valid, idx, -1), col < K)
-    tl.store(scores + row * K + col, tl.where(valid, score, -float("inf")), col < K)
-
-
-def normalize_dcp_candidates(indices, scores, query_start_loc):
-    """Clear invalid candidates and graph padding in BF16 or FP32 outputs in place.
-
-    QLI does not initialize rows beyond the cumulative query endpoint. Each
-    kernel lane owns its index/score slot, so no extra transport buffer is needed.
-    """
-    if scores.dtype not in (torch.bfloat16, torch.float32):
-        raise TypeError("DCP candidate normalization requires BF16 or FP32 QLI scores")
-    rows, _, topk = indices.shape
-    if rows:
-        _normalize_dcp_candidates[(rows, triton.cdiv(topk, 256))](
-            indices, scores, query_start_loc, query_start_loc.numel() - 1, topk, 256
-        )
-    return indices, scores
