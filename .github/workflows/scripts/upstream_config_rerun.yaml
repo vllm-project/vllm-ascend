@@ -2,10 +2,6 @@ e2e-upstream_pr:
   - name: tests/v1/worker/test_mamba_utils.py
     estimated_time: 20
 e2e-upstream_singlecard:
-  - name: tests/entrypoints/pooling/scoring/test_cross_encoder_online_vision.py
-    estimated_time: 20
-  - name: tests/models/multimodal/processing/test_minicpmv.py
-    estimated_time: 20
   - name: tests/models/multimodal/processing/test_qwen2_vl.py
     estimated_time: 20
   - name: tests/v1/core/test_scheduler.py
@@ -23,8 +19,6 @@ e2e-upstream_online_1:
     estimated_time: 20
   - name: tests/evals/mrcr/test_mrcr_correctness.py
     estimated_time: 20
-  - name: tests/plugins_tests/lora_resolvers/test_hf_hub_resolver.py
-    estimated_time: 20
   - name: tests/entrypoints/llm/offline_mode/test_offline_mode.py
     estimated_time: 20
   - name: tests/model_executor/test_model_load_with_params.py
@@ -34,14 +28,6 @@ e2e-upstream_online_1:
   - name: tests/entrypoints/pooling/basic/test_tiling_engine.py
     estimated_time: 20
   - name: tests/entrypoints/openai/completion/test_token_in_token_out.py
-    estimated_time: 20
-  - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_s3.py
-    estimated_time: 20
-  - name: tests/models/multimodal/processing/test_moondream3.py
-    estimated_time: 20
-  - name: tests/tokenizers_/test_basic.py
-    estimated_time: 20
-  - name: tests/v1/structured_output/test_backend_guidance.py
     estimated_time: 20
 e2e-upstream_a2_2:
   - name: tests/models/multimodal/pooling/test_d3.py
