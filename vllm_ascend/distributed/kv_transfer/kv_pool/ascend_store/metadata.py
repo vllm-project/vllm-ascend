@@ -796,26 +796,26 @@ class LoadSpec:
 
     token_len: int = 0
 
-    # Exact request-scoped snapshot identity, separate from the logical length
-    # which can roll back after speculative-token rejection.
-    layerwise_snapshot_end_token: int | None = None
-    layerwise_snapshot_block_index: int | None = None
     # Distinguish the preceding step of this request from external prefix hits.
     layerwise_previous_step: bool = False
-    # First block stored under request-scoped keys, including unhashed full blocks.
-    layerwise_snapshot_start_block: int | None = None
 
 
 @dataclass(init=False)
 class RequestTracker:
     # Request id
     req_id: str
-
     token_len: int
 
     # The block ids that has been allocated so far, grouped by KV cache group.
     # NOTE: allocated blocks could be more than the number of tokens.
     allocated_block_ids_by_group: list[list[int]]
+
+    # Namespace for request-scoped snapshots; renewed after preemption/reuse.
+    layerwise_request_id: str | None = None
+
+    # Public prefix pages loaded before this execution may be reused unchanged.
+    # Newly computed pages need an execution-local identity until the request ends.
+    layerwise_recompute_start_token: int | None = None
 
     # The number of tokens that has been savd
     num_saved_tokens: int = 0
@@ -835,11 +835,6 @@ class RequestTracker:
     block_gvas_by_group: list[list[int]] = field(default_factory=list)
     gva_block_offset: int = 0
     last_block_gva: int | None = None
-
-    # Identity of the latest request-scoped layerwise partial snapshot.
-    last_layerwise_snapshot_end_token: int | None = None
-    last_layerwise_snapshot_block_index: int | None = None
-    last_layerwise_snapshot_start_block: int | None = None
 
     # Number of speculative scratch blocks for each Mamba cache group.
     num_speculative_blocks_by_group: dict[int, int] | None = None
@@ -862,9 +857,6 @@ class RequestTracker:
         last_block_gva: int | None = None,
         num_speculative_blocks_by_group: dict[int, int] | None = None,
         block_sizes: list[int] | None = None,
-        last_layerwise_snapshot_end_token: int | None = None,
-        last_layerwise_snapshot_block_index: int | None = None,
-        last_layerwise_snapshot_start_block: int | None = None,
     ) -> None:
         self.req_id = req_id
         self.token_len = token_len
@@ -882,9 +874,6 @@ class RequestTracker:
         self.gva_block_offset = gva_block_offset
         self.last_block_gva = last_block_gva
         self.block_sizes = block_sizes
-        self.last_layerwise_snapshot_end_token = last_layerwise_snapshot_end_token
-        self.last_layerwise_snapshot_block_index = last_layerwise_snapshot_block_index
-        self.last_layerwise_snapshot_start_block = last_layerwise_snapshot_start_block
 
     @property
     def allocated_block_ids(self) -> list[int]:
@@ -952,6 +941,10 @@ class ReqMeta:
     block_ids_by_group: list[list[int]]
 
     block_hashes: list[BlockHash]
+    layerwise_request_id: str | None = None
+    layerwise_recompute_start_token: int | None = None
+    public_save_blocks: dict[int, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
+    needs_private_snapshot: bool = True
 
     # First token that has not been saved before this metadata was built.
     save_start_token: int = 0
@@ -1019,10 +1012,17 @@ class ReqMeta:
         load_key_block_offset: int = 0,
         load_last_block_key: str | None = None,
         load_keys: list[str] | None = None,
+        layerwise_request_id: str | None = None,
+        layerwise_recompute_start_token: int | None = None,
+        needs_private_snapshot: bool = True,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
         self.req_id = req_id
+        self.layerwise_request_id = layerwise_request_id
+        self.layerwise_recompute_start_token = layerwise_recompute_start_token
+        self.public_save_blocks = {}
+        self.needs_private_snapshot = needs_private_snapshot
         self.token_len_chunk = token_len_chunk
         self.save_end_token = token_len_chunk if save_end_token is None else save_end_token
         self.target_token_len = token_len_chunk if target_token_len is None else target_token_len
@@ -1128,6 +1128,12 @@ class ReqMeta:
             block_hashes = []
         target_token_len = tracker.token_len
         previous_saved_tokens = tracker.num_saved_tokens
+        if save_partial_block and tracker.layerwise_recompute_start_token is None:
+            tracker.layerwise_recompute_start_token = (
+                load_spec.kvpool_cached_tokens
+                if load_spec is not None and load_spec.can_load and not load_spec.layerwise_previous_step
+                else previous_saved_tokens
+            )
 
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
@@ -1187,16 +1193,6 @@ class ReqMeta:
                 tracker.num_saved_tokens,
                 num_tokens_to_save,
             )
-            if should_save_partial_block:
-                tracker.last_layerwise_snapshot_end_token = target_token_len
-                tracker.last_layerwise_snapshot_start_block = min(full_block_count, available_full_block_count)
-                tracker.last_layerwise_snapshot_block_index = (
-                    full_block_count if target_token_len % cache_transfer_granularity != 0 else full_block_count - 1
-                )
-            elif save_partial_block:
-                tracker.last_layerwise_snapshot_end_token = None
-                tracker.last_layerwise_snapshot_block_index = None
-                tracker.last_layerwise_snapshot_start_block = None
 
         token_ids = None
         if tracker.token_ids and not skip_save:
@@ -1217,6 +1213,8 @@ class ReqMeta:
         logger.debug("request:%s, meta save spec:%s, meta load spec:%s", tracker.req_id, not skip_save, load_spec)
         return ReqMeta(
             req_id=tracker.req_id,
+            layerwise_request_id=tracker.layerwise_request_id,
+            layerwise_recompute_start_token=tracker.layerwise_recompute_start_token,
             token_len_chunk=num_tokens_to_save,
             save_end_token=num_tokens_to_save,
             target_token_len=target_token_len,
