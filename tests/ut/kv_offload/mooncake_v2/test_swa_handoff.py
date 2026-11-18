@@ -142,7 +142,7 @@ def test_swa_handoff_preserves_payload_without_extra_retention(
         )
 
     p_manager, d_manager = make_manager(), make_manager()
-    payload = {}
+    payload: dict[int, dict[int, int]] = {}
     processed = 0
     while processed < producer.num_prompt_tokens:
         end = min(processed + 256, producer.num_prompt_tokens)
@@ -159,7 +159,7 @@ def test_swa_handoff_preserves_payload_without_extra_retention(
         payload[block.block_id] = {offset: -1 for offset in range(BLOCK_SIZE)}
     p_blocks = p_manager.req_to_blocks["p"]
     full_ids = list(range(100, 100 + len(p_blocks)))
-    block_ids = ([block.block_id for block in p_blocks],)
+    block_ids: tuple[list[int], ...] = ([block.block_id for block in p_blocks],)
     if cache_layout in ("full_swa", "step5"):
         block_ids += (full_ids,)
     if cache_layout == "step5":
