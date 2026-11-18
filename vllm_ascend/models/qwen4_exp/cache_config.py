@@ -28,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -121,6 +122,10 @@ def _classify_spec(layer_name: str, spec: KVCacheSpec) -> str | None:
         and get_kv_cache_compression_ratio(spec) > 1
     ):
         return QSA_COMPRESSED
+    # DFlash2 draft sliding-window layers own private KV storage; they are
+    # not QSA main/raw/compressed owners.
+    if isinstance(spec, SlidingWindowSpec):
+        return HIDDEN
     if layer_name.endswith(".attn") and isinstance(spec, FullAttentionSpec):
         return QSA_MAIN
     if isinstance(spec, MambaSpec):

@@ -1,5 +1,5 @@
 pr: 19430
 entries:
   - category: bugfix
-    text: Fixed Qwen3.8-Flash-Next initialization with DFlash2 by allowing this draft configuration, providing its required target auxiliary hidden states, and avoiding startup failures when pinned host memory is unavailable for the M-RoPE position buffer or multimodal encoder inputs.
+    text: Fixed Qwen3.8-Flash-Next initialization with DFlash2 by allowing this draft configuration, providing its required target auxiliary hidden states, handling its sliding-window KV caches, and avoiding startup failures when pinned host memory is unavailable for the M-RoPE position buffer or multimodal encoder inputs.
     model: qwen3-dflash

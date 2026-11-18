@@ -15,6 +15,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -194,6 +195,53 @@ def test_block_packed_states_have_disjoint_components_and_aligned_kv_pages() -> 
     assert layout.owner("model.layers.0.linear_attn").role == GDN
     assert layout.owner("model.ple").role == PLE
     assert layout.owner("model.cache_only_layers.0").role == HIDDEN
+
+
+def test_dflash2_sliding_window_layers_use_private_cache_storage() -> None:
+    draft_layers = [f"model.layers.{index}.self_attn.attn" for index in range(48, 53)]
+    sliding = SlidingWindowSpec(
+        block_size=256,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.bfloat16,
+        sliding_window=1024,
+    )
+    groups = _groups() + [KVCacheGroupSpec(draft_layers, sliding)]
+
+    layout = build_qwen4_kv_cache_layout(groups, num_blocks=3)
+    assert layout is not None
+    assert layout.slot_count == 3
+    for slot, source in enumerate(
+        [
+            "model.layers.11.self_attn",
+            "model.layers.47.self_attn",
+            "model.mtp.layers.48.self_attn",
+        ]
+    ):
+        assert layout.owner(f"{source}.attn").slot == slot
+        assert layout.owner(f"{source}.indexer.raw_key_cache").slot == slot
+        assert layout.owner(f"{source}.indexer.compressed_key_cache").slot == slot
+    assert all(layout.owner(name).role == HIDDEN for name in draft_layers)
+
+    config = get_qwen4_exp_kv_cache_config(
+        SimpleNamespace(
+            cache_config=SimpleNamespace(
+                num_gpu_blocks_override=3,
+                prefix_cache_retention_interval=None,
+            )
+        ),
+        groups,
+        10**9,
+    )
+    assert config is not None
+    draft_tensors = {
+        layer: tensor for tensor in config.kv_cache_tensors for layer in tensor.layers if layer in draft_layers
+    }
+    assert set(draft_tensors) == set(draft_layers)
+    for name, tensor in draft_tensors.items():
+        assert tensor.layers == [name]
+        assert tensor.size == 3 * sliding.page_size_bytes
+        assert tensor.block_stride == sliding.page_size_bytes
 
 
 def test_qwen4_cache_views_are_contiguous_and_advanced_index_is_bounded() -> None:
