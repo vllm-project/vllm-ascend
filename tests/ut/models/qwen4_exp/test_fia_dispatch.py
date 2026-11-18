@@ -208,13 +208,13 @@ def run_stub_batch(implementation, phases, query_lengths, kv_lengths):
         out.fill_(7)
         return out
 
-    def union(q, k, v, idx, table, requests, positions, lengths, out, *, request_index):
+    def union(q, k, v, idx, table, requests, positions, lengths, out, *, request_index, prepared):
         assert torch.all(requests == request_index)
         calls.append(("union", q.flatten().tolist()))
         out.fill_(7)
         return out
 
-    def union_batch(q, k, v, idx, table, requests, positions, lengths, out, *, query_starts, request_indices):
+    def union_batch(q, k, v, idx, table, requests, positions, lengths, out, *, query_starts, request_indices, prepared):
         assert query_starts[0] == 0 and query_starts[-1] == q.shape[0]
         for start, end, request in zip(query_starts, query_starts[1:], request_indices):
             assert torch.all(requests[start:end] == request)
@@ -231,6 +231,12 @@ def run_stub_batch(implementation, phases, query_lengths, kv_lengths):
     )
     plan = implementation["build_qsa_request_plan"](
         torch.tensor(starts), torch.tensor(kv_lengths), total, torch.tensor(phases)
+    )
+    plan = implementation["prepare_qsa_union_batches"](
+        plan,
+        torch.arange(total, dtype=torch.int32),
+        torch.tensor(kv_lengths),
+        torch.zeros(len(phases), 256),
     )
     requests = torch.repeat_interleave(torch.arange(len(phases)), torch.tensor(query_lengths))
     implementation["dispatch_qsa_attention"](

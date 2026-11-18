@@ -11,11 +11,6 @@ from typing import Any
 import torch
 
 from vllm_ascend.ops.gbsa import generic_block_sparse_attention_out
-from vllm_ascend.ops.triton.qwen4_exp.gbsa import prepare_qsa_gbsa_inputs
-from vllm_ascend.ops.triton.qwen4_exp.gbsa_union import (
-    build_qsa_union_inputs_from_compact_triton,
-    build_qsa_union_inputs_triton,
-)
 
 UNION_SIZE = 8
 BLOCK_Y = 4
@@ -23,13 +18,26 @@ INVALID_KEY = 1 << 30
 GBSA_PAGE_SIZE = 128
 
 
-def build_qsa_union_inputs(
-    sparse_idx: torch.Tensor,
-    sparse_count: torch.Tensor,
+def build_qsa_union_inputs_from_compact(
+    compact_indices: torch.Tensor,
     visible: torch.Tensor,
+    group_row_map: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Group one request without altering its selected blocks or tail policy."""
-    return build_qsa_union_inputs_triton(sparse_idx, sparse_count, visible)
+    """Build Union inputs with the native AscendC operator."""
+    if compact_indices.ndim != 2:
+        raise ValueError("Union compact indices must be two-dimensional")
+    if visible.shape != (compact_indices.shape[0],):
+        raise ValueError("Union visible lengths must match compact rows")
+    if group_row_map.ndim != 2 or group_row_map.shape[1] != UNION_SIZE:
+        raise ValueError("Union row map must have eight lanes per group")
+    input_groups = compact_indices.shape[1] - 3
+    topk = input_groups + int(input_groups < 512)
+    if input_groups <= 0 or topk & (topk - 1):
+        raise ValueError("Union packed width must be a positive power of two")
+
+    return torch.ops._C_ascend.qsa_union_inputs(
+        compact_indices.contiguous(), visible.contiguous(), group_row_map.contiguous()
+    )
 
 
 def _build_qsa_union_inputs_torch(
@@ -176,7 +184,7 @@ def qsa_union_gbsa_attention(
     output: torch.Tensor,
     *,
     request_index: int,
-    prepared: Any | None = None,
+    prepared: Any,
 ) -> torch.Tensor:
     # Lazy import isolates the optional vendor package from model discovery and
     # from stock decode/graph capture. Missing support must fail visibly.
@@ -186,24 +194,13 @@ def qsa_union_gbsa_attention(
         raise ValueError("Union GBSA requires one KV head and at most 16 Q heads per launch")
     if block_table.shape[1] * GBSA_PAGE_SIZE > (1 << 23):
         raise ValueError("Union index encoding exceeds exact FP32 sort range")
-    rows = query.shape[0]
-    if prepared is None:
-        sparse_idx, sparse_count, visible, _, _ = prepare_qsa_gbsa_inputs(
-            compact_indices, logical_positions, seq_lens, token_to_req, block_table, 1, write_row_metadata=False
-        )
-        union_inputs = build_qsa_union_inputs(sparse_idx, sparse_count, visible)
-        cu_q = torch.tensor([0, rows], dtype=torch.int64, device=query.device)
-        selected_lengths = seq_lens[request_index : request_index + 1].contiguous()
-        selected_table = block_table[request_index : request_index + 1]
-        max_query_length = rows
-    else:
-        union_inputs = build_qsa_union_inputs_from_compact_triton(
-            compact_indices, prepared.visible_lengths, prepared.group_row_map
-        )
-        cu_q = prepared.cu_q
-        selected_lengths = prepared.seq_lens
-        selected_table = prepared.block_table
-        max_query_length = prepared.max_query_length
+    union_inputs = build_qsa_union_inputs_from_compact(
+        compact_indices, prepared.visible_lengths, prepared.group_row_map
+    )
+    cu_q = prepared.cu_q
+    selected_lengths = prepared.seq_lens
+    selected_table = prepared.block_table
+    max_query_length = prepared.max_query_length
     return _run_union_gbsa(
         union_ops,
         query,
@@ -216,46 +213,6 @@ def qsa_union_gbsa_attention(
         output,
         max_query_length=max_query_length,
     )
-
-
-def build_qsa_union_batch_inputs(
-    sparse_idx: torch.Tensor,
-    sparse_count: torch.Tensor,
-    visible: torch.Tensor,
-    query_starts: tuple[int, ...],
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Batch union construction while keeping every request's groups separate."""
-    lengths = tuple(b - a for a, b in zip(query_starts, query_starts[1:]))
-    if (
-        len(query_starts) < 2
-        or query_starts[0] != 0
-        or query_starts[-1] != sparse_idx.shape[1]
-        or any(n <= 0 for n in lengths)
-    ):
-        raise ValueError("Packed query starts must cover all nonempty requests")
-    if all(n % UNION_SIZE == 0 for n in lengths):
-        return build_qsa_union_inputs(sparse_idx, sparse_count, visible)
-    # Padding is per request, never across a request boundary. Keep actual Q
-    # unpadded; metadata uses its original cu_seqlens_q to locate union groups.
-    padded_rows = 0
-    destinations: list[int] = []
-    for length in lengths:
-        start = padded_rows
-        destinations.extend(range(start, start + length))
-        padded_rows += (length + UNION_SIZE - 1) // UNION_SIZE * UNION_SIZE
-    destination = torch.tensor(destinations, dtype=torch.int64, device=sparse_idx.device)
-    padded_idx = torch.full(
-        (1, padded_rows, sparse_idx.shape[-1]),
-        -1,
-        dtype=sparse_idx.dtype,
-        device=sparse_idx.device,
-    )
-    padded_count = torch.zeros((1, padded_rows), dtype=sparse_count.dtype, device=sparse_count.device)
-    padded_visible = torch.zeros(padded_rows, dtype=visible.dtype, device=visible.device)
-    padded_idx[0].index_copy_(0, destination, sparse_idx[0])
-    padded_count[0].index_copy_(0, destination, sparse_count[0])
-    padded_visible.index_copy_(0, destination, visible)
-    return build_qsa_union_inputs(padded_idx, padded_count, padded_visible)
 
 
 def qsa_union_gbsa_attention_batch(
@@ -271,7 +228,7 @@ def qsa_union_gbsa_attention_batch(
     *,
     query_starts: tuple[int, ...],
     request_indices: tuple[int, ...],
-    prepared: Any | None = None,
+    prepared: Any,
 ) -> torch.Tensor:
     """Run adjacent packed Prefill requests in one union GBSA launch."""
     from vllm_ascend.ops import gbsa as union_ops
@@ -282,30 +239,13 @@ def qsa_union_gbsa_attention_batch(
         raise ValueError("Union GBSA requires one KV head and at most 16 Q heads")
     if block_table.shape[1] * GBSA_PAGE_SIZE > (1 << 23):
         raise ValueError("Union index encoding exceeds exact FP32 sort range")
-    if prepared is None:
-        sparse_idx, sparse_count, visible, _, _ = prepare_qsa_gbsa_inputs(
-            compact_indices,
-            logical_positions,
-            seq_lens,
-            token_to_req,
-            block_table,
-            1,
-            write_row_metadata=False,
-        )
-        union_inputs = build_qsa_union_batch_inputs(sparse_idx, sparse_count, visible, query_starts)
-        cu_q = torch.tensor(query_starts, dtype=torch.int64, device=query.device)
-        selected = torch.tensor(request_indices, dtype=torch.int64, device=query.device)
-        table = block_table.index_select(0, selected)
-        lengths = seq_lens.index_select(0, selected)
-        max_query_length = max(b - a for a, b in zip(query_starts, query_starts[1:]))
-    else:
-        union_inputs = build_qsa_union_inputs_from_compact_triton(
-            compact_indices, prepared.visible_lengths, prepared.group_row_map
-        )
-        cu_q = prepared.cu_q
-        table = prepared.block_table
-        lengths = prepared.seq_lens
-        max_query_length = prepared.max_query_length
+    union_inputs = build_qsa_union_inputs_from_compact(
+        compact_indices, prepared.visible_lengths, prepared.group_row_map
+    )
+    cu_q = prepared.cu_q
+    table = prepared.block_table
+    lengths = prepared.seq_lens
+    max_query_length = prepared.max_query_length
     return _run_union_gbsa(
         union_ops,
         query,
