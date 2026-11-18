@@ -173,6 +173,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
         context.padded_num_tokens = padded_num_tokens
         context.in_profile_run = False
         context.is_padding = is_padding
+        context.use_mega_moe = False
         context.additional_kwargs = {}
         patches = (
             patch("vllm_ascend.ascend_forward_context.get_forward_context", return_value=context),
