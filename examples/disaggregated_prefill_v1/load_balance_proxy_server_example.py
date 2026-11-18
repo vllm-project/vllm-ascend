@@ -1092,13 +1092,19 @@ async def send_cloze_request_to_service(
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 400 or attempt == max_attempts:
                 raise
-            logger.warning("Attempt %s/%s failed with %s, retrying cloze request %s",
-                           attempt, max_attempts, exc.response.status_code, request_id)
+            logger.warning(
+                "Attempt %s/%s failed with %s, retrying cloze request %s",
+                attempt,
+                max_attempts,
+                exc.response.status_code,
+                request_id,
+            )
         except httpx.HTTPError as exc:
             if attempt == max_attempts:
                 raise
-            logger.warning("Attempt %s/%s network error, retrying cloze request %s: %s",
-                           attempt, max_attempts, request_id, exc)
+            logger.warning(
+                "Attempt %s/%s network error, retrying cloze request %s: %s", attempt, max_attempts, request_id, exc
+            )
         await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
     raise RuntimeError("unreachable")
 

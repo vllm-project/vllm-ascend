@@ -20,9 +20,9 @@ import ast
 import pathlib
 
 SRC_CANDIDATES = [
-    "pd_proxy_pr2_cloze_shortcut.py",   # local PR working copy (LF)
+    "pd_proxy_pr2_cloze_shortcut.py",  # local PR working copy (LF)
     "load_balance_proxy_server_example.py",  # vllm-ascend examples/ copy
-    "pd_proxy.py",                       # device runtime copy
+    "pd_proxy.py",  # device runtime copy
     "pd_proxy_pr2_cloze_shortcut_CRLF.py",
 ]
 
@@ -66,17 +66,19 @@ def _echo_response(choices):
     out_choices = []
     for spec in choices:
         rows = list(spec["echo_tokens"]) + [spec["forced_token"]]
-        out_choices.append({
-            "index": len(out_choices),
-            "text": "".join(rows),
-            "finish_reason": "length",  # max_tokens=0 + min_tokens=1 -> length
-            "logprobs": {
-                "tokens": rows,
-                "token_logprobs": spec["logprobs_rows"],
-                "top_logprobs": [{t: p} for t, p in zip(rows, spec["logprobs_rows"])],
-                "text_offset": spec["offsets"],
-            },
-        })
+        out_choices.append(
+            {
+                "index": len(out_choices),
+                "text": "".join(rows),
+                "finish_reason": "length",  # max_tokens=0 + min_tokens=1 -> length
+                "logprobs": {
+                    "tokens": rows,
+                    "token_logprobs": spec["logprobs_rows"],
+                    "top_logprobs": [{t: p} for t, p in zip(rows, spec["logprobs_rows"])],
+                    "text_offset": spec["offsets"],
+                },
+            }
+        )
     return {
         "id": "cmpl-test",
         "object": "text_completion",
@@ -87,20 +89,22 @@ def _echo_response(choices):
 
 def test_batch_two_choices_all_trimmed():
     """P2-1: both choices trimmed + usage recomputed (was: only choices[0])."""
-    resp = _echo_response([
-        {   # 3 echo rows + 1 forced row
-            "echo_tokens": ["Hello", "!", " world"],
-            "forced_token": " world",
-            "logprobs_rows": [-0.1, -0.2, -0.3, -0.7],
-            "offsets": [0, 5, 6, 12],
-        },
-        {
-            "echo_tokens": ["World", "!", "!"],
-            "forced_token": "!",
-            "logprobs_rows": [-0.05, -0.15, -0.25, -0.9],
-            "offsets": [0, 5, 6, 7],
-        },
-    ])
+    resp = _echo_response(
+        [
+            {  # 3 echo rows + 1 forced row
+                "echo_tokens": ["Hello", "!", " world"],
+                "forced_token": " world",
+                "logprobs_rows": [-0.1, -0.2, -0.3, -0.7],
+                "offsets": [0, 5, 6, 12],
+            },
+            {
+                "echo_tokens": ["World", "!", "!"],
+                "forced_token": "!",
+                "logprobs_rows": [-0.05, -0.15, -0.25, -0.9],
+                "offsets": [0, 5, 6, 7],
+            },
+        ]
+    )
     out = strip(resp)
 
     a, b = out["choices"]
@@ -120,25 +124,28 @@ def test_batch_two_choices_all_trimmed():
     assert a["finish_reason"] == "stop"
     assert b["finish_reason"] == "stop"
     # usage recomputed: completion zeroed, total == prompt (isinstance guard fix)
-    assert out["usage"] == {"prompt_tokens": 10, "completion_tokens": 0,
-                            "total_tokens": 10}
+    assert out["usage"] == {"prompt_tokens": 10, "completion_tokens": 0, "total_tokens": 10}
 
 
 def test_text_offset_aligned_two_token_echo():
     """P2-2: reviewer's minimal repro -- offsets stay locked to token count."""
-    resp = _echo_response([{
-        "echo_tokens": ["Hello", " world"],
-        "forced_token": " world",
-        "logprobs_rows": [-0.01, -0.02, -0.7],
-        "offsets": [0, 5, 11],
-    }])
+    resp = _echo_response(
+        [
+            {
+                "echo_tokens": ["Hello", " world"],
+                "forced_token": " world",
+                "logprobs_rows": [-0.01, -0.02, -0.7],
+                "offsets": [0, 5, 11],
+            }
+        ]
+    )
     out = strip(resp)
     (choice,) = out["choices"]
     assert choice["text"] == "Hello world"
     lp = choice["logprobs"]
     assert lp["tokens"] == ["Hello", " world"]
     assert lp["token_logprobs"] == [-0.01, -0.02]
-    assert lp["text_offset"] == [0, 5]          # was [0, 5, 11] in v1
+    assert lp["text_offset"] == [0, 5]  # was [0, 5, 11] in v1
     assert len(lp["text_offset"]) == len(lp["tokens"])
 
 
@@ -169,17 +176,19 @@ def test_non_dict_usage_untouched():
 def test_single_row_response_unchanged():
     """Degenerate 1-row echo (no separable forced row): nothing trimmed."""
     resp = {
-        "choices": [{
-            "index": 0,
-            "text": "Hello",
-            "finish_reason": "stop",
-            "logprobs": {
-                "tokens": ["Hello"],
-                "token_logprobs": [-0.3],
-                "top_logprobs": [{"Hello": -0.3}],
-                "text_offset": [0],
-            },
-        }],
+        "choices": [
+            {
+                "index": 0,
+                "text": "Hello",
+                "finish_reason": "stop",
+                "logprobs": {
+                    "tokens": ["Hello"],
+                    "token_logprobs": [-0.3],
+                    "top_logprobs": [{"Hello": -0.3}],
+                    "text_offset": [0],
+                },
+            }
+        ],
         "usage": {"prompt_tokens": 2, "completion_tokens": 0, "total_tokens": 2},
     }
     out = strip(resp)
