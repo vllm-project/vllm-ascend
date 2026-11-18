@@ -3,7 +3,6 @@
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock
-from zlib import adler32
 
 import numpy as np
 import pytest
@@ -11,6 +10,11 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1 import utils as v1_utils
 
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import RequestIdentityRegistry
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    update_sparse_kv_offload_metadata,
+)
+from vllm_ascend.worker.v2.model_states.default import AscendModelState, DefaultModelState
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar import sparse_kv_offload
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.sparse_kv_offload import SparseKVOffloadMetadata
 
@@ -36,13 +40,14 @@ def _batch(*, dummy=False):
 
 
 def _state(*, pool=True):
+    registry = RequestIdentityRegistry()
     if not pool:
-        return SimpleNamespace(_offload_pool_slots=None, _offload_pool_active=None)
+        return SimpleNamespace(_offload_pool_slots=None, _offload_pool_active=None, _offload_request_identity=registry)
     slots = v1_utils.CpuGpuBuffer(4, dtype=torch.int32, device=torch.device("cpu"), pin_memory=False)
     active = v1_utils.CpuGpuBuffer(4, dtype=torch.bool, device=torch.device("cpu"), pin_memory=False)
     slots.cpu.copy_(torch.tensor([7, 8, 9, 10]))
     active.cpu.copy_(torch.tensor([True, False, True, False]))
-    return SimpleNamespace(_offload_pool_slots=slots, _offload_pool_active=active)
+    return SimpleNamespace(_offload_pool_slots=slots, _offload_pool_active=active, _offload_request_identity=registry)
 
 
 def _descriptor(mode=CUDAGraphMode.FULL, *, num_reqs=4):
@@ -103,6 +108,7 @@ def test_full_graph_metadata_preserves_live_ids_pool_cpu_views_and_step(monkeypa
     assert args[5] is query_start
     assert args[6] is metadata.req_ids_buffers[1]
     assert args[7] is metadata.token_to_req_buffers[1]
+    assert update.call_args.kwargs == {"request_identity": state._offload_request_identity, "is_dummy": False}
     assert set(kwargs) == {
         "req_ids_tensor",
         "token_to_req",
@@ -111,7 +117,7 @@ def test_full_graph_metadata_preserves_live_ids_pool_cpu_views_and_step(monkeypa
         "copy_sfa_draft_index",
         "offload_dummy",
     }
-    assert kwargs["req_ids_tensor"].tolist() == [adler32(b"live-a"), adler32(b"live-b"), 0, 0]
+    assert kwargs["req_ids_tensor"].tolist() == [1, 2, 0, 0]
     assert kwargs["token_to_req"].tolist() == [0, 0, 1, 1, 1, 0, 0, 0]
     assert kwargs["req_topk_buffer_slots"].data_ptr() == state._offload_pool_slots.cpu.data_ptr()
     assert kwargs["req_topk_buffer_slots"].tolist() == [7, 8, 9, 10]
@@ -141,15 +147,16 @@ def test_repeated_step_reuses_addresses_clears_padding_and_keeps_other_steps(mon
     allocate = MagicMock(side_effect=AssertionError("step execution allocated a new metadata buffer"))
     monkeypatch.setattr(sparse_kv_offload, "CpuGpuBuffer", allocate)
     query_start = np.array([0, 2, 5], dtype=np.int32)
-    step0 = metadata.build_kwargs(_batch(), _state(), 2, _descriptor(), query_start, 0)
-    step1 = metadata.build_kwargs(_batch(), _state(), 2, _descriptor(), query_start, 1)
+    state = _state()
+    step0 = metadata.build_kwargs(_batch(), state, 2, _descriptor(), query_start, 0)
+    step1 = metadata.build_kwargs(_batch(), state, 2, _descriptor(), query_start, 1)
     assert step0 is not None
     assert step1 is not None
     saved_step0 = {key: step0[key].clone() for key in ("req_ids_tensor", "token_to_req")}
     previous_addresses = {key: step1[key].data_ptr() for key in ("req_ids_tensor", "token_to_req")}
 
     repeated = metadata.build_kwargs(
-        SimpleNamespace(req_ids=["replacement"]), _state(), 1, _descriptor(), np.array([0, 1]), 1
+        SimpleNamespace(req_ids=["replacement"]), state, 1, _descriptor(), np.array([0, 1]), 1
     )
 
     assert repeated is not None
@@ -157,7 +164,7 @@ def test_repeated_step_reuses_addresses_clears_padding_and_keeps_other_steps(mon
         assert repeated[key].data_ptr() == previous_addresses[key]
         assert repeated[key].data_ptr() != step0[key].data_ptr()
         assert torch.equal(step0[key], saved_step0[key])
-    assert repeated["req_ids_tensor"].tolist() == [adler32(b"replacement"), 0, 0, 0]
+    assert repeated["req_ids_tensor"].tolist() == [3, 0, 0, 0]
     assert repeated["token_to_req"].tolist() == [0] * 8
     assert repeated["offload_dummy"] is False
     allocate.assert_not_called()
@@ -173,8 +180,9 @@ def test_dummy_uses_distinct_nonzero_ids_when_live_request_list_is_empty(monkeyp
     )
 
     assert kwargs is not None
-    assert update.call_args.args[4] == ["offload-dummy-0", "offload-dummy-1"]
-    assert kwargs["req_ids_tensor"].tolist() == [adler32(b"offload-dummy-0"), adler32(b"offload-dummy-1"), 0, 0]
+    assert update.call_args.args[4] == []
+    assert update.call_args.kwargs["is_dummy"] is True
+    assert kwargs["req_ids_tensor"].tolist() == [-2, -3, 0, 0]
     assert kwargs["offload_dummy"] is True
     assert kwargs["copy_sfa_draft_index"] == 2
 
@@ -183,10 +191,80 @@ def test_batch_with_no_live_ids_does_not_reuse_previous_request_identity():
     metadata = _metadata()
     metadata.build_kwargs(_batch(), _state(), 2, _descriptor(), np.array([0, 2, 5]), 0)
 
-    kwargs = metadata.build_kwargs(
-        SimpleNamespace(req_ids=[], is_dummy=False), _state(pool=False), 2, _descriptor(), np.array([0, 2, 5]), 0
-    )
+    with pytest.raises((ValueError, RuntimeError), match="request|req_ids"):
+        metadata.build_kwargs(
+            SimpleNamespace(req_ids=[], is_dummy=False), _state(pool=False), 2, _descriptor(), np.array([0, 2, 5]), 0
+        )
 
-    assert kwargs is not None
-    assert kwargs["req_ids_tensor"].tolist() == [0, 0, 0, 0]
-    assert kwargs["offload_dummy"] is False
+
+def test_target_and_all_draft_steps_share_owner_namespace_after_reorder_and_dummy():
+    metadata = _metadata()
+    state = _state(pool=False)
+    collision_ids = ["234054828099429543", "471754017250656876"]
+    target_ids = v1_utils.CpuGpuBuffer(4, dtype=torch.int64, device=torch.device("cpu"), pin_memory=False)
+    target_tokens = v1_utils.CpuGpuBuffer(8, dtype=torch.int32, device=torch.device("cpu"), pin_memory=False)
+    update_sparse_kv_offload_metadata(
+        2,
+        2,
+        8,
+        4,
+        collision_ids,
+        np.array([0, 1, 2]),
+        target_ids,
+        target_tokens,
+        request_identity=state._offload_request_identity,
+    )
+    target_owners = target_ids.gpu[:2].tolist()
+    assert target_owners[0] != target_owners[1]
+
+    metadata.build_kwargs(SimpleNamespace(req_ids=[], is_dummy=True), state, 2, _descriptor(), np.array([0, 1, 2]), 0)
+    for step in range(3):
+        kwargs = metadata.build_kwargs(
+            SimpleNamespace(req_ids=collision_ids[::-1], is_dummy=False),
+            state,
+            2,
+            _descriptor(),
+            np.array([0, 1, 2]),
+            step,
+        )
+        assert kwargs is not None
+        assert kwargs["req_ids_tensor"].tolist() == target_owners[::-1] + [0, 0]
+
+    # Local state destruction (finish/cancel/preemption) creates a new incarnation.
+    state._offload_request_identity.remove(collision_ids[0])
+    new_kwargs = metadata.build_kwargs(
+        SimpleNamespace(req_ids=collision_ids, is_dummy=False),
+        state,
+        2,
+        _descriptor(),
+        np.array([0, 1, 2]),
+        0,
+    )
+    assert new_kwargs is not None
+    assert new_kwargs["req_ids_tensor"][0] > max(target_owners)
+    assert new_kwargs["req_ids_tensor"][1] == target_owners[1]
+
+
+def test_model_state_removal_ends_owner_incarnation_after_upstream_removal(monkeypatch):
+    state = AscendModelState.__new__(AscendModelState)
+    state._offload_request_identity = RequestIdentityRegistry()
+    state._offload_request_states = SimpleNamespace(remove_request=MagicMock())
+    old_owner = state._offload_request_identity.get_or_create("finished")
+    retained_owner = state._offload_request_identity.get_or_create("temporarily-unscheduled")
+    remove = MagicMock()
+
+    def upstream_remove(actual_state, req_id):
+        remove(actual_state, req_id)
+        assert actual_state is state
+        assert req_id == "finished"
+        assert state._offload_request_identity is not None
+        assert state._offload_request_identity.get_or_create(req_id) == old_owner
+
+    monkeypatch.setattr(DefaultModelState, "remove_request", upstream_remove)
+
+    state.remove_request("finished")
+
+    remove.assert_called_once_with(state, "finished")
+    state._offload_request_states.remove_request.assert_called_once_with("finished")
+    assert state._offload_request_identity.get_or_create("finished") > retained_owner
+    assert state._offload_request_identity.get_or_create("temporarily-unscheduled") == retained_owner

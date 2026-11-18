@@ -18,6 +18,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
     MLAAttentionImpl,
+    max_decode_query_len,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
@@ -29,6 +30,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.indexer import AscendSFAIndexerCache
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
@@ -370,6 +372,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
+        if get_current_vllm_config().attention_config.hisparse_config is not None:
+            from vllm_ascend.attention.sfa_hisparse import AscendHiSparseMetadataBuilder
+
+            return AscendHiSparseMetadataBuilder
         if get_ascend_config().sparse_kv_offload_config.enabled:
             from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadMetadataBuilder
 
@@ -398,6 +404,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
+        if get_current_vllm_config().attention_config.hisparse_config is not None:
+            from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
+
+            return AscendHiSparseImpl
         if get_ascend_config().sparse_kv_offload_config.enabled:
             from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
 
@@ -568,14 +578,15 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     ) -> AttentionCGSupport:
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
-        speculative_config = vllm_config.speculative_config
-        if (
-            speculative_config is not None
-            and speculative_config.method == "dspark"
-            and getattr(speculative_config, "enable_adaptive_verification", False)
-        ):
-            return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls: type["AscendSFAMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> int | None:
+        return max_decode_query_len(vllm_config)
 
     def build(
         self,
@@ -875,6 +886,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         # - C8 indexer cache for lightning indexer.
         # The user-facing switches control these layouts independently. LI C8
         # applies only to layers that own an indexer cache.
+        self._update_indexer_cache_enabled()
+        self.store_kv_cache_on_host = ascend_config.sparse_kv_offload_config.enabled
+        self.kv_cache_dtype = self.vllm_config.cache_config.cache_dtype
         self.enable_sparse_sfa_turboquant = ascend_config.enable_sparse_sfa_turboquant
         self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
         if self.enable_sparse_sfa_c8:
@@ -938,6 +952,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         self._skip_topk = bool(value)
         if hasattr(self, "_is_mtp_layer"):
             self.skip_indexer_pre_process = self._skip_topk and not self._is_mtp_layer
+            self._update_indexer_cache_enabled()
+
+    def _update_indexer_cache_enabled(self) -> None:
+        if getattr(self, "has_indexer", False):
+            cache = getattr(getattr(self, "indexer", None), "k_cache", None)
+            if isinstance(cache, AscendSFAIndexerCache):
+                cache.cache_enabled = self.runtime_has_indexer
 
     @property
     def runtime_has_indexer(self) -> bool:

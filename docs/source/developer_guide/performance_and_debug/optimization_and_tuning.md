@@ -109,6 +109,10 @@ Scheduling optimization:
 
 ```bash
 # Optimize operator delivery queue. This will affect the memory peak value, and may degrade if the memory is tight.
+# Note: TASK_QUEUE_ENABLE=2 cannot be used together with NPU graph capture (ACLGraph). Enabling graph capture
+# with this value makes model startup fail during capture_model with:
+#   RuntimeError: Do not support TASK_QUEUE_ENABLE = 2 during NPU graph capture, please export TASK_QUEUE_ENABLE=1/0.
+# Use TASK_QUEUE_ENABLE=1 (or 0) when NPU graph capture is enabled.
 export TASK_QUEUE_ENABLE=2
 
 # This will greatly improve the CPU bottleneck model and ensure the same performance for the NPU bottleneck model.

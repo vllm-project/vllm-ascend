@@ -26,7 +26,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-Download the checkpoint from ModelScope for the hardware shown below. A3 and 950PR&950DT Products checkpoints use different quantization formats; do not interchange them. The scripts use `/root/.cache/modelscope/hub/models/vllm-ascend/<checkpoint-name>` as a local mount path, not as a download source. Preserve the exact case of the repository name when naming the local directory.
+Download the checkpoint from ModelScope for the hardware shown below. A3 and 950PR&950DT products checkpoints use different quantization formats; do not interchange them. The scripts use `/root/.cache/modelscope/hub/models/vllm-ascend/<checkpoint-name>` as a local mount path, not as a download source. Preserve the exact case of the repository name when naming the local directory.
 
 |  Weight Version          | Hardware Requirements                                             | Download Links |
 |--------------------------|-------------------------------------------------------------------|----------------|
@@ -34,12 +34,12 @@ Download the checkpoint from ModelScope for the hardware shown below. A3 and 950
 |  `GLM-5.2-W8A8C8-mxfp8` | 2 950DT products (96GB × 8) nodes for colocated deployment | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-W8A8C8-mxfp8) |
 |  `GLM-5.3-w8a8c8`        | 2 A3 series (64GB × 16) nodes or 4 A2 series (64GB × 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w8a8c8) |
 |  `GLM-5.3-W8A8C8-mxfp8` | 2 950DT products (96GB × 8) nodes for colocated deployment | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-W8A8C8-mxfp8) |
-|  `GLM-5.3-W4A4C8-mxfp4` | 1 950DT products (96GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w4a4c8-mxfp4) |
+|  `GLM-5.3-w4a4c8-mxfp4` | 1 950DT products (96GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w4a4c8-mxfp4) |
 |  `GLM-5.2-w4a4c8-mxfp4` | 1 950DT products (96GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a4c8-mxfp4) |
 
 - `GLM-5.2-w8a8c8`: The weights have been verified and are recommended for use on A3. For GLM-5.3, use its own checkpoint and the version-specific commands below; do not apply the GLM-5.2 accuracy or performance results to GLM-5.3.
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
-- `GLM-5.2-w4a4c8-mxfp4` (950PR&950DT Products, W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
+- `GLM-5.2-w4a4c8-mxfp4` (950PR&950DT products, W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
 
 The checkpoints linked above are already quantized and can be served directly. For self-quantization, follow the installation and command examples in the [msModelSlim quantization guide](https://www.hiascend.com/document/detail/en/mindstudio/2610/TITools/msModelSlim/docs/en/user_guide/feature_guide/quick_quantization_v1/usage.md) and select the configuration for the exact model and target hardware from the [model recipes](https://gitcode.com/Ascend/msmodelslim/tree/master/lab_practice). Do not reuse a different model's YAML file.
 
@@ -51,7 +51,7 @@ Before using any script with `VLLM_USE_FASTOKENS=1`, install the [fastokens toke
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
@@ -253,7 +253,7 @@ variable in the selected script. Use the same checkpoint path on all nodes.
 
     export VLLM_USE_V2_MODEL_RUNNER=1
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W4A4C8-mxfp4 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w4a4c8-mxfp4 \
       --host 0.0.0.0 \
       --port 8000 \
       --api-server-count 1 \
@@ -288,9 +288,9 @@ variable in the selected script. Use the same checkpoint path on all nodes.
     - `HCCL_BUFFSIZE=400` reserves the communication buffer size described in
       [Common Parameter Descriptions](#glm-common-parameters).
 
-=== "A3 Series"
+=== "A3 series"
 
-    ##### A3 Series {: #glm52-53-5-1-1-a3 }
+    ##### A3 series {: #glm52-53-5-1-1-a3 }
 
     For a reduced context of 32768 tokens, the W8A8C8 checkpoint can run on 1 A3 series (64GB × 16) with DP1/TP16. Select the GLM-5.2 or GLM-5.3 checkpoint below. This is not the full-context deployment: use the multi-node deployment for longer contexts.
 
@@ -570,7 +570,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
 === "A3 series"
 
     ##### A3 series {: #glm52-53-5-1-2-a3 }
-    -  `GLM-5.3-w8a8c8`: can be deployed on 2 A3 series (64GB × 16).
+    - `GLM-5.3-w8a8c8`: can be deployed on 2 A3 series (64GB × 16).
 
     Run the following scripts on two nodes respectively.
 
@@ -918,7 +918,7 @@ layerwise setting and topology.
 
     See [950DT preparation](#glm-950-preparation) for checkpoint, environment and PP-node settings.
 
-    This 2P1D service layout has two independent Prefill instances and one Decode group. Each Prefill instance uses PP2/TP1/PCP8 across two eight-device nodes: P0/P1 form the first instance, and P2/P3 form the second. P0 and P2 expose the two Prefill API endpoints; P1 and P3 run headless. Decode uses DP16/TP1 across D0/D1, with eight local ranks per node (global ranks 0–15). Both roles declare DP16/TP1 in MooncakeConnectorV2. Prefill uses one MTP token; Decode uses five, a 60-token batch budget, and at most ten sequences per rank.
+    This 2P1D service layout has two independent Prefill instances and one Decode group. Each Prefill instance uses PP2/TP1/PCP8 across two eight-device nodes: P0/P1 form the first instance, and P2/P3 form the second. P0 and P2 expose the two Prefill API endpoints; P1 and P3 run headless. Decode uses DP16/TP1 across D0/D1, with eight local ranks per node (global ranks 0-15). Both roles declare DP16/TP1 in MooncakeConnectorV2. Prefill uses one MTP token; Decode uses five, a 60-token batch budget, and at most ten sequences per rank.
 
     ###### Prepare the Scripts
 
@@ -1436,7 +1436,7 @@ layerwise setting and topology.
     compatibility with the selected build and TP2 worker layout. Fused MC2 mode
     selection is version-dependent; confirm the effective mode in startup logs.
 
-    Here, “198k” is the workload label, not an additional sequence-length setting. The `--max-model-len 200000` limit applies to prompt and generated tokens together; leave room for the requested output. The colocated example's separate 202752-token limit does not apply to this PD deployment.
+    Here, "198k" is the workload label, not an additional sequence-length setting. The `--max-model-len 200000` limit applies to prompt and generated tokens together; leave room for the requested output. The colocated example's separate 202752-token limit does not apply to this PD deployment.
 
     ###### Topology and Prerequisites
 
@@ -1454,7 +1454,7 @@ layerwise setting and topology.
     1. Prepare the same weights and software on all four nodes. Set `MODEL_PATH`
        and `PYTHON_LIB_DIR` in each role script to the installed paths. Install
        `fastokens` on Prefill nodes for `VLLM_USE_FASTOKENS=1`.
-    2. Verify [multi-node communication](../../getting_started/installation.md#installation-multi-node-interconnect).
+    2. Verify [Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
        Set `LOCAL_IP="<PREFILL_NODE_IP>"` on each Prefill node and
        `LOCAL_IP="<DECODE_NODE_IP>"` on each Decode node to that node's IP.
        Set `NIC_NAME="<NETWORK_INTERFACE>"` to its matching interface and
@@ -1992,7 +1992,7 @@ layerwise setting and topology.
     (PP4); the [A2 pooling topology in Section 5.1.4](#glm53-pool-a2) is different.
 
     Prepare identical weights and software on all eight nodes, verify
-    [multi-node communication](../../getting_started/installation.md#installation-multi-node-interconnect),
+    [Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect),
     and set the model path, node IP, and network interface in each script.
     Install `fastokens` on every Prefill node for `VLLM_USE_FASTOKENS=1`.
     Reserve Prefill master port 29501, Prefill DP RPC port 12980, Decode
@@ -2392,7 +2392,7 @@ layerwise setting and topology.
     ```
 
     The same check and conditional fix apply to the pooled Prefill PP
-    headless workers in the [A2 pooling tab of Section 5.1.4](#glm53-pool-a2).
+    headless workers in the [A2 pooling topology in Section 5.1.4](#glm53-pool-a2).
     Confirm that the active Python package contains the change on every
     Prefill node, then start all members of the Prefill group before waiting
     for it to become ready.
@@ -2681,7 +2681,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
               --headless
             ```
 
-        3. Decode nodes 0–3
+        3. Decode nodes 0-3
 
             ```shell
             #!/usr/bin/env bash
@@ -3639,7 +3639,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
       --enforce-eager \
       --kv-cache-dtype int8 \
       --attention_config.indexer_kv_dtype int8 \
-      --additional-config '{"enable_flashcomm1":true,"enable_shared_expert_dp":true,"scheduler_config":{"profiling_chunk_config":{"enabled":true}}}' \
+      --additional-config '{"enable_flashcomm1":true,"enable_shared_expert_dp":true}' \
       --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp","enforce_eager":true}' \
       --kv-transfer-config '{
         "kv_connector": "MultiConnector",
@@ -3674,7 +3674,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     ```
 
     The Prefill script keeps `--no-async-scheduling` together with the V2
-    runner and `profiling_chunk_config.enabled=true`.
+    runner.
 
     PP headless workers may fail with
     `Mooncake worker requires a local DP rank`. The pooled Prefill instance
@@ -4187,7 +4187,7 @@ Select the tab that matches your deployment hardware.
     128 on both roles.
 
     1. Prepare identical weights and software on all four nodes and verify
-       [multi-node communication](../../getting_started/installation.md#installation-multi-node-interconnect).
+       [Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
        This configuration selects `hccs:device` and communication resource
        version `1.2`; use a compatible HCCS network and software build.
     2. Set `LOCAL_IP`, `NIC_NAME`, `MODEL_PATH`, and `PYTHON_LIB_DIR` on each
@@ -4850,7 +4850,7 @@ For common environment, installation, and general parameter issues, please refer
 
 ### Q: How to enable function calling for GLM-5.2 and GLM-5.3?
 
-A: Please add following configurations in vLLM startup command.
+A: Please add following configurations in vLLM startup command:
 
 ```shell
 --tool-call-parser glm47 \
@@ -4860,7 +4860,7 @@ A: Please add following configurations in vLLM startup command.
 
 ### Q: How do the W4A4C8 ultra-low-bit quantized weights preserve accuracy?
 
-A: For 950PR&950DT Products, the W4A4C8 weights of GLM-5.2 are quantized with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/glm_5_2/glm_5_2_w4a4c8_mxfp4.yaml). The quantization pipeline first applies QuaRot rotation and FlexSmoothQuant smoothing to suppress activation outliers, and then quantizes the model with a mixed-precision strategy: only the modules that dominate the parameter count are quantized to 4 bit, while precision-sensitive modules fall back to higher precision or are not quantized at all.
+A: For 950PR&950DT products, the W4A4C8 weights of GLM-5.2 are quantized with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/glm_5_2/glm_5_2_w4a4c8_mxfp4.yaml). The quantization pipeline first applies QuaRot rotation and FlexSmoothQuant smoothing to suppress activation outliers, and then quantizes the model with a mixed-precision strategy: only the modules that dominate the parameter count are quantized to 4 bit, while precision-sensitive modules fall back to higher precision or are not quantized at all.
 
 | Module | Quantization configuration |
 | ------ | -------------------------- |
@@ -4870,7 +4870,7 @@ A: For 950PR&950DT Products, the W4A4C8 weights of GLM-5.2 are quantized with [m
 | Router gates, `kv_b_proj`, `wk`, `weights_proj` | Not quantized (kept in high precision) |
 
 - **Quantization algorithm**: The weights and activations use the MXFP4/MXFP8 microscaling formats. Each tensor is divided into blocks of 32 elements, and each block shares a single scaling factor obtained with symmetric min-max calibration on a chain-of-thought calibration dataset. Combined with the QuaRot/FlexSmoothQuant outlier suppression, block-wise scaling adapts to the local dynamic range of each tensor, so the quantization error is far lower than that of uniform INT4 quantization.
-- **C8 (FP8 KV cache)**: C8 is a dynamic quantization applied to the KV cache during inference. On 950PR&950DT Products, the KV cache is quantized to FP8 (not INT8). It is unrelated to the parameters stored in the weight checkpoint and is controlled only by the serving configuration:
+- **C8 (FP8 KV cache)**: C8 is a dynamic quantization applied to the KV cache during inference. On 950PR&950DT products, the KV cache is quantized to FP8 (not INT8). It is unrelated to the parameters stored in the weight checkpoint and is controlled only by the serving configuration:
     - **Attention KV cache** (SFA C8, enabled with `--kv-cache-dtype fp8`): the compressed KV latent, which serves as both K and V, is dynamically quantized per 128-element tile to FP8 (E4M3) with a per-tile scale; the RoPE part of the KV cache stays in BF16, and Q is not quantized.
     - **Indexer cache** (LI C8, enabled with `--attention_config.indexer_kv_dtype fp8`): both indexer Q and K are first rotated by a 128-dimensional Hadamard matrix to spread outliers, and then dynamically quantized per token to FP8 (E4M3) with per-token FP32 scales.
     - Precision-sensitive modules (the indexer and some attention layers) are configured as C8 fallback layers in the quantization configuration: they are excluded from C8 quantization during inference and run in high precision.

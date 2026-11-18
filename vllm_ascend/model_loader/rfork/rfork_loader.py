@@ -76,7 +76,6 @@ class _RForkSeedUnavailable(RuntimeError):
 FALLBACK_CLEANUP_MAX_ATTEMPTS = 2
 FALLBACK_MEMORY_RECLAIM_PASSES = 4
 RFORK_FALLBACK_EXCEPTIONS = (ImportError, OSError, RuntimeError, ValueError)
-INITIAL_ASCEND_MOE_COUNTER = -1
 
 
 class _RForkLoadAborted(RuntimeError):
@@ -147,8 +146,6 @@ class _RForkProcessGlobalModelState:
     static_forward_context: tuple[dict[Any, Any], dict[Any, Any]] | None
     static_all_moe_layers: tuple[list[Any], list[Any]] | None
     rope_cache: dict[Any, Any] | None
-    ascend_moe_layers: tuple[list[Any], list[Any]] | None = None
-    ascend_moe_counter: int = INITIAL_ASCEND_MOE_COUNTER
     ascend_rope_caches: tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None] | None = None
     dynamo_bytecode_hook_ids: frozenset[int] = frozenset()
 
@@ -486,17 +483,10 @@ def _snapshot_process_global_model_state(vllm_config: VllmConfig) -> _RForkProce
             getattr(rope_ops_module, "_sin_cache", None),
         )
 
-    adaptor = getattr(sys.modules.get("vllm_ascend.eplb.adaptor.vllm_adaptor"), "VllmEplbAdaptor", None)
-    registry = getattr(adaptor, "_registered_moe_layers", None)
-    ascend_moe_layers = (registry, list(registry)) if isinstance(registry, list) else None
-    routed_experts = getattr(sys.modules.get("vllm_ascend.ops.fused_moe.routed_experts"), "AscendRoutedExperts", None)
-    ascend_moe_counter = getattr(routed_experts, "moe_counter", INITIAL_ASCEND_MOE_COUNTER)
     return _RForkProcessGlobalModelState(
         static_forward_context,
         static_all_moe_layers,
         rope_cache,
-        ascend_moe_layers,
-        ascend_moe_counter,
         ascend_rope_caches,
         frozenset(_get_dynamo_bytecode_hooks()),
     )
@@ -511,25 +501,6 @@ def _reset_process_global_model_state(
     stale_module_ids = {id(module) for module in model.modules()} if model is not None else set()
     _remove_discarded_compilation_hooks(stale_module_ids, snapshot)
 
-    adaptor = getattr(sys.modules.get("vllm_ascend.eplb.adaptor.vllm_adaptor"), "VllmEplbAdaptor", None)
-    registry = getattr(adaptor, "_registered_moe_layers", None)
-    if snapshot is not None and snapshot.ascend_moe_layers is not None:
-        baseline_registry, baseline_layers = snapshot.ascend_moe_layers
-        baseline_registry[:] = baseline_layers
-        if adaptor is not None and registry is not baseline_registry:
-            adaptor._registered_moe_layers = baseline_registry
-    elif isinstance(registry, list):
-        if snapshot is not None or not stale_module_ids:
-            registry.clear()
-        else:
-            registry[:] = [layer for layer in registry if id(layer) not in stale_module_ids]
-
-    if snapshot is not None:
-        routed_experts = getattr(
-            sys.modules.get("vllm_ascend.ops.fused_moe.routed_experts"), "AscendRoutedExperts", None
-        )
-        if routed_experts is not None:
-            routed_experts.moe_counter = snapshot.ascend_moe_counter
     removed_names: set[Any] = set()
     compilation_config = getattr(vllm_config, "compilation_config", None)
     if compilation_config is not None:
@@ -624,15 +595,6 @@ def _rfork_pre_transfer_weight_processing(model: Module):
     finally:
         for quant_method, process_weights in restored:
             quant_method.process_weights_after_loading = process_weights
-
-
-def _is_dynamic_eplb_enabled(vllm_config: VllmConfig) -> bool:
-    parallel_config = getattr(vllm_config, "parallel_config", None)
-    if bool(getattr(parallel_config, "enable_eplb", False)):
-        return True
-
-    eplb_config = get_ascend_config().eplb_config
-    return eplb_config.dynamic_eplb or bool(eplb_config.expert_map_record_path)
 
 
 @contextmanager
@@ -803,13 +765,6 @@ class RForkModelLoader(BaseModelLoader):
             model_state_prepared = True
             processed_layout_transfer = self._requires_processed_layout_transfer(model_config)
             bypass_reason = mutable_weights_bypass_reason(vllm_config, model_config)
-            if bypass_reason is None:
-                eplb_config = get_ascend_config().eplb_config
-                if getattr(eplb_config, "expert_map_path", None) is not None:
-                    bypass_reason = "static expert placement (expert_map_path)"
-                elif _is_dynamic_eplb_enabled(vllm_config):
-                    bypass_reason = "dynamic EPLB"
-
             if bypass_reason is not None:
                 logger.warning(
                     "RFork transfer is disabled when %s is enabled; using the default model loader.",
