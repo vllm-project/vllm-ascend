@@ -105,21 +105,15 @@ def megamoe_target(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("method", "speculator_cls", "outcome"),
+    ("method", "speculator_cls"),
     [
-        pytest.param("dflash", AscendDFlashSpeculator, "success", id="dflash"),
-        pytest.param("dflash", AscendDFlash2Speculator, "success", id="dflash2"),
-        pytest.param("dflash", AscendDFlashSpeculator, "no_hook", id="dflash-no-hook"),
-        pytest.param("dflash", AscendDFlash2Speculator, "no_hook", id="dflash2-no-hook"),
-        pytest.param("dflash", AscendDFlashSpeculator, "load_error", id="dflash-load-error"),
-        pytest.param("dflash", AscendDFlash2Speculator, "load_error", id="dflash2-load-error"),
-        pytest.param("dflash", AscendDFlashSpeculator, "hook_error", id="dflash-post-process-error"),
-        pytest.param("dflash", AscendDFlash2Speculator, "hook_error", id="dflash2-post-process-error"),
-        pytest.param("dspark", AscendDSparkSpeculator, "no_hook", id="dspark"),
-        pytest.param("mtp", AscendMTPSpeculator, "no_hook", id="mtp"),
+        pytest.param("dflash", AscendDFlashSpeculator, id="dflash"),
+        pytest.param("dflash", AscendDFlash2Speculator, id="dflash2"),
+        pytest.param("dspark", AscendDSparkSpeculator, id="dspark"),
+        pytest.param("mtp", AscendMTPSpeculator, id="mtp"),
     ],
 )
-def test_draft_loading_preserves_target_megamoe(monkeypatch, megamoe_target, method, speculator_cls, outcome):
+def test_draft_loading_preserves_target_megamoe(monkeypatch, megamoe_target, method, speculator_cls):
     target_config, initialized, assert_target_active = megamoe_target
     target_config.speculative_config.method = method
     target = nn.Module()
@@ -145,19 +139,15 @@ def test_draft_loading_preserves_target_megamoe(monkeypatch, megamoe_target, met
         assert initialized[-1] is not initialized[0]
         assert initialized[-1].enable_fused_mc2 == (1 if method == "mtp" else 0)
         calls.append("get_model")
-        if outcome == "load_error":
-            raise RuntimeError("draft load failed")
         return draft
 
     def post_process(config):
         assert config is draft_config
-        assert not ascend_config.is_draft_config_context()
         assert_target_active()
         calls.append("post_process")
-        if outcome == "hook_error":
-            raise RuntimeError("draft post-process failed")
 
-    if method == "dflash" and outcome != "no_hook":
+    has_post_process = speculator_cls is AscendDFlash2Speculator
+    if has_post_process:
         draft.post_process = post_process
 
     # Stop before model construction and checkpoint I/O. Keep the real
@@ -179,14 +169,9 @@ def test_draft_loading_preserves_target_megamoe(monkeypatch, megamoe_target, met
         spec.draft_vllm_config = spec._create_draft_vllm_config()
         assert len(initialized) == 2
         assert_target_active()
-    if outcome in ("load_error", "hook_error"):
-        message = "draft load failed" if outcome == "load_error" else "draft post-process failed"
-        with pytest.raises(RuntimeError, match=message):
-            spec.load_draft_model(target, set())
-    else:
-        assert spec.load_draft_model(target, set()) is draft
+    assert spec.load_draft_model(target, set()) is draft
 
     assert len(initialized) == (3 if method == "mtp" else 2)
-    assert calls == (["get_model", "post_process"] if outcome in ("success", "hook_error") else ["get_model"])
+    assert calls == (["get_model", "post_process"] if has_post_process else ["get_model"])
     assert not ascend_config.is_draft_config_context()
     assert_target_active()

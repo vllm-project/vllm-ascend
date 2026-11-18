@@ -145,13 +145,13 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             # NPU draft-logits kernels index the cache by request state.
             return False
 
+    @draft_config_context()
     def load_draft_model(
         self,
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        with draft_config_context():
-            model = super().load_draft_model(target_model, target_attn_layer_names)
+        model = super().load_draft_model(target_model, target_attn_layer_names)
         # QuaRot targets require draft weights to be aligned after sharing
         # target layers, using the target Ascend configuration.
         if hasattr(model, "post_process"):
