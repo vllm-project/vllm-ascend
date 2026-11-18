@@ -35,6 +35,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mem
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_backend as mooncake_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     Backend,
+    parse_qos_from_extra_config,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
     MemcacheBackend,
@@ -59,7 +60,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend import (
     YuanrongConfig,
 )
-from vllm_ascend.distributed.kv_transfer.utils.qos import parse_qos_from_extra_config
 
 
 def _format_log_call(call):
@@ -763,7 +763,7 @@ class TestExtraConfigQos(unittest.TestCase):
         self.assertIsNone(parse_qos_from_extra_config(None))
         self.assertIsNone(parse_qos_from_extra_config({}))
         self.assertIsNone(parse_qos_from_extra_config({"backend": "mooncake"}))
-        for qos in (0, 1, 2, 3, 4):
+        for qos in range(8):
             with self.subTest(qos=qos):
                 self.assertEqual(parse_qos_from_extra_config({"qos_priority": qos}), qos)
 

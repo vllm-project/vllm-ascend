@@ -10,20 +10,23 @@ import torch
 import torch.distributed as dist
 from vllm.logger import logger
 
-from vllm_ascend.distributed.kv_transfer.utils.qos import parse_qos_from_extra_config, warn_high_qos
 from vllm_ascend.distributed.parallel_state import get_p_tp_group
 
 MAX_HCCL_REGISTER_REGIONS = 256
 REGISTER_MERGE_GAP_BYTES = 4096
 
 QOS_KEY = "comm_resource_config.qos"
+QOS_MAX = 7
+QOS_WARNING_THRESHOLD = 4
 
 
 def inject_qos(extra_config: dict[str, Any]) -> None:
     """Merge P/D QoS before engine initialization, preserving all other fields."""
-    qos = parse_qos_from_extra_config(extra_config)
-    if qos is None:
+    if "qos_priority" not in extra_config:
         return
+    qos = extra_config["qos_priority"]
+    if type(qos) is not int or not 0 <= qos <= QOS_MAX:
+        raise ValueError(f"kv_connector_extra_config.qos_priority must be an integer in [0, {QOS_MAX}]")
     raw = os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG", "")
     try:
         config = json.loads(raw) if raw else {}
@@ -38,7 +41,13 @@ def inject_qos(extra_config: dict[str, Any]) -> None:
             config[QOS_KEY],
             qos,
         )
-    warn_high_qos(qos, "kv_connector_extra_config.qos_priority")
+    if qos > QOS_WARNING_THRESHOLD:
+        logger.warning(
+            "QoS %d in kv_connector_extra_config.qos_priority exceeds %d. "
+            "Verify that the transfer backend and switch are configured for this priority.",
+            qos,
+            QOS_WARNING_THRESHOLD,
+        )
     config[QOS_KEY] = qos
     os.environ["ASCEND_GLOBAL_RESOURCE_CONFIG"] = json.dumps(config)
     logger.info(
