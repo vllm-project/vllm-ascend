@@ -181,6 +181,22 @@ def test_accept0_census(capture):
     assert "req_ids_first8=[0, 3]" in recs[0]
 
 
+def test_accept0_excludes_draftless_requests(capture):
+    """Regression: with packed cu_num_logits, a request with no scheduled
+    drafts (a single row) also stores num_sampled == 1 -- with nothing to
+    reject. Both numerator and denominator must count only requests that
+    actually had drafts. With cu=[0, 1, 5, 8]: request 0 has no drafts
+    (num_sampled=1, excluded), request 1 has three drafts (num_sampled=6),
+    request 2 has two drafts (num_sampled=1, counted)."""
+    num_sampled = torch.tensor([1, 6, 1], dtype=torch.int32)
+    cu = torch.tensor([0, 1, 5, 8], dtype=torch.int64)
+    dfx.log_accept0_census(num_sampled, 3, cu)
+    recs = _messages(capture)
+    assert len(recs) == 1, recs
+    assert "accept0_reqs=1/2(had_drafts)" in recs[0]
+    assert "req_ids_first8=[2]" in recs[0]
+
+
 def test_accept0_normal_silent(capture):
     dfx.log_accept0_census(torch.tensor([6, 6], dtype=torch.int32), 2)
     assert capture.records == []

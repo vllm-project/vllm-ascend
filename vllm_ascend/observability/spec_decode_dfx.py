@@ -128,27 +128,49 @@ def log_nan_census(
         _logger.debug("[dfx/nan] target/draft census failed: %s", e)
 
 
-def log_accept0_census(num_sampled: torch.Tensor, num_reqs: int) -> None:
+def log_accept0_census(
+    num_sampled: torch.Tensor,
+    num_reqs: int,
+    cu_num_logits: torch.Tensor | None = None,
+) -> None:
     """[dfx/nan] Post-resample accepted-count census.
 
     ``num_sampled`` stores ``resample_idx + 1`` unconditionally for every
     request (finalize kernel), so ``num_sampled == 1`` marks a request whose
-    drafts were ALL rejected this step. Correlate with the input NaN census
-    of the same step: ``rows_with_nan`` rising together with ``accept0``
-    confirms the NaN -> forced-reject -> garbage-token causality in
-    production; NaN present but accept0 normal means the row-level NaN did
-    NOT reach the verdict (reduction NaN semantics evidence).
+    drafts were ALL rejected this step -- but only for requests that
+    actually had drafts: a request with no scheduled drafts (a single row
+    under packed ``cu_num_logits``) also stores ``num_sampled == 1`` with
+    nothing to reject. When boundaries are given, both the numerator and
+    the denominator are restricted to requests with ``cu[i+1] - cu[i] > 1``.
+
+    Correlate with the input NaN census of the same step: ``rows_with_nan``
+    rising together with ``accept0`` confirms the NaN -> forced-reject ->
+    garbage-token causality in production; NaN present but accept0 normal
+    means the row-level NaN did NOT reach the verdict (reduction NaN
+    semantics evidence).
     """
     if not _logger.isEnabledFor(logging.DEBUG):
         return
     try:
-        zero_accept = (num_sampled == 1).nonzero(as_tuple=True)[0]
-        if zero_accept.numel() > 0:
+        ns_list = num_sampled.tolist()
+        zero_accept_all = [i for i, n in enumerate(ns_list) if n == 1]
+        if cu_num_logits is not None:
+            bounds = cu_num_logits.tolist() if torch.is_tensor(cu_num_logits) else list(cu_num_logits)
+            draft_reqs = [i for i in range(len(bounds) - 1) if bounds[i + 1] - bounds[i] > 1]
+            zero_accept = [i for i in zero_accept_all if i in draft_reqs]
+            denom = len(draft_reqs)
+            suffix = "(had_drafts)"
+        else:
+            zero_accept = zero_accept_all
+            denom = num_reqs
+            suffix = ""
+        if zero_accept:
             _logger.debug(
-                "[dfx/nan] post-resample: accept0_reqs=%d/%d req_ids_first8=%s",
-                zero_accept.numel(),
-                num_reqs,
-                zero_accept[:_NAN_ROW_FMT_LIMIT].tolist(),
+                "[dfx/nan] post-resample: accept0_reqs=%d/%d%s req_ids_first8=%s",
+                len(zero_accept),
+                denom,
+                suffix,
+                zero_accept[:_NAN_ROW_FMT_LIMIT],
             )
     except Exception as e:  # diagnostics must never take down the sampler
         _logger.debug("[dfx/nan] accept0 census failed: %s", e)

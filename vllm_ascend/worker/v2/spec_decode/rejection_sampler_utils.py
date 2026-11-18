@@ -705,6 +705,7 @@ def rejection_sample(
     )
 
     # [dfx/nan] Output-side census: correlate accept0 requests with the
-    # input NaN census logged above for the same step.
-    log_accept0_census(num_sampled, num_reqs)
+    # input NaN census logged above for the same step. The packed row
+    # boundaries restrict the count to requests that actually had drafts.
+    log_accept0_census(num_sampled, num_reqs, cu_num_logits)
     return sampled, num_sampled
