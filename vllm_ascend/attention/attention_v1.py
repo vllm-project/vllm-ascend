@@ -356,10 +356,16 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
         is_prefilling = common_attn_metadata.is_prefilling
-        has_prefill_flag = bool(is_prefilling.numpy().any()) if is_prefilling is not None else None
+        if is_prefilling is None:
+            has_prefill_flag = None
+        elif is_prefilling.device.type == "cpu":
+            has_prefill_flag = bool(is_prefilling.numpy().any())
+        else:
+            has_prefill_flag = bool(is_prefilling.any().item())
         if (
             not self.use_pcp
-            and common_attn_metadata.context_parallel_metadata is None
+            and getattr(common_attn_metadata, "pcp_context", None) is None
+            and getattr(common_attn_metadata, "context_parallel_metadata", None) is None
             and has_prefill_flag is False
             and (common_attn_metadata.max_query_len or 0) <= self.decode_threshold
         ):

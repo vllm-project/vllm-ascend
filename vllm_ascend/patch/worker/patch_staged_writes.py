@@ -114,9 +114,9 @@ def _guard_state_class(cls, field_specs: tuple[tuple[str, str], ...]) -> None:
 
 
 def _patch_sampler_dirty_guards() -> None:
+    import vllm.v1.worker.gpu.sample.logprob as _logprob_mod
     from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
     from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
-    from vllm.v1.worker.gpu.sample.logprob import LogprobState
     from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
     from vllm.v1.worker.gpu.sample.states import SamplingStates
 
@@ -139,7 +139,9 @@ def _patch_sampler_dirty_guards() -> None:
             ("restore_when_all_masked", "_ascend_restore_dirty"),
         ),
     )
-    _guard_state_class(LogprobState, (("num_token_ids", "_ascend_num_token_ids_dirty"),))
+    _logprob_cls = getattr(_logprob_mod, "LogprobState", None) or getattr(_logprob_mod, "LogprobTokenIdsState", None)
+    if _logprob_cls is not None:
+        _guard_state_class(_logprob_cls, (("num_token_ids", "_ascend_num_token_ids_dirty"),))
     _guard_state_class(
         SamplingStates,
         (

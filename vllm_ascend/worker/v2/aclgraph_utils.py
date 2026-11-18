@@ -145,14 +145,19 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         assert self.update_stream is not None
-        if self._cached_use_updatable is None:
+        if getattr(self, "_cached_use_updatable", None) is None:
             with set_current_vllm_config(self.vllm_config):
                 attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
             self._cached_graph_update_backend = attn_backend
             self._cached_use_updatable = use_updatable_graph(attn_backend)
         else:
-            assert self._cached_graph_update_backend is not None
-            attn_backend = self._cached_graph_update_backend
+            cached_backend = getattr(self, "_cached_graph_update_backend", None)
+            if cached_backend is None:
+                with set_current_vllm_config(self.vllm_config):
+                    attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
+                self._cached_graph_update_backend = attn_backend
+            else:
+                attn_backend = cached_backend
         attn_metadata = self.model_runner.model_state.attn_metadata
 
         metadata = getattr(self.model_runner.model_state, "device_metadata", None)

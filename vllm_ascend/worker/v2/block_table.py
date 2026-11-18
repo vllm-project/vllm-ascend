@@ -383,9 +383,6 @@ class AscendBlockTables(BlockTables):
                     self.slot_mapping_enabled,
                     self.slot_mappings,
                     slot_mappings_stride,
-                    PAD_SLOT_ID,
-                    1024,
-                    1024,
                 )
         return (
             tuple(bt[:num_reqs_padded] for bt in self.input_block_tables),

@@ -292,7 +292,7 @@ if not hasattr(_StagedWriteTensor, "_ascend_non_uva_patched"):
     _orig_staged_apply_write = _StagedWriteTensor.apply_write
 
     def _patched_staged_apply_write(self) -> None:
-        if vllm.v1.worker.gpu.buffer_utils.is_uva_available():
+        if is_uva_available():
             return _orig_staged_apply_write(self)
         n = len(self._staged_write_indices)
         if n == 0:

@@ -101,7 +101,7 @@ def _suffix_local_scan_kernel(
 
     scratch_off = b * scratch_stride + blk
     base_pos = blk * BLOCK
-    if base_pos >= seq_len or num_sampled <= 0 or seq_len <= 0:
+    if (base_pos >= seq_len) | (num_sampled <= 0) | (seq_len <= 0):
         tl.store(scratch_ptr + scratch_off, 0)
         return
 
@@ -868,12 +868,6 @@ class SuffixSpeculator(BaseSpeculator):
                     doc_seq_out,
                     ek,
                     ev,
-                    _HASH_MUL,
-                    self.num_buckets,
-                    _BUCKET_SLOTS,
-                    _INGEST_BLOCK,
-                    active_emit_p,
-                    sentinel,
                 )
             sorted_keys, permutation = torch.sort(ek)
             sort_align = (((sorted_keys.data_ptr() & 15) == 0) << 0) | (((permutation.data_ptr() & 15) == 0) << 1)
@@ -912,8 +906,6 @@ class SuffixSpeculator(BaseSpeculator):
                     esv,
                     esh,
                     C,
-                    sentinel,
-                    _INGEST_BLOCK,
                 )
             ssc_key = ("ssc", dev_idx, T, carry_block)
             k_ssc = self._triton_kcache.get(ssc_key)
@@ -942,8 +934,6 @@ class SuffixSpeculator(BaseSpeculator):
                     esv,
                     esh,
                     eca,
-                    T,
-                    carry_block,
                 )
             stm_key = ("stm", dev_idx, (sorted_keys.data_ptr() & 15) == 0)
             k_stm = self._triton_kcache.get(stm_key)
@@ -976,8 +966,6 @@ class SuffixSpeculator(BaseSpeculator):
                     eca,
                     self.table,
                     C,
-                    sentinel,
-                    _INGEST_BLOCK,
                 )
         # Publish staged state for the next batch only after the whole chain.
         self._corpus_state.copy_(self.ingest_out)
@@ -1178,8 +1166,6 @@ class SuffixSpeculator(BaseSpeculator):
                     self.scratch,
                     scr_stride,
                     lp1,
-                    self.max_depth,
-                    self.block_l,
                 )
 
             fa_key = ("fa", dev_idx, active_n_blocks == 1, active_nb_po2, write_req_drafts, p_align)
@@ -1264,18 +1250,6 @@ class SuffixSpeculator(BaseSpeculator):
                     self._corpus_vals,
                     self._corpus_cont_t,
                     self._corpus_llen,
-                    req_drafts_stride,
-                    self.has_corpus,
-                    self.enable_adaptive_verification,
-                    write_req_drafts,
-                    _HASH_MUL,
-                    self.num_buckets,
-                    _BUCKET_SLOTS,
-                    self.max_depth,
-                    depth_po2,
-                    self.num_speculative_steps,
-                    k_po2,
-                    active_nb_po2,
                 )
 
             if self.has_corpus:
@@ -1330,11 +1304,5 @@ class SuffixSpeculator(BaseSpeculator):
                         self.last_bucket,
                         self.last_valid,
                         self.draft_token_confidence_probs,
-                        req_drafts_stride,
-                        self.enable_adaptive_verification,
-                        write_req_drafts,
-                        _BUCKET_SLOTS,
-                        self.num_speculative_steps,
-                        k_po2,
                     )
         return self.drafts[:num_reqs]

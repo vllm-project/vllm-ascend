@@ -80,8 +80,8 @@ def fast_swiglu_kernel(
 
 _VEC_CORES: int | None = None
 _get_raw_stream = getattr(getattr(torch_npu, "_C", None), "_npu_getCurrentRawStream", None)
-_ADD_RMSNORM_KERNELS: dict[tuple[int, int, float, int], object] = {}
-_SWIGLU_KERNELS: dict[tuple[int, int, int, int], object] = {}
+_ADD_RMSNORM_KERNELS: dict[tuple[int, int, float, int, int], object] = {}
+_SWIGLU_KERNELS: dict[tuple[int, int, int, int, int], object] = {}
 
 
 def _get_vec_cores() -> int:
@@ -120,7 +120,14 @@ def npu_fast_add_rms_norm_impl(
         )
     else:
         dev_idx = x.device.index if x.device.index is not None else 0
-        key = (dev_idx, h, feps, ncores)
+        align = (
+            (((x.data_ptr() & 15) == 0) << 0)
+            | (((residual.data_ptr() & 15) == 0) << 1)
+            | (((weight.data_ptr() & 15) == 0) << 2)
+            | (((out.data_ptr() & 15) == 0) << 3)
+            | (((out_res.data_ptr() & 15) == 0) << 4)
+        )
+        key = (dev_idx, h, feps, ncores, align)
         k = _ADD_RMSNORM_KERNELS.get(key)
         if k is None:
             k = fast_add_rmsnorm_kernel[(ncores,)](
@@ -153,9 +160,6 @@ def npu_fast_add_rms_norm_impl(
                 out,
                 out_res,
                 m,
-                h,
-                feps,
-                ncores,
             )
     return out, out_res
 
@@ -189,7 +193,8 @@ def npu_fast_swiglu_impl(x: torch.Tensor) -> torch.Tensor:
             fast_swiglu_kernel[(ncores,)](x, out, m, h, ncores, bh)
         else:
             dev_idx = x.device.index if x.device.index is not None else 0
-            key = (dev_idx, h, bh, ncores)
+            align = (((x.data_ptr() & 15) == 0) << 0) | (((out.data_ptr() & 15) == 0) << 1)
+            key = (dev_idx, h, bh, ncores, align)
             k = _SWIGLU_KERNELS.get(key)
             if k is None:
                 k = fast_swiglu_kernel[(ncores,)](x, out, m, h, ncores, bh)
@@ -209,9 +214,6 @@ def npu_fast_swiglu_impl(x: torch.Tensor) -> torch.Tensor:
                     x,
                     out,
                     m,
-                    h,
-                    ncores,
-                    bh,
                 )
         return out
     return torch_npu.npu_swiglu(x)

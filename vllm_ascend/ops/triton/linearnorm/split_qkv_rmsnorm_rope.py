@@ -601,7 +601,8 @@ def split_qkv_rmsnorm_rope_impl(
             )
         else:
             dev_idx = input.device.index if input.device.index is not None else 0
-            key = (dev_idx, feps, num_vectorcore, positions.dtype, q_hidden_size, kv_hidden_size, head_dim)
+            align = (((input.data_ptr() & 15) == 0) << 0) | (((positions.data_ptr() & 15) == 0) << 1)
+            key = (dev_idx, feps, num_vectorcore, positions.dtype, q_hidden_size, kv_hidden_size, head_dim, align)
             k = _FAST_SPLIT_KERNELS.get(key)
             if k is None:
                 k = fast_split_qkv_rope_kernel[(num_vectorcore,)](
@@ -647,16 +648,6 @@ def split_qkv_rmsnorm_rope_impl(
                     q_weight,
                     k_weight,
                     batch_size,
-                    feps,
-                    q_hidden_size,
-                    kv_hidden_size,
-                    total_hidden,
-                    q_heads,
-                    kv_heads,
-                    head_dim,
-                    rope_dim,
-                    half_rope,
-                    num_vectorcore,
                 )
         return q_output, k_output, v_output
 
@@ -984,18 +975,6 @@ def qkv_rmsnorm_rope_cache_impl(
                             total_slots,
                             kc_bs,
                             vc_bs,
-                            feps,
-                            q_hidden_size,
-                            kv_hidden_size,
-                            total_hidden,
-                            q_heads,
-                            kv_heads,
-                            head_dim,
-                            rope_dim,
-                            half_rope,
-                            block_size,
-                            num_vectorcore,
-                            write_kv_tensors,
                         )
                 done_layers = getattr(attn_metadata, "_m19_kv_done_layers", None)
                 if done_layers is None:
