@@ -34,6 +34,7 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.distributed.utils import get_distributed_timeout_or_none
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -124,7 +125,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     skip_ring_state_update,
 )
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
-from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers, fused_prepare_inputs
 from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -886,22 +887,25 @@ class NPUModelRunner(GPUModelRunner):
 
         req_ids = batch_req_state.req_ids
 
-        self._update_seq_lens_cpu(scheduler_output, req_ids)
-
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
-        idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
+        self._update_seq_lens_cpu(scheduler_output, req_ids, idx_mapping_np, num_scheduled_tokens_np)
+        idx_mapping = self._async_h2d_1d("idx_mapping", idx_mapping_np)
         num_reqs = len(req_ids)
 
-        num_valid_tokens = num_scheduled_tokens_np
-        if scheduler_output.scheduled_spec_decode_tokens:
-            num_valid_tokens = np.array(
-                [
-                    num_toks - len(scheduler_output.scheduled_spec_decode_tokens.get(i, []))
-                    for num_toks, i in zip(num_scheduled_tokens_np, req_ids)
-                ],
-                dtype=np.int32,
-            )
+        num_draft_tokens_per_req = getattr(batch_req_state, "num_draft_tokens_np", None)
+        if num_draft_tokens_per_req is not None:
+            num_valid_tokens = num_scheduled_tokens_np - num_draft_tokens_per_req
+        else:
+            num_valid_tokens = num_scheduled_tokens_np
+            if scheduler_output.scheduled_spec_decode_tokens:
+                num_valid_tokens = np.array(
+                    [
+                        num_toks - len(scheduler_output.scheduled_spec_decode_tokens.get(i, []))
+                        for num_toks, i in zip(num_scheduled_tokens_np, req_ids)
+                    ],
+                    dtype=np.int32,
+                )
         attn_state = build_attn_state(
             self.vllm_config,
             self.input_buffers.seq_lens_np,
@@ -913,9 +917,10 @@ class NPUModelRunner(GPUModelRunner):
 
         # Get the number of draft tokens for each request.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
-        num_draft_tokens_per_req = None
+        num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
         if not draft_tokens:
             # No draft token scheduled (common case).
+            num_draft_tokens_per_req = None
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
             cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
@@ -923,19 +928,15 @@ class NPUModelRunner(GPUModelRunner):
             expanded_idx_mapping = idx_mapping
             expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
         else:
-            num_draft_tokens_per_req = np.fromiter(
-                (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
-                dtype=np.int32,
-                count=num_reqs,
-            )
-            num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
+            if num_draft_tokens_per_req is None:
+                num_draft_tokens_per_req = np.fromiter(
+                    (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
+                    dtype=np.int32,
+                    count=num_reqs,
+                )
             total_num_draft_tokens = int(num_draft_tokens_per_req.sum())
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
             num_logits = num_draft_tokens_per_req + num_bonus_tokens
-            cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
-            cu_num_logits_np[0] = 0
-            np.cumsum(num_logits, out=cu_num_logits_np[1:])
-            cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
         adaptive_verification_manager = self.adaptive_verification
         adaptive_verification_active = (
@@ -944,6 +945,10 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
         admitted_draft_kwargs = {}
         if adaptive_verification_active:
+            cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
+            cu_num_logits_np[0] = 0
+            np.cumsum(num_logits, out=cu_num_logits_np[1:])
+            cu_num_logits = self._async_h2d_1d("cu_num_logits", cu_num_logits_np)
             num_scheduled_tokens_np, cu_num_logits_np = adaptive_verification_manager.compact_batch(
                 num_draft_tokens_per_req, num_scheduled_tokens_np, cu_num_logits_np
             )
@@ -972,7 +977,17 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         query_start_loc = self.input_buffers.query_start_loc
-        async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
+        self._async_h2d_1d("query_start_loc", query_start_loc_np, out=query_start_loc)
+
+        if draft_tokens and not adaptive_verification_active:
+            if total_num_logits == num_tokens and num_bonus_tokens == 1:
+                cu_num_logits_np = query_start_loc_np[: num_reqs + 1].copy()
+                cu_num_logits = query_start_loc[: num_reqs + 1]
+            else:
+                cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
+                cu_num_logits_np[0] = 0
+                np.cumsum(num_logits, out=cu_num_logits_np[1:])
+                cu_num_logits = self._async_h2d_1d("cu_num_logits", cu_num_logits_np)
 
         if adaptive_verification_active:
             num_scheduled_draft_tokens = total_num_draft_tokens
@@ -1012,12 +1027,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
 
             query_start_loc = self.input_buffers.query_start_loc
-            async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
-
-        if draft_tokens:
-            expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
-                idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
-            )
+            self._async_h2d_1d("query_start_loc", query_start_loc_np, out=query_start_loc)
 
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = query_start_loc[: num_reqs_padded + 1]
@@ -1038,49 +1048,82 @@ class NPUModelRunner(GPUModelRunner):
                 self.req_states.num_computed_tokens.gpu,
             )
 
-        # Prepare positions and seq_lens.
-        prepare_pos_seq_lens(
-            idx_mapping,
-            query_start_loc,
-            self.req_states.num_computed_tokens.gpu,
-            self.input_buffers.positions,
-            self.input_buffers.seq_lens,
-        )
-        seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
-        if adaptive_verification_active and self.use_fia:
-            self.input_buffers.seq_lens_np[:num_reqs] = seq_lens[:num_reqs].cpu().numpy()
-
-        # Pad for full CUDA graph mode.
-        self.input_buffers.seq_lens_np[num_reqs:] = 0
-
         dcp_local_seq_lens = None
         # Main computes DCP lengths in the inherited execute_model after PCP
         # partitioning (vLLM #55212).
 
-        # Some input token ids are directly read from the last sampled tokens
-        # and draft tokens. Also, get the logits indices to sample tokens from.
-        logits_indices = combine_sampled_and_draft_tokens(
-            self.input_buffers.input_ids,
-            idx_mapping,
-            self.req_states.last_sampled_tokens,
-            query_start_loc,
-            seq_lens,
-            self.req_states.prefill_len.gpu,
-            self.req_states.draft_tokens,
-            cu_num_logits,
-            total_num_logits,
-            self.model_state.num_new_sampled_tokens_per_step,
+        if self.device.type == "npu" and draft_tokens and not adaptive_verification_active:
+            expanded_idx_mapping, expanded_local_pos, logits_indices = fused_prepare_inputs(
+                self.input_buffers,
+                idx_mapping,
+                query_start_loc,
+                self.req_states.num_computed_tokens.gpu,
+                self.req_states.last_sampled_tokens,
+                self.req_states.prefill_len.gpu,
+                self.req_states.draft_tokens,
+                cu_num_logits,
+                total_num_logits,
+                num_bonus_tokens,
+            )
+            seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
+            # Pad for full CUDA graph mode.
+            self.input_buffers.seq_lens_np[num_reqs:] = 0
+        else:
+            if draft_tokens:
+                expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
+                    idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
+                )
+
+            # Prepare positions and seq_lens.
+            prepare_pos_seq_lens(
+                idx_mapping,
+                query_start_loc,
+                self.req_states.num_computed_tokens.gpu,
+                self.input_buffers.positions,
+                self.input_buffers.seq_lens,
+            )
+            seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
+            if adaptive_verification_active and self.use_fia:
+                self.input_buffers.seq_lens_np[:num_reqs] = seq_lens[:num_reqs].cpu().numpy()
+
+            # Pad for full CUDA graph mode.
+            self.input_buffers.seq_lens_np[num_reqs:] = 0
+
+            # Some input token ids are directly read from the last sampled tokens
+            # and draft tokens. Also, get the logits indices to sample tokens from.
+            logits_indices = combine_sampled_and_draft_tokens(
+                self.input_buffers.input_ids,
+                idx_mapping,
+                self.req_states.last_sampled_tokens,
+                query_start_loc,
+                seq_lens,
+                self.req_states.prefill_len.gpu,
+                self.req_states.draft_tokens,
+                cu_num_logits,
+                total_num_logits,
+                num_bonus_tokens,
+            )
+
+        contiguous_logits_indices = (
+            not batch_req_state.has_prefill
+            and not adaptive_verification_active
+            and total_num_logits == num_tokens
+            and self.pcp_manager is None
+            and (num_bonus_tokens == 1 if draft_tokens else True)
         )
 
         # CPU upper bound on seq_lens (num_computed_tokens + num_scheduled_tokens).
         # Added by vLLM PR #40654 to avoid GPU->CPU sync for seq_lens.
         num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
-        seq_lens_cpu_upper_bound_np = np.zeros(num_reqs_padded, dtype=np.int32)
-        np.add(
-            num_computed_tokens_np,
-            num_scheduled_tokens_upper_bound,
-            out=seq_lens_cpu_upper_bound_np[:num_reqs],
-        )
+        if not adaptive_verification_active and num_reqs_padded <= self.input_buffers.seq_lens_np.shape[0]:
+            seq_lens_cpu_upper_bound_np = self.input_buffers.seq_lens_np[:num_reqs_padded].copy()
+        else:
+            seq_lens_cpu_upper_bound_np = np.zeros(num_reqs_padded, dtype=np.int32)
+            np.add(
+                num_computed_tokens_np,
+                num_scheduled_tokens_upper_bound,
+                out=seq_lens_cpu_upper_bound_np[:num_reqs],
+            )
         seq_lens_cpu_upper_bound = torch.from_numpy(seq_lens_cpu_upper_bound_np)
 
         prompt_lens = None
@@ -1125,6 +1168,7 @@ class NPUModelRunner(GPUModelRunner):
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
             # TODO: only populated for R-SWA (not supported yet).
             prompt_lens=prompt_lens,
+            contiguous_logits_indices=contiguous_logits_indices,
             # extra attributes for ascend npus.
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
@@ -1133,6 +1177,16 @@ class NPUModelRunner(GPUModelRunner):
         # helper; PCPManager.partition_batch now takes the batch descriptor.
         if self.pcp_manager is not None:
             input_batch = self.pcp_manager.partition_batch(input_batch, batch_desc)
+
+        if (
+            self.cudagraph_manager is not None
+            and batch_desc.cg_mode == CUDAGraphMode.FULL
+            and not input_batch.has_prefill
+            and self.pcp_manager is None
+            and self.dcp_size == 1
+            and hasattr(self.cudagraph_manager, "start_bg_first_task")
+        ):
+            self.cudagraph_manager.start_bg_first_task(batch_desc, input_batch)
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
@@ -1520,28 +1574,90 @@ class NPUModelRunner(GPUModelRunner):
             )
             self.num_computed_tokens_event.record()
 
+    def _async_h2d_1d(
+        self,
+        key: str,
+        data: np.ndarray,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.device.type != "npu" or data.ndim != 1:
+            return async_copy_to_gpu(data, device=self.device, out=out)
+        scratch: dict[tuple[str, torch.dtype], list[Any]] | None = getattr(self, "_h2d_scratch", None)
+        if scratch is None:
+            scratch = {}
+            self._h2d_scratch = scratch
+        t_cpu = torch.from_numpy(data)
+        dtype = out.dtype if out is not None else t_cpu.dtype
+        if t_cpu.dtype != dtype:
+            return async_copy_to_gpu(data, device=self.device, out=out)
+        n = data.shape[0]
+        min_cap = max(n, self.max_num_reqs + 2)
+        state = scratch.get((key, dtype))
+        if state is None or state[0] < n:
+            state = [min_cap, 0, [None, None, None, None]]
+            scratch[(key, dtype)] = state
+        cap, idx, slots = state
+        state[1] = (idx + 1) & 3
+        entry = slots[idx]
+        if entry is None:
+            cpu_pin = torch.empty(cap, dtype=dtype, device="cpu", pin_memory=PIN_MEMORY)
+            npu_buf = None if out is not None else torch.empty(cap, dtype=dtype, device=self.device)
+            entry = (cpu_pin, cpu_pin.numpy(), npu_buf)
+            slots[idx] = entry
+        cpu_pin, cpu_np, npu_buf = entry
+        cpu_np[:n] = data
+        if out is not None:
+            target = out if n == out.shape[0] else out[:n]
+            target.copy_(cpu_pin[:n], non_blocking=True)
+            return out
+        assert npu_buf is not None
+        return npu_buf[:n].copy_(cpu_pin[:n], non_blocking=True)
+
     def _update_seq_lens_cpu(
         self,
         scheduler_output: SchedulerOutput,
         req_ids: list[str],
+        idx_mapping_np: np.ndarray | None = None,
+        num_scheduled_tokens_np: np.ndarray | None = None,
     ):
-        num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-
         # Wait for and consume the snapshot only when its producer runs.
         # req_states.num_computed_tokens_cpu also backs the NumPy view used by PCP.
-        if (self.speculator is not None or self.sync_spec_pp_cpu_counts) and not self._can_skip_spec_cpu_length_sync():
+        scheduler_cfg = getattr(self, "scheduler_config", None)
+        async_sched = getattr(scheduler_cfg, "async_scheduling", True)
+        if (
+            (async_sched and self.speculator is not None) or self.sync_spec_pp_cpu_counts
+        ) and not self._can_skip_spec_cpu_length_sync():
             # Blocks CPU submission until D2H completes; may stall the async pipeline.
             self.num_computed_tokens_event.synchronize()
-            for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
-                req_index = self.req_states.req_id_to_index[req_id]
-                self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
+            cached_req_ids = scheduler_output.scheduled_cached_reqs.req_ids
+            if cached_req_ids:
+                req_id_to_index = self.req_states.req_id_to_index
+                cached_idx = np.fromiter(
+                    map(req_id_to_index.__getitem__, cached_req_ids),
+                    dtype=np.intp,
+                    count=len(cached_req_ids),
+                )
+                dst_np = self.req_states.num_computed_tokens_cpu.numpy()
+                src_np = self.num_computed_tokens_cpu.numpy()
+                dst_np[cached_idx] = src_np[cached_idx]
 
         # Without a CPU consumer, retain the upstream optimistic upper bound.
         # prepare_pos_seq_lens still reads exact rejection-corrected NPU state.
-        for i, req_id in enumerate(req_ids):  # type: ignore
-            req_index = self.req_states.req_id_to_index[req_id]
-            num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
-            self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + num_scheduled_tokens[req_id]
+        n = len(req_ids)
+        if n > 0:
+            if idx_mapping_np is None:
+                req_id_to_index = self.req_states.req_id_to_index
+                idx_mapping_np = np.fromiter(map(req_id_to_index.__getitem__, req_ids), dtype=np.intp, count=n)
+            if num_scheduled_tokens_np is None:
+                num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+                num_scheduled_tokens_np = np.fromiter(
+                    map(num_scheduled_tokens.__getitem__, req_ids), dtype=np.int32, count=n
+                )
+            np.add(
+                self.req_states.num_computed_tokens_cpu.numpy()[idx_mapping_np],
+                num_scheduled_tokens_np,
+                out=self.input_buffers.seq_lens_np[:n],
+            )
 
     def _pad_query_start_loc_for_fia(
         self,

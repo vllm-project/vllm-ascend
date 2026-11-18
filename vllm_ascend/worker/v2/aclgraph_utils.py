@@ -16,12 +16,16 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import os
+import threading
+import time
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from typing import Any
 
 import torch
 import torch.nn as nn
+import torch_npu
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
@@ -106,9 +110,30 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             ubatch_runner=ubatch_runner,
         )
         self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
+        self._cached_graph_update_backend: type[AttentionBackend] | None = None
+        self._cached_use_updatable: bool | None = None
         self.model_runner = model_runner
         self.update_stream = self.model_runner.update_stream
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
+        is_npu = device.type == "npu"
+        self._update_sync_event = torch.npu.Event() if is_npu else None
+        self._update_sync_ready = False
+        self._bg_enabled = is_npu and os.environ.get("VLLM_ASCEND_DISABLE_BG_TASK0") != "1"
+        self._bg_req = threading.Event()
+        self._bg_done = threading.Event()
+        self._bg_done.set()
+        self._bg_job: tuple[UpdatableGraph, Any, Any, torch.Tensor] | None = None
+        self._bg_result: tuple[UpdatableGraph, Any, Any, torch.Tensor] | None = None
+        self._bg_error: Exception | None = None
+        self._bg_stop = False
+        self._bg_thread: threading.Thread | None = None
+        if self._bg_enabled:
+            self._bg_thread = threading.Thread(
+                target=self._bg_update_loop,
+                name="aclgraph-bg-t0",
+                daemon=True,
+            )
+            self._bg_thread.start()
         if super().needs_capture():
             set_graph_params(self.capture_sizes)
 
@@ -120,8 +145,13 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         assert self.update_stream is not None
-        with set_current_vllm_config(self.vllm_config):
-            attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
+        if self._cached_use_updatable is None:
+            with set_current_vllm_config(self.vllm_config):
+                attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
+            self._cached_graph_update_backend = attn_backend
+            self._cached_use_updatable = use_updatable_graph(attn_backend)
+        else:
+            attn_backend = self._cached_graph_update_backend
         attn_metadata = self.model_runner.model_state.attn_metadata
 
         metadata = getattr(self.model_runner.model_state, "device_metadata", None)
@@ -142,7 +172,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                     ),
                 ):
                     prepare_engram()
-            if use_updatable_graph(attn_backend):
+            if self._cached_use_updatable:
                 return self._updatable_graph_replay(desc, attn_metadata)
             else:
                 # This will be removed once the refactoring is fully complete.
@@ -151,7 +181,115 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             if metadata is not None:
                 metadata.finish_replay()
 
+    def _bg_update_loop(self) -> None:
+        if self.device.type == "npu":
+            torch.npu.set_device(self.device)
+        while True:
+            self._bg_req.wait()
+            self._bg_req.clear()
+            if self._bg_stop:
+                self._bg_done.set()
+                return
+            job = self._bg_job
+            self._bg_job = None
+            if job is None:
+                self._bg_done.set()
+                continue
+            graph, aq, akv, bt = job
+            try:
+                t0 = graph.tasks[0].bind(
+                    {
+                        "actual_seq_lengths": aq,
+                        "actual_seq_lengths_kv": akv,
+                        "block_table": bt,
+                    }
+                )
+                with torch.npu.stream(self.update_stream):
+                    t0.apply(self.update_stream)
+                self._bg_result = (graph, aq, akv, bt)
+                self._bg_error = None
+            except Exception as exc:
+                self._bg_error = exc
+                self._bg_result = None
+            finally:
+                self._bg_done.set()
+
+    def _join_bg(self) -> tuple[UpdatableGraph, Any, Any, torch.Tensor] | None:
+        bg_done = getattr(self, "_bg_done", None)
+        if bg_done is None:
+            return None
+        bg_done.wait()
+        err = getattr(self, "_bg_error", None)
+        self._bg_error = None
+        if err is not None:
+            self._bg_result = None
+            raise err
+        return getattr(self, "_bg_result", None)
+
+    def release_graphs(self) -> None:
+        self._join_bg()
+        self._bg_result = None
+        self._update_sync_ready = False
+        super().release_graphs()
+
+    def start_bg_first_task(self, desc: BatchExecutionDescriptor, input_batch: Any) -> None:
+        self._join_bg()
+        self._bg_result = None
+        if not getattr(self, "_bg_enabled", False) or self.update_stream is None:
+            return
+        if desc.cg_mode != CUDAGraphMode.FULL or input_batch.has_prefill:
+            return
+        graph = self.graphs.get(desc)
+        if not isinstance(graph, UpdatableGraph) or not graph.tasks:
+            return
+        t0 = graph.tasks[0]
+        if t0.operation is not torch_npu.npu_fused_infer_attention_score.out:
+            return
+        prov = t0.provider
+        if getattr(prov, "is_non_pa", False) or getattr(prov, "sliding_window", None):
+            return
+        block_tables_all = self.model_runner.block_tables.input_block_tables
+        if not block_tables_all:
+            return
+        prov_width = getattr(prov, "width", None)
+        if prov_width is not None:
+            capacity = prov.capacity  # type: ignore[attr-defined]
+            real_rows = input_batch.num_reqs
+            bt_mgr = self.model_runner.block_tables
+            if (
+                real_rows <= 0
+                or real_rows > capacity
+                or input_batch.num_tokens != real_rows * prov_width
+                or input_batch.num_tokens_after_padding != capacity * prov_width
+                or bt_mgr.has_sliding_window_groups
+                or bt_mgr.cp_size != 1
+                or block_tables_all[0].shape[0] < capacity
+            ):
+                return
+            aq = None
+            akv = input_batch.seq_lens_np[:real_rows].tolist() + [prov_width] * (capacity - real_rows)
+            bt = block_tables_all[0][:capacity]
+        else:
+            num_reqs_padded = input_batch.num_reqs_after_padding
+            num_input_tokens = input_batch.num_tokens_after_padding
+            aq = input_batch.query_start_loc_np[1:].tolist()
+            max_query_len = int(input_batch.num_scheduled_tokens.max()) if input_batch.num_reqs > 0 else 1
+            if max_query_len > 1 and aq and num_input_tokens > aq[-1]:
+                aq.append(num_input_tokens)
+            akv = input_batch.seq_lens_np[:num_reqs_padded].tolist()
+            if len(akv) < len(aq):
+                akv.extend([1] * (len(aq) - len(akv)))
+            bt = block_tables_all[0][:num_reqs_padded]
+            if bt.shape[0] < len(aq):
+                return
+        self._bg_job = (graph, aq, akv, bt)
+        self._bg_done.clear()
+        self._bg_req.set()
+        time.sleep(0)
+
     def _graph_relay(self, attn_backend, desc, num_tokens, attn_metadata):
+        self._join_bg()
+        self._bg_result = None
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
 
@@ -190,10 +328,62 @@ class ModelAclGraphManager(ModelCudaGraphManager):
     def _updatable_graph_replay(self, desc, attn_metadata):
         graph = self.graphs[desc]
         assert isinstance(graph, UpdatableGraph)
-        resolved_tasks = graph.resolve_tasks(ContextSource(attn_metadata))
-        self.update_stream.wait_stream(torch.npu.current_stream())
+        prefetched = self._join_bg()
+        self._bg_result = None
+        if self._update_sync_event is not None and not self._update_sync_ready:
+            self._update_sync_event.record(torch.npu.current_stream())
+            self.update_stream.wait_event(self._update_sync_event)
+            self._update_sync_ready = True
+
+        resolved_tasks = None
+        if graph.tasks:
+            first_prov = graph.tasks[0].provider
+            if getattr(first_prov, "width", None) is not None:
+                bt_mgr = self.model_runner.block_tables
+                can_defer = False
+                if (
+                    not bt_mgr.has_sliding_window_groups
+                    and bt_mgr.cp_size == 1
+                    and bt_mgr.input_block_tables
+                    and isinstance(attn_metadata, dict)
+                ):
+                    meta0 = attn_metadata.get(getattr(first_prov, "layer_name", ""))
+                    full_bt = bt_mgr.input_block_tables[0]
+                    if meta0 is not None:
+                        meta0._suffix_bsh_full_block_table = full_bt
+                        cap = getattr(first_prov, "capacity", 0)
+                        if full_bt.shape[0] >= cap and full_bt.is_contiguous():
+                            can_defer = all(v is meta0 for v in attn_metadata.values())
+                if not can_defer:
+                    # Resolve before run_fullgraph so any fallback tensor op precedes replay.
+                    resolved_tasks = graph.resolve_tasks(ContextSource(attn_metadata))
         ret = super().run_fullgraph(desc)
-        graph.update(self.update_stream, resolved_tasks)
+        if resolved_tasks is None:
+            resolved_tasks = graph.resolve_tasks(ContextSource(attn_metadata))
+        tasks_to_update = resolved_tasks
+        if prefetched is not None and resolved_tasks:
+            p_graph, p_aq, p_akv, p_bt = prefetched
+            t0_kw = resolved_tasks[0].kwargs
+            t0_bt = t0_kw.get("block_table")
+            bt_ok = (p_bt is t0_bt) or (
+                t0_bt is not None
+                and p_bt.data_ptr() == t0_bt.data_ptr()
+                and p_bt.shape == t0_bt.shape
+                and p_bt.stride() == t0_bt.stride()
+            )
+            if (
+                p_graph is graph
+                and p_aq == t0_kw.get("actual_seq_lengths")
+                and p_akv == t0_kw.get("actual_seq_lengths_kv")
+                and bt_ok
+            ):
+                tasks_to_update = resolved_tasks[1:]
+
+        if tasks_to_update:
+            graph.update(self.update_stream, tasks_to_update)
+        if self._update_sync_event is not None:
+            self._update_sync_event.record(torch.npu.current_stream())
+            self.update_stream.wait_event(self._update_sync_event)
         return ret
 
     def capture(
