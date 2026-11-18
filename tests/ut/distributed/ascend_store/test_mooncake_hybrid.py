@@ -456,14 +456,14 @@ class TestMooncakeHybrid(unittest.TestCase):
         scheduler = object.__new__(LayerwiseKVPoolScheduler)
         scheduler.sharded_mamba_group_ids = set()
         scheduler.dspark_prefix_keys = None
-        scheduler.num_speculative_blocks_by_group = {}
+        scheduler.num_mamba_speculative_blocks_by_group = {}
         scheduler.block_key_hybrid = True
         scheduler.layerwise_backend = mooncake_backend.MooncakeBackend
         scheduler.model_name = "model"
         scheduler.tp_size = 2
         scheduler.pp_size = 1
         scheduler.put_step = 1
-        scheduler.num_speculative_blocks_by_group = {}
+        scheduler.num_mamba_speculative_blocks_by_group = {}
         scheduler.grouped_block_size = [16, 32]
         with patch.object(mooncake_layerwise, "hybrid_layout_id", return_value="layout"):
             scheduler.layerwise_keys = scheduler.layerwise_backend.bind_layerwise_keys(

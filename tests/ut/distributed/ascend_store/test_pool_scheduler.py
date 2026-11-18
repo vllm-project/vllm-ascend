@@ -78,7 +78,7 @@ def test_layerwise_state_lookup_keeps_tp_rank_separate_from_pcp_without_scratch_
     scheduler.sharded_mamba_group_ids = {2}
     scheduler.tp_size = scheduler.put_step = tp_size
     scheduler.pcp_size = pcp_size
-    scheduler.num_speculative_blocks_by_group = {}
+    scheduler.num_mamba_speculative_blocks_by_group = {}
     scheduler.dspark_prefix_keys = None
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=["state-key"]))
 
@@ -93,7 +93,7 @@ def test_joint_prefix_keys_keep_target_keys_and_require_every_final_pp_draft_rep
     target_keys = ["target-pp0-rank0", "target-pp1-rank0"]
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=target_keys.copy()))
     scheduler.tp_size, scheduler.put_step = 4, 4
-    scheduler.num_speculative_blocks_by_group = {}
+    scheduler.num_mamba_speculative_blocks_by_group = {}
     scheduler.dspark_prefix_keys = DSparkPrefixKeys("draft-contract", pp_size=2, tp_size=4) if dspark else None
     scheduler.dspark_draft_only_group_ids = frozenset()
     scheduler.layerwise_max_transfer_blocks = 0
@@ -118,7 +118,7 @@ def test_joint_prefix_draft_only_group_uses_companion_keys_without_losing_mixed_
     scheduler.sharded_mamba_group_ids = set()
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=["target-group3"]))
     scheduler.tp_size, scheduler.put_step = 4, 4
-    scheduler.num_speculative_blocks_by_group = {}
+    scheduler.num_mamba_speculative_blocks_by_group = {}
     scheduler.dspark_prefix_keys = DSparkPrefixKeys("draft-contract", pp_size=2, tp_size=4)
     scheduler.dspark_draft_only_group_ids = frozenset({3}) if draft_only else frozenset()
     scheduler.layerwise_max_transfer_blocks = 0
@@ -149,7 +149,7 @@ def test_prefix_lookup_rechecks_after_save_and_eviction(mode):
     # return_value would accumulate draft keys across lookups.
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(side_effect=lambda *args: ["target"]))
     scheduler.tp_size, scheduler.put_step = 4, 4
-    scheduler.num_speculative_blocks_by_group = {}
+    scheduler.num_mamba_speculative_blocks_by_group = {}
     scheduler.dspark_prefix_keys = (
         DSparkPrefixKeys("draft-contract", pp_size=2, tp_size=4) if mode == "dspark" else None
     )
@@ -235,7 +235,7 @@ def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp
         make_hit_check_keys=MagicMock(side_effect=lambda group_id, *_: [f"target-group{group_id}"])
     )
     scheduler.tp_size, scheduler.put_step = 4, 4
-    scheduler.num_speculative_blocks_by_group = {}
+    scheduler.num_mamba_speculative_blocks_by_group = {}
     scheduler.dspark_prefix_keys = DSparkPrefixKeys("draft-contract", pp_size=2, tp_size=4)
     scheduler.dspark_draft_only_group_ids = frozenset(scheduler_config.dspark_draft_only_group_ids)
     draft_keys = scheduler.dspark_prefix_keys.make_hit_check_keys("block-hash")
@@ -300,7 +300,7 @@ def test_mooncake_layerwise_accepts_aligned_recurrent_state(num_speculative_bloc
         )
     kv_cache_config = MagicMock(kv_cache_groups=groups, hash_block_size=16, cache_hit_alignment_tokens=None)
     scheduler = create_kv_pool_scheduler(config, use_layerwise=True, kv_cache_config=kv_cache_config)
-    assert scheduler.num_speculative_blocks_by_group == (
+    assert scheduler.num_mamba_speculative_blocks_by_group == (
         {} if num_speculative_blocks is None else {1: num_speculative_blocks}
     )
     assert scheduler.sharded_mamba_group_ids == ({1} if num_speculative_blocks is not None else set())
@@ -447,7 +447,7 @@ class TestKVPoolScheduler(unittest.TestCase):
             use_layerwise=False,
             kv_cache_config=MagicMock(kv_cache_groups=hybrid_groups, hash_block_size=16, cache_hit_alignment_tokens=16),
         )
-        self.assertEqual(scheduler.num_speculative_blocks_by_group, {1: 3, 2: 0})
+        self.assertEqual(scheduler.num_mamba_speculative_blocks_by_group, {1: 3, 2: 0})
 
         scheduler.bind_gpu_block_pool(MagicMock())
         scheduler._block_pool.blocks = {block_id: MagicMock(block_id=block_id) for block_id in range(1, 13)}
@@ -1588,7 +1588,7 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         scheduler = self._make_scheduler()
         scheduler.use_hybrid = False
         scheduler.enable_partial_hash_hits = False
-        scheduler.num_speculative_blocks_by_group = {0: 1}
+        scheduler.num_mamba_speculative_blocks_by_group = {0: 1}
         scheduler._block_pool.blocks = [MagicMock() for _ in range(4)]
         req_meta = ReqMeta("r1", block_ids_by_group=[[0, 1, 2, 3]], can_save=True)
 
@@ -1599,7 +1599,7 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
     def test_store_job_pins_mamba_blocks_until_all_workers_finish(self):
         scheduler = self._make_scheduler()
         scheduler.use_hybrid = True
-        scheduler.num_speculative_blocks_by_group = {0: 1}
+        scheduler.num_mamba_speculative_blocks_by_group = {0: 1}
         scheduler._block_pool.blocks = [MagicMock() for _ in range(4)]
         req_meta = ReqMeta(
             "r1", token_len_chunk=16, block_ids_by_group=[[0, 1, 2, 3]], block_hashes=[b"h0"], can_save=True
@@ -1789,7 +1789,7 @@ class TestKVPoolSchedulerMambaGroups(unittest.TestCase):
         config.model_config.get_num_layers.return_value = 2
         scheduler = KVPoolScheduler(config, kv_cache_config=make_resolved_cache_config(config), use_layerwise=False)
         self.assertEqual(scheduler._infer_mamba_groups(), {})
-        self.assertEqual(scheduler.num_speculative_blocks_by_group, {})
+        self.assertEqual(scheduler.num_mamba_speculative_blocks_by_group, {})
 
 
 class TestKVPoolSchedulerGetLayerwiseHitTokens(unittest.TestCase):

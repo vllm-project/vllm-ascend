@@ -966,7 +966,7 @@ class RequestTracker:
     last_layerwise_snapshot_start_block: int | None = None
 
     # Number of speculative scratch blocks for each Mamba cache group.
-    num_speculative_blocks_by_group: dict[int, int] | None = None
+    num_mamba_speculative_blocks_by_group: dict[int, int] | None = None
 
     block_sizes: list[int] | None = None
     partial_tail_sent: bool = False
@@ -985,7 +985,7 @@ class RequestTracker:
         block_gvas_by_group: list[list[int]] | None = None,
         gva_block_offset: int = 0,
         last_block_gva: int | None = None,
-        num_speculative_blocks_by_group: dict[int, int] | None = None,
+        num_mamba_speculative_blocks_by_group: dict[int, int] | None = None,
         block_sizes: list[int] | None = None,
         last_layerwise_snapshot_end_token: int | None = None,
         last_layerwise_snapshot_block_index: int | None = None,
@@ -994,7 +994,7 @@ class RequestTracker:
     ) -> None:
         self.req_id = req_id
         self.token_len = token_len
-        self.num_speculative_blocks_by_group = num_speculative_blocks_by_group
+        self.num_mamba_speculative_blocks_by_group = num_mamba_speculative_blocks_by_group
         block_ids = allocated_block_ids_by_group
         if block_ids is None:
             block_ids = normalize_block_ids_by_group(allocated_block_ids or [])
@@ -1046,8 +1046,9 @@ class RequestTracker:
         we also need to update the previous allocated_block_ids to 0.
         """
         if (
-            self.num_speculative_blocks_by_group is not None
-            and (num_speculative_blocks := self.num_speculative_blocks_by_group.get(kv_cache_group_id)) is not None
+            self.num_mamba_speculative_blocks_by_group is not None
+            and (num_speculative_blocks := self.num_mamba_speculative_blocks_by_group.get(kv_cache_group_id))
+            is not None
         ):
             assert self.block_sizes is not None and len(self.block_sizes) > kv_cache_group_id
             num_skipped_blocks = (

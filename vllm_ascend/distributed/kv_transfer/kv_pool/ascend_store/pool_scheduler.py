@@ -87,7 +87,7 @@ class BaseKVPoolScheduler(ABC):
             else [0]
         )
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
-        self.num_speculative_blocks_by_group = self._infer_mamba_groups()
+        self.num_mamba_speculative_blocks_by_group = self._infer_mamba_groups()
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_load", False
@@ -252,7 +252,7 @@ class BaseKVPoolScheduler(ABC):
         if self.kv_cache_config is None:
             return {}
 
-        num_speculative_blocks_by_group: dict[int, int] = {}
+        num_mamba_speculative_blocks_by_group: dict[int, int] = {}
         for group_id, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -264,8 +264,8 @@ class BaseKVPoolScheduler(ABC):
                     "AscendStore hybrid linear-attention support currently requires mamba_cache_mode='align'."
                 )
             if self.use_hybrid:
-                num_speculative_blocks_by_group[group_id] = kv_cache_spec.num_speculative_blocks
-        return num_speculative_blocks_by_group
+                num_mamba_speculative_blocks_by_group[group_id] = kv_cache_spec.num_speculative_blocks
+        return num_mamba_speculative_blocks_by_group
 
     def get_num_new_matched_tokens(
         self,
@@ -503,7 +503,7 @@ class BaseKVPoolScheduler(ABC):
             prefill_end_tokens=len(prefill_tokens),
             block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
-            num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
+            num_mamba_speculative_blocks_by_group=self.num_mamba_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
         )
         self._request_trackers[request.req_id] = request_tracker
@@ -545,7 +545,7 @@ class BaseKVPoolScheduler(ABC):
             prefill_end_tokens=len(request_real.all_token_ids),
             block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
-            num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
+            num_mamba_speculative_blocks_by_group=self.num_mamba_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
         )
         self._request_trackers[req_id] = request_tracker
@@ -641,7 +641,7 @@ class BaseKVPoolScheduler(ABC):
             prefill_end_tokens=len(request.prompt_token_ids),
             block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
-            num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
+            num_mamba_speculative_blocks_by_group=self.num_mamba_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
         )
         self._request_trackers[request_id] = request_tracker
@@ -856,7 +856,7 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         """Keep Mamba source blocks alive until bulk save completes."""
         self._in_flight_save_blocks.retain(
             req_meta,
-            self.num_speculative_blocks_by_group,
+            self.num_mamba_speculative_blocks_by_group,
             self._block_pool,
             retain_all=self.enable_partial_hash_hits,
         )

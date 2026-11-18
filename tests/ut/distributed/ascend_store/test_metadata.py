@@ -527,7 +527,7 @@ class TestRequestTracker(unittest.TestCase):
             req_id="r1",
             token_len=32,
             allocated_block_ids_by_group=[[1, 2], [3, 4], [5, 6]],
-            num_speculative_blocks_by_group={1: 1, 2: 0},
+            num_mamba_speculative_blocks_by_group={1: 1, 2: 0},
             block_sizes=[16] * 3,
         )
 
@@ -547,7 +547,7 @@ class TestRequestTracker(unittest.TestCase):
                 [0, 7, 8, 9, 10],
                 [0, 11, 12, 13, 14],
             ],
-            num_speculative_blocks_by_group={1: 3, 2: 3, 3: 3},
+            num_mamba_speculative_blocks_by_group={1: 3, 2: 3, 3: 3},
             block_sizes=[16] * 4,
         )
 
@@ -567,7 +567,7 @@ class TestRequestTracker(unittest.TestCase):
                 [0, 0, 0, 0, 0, 0, 0, 13, 14, 15, 16],
                 [0, 0, 0, 0, 0, 0, 0, 17, 18, 19, 20],
             ],
-            num_speculative_blocks_by_group={1: 3, 2: 3, 3: 3},
+            num_mamba_speculative_blocks_by_group={1: 3, 2: 3, 3: 3},
             block_sizes=[16] * 4,
         )
 

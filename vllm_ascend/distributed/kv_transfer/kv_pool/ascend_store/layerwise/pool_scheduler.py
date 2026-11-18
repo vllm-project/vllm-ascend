@@ -316,7 +316,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         if draft_keys is not None and group_id in self.dspark_draft_only_group_ids:
             # Draft-only groups have no ordinary layerwise target object.
             return draft_keys.make_hit_check_keys(block_hash_hex)
-        if group_id in self.sharded_mamba_group_ids or group_id in self.num_speculative_blocks_by_group:
+        if group_id in self.sharded_mamba_group_ids or group_id in self.num_mamba_speculative_blocks_by_group:
             head_or_tp_ranks = self.tp_size
         else:
             head_or_tp_ranks = self.tp_size // self.put_step

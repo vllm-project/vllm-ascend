@@ -16,7 +16,7 @@ class InFlightSaveBlockTracker:
     def retain(
         self,
         req_meta: ReqMeta,
-        speculative_blocks_by_group: dict[int, int],
+        num_mamba_speculative_blocks_by_group: dict[int, int],
         block_pool: BlockPool | None,
         *,
         retain_all: bool = False,
@@ -37,12 +37,12 @@ class InFlightSaveBlockTracker:
             groups = [
                 group_id
                 for group_id in range(len(req_meta.block_ids_by_group))
-                if group_id not in speculative_blocks_by_group
+                if group_id not in num_mamba_speculative_blocks_by_group
             ]
         else:
-            groups = list(speculative_blocks_by_group)
+            groups = list(num_mamba_speculative_blocks_by_group)
         for group_id in groups:
-            num_speculative_blocks = speculative_blocks_by_group.get(group_id, 0)
+            num_speculative_blocks = num_mamba_speculative_blocks_by_group.get(group_id, 0)
             group_block_ids = req_meta.block_ids_by_group[group_id]
             # Speculative scratch slots must remain exclusively owned for relocation.
             non_spec_block_ids = (

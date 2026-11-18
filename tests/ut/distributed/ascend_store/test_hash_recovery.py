@@ -233,7 +233,7 @@ def finishing_tail():
     )
     scheduler.grouped_block_size = [16, 16]
     scheduler.cacheable_group_ids = [0, 1]
-    scheduler.num_speculative_blocks_by_group = {1: 1}
+    scheduler.num_mamba_speculative_blocks_by_group = {1: 1}
     scheduler._request_trackers = {"tail": SimpleNamespace(prefill_end_tokens=65, num_prompt_tokens=65)}
     scheduler._finished_partial_tail_metas = {}
     scheduler._in_flight_save_blocks = InFlightSaveBlockTracker(2)
