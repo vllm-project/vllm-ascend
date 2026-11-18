@@ -1695,12 +1695,6 @@
 # Related PR: vllm-project/vllm#60050.
 # Future Plan: remove this initialization hook when a shared backend extension supports it.
 
-# worker/patch_qwen3_5.py: GDN input projection overlap.
-# Why: Ascend replaces the upstream GDN forward/backend.
-# How: reuse packed-weight initialization for hardware-gated per-layer NPU overlap.
-# Related PR: vllm-project/vllm#64425.
-# Future Plan: remove this initialization hook when a shared backend extension supports it.
-
 # ** 36. File: worker/patch_staged_writes.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.block_table.BlockTables.__init__`,
