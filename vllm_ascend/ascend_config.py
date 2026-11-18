@@ -133,11 +133,6 @@ class AscendCompilationConfig:
     fuse_norm_quant: bool = True
     fuse_qknorm_rope: bool = True
     fuse_muls_add: bool = True
-    # Derived by ``AscendPlatform.update_config`` after graph gears are
-    # normalized.  Keep the contracts in the typed nested config so engine
-    # config reconstruction accepts the values carried in additional_config.
-    runner_tp_token_alignment_size: int = 1
-    tp_token_alignment_size: int = 1
 
     @model_validator(mode="before")
     @classmethod
@@ -925,11 +920,8 @@ class AscendConfig:
         if vc.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vc):
             tp_pcp_size = vc.parallel_config.tensor_parallel_size * vc.parallel_config.prefill_context_parallel_size
             if vc.scheduler_config.max_num_batched_tokens % tp_pcp_size != 0:
-                logical_capacity = vc.scheduler_config.max_num_batched_tokens
-                if vc.scheduler_config.max_num_scheduled_tokens is None:
-                    vc.scheduler_config.max_num_scheduled_tokens = logical_capacity
                 vc.scheduler_config.max_num_batched_tokens = (
-                    cdiv(logical_capacity, tp_pcp_size) * tp_pcp_size
+                    cdiv(vc.scheduler_config.max_num_batched_tokens, tp_pcp_size) * tp_pcp_size
                 )
                 logger.warning_once(
                     "When using sequence parallelism, the max_num_batched_tokens should be divisible "

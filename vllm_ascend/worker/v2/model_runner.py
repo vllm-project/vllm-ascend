@@ -110,9 +110,7 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     create_hccl_pg_options,
     enable_sfa_dcp_sharded_indexer,
-    enable_sp,
     get_pcp_profile_num_tokens,
-    get_runner_tp_token_alignment,
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
     lmhead_tp_enable,
@@ -120,7 +118,6 @@ from vllm_ascend.utils import (
     lmhead_tp_pad_rows,
     requires_lmhead_dp_sync,
     set_potential_max_tokens,
-    set_runner_tp_token_alignment,
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
 )
@@ -215,7 +212,6 @@ class NPUModelRunner(GPUModelRunner):
                 "Qwen3_5ForConditionalGeneration",
             )
         )
-
         # These draft heads consume target aux states collected across PP ranks.
         if spec_pp_support is not None and spec_pp_support.needs_aux_hidden_states:
             self.use_aux_hidden_state_outputs = True
@@ -769,10 +765,7 @@ class NPUModelRunner(GPUModelRunner):
         dp_coordination_context = skip_dp_coordination() if skip_dp_metadata_sync else nullcontext()
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
-        with (
-            dp_coordination_context,
-            set_runner_tp_token_alignment(self.vllm_config),
-        ):
+        with dp_coordination_context:
             try:
                 output = super().execute_model(
                     scheduler_output,
@@ -1299,45 +1292,20 @@ class NPUModelRunner(GPUModelRunner):
         # preserves logical query lengths separately from graph padding.
         dummy_query_tokens: int | None = None
         if (
+            # FULL modes can also pad requests; only change token-only PIECEWISE padding.
+            self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
             # PCP prepares and partitions its own dummy input layout.
-            self.pcp_manager is None
-            and (
-                self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
-                # A FULL-capable service can still dispatch an individual
-                # batch eagerly; preserve its logical query count as well.
-                or get_runner_tp_token_alignment(self.vllm_config) > 1
-            )
+            and self.pcp_manager is None
         ):
             # Match the logical token count in the upstream dummy scheduler.
             dummy_query_tokens = max(num_tokens, self.decode_query_len) if uniform_decode else num_tokens
 
-        dummy_num_reqs: int | None = None
-        if dummy_query_tokens is not None:
-            dummy_num_reqs = min(num_tokens, self.max_num_reqs)
-            if uniform_decode:
-                dummy_num_reqs = dummy_query_tokens // self.decode_query_len
-            elif self.speculator is not None:
-                assert self.speculative_config is not None
-                dummy_num_reqs = min(
-                    dummy_num_reqs,
-                    self.max_num_tokens // self.speculator.num_query_per_req,
-                )
-                dummy_query_tokens = min(
-                    dummy_query_tokens,
-                    self.max_num_tokens
-                    - dummy_num_reqs
-                    * self.speculative_config.max_num_new_slots_for_drafting,
-                )
-
         previous_dummy_tokens = self.input_buffers.dummy_num_tokens
-        previous_dummy_reqs = self.input_buffers.dummy_num_reqs
         self.input_buffers.dummy_num_tokens = dummy_query_tokens
-        self.input_buffers.dummy_num_reqs = dummy_num_reqs
         try:
             yield
         finally:
             self.input_buffers.dummy_num_tokens = previous_dummy_tokens
-            self.input_buffers.dummy_num_reqs = previous_dummy_reqs
 
     @step_eplb_after(is_dummy=True)
     def _dummy_run(

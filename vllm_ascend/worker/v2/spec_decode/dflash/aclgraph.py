@@ -25,12 +25,7 @@ from vllm_ascend.compilation.updatable_graph import (
     UpdatableGraph,
 )
 from vllm_ascend.utils import use_updatable_graph, vllm_version_is
-from vllm_ascend.worker.v2.aclgraph_utils import (
-    collect_sorted_captured_token_sizes,
-    model_capture_wrapper,
-    normalize_tp_aligned_token_descriptors,
-    validate_tp_aligned_capture_descriptors,
-)
+from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -51,10 +46,6 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             device,
             cudagraph_mode,
             query_shapes,
-        )
-        normalize_tp_aligned_token_descriptors(vllm_config, self)
-        validate_tp_aligned_capture_descriptors(
-            vllm_config, self._capture_descs
         )
 
         # It is set by AscendDFlashSpeculator.init_cudagraph_manager after creation,

@@ -76,15 +76,10 @@ def test_adaptive_verification_backend_capabilities(
 )
 def test_adaptive_tail_dummy_run_balances_moe_routing(adaptive_verification, context_len, expected):
     runner = NPUModelRunner.__new__(NPUModelRunner)
-    runner.input_buffers = SimpleNamespace(  # type: ignore[assignment]
-        dummy_num_tokens=None,
-        dummy_num_reqs=None,
-    )
+    runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)  # type: ignore[assignment]
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
-    runner.vllm_config = SimpleNamespace(additional_config={})
     runner.debugger = None
     runner.adaptive_verification = adaptive_verification
-    runner.pcp_manager = None
     runner.ascend_config = SimpleNamespace(xlite_graph_config=SimpleNamespace(enabled=False))
     runner.eplb = Mock()
     observed = []

@@ -1,9 +1,8 @@
 import ast
-import sys
 from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, Mock, patch
 
@@ -36,18 +35,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.model_executor.offloader import AscendPrefetchOffloader
-from vllm_ascend.utils import (
-    align_cudagraph_capture_sizes,
-    align_num_tokens_to_tp,
-    requires_tp_token_padding,
-    set_runner_tp_token_alignment,
-    vllm_version_is,
-)
-from vllm_ascend.worker.v2.aclgraph_utils import (
-    align_decode_capture_request_sizes,
-    normalize_tp_aligned_token_descriptors,
-    validate_tp_aligned_capture_descriptors,
-)
+from vllm_ascend.patch.worker import patch_model_runner
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -89,11 +78,7 @@ def _make_runner(*args, **kwargs):
     runner.attn_groups = []
     runner._target_uses_flashmla = False
     runner.adaptive_verification = None
-    runner.pcp_manager = None
-    runner.input_buffers = SimpleNamespace(  # type: ignore[assignment]
-        dummy_num_tokens=None,
-        dummy_num_reqs=None,
-    )
+    runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)  # type: ignore[assignment]
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
     runner.use_fia = False
     runner.sync_spec_pp_cpu_counts = False
@@ -110,295 +95,45 @@ def _make_runner(*args, **kwargs):
     return runner
 
 
-@pytest.mark.parametrize(
-    ("num_tokens", "tp_size", "expected"),
-    [(0, 8, 0), (55, 8, 56), (56, 8, 56)],
-)
-def test_align_num_tokens_to_tp(num_tokens, tp_size, expected):
-    assert align_num_tokens_to_tp(num_tokens, tp_size) == expected
-
-
-def test_align_cudagraph_capture_sizes_rounds_and_deduplicates():
-    assert align_cudagraph_capture_sizes([1, 2, 7, 8, 15], 8, 16) == [8, 16]
-
-
-def test_align_decode_capture_request_sizes_uses_all_query_lengths():
-    config = SimpleNamespace(
-        additional_config={
-            "ascend_compilation_config": {"tp_token_alignment_size": 8}
-        },
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=64),
-        compilation_config=SimpleNamespace(
-            max_decode_cudagraph_capture_tokens=None
-        ),
-    )
-
-    assert align_decode_capture_request_sizes(
-        config,
-        [1, 2, 3, 4, 8],
-        {1: 16, 3: 16},
-    ) == [8]
-    assert align_decode_capture_request_sizes(
-        config,
-        [1, 2, 4],
-        {1: 4},
-    ) == []
-
-
-def test_validate_tp_aligned_capture_descriptors_rejects_final_shape():
-    config = SimpleNamespace(
-        additional_config={
-            "ascend_compilation_config": {"tp_token_alignment_size": 8}
-        }
-    )
-    capture_descs = {
-        CUDAGraphMode.FULL: [
-            BatchExecutionDescriptor(
-                cg_mode=CUDAGraphMode.FULL,
-                num_tokens=9,
-                num_reqs=3,
-            )
-        ]
-    }
-
-    with pytest.raises(ValueError, match=r"divisible.*8.*9"):
-        validate_tp_aligned_capture_descriptors(config, capture_descs)
-
-
-def test_normalize_tp_aligned_varlen_descriptor_updates_dispatch_table():
-    config = SimpleNamespace(
-        additional_config={
-            "ascend_compilation_config": {"tp_token_alignment_size": 8}
-        }
-    )
-    desc = BatchExecutionDescriptor(
-        cg_mode=CUDAGraphMode.FULL,
-        num_tokens=1,
-        num_reqs=1,
-        max_query_len=4,
-    )
-    manager = SimpleNamespace(
-        max_num_reqs=8,
-        _capture_descs={CUDAGraphMode.FULL: [desc]},
-        _candidates={(1, 0): [desc]},
-    )
-
-    normalize_tp_aligned_token_descriptors(config, manager)
-
-    normalized = manager._capture_descs[CUDAGraphMode.FULL][0]
-    assert normalized.num_tokens == 8
-    assert normalized.num_reqs == 2
-    assert manager._candidates[(1, 0)][0] is normalized
-    validate_tp_aligned_capture_descriptors(
-        config, manager._capture_descs
-    )
-
-
-@pytest.mark.parametrize(
-    ("architecture", "speculative_method", "tp_size", "pp_size", "sp_enabled", "expected"),
-    [
-        ("Qwen4ExpForCausalLM", "qwen3_5_mtp", 8, 1, True, True),
-        ("Qwen4ExpForConditionalGeneration", "mtp", 4, 1, True, True),
-        ("Qwen4ExpMTP", "mtp", 8, 1, True, True),
-        ("Qwen4ExpForCausalLM", "mtp", 8, 1, False, False),
-        ("Qwen4ExpForCausalLM", "mtp", 8, 2, True, True),
-        ("Qwen4ExpForCausalLM", "ngram", 8, 1, True, False),
-        ("OtherForCausalLM", "qwen3_5_mtp", 8, 1, True, False),
-        ("OtherForCausalLM", None, 8, 2, True, True),
-        ("OtherForCausalLM", None, 8, 2, False, False),
-        ("Qwen4ExpForCausalLM", "mtp", 1, 1, True, False),
-    ],
-)
-def test_requires_tp_token_padding(
-    monkeypatch,
-    architecture,
-    speculative_method,
-    tp_size,
-    pp_size,
-    sp_enabled,
-    expected,
-):
-    config = SimpleNamespace(
+def test_eager_dispatch_tp_aligns_target_and_reused_draft_sync(monkeypatch):
+    vllm_config = SimpleNamespace(
+        additional_config={},
         parallel_config=SimpleNamespace(
-            tensor_parallel_size=tp_size,
-            pipeline_parallel_size=pp_size,
-            enable_hc_sp=sp_enabled,
-            use_sequence_parallel_moe=False,
-        ),
-        model_config=SimpleNamespace(architecture=architecture),
-        speculative_config=(
-            None if speculative_method is None else SimpleNamespace(method=speculative_method)
+            tensor_parallel_size=4,
+            use_sequence_parallel_moe=True,
+            enable_hc_sp=False,
         ),
     )
-    monkeypatch.setattr("vllm_ascend.utils.enable_sp", lambda _config: sp_enabled)
-
-    assert requires_tp_token_padding(config) is expected
-
-
-def test_requires_tp_token_padding_for_pp_hc_sp_only(monkeypatch):
-    config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            tensor_parallel_size=8,
-            pipeline_parallel_size=2,
-            enable_hc_sp=True,
-            use_sequence_parallel_moe=False,
-        ),
-        model_config=SimpleNamespace(architecture="OtherForCausalLM"),
-        speculative_config=None,
-    )
-    monkeypatch.setattr("vllm_ascend.utils.enable_sp", lambda _config: False)
-
-    assert requires_tp_token_padding(config)
-
-
-def test_dispatch_tp_padding_is_stateless_across_runners(monkeypatch):
-    from vllm_ascend.patch.worker import patch_model_runner
-
-    dispatched_tokens = []
-    padded_tokens = []
-
-    def dispatch(manager, num_reqs, num_tokens, uniform_token_count, *args, **kwargs):
-        dispatched_tokens.append(num_tokens)
-        return (
-            BatchExecutionDescriptor(
-                cg_mode=CUDAGraphMode.NONE,
-                num_tokens=num_tokens,
-                num_reqs=num_reqs,
-            ),
-            None,
-        )
-
-    monkeypatch.setattr(patch_model_runner, "_dispatch_cg_and_sync_dp", dispatch)
-    for tp_size, num_tokens in ((8, 15), (4, 5)):
-        config = SimpleNamespace(
-            additional_config={
-                "ascend_compilation_config": {
-                    "runner_tp_token_alignment_size": tp_size,
-                }
-            },
-            parallel_config=SimpleNamespace(
-                tensor_parallel_size=tp_size,
-                pipeline_parallel_size=1,
-                enable_hc_sp=True,
-                use_sequence_parallel_moe=False,
-            ),
-            model_config=SimpleNamespace(architecture="Qwen4ExpForCausalLM"),
-            speculative_config=SimpleNamespace(method="mtp"),
-        )
-        manager = SimpleNamespace(vllm_config=config)
-        batch_desc, _ = patch_model_runner.dispatch_cg_and_sync_dp(
-            manager,
-            1,
-            num_tokens,
-            None,
-            2,
-            0,
-        )
-        padded_tokens.append(batch_desc.num_tokens)
-
-    # Graph matching sees logical counts; only the actual eager descriptor is
-    # materialized to TP-aligned physical rows.
-    assert dispatched_tokens == [15, 5]
-    assert padded_tokens == [16, 8]
-
-
-def test_dispatch_eager_padding_updates_dp_state_atomically(monkeypatch):
-    from vllm_ascend.patch.worker import patch_model_runner
-
-    state = DPSyncState(
-        num_tokens_across_dp=torch.tensor([3, 5], dtype=torch.int32),
+    manager = SimpleNamespace(vllm_config=vllm_config)
+    initial_sync = DPSyncState(
+        num_tokens_across_dp=torch.tensor([3, 5]),
         uniform_token_count=None,
         max_query_len=None,
         eager=True,
-        num_reqs=2,
+        num_reqs=1,
     )
+    seen_tokens = []
 
-    def dispatch(manager, num_reqs, num_tokens, uniform_token_count, *args, **kwargs):
+    def dispatch(_manager, num_reqs, num_tokens, _uniform, *args, **kwargs):
+        seen_tokens.append(num_tokens)
         return (
             BatchExecutionDescriptor(
                 cg_mode=CUDAGraphMode.NONE,
                 num_tokens=num_tokens,
                 num_reqs=num_reqs,
             ),
-            state,
+            kwargs.get("dp_sync_state") or initial_sync,
         )
 
     monkeypatch.setattr(patch_model_runner, "_dispatch_cg_and_sync_dp", dispatch)
-    config = SimpleNamespace(
-        additional_config={
-            "ascend_compilation_config": {
-                "runner_tp_token_alignment_size": 4,
-            }
-        },
-        parallel_config=SimpleNamespace(
-            tensor_parallel_size=4,
-            pipeline_parallel_size=1,
-            enable_hc_sp=True,
-            use_sequence_parallel_moe=False,
-        ),
-        model_config=SimpleNamespace(architecture="Qwen4ExpForCausalLM"),
-        speculative_config=SimpleNamespace(method="mtp"),
-    )
-    batch_desc, aligned_state = patch_model_runner.dispatch_cg_and_sync_dp(
-        SimpleNamespace(vllm_config=config), 2, 3, None, 2, 0
-    )
+    target_desc, target_sync = patch_model_runner.dispatch_cg_and_sync_dp(manager, 1, 3, None)
+    assert target_desc.num_tokens == 4
+    assert target_sync is not None
+    torch.testing.assert_close(target_sync.num_tokens_across_dp, torch.tensor([4, 8]))
 
-    assert batch_desc.num_tokens == 4
-    assert aligned_state is not None
-    assert aligned_state.num_tokens_across_dp.tolist() == [4, 8]
-
-
-def test_dispatch_eager_without_graph_manager_uses_runner_scope(monkeypatch):
-    from vllm_ascend.patch.worker import patch_model_runner
-
-    monkeypatch.setattr(
-        patch_model_runner,
-        "_dispatch_cg_and_sync_dp",
-        lambda manager, num_reqs, num_tokens, uniform, *args, **kwargs: (
-            BatchExecutionDescriptor(
-                cg_mode=CUDAGraphMode.NONE,
-                num_tokens=num_tokens,
-                num_reqs=num_reqs,
-            ),
-            None,
-        ),
-    )
-    config = SimpleNamespace(
-        additional_config={
-            "ascend_compilation_config": {
-                "runner_tp_token_alignment_size": 8,
-            }
-        }
-    )
-
-    with set_runner_tp_token_alignment(config):
-        batch_desc, _ = patch_model_runner.dispatch_cg_and_sync_dp(
-            None,
-            1,
-            5,
-            None,
-            1,
-            0,
-            need_eager=True,
-        )
-
-    assert batch_desc.num_tokens == 8
-
-
-def test_dispatch_adapter_updates_already_loaded_speculator(monkeypatch):
-    from vllm_ascend.patch.worker import patch_model_runner
-
-    module_name = patch_model_runner._DISPATCH_CONSUMER_MODULES[0]
-    consumer = ModuleType(module_name)
-    consumer.dispatch_cg_and_sync_dp = patch_model_runner._dispatch_cg_and_sync_dp
-    monkeypatch.setitem(sys.modules, module_name, consumer)
-
-    patch_model_runner._patch_loaded_dispatch_consumers()
-
-    assert (
-        consumer.dispatch_cg_and_sync_dp
-        is patch_model_runner.dispatch_cg_and_sync_dp
-    )
+    draft_desc, _ = patch_model_runner.dispatch_cg_and_sync_dp(manager, 1, 3, None, dp_sync_state=target_sync)
+    assert draft_desc.num_tokens == 4
+    assert seen_tokens == [3, 4]
 
 
 @pytest.mark.parametrize(
@@ -814,11 +549,9 @@ def test_adaptive_verification_pads_fia_query_boundaries(
 def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
     source_path = Path(__file__).parents[3] / "vllm_ascend" / "worker" / "v2" / "model_runner.py"
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
-    functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
-    prepare_inputs = functions["_prepare_inputs_impl"]
     padding_assignments = [
         node
-        for node in ast.walk(prepare_inputs)
+        for node in ast.walk(tree)
         if isinstance(node, ast.Assign)
         and any(isinstance(target, ast.Name) and target.id == "num_tokens_after_padding" for target in node.targets)
     ]
@@ -1278,30 +1011,6 @@ def test_dummy_run_flushes_dump_window_without_writing(is_profile, lmhead_tp):
     debugger.step.assert_called_once_with(dump=False)
     # The lmhead TP join happens inside execute_model; do not repeat it here.
     runner.model.compute_logits.assert_not_called()
-
-
-def test_dummy_batch_keeps_logical_queries_and_physical_tp_rows():
-    input_buffers = AscendInputBuffers(4, 8, torch.device("cpu"))
-    input_buffers.dummy_num_tokens = 2
-    input_buffers.dummy_num_reqs = 1
-    with patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
-        dummy = AscendInputBatch.make_dummy(1, 4, input_buffers)
-
-    assert dummy.num_tokens == 2
-    assert dummy.num_tokens_after_padding == 4
-    assert dummy.input_ids.shape[0] == 4
-    assert dummy.is_padding.tolist() == [True, True, True, True]
-
-
-def test_dummy_batch_ignores_logical_override_for_request_padding():
-    input_buffers = AscendInputBuffers(4, 16, torch.device("cpu"))
-    input_buffers.dummy_num_tokens = 8
-    input_buffers.dummy_num_reqs = 2
-    with patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
-        dummy = AscendInputBatch.make_dummy(4, 16, input_buffers)
-
-    assert dummy.num_tokens == 16
-    assert dummy.num_tokens_after_padding == 16
 
 
 @pytest.mark.parametrize("num_reqs,num_tokens", [(4, 4), (2, 6)])

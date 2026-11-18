@@ -16,10 +16,8 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import math
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
-from dataclasses import replace
 from typing import Any
 
 import torch
@@ -49,13 +47,7 @@ from vllm_ascend.compilation.updatable_graph import (
     UpdatableGraph,
 )
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
-from vllm_ascend.utils import (
-    align_cudagraph_capture_sizes,
-    align_num_tokens_to_tp,
-    get_tp_graph_token_alignment,
-    use_updatable_graph,
-    vllm_version_is,
-)
+from vllm_ascend.utils import use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -71,133 +63,6 @@ def collect_sorted_captured_token_sizes(capture_descs: dict) -> list[int]:
     capture descriptors, not the raw config sizes.
     """
     return sorted({desc.num_tokens for descs in capture_descs.values() for desc in descs})
-
-
-def align_decode_capture_request_sizes(
-    vllm_config: VllmConfig,
-    sizes: list[int],
-    query_lens: Mapping[int, int],
-) -> list[int]:
-    """Normalize a request-keyed graph grid to TP-aligned token shapes."""
-    tp_size = get_tp_graph_token_alignment(vllm_config)
-    if tp_size <= 1 or not sizes:
-        return sizes
-    if not query_lens:
-        return []
-    request_alignment = math.lcm(
-        *(tp_size // math.gcd(tp_size, query_len) for query_len in query_lens)
-    )
-    compilation_config = vllm_config.compilation_config
-    max_tokens = min(
-        vllm_config.scheduler_config.max_num_batched_tokens,
-        compilation_config.max_decode_cudagraph_capture_tokens
-        or vllm_config.scheduler_config.max_num_batched_tokens,
-    )
-    safe_limit = min(
-        (min(max_reqs, max_tokens // query_len) // request_alignment)
-        * request_alignment
-        for query_len, max_reqs in query_lens.items()
-    )
-    return align_cudagraph_capture_sizes(
-        sizes, request_alignment, safe_limit
-    )
-
-
-def normalize_tp_aligned_token_descriptors(
-    vllm_config: VllmConfig, graph_manager: Any
-) -> None:
-    """Normalize final token-keyed graph descriptors and their dispatch table.
-
-    Upstream builds some private token grids after platform configuration
-    (notably adaptive-verification varlen decode). Normalize those final
-    descriptors here, without changing the shared MRV2 implementation.
-    Request-keyed uniform-decode descriptors are left to the request-grid
-    normalization and final validator because their token/request ratio is
-    part of the graph ABI.
-    """
-    tp_size = get_tp_graph_token_alignment(vllm_config)
-    if tp_size <= 1:
-        return
-
-    replacements: dict[
-        BatchExecutionDescriptor, BatchExecutionDescriptor
-    ] = {}
-    canonical: dict[
-        BatchExecutionDescriptor, BatchExecutionDescriptor
-    ] = {}
-    for descs in graph_manager._capture_descs.values():
-        for desc in descs:
-            aligned_tokens = align_num_tokens_to_tp(
-                desc.num_tokens, tp_size
-            )
-            normalized = desc
-            if (
-                aligned_tokens != desc.num_tokens
-                and desc.uniform_token_count is None
-            ):
-                num_reqs = desc.num_reqs
-                if desc.max_query_len is not None and num_reqs is not None:
-                    num_reqs = max(
-                        num_reqs,
-                        math.ceil(aligned_tokens / desc.max_query_len),
-                    )
-                    if num_reqs > graph_manager.max_num_reqs:
-                        raise ValueError(
-                            "Cannot TP-align graph token gear "
-                            f"{desc.num_tokens} to {aligned_tokens}: "
-                            f"{num_reqs} requests exceed max_num_reqs="
-                            f"{graph_manager.max_num_reqs}"
-                        )
-                normalized = replace(
-                    desc,
-                    num_tokens=aligned_tokens,
-                    num_reqs=num_reqs,
-                )
-            normalized = canonical.setdefault(normalized, normalized)
-            replacements[desc] = normalized
-
-    for mode, descs in graph_manager._capture_descs.items():
-        normalized_descs = []
-        seen = set()
-        for desc in descs:
-            normalized = replacements[desc]
-            if normalized not in seen:
-                normalized_descs.append(normalized)
-                seen.add(normalized)
-        graph_manager._capture_descs[mode] = normalized_descs
-
-    for key, candidates in graph_manager._candidates.items():
-        normalized_candidates = []
-        seen = set()
-        for desc in candidates:
-            normalized = replacements.get(desc, desc)
-            if normalized not in seen:
-                normalized_candidates.append(normalized)
-                seen.add(normalized)
-        graph_manager._candidates[key] = normalized_candidates
-
-
-def validate_tp_aligned_capture_descriptors(
-    vllm_config: VllmConfig, capture_descs: Mapping
-) -> None:
-    """Fail before capture if any final graph descriptor violates TP layout."""
-    tp_size = get_tp_graph_token_alignment(vllm_config)
-    if tp_size <= 1:
-        return
-    invalid_sizes = sorted(
-        {
-            desc.num_tokens
-            for descs in capture_descs.values()
-            for desc in descs
-            if align_num_tokens_to_tp(desc.num_tokens, tp_size)
-            != desc.num_tokens
-        }
-    )
-    if invalid_sizes:
-        raise ValueError(
-            "All ACL graph token gears must be divisible by tensor parallel "
-            f"size {tp_size}; invalid final descriptor sizes: {invalid_sizes}"
-        )
 
 
 def _get_graph_update_backend(
@@ -240,10 +105,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,
             ubatch_runner=ubatch_runner,
-        )
-        normalize_tp_aligned_token_descriptors(vllm_config, self)
-        validate_tp_aligned_capture_descriptors(
-            vllm_config, self._capture_descs
         )
         self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
         self.model_runner = model_runner
