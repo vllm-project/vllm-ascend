@@ -145,13 +145,14 @@ def test_boundary_save_lookup_and_physical_page_replay(seed, store_job_id):
     torch.testing.assert_close(output, sources[0][1].sum() + sources[1][3].sum(), rtol=0, atol=0)
 
 
-def test_partial_chunks_do_not_fold_hashes_into_page_keys():
+@pytest.mark.parametrize("tail_key_boundary, tail_hash_index", [(None, 4), (20, 4), (24, 5)])
+def test_partial_chunks_do_not_fold_hashes_into_page_keys(tail_key_boundary, tail_hash_index):
     db = metadata.ChunkedTokenDatabase([metadata.KeyMetadata("model", 0, 0, 0, 0)], [16], None, hash_block_size=4)
     db.cache_coordinator = Mock(cacheable_group_ids=[0], enable_partial_hash_hits=True)
-    hashes = [BlockHash(bytes([i + 1]) * 8) for i in range(5)]
+    hashes = [BlockHash(bytes([i + 1]) * 8) for i in range(6)]
     with patch.object(metadata, "get_block_hashes", side_effect=AssertionError("unused page hash folding")):
-        chunks = list(db._iter_token_chunks(20, hashes))
-    assert chunks == [(0, 16, hashes[3], None), (16, 20, hashes[4], None)]
+        chunks = list(db._iter_token_chunks(20, hashes, tail_key_boundary=tail_key_boundary))
+    assert chunks == [(0, 16, hashes[3], None), (16, 32, hashes[tail_hash_index], None)]
 
 
 @pytest.mark.parametrize(

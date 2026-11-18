@@ -1104,12 +1104,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 for start, end, key, _block_hash, block_id in token_iter:
                     addr, size, block_id = self._prepare_value(
                         start,
-                        (
-                            start + group_block_size
-                            if self.token_database.cache_coordinator is not None
-                            and self.token_database.cache_coordinator.enable_partial_hash_hits
-                            else end
-                        ),
+                        end,
                         block_ids,
                         kv_cache_group_id=group_id,
                         block_id=block_id,

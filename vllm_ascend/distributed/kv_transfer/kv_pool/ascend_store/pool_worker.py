@@ -1585,7 +1585,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 ):
                     addr, size, block_id = self.token_database.prepare_value(
                         start,
-                        start + group_block_size if self.enable_partial_hash_hits else end,
+                        end,
                         block_ids,
                         kv_cache_group_id=group_id,
                         block_id=block_id,

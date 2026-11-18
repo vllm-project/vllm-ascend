@@ -702,6 +702,10 @@ class ChunkedTokenDatabase:
                 chunk_hash = block_hashes[hash_index]
             else:
                 chunk_hash = grouped_hashes[chunk_id]
+            # Partial-hit keys name a recoverable hash boundary, but their
+            # values contain the whole physical page (or Mamba checkpoint).
+            if partial:
+                end_idx = start_idx + logical_block_size
             yield start_idx, end_idx, chunk_hash, block_id
 
     def process_tokens(
