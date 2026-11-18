@@ -1,0 +1,4 @@
+pr: 22311
+entries:
+  - category: performance
+    text: Reduce MoE routing overhead for DeepSeek V4.1 on supported Ascend devices by preparing token IDs and image masks once per forward pass.

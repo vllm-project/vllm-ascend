@@ -1,4 +1,0 @@
-pr: 21823
-entries:
-  - category: performance
-    text: Reuse prepared DeepSeek V4.1 hash routing inputs across MoE layers.
