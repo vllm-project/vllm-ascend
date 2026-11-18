@@ -24,12 +24,12 @@ from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
-from vllm_ascend.ops.gdn import (
+from vllm_ascend.attention.gdn import (
     AscendGatedDeltaNetAttention,
     _pack_conv_weights,
     initialize_packed_conv_weight,
 )
-from vllm_ascend.ops.gdn_attn_builder import (
+from vllm_ascend.attention.gdn_attn_builder import (
     GDNCausalConv1dMetadata,
     GDNPrefillMetadata,
     _build_non_spec_chunked_prefill_metadata,
@@ -199,21 +199,21 @@ def test_fla_prefill_uses_host_metadata_with_strided_ssm_cache():
 
     with (
         override_forward_context(forward_context),
-        patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
+        patch("vllm_ascend.attention.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
         patch(
-            "vllm_ascend.ops.gdn.get_current_hardware_profile",
+            "vllm_ascend.attention.gdn.get_current_hardware_profile",
             return_value=SimpleNamespace(supports=lambda _: True),
         ),
-        patch("vllm_ascend.ops.gdn._get_fla_gdn_prefill_op", return_value=fused_op),
-        patch("vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),
-        patch("vllm_ascend.ops.gdn.DeviceOperator.fla_gdn_prefill", side_effect=fla_prefill) as fla_mock,
-        patch("vllm_ascend.ops.gdn.gather_ssm_states", side_effect=gather_state) as gather_mock,
-        patch("vllm_ascend.ops.gdn.scatter_ssm_states_", side_effect=scatter_state) as scatter_mock,
-        patch("vllm_ascend.ops.gdn.chunk_gated_delta_rule") as triton_fallback,
-        patch("vllm_ascend.ops.gdn.causal_conv1d_fn", side_effect=lambda x, *a, **k: x.clone()),
-        patch("vllm_ascend.ops.gdn.wait_for_kv_layer_from_connector"),
-        patch("vllm_ascend.ops.gdn.record_attention_compute_start"),
-        patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
+        patch("vllm_ascend.attention.gdn._get_fla_gdn_prefill_op", return_value=fused_op),
+        patch("vllm_ascend.attention.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),
+        patch("vllm_ascend.attention.gdn.DeviceOperator.fla_gdn_prefill", side_effect=fla_prefill) as fla_mock,
+        patch("vllm_ascend.attention.gdn.gather_ssm_states", side_effect=gather_state) as gather_mock,
+        patch("vllm_ascend.attention.gdn.scatter_ssm_states_", side_effect=scatter_state) as scatter_mock,
+        patch("vllm_ascend.attention.gdn.chunk_gated_delta_rule") as triton_fallback,
+        patch("vllm_ascend.attention.gdn.causal_conv1d_fn", side_effect=lambda x, *a, **k: x.clone()),
+        patch("vllm_ascend.attention.gdn.wait_for_kv_layer_from_connector"),
+        patch("vllm_ascend.attention.gdn.record_attention_compute_start"),
+        patch("vllm_ascend.attention.gdn.maybe_save_kv_layer_to_connector"),
     ):
         AscendGatedDeltaNetAttention._forward_core(
             model,
@@ -289,22 +289,22 @@ def test_non_bf16_prefill_falls_back_to_triton_pipeline_with_strided_ssm_cache()
 
     with (
         override_forward_context(forward_context),
-        patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
+        patch("vllm_ascend.attention.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
         patch(
-            "vllm_ascend.ops.gdn.get_current_hardware_profile",
+            "vllm_ascend.attention.gdn.get_current_hardware_profile",
             return_value=SimpleNamespace(supports=lambda _: True),
         ),
-        patch("vllm_ascend.ops.gdn._get_fla_gdn_prefill_op", return_value=object()),
-        patch("vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),
-        patch("vllm_ascend.ops.gdn.DeviceOperator.fla_gdn_prefill", side_effect=fla_prefill),
-        patch("vllm_ascend.ops.gdn.chunk_gated_delta_rule", side_effect=triton_prefill) as triton_fallback,
-        patch("vllm_ascend.ops.gdn.gather_ssm_states", side_effect=gather_state) as gather_mock,
-        patch("vllm_ascend.ops.gdn.scatter_ssm_states_", side_effect=scatter_state) as scatter_mock,
-        patch("vllm_ascend.ops.gdn.clear_ssm_states") as clear_mock,
-        patch("vllm_ascend.ops.gdn.causal_conv1d_fn", side_effect=lambda x, *a, **k: x.clone()),
-        patch("vllm_ascend.ops.gdn.wait_for_kv_layer_from_connector"),
-        patch("vllm_ascend.ops.gdn.record_attention_compute_start"),
-        patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
+        patch("vllm_ascend.attention.gdn._get_fla_gdn_prefill_op", return_value=object()),
+        patch("vllm_ascend.attention.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),
+        patch("vllm_ascend.attention.gdn.DeviceOperator.fla_gdn_prefill", side_effect=fla_prefill),
+        patch("vllm_ascend.attention.gdn.chunk_gated_delta_rule", side_effect=triton_prefill) as triton_fallback,
+        patch("vllm_ascend.attention.gdn.gather_ssm_states", side_effect=gather_state) as gather_mock,
+        patch("vllm_ascend.attention.gdn.scatter_ssm_states_", side_effect=scatter_state) as scatter_mock,
+        patch("vllm_ascend.attention.gdn.clear_ssm_states") as clear_mock,
+        patch("vllm_ascend.attention.gdn.causal_conv1d_fn", side_effect=lambda x, *a, **k: x.clone()),
+        patch("vllm_ascend.attention.gdn.wait_for_kv_layer_from_connector"),
+        patch("vllm_ascend.attention.gdn.record_attention_compute_start"),
+        patch("vllm_ascend.attention.gdn.maybe_save_kv_layer_to_connector"),
     ):
         AscendGatedDeltaNetAttention._forward_core(
             model,
@@ -365,31 +365,34 @@ def test_connector_observes_updated_gdn_state_for_each_compiled_call():
     with (
         override_forward_context(forward_context),
         patch.object(torch.accelerator, "is_available", return_value=False),
-        patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
+        patch("vllm_ascend.attention.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
         patch(
-            "vllm_ascend.ops.gdn.get_current_hardware_profile",
+            "vllm_ascend.attention.gdn.get_current_hardware_profile",
             return_value=SimpleNamespace(supports=lambda _: False),
         ),
-        patch("vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),
-        patch("vllm_ascend.ops.gdn.clear_ssm_states"),
-        patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
+        patch("vllm_ascend.attention.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),
+        patch("vllm_ascend.attention.gdn.clear_ssm_states"),
+        patch("vllm_ascend.attention.gdn.l2norm_fwd", side_effect=lambda x: x),
         patch.object(AscendGatedDeltaNetAttention, "_probe_fused_chunk", return_value=False),
         patch(
-            "vllm_ascend.ops.gdn.gather_ssm_states",
+            "vllm_ascend.attention.gdn.gather_ssm_states",
             side_effect=lambda state, indices, has_initial_state, **kwargs: state.index_select(
                 0, indices.to(torch.long)
             ),
         ),
-        patch("vllm_ascend.ops.gdn.chunk_gated_delta_rule", side_effect=chunk_attention),
-        patch("vllm_ascend.ops.gdn.causal_conv1d_fn", side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k)),
-        patch("vllm_ascend.ops.gdn.causal_conv1d_update", side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k)),
+        patch("vllm_ascend.attention.gdn.chunk_gated_delta_rule", side_effect=chunk_attention),
+        patch("vllm_ascend.attention.gdn.causal_conv1d_fn", side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k)),
+        patch(
+            "vllm_ascend.attention.gdn.causal_conv1d_update",
+            side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k),
+        ),
         patch("vllm_ascend.attention.utils.has_kv_transfer_group", return_value=True),
         patch("vllm_ascend.attention.utils.is_v1_kv_transfer_group", return_value=True),
         patch("vllm_ascend.attention.utils.get_kv_transfer_group", return_value=connector),
         # NPU-only side effects live in the compiled forward on device; stub them
         # so the CPU inductor graph stays fullgraph (no graph break).
-        patch("vllm_ascend.ops.gdn.wait_for_kv_layer_from_connector", lambda *a, **k: None),
-        patch("vllm_ascend.ops.gdn.record_attention_compute_start", lambda: None),
+        patch("vllm_ascend.attention.gdn.wait_for_kv_layer_from_connector", lambda *a, **k: None),
+        patch("vllm_ascend.attention.gdn.record_attention_compute_start", lambda: None),
     ):
         eager_output = _run_gdn_forward(model, hidden_states, output)
         torch.testing.assert_close(eager_output, hidden_states + 1)

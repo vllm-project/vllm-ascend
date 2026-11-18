@@ -14,6 +14,7 @@
 
 """Ascend wrapper for Qwen3.8-Flash-Next MTP."""
 
+from copy import copy
 from typing import Any
 
 import regex as re
@@ -23,6 +24,8 @@ from vllm.distributed import get_pp_group
 from vllm.models.qwen4_exp.amd import mtp as upstream_mtp
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import iter_rope_parameters
+
+from vllm_ascend.models.qwen_gdn_recoverssm import _uses_gdn_recoverssm
 
 # Import the target wrapper first so the upstream decoder resolves Ascend QSA
 # and HyperConnection components before the MTP module is initialized.
@@ -108,19 +111,27 @@ _upstream_make_draft_vllm_config = upstream_mtp._make_draft_vllm_config
 def _make_draft_vllm_config(
     vllm_config: VllmConfig,
     mtp_start_layer_idx: int,
+    num_mtp_layers: int | None = None,
 ) -> VllmConfig:
     # Run before the Qwen4Exp MTP layers construct their rotary embeddings so
     # graph capture cannot retain an undersized cache.
     _align_qwen4_exp_mtp_position_cache(vllm_config)
-    draft_vllm_config = _upstream_make_draft_vllm_config(
-        vllm_config,
-        mtp_start_layer_idx,
-    )
-    num_mtp_layers = getattr(
-        vllm_config.model_config.hf_text_config,
-        "mtp_num_hidden_layers",
-        1,
-    )
+    if num_mtp_layers is None:
+        num_mtp_layers = getattr(vllm_config.model_config.hf_text_config, "mtp_num_hidden_layers", 1)
+    draft_input = vllm_config
+    if getattr(vllm_config, "cache_config", None) is not None and _uses_gdn_recoverssm(vllm_config):
+        # The QSA-only drafter inherits cache settings from the target. Clear
+        # target-only RecoverSSM flags before upstream validates the draft.
+        draft_input = copy(vllm_config)
+        draft_input.cache_config = copy(vllm_config.cache_config)
+        draft_input.cache_config.use_replayssm = False
+        draft_input.cache_config.use_kda_recoverssm = False
+    draft_vllm_config = _upstream_make_draft_vllm_config(draft_input, mtp_start_layer_idx, num_mtp_layers)
+    if draft_input is not vllm_config:
+        # QSA cache owners are built from both configs. Keep the shared cache
+        # object so the runner's later block-size negotiation reaches both.
+        # The draft architecture is excluded by the GDN backend selector.
+        draft_vllm_config.cache_config = vllm_config.cache_config
     _remap_modelslim_mtp_layer_ids(
         draft_vllm_config.quant_config,
         mtp_start_layer_idx,

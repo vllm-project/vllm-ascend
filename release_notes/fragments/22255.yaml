@@ -1,0 +1,7 @@
+pr: 22255
+entries:
+  - category: feature
+    text: >-
+      Add experimental Qwen4Exp GDN RecoverSSM support with Model Runner V2
+      and Mooncake PD. Use `--use-replayssm` to opt in. Aligned prefix caching
+      uses the existing convolution and SSM cache pages.

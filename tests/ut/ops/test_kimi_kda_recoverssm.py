@@ -3,6 +3,7 @@
 """CPU contracts for request-indexed RecoverSSM records."""
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -105,13 +106,16 @@ def test_verify_accepts_raw_beta_and_request_records(monkeypatch):
 
 def test_commit_launches_for_request_records(monkeypatch):
     context = recoverssm.KDARecoverSSMCommitContext.create([make_layer()], spec_query_len=4, max_num_reqs=4)
-    plan, compact, commit = RecordingKernel(), RecordingKernel(), RecordingKernel()
-    monkeypatch.setattr(recoverssm, "_prepare_commit_plan_kernel", plan)
-    monkeypatch.setattr(recoverssm, "_compact_conv_state_kernel", compact)
+    plan, compact = Mock(), Mock()
+    commit = RecordingKernel()
+    monkeypatch.setattr(recoverssm, "prepare_commit_plan", plan)
+    monkeypatch.setattr(recoverssm, "compact_conv_state", compact)
     monkeypatch.setattr(recoverssm, "_commit_kda_state_kernel", commit)
     context.commit(
         torch.tensor([2, 1], dtype=torch.int32),
         torch.tensor([7, 3], dtype=torch.int32),
         torch.tensor([0, 3, 5], dtype=torch.int32),
     )
-    assert len(plan.calls) == len(compact.calls) == len(commit.calls) == 1
+    plan.assert_called_once()
+    compact.assert_called_once()
+    assert len(commit.calls) == 1

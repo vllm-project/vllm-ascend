@@ -1,8 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
+from typing import cast
+
+from vllm.config import VllmConfig
 
 from vllm_ascend.models.qwen4_exp import mtp
+
+
+def test_qwen4_exp_mtp_does_not_inherit_target_recoverssm(monkeypatch) -> None:
+    cache = SimpleNamespace(use_replayssm=True, use_kda_recoverssm=True)
+    target = SimpleNamespace(
+        cache_config=cache,
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen4_exp_text")),
+        speculative_config=SimpleNamespace(draft_model_config=None, target_model_config=None, num_speculative_tokens=3),
+    )
+    draft = SimpleNamespace(quant_config=None)
+
+    def make_draft(config, _start, _layers):
+        assert not config.cache_config.use_replayssm
+        assert not config.cache_config.use_kda_recoverssm
+        return draft
+
+    monkeypatch.setattr(mtp, "_upstream_make_draft_vllm_config", make_draft)
+    assert mtp._make_draft_vllm_config(cast(VllmConfig, target), 4, 1) is draft
+    assert cache.use_replayssm and cache.use_kda_recoverssm
+    assert draft.cache_config is cache
 
 
 def _make_long_context_config(
@@ -144,7 +167,7 @@ def test_draft_config_remaps_modelslim_description(monkeypatch) -> None:
     monkeypatch.setattr(
         mtp,
         "_upstream_make_draft_vllm_config",
-        lambda _config, _start: draft_config,
+        lambda _config, _start, _layers: draft_config,
     )
 
     actual = mtp._make_draft_vllm_config(target_config, mtp_start_layer_idx=48)
@@ -160,7 +183,7 @@ def test_position_cache_is_aligned_before_upstream_draft_config(monkeypatch) -> 
     draft_model_config.hf_text_config.mtp_num_hidden_layers = 1
     draft_config = SimpleNamespace(quant_config=None)
 
-    def make_draft_config(_config, _start):
+    def make_draft_config(_config, _start, _layers):
         assert draft_model_config.hf_text_config.max_position_embeddings == 1010000
         assert draft_model_config.max_model_len == 1010000
         return draft_config

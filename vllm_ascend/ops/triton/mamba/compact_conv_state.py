@@ -100,8 +100,9 @@ def _compact_conv_state_kernel(
     if ALIGN_MODE:
         boundary_ptr = conv_state_ptr + boundary_state_idx * block_stride
 
-    if USE_1D_CHANNEL_GATHER and (DIM_STRIDE is not None and DIM_STRIDE != 1):
-        # A3 Triton 3.2 requires one-dimensional gathers for strided channels.
+    if USE_1D_CHANNEL_GATHER and DIM_STRIDE != 1:
+        # A3 needs one-dimensional gathers for strided channels, including
+        # layers whose channel stride is loaded from the cache descriptor.
         offs_d = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
         for history in tl.static_range(BLOCK_HISTORY):
             mask = (offs_d < conv_dim) & (history < conv_history_len)

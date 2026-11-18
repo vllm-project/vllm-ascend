@@ -337,9 +337,12 @@ def patch_upstream_ple_short_conv() -> None:
         AscendModelSlimConfig,
     )
 
+    from .recoverssm_ple import QwenPLERecoverSSMBackend
+
     # The AMD PLE class binds this function at module import time.  Replace
     # only that model-local binding; other platforms keep the upstream kernel.
     upstream_ple_layer.ple_conv = _ple_conv_ascend
+    upstream_ple_layer.PleShortConvAttentionBackend = QwenPLERecoverSSMBackend
 
     original_attr = "_ascend_original_short_conv"
     if not hasattr(Qwen4ExpPLELayer, original_attr):
