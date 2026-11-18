@@ -234,9 +234,11 @@ jobs:
           replicas="${{ inputs.replicas }}"
           replicas="${replicas:-1}"
 
-          leader_pod="${LWS_NAME}-$((replicas - 1))"
-          worker_pod="${leader_pod}-$((size - 1))"
-          for pod_name in "$leader_pod" "$worker_pod"; do
+          # Longest possible pod names, used only for the 53-char length check
+          # below. The runtime leader is always replica 0 (see LEADER_POD).
+          max_leader_pod="${LWS_NAME}-$((replicas - 1))"
+          max_worker_pod="${max_leader_pod}-$((size - 1))"
+          for pod_name in "$max_leader_pod" "$max_worker_pod"; do
             if [ "${#pod_name}" -gt "$max_pod_name_len" ]; then
               echo "::error::Pod name '${pod_name}' is ${#pod_name} chars, over the ${max_pod_name_len}-char limit (config_file_path: ${config_file}). Shorten the config file name."
               exit 1
