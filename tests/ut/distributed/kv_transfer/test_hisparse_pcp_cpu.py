@@ -179,12 +179,14 @@ def test_capture_and_real_forward_keep_query_and_scatter_input_addresses():
     cache._prepare_for_batch(meta)
     prepare_pcp_query_states(cache, meta)
     captured_states = cache.runtime.request_state_indices
+    # Workspace capacity can exceed this batch's Hot/Source request rows.
+    assert captured_states.shape == local.idx_mapping.shape
     captured_slots = cache.slot_mapping
     prepare_pcp_query_metadata(meta, states, local.idx_mapping, 1)
     scheduler = NS(kv_connector_metadata=object(), has_sync_kv_loads=True)
     connector.pre_forward(scheduler, local, {"layer0": meta, "indexer": NS()})
-    assert captured_states is meta.hisparse_request_state_indices
-    assert captured_states.tolist() == [7, 9, -1, -1, -1, -1, -1, -1]
+    assert captured_states.data_ptr() == meta.hisparse_request_state_indices.data_ptr()
+    assert captured_states.tolist() == [7, 9]
     assert meta.hisparse_num_valid_write_rows is None
     connector.prepare_host_mirror()
     assert cache.req_id_per_token is meta.req_id_per_token
