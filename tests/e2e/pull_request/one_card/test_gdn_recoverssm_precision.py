@@ -6,6 +6,7 @@ import torch
 import torch_npu  # noqa: F401
 
 from vllm_ascend.ops.triton.gdn.gdn_recoverssm_verify import gdn_recoverssm_verify
+from vllm_ascend.ops.triton.mamba.compact_conv_state import compact_conv_state
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 
@@ -60,3 +61,31 @@ def test_qk_normalization_preserves_activation_rounding(npu):
     # normalization's FP32 intermediates instead produces an output below one.
     out, _, _ = verify_one_token(npu, torch.bfloat16, torch.float32, 100.0, True)
     torch.testing.assert_close(out, torch.ones_like(out), atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("channel_first", [True, False])
+def test_ple_compaction_with_runtime_channel_stride(npu, channel_first):
+    channels, history, draft_tokens = 5120, 12, 3
+    span = history + draft_tokens
+    shape = (4, channels, span) if channel_first else (4, span, channels)
+    storage = torch.arange(4 * channels * span, dtype=torch.int32).view(shape)
+    storage = (storage % 251).to(torch.bfloat16).to(npu)
+    values = storage if channel_first else storage.transpose(1, 2)
+    expected = values.cpu().clone()
+    expected[2, :, :history] = expected[1, :, 3 : 3 + history]
+    expected[3, :, :history] = expected[1, :, 1 : 1 + history]
+    descriptors = [values.data_ptr(), *values.stride()]
+    tables = [torch.tensor([value], dtype=torch.int64, device=npu) for value in descriptors]
+    plan = [torch.tensor([value], dtype=torch.int32, device=npu) for value in (1, 4, 2, 3, 2)]
+
+    compact_conv_state(
+        values,
+        *tables,
+        *plan,
+        conv_history_len=history,
+        align_mode=True,
+        dim_stride=None,
+        null_block_id=0,
+    )
+
+    torch.testing.assert_close(values.cpu(), expected, atol=0, rtol=0)
