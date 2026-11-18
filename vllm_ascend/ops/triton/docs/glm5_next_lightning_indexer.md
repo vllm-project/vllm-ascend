@@ -48,3 +48,19 @@
 - **Origin**: Developed for GLM-5.3-Flash pooled-key selection.
 - **Differences**: Retains device `torch.topk`, with request lookup, paged scoring, and final index expansion implemented in Triton. Larger token batches reuse each head-weighted query across several pool tiles; small batches expose more pool-level parallelism. Contiguous pool-ID reads avoid repeatedly gathering each ID for all tokens in its pool. Larger batches also expand output indices in wider blocks. The model no longer needs separate tail scatter, padding-mask, buffer fill, and copy operations.
 - **Tiling**: Packed scoring and paged gathering use 128-pool tiles to bound local-memory usage for FP32 multiplication and reduction. Index expansion uses 256-column blocks below 512 token rows and 4096-column blocks for larger chunks.
+
+## Context buckets in full decode graphs
+
+The GLM target-model backend registers score and TopK as an updatable graph task.
+The host metadata builder supplies an optimistic upper bound on the live pool
+count, without reading a device tensor. Replay rounds that bound up to a power
+of two with a 2048-pool minimum; the final bucket covers the full block-table
+capacity, including million-token contexts and allocation padding. Missing
+bounds use full capacity. Invalid bounds fail rather than truncate history.
+
+The graph retains full-capacity score storage and fixed-size TopK outputs.
+Updating a task changes the packed score view and kernel parameters, not output
+addresses or downstream expansion shapes. Length growth and shrinkage are both
+supported. Distinct token chunks have distinct providers. Draft-model graphs
+retain the original full-capacity path. Eager and plain NPUGraph callers retain
+the original behavior unless they explicitly register an updatable task.

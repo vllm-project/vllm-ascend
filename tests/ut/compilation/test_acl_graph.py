@@ -294,6 +294,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
+        mock_npu_graph.tasks = []
         self.mock_updatable_graph.return_value = mock_npu_graph
 
         # Mock torch.npu.graph context manager
@@ -380,6 +381,7 @@ class TestACLGraphWrapper(TestBase):
                 self.mock_get_ascend_config.return_value.ascend_compilation_config.enable_super_kernel = enabled
 
                 mock_npu_graph = MagicMock()
+                mock_npu_graph.tasks = []
                 self.mock_updatable_graph.return_value = mock_npu_graph
                 mock_graph_context = MagicMock()
                 mock_torch.npu.graph.return_value = mock_graph_context
@@ -435,6 +437,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
+        mock_npu_graph.tasks = []
         self.mock_updatable_graph.return_value = mock_npu_graph
 
         # Mock torch.npu.graph context manager
@@ -514,6 +517,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
+        mock_npu_graph.tasks = []
         self.mock_updatable_graph.return_value = mock_npu_graph
 
         # Mock torch.npu.graph context manager
@@ -575,6 +579,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
+        mock_npu_graph.tasks = []
         self.mock_updatable_graph.return_value = mock_npu_graph
 
         # Mock torch.npu.graph context manager
@@ -646,6 +651,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
+        mock_npu_graph.tasks = []
         self.mock_updatable_graph.return_value = mock_npu_graph
 
         # Mock torch.npu.graph context manager
@@ -725,6 +731,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
+        mock_npu_graph.tasks = []
         self.mock_updatable_graph.return_value = mock_npu_graph
 
         # Mock torch.npu.graph context manager
@@ -791,6 +798,7 @@ class TestACLGraphWrapper(TestBase):
         with patch("vllm_ascend.compilation.acl_graph.torch") as mock_torch:
             # Mock torch.npu.NPUGraph
             mock_npu_graph = MagicMock()
+            mock_npu_graph.tasks = []
             self.mock_updatable_graph.return_value = mock_npu_graph
 
             # Mock torch.npu.graph context manager

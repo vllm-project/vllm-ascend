@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import torch
 from torch import nn
 
+from vllm_ascend.compilation.kpool_buckets import KPoolBucketProvider
 from vllm_ascend.ops.triton.glm5_next_kpool_tail_compress import (  # type: ignore[import-untyped]
     glm5_next_kpool_tail_compress_and_write_cache_triton,
 )
@@ -82,6 +83,7 @@ class SparseAttnIndexerKpool(nn.Module):
         compute_topk: bool,
         output_buffer: torch.Tensor | None = None,
         allow_cache_packing: bool = True,
+        score_provider: KPoolBucketProvider | None = None,
         query_metadata: AscendIndexerKPoolQueryMetadata | None = None,
     ) -> torch.Tensor | None:
         num_tokens = k.shape[0]
@@ -147,6 +149,7 @@ class SparseAttnIndexerKpool(nn.Module):
             output_buffer=output_buffer,
             pack_tail=True,
             allow_cache_packing=allow_cache_packing,
+            score_provider=score_provider,
         )
         # Expansion also packs the causal tail and clears every padded row.
         if query_metadata is not None:
