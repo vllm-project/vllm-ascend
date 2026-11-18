@@ -5,11 +5,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-import vllm_ascend.attention.indexer_kpool as backend_module
 from vllm_ascend.attention.indexer_kpool import Glm5NextKPoolIndexerBackend
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
 from vllm_ascend.models.glm5next.attention import Indexer
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache
 
@@ -21,12 +18,8 @@ def test_unsupported_dtype_fails_before_layer_construction(dtype):
         Indexer(config, None, 8, 8, None, None, None)
 
 
-@pytest.mark.parametrize("device", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.int8])
-def test_int8_kpool_requires_a3_without_restricting_bf16(monkeypatch, device, dtype):
-    profile = get_hardware_profile(device)
-    assert profile.supports(HardwareCapability.POOL_KEY_INDEXER_INT8) == (device is AscendDeviceType.A3)
-    monkeypatch.setattr(backend_module, "get_current_hardware_profile", lambda: profile)
+def test_int8_kpool_cache_tensor_count(monkeypatch, dtype):
     monkeypatch.setattr(Glm5NextKPoolIndexerBackend, "_init_cann_ops", lambda self: None)
     indexer = SimpleNamespace(
         vllm_config=SimpleNamespace(
@@ -47,12 +40,9 @@ def test_int8_kpool_requires_a3_without_restricting_bf16(monkeypatch, device, dt
         tail_cache=SimpleNamespace(),
         topk_indices_buffer=None,
     )
-    if dtype == torch.int8 and device is not AscendDeviceType.A3:
-        with pytest.raises(NotImplementedError, match="INT8.*Ascend A3"):
-            Glm5NextKPoolIndexerBackend(indexer, qk_rope_head_dim=0)
-    else:
-        backend = Glm5NextKPoolIndexerBackend(indexer, qk_rope_head_dim=0)
-        assert backend.kpool_int8 == (dtype == torch.int8)
+    backend = Glm5NextKPoolIndexerBackend(indexer, qk_rope_head_dim=0)
+    assert backend.kpool_int8 == (dtype == torch.int8)
+    assert backend.num_cache_tensors == (2 if dtype == torch.int8 else 1)
 
 
 @pytest.mark.parametrize("rows", [0, 1, 8])

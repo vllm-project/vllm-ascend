@@ -38,7 +38,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
     get_storage_block_size,
 )
-from vllm_ascend.device.hardware_profile import AttentionBackendFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
@@ -812,8 +812,6 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         self.index_kpool_compress_gate = vllm_indexer.index_kpool_compress_gate
         self.k_cache: Any = vllm_indexer.k_cache
         self.kpool_int8 = getattr(self.k_cache, "dtype", torch.bfloat16) == torch.int8
-        if self.kpool_int8 and not get_current_hardware_profile().supports(HardwareCapability.POOL_KEY_INDEXER_INT8):
-            raise NotImplementedError("GLM KPool INT8 requires CANN PoolKeyIndexer INT8 support on Ascend A3.")
         self.tail_cache: Any = vllm_indexer.tail_cache
         self.topk_indices_buffer: torch.Tensor | None = vllm_indexer.topk_indices_buffer
         # Reserve the shared exchange workspace at model-build time: backend
@@ -829,10 +827,6 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
                 self.topk_output_width,
                 parallel_config.tensor_parallel_size,
             )
-        if self.enable_sparse_li_c8 and not get_current_hardware_profile().supports(
-            HardwareCapability.POOL_KEY_INDEXER_FP8
-        ):
-            raise NotImplementedError("GLM KPool FP8 LI requires CANN PoolKeyIndexer FP8 support on Ascend 950.")
         self._init_cann_ops()
         self._head_weight_f32 = None
 
