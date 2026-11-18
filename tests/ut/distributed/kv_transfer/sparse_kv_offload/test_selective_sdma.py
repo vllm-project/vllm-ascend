@@ -4,10 +4,11 @@ import struct
 import unittest
 from multiprocessing import shared_memory
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import torch
 
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload import sparse_kv_offload_manager as manager_module
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     HostGatherCoordinator,
     SelectiveSDMATransfer,
@@ -87,10 +88,13 @@ class TestSharedSDMAPrefetch(unittest.TestCase):
                 ),
             ):
                 operations.clear()
-                manager = SimpleNamespace(copy_sfa_kv=lambda *args: operations.append("scatter"))
                 addresses = torch.zeros(2 * rows, dtype=torch.int64)
                 lengths = torch.tensor([128] * rows + [64] * rows, dtype=torch.int32)
-                transfer.transfer(manager, addresses, addresses, lengths, None, to_device=True)
+                kernel = MagicMock()
+                kernel.__getitem__.return_value.side_effect = lambda *args, **kwargs: operations.append("scatter")
+                with patch.object(manager_module, "batch_memcpy_kernel", kernel):
+                    transfer.transfer(addresses, addresses, lengths, to_device=True)
+                kernel.__getitem__.assert_called_once_with((2 * rows,))
                 self.assertEqual(
                     operations,
                     [

@@ -11,6 +11,7 @@ from __future__ import annotations
 import threading
 from typing import Any
 
+import torch_npu
 from vllm.logger import logger
 
 BACKEND_MEMFABRIC = "memfabric"
@@ -27,8 +28,9 @@ _DEFAULT_MEMFABRIC_TRANSFER_PROTOCOL = "sdma"
 class MemfabricBackend:
     """Normalize the MemFabric API used by the SFA PD connector."""
 
-    def __init__(self, engine: Any, advertised_rpc_port: int):
+    def __init__(self, engine: Any, advertised_rpc_port: int, transfer_protocol: str):
         self._engine = engine
+        self._transfer_protocol = transfer_protocol
         self._advertised_rpc_port = advertised_rpc_port
 
     def get_rpc_port(self) -> int:
@@ -43,13 +45,19 @@ class MemfabricBackend:
         local_buffers: list[int],
         peer_buffers: list[int],
         length_list: list[int],
+        *,
+        stream: torch_npu.npu.Stream | None = None,
     ) -> int:
-        ret = self._engine.batch_transfer_sync_read(
-            session_id,
-            local_buffers,
-            peer_buffers,
-            length_list,
-        )
+        args = (session_id, local_buffers, peer_buffers, length_list)
+        if stream is not None and self._transfer_protocol == "sdma":
+            # Let ACL manage the SDMA queue rather than using MemFabric's raw SQ.
+            with torch_npu.npu.device(stream.device):
+                try:
+                    ret = self._engine.batch_transfer_async_read_submit(*args, stream.npu_stream)
+                finally:
+                    stream.synchronize()
+        else:
+            ret = self._engine.batch_transfer_sync_read(*args)
         if ret != 0:
             logger.error(
                 "MemFabric batch_transfer_sync_read failed (ret=%s) for session %s",
@@ -201,7 +209,9 @@ class GlobalMemfabricTE:
             )
         advertised_rpc_port = raw_engine.get_rpc_port()
         self._unique_id = f"{hostname}:{advertised_rpc_port}"
-        return MemfabricBackend(raw_engine, advertised_rpc_port)
+        return MemfabricBackend(
+            raw_engine, advertised_rpc_port, self._transfer_protocol or _DEFAULT_MEMFABRIC_TRANSFER_PROTOCOL
+        )
 
     def register_buffer(self, ptrs: list[int], sizes: list[int]) -> None:
         if len(ptrs) != len(sizes):

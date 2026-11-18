@@ -434,7 +434,6 @@ def test_two_graphs_share_group_state_but_not_staging(num_layers, capacity):
         manager.topk_buffers_k.append(torch.empty_like(manager.topk_buffers_k[0]))
         manager.topk_buffers_v.append(torch.empty_like(manager.topk_buffers_v[0]))
     manager.selective_physical = torch.empty((num_layers, 2, 1, 4), dtype=torch.int32)
-    manager.selective_copy_counts = torch.tensor([8, 16], dtype=torch.int32)
     trace = []
     manager.selective_prefetch_ready = [
         SimpleNamespace(record=lambda: trace.append("ready0")),

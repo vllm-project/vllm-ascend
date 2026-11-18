@@ -38,6 +38,7 @@ from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import copy_sfa_pool_capacity
+from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
 # Main BF16 cache:
@@ -304,11 +305,13 @@ class SelectiveSDMATransfer:
         self.coordinator = coordinator
         self.enqueue = torch.ops._C_ascend.enqueue_selective_host_gather
         self.complete = torch.ops._C_ascend.enqueue_selective_host_gather_done
-        self.empty_control = torch.empty(0, dtype=torch.int64)
         self.sources = torch.empty(2 * entries, dtype=torch.int64, pin_memory=True)
         self.destinations = torch.empty_like(self.sources, pin_memory=True)
         self.lengths = torch.empty(2 * entries, dtype=torch.int32, pin_memory=True)
         if coordinator is None:
+            # The Host gather callback uses the same protocol with one local participant.
+            self.local_control = torch.zeros(7, dtype=torch.int64)
+            self.local_epoch = torch.zeros(1, dtype=torch.int64)
             self.host = [
                 torch.zeros((entries, size), dtype=torch.uint8, pin_memory=True) for size in (k_bytes, v_bytes)
             ]
@@ -337,7 +340,7 @@ class SelectiveSDMATransfer:
             kind - 1,
         )
 
-    def transfer(self, manager, sources, destinations, lengths, count, *, to_device: bool) -> None:
+    def transfer(self, sources, destinations, lengths, *, to_device: bool) -> None:
         entries = sources.numel() // 2
         if sources.numel() != 2 * entries or entries > self.host[0].shape[0]:
             raise ValueError("Selective SDMA descriptors exceed staging capacity")
@@ -366,9 +369,9 @@ class SelectiveSDMATransfer:
                 self.copy_bytes(device.data_ptr(), host.data_ptr(), entries * device.shape[1], 1)
             if self.coordinator is not None:
                 self.complete(self.device[0], self.coordinator.control, self.coordinator.epoch, self.coordinator.rank)
-            manager.copy_sfa_kv(packed, destinations, lengths, count)
+            batch_memcpy_kernel[(2 * entries,)](packed, destinations, lengths, BLOCK_SIZE=1024)
         else:
-            manager.copy_sfa_kv(sources, packed, lengths, count)
+            batch_memcpy_kernel[(2 * entries,)](sources, packed, lengths, BLOCK_SIZE=1024)
             self.copy(self.destinations[: 2 * entries], destinations, 2)
             for host, device in zip(self.host, self.device):
                 self.copy(host[:entries], device[:entries], 2)
@@ -385,8 +388,8 @@ class SelectiveSDMATransfer:
             self.lengths[: 2 * entries],
             host_k,
             host_v,
-            coordinator.control if coordinator is not None else self.empty_control,
-            coordinator.epoch if coordinator is not None else self.empty_control,
+            coordinator.control if coordinator is not None else self.local_control,
+            coordinator.epoch if coordinator is not None else self.local_epoch,
             entries,
             host_k.shape[1],
             host_v.shape[1],
@@ -395,7 +398,7 @@ class SelectiveSDMATransfer:
             to_device,
         )
 
-    def restore(self, manager, sources, destinations, lengths) -> None:
+    def restore(self, sources, destinations, lengths) -> None:
         """Expand rollback blocks into token rows and reuse the same Host gather/SDMA path."""
         source_rows = sources.cpu().tolist()
         target_rows = destinations.cpu().tolist()
@@ -420,8 +423,7 @@ class SelectiveSDMATransfer:
             src = torch.tensor(k_sources[start:end] + v_sources[start:end], dtype=torch.int64, device=sources.device)
             dst = torch.tensor(k_targets[start:end] + v_targets[start:end], dtype=torch.int64, device=sources.device)
             size = torch.tensor([k_bytes] * rows + [v_bytes] * rows, dtype=torch.int32, device=sources.device)
-            count = torch.tensor([2 * rows], dtype=torch.int32, device=sources.device)
-            self.transfer(manager, src, dst, size, count, to_device=True)
+            self.transfer(src, dst, size, to_device=True)
             # Rollback runs outside capture; retain temporary descriptors until their copies finish.
             torch_npu.npu.current_stream().synchronize()
 
@@ -952,25 +954,16 @@ class SparseKVOffloadManager:
             sparse_kv_offload_config.dram_size_per_dp_GB,
             kv_cache_config.num_blocks,
         )
-        config = offload.OffloadConfig()
-        config.device_id = torch_npu.npu.current_device()
-        config.scene = offload.Scene.SHARED
-        store_index = parallel_config.data_parallel_index
-        if self.local_host_pool:
-            # The descriptor-copy runtime requires one nonempty local host slice.
-            config.reserve_size = _CPU_CACHE_ALIGNMENT
-            config.alloc_size = _CPU_CACHE_ALIGNMENT
-            config.world_size = 1
-            config.rank_id = 0
-            store_index = store_index * self.tp_size + self.tp_rank
-        else:
+        if not self.local_host_pool:
+            config = offload.OffloadConfig()
+            config.device_id = torch_npu.npu.current_device()
+            config.scene = offload.Scene.SHARED
             config.reserve_size = actual_pool_size_bytes
             config.alloc_size = actual_pool_size_bytes if self.tp_rank == 0 else 0
             config.world_size = self.tp_size
             config.rank_id = self.tp_rank
-        config.store_url = f"tcp://127.0.0.1:{OFFLOAD_STORE_PORT_BASE + store_index}"
-        assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
-        if not self.local_host_pool:
+            config.store_url = f"tcp://127.0.0.1:{OFFLOAD_STORE_PORT_BASE + parallel_config.data_parallel_index}"
+            assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
             self.tp_group.barrier()
 
     @property
@@ -1226,7 +1219,6 @@ class SparseKVOffloadManager:
             self.selective_copy_src = torch.empty(descriptor_shape, dtype=torch.int64, device=device)
             self.selective_copy_dst = torch.empty_like(self.selective_copy_src)
             self.selective_copy_lengths = torch.empty(descriptor_shape, dtype=torch.int32, device=device)
-            self.selective_copy_counts = torch.arange(1, rows + 1, dtype=torch.int32, device=device) * (2 * self.topk)
             self.selective_physical = torch.empty(
                 (self.num_layers, rows, 1, self.topk), dtype=torch.int32, device=device
             )
@@ -1612,7 +1604,7 @@ class SparseKVOffloadManager:
                 sources = (src_offsets + host_bases).reshape(-1)
                 destinations = (dst_offsets + device_bases).reshape(-1)
                 if self.selective_sdma_prefetch is not None:
-                    self.selective_sdma_prefetch.restore(self, sources, destinations, lengths_bytes.reshape(-1))
+                    self.selective_sdma_prefetch.restore(sources, destinations, lengths_bytes.reshape(-1))
                 else:
                     self.copy_sfa_kv(sources, destinations, lengths_bytes.reshape(-1), count)
 
@@ -1631,9 +1623,7 @@ class SparseKVOffloadManager:
             torch.add(src_off.view(2, -1), host_bases, out=self.copy_sfa_copy_src[:n].view(2, -1))
             torch.add(dst_off.view(2, -1), device_bases, out=self.copy_sfa_copy_dst[:n].view(2, -1))
             if self.selective_sdma_prefetch is not None:
-                self.selective_sdma_prefetch.restore(
-                    self, self.copy_sfa_copy_src[:n], self.copy_sfa_copy_dst[:n], lengths
-                )
+                self.selective_sdma_prefetch.restore(self.copy_sfa_copy_src[:n], self.copy_sfa_copy_dst[:n], lengths)
             else:
                 self.copy_sfa_kv(self.copy_sfa_copy_src[:n], self.copy_sfa_copy_dst[:n], lengths, count)
 
@@ -1705,7 +1695,6 @@ class SparseKVOffloadManager:
         logger.info_once("Selective KV offload launched the native precomputed-TopK LIM kernel (grouped).")
         for layer_id, _, _ in layers:
             self.prefetch_selective_kv(
-                rows,
                 self.selective_copy_src[layer_id, :entries],
                 self.selective_copy_dst[layer_id, :entries],
                 self.selective_copy_lengths[layer_id, :entries],
@@ -2259,10 +2248,9 @@ class SparseKVOffloadManager:
                 raise RuntimeError(f"Native selective TP coordinator close failed: {gathered}")
             self._selective_native_tp_groups.clear()
 
-    def prefetch_selective_kv(self, rows, sources, destinations, lengths) -> None:
-        count = self.selective_copy_counts[rows - 1]
+    def prefetch_selective_kv(self, sources, destinations, lengths) -> None:
         assert self.selective_sdma_prefetch is not None
-        self.selective_sdma_prefetch.transfer(self, sources, destinations, lengths, count, to_device=True)
+        self.selective_sdma_prefetch.transfer(sources, destinations, lengths, to_device=True)
 
     def copy_sfa_kv(self, sources, destinations, lengths, count) -> None:
         """Enqueue bounded descriptor copies on the current compute stream."""
@@ -2320,7 +2308,6 @@ class SparseKVOffloadManager:
                 self.d2h_src_ptrs_npu[segment].copy_(cache.data_ptr() + source * row_bytes)
                 self.d2h_dst_ptrs_npu[segment].copy_(gva + host_base * row_bytes)
                 self.d2h_lengths_npu[segment].copy_((tokens * row_bytes).to(torch.int32))
-            self.d2h_size_npu.fill_(2 * rows)
             self._submit_current_kv_writeback(k_cache.device, rows, tail=True)
 
         context = get_forward_context()
@@ -2484,11 +2471,9 @@ class SparseKVOffloadManager:
             transfer = self.selective_sdma_tail if tail else self.selective_sdma_prefill
             assert transfer is not None
             transfer.transfer(
-                self,
                 self.d2h_src_ptrs_npu[: 2 * entries],
                 self.d2h_dst_ptrs_npu[: 2 * entries],
                 self.d2h_lengths_npu[: 2 * entries],
-                self.d2h_size_npu,
                 to_device=False,
             )
             return

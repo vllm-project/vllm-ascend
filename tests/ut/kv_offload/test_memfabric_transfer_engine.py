@@ -13,6 +13,7 @@ from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import 
     MEMFABRIC_ROLE_DECODE,
     MEMFABRIC_ROLE_PREFILL,
     GlobalMemfabricTE,
+    MemfabricBackend,
 )
 
 
@@ -177,3 +178,31 @@ def test_memfabric_transfer_protocol_rejects_unknown_value():
 
     with pytest.raises(ValueError, match="Invalid MemFabric transfer_protocol"):
         manager.configure(role=MEMFABRIC_ROLE_DECODE, device_id=0, transfer_protocol="rocev2")
+
+
+@pytest.mark.parametrize("submit_result,expected", [(0, 0), (-7, -1)])
+def test_sdma_read_waits_for_acl_stream_even_when_submit_fails(submit_result, expected):
+    engine = MagicMock()
+    stream = MagicMock(npu_stream=123)
+    engine.batch_transfer_async_read_submit.return_value = submit_result
+    calls = MagicMock()
+    calls.attach_mock(engine.batch_transfer_async_read_submit, "submit")
+    calls.attach_mock(stream.synchronize, "sync")
+    backend = MemfabricBackend(engine, 23456, "sdma")
+    args = ("peer:1", [100], [200], [64])
+    with patch("torch_npu.npu.device"):
+        assert backend.batch_transfer_sync_read(*args, stream=stream) == expected
+    assert calls.mock_calls == [call.submit(*args, 123), call.sync()]
+    engine.batch_transfer_sync_read.assert_not_called()
+
+
+def test_non_sdma_read_preserves_sync_api():
+    engine = MagicMock()
+    engine.batch_transfer_sync_read.return_value = 0
+    stream = MagicMock()
+    backend = MemfabricBackend(engine, 23456, "device_urma")
+    args = ("peer:1", [100], [200], [64])
+    assert backend.batch_transfer_sync_read(*args, stream=stream) == 0
+    engine.batch_transfer_sync_read.assert_called_once_with(*args)
+    engine.batch_transfer_async_read_submit.assert_not_called()
+    stream.synchronize.assert_not_called()

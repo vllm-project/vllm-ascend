@@ -361,9 +361,9 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
             (1, 0, 0, False),
             (0, planned_pool_size, 1, False),
             (1, 0, 1, False),
-            (0, manager_module._CPU_CACHE_ALIGNMENT, 0, True),
-            (1, manager_module._CPU_CACHE_ALIGNMENT, 0, True),
-            (1, manager_module._CPU_CACHE_ALIGNMENT, 1, True),
+            (0, 0, 0, True),
+            (1, 0, 0, True),
+            (1, 0, 1, True),
         ):
             with self.subTest(rank=rank, dp_index=dp_index):
                 offload_config.selective_offload = selective
@@ -421,23 +421,22 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                     )
                     self.assertEqual(sparse_ops.call_count, 0 if selective else 1)
 
+                if selective:
+                    offload_backend.initialize.assert_not_called()
+                    tp_group.barrier.assert_not_called()
+                    continue
+
                 initialized_config = offload_backend.initialize.call_args.args[0]
-                self.assertEqual(
-                    initialized_config.reserve_size,
-                    manager_module._CPU_CACHE_ALIGNMENT if selective else planned_pool_size,
-                )
-                self.assertEqual(
-                    initialized_config.alloc_size,
-                    expected_alloc_size,
-                )
-                self.assertEqual(initialized_config.world_size, 1 if selective else 2)
-                self.assertEqual(initialized_config.rank_id, 0 if selective else rank)
-                store_index = dp_index * 2 + rank if selective else dp_index
+                self.assertEqual(initialized_config.scene, "shared")
+                self.assertEqual(initialized_config.reserve_size, planned_pool_size)
+                self.assertEqual(initialized_config.alloc_size, expected_alloc_size)
+                self.assertEqual(initialized_config.world_size, 2)
+                self.assertEqual(initialized_config.rank_id, rank)
                 self.assertEqual(
                     initialized_config.store_url,
-                    f"tcp://127.0.0.1:{manager_module.OFFLOAD_STORE_PORT_BASE + store_index}",
+                    f"tcp://127.0.0.1:{manager_module.OFFLOAD_STORE_PORT_BASE + dp_index}",
                 )
-                self.assertEqual(tp_group.barrier.call_count, 0 if selective else 1)
+                tp_group.barrier.assert_called_once()
 
     def test_manager_rejects_pool_larger_than_dram_limit(self):
         vllm_config, kv_cache_config, offload_config = self._make_manager_init_inputs()

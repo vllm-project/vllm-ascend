@@ -1062,7 +1062,7 @@ class MembPullReadThread(threading.Thread):
         with torch_npu.npu.stream(stream):
             # The read thread must finish both legs before acknowledging or reusing staging.
             def flush():
-                ret = self.engine.batch_transfer_sync_read(p_session, device_ptrs, peer_ptrs, sizes)
+                ret = self.engine.batch_transfer_sync_read(p_session, device_ptrs, peer_ptrs, sizes, stream=stream)
                 if ret != 0:
                     raise RuntimeError(f"memfabric staged D2D read failed for layer {layer_name}, ret={ret}")
                 try:
@@ -1199,7 +1199,11 @@ class MembPullReadThread(threading.Thread):
                 atomic_total,
             )
         if all_local_ptrs:
-            ret = self.engine.batch_transfer_sync_read(p_session, all_local_ptrs, all_peer_ptrs, all_lengths)
+            args = (p_session, all_local_ptrs, all_peer_ptrs, all_lengths)
+            if self._state.shared_kv_staging is not None:
+                ret = self.engine.batch_transfer_sync_read(*args, stream=self._staging_stream)
+            else:
+                ret = self.engine.batch_transfer_sync_read(*args)
             if ret != 0:
                 raise RuntimeError(f"memfabric batch read failed for layer {layer_name}, ret={ret}")
         if host_transfers:
