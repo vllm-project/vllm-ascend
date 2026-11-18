@@ -30,22 +30,15 @@ def _select_metadata() -> SimpleNamespace:
     )
 
 
-@pytest.mark.parametrize("prepared", [False, True])
-def test_select_always_uses_cann_lightning_v2(monkeypatch, prepared) -> None:
+def test_select_always_uses_cann_lightning_v2(monkeypatch) -> None:
     sentinel = torch.zeros(1, 2051, dtype=torch.int32)
     calls: list[tuple] = []
     metadata = _select_metadata()
-    metadata.qsa_num_live_requests = 1
-    metadata.qsa_num_live_tokens = 1
-    schedule = torch.empty(2048, dtype=torch.int32) if prepared else None
-    if prepared:
-        metadata.qsa_lightning_v2_metadata = schedule
 
     def lightning(*args, **kwargs):
         calls.append(args)
-        assert kwargs["num_actual_requests"] == 1
-        assert kwargs["num_actual_tokens"] == 1
-        assert kwargs["prepared_metadata"] is schedule
+        assert args[2] is metadata
+        assert not kwargs
         return sentinel
 
     monkeypatch.setattr(ascend_qsa, "qsa_select_paged_tokens_lightning_v2", lightning)

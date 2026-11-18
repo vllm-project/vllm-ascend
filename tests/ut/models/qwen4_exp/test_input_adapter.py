@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import ast
 import os
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
 
 
-def _load_adapter(*, load_wrapper: bool = False):
+def _load_adapter(monkeypatch, *, load_wrapper: bool = False):
     source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/input_adapter.py"
     module = ast.parse(source.read_text())
     module.body = [node for node in module.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
@@ -21,7 +22,7 @@ def _load_adapter(*, load_wrapper: bool = False):
         del args
         calls["li"] += 1
         return torch.tensor(
-            [kwargs["batch_size"], int(kwargs["seqused_k"].sum())],
+            [kwargs["batch_size"], int(kwargs["seqused_k"].sum()), int(kwargs["cu_seqlens_q"][-1])],
             dtype=torch.int32,
         )
 
@@ -32,6 +33,8 @@ def _load_adapter(*, load_wrapper: bool = False):
             dtype=torch.int32,
         )
 
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer", ModuleType("cann_ops_transformer"))
+    monkeypatch.setattr(torch.ops.cann_ops_transformer, "lightning_indexer_metadata", lightning_metadata, raising=False)
     namespace = {
         "torch": torch,
         "os": os,
@@ -39,7 +42,6 @@ def _load_adapter(*, load_wrapper: bool = False):
         "GBSA_COMPRESS_RATIO": 4,
         "GBSA_PAGE_SIZE": 128,
         "generic_block_sparse_attention_metadata": gbsa_metadata,
-        "lightning_indexer_v2_metadata": lightning_metadata,
     }
     exec(compile(module, str(source), "exec"), namespace)
     if load_wrapper:
@@ -104,7 +106,7 @@ class _RotaryDelegate(torch.nn.Module):
 
 
 def test_rotary_wrapper_consumes_prepared_rows_without_replacing_upstream_projection(monkeypatch):
-    wrapper_cls, _ = _load_adapter(load_wrapper=True)
+    wrapper_cls, _ = _load_adapter(monkeypatch, load_wrapper=True)
     delegate = _RotaryDelegate()
     wrapper = wrapper_cls(delegate)
     positions = torch.arange(2)
@@ -122,7 +124,7 @@ def test_rotary_wrapper_consumes_prepared_rows_without_replacing_upstream_projec
 
 
 def test_rotary_wrapper_preserves_delegate_fallback(monkeypatch):
-    wrapper_cls, _ = _load_adapter(load_wrapper=True)
+    wrapper_cls, _ = _load_adapter(monkeypatch, load_wrapper=True)
     delegate = _RotaryDelegate()
     wrapper = wrapper_cls(delegate)
     monkeypatch.setattr(wrapper, "_can_use_prepared", lambda *args: False)
@@ -136,8 +138,8 @@ def test_rotary_wrapper_preserves_delegate_fallback(monkeypatch):
 
 
 @pytest.mark.parametrize("tokens", [1, 2, 7])
-def test_mrope_slices_token_axis_and_keeps_fixed_address(tokens: int):
-    adapter_cls, _ = _load_adapter()
+def test_mrope_slices_token_axis_and_keeps_fixed_address(tokens: int, monkeypatch):
+    adapter_cls, _ = _load_adapter(monkeypatch)
     layer = AscendQwen4ExpQSAAttention()
     adapter = adapter_cls(_Model(layer))
     positions = torch.stack((torch.arange(9), torch.arange(9) + 1, torch.arange(9) + 2))
@@ -152,8 +154,8 @@ def test_mrope_slices_token_axis_and_keeps_fixed_address(tokens: int):
     torch.testing.assert_close(layer._qsa_prepared_cos_sin, layer.rotary_emb.cos_sin_cache[(positions + 3)[:, :tokens]])
 
 
-def test_one_dimensional_positions_keep_fixed_address():
-    adapter_cls, _ = _load_adapter()
+def test_one_dimensional_positions_keep_fixed_address(monkeypatch):
+    adapter_cls, _ = _load_adapter(monkeypatch)
     layer = AscendQwen4ExpQSAAttention()
     adapter = adapter_cls(_Model(layer))
 
@@ -165,8 +167,8 @@ def test_one_dimensional_positions_keep_fixed_address():
     assert layer._qsa_prepared_cos_sin.data_ptr() == pointer
 
 
-def test_full_graph_metadata_uses_padded_geometry_and_fixed_address():
-    adapter_cls, calls = _load_adapter()
+def test_full_graph_metadata_uses_padded_geometry_and_fixed_address(monkeypatch):
+    adapter_cls, calls = _load_adapter(monkeypatch)
     layer = AscendQwen4ExpQSAAttention()
     adapter = adapter_cls(_Model(layer))
 
@@ -181,7 +183,7 @@ def test_full_graph_metadata_uses_padded_geometry_and_fixed_address():
             token_to_req=raw.token_to_req,
             seq_lens=seq_lens,
             query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
-            qsa_num_live_requests=1,
+            num_actual_tokens=raw.token_to_req.shape[0],
         )
         main = SimpleNamespace(
             num_actual_tokens=1,
@@ -212,8 +214,8 @@ def test_full_graph_metadata_uses_padded_geometry_and_fixed_address():
     assert calls == {"li": 2, "gbsa": 2}
 
 
-def test_full_graph_negative_padding_request_uses_last_sequence():
-    adapter_cls, _ = _load_adapter()
+def test_full_graph_negative_padding_request_uses_last_sequence(monkeypatch):
+    adapter_cls, _ = _load_adapter(monkeypatch)
     layer = AscendQwen4ExpQSAAttention()
     adapter = adapter_cls(_Model(layer))
     seq_lens = torch.tensor([4, 20], dtype=torch.int32)
@@ -226,7 +228,7 @@ def test_full_graph_negative_padding_request_uses_last_sequence():
         token_to_req=raw.token_to_req,
         seq_lens=seq_lens,
         query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
-        qsa_num_live_requests=1,
+        num_actual_tokens=raw.token_to_req.shape[0],
     )
     main = SimpleNamespace(
         num_actual_tokens=1,
@@ -247,8 +249,8 @@ def test_full_graph_negative_padding_request_uses_last_sequence():
     )
 
 
-def test_compatible_layers_share_one_schedule_per_step():
-    adapter_cls, calls = _load_adapter()
+def test_compatible_layers_share_one_schedule_per_step(monkeypatch):
+    adapter_cls, calls = _load_adapter(monkeypatch)
     first = AscendQwen4ExpQSAAttention()
     second = AscendQwen4ExpQSAAttention()
     second.layer_name = "model.layers.1.self_attn"
@@ -267,7 +269,7 @@ def test_compatible_layers_share_one_schedule_per_step():
         token_to_req=raw.token_to_req,
         seq_lens=raw.seq_lens,
         query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
-        qsa_num_live_requests=1,
+        num_actual_tokens=raw.token_to_req.shape[0],
     )
     main1 = SimpleNamespace(
         num_actual_tokens=2,
@@ -296,8 +298,8 @@ def test_compatible_layers_share_one_schedule_per_step():
     assert first._qsa_prepared_cos_sin.data_ptr() == second._qsa_prepared_cos_sin.data_ptr()
 
 
-def test_same_geometry_with_different_dynamic_tensors_does_not_share():
-    adapter_cls, calls = _load_adapter()
+def test_same_geometry_with_different_dynamic_tensors_does_not_share(monkeypatch):
+    adapter_cls, calls = _load_adapter(monkeypatch)
     first = AscendQwen4ExpQSAAttention()
     second = AscendQwen4ExpQSAAttention()
     second.layer_name = "model.layers.1.self_attn"
@@ -316,7 +318,7 @@ def test_same_geometry_with_different_dynamic_tensors_does_not_share():
             token_to_req=raw.token_to_req,
             seq_lens=seq_lens,
             query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
-            qsa_num_live_requests=1,
+            num_actual_tokens=raw.token_to_req.shape[0],
         )
         return raw, compressed
 
@@ -350,8 +352,8 @@ def test_same_geometry_with_different_dynamic_tensors_does_not_share():
     assert main1.qsa_gbsa_metadata.data_ptr() != main2.qsa_gbsa_metadata.data_ptr()
 
 
-def test_persistent_metadata_shape_error_names_operator_kind():
-    adapter_cls, _ = _load_adapter()
+def test_persistent_metadata_shape_error_names_operator_kind(monkeypatch):
+    adapter_cls, _ = _load_adapter(monkeypatch)
     adapter = adapter_cls(_Model(AscendQwen4ExpQSAAttention()))
 
     adapter._persistent_metadata(("gbsa", "signature"), torch.zeros(2, dtype=torch.int32))
@@ -422,3 +424,26 @@ def test_model_state_falls_back_to_scheduler_positions():
         raw_positions,
         2,
     )
+
+
+@pytest.mark.parametrize("full_graph", [False, True])
+@pytest.mark.parametrize("rows", [4, 6])
+def test_lightning_schedule_matches_trimmed_or_padded_query(monkeypatch, full_graph, rows):
+    adapter_cls, _ = _load_adapter(monkeypatch)
+    layer = AscendQwen4ExpQSAAttention()
+    adapter = adapter_cls(_Model(layer))
+    metadata = SimpleNamespace(
+        num_actual_tokens=rows,
+        token_to_req=torch.tensor([0, 0, 1, 1, 2, 2]),
+        seq_lens=torch.tensor([33, 34, 0], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 2, 4, 6], dtype=torch.int32),
+    )
+    adapter.prepare_attention_metadata(
+        {layer.layer_name: SimpleNamespace(qsa_request_plan=object()), "raw": object(), "compressed": metadata},
+        full_graph=full_graph,
+    )
+    torch.testing.assert_close(
+        metadata.qsa_lightning_v2_metadata,
+        torch.tensor([3, 16, rows], dtype=torch.int32),
+    )
+    torch.testing.assert_close(metadata.query_start_loc, torch.tensor([0, 2, 4, 6], dtype=torch.int32))

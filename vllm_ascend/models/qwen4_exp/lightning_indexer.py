@@ -7,21 +7,17 @@
 
 from __future__ import annotations
 
+import math
 from typing import Protocol
 
 import torch
 from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 
-from vllm_ascend.ops.lightning_indexer_v2 import (
-    lightning_indexer_v2,
-    lightning_indexer_v2_metadata,
-)
-from vllm_ascend.ops.triton.qwen4_exp.lightning_prepare import prepare_qsa_lightning_inputs
 from vllm_ascend.ops.triton.qwen4_exp.qsa import pack_qsa_group_indices_npu
 
 _HEAD_DIM = 128
-_COMPRESS_RATIO = 4
-_TOKEN_TOPK = 2048
+# BF16 spacing at the old weight 1/sqrt(128) is 2**-11.
+_LI_V2_WEIGHT_FRACTION_BITS = 11
 
 
 class QSAIndexerMetadataProtocol(Protocol):
@@ -34,6 +30,7 @@ class QSAIndexerMetadataProtocol(Protocol):
     logical_positions: torch.Tensor
     query_start_loc: torch.Tensor
     seq_lens: torch.Tensor
+    write_metadata: QSAIndexerMetadataProtocol
 
 
 def qsa_select_paged_tokens_lightning_v2(
@@ -86,11 +83,10 @@ def qsa_select_paged_tokens_lightning_v2(
     # Metadata uses original-token lengths. Only request-sized arrays are
     # materialized; there is no token-wise length or page-table gather.
     lengths = attn_metadata.seq_lens[:requests]
-    weights, cu_query, compressed_lengths, residual_lengths = prepare_qsa_lightning_v2_inputs(
-        query, lengths, attn_metadata.query_start_loc, compress_ratio
-    )
+    compressed_lengths = lengths.floor_divide(compress_ratio)
+    residual_lengths = lengths.remainder(compress_ratio)
     common = dict(
-        cu_seqlens_q=cu_query,
+        cu_seqlens_q=attn_metadata.query_start_loc[: requests + 1].clamp_max(rows),
         seqused_k=compressed_lengths,
         cmp_residual_k=residual_lengths,
         layout_q="TND",
@@ -99,11 +95,31 @@ def qsa_select_paged_tokens_lightning_v2(
         cmp_ratio=compress_ratio,
     )
     block_topk = token_topk // compress_ratio
-    packed_width = block_topk + compress_ratio - 1
-    query, weights, visible_groups, query_cu_seqlens, row_block_table = prepare_qsa_lightning_inputs(
-        query, query_positions, sequence_lengths, token_to_req, block_table
+    # MRV2 prepares one schedule outside the layer loop. A caller that trims
+    # the query further must regenerate it for the new boundary instead.
+    metadata = getattr(attn_metadata, "qsa_lightning_v2_metadata", None)
+    if metadata is None or rows != attn_metadata.num_actual_tokens:
+        metadata = torch.ops.cann_ops_transformer.lightning_indexer_metadata(
+            query.shape[1],
+            1,
+            _HEAD_DIM,
+            block_topk,
+            batch_size=requests,
+            **common,
+        )
+    # Promote the old BF16-representable uniform weight to FP32. Keep its
+    # effective value while removing zero-head padding supported by native V2.
+    score_weight = math.ldexp(
+        round(math.ldexp(1.0 / math.sqrt(_HEAD_DIM), _LI_V2_WEIGHT_FRACTION_BITS)),
+        -_LI_V2_WEIGHT_FRACTION_BITS,
     )
-    groups, _ = torch.ops.npu.npu_lightning_indexer.default(
+    weights = torch.full(
+        (rows, query.shape[1]),
+        score_weight,
+        dtype=torch.float32,
+        device=query.device,
+    )
+    groups, _ = torch.ops.cann_ops_transformer.lightning_indexer(
         query,
         compressed_key_cache,
         weights,
@@ -122,139 +138,5 @@ def qsa_select_paged_tokens_lightning_v2(
         compress_ratio,
         token_topk,
         out[:rows, :packed_width],
-    )
-    return out
-
-
-# BF16 spacing at the old weight 1/sqrt(128) is 2**-11.
-_LI_V2_WEIGHT_FRACTION_BITS = 11
-
-
-def qsa_select_paged_tokens_lightning_v2(
-    query: torch.Tensor,
-    compressed_key_cache: torch.Tensor,
-    block_table: torch.Tensor,
-    token_to_req: torch.Tensor,
-    query_positions: torch.Tensor,
-    sequence_lengths: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    token_topk: int,
-    compress_ratio: int,
-    out: torch.Tensor | None = None,
-    *,
-    num_actual_requests: int | None = None,
-    num_actual_tokens: int | None = None,
-    prepared_metadata: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Select QSA groups with native request-batched LightningIndexerV2.
-
-    Unlike the old selector, preserve the original request batch and page table.
-    The QSA producer must provide packed, contiguous query suffixes: local row i
-    of request r has logical position seq_lens[r] - query_len[r] + i. The upstream
-    QSA builder establishes this relationship. Request boundaries start at zero
-    and their final live boundary equals the number of live query rows. Positions
-    and token_to_req must describe those same rows; arbitrary reordering is not
-    supported. These are value-level preconditions, not host tensor reads here.
-
-    Optional host counts trim graph-padding requests/rows before V2. Supply
-    them from existing CPU scheduling metadata, not by reading NPU tensors.
-    Without counts, all input rows and requests are assumed live. Live requests
-    and rows must occupy contiguous prefixes of the corresponding inputs.
-
-    Preserve the original [query_rows,2051] INT32 output ABI, including the
-    caller's buffer identity. The first 515 columns hold 512 logical group IDs
-    and up to three original-token tail IDs; all other/padded entries are -1.
-    Later MTP steps must continue to reuse the buffer without invoking selection.
-    """
-    # CANN checks even singleton-axis strides strictly. Cache views may have
-    # an arbitrary stride on the size-one head axis; normalize metadata only,
-    # preserving storage, storage offset and the physical stride between pages.
-    compressed_key_cache = canonicalize_singleton_dim_strides(compressed_key_cache)
-    if token_topk != _TOKEN_TOPK or compress_ratio != _COMPRESS_RATIO:
-        raise ValueError("QSA LI V2 requires token_topk=2048 and compress_ratio=4")
-    rows = query.shape[0]
-    requests = sequence_lengths.shape[0] if num_actual_requests is None else num_actual_requests
-    live_rows = rows if num_actual_tokens is None else num_actual_tokens
-    # Check capacities before slicing: Python otherwise silently truncates.
-    if not 0 <= requests <= sequence_lengths.shape[0] or not 0 <= live_rows <= rows:
-        raise ValueError("QSA LI V2 live counts exceed metadata capacity")
-    if block_table.shape[0] < requests or query_start_loc.shape[0] < requests + 1:
-        raise ValueError("QSA LI V2 metadata does not cover the live requests")
-    if live_rows and not requests:
-        raise ValueError("QSA LI V2 nonempty queries require live requests")
-    # These packing inputs and the caller's output do not go through CANN.
-    if token_to_req.shape != (rows,) or query_positions.shape != (rows,):
-        raise ValueError("QSA LI V2 row metadata must match query rows")
-    if any(t.device != query.device for t in (token_to_req, query_positions, sequence_lengths)):
-        raise ValueError("QSA packing metadata must be on the query device")
-    if any(t.dtype not in (torch.int32, torch.int64) for t in (token_to_req, query_positions)):
-        raise ValueError("QSA row mappings and positions must be integer tensors")
-    output_width = token_topk + compress_ratio - 1
-    if out is not None and (
-        out.shape != (rows, output_width) or out.dtype != torch.int32 or out.device != query.device
-    ):
-        raise ValueError("QSA LI V2 output must match query rows, INT32 dtype and device")
-    if out is None:
-        out = torch.empty((rows, output_width), dtype=torch.int32, device=query.device)
-    out.fill_(-1)
-    if not live_rows:
-        return out
-
-    # Metadata uses original-token lengths. Only these two request-sized arrays
-    # are materialized; there is no token-wise length or page-table gather.
-    lengths = sequence_lengths[:requests]
-    compressed_lengths = lengths.floor_divide(compress_ratio)
-    residual_lengths = lengths.remainder(compress_ratio)
-    common = dict(
-        cu_seqlens_q=query_start_loc[: requests + 1],
-        seqused_k=compressed_lengths,
-        cmp_residual_k=residual_lengths,
-        layout_q="TND",
-        layout_k="PA_BBND",
-        mask_mode=3,
-        cmp_ratio=compress_ratio,
-    )
-    block_topk = token_topk // compress_ratio
-    metadata = prepared_metadata
-    if metadata is None:
-        metadata = lightning_indexer_v2_metadata(
-            query.shape[1],
-            1,
-            _HEAD_DIM,
-            block_topk,
-            batch_size=requests,
-            **common,
-        )
-    # Promote the old BF16-representable uniform weight to FP32. Keep its
-    # effective value while removing zero-head padding supported by native V2.
-    score_weight = math.ldexp(
-        round(math.ldexp(1.0 / math.sqrt(_HEAD_DIM), _LI_V2_WEIGHT_FRACTION_BITS)),
-        -_LI_V2_WEIGHT_FRACTION_BITS,
-    )
-    weights = torch.full(
-        (live_rows, query.shape[1]),
-        score_weight,
-        dtype=torch.float32,
-        device=query.device,
-    )
-    groups, _ = lightning_indexer_v2(
-        query[:live_rows],
-        compressed_key_cache,
-        weights,
-        block_topk,
-        block_table=block_table[:requests],
-        metadata=metadata,
-        return_value=0,
-        **common,
-    )
-    packed_width = block_topk + compress_ratio - 1
-    pack_qsa_group_indices_npu(
-        groups.squeeze(1),
-        query_positions[:live_rows],
-        lengths,
-        token_to_req[:live_rows],
-        compress_ratio,
-        token_topk,
-        out[:live_rows, :packed_width],
     )
     return out

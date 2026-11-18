@@ -52,7 +52,7 @@ from vllm_ascend.utils import vllm_version_is
 
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
-from .lightning_indexer import qsa_select_paged_tokens_lightning_v2
+from .lightning_indexer import QSAIndexerMetadataProtocol, qsa_select_paged_tokens_lightning_v2
 
 if vllm_version_is("0.33.0"):
     import vllm.models.qwen4_exp.amd.indexer_qsa as upstream_indexer  # type: ignore[import-not-found]
@@ -120,19 +120,6 @@ def _compress_qsa_groups(
     )
     assert result is not None
     return result
-
-
-class QSAIndexerMetadataProtocol(Protocol):
-    """Metadata fields consumed by the Ascend sparse QSA implementation."""
-
-    num_actual_tokens: int
-    block_table: torch.Tensor
-    slot_mapping: torch.Tensor
-    token_to_req: torch.Tensor
-    logical_positions: torch.Tensor
-    query_start_loc: torch.Tensor
-    seq_lens: torch.Tensor
-    write_metadata: "QSAIndexerMetadataProtocol"
 
 
 def _qsa_cache_is_bound(kv_cache: QSAKVCache) -> bool:
@@ -518,7 +505,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         metadata: QSAIndexerMetadataProtocol,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
-        logger.info_once("QSA is using native request-batched LightningIndexerV2 through the upstream Torch interface.")
+        logger.info_once("QSA is using native request-batched LightningIndexerV2 through the CANN Torch interface.")
         return qsa_select_paged_tokens_lightning_v2(
             query,
             self.compressed_key_cache.kv_cache,
@@ -526,10 +513,6 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             self.token_topk,
             self.compress_ratio,
             out,
-            # Live prefixes come from CPU scheduling metadata, without NPU reads.
-            num_actual_requests=getattr(metadata, "qsa_num_live_requests", None),
-            num_actual_tokens=getattr(metadata, "qsa_num_live_tokens", metadata.num_actual_tokens),
-            prepared_metadata=getattr(metadata, "qsa_lightning_v2_metadata", None),
         )
 
 
