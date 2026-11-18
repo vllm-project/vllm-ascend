@@ -487,11 +487,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self.kv_recv_thread.external_slot_release_waiter = waiter
         return True
 
-    def _global_group_alloc_size(self, group_id: int) -> int:
-        if getattr(self, "has_shared_kv", False) and self.group_block_len.get(group_id):
-            return sum(self.group_block_len[group_id])
-        return super()._global_group_alloc_size(group_id)
-
     def _start_kv_transfer_threads(self) -> None:
         if self.use_layerwise_transfer:
             self.m_store.ensure_initialized()
