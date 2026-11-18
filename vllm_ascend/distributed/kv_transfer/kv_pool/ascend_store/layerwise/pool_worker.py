@@ -1182,6 +1182,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         previous_step=bool(request.load_spec and request.load_spec.layerwise_previous_step),
                         endpoint=request.load_spec.kvpool_cached_tokens if request.load_spec else None,
                         private_snapshot="offload_v1:" in key,
+                        key=key,
                     )
                     for request, key, block_id, _ in request_key_slots
                     if key in failed_keys
@@ -1248,52 +1249,63 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         for request in requests:
             if request.can_save is None or not request.can_save:
                 continue
-            save_start_block = request.save_start_token // block_size
-            group_block_hashes = get_block_hashes(
-                request.block_hashes,
-                block_size,
-                self.hash_block_size,
-            )
-            partial_block_index = get_partial_block_index(
-                request.target_token_len,
-                block_size,
-                len(group_block_hashes),
-                self.layerwise_offload,
-            )
-            save_end_block = self._layerwise_save_full_end(request, group_id, block_size, partial_block_index)
-            # External hits already have full keys. A previous-step hit may
-            # instead use snapshots, which still need promotion to full keys.
-            if (
-                request.load_spec is not None
-                and request.load_spec.can_load
-                and not request.load_spec.layerwise_previous_step
-            ):
-                pool_hit_tokens = (
-                    request.load_spec.kvpool_store_skip_tokens
-                    if request.load_spec.kvpool_store_skip_tokens is not None
-                    else request.load_spec.kvpool_cached_tokens
+            if self.use_block_key_layerwise and self.layerwise_offload:
+                # The prepared keys include request-private pages excluded by
+                # the public prefix mask. Only opened PUT sessions have keys
+                # here, and the batch builder skips empty slots.
+                start = request.save_key_block_offset
+                end = start + len(request.save_block_keys)
+                block_runs = [(start, end)] if any(request.save_block_keys) else []
+                partial_block_index = (
+                    request.partial_block_index if request.save_last_block_key is not None else None
                 )
-                hit_full_blocks = pool_hit_tokens // block_size
-                save_start_block = max(save_start_block, hit_full_blocks)
-            if partial_block_index is None:
-                partial_block_index = request.partial_block_index
-            num_allocated_blocks = (
-                len(request.block_ids_by_group_np[group_id])
-                if request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np)
-                else len(request.block_ids_by_group[group_id])
-            )
-            save_end_block = min(save_end_block, num_allocated_blocks)
-            save_start_block = min(save_start_block, save_end_block)
-            if partial_block_index is not None and partial_block_index >= num_allocated_blocks:
-                partial_block_index = None
-            group_store_mask = (
-                request.store_masks[group_id]
-                if request.store_masks is not None and group_id < len(request.store_masks)
-                else None
-            )
-            block_runs = self._masked_block_runs_cached(
-                "save", request, group_id, save_start_block, save_end_block, group_store_mask
-            )
+            else:
+                save_start_block = request.save_start_token // block_size
+                group_block_hashes = get_block_hashes(
+                    request.block_hashes,
+                    block_size,
+                    self.hash_block_size,
+                )
+                partial_block_index = get_partial_block_index(
+                    request.target_token_len,
+                    block_size,
+                    len(group_block_hashes),
+                    self.layerwise_offload,
+                )
+                save_end_block = self._layerwise_save_full_end(request, group_id, block_size, partial_block_index)
+                # External hits already have full keys. A previous-step hit may
+                # instead use snapshots, which still need promotion to full keys.
+                if (
+                    request.load_spec is not None
+                    and request.load_spec.can_load
+                    and not request.load_spec.layerwise_previous_step
+                ):
+                    pool_hit_tokens = (
+                        request.load_spec.kvpool_store_skip_tokens
+                        if request.load_spec.kvpool_store_skip_tokens is not None
+                        else request.load_spec.kvpool_cached_tokens
+                    )
+                    hit_full_blocks = pool_hit_tokens // block_size
+                    save_start_block = max(save_start_block, hit_full_blocks)
+                if partial_block_index is None:
+                    partial_block_index = request.partial_block_index
+                num_allocated_blocks = (
+                    len(request.block_ids_by_group_np[group_id])
+                    if request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np)
+                    else len(request.block_ids_by_group[group_id])
+                )
+                save_end_block = min(save_end_block, num_allocated_blocks)
+                save_start_block = min(save_start_block, save_end_block)
+                if partial_block_index is not None and partial_block_index >= num_allocated_blocks:
+                    partial_block_index = None
+                group_store_mask = (
+                    request.store_masks[group_id]
+                    if request.store_masks is not None and group_id < len(request.store_masks)
+                    else None
+                )
+                block_runs = self._masked_block_runs_cached(
+                    "save", request, group_id, save_start_block, save_end_block, group_store_mask
+                )
             if not block_runs and partial_block_index is None:
                 continue
             for run_idx, (run_start_block, run_end_block) in enumerate(block_runs):

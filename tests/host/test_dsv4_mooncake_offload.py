@@ -523,6 +523,32 @@ def isolated_method(path, cls_name, method_name, ns):
     return ns[cls_name]
 
 
+def test_offload_save_tasks_follow_opened_keys_instead_of_public_mask(ns):
+    cls = isolated_method(
+        STORE + "layerwise/pool_worker.py", "LayerwiseKVPoolWorker", "_process_save_for_layer_batch",
+        {**ns, "get_group_block_size": lambda sizes, group: sizes[group],
+         "LayerBlockRange": NS, "LayerTransferTask": NS},
+    )
+    worker = cls()
+    worker._is_layerwise_save_owner = lambda group: True
+    worker.grouped_block_size = [128]
+    worker.num_layers = 1
+    worker.layer_save_tasks = [[]]
+    worker.use_block_key_layerwise = worker.layerwise_offload = True
+    request = NS(
+        can_save=True,
+        save_key_block_offset=3,
+        save_block_keys=["offload_v1:incarnation:768:3", None],
+        save_last_block_key="offload_v1:incarnation:768:5",
+        partial_block_index=5,
+        store_masks=[[False] * 6],
+    )
+    worker._process_save_for_layer_batch([request], 0)
+    [task] = worker.layer_save_tasks[0]
+    [block_range] = task.block_ranges
+    assert (block_range.start_block, block_range.end_block, block_range.partial_block_index) == (3, 5, 5)
+
+
 @pytest.mark.parametrize(
     ("offload", "target", "is_last_chunk"),
     [(True, 1024, False), (True, 1030, True), (False, 1024, True)],
