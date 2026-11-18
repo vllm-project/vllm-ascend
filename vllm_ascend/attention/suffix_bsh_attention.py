@@ -93,10 +93,21 @@ def prepare_metadata(metadata, capacity: int, width: int, *, max_model_len: int)
     if real_rows == capacity:
         padded_table = table[:capacity]
     else:
-        # These device operations precede task registration during capture, and
-        # run before the manager's update-stream wait during replay resolution.
-        padded_table = table.new_zeros((capacity, table.shape[1]))
-        padded_table[:real_rows].copy_(table[:real_rows])
+        full_table = getattr(metadata, "_suffix_bsh_full_block_table", None)
+        if (
+            isinstance(full_table, torch.Tensor)
+            and full_table.ndim == 2
+            and full_table.shape[0] >= capacity
+            and full_table.shape[1] == table.shape[1]
+            and full_table.dtype == table.dtype
+            and full_table.device == table.device
+            and full_table.is_contiguous()
+        ):
+            padded_table = full_table[:capacity]
+        else:
+            # Fallback when no persistent zero-padded backing table is attached.
+            padded_table = table.new_zeros((capacity, table.shape[1]))
+            padded_table[:real_rows].copy_(table[:real_rows])
     result = (lengths, padded_table)
     if cache is None:
         cache = {}
