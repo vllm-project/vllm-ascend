@@ -754,6 +754,43 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     self.completed_events[req_meta.event_id] = 1
             self.request_queue.task_done()
 
+    def _store_boundary_puts(self, req_meta: ReqMeta) -> bool:
+        """Store complete pages/checkpoints under their exact boundary keys."""
+        current_event = req_meta.current_event
+        # A boundary value is a complete physical page/checkpoint, keyed by
+        # its logical hash boundary. Never slice a head-major page by bytes.
+        if current_event is not None:
+            current_event.synchronize()
+        boundary_values = {}
+        for group, block, boundary in req_meta.boundary_puts:
+            if block <= 0 or boundary <= 0 or boundary % self.token_database.hash_block_size:
+                raise ValueError("Invalid Core boundary-state handoff")
+            index = boundary // self.token_database.hash_block_size - 1
+            if index >= len(req_meta.block_hashes):
+                raise ValueError("Boundary state has no committed hash")
+            key = self.token_database._get_key_prefix(group) + block_hash_to_str(req_meta.block_hashes[index])
+            page = self._get_block_size(group)
+            addrs, sizes, _ = self._prepare_value(0, page, [], kv_cache_group_id=group, block_id=block)
+            if not addrs or len(addrs) != len(sizes):
+                raise ValueError("Boundary state has no transferable buffers")
+            boundary_values[key] = (addrs, sizes)
+        keys = list(boundary_values)
+        missing_indices = self._get_missing_indices(keys)
+        if not missing_indices:
+            return True
+        keys = [keys[index] for index in missing_indices]
+        result = self.m_store.put(
+            keys,
+            [boundary_values[key][0] for key in keys],
+            [boundary_values[key][1] for key in keys],
+        )
+        if isinstance(result, list):
+            if len(result) != len(keys) or not all(result):
+                return False
+        elif result is False:
+            return False
+        return True
+
     def _handle_stored_request(self, req_meta: ReqMeta) -> bool:
         """Store missing KV chunks; log validation/PUT failures and return False."""
         if req_meta.can_save is False:
@@ -761,37 +798,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         token_len = req_meta.token_len_chunk
         req_id = req_meta.req_id
         current_event = req_meta.current_event
-        if req_meta.boundary_puts:
-            # A boundary value is a complete physical page/checkpoint, keyed by
-            # its logical hash boundary. Never slice a head-major page by bytes.
-            if current_event is not None:
-                current_event.synchronize()
-            boundary_values = {}
-            for group, block, boundary in req_meta.boundary_puts:
-                if block <= 0 or boundary <= 0 or boundary % self.token_database.hash_block_size:
-                    raise ValueError("Invalid Core boundary-state handoff")
-                index = boundary // self.token_database.hash_block_size - 1
-                if index >= len(req_meta.block_hashes):
-                    raise ValueError("Boundary state has no committed hash")
-                key = self.token_database._get_key_prefix(group) + block_hash_to_str(req_meta.block_hashes[index])
-                page = self._get_block_size(group)
-                addrs, sizes, _ = self._prepare_value(0, page, [], kv_cache_group_id=group, block_id=block)
-                if not addrs or len(addrs) != len(sizes):
-                    raise ValueError("Boundary state has no transferable buffers")
-                boundary_values[key] = (addrs, sizes)
-            keys = list(boundary_values)
-            exists = self.m_store.exists(keys)
-            if exists is None or len(exists) != len(keys):
-                return False
-            keys = [key for key, present in zip(keys, exists, strict=True) if present != 1]
-            if keys:
-                result = self.m_store.put(
-                    keys,
-                    [boundary_values[key][0] for key in keys],
-                    [boundary_values[key][1] for key in keys],
-                )
-                if result is False or isinstance(result, list) and (len(result) != len(keys) or not all(result)):
-                    return False
+        if req_meta.boundary_puts and not self._store_boundary_puts(req_meta):
+            return False
         try:
             store_masks = self.token_database.store_mask(token_len, req_meta.num_prompt_tokens)
         except AssertionError as exc:

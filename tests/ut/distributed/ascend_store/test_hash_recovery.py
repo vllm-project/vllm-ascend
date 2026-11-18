@@ -383,3 +383,38 @@ def test_aligned_boundary_put_uses_exact_state_without_positional_mamba_save(par
     state_key = db._get_key_prefix(1) + hashes[-1].hex()
     assert store.values[state_key] == sources[1][3].numpy().tobytes()
     assert coord.store_mask(16, 16)[1] == [False]
+
+
+@pytest.mark.parametrize(
+    "requires_exists, exists, expected_keys",
+    [
+        (True, [1, 0], ["g1-0202020202020202"]),
+        (True, [1, 1], []),
+        (False, [], ["g0-0101010101010101", "g1-0202020202020202"]),
+    ],
+)
+def test_boundary_put_reuses_backend_exists_policy_and_deduplicates(requires_exists, exists, expected_keys):
+    send = object.__new__(KVCacheStoreSendingThread)
+    send.token_database = SimpleNamespace(hash_block_size=4, _get_key_prefix=lambda group: f"g{group}-")
+    send.m_store = SimpleNamespace(
+        requires_exists_before_put=requires_exists,
+        exists=Mock(return_value=exists),
+        put=Mock(return_value=True),
+    )
+    send._get_block_size = Mock(return_value=16)
+    send._prepare_value = Mock(side_effect=lambda *args, block_id, **kwargs: ([block_id * 100], [16], block_id))
+    req = metadata.ReqMeta(
+        "boundary",
+        block_hashes=[BlockHash(bytes([1]) * 8), BlockHash(bytes([2]) * 8)],
+        boundary_puts=[metadata.BoundaryPut(0, 1, 4), metadata.BoundaryPut(1, 2, 8), metadata.BoundaryPut(0, 1, 4)],
+    )
+    assert send._store_boundary_puts(req) is True
+    if expected_keys:
+        actual_keys, addrs, sizes = send.m_store.put.call_args.args
+        assert actual_keys == expected_keys
+        assert addrs == ([[200]] if requires_exists else [[100], [200]])
+        assert sizes == [[16]] * len(expected_keys)
+    else:
+        send.m_store.put.assert_not_called()
+    if not requires_exists:
+        send.m_store.exists.assert_not_called()
