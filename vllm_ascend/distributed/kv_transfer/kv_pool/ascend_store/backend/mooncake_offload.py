@@ -171,6 +171,12 @@ def _save_entries(worker, request, view, group, hashes):
             snapshot_start = min(full_transfer_blocks, hashed_transfer_blocks) * transfer_size // size
     entries = []
     window_start = _continuation_window_start(worker, group, request.target_token_len, size)
+    if window_start is None and group in getattr(
+        getattr(worker, "kv_cache_config", None), "dsv4_window_group_ids", ()
+    ) and worker._group_reuses_buffer(group):
+        # Speculative decoding disables window trimming. Keep every live
+        # page needed for continuation, including pages outside the public mask.
+        window_start = 0
     for index in range(start, end):
         if ids[index] == 0:
             continue

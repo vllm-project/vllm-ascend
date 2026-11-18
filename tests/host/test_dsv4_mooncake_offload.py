@@ -474,6 +474,36 @@ def test_window_save_keeps_public_checkpoint_and_private_tail(ns):
     assert entries == [(b"a".hex(), 0), ("offload_v1:incarnation:512:3", 3)]
 
 
+def test_untrimmed_shared_window_saves_masked_live_page_for_continuation(ns):
+    worker = NS(
+        grouped_block_size=[128],
+        group_uses_align_state=[False],
+        use_eagle=True,
+        kv_cache_config=NS(dsv4_window_group_ids=(0,)),
+        _group_reuses_buffer=lambda group: True,
+        _is_layerwise_save_owner=lambda group: True,
+        _layerwise_save_full_end=lambda *args: 3,
+        _layerwise_load_snapshot_start=lambda *args: None,
+        _make_layerwise_full_key=lambda group, key: key,
+    )
+    request = NS(
+        req_id="request", layerwise_request_id="incarnation",
+        target_token_len=384, save_start_token=0, can_save=True,
+        block_ids_by_group=[[1, 0, 3]], store_masks=[[False, False, True]],
+        load_spec=NS(
+            can_load=True, layerwise_previous_step=True,
+            kvpool_cached_tokens=384, kvpool_store_skip_tokens=None,
+        ),
+    )
+    hashes = [b"a", b"b", b"c"]
+    saved = ns["_save_entries"](worker, request, NS(), 0, hashes)
+    assert saved == [("offload_v1:incarnation:384:0", 0), (b"c".hex(), 2)]
+    worker._offload_active_pages = {
+        ("request", "incarnation", 0): (384, {index: key for key, index in saved})
+    }
+    assert ns["_load_entries"](worker, request, 0, hashes, request.store_masks[0]) == saved
+
+
 def test_indexer_transport_drops_only_overlapping_view(ns):
     views = [object(), object(), object()]
     caches = {"layer.indexer.k_cache": views, "other": views}
