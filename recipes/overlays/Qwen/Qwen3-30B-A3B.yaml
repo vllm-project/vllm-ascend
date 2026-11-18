@@ -51,3 +51,76 @@ hardware_opt_in_features:
   ascend_910c:
     - tool_calling
     - reasoning
+guide_sections:
+  ascend: |
+    ## Ascend deployment and evaluation
+
+    The Ascend W8A8 variant uses the
+    [Eco-Tech/Qwen3-30B-A3B-w8a8 checkpoint](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8),
+    rather than the BF16 checkpoint linked in the page header. Download the
+    complete checkpoint, including its quantization configuration. The
+    `ascend` quantization backend expects these quantized weights; it does not
+    quantize the BF16 checkpoint when the server starts.
+
+    The existing Ascend configuration is a single-node TP4 deployment on
+    Atlas 800I A3 (Ascend 910C). Four visible chips correspond to two physical
+    A3 NPUs, because each A3 NPU has two dies. Reserve the chips together and
+    use their allocated device IDs. A successful run on Ascend 910B does not
+    establish validation of this A3 configuration.
+
+    The [official model tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Qwen3-30B-A3B.html)
+    also documents BF16 serving, a TP1 throughput configuration, a TP4
+    low-latency configuration, and a 131,072-token YaRN configuration. These
+    are separate validation targets: the TP4 W8A8 verification badge does not
+    establish results for those configurations or for optional Eagle3 decoding.
+    Eagle3 requires the separate
+    [AngelSlim/Qwen3-a3B_eagle3 draft checkpoint](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3).
+
+    ### Verify inference
+
+    Check the health endpoint and model listing before issuing a request.
+    The model listing is a readiness check; verify that chat completion also
+    returns a successful response with nonempty generated text. Use the
+    served model ID from `/v1/models`, which changes when a different
+    checkpoint is selected or `--served-model-name` is supplied.
+
+    ```python
+    from openai import OpenAI
+
+    client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="unused")
+    served_model = client.models.list().data[0].id
+    response = client.chat.completions.create(
+        model=served_model,
+        messages=[{"role": "user", "content": "Explain tensor parallelism briefly."}],
+        temperature=0,
+        max_completion_tokens=256,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+    assert response.choices[0].message.content
+    print(response.choices[0].message.content)
+    ```
+
+    ### Reproduce accuracy and performance
+
+    Follow the tutorial's
+    [AISBench instructions](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_ais_bench.html)
+    to prepare the datasets and service configuration. Set the model name,
+    tokenizer path, host, and port to match the running server. The tutorial
+    provides GSM8K 4-shot CoT, GPQA-Diamond, AIME 2024, and LiveCodeBench
+    accuracy configurations. Its published scores describe the historical
+    v0.22.1rc W8A8 run; they are reference results, not new measurements of
+    the image selected here or of the current main branch.
+
+    For performance, record the input and output token lengths, request
+    count, concurrency, request rate, streaming mode, and prefix-cache setting
+    alongside throughput, TTFT, and TPOT. Use identical workload settings
+    when comparing runs; synthetic random prompts do not measure prefix-cache
+    reuse. Preserve the per-request output and summary, not just the final
+    throughput number.
+
+    For a main-branch reproduction, record the resolved container digest,
+    vLLM and vLLM-Ascend commits, CANN and driver versions, checkpoint revision,
+    and exact device topology. Keep source builds, package environments,
+    model downloads, logs, and compiler caches in a dedicated task directory
+    on shared hosts. The original variant's hardware badge remains historical
+    evidence; adding this guide does not claim a new hardware run.
