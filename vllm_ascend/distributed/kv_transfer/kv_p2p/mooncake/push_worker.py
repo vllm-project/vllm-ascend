@@ -232,6 +232,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             self._layer_names_by_index: dict[tuple[str, int], list[str]] = {}
             for name, layer_index in self._layer_index_by_name.items():
                 self._layer_names_by_index.setdefault(layer_index, []).append(name)
+            self._register_composite_layer_aliases()
             # Layer numbers do not establish execution order across models.
             # Multiple namespaces finalize at wait_for_save after draft execution.
             namespaces = {namespace for namespace, _ in self._layer_names_by_index}
@@ -254,6 +255,14 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             self.shutdown()
             raise
 
+    def _register_composite_layer_aliases(self) -> None:
+        """Map model-ready boundaries to this worker's registered cache owners."""
+        context = self.vllm_config.compilation_config.static_forward_context
+        for alias, layer in context.items():
+            cache_names = getattr(layer, "kv_transfer_cache_names", None)
+            if cache_names is not None:
+                self._layer_index_by_name[alias] = self._layer_index_by_name[cache_names[0]]
+
     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
         if self.kv_transfer_config.is_kv_producer:
             # The previous step's wait_for_save has joined its WRITE tasks.
@@ -262,8 +271,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 state.metadata = request
                 if not state.destinations:
                     self._prepare_destinations(state, request)
-                # A prefix hit is already resident before this forward.
-                if not state.available_layers and request.num_computed_tokens:
+                # External hits still need loading on P; HBM hits are ready now.
+                if not request.num_external_tokens and not state.available_layers and request.num_computed_tokens:
                     event = torch.npu.Event()
                     event.record()
                     state.available_layers = {
