@@ -16,13 +16,11 @@ if current_platform.device_type != "npu":
 if vllm_version_is("0.33.0"):
     pytest.skip("requires upstream MRV2 suffix support", allow_module_level=True)
 
-from vllm_ascend.ops.triton.spec_decode.suffix import _suffix_local_scan_kernel  # noqa: E402
-
 # These tests instantiate the speculator without an NPUWorker.
+from vllm.v1.worker.gpu.spec_decode.suffix.speculator import SuffixSpeculator  # noqa: E402
+
+from vllm_ascend.ops.triton.spec_decode.suffix import _suffix_local_scan_kernel  # noqa: E402
 from vllm_ascend.patch.worker import patch_triton  # noqa: E402, F401
-from vllm_ascend.worker.v2.spec_decode.suffix.speculator import (  # noqa: E402
-    AscendSuffixSpeculator as SuffixSpeculator,
-)
 
 DEVICE = torch.device("npu")
 
