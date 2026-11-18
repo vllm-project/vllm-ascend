@@ -83,24 +83,55 @@ def qsa_gbsa_attention(
         for first in range(0, query.shape[0], 32):
             rows = slice(first, first + 32)
             packed_k, packed_v, idx, lens, table = pack_selected_kv(
-                key_cache, value_cache, row_block_table[rows], sparse_idx[:, rows],
-                sparse_count[:, rows], row_visible_lens[rows],
+                key_cache,
+                value_cache,
+                row_block_table[rows],
+                sparse_idx[:, rows],
+                sparse_count[:, rows],
+                row_visible_lens[rows],
             )
             size = lens.shape[0]
-            output[rows].copy_(_run_gbsa(
-                query[rows], packed_k, packed_v, idx, sparse_count[:, rows].contiguous(),
-                lens, cu_q[:size + 1], table, table.shape[1] * GBSA_PAGE_SIZE,
-            ))
+            output[rows].copy_(
+                _run_gbsa(
+                    query[rows],
+                    packed_k,
+                    packed_v,
+                    idx,
+                    sparse_count[:, rows].contiguous(),
+                    lens,
+                    cu_q[: size + 1],
+                    table,
+                    table.shape[1] * GBSA_PAGE_SIZE,
+                )
+            )
     else:
-        output.copy_(_run_gbsa(
-            query, key_cache, value_cache, sparse_idx, sparse_count,
-            row_visible_lens, cu_q, row_block_table, logical_max_seqlen_kv,
-        ))
+        output.copy_(
+            _run_gbsa(
+                query,
+                key_cache,
+                value_cache,
+                sparse_idx,
+                sparse_count,
+                row_visible_lens,
+                cu_q,
+                row_block_table,
+                logical_max_seqlen_kv,
+            )
+        )
     return output
 
 
-def _run_gbsa(query, key_cache, value_cache, sparse_idx, sparse_count, row_visible_lens,
-              cu_q, row_block_table, logical_max_seqlen_kv):
+def _run_gbsa(
+    query,
+    key_cache,
+    value_cache,
+    sparse_idx,
+    sparse_count,
+    row_visible_lens,
+    cu_q,
+    row_block_table,
+    logical_max_seqlen_kv,
+):
     num_kv_heads = key_cache.shape[2]
     common = dict(
         cu_seqlens_q=cu_q,

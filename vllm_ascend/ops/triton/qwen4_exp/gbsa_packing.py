@@ -1,19 +1,43 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pack selected QSA KV blocks in logical order for batch-invariant GBSA."""
+
 import torch
 from vllm.triton_utils import tl, triton
 
 
 @triton.jit
 def _pack_selected_blocks(
-    key, value, source_table, indices, counts, visible_lens,
-    packed_key, packed_value, packed_indices, packed_lens,
-    key_page_stride, key_token_stride, key_head_stride, key_dim_stride,
-    value_page_stride, value_token_stride, value_head_stride, value_dim_stride,
-    idx_head_stride, idx_row_stride, idx_group_stride,
-    count_head_stride, count_row_stride, table_row_stride, table_col_stride,
-    ROWS: tl.constexpr, GROUPS: tl.constexpr, CAPACITY: tl.constexpr,
-    HEADS: tl.constexpr, DIM: tl.constexpr, DIM_TILE: tl.constexpr,
+    key,
+    value,
+    source_table,
+    indices,
+    counts,
+    visible_lens,
+    packed_key,
+    packed_value,
+    packed_indices,
+    packed_lens,
+    key_page_stride,
+    key_token_stride,
+    key_head_stride,
+    key_dim_stride,
+    value_page_stride,
+    value_token_stride,
+    value_head_stride,
+    value_dim_stride,
+    idx_head_stride,
+    idx_row_stride,
+    idx_group_stride,
+    count_head_stride,
+    count_row_stride,
+    table_row_stride,
+    table_col_stride,
+    ROWS: tl.constexpr,
+    GROUPS: tl.constexpr,
+    CAPACITY: tl.constexpr,
+    HEADS: tl.constexpr,
+    DIM: tl.constexpr,
+    DIM_TILE: tl.constexpr,
     GROUP_TILE: tl.constexpr,
 ):
     tile = tl.program_id(0)
@@ -22,28 +46,38 @@ def _pack_selected_blocks(
     count = tl.load(counts + head * count_head_stride + row * count_row_stride)
     visible = tl.load(visible_lens + row)
     # QSA's prepared indices end with the partial tail group, when there is one.
-    last = tl.load(indices + head * idx_head_stride + row * idx_row_stride +
-                   tl.maximum(count - 1, 0) * idx_group_stride, mask=count > 0, other=-1)
+    last = tl.load(
+        indices + head * idx_head_stride + row * idx_row_stride + tl.maximum(count - 1, 0) * idx_group_stride,
+        mask=count > 0,
+        other=-1,
+    )
     if tile == 0 and head == 0:
         tail = visible % 4
         missing = tl.where((count > 0) & (tail > 0) & (last == visible // 4), 4 - tail, 0)
         tl.store(packed_lens + row, count * 4 - missing)
 
     groups = tile * GROUP_TILE + tl.arange(0, GROUP_TILE)
-    tl.store(packed_indices + (head * ROWS + row) * GROUPS + groups,
-             tl.where(groups < count, groups, -1), mask=groups < GROUPS)
+    tl.store(
+        packed_indices + (head * ROWS + row) * GROUPS + groups,
+        tl.where(groups < count, groups, -1),
+        mask=groups < GROUPS,
+    )
 
     tokens = tile * (4 * GROUP_TILE) + tl.arange(0, 4 * GROUP_TILE)
     slot = tokens // 4
-    group = tl.load(indices + head * idx_head_stride + row * idx_row_stride + slot * idx_group_stride,
-                    mask=(slot < count) & (slot < GROUPS), other=-1)
+    group = tl.load(
+        indices + head * idx_head_stride + row * idx_row_stride + slot * idx_group_stride,
+        mask=(slot < count) & (slot < GROUPS),
+        other=-1,
+    )
     # Keep masked lanes within the source allocation as Triton may form pointer
     # offsets before applying the load mask.
     safe_group = tl.where(group >= 0, group, 0)
     logical = safe_group * 4 + tokens % 4
     valid = (group >= 0) & (logical < visible)
-    page = tl.load(source_table + row * table_row_stride + (logical // 128) * table_col_stride,
-                   mask=valid, other=0).to(tl.int64)
+    page = tl.load(source_table + row * table_row_stride + (logical // 128) * table_col_stride, mask=valid, other=0).to(
+        tl.int64
+    )
     channel = tl.arange(0, DIM_TILE)
     key_row = page * key_page_stride + (logical % 128) * key_token_stride + head * key_head_stride
     value_row = page * value_page_stride + (logical % 128) * value_token_stride + head * value_head_stride
@@ -74,10 +108,28 @@ def pack_selected_kv(key, value, source_table, indices, counts, visible_lens):
     table = torch.arange(rows * pages, dtype=source_table.dtype, device=key.device).reshape(rows, pages)
     group_tile = 8
     _pack_selected_blocks[(triton.cdiv(capacity, group_tile * 4), rows, heads)](
-        key, value, source_table, indices, counts, visible_lens,
-        packed_key, packed_value, packed_indices, packed_lens,
-        *key.stride(), *value.stride(), *indices.stride(), *counts.stride(), *source_table.stride(),
-        ROWS=rows, GROUPS=groups, CAPACITY=capacity, HEADS=heads, DIM=dim,
-        DIM_TILE=triton.next_power_of_2(dim), GROUP_TILE=group_tile, num_warps=1,
+        key,
+        value,
+        source_table,
+        indices,
+        counts,
+        visible_lens,
+        packed_key,
+        packed_value,
+        packed_indices,
+        packed_lens,
+        *key.stride(),
+        *value.stride(),
+        *indices.stride(),
+        *counts.stride(),
+        *source_table.stride(),
+        ROWS=rows,
+        GROUPS=groups,
+        CAPACITY=capacity,
+        HEADS=heads,
+        DIM=dim,
+        DIM_TILE=triton.next_power_of_2(dim),
+        GROUP_TILE=group_tile,
+        num_warps=1,
     )
     return packed_key, packed_value, packed_indices, packed_lens, table
