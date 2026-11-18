@@ -13,7 +13,8 @@ from vllm.platforms.interface import set_assigned_physical_gpu_ids
 # QoS range supported by the pooled KV store backends. A larger value
 # means a higher transfer priority.
 QOS_VALUE_MIN = 0
-QOS_VALUE_MAX = 4
+QOS_VALUE_MAX = 7
+QOS_WARNING_THRESHOLD = 4
 
 
 def parse_qos_from_extra_config(extra_config: dict[str, Any] | None) -> int | None:

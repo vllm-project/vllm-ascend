@@ -12,6 +12,7 @@ from vllm.logger import logger
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     QOS_VALUE_MAX,
     QOS_VALUE_MIN,
+    QOS_WARNING_THRESHOLD,
     Backend,
     BatchResultShapeError,
     get_scheduler_device_id,
@@ -59,6 +60,13 @@ def _validate_device_ub_qos() -> None:
     if not (QOS_VALUE_MIN <= qos <= QOS_VALUE_MAX):
         raise ValueError(
             f"Invalid MF_DEVICE_UB_QOS value {qos}: QoS must be an integer in [{QOS_VALUE_MIN}, {QOS_VALUE_MAX}]."
+        )
+    if qos > QOS_WARNING_THRESHOLD:
+        logger.warning(
+            "QoS %d in MF_DEVICE_UB_QOS exceeds %d. "
+            "Verify that the transfer backend and switch are configured for this priority.",
+            qos,
+            QOS_WARNING_THRESHOLD,
         )
 
 
