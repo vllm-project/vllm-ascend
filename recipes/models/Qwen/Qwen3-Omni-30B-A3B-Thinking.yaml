@@ -52,7 +52,7 @@ variants:
     description: "W8A8 weights produced from the official BF16 checkpoint with msmodelslim; point the model id at the local quantized directory."
   bf16:
     precision: bf16
-    vram_minimum_gb: 60
+    vram_minimum_gb: 64
     supported_hardware: [ascend_910c]
     hardware_overrides:
       ascend_910c:
@@ -143,7 +143,7 @@ presets:
     hardware: ascend_910c
     strategy: single_node_tp
     variants: [default]
-    workload: "60025-token prompt functional check"
+    workload: "70025-token prompt functional check"
     description: "TP4 with a 131072-token limit, YaRN scaling, and a smaller sequence budget for KV cache."
     tp: 4
     args:
@@ -165,14 +165,14 @@ presets:
       - "--gpu-memory-utilization"
       - "0.95"
       - "--hf-overrides"
-      - '{"rope_parameters": {"rope_type": "yarn", "factor": 4, "original_max_position_embeddings": 32768}}'
+      - '{"rope_parameters": {"rope_type": "yarn", "factor": 2, "original_max_position_embeddings": 65536}}'
     env:
       VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
     runbook: |
       Measured on one Atlas 800I A3 with `quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler`
       (4 of 16 chips, TP4) and locally quantized W8A8 weights.
 
-      - A 60025-token prompt returned the correct answer (`Fox`) in 5.27 s.
+      - A 70025-token prompt returned the correct answer (`Fox`) in 6.16 s.
       - No multi-request throughput run was performed for this context length.
       - `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` is required because the checkpoint declares
         65536 positions while the preset requests 131072.
@@ -200,9 +200,9 @@ guide: |
   | --- | --- | --- | --- | --- | --- | --- |
   | High Throughput (TP1) | 1 | 200 in / 512 out, concurrency 32 | 200/200 | 906.42 | 278.16 ms | 32.26 ms |
   | Low Latency (TP4) | 4 | 200 in / 128 out, 1 request/s | 200/200 | 126.71 | 187.63 ms | 17.85 ms |
-  | Long Context (TP4) | 4 | 60025-token prompt | 1/1 | not measured | not measured | not measured |
+  | Long Context (TP4) | 4 | 70025-token prompt | 1/1 | not measured | not measured | not measured |
 
-  The long-context preset returned the correct answer in 5.27 s. These numbers are
+  The long-context preset returned the correct answer in 6.16 s. These numbers are
   reproducibility measurements on the stated image, not an official performance baseline.
 
   ## Accuracy
