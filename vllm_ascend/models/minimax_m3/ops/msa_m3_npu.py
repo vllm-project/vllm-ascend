@@ -3,11 +3,8 @@
 
 from __future__ import annotations
 
-import inspect
-import sys
 from functools import lru_cache
 from importlib import import_module
-from importlib.util import find_spec
 from typing import Any
 
 import torch
@@ -38,19 +35,11 @@ _FP8_E4M3_MAX = 448.0
 _INDEX_SCORE_RETURN_INDICES = 1
 # CANN restricts ``topk`` to this range.
 _INDEX_SCORE_TOPK_MAX = 128
-# Fused TopK indices are always inferred as ``[heads, tokens, topk]``; validate
-_INDEX_SCORE_FUSED_OUTPUT_DIM = 3
-_INDEX_SCORE_OPS_MODULE_NAME = "cann_ops_transformer.ops"
 _MSA_INDEX_KEY_LAYOUT = "BBND"
-# ``sparse_mode`` the index score accepts: 3 requires ``atten_mask`` of
-# ``[_MSA_MASK_SIZE, _MSA_MASK_SIZE]`` and 0 forbids it, so the two must always
-# be derived from the same "causal" decision.
+# ``sparse_mode`` the index score accepts: 3 requires an ``atten_mask`` and 0
+# forbids it, so both must be derived from the same "causal" decision.
 _MSA_SPARSE_MODE_DENSE = 0
 _MSA_SPARSE_MODE_CAUSAL = 3
-_MSA_MASK_SIZE = 2048
-# Name the CANN wrapper reads for a fused output; it lives on the inner operator
-# module, not on the package namespace.
-_INDEX_SCORE_FUSED_ENTRY_NAME = "msa_index_score_sparse"
 # The operator produces incorrect results when topk is not a multiple of 8.
 _INDEX_SCORE_TOPK_WRITE_ALIGNMENT = 8
 
@@ -432,85 +421,9 @@ def _build_cu_block_lens(
     return cu_block_lens
 
 
-@lru_cache
-def _cann_index_score_topk_fusion_available() -> bool:
-    """Whether the installed CANN MsaIndexScore op can fuse the block TopK.
-
-    Older CANN wheels expose ``msa_index_score`` without the ``return_choice``
-    keyword, so inspect the Python wrapper signature instead of the op name.
-    For a fused output the wrapper calls ``msa_index_score_sparse`` on the
-    *inner* operator module it loads (``_get_op_module``), not on the package
-    namespace, so that is where the binding has to exist.
-    """
-    if find_spec("cann_ops_transformer") is None:
-        return False
-    try:
-        ops_module = _index_score_ops_module()
-        wrapper = ops_module.msa_index_score
-        if "return_choice" not in inspect.signature(wrapper).parameters:
-            return False
-        fused_entry = _fused_index_score_entry(wrapper)
-        if fused_entry is None:
-            return False
-        _ = getattr(fused_entry, _INDEX_SCORE_FUSED_ENTRY_NAME)
-    except Exception:  # noqa: BLE001 -- optional toolchain, any failure -> separate TopK
-        return False
-    return True
-
-
-def _fused_index_score_entry(wrapper: Any) -> Any:
-    """Return the operator module that holds ``msa_index_score_sparse``.
-
-    The wrapper binds the fused op lazily, so the module only exists after its
-    own loader ran. Prefer that module; fall back to the package namespace for
-    toolchains that bind the entry there instead.
-    """
-    wrapper_file = getattr(wrapper, "__module__", None)
-    module = sys.modules.get(wrapper_file) if wrapper_file else None
-    get_op_module = getattr(module, "_get_op_module", None)
-    if get_op_module is not None:
-        return get_op_module()
-    ops_module = _index_score_ops_module()
-    return ops_module if hasattr(ops_module, _INDEX_SCORE_FUSED_ENTRY_NAME) else None
-
-
 def _use_index_score_topk_fusion() -> bool:
-    """Select the fused CANN TopK when both the hardware and toolchain allow it."""
-    return index_score_topk_fusion_available()
-
-
-def _index_score_ops_module() -> Any:
-    # The wrapper binds ``msa_index_score_sparse`` on this module, so share it
-    # instead of importing the name with ``from ... import``. Resolve the live
-    # ``sys.modules`` entry on every call: that is a dict lookup, and it means a
-    # replaced package (an upgrade, or a patched module in tests) is re-probed
-    # instead of a stale binding being pinned for the life of the process.
-    module = sys.modules.get(_INDEX_SCORE_OPS_MODULE_NAME)
-    if module is None:
-        module = import_module(_INDEX_SCORE_OPS_MODULE_NAME)
-    return module
-
-
-@lru_cache
-def index_score_topk_fusion_available() -> bool:
-    """Whether the CANN package and the current device can fuse the block TopK.
-    """
-    return _cann_index_score_topk_fusion_available() and get_current_hardware_profile().supports(
-        HardwareCapability.MINIMAX_M3_INDEX_SCORE_TOPK_FUSION
-    )
-
-
-def _check_fused_index_score_indices(indices: Any, output_shape: tuple[int, ...]) -> torch.Tensor:
-    """Validate the fused indices against the ``[heads, tokens, topk]`` contract.
-
-    The operator infers exactly ``[num_index_heads, total_q, topk]``, so any
-    other shape means the installed op disagrees with this adapter.
-    """
-    if tuple(indices.shape) != output_shape:
-        raise RuntimeError(
-            f"MsaIndexScore returned sparse indices shaped {tuple(indices.shape)}, expected {output_shape}"
-        )
-    return indices
+    """Select the fused CANN TopK on hardware that supports it."""
+    return get_current_hardware_profile().supports(HardwareCapability.MINIMAX_M3_INDEX_SCORE_TOPK_FUSION)
 
 
 @torch.no_grad()
@@ -523,48 +436,38 @@ def _minimax_m3_index_score(
     start_loc: torch.Tensor,
     causal_mask: torch.Tensor | None,
     *,
-    topk: int = 0,
     init_blocks: int = 0,
     local_blocks: int = 0,
-) -> Any:
-    """Compute MSA index scores, or the fused block TopK, with the CANN operator.
-    """
-    index_score_ops = _index_score_ops_module()
+) -> torch.Tensor:
+    """Compute MSA index scores with the CANN operator.
 
-    if causal_mask is not None and tuple(causal_mask.shape[-2:]) != (_MSA_MASK_SIZE, _MSA_MASK_SIZE):
-        raise ValueError(
-            f"causal mask must be {_MSA_MASK_SIZE}x{_MSA_MASK_SIZE}, got {tuple(causal_mask.shape)}"
-        )
+    ``start_loc`` is the current query block in the complete block table.
+    A causal mask selects sparse mode 3; passing no mask selects dense mode 0.
+    ``init_blocks`` and ``local_blocks`` are kept for parity with the index
+    scoring interface; candidate forcing is applied by the TopK stage.
+    """
+    from cann_ops_transformer.ops import msa_index_score
 
     index_kv_cache = _as_ascendc_index_kv_cache(index_kv_cache)
     if index_kv_cache.dtype == torch.float8_e4m3fn and idx_q.dtype != index_kv_cache.dtype:
         idx_q = _to_fp8_e4m3(idx_q)
-    causal = causal_mask is not None
-    kwargs = {
-        "block_table": block_table,
-        "atten_mask": causal_mask,
-        "actual_seq_qlen": cu_seqlens_q,
-        "actual_seq_klen": seq_lens,
-        "layout_key": _MSA_INDEX_KEY_LAYOUT,
-        "sparse_mode": _MSA_SPARSE_MODE_CAUSAL if causal else _MSA_SPARSE_MODE_DENSE,
-        "init_blocks": init_blocks,
-        "local_blocks": local_blocks,
-    }
-    if topk <= 0:
-        return index_score_ops.msa_index_score(idx_q, index_kv_cache, start_loc, **kwargs)
-    indices = index_score_ops.msa_index_score(
+    return msa_index_score(
         idx_q,
         index_kv_cache,
         start_loc,
-        return_choice=_INDEX_SCORE_RETURN_INDICES,
-        topk=topk,
-        **kwargs,
+        block_table=block_table,
+        atten_mask=causal_mask,
+        actual_seq_qlen=cu_seqlens_q,
+        actual_seq_klen=seq_lens,
+        layout_key="BBND",
+        sparse_mode=3 if causal_mask is not None else 0,
+        init_blocks=0,
+        local_blocks=0,
     )
-    return _check_fused_index_score_indices(indices, (idx_q.shape[1], idx_q.shape[0], topk))
 
 
 @torch.no_grad()
-def _fused_index_topk(
+def _minimax_m3_index_score_topk(
     idx_q: torch.Tensor,
     index_kv_cache: torch.Tensor | tuple[torch.Tensor],
     block_table: torch.Tensor,
@@ -572,33 +475,58 @@ def _fused_index_topk(
     seq_lens: torch.Tensor,
     start_loc: torch.Tensor,
     causal_mask: torch.Tensor | None,
+    *,
     topk: int,
     init_blocks: int = 0,
     local_blocks: int = 0,
-) -> torch.Tensor | None:
-    """Return the operator's fused block TopK, or None to use the separate path."""
+) -> torch.Tensor:
+    """Run the CANN MsaIndexScore TopK fusion and return its block indices.
 
-    if not _use_index_score_topk_fusion():
-        return None
-    if not 0 < topk <= _INDEX_SCORE_TOPK_MAX:
-        return None
-    if topk % _INDEX_SCORE_TOPK_WRITE_ALIGNMENT != 0:
-        return None
-    indices = _minimax_m3_index_score(
+    The operator applies ``init_blocks`` / ``local_blocks`` inside its epilogue
+    (``ApplyLocalMaskUb``) before selecting, so the forced columns take part in
+    the TopK exactly like the separate path's ``1e30`` / ``1e29`` overwrite.
+    ``start_loc`` is one block index per request.
+
+    Returns ``[num_index_heads, total_q, topk]`` int32 logical block IDs, already
+    ordered by the operator.
+    """
+    from cann_ops_transformer.ops import msa_index_score
+
+    index_kv_cache = _as_ascendc_index_kv_cache(index_kv_cache)
+    if index_kv_cache.dtype == torch.float8_e4m3fn and idx_q.dtype != index_kv_cache.dtype:
+        idx_q = _to_fp8_e4m3(idx_q)
+    return msa_index_score(
         idx_q,
         index_kv_cache,
-        block_table,
-        cu_seqlens_q,
-        seq_lens,
         start_loc,
-        causal_mask,
+        return_choice=_INDEX_SCORE_RETURN_INDICES,
         topk=topk,
+        block_table=block_table,
+        atten_mask=causal_mask,
+        actual_seq_qlen=cu_seqlens_q,
+        actual_seq_klen=seq_lens,
+        layout_key=_MSA_INDEX_KEY_LAYOUT,
+        sparse_mode=_MSA_SPARSE_MODE_CAUSAL if causal_mask is not None else _MSA_SPARSE_MODE_DENSE,
         init_blocks=init_blocks,
         local_blocks=local_blocks,
     )
-    if indices.ndim != _INDEX_SCORE_FUSED_OUTPUT_DIM or topk != indices.shape[-1]:
-        return None
-    return indices
+
+
+def _can_use_index_score_topk_fusion(topk: int) -> bool:
+    """Whether the fused TopK can serve this ``topk``.
+
+    ``topk`` must be aligned to the kernel's bulk write-back. The kernel collapses
+    the row only for that alignment and otherwise stores slot by slot, which with
+    more than one query token returns uninitialised memory for every row but the
+    last. Measured on Ascend950DT: ``topk`` in {4, 12, 17} at ``q_len`` in
+    {2, 4, 8} produced values like ``1050427392`` and ``-8388609``; ``topk`` in
+    {8, 16, 24, 32} was exact for every shape measured.
+    """
+    return (
+        _use_index_score_topk_fusion()
+        and 0 < topk <= _INDEX_SCORE_TOPK_MAX
+        and topk % _INDEX_SCORE_TOPK_WRITE_ALIGNMENT == 0
+    )
 
 
 @torch.no_grad()
@@ -624,20 +552,19 @@ def minimax_m3_index_prefill(
     toolchain support ``return_choice``; otherwise the scores feed the separate
     TopK and sort helpers.
     """
-    indices = _fused_index_topk(
-        idx_q,
-        index_kv_cache,
-        block_table,
-        cu_seqlens_q,
-        seq_lens,
-        start_loc,
-        causal_mask,
-        topk,
-        init_blocks,
-        local_blocks,
-    )
-    if indices is not None:
-        return indices
+    if _can_use_index_score_topk_fusion(topk):
+        return _minimax_m3_index_score_topk(
+            idx_q,
+            index_kv_cache,
+            block_table,
+            cu_seqlens_q,
+            seq_lens,
+            start_loc,
+            causal_mask,
+            topk=topk,
+            init_blocks=init_blocks,
+            local_blocks=local_blocks,
+        )
     score = _minimax_m3_index_score(
         idx_q,
         index_kv_cache,
@@ -646,6 +573,8 @@ def minimax_m3_index_prefill(
         seq_lens,
         start_loc,
         causal_mask,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
     )
     logical_block_count = (max_seq_len + _MSA_INDEX_BLOCK_SIZE - 1) // _MSA_INDEX_BLOCK_SIZE
     logical_score_width = (
@@ -689,8 +618,8 @@ def minimax_m3_index_decode(
     straight through and the separate sort helper is only used on the score path.
 
     """
-    if sort_indices:
-        indices = _fused_index_topk(
+    if sort_indices and _can_use_index_score_topk_fusion(topk):
+        indices = _minimax_m3_index_score_topk(
             idx_q,
             index_kv_cache,
             block_table,
@@ -698,12 +627,11 @@ def minimax_m3_index_decode(
             seq_lens,
             start_loc,
             causal_mask,
-            topk,
-            init_blocks,
-            local_blocks,
+            topk=topk,
+            init_blocks=init_blocks,
+            local_blocks=local_blocks,
         )
-        if indices is not None:
-            return indices, _select_num_idx_from_topk(indices)
+        return indices, _select_num_idx_from_topk(indices)
     score = _minimax_m3_index_score(
         idx_q,
         index_kv_cache,

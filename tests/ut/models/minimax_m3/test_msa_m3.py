@@ -53,6 +53,7 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     _as_ascendc_index_kv_cache,
     _decode_gbsa_block_counts,
     _minimax_m3_index_score,
+    _minimax_m3_index_score_topk,
     _minimax_m3_sparse_attn_kv_gather_q,
     minimax_m3_index_decode,
     minimax_m3_index_prefill,
@@ -1403,7 +1404,7 @@ def test_cann_index_score_forwards_metadata_operands() -> None:
 
     mock_index_score = MagicMock(return_value=expected)
     with patch.dict("sys.modules", {"cann_ops_transformer.ops": SimpleNamespace(msa_index_score=mock_index_score)}):
-        actual = _minimax_m3_index_score(
+        actual = _minimax_m3_index_score_topk(
             idx_q,
             index_key_cache,
             block_table,
@@ -1411,6 +1412,7 @@ def test_cann_index_score_forwards_metadata_operands() -> None:
             seq_lens,
             start_loc,
             causal_mask,
+            topk=8,
             init_blocks=2,
             local_blocks=3,
         )
@@ -1428,6 +1430,8 @@ def test_cann_index_score_forwards_metadata_operands() -> None:
     assert kwargs["actual_seq_klen"] is seq_lens
     assert kwargs["layout_key"] == "BBND"
     assert kwargs["sparse_mode"] == 3
+    assert kwargs["return_choice"] == 1
+    assert kwargs["topk"] == 8
     assert kwargs["init_blocks"] == 2
     assert kwargs["local_blocks"] == 3
 
@@ -1540,6 +1544,7 @@ def test_ascendc_index_prefill_limits_score_width_for_topk(
         )
 
     assert actual is expected
+    # score 计算恒用 init_blocks=0/local_blocks=0；强制块只交给 TopK 阶段。
     mock_score.assert_called_once_with(
         idx_q,
         index_key_cache,
@@ -1595,6 +1600,7 @@ def test_ascendc_index_decode_returns_fused_select_counts() -> None:
             init_blocks=1,
             local_blocks=1,
             decode_query_len=1,
+
         )
 
     assert actual is expected
@@ -1618,31 +1624,6 @@ def test_ascendc_index_decode_returns_fused_select_counts() -> None:
         local_blocks=1,
         sort_indices=False,
     )
-
-
-def _signature_with(**extra: object) -> inspect.Signature:
-    """Build a wrapper signature with the given extra keyword-only params."""
-    return inspect.Signature(
-        [inspect.Parameter("query", inspect.Parameter.POSITIONAL_OR_KEYWORD)]
-        + [
-            inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, default=default)
-            for name, default in extra.items()
-        ]
-    )
-
-
-def _post_pr_index_score_wrapper() -> MagicMock:
-    """Model the ops-transformer wrapper that gained the fused block TopK."""
-    wrapper = MagicMock(name="msa_index_score")
-    wrapper.__signature__ = _signature_with(  # type: ignore[attr-defined]
-        block_table=None,
-        query_scale=None,
-        key_scale=None,
-        return_choice=0,
-        topk=16,
-        compress_factor=1,
-    )
-    return wrapper
 
 
 def _index_score_test_operands(
@@ -1678,55 +1659,38 @@ def _fused_index_topk_operands(
     max_blocks: int = 4,
     num_heads: int = 2,
 ) -> dict[str, torch.Tensor]:
-    """Operands for ``_fused_index_topk``."""
+    """Operands for the fused TopK functions (``_minimax_m3_index_score_topk``)."""
     return _index_score_call_operands(total_q=total_q, max_blocks=max_blocks, num_heads=num_heads)
 
 
 @pytest.fixture
 def fused_index_ops(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Install a CANN package with the fused TopK and enable it on the device."""
-    ops = SimpleNamespace(
-        msa_index_score=_post_pr_index_score_wrapper(),
-        msa_index_score_sparse=MagicMock(),
-    )
+    ops = SimpleNamespace(msa_index_score=MagicMock(name="msa_index_score"))
+    # ``from cann_ops_transformer.ops import msa_index_score`` resolves through
+    # sys.modules, so replacing both entries makes the import pick up the mock.
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer", SimpleNamespace(ops=ops))
     monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
-    monkeypatch.setattr(msa_m3_npu_module, "_cann_index_score_topk_fusion_available", lambda: True)
-    # Keep the real ``index_score_topk_fusion_available`` so device gating is covered.
-    monkeypatch.setattr(msa_m3_npu_module, "_index_score_ops_module", lambda: ops)
     monkeypatch.setattr(
         msa_m3_npu_module,
         "get_current_hardware_profile",
         lambda: get_hardware_profile(AscendDeviceType.A5),
     )
-    msa_m3_npu_module.index_score_topk_fusion_available.cache_clear()
     return ops.msa_index_score
 
 
-def test_topk_fusion_probe_requires_fused_outputs(monkeypatch: pytest.MonkeyPatch) -> None:
-    # 没有 return_choice 的旧包保持分离 TopK 路径。
-    legacy = MagicMock(name="msa_index_score")
-    legacy.__signature__ = _signature_with()  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", SimpleNamespace(msa_index_score=legacy))
-    msa_m3_npu_module._cann_index_score_topk_fusion_available.cache_clear()
-    assert msa_m3_npu_module._cann_index_score_topk_fusion_available() is False
-
-    # 有 return_choice 但缺少 sparse 入口时同样不可用。
-    monkeypatch.setitem(
-        sys.modules,
-        "cann_ops_transformer.ops",
-        SimpleNamespace(msa_index_score=_post_pr_index_score_wrapper()),
-    )
-    msa_m3_npu_module._cann_index_score_topk_fusion_available.cache_clear()
-    assert msa_m3_npu_module._cann_index_score_topk_fusion_available() is False
-
-    monkeypatch.setitem(
-        sys.modules,
-        "cann_ops_transformer.ops",
-        SimpleNamespace(msa_index_score=_post_pr_index_score_wrapper(), msa_index_score_sparse=MagicMock()),
-    )
-    msa_m3_npu_module._cann_index_score_topk_fusion_available.cache_clear()
-    assert msa_m3_npu_module._cann_index_score_topk_fusion_available() is True
-    msa_m3_npu_module._cann_index_score_topk_fusion_available.cache_clear()
+def test_topk_fusion_is_enabled_on_a5_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    for device, expected in [
+        (AscendDeviceType.A5, True),
+        (AscendDeviceType.A3, False),
+        (AscendDeviceType.A2, False),
+    ]:
+        monkeypatch.setattr(
+            msa_m3_npu_module,
+            "get_current_hardware_profile",
+            lambda device=device: get_hardware_profile(device),
+        )
+        assert msa_m3_npu_module._use_index_score_topk_fusion() is expected
 
 
 def test_index_score_requests_fused_topk_indices(fused_index_ops: MagicMock) -> None:
@@ -1734,7 +1698,7 @@ def test_index_score_requests_fused_topk_indices(fused_index_ops: MagicMock) -> 
     indices = torch.zeros(2, 2, 3, dtype=torch.int32)
     fused_index_ops.return_value = indices
 
-    actual = _minimax_m3_index_score(**operands, topk=3)
+    actual = _minimax_m3_index_score_topk(**operands, topk=3, local_blocks=1)
 
     assert actual is indices
     kwargs = fused_index_ops.call_args.kwargs
@@ -1742,41 +1706,22 @@ def test_index_score_requests_fused_topk_indices(fused_index_ops: MagicMock) -> 
     assert kwargs["topk"] == 3
     assert kwargs["layout_key"] == "BBND"
     assert kwargs["sparse_mode"] == 3
-    # 强制选块必须由 TopK 阶段处理，算子侧保持关闭。
+    # 强制选块由算子在 TopK 之前施加，与分离路径写 1e30 / 1e29 等价。
     assert kwargs["init_blocks"] == 0
-    assert kwargs["local_blocks"] == 0
+    assert kwargs["local_blocks"] == 1
 
 
-def test_index_score_score_mode_keeps_plain_output(fused_index_ops: MagicMock) -> None:
+def test_index_score_keeps_forcing_off_on_the_score_path(fused_index_ops: MagicMock) -> None:
+    """老路径显式把 init_blocks / local_blocks 置 0，强制块交给分离 TopK。"""
     operands = _index_score_call_operands()
     fused_index_ops.return_value = torch.zeros(2, 2, 4)
 
-    _minimax_m3_index_score(**operands)
+    _minimax_m3_index_score(**operands, init_blocks=2, local_blocks=1)
 
     assert "return_choice" not in fused_index_ops.call_args.kwargs
     assert "topk" not in fused_index_ops.call_args.kwargs
-
-
-@pytest.mark.parametrize(
-    ("reported_shape", "matches"),
-    [((2, 2, 3), True), ((2, 128, 3), False)],
-    ids=["exact", "operator-pads-tokens"],
-)
-def test_index_score_fused_output_must_match_head_token_topk(
-    fused_index_ops: MagicMock,
-    reported_shape: tuple[int, ...],
-    matches: bool,
-) -> None:
-    # Infershape 固定写出 [N1, T1, topk]，形状不符说明算子与适配层不一致。
-    fused_index_ops.return_value = torch.zeros(reported_shape, dtype=torch.int32)
-    operands = _index_score_call_operands(total_q=2, num_heads=2)
-
-    if matches:
-        actual = _minimax_m3_index_score(**operands, topk=3)
-        assert tuple(actual.shape) == reported_shape
-    else:
-        with pytest.raises(RuntimeError, match="sparse indices"):
-            _minimax_m3_index_score(**operands, topk=3)
+    assert fused_index_ops.call_args.kwargs["init_blocks"] == 0
+    assert fused_index_ops.call_args.kwargs["local_blocks"] == 0
 
 
 def test_ascendc_index_prefill_uses_fused_topk(fused_index_ops: MagicMock) -> None:
@@ -1872,14 +1817,72 @@ def test_ascendc_index_prefill_falls_back_without_fused_topk(monkeypatch: pytest
 
 
 @pytest.mark.parametrize("topk", [0, 129])
-def test_fused_index_topk_skips_unsupported_k(fused_index_ops: MagicMock, topk: int) -> None:
+def test_fusion_gate_rejects_unsupported_k(fused_index_ops: MagicMock, topk: int) -> None:
     # 算子只接受 1..128 的 topk，其余交给分离路径。
-    operands = _fused_index_topk_operands(max_blocks=256)
+    assert msa_m3_npu_module._can_use_index_score_topk_fusion(topk) is False
 
-    actual = msa_m3_npu_module._fused_index_topk(**operands, topk=topk)
 
-    assert actual is None
-    fused_index_ops.assert_not_called()
+@pytest.mark.parametrize("topk", [1, 2, 4, 12, 17, 127])
+def test_fusion_gate_rejects_unaligned_topk(topk: int) -> None:
+    """Unaligned ``topk`` must not reach the operator.
+
+    上机实测（Ascend950DT，PR #15456 kernel）：kernel 只对 ``k % 8 == 0`` 走整行
+    DataCopy 写回，其余按槽位标量写；q_len > 1 时除最后一行外都读到未初始化内存
+    （1050427392 / -8388609 之类的垃圾值）。这里断言适配层直接回退分离路径。
+    """
+    assert msa_m3_npu_module._can_use_index_score_topk_fusion(topk) is False
+
+
+@pytest.mark.parametrize("topk", [8, 16, 24, 32, 128])
+def test_fusion_gate_allows_aligned_topk(fused_index_ops: MagicMock, topk: int) -> None:
+    """``k % 8 == 0`` was exact and deterministic in every measured shape."""
+    assert msa_m3_npu_module._can_use_index_score_topk_fusion(topk) is True
+
+
+def test_fusion_gate_requires_device_support(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        msa_m3_npu_module,
+        "_use_index_score_topk_fusion",
+        lambda: False,
+    )
+    assert msa_m3_npu_module._can_use_index_score_topk_fusion(16) is False
+
+
+def test_ascendc_index_prefill_falls_back_when_device_cannot_fuse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """硬件或 CANN 不支持融合时，对齐的 topk 也必须走分离路径。"""
+    monkeypatch.setattr(msa_m3_npu_module, "_use_index_score_topk_fusion", lambda: False)
+    operands = _index_score_test_operands()
+    score = torch.zeros(2, 2, 64)
+    expected = torch.zeros(2, 2, 16, dtype=torch.int32)
+
+    with (
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_score",
+            return_value=score,
+        ) as mock_score,
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_score_topk",
+        ) as mock_fused,
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_prefill_topk",
+            return_value=expected,
+        ) as mock_topk,
+    ):
+        actual = minimax_m3_index_prefill(
+            **operands,
+            max_query_len=2,
+            max_seq_len=2048,
+            topk=16,
+            init_blocks=0,
+            local_blocks=1,
+        )
+
+    assert actual is expected
+    mock_fused.assert_not_called()
+    mock_score.assert_called_once()
+    mock_topk.assert_called_once()
 
 
 def test_fused_index_topk_passes_topk_through(fused_index_ops: MagicMock) -> None:
@@ -1889,44 +1892,10 @@ def test_fused_index_topk_passes_topk_through(fused_index_ops: MagicMock) -> Non
     operands = _fused_index_topk_operands(max_blocks=4)
     fused_index_ops.return_value = torch.zeros(2, 2, 8, dtype=torch.int32)
 
-    actual = msa_m3_npu_module._fused_index_topk(**operands, topk=8)
+    actual = _minimax_m3_index_score_topk(**operands, topk=8)
 
-    assert actual is not None
     assert fused_index_ops.call_args.kwargs["topk"] == 8
-
-
-@pytest.mark.parametrize("topk", [1, 2, 4, 12, 17, 127])
-def test_fused_index_topk_skips_unaligned_topk(topk: int) -> None:
-    """Unaligned ``topk`` must not reach the operator.
-
-    上机实测（Ascend950DT，PR #15456 kernel）：kernel 只对 ``k % 8 == 0`` 走整行
-    DataCopy 写回，其余按槽位标量写；q_len > 1 时除最后一行外都读到未初始化内存
-    （1050427392 / -8388609 之类的垃圾值）。这里断言适配层直接回退分离路径。
-    """
-    idx_q = torch.zeros(4, 2, 128)
-    index_kv_cache = torch.zeros(4, 128, 128)
-    block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
-    cu_seqlens_q = torch.tensor([0, 4], dtype=torch.int32)
-    seq_lens = torch.tensor([512], dtype=torch.int32)
-    start_loc = torch.tensor([0], dtype=torch.int32)
-
-    with (
-        patch.object(msa_m3_npu_module, "_use_index_score_topk_fusion", return_value=True),
-        patch.object(msa_m3_npu_module, "_minimax_m3_index_score") as index_score,
-    ):
-        result = msa_m3_npu_module._fused_index_topk(
-            idx_q,
-            index_kv_cache,
-            block_table,
-            cu_seqlens_q,
-            seq_lens,
-            start_loc,
-            None,
-            topk,
-        )
-
-    assert result is None
-    index_score.assert_not_called()
+    assert tuple(actual.shape) == (2, 2, 8)
 
 
 @pytest.mark.parametrize(
@@ -1958,14 +1927,13 @@ def test_fused_index_topk_forwards_forced_blocks(
     }
     fused_index_ops.return_value = torch.zeros(2, 2, 16, dtype=torch.int32)
 
-    actual = msa_m3_npu_module._fused_index_topk(
+    _minimax_m3_index_score_topk(
         **operands,
         topk=16,
         init_blocks=init_blocks,
         local_blocks=local_blocks,
     )
 
-    assert actual is not None
     fused_index_ops.assert_called_once()
     kwargs = fused_index_ops.call_args.kwargs
     assert kwargs["init_blocks"] == init_blocks
@@ -1991,13 +1959,8 @@ def test_fused_index_topk_forwards_forced_blocks_for_multi_token_requests(
     operands = _fused_index_topk_operands(total_q=4, max_blocks=256)
     fused_index_ops.return_value = torch.zeros(2, 4, 16, dtype=torch.int32)
 
-    actual = msa_m3_npu_module._fused_index_topk(
-        **operands,
-        topk=16,
-        local_blocks=1,
-    )
+    _minimax_m3_index_score_topk(**operands, topk=16, local_blocks=1)
 
-    assert actual is not None
     fused_index_ops.assert_called_once()
     assert fused_index_ops.call_args.kwargs["local_blocks"] == 1
 
@@ -2009,78 +1972,10 @@ def test_fused_index_topk_allows_multi_token_requests_without_forced_blocks(
     operands = _fused_index_topk_operands(total_q=4, max_blocks=256)
     fused_index_ops.return_value = torch.zeros(2, 4, 16, dtype=torch.int32)
 
-    actual = msa_m3_npu_module._fused_index_topk(**operands, topk=16)
+    _minimax_m3_index_score_topk(**operands, topk=16)
 
-    assert actual is not None
     fused_index_ops.assert_called_once()
     assert fused_index_ops.call_args.kwargs["local_blocks"] == 0
-
-
-@pytest.mark.parametrize("topk", [4, 129])
-def test_fused_index_topk_falls_back_on_unsupported_topk(
-    fused_index_ops: MagicMock,
-    topk: int,
-) -> None:
-    """``topk`` 未对齐 8 或超出算子范围时交回分离 TopK，且不调用融合算子。"""
-    operands = _fused_index_topk_operands(max_blocks=256)
-
-    actual = msa_m3_npu_module._fused_index_topk(**operands, topk=topk)
-
-    assert actual is None
-    fused_index_ops.assert_not_called()
-
-
-@pytest.mark.parametrize("topk", [8, 16, 24, 32])
-def test_fused_index_topk_allows_aligned_topk(topk: int) -> None:
-    """``k % 8 == 0`` was exact and deterministic in every measured shape."""
-    idx_q = torch.zeros(4, 2, 128)
-    index_kv_cache = torch.zeros(4, 128, 128)
-    block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
-    cu_seqlens_q = torch.tensor([0, 4], dtype=torch.int32)
-    seq_lens = torch.tensor([512], dtype=torch.int32)
-    start_loc = torch.tensor([0], dtype=torch.int32)
-    indices = torch.arange(topk, dtype=torch.int32).repeat(2, 4, 1)
-
-    with (
-        patch.object(msa_m3_npu_module, "_use_index_score_topk_fusion", return_value=True),
-        patch.object(msa_m3_npu_module, "_minimax_m3_index_score", return_value=indices) as index_score,
-    ):
-        result = msa_m3_npu_module._fused_index_topk(
-            idx_q,
-            index_kv_cache,
-            block_table,
-            cu_seqlens_q,
-            seq_lens,
-            start_loc,
-            None,
-            topk,
-        )
-
-    index_score.assert_called_once()
-    assert index_score.call_args.kwargs["topk"] == topk
-    assert result is not None
-    assert result.shape == indices.shape
-
-
-def test_cann_index_score_rejects_bad_causal_mask_shape() -> None:
-    idx_q = torch.zeros(1, 2, 128)
-    index_key_cache = torch.zeros(4, 128, 128)
-    block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
-    cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32)
-    seq_lens = torch.tensor([128], dtype=torch.int32)
-    start_loc = torch.tensor([1], dtype=torch.int32)
-    bad_mask = torch.zeros(16, 16, dtype=torch.int8)
-
-    with pytest.raises(ValueError, match="causal mask must be 2048x2048"):
-        msa_m3_npu_module._minimax_m3_index_score(
-            idx_q,
-            index_key_cache,
-            block_table,
-            cu_seqlens_q,
-            seq_lens,
-            start_loc,
-            bad_mask,
-        )
 
 
 def test_ascendc_index_decode_uses_fused_topk_for_speculative_decode(fused_index_ops: MagicMock) -> None:
@@ -2254,24 +2149,6 @@ def test_ascendc_index_decode_keeps_separate_helpers_when_unsorted(
     assert counts is expected_counts
     assert "topk" not in mock_score.call_args.kwargs
     mock_separate.assert_called_once()
-
-
-@pytest.mark.parametrize(
-    ("device_type", "expected"),
-    [(AscendDeviceType.A5, True), (AscendDeviceType.A3, False), (AscendDeviceType.A2, False)],
-)
-def test_index_score_topk_fusion_is_limited_to_ascend_950(
-    device_type: AscendDeviceType,
-    expected: bool,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # 只 mock 工具链探测，硬件判断走真实能力位，确保 A5 之外不会启用融合。
-    monkeypatch.setattr(msa_m3_npu_module, "_cann_index_score_topk_fusion_available", lambda: True)
-    monkeypatch.setattr(msa_m3_npu_module, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
-    msa_m3_npu_module.index_score_topk_fusion_available.cache_clear()
-
-    assert msa_m3_npu_module._use_index_score_topk_fusion() is expected
-    msa_m3_npu_module.index_score_topk_fusion_available.cache_clear()
 
 
 @pytest.mark.parametrize(
