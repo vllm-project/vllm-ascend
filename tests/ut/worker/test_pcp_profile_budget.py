@@ -10,7 +10,7 @@ from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.mrv2_utils import get_pcp_profile_num_tokens
+from vllm_ascend.utils import get_pcp_profile_num_tokens
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 

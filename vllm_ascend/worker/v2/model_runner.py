@@ -98,7 +98,6 @@ from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target
 from vllm_ascend.kv_trace.kv_trace_runner import install_trace
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.models.host_offload import track_host_offload_owners
-from vllm_ascend.mrv2_utils import get_pcp_profile_num_tokens
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
     runtime_guard_step,
@@ -108,6 +107,7 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     create_hccl_pg_options,
     enable_sfa_dcp_sharded_indexer,
+    get_pcp_profile_num_tokens,
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
     lmhead_tp_enable,

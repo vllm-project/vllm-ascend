@@ -16,9 +16,10 @@ from vllm_ascend.device.hardware_profile import (
     MoECommPolicy,
     get_current_hardware_profile,
 )
-from vllm_ascend.mrv2_utils import get_pcp_profile_num_tokens, use_v2_model_runner
+from vllm_ascend.mrv2_utils import use_v2_model_runner
 from vllm_ascend.quantization.quant_type import A5_SUPPORT_MEGA_MOE_QUANT_TYPES, QuantType
 from vllm_ascend.utils import (
+    get_pcp_profile_num_tokens,
     has_layer_idx,
     is_moe_model,
     vllm_version_is,
