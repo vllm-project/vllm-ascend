@@ -226,7 +226,7 @@ def test_replay_metadata_preserves_pcp_layout_contract(state, monkeypatch, actua
     replay_inputs = replay_mod.DecoderReplayInputs(
         batch, (torch.zeros(1, 1), torch.zeros(1, 1)), state.slots, [], torch.zeros(1)
     )
-    tasks = [] if deferred else None
+    tasks: list[DeviceMetadataTask] | None = [] if deferred else None
     result = replay_mod.DecoderReplayState._build_metadata(state, replay_inputs, offsets, tasks=tasks)
     assert result["decoder.swa_cache"] is metadata
     if deferred:

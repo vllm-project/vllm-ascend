@@ -1280,7 +1280,7 @@ def test_replay_visibility_sharing_is_scoped_to_floor_and_submission(
     monkeypatch.setattr(dsa_v41, "build_replay_swa_visible_lens", visible)
     common = _batch(2, 0, "prefill").local
     floor = torch.zeros_like(common.seq_lens)
-    batch_cache = {}
+    batch_cache: dict[str, Any] = {}
     results = []
     for index, owner in enumerate(owners):
         if index and new_submission:
