@@ -456,6 +456,18 @@ def test_dsv4_window_continuation_restores_live_pages_only(ns):
         ns["_load_entries"](worker, request, 0, [], None)
 
 
+def test_mtp_prefill_uses_same_window_for_save_and_continuation(ns):
+    window_start = ns["_continuation_window_start"]
+    worker = NS(kv_cache_config=NS(dsv4_nominal_windows={4: 8}))
+    saved = NS(target_token_len=114688, num_prompt_tokens=118046)
+    resumed = NS(target_token_len=118046, num_prompt_tokens=118046)
+    assert window_start(worker, 4, 114688, 2, saved) == 57340
+    assert window_start(worker, 4, 114688, 2, resumed) == 57340
+    assert window_start(worker, 0, 114688, 128, resumed) is None
+    resumed.target_token_len += 1
+    assert window_start(worker, 4, 114688, 2, resumed) is None
+
+
 def test_window_save_keeps_public_checkpoint_and_private_tail(ns):
     worker = NS(
         grouped_block_size=[128],

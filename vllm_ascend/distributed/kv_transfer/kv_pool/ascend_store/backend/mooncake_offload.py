@@ -36,8 +36,12 @@ def snapshot_key(worker: LayerwiseKVPoolWorker, request: ReqMeta, group: int, in
     return worker._make_layerwise_full_key(group, f"offload_v1:{incarnation}:{endpoint}:{index}")
 
 
-def _continuation_window_start(worker, group, endpoint, page_tokens):
-    window = getattr(getattr(worker, "kv_cache_config", None), "dsv4_continuation_windows", {}).get(group)
+def _continuation_window_start(worker, group, endpoint, page_tokens, request=None):
+    config = getattr(worker, "kv_cache_config", None)
+    window = getattr(config, "dsv4_continuation_windows", {}).get(group)
+    prefill_end = getattr(request, "num_prompt_tokens", None)
+    if window is None and prefill_end is not None and request.target_token_len <= prefill_end:
+        window = getattr(config, "dsv4_nominal_windows", {}).get(group)
     return None if window is None else max(0, endpoint - window + 1) // page_tokens
 
 
@@ -91,7 +95,7 @@ def _load_entries(worker, request, group, hashes, mask):
         )
     snapshot_start = worker._layerwise_load_snapshot_start(request, group, tokens)
     entries = []
-    first = _continuation_window_start(worker, group, tokens, size) if live_window else None
+    first = _continuation_window_start(worker, group, tokens, size, request) if live_window else None
     for index in range(first or 0, end):
         if not live_window and mask is not None and index < len(mask) and not mask[index]:
             continue
@@ -171,7 +175,7 @@ def _save_entries(worker, request, view, group, hashes):
         if request.target_token_len % transfer_size or full_transfer_blocks > hashed_transfer_blocks:
             snapshot_start = min(full_transfer_blocks, hashed_transfer_blocks) * transfer_size // size
     entries = []
-    window_start = _continuation_window_start(worker, group, request.target_token_len, size)
+    window_start = _continuation_window_start(worker, group, request.target_token_len, size, request)
     if window_start is None and group in getattr(
         getattr(worker, "kv_cache_config", None), "dsv4_window_group_ids", ()
     ) and worker._group_reuses_buffer(group):
@@ -352,7 +356,7 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
                     pages[index] = key
                 live_ids = request.block_ids_by_group[group]
                 first = _continuation_window_start(
-                    worker, group, request.target_token_len, worker.grouped_block_size[group]
+                    worker, group, request.target_token_len, worker.grouped_block_size[group], request
                 )
                 pages = {
                     index: key for index, key in pages.items()

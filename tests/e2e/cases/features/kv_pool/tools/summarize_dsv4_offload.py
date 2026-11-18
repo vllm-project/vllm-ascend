@@ -152,13 +152,21 @@ def summarize(paths):
                         entry["page_bytes"],
                     )
         checked_edges = 0
-        for layer, predecessor in config["predecessors"].items():
-            left, right = by_layer[int(layer)], by_layer[int(predecessor)]
-            if left and right:
-                checked_edges += 1
-                bad_layout += left != right
+        expected_edges = 0
+        for layer, predecessors in config["predecessors"].items():
+            if not isinstance(predecessors, list):
+                predecessors = [predecessors]
+            expected_edges += len(predecessors)
+            for predecessor in predecessors:
+                left, right = by_layer[int(layer)], by_layer[int(predecessor)]
+                if left and right:
+                    checked_edges += 1
+                    if len(predecessors) == 1:
+                        bad_layout += left != right
+                    else:
+                        bad_layout += not (set(left.values()) & set(right.values()))
         component_count = len({e["component"] for e in entries.values()})
-        if component_count == config.get("expected_components") and checked_edges == len(config["predecessors"]):
+        if component_count == config.get("expected_components") and checked_edges == expected_edges:
             complete_layouts.add(config.get("buffers"))
         else:
             incomplete_layouts += 1
