@@ -24,6 +24,11 @@ from vllm_ascend.model_loader.weight_state import iter_module_weight_states
 
 from .bigtensordefaultloader import BigTensorDefaultLoader
 
+# torch_npu exposes the ACL Fractal NZ format only as the raw id 29 (there is
+# no named symbol to import); manifest "format" entries and npu_format_cast
+# calls go through this constant.
+ACL_FORMAT_FRACTAL_NZ = 29
+
 
 @register_model_loader("bigtensorloader")
 class BigTensorLoader(BigTensorDefaultLoader):
@@ -148,7 +153,11 @@ class BigTensorLoader(BigTensorDefaultLoader):
     @staticmethod
     def _is_packed_nz(t: torch.Tensor) -> bool:
         """Check if t is a packed low-bit NZ weight (int8 NZ viewed as int32)."""
-        return t.device.type == "npu" and t.dtype == torch.int32 and int(torch_npu.get_npu_format(t)) == 29
+        return (
+            t.device.type == "npu"
+            and t.dtype == torch.int32
+            and int(torch_npu.get_npu_format(t)) == ACL_FORMAT_FRACTAL_NZ
+        )
 
     def _append_tensor(self, t: torch.Tensor, blob_parts: list, offset: int) -> tuple[dict, int]:
         """Serialize one tensor into blob_parts (16B-aligned), return entry + new offset."""
@@ -410,7 +419,7 @@ class BigTensorLoader(BigTensorDefaultLoader):
             return False, 0, 0, 0
         dev_entries = [e for e in tensors.values() if e.get("device") != "cpu"]
         dev_bytes = sum(e["nbytes"] for e in dev_entries)
-        nz_bytes = sum(e["nbytes"] for e in dev_entries if e["format"] == 29)
+        nz_bytes = sum(e["nbytes"] for e in dev_entries if e["format"] == ACL_FORMAT_FRACTAL_NZ)
         env_chunk_raw = os.getenv("VLLM_ASCEND_BIGTENSOR_BULK_CHUNK_MB")
         if env_chunk_raw is not None:
             try:
@@ -984,8 +993,8 @@ class BigTensorLoader(BigTensorDefaultLoader):
                         tensor = torch.empty(save_shape, dtype=save_dtype)
                         if e.get("device") != "cpu":
                             tensor = tensor.to(target_device)
-                            if e["format"] == 29:
-                                tensor = torch_npu.npu_format_cast(tensor, 29)
+                            if e["format"] == ACL_FORMAT_FRACTAL_NZ:
+                                tensor = torch_npu.npu_format_cast(tensor, ACL_FORMAT_FRACTAL_NZ)
                                 n_nz += 1
                             else:
                                 n_nd += 1
@@ -1006,8 +1015,8 @@ class BigTensorLoader(BigTensorDefaultLoader):
                         view = (
                             dev_chunk.narrow(0, e["offset"] - chunk_base, e["nbytes"]).view(save_dtype).view(save_shape)
                         )
-                        if e["format"] == 29:
-                            tensor = torch_npu.npu_format_cast(view.clone(), 29)
+                        if e["format"] == ACL_FORMAT_FRACTAL_NZ:
+                            tensor = torch_npu.npu_format_cast(view.clone(), ACL_FORMAT_FRACTAL_NZ)
                             n_nz += 1
                         else:
                             tensor = view.clone()  # offset-0 standalone
@@ -1019,8 +1028,8 @@ class BigTensorLoader(BigTensorDefaultLoader):
                             tensor = tensor.clone()
                         else:
                             tensor = tensor.to(target_device)
-                            if e["format"] == 29:
-                                tensor = torch_npu.npu_format_cast(tensor, 29)
+                            if e["format"] == ACL_FORMAT_FRACTAL_NZ:
+                                tensor = torch_npu.npu_format_cast(tensor, ACL_FORMAT_FRACTAL_NZ)
                                 n_nz += 1
                             else:
                                 n_nd += 1
