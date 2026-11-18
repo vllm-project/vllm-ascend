@@ -428,7 +428,11 @@ class BaseKVPoolWorker(ABC):
         self._closed = True
 
     def _build_cache_coordinator(self, vllm_config: VllmConfig) -> AscendStoreCoordinator | None:
-        if self.kv_cache_config is None or not (self.use_hybrid or self.enable_partial_hash_hits):
+        if self.kv_cache_config is None:
+            return None
+        # Hybrid caches need group arbitration; partial hits need hash-level
+        # recovery even for a single cache group.
+        if not self.use_hybrid and not self.enable_partial_hash_hits:
             return None
         speculative_config = getattr(vllm_config, "speculative_config", None)
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
