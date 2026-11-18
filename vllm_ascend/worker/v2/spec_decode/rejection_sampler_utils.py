@@ -407,12 +407,6 @@ def rejection_sample(
     num_logits, vocab_size = target_logits.shape
     has_draft_logits = draft_logits is not None
 
-    # [dfx/nan] Input-side NaN census -- BEFORE the dummy replacement below
-    # so the real draft_logits (or None) is what gets inspected. The packed
-    # row boundaries are passed so mixed prefill/decode or shorter-draft
-    # batches get correct request/step coordinates.
-    log_nan_census(target_logits, draft_logits, num_speculative_steps, cu_num_logits)
-
     # Both upstream kernels detect bonus rows using the total logit count.
     stats_num_logits = num_logits
 
@@ -704,8 +698,11 @@ def rejection_sample(
         use_block_verification=use_block_verification,
     )
 
-    # [dfx/nan] Output-side census: correlate accept0 requests with the
-    # input NaN census logged above for the same step. The packed row
-    # boundaries restrict the count to requests that actually had drafts.
+    # [dfx/nan] Output-side census (the accept0 verdict, which synchronizes
+    # the stream) followed by the input-side census: every host sync lands
+    # after this step's verdict, never at an observation point. The packed
+    # row boundaries give correct request/step coordinates for mixed
+    # prefill/decode or shorter-draft batches.
     log_accept0_census(num_sampled, num_reqs, cu_num_logits)
+    log_nan_census(target_logits, draft_logits, num_speculative_steps, cu_num_logits)
     return sampled, num_sampled

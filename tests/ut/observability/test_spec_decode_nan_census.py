@@ -1,8 +1,13 @@
-# UT for the [dfx/nan] DFX census probes in observability/spec_decode_dfx.
+# UT for the [dfx/nan] DFX probes in observability/spec_decode_dfx.
 #
 # The probes are pure torch (no Triton launch) so they run in the CPU UT
 # environment; the full rejection_sample wiring plus kernel behavior under
 # NaN is covered by the NPU nightly e2e (test_rejection_sample_v2.py).
+#
+# Timing contract: the probes are called AFTER the accept0 verdict of the
+# same step -- the verdict path runs with zero diagnostic kernels in
+# flight, and every host sync lands after the verdict (observer-effect
+# free for timing-sensitive NaN failures).
 #
 # Verified contract:
 #   * clean inputs  -> zero log records even at DEBUG (no log spam on
@@ -10,7 +15,9 @@
 #   * any NaN       -> exactly one record per input tensor carrying
 #     per-row req/step coordinates and NaN counts
 #   * INFO level    -> zero records AND zero tensor work (gate first line)
-#   * num_sampled==1 marks a fully-rejected request (accepted drafts + 1)
+#   * num_sampled==1 marks a fully-rejected request (accepted drafts + 1),
+#     restricted to requests that actually had drafts under packed
+#     cu_num_logits
 
 import logging
 
@@ -123,6 +130,16 @@ def test_draft_logits_nan(capture):
     assert len(recs) == 1, recs
     assert "rows_with_nan=1" in recs[0]
     assert "total_nan=7" in recs[0]
+    assert "slot=1 step=3 nan=7" in recs[0]
+
+
+def test_draft_logits_none_no_crash(capture):
+    dfx.log_nan_census(_clean_target(), None, K)
+    assert capture.records == []
+    # and with a poisoned target while draft is None:
+    dfx.log_nan_census(_with_nan(_clean_target(), 0, 2), None, K)
+    assert len(_target_records(capture)) == 1
+    assert _draft_records(capture) == []
 
 
 def test_packed_rows_mixed_boundaries(capture):
@@ -157,18 +174,10 @@ def test_packed_rows_uniform_boundaries_match_legacy(capture):
     assert "req=1 step=0 nan=1" in recs[0]
 
 
-def test_draft_logits_none_no_crash(capture):
-    dfx.log_nan_census(_clean_target(), None, K)
-    assert capture.records == []
-    # and with a poisoned target while draft is None:
-    dfx.log_nan_census(_with_nan(_clean_target(), 0, 2), None, K)
-    assert len(_target_records(capture)) == 1
-    assert _draft_records(capture) == []
-
-
 def test_info_level_silent(capture_info):
     t = _with_nan(_clean_target(), 6, V)  # poisoned, but gate closed
     dfx.log_nan_census(t, torch.zeros(4, K, V), K)
+    dfx.log_accept0_census(torch.tensor([6], dtype=torch.int32), 1)
     assert capture_info.records == [], f"INFO must stay silent, got {_messages(capture_info)}"
 
 

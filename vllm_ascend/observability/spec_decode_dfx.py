@@ -82,13 +82,22 @@ def log_nan_census(
     degenerate but legal token (id 0). A single census record therefore
     identifies exactly which request/step was poisoned.
 
+    Timing: call this AFTER the accept0 verdict of the same step. The
+    verdict path runs with zero diagnostic kernels in flight; this
+    function issues its reductions only after the verdict's own sync has
+    drained the stream, so a sync can never land at an observation point
+    of the verdict path (see the reviewer discussion on observer effects
+    for timing-sensitive NaN failures).
+
     ``cu_num_logits`` (inclusive cumsum over rows per request) should be
     passed whenever available: without it the coordinates assume a uniform
     ``num_speculative_steps + 1`` layout, which misassigns rows in mixed
-    prefill/decode or shorter-draft batches.
+    prefill/decode or shorter-draft batches. ``draft_logits`` keeps the
+    uniform ``slot`` layout (its ``[R, K, V]`` shape is padded and fixed).
 
-    DEBUG-gated: INFO pays one integer compare per step; DEBUG pays one
-    device reduction + D2H sync per input tensor (diagnostic mode only).
+    DEBUG-gated: INFO pays one integer compare per step; DEBUG pays two
+    syncs (the verdict-path one plus a microsecond-scale read of the
+    freshly issued reductions) -- all after the verdict.
     """
     if not _logger.isEnabledFor(logging.DEBUG):
         return
