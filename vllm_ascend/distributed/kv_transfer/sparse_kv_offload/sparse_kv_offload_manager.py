@@ -520,12 +520,11 @@ def get_selective_sdma_device_memory_bytes(
     shared_layers = getattr(sparse_kv_offload_config, "indexer_types", ()).count("shared")
     memory_bytes += shared_layers * SELECTIVE_LIM_LAYER_FIELDS * torch.int64.itemsize * len(sizes)
     memory_bytes += shared_layers * rows * sparse_kv_offload_config.topk_buffer_size * torch.int32.itemsize
-    if get_tensor_model_parallel_rank() == 0:
-        block_size = vllm_config.cache_config.block_size
-        memory_bytes += SelectiveSDMATransfer.device_memory_bytes(rows, block_size * k_bytes, block_size * v_bytes)
-        memory_bytes += SelectiveSDMATransfer.device_memory_bytes(
-            vllm_config.scheduler_config.max_num_batched_tokens, k_bytes, v_bytes
-        )
+    block_size = vllm_config.cache_config.block_size
+    memory_bytes += SelectiveSDMATransfer.device_memory_bytes(rows, block_size * k_bytes, block_size * v_bytes)
+    memory_bytes += SelectiveSDMATransfer.device_memory_bytes(
+        vllm_config.scheduler_config.max_num_batched_tokens, k_bytes, v_bytes
+    )
     return memory_bytes
 
 
@@ -541,6 +540,8 @@ _VLLM_NULL_BLOCK_COUNT = 1
 def empty_aligned_int8_cpu_tensors(
     sizes: list[int],
     alignment: int = _CPU_CACHE_ALIGNMENT,
+    *,
+    local_host_pool: bool = False,
 ) -> list[torch.Tensor]:
     """
     Allocate multiple int8 tensors with specified sizes,
@@ -550,7 +551,8 @@ def empty_aligned_int8_cpu_tensors(
     """
     chunk_nums = [cdiv(size, alignment) for size in sizes]
     total_chunk_num = 1 + sum(chunk_nums)
-    raw_tensor = offload.empty([total_chunk_num * alignment], dtype=torch.int8, pin_memory=True)
+    allocate = torch.empty if local_host_pool else offload.empty
+    raw_tensor = allocate([total_chunk_num * alignment], dtype=torch.int8, pin_memory=True)
     base_addr = raw_tensor.data_ptr()
     if base_addr % alignment:
         base_addr = (base_addr // alignment + 1) * alignment
@@ -679,6 +681,11 @@ def plan_sparse_kv_offload_memory(
     )
 
 
+def get_sparse_kv_offload_dram_limit_bytes(config: SparseKVOffloadConfig, tp_size: int) -> int:
+    limit = int(config.dram_size_per_dp_GB * (1 << 30))
+    return limit // tp_size if config.selective_offload else limit
+
+
 def get_sparse_kv_offload_cpu_pool_size_bytes(
     kv_cache_config: KVCacheConfig,
 ) -> int:
@@ -704,11 +711,14 @@ def allocate_kv_cache_tensors_for_sparse_kv_offload(
     tp_rank: int,
     keep_device_kv_cache: bool,
     npu_kv_cache_allocate_func: typing.Callable,
+    *,
+    local_host_pool: bool = False,
 ):
-    if tp_rank == 0:
+    if tp_rank == 0 or local_host_pool:
         [k_tensor_cpu, v_tensor_cpu] = empty_aligned_int8_cpu_tensors(
             [k_tensor_size, v_tensor_size],
             alignment,
+            local_host_pool=local_host_pool,
         )
     else:
         k_tensor_cpu = None
@@ -767,7 +777,7 @@ def reshape_kv_cache_tensors_for_sparse_kv_offload(
     k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape) if raw_k_tensor is not None else None
     v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape) if raw_v_tensor is not None else None
 
-    if tp_rank == 0:
+    if tp_rank == 0 or sparse_kv_offload_config.selective_offload:
         k_cache_cpu = raw_k_tensor_cpu.view(k_cache_dtype).view(k_shape)
         v_cache_cpu = raw_v_tensor_cpu.view(v_cache_dtype).view(v_shape)
     else:
@@ -922,35 +932,54 @@ class SparseKVOffloadManager:
         if not getattr(sparse_kv_offload_config, "selective_offload", False):
             _sparse_kv_ops()
 
-        dram_limit_bytes = int(sparse_kv_offload_config.dram_size_per_dp_GB * (1 << 30))
+        dram_limit_bytes = get_sparse_kv_offload_dram_limit_bytes(sparse_kv_offload_config, self.tp_size)
         planned_pool_size_bytes = get_sparse_kv_offload_cpu_pool_size_bytes(kv_cache_config)
         if planned_pool_size_bytes > dram_limit_bytes:
             raise ValueError(
                 "Sparse KV offload planned CPU pool exceeds DRAM limit after "
                 "alignment: "
                 f"planned={planned_pool_size_bytes / (1 << 30):.2f} GiB, "
-                f"limit={sparse_kv_offload_config.dram_size_per_dp_GB} GiB, "
+                f"per-pool limit={dram_limit_bytes / (1 << 30):.2f} GiB, "
                 f"num_blocks={kv_cache_config.num_blocks}"
             )
         actual_pool_size_bytes = min(planned_pool_size_bytes, dram_limit_bytes)
         logger.info(
             "SparseKVOffloadManager starts CPU KV pool initialization: "
-            "planned=%.2f GiB, configured_limit=%s GiB, num_blocks=%s.",
+            "tp_rank=%d, rank_local=%s, planned=%.2f GiB, configured_DP_limit=%s GiB, num_blocks=%s.",
+            self.tp_rank,
+            self.local_host_pool,
             actual_pool_size_bytes / (1 << 30),
             sparse_kv_offload_config.dram_size_per_dp_GB,
             kv_cache_config.num_blocks,
         )
         config = offload.OffloadConfig()
         config.device_id = torch_npu.npu.current_device()
-        config.reserve_size = actual_pool_size_bytes
-        config.alloc_size = actual_pool_size_bytes if self.tp_rank == 0 else 0
-        config.world_size = self.tp_size
-        config.rank_id = self.tp_rank
         config.scene = offload.Scene.SHARED
-        store_port = OFFLOAD_STORE_PORT_BASE + parallel_config.data_parallel_index
-        config.store_url = f"tcp://127.0.0.1:{store_port}"
+        store_index = parallel_config.data_parallel_index
+        if self.local_host_pool:
+            # The descriptor-copy runtime requires one nonempty local host slice.
+            config.reserve_size = _CPU_CACHE_ALIGNMENT
+            config.alloc_size = _CPU_CACHE_ALIGNMENT
+            config.world_size = 1
+            config.rank_id = 0
+            store_index = store_index * self.tp_size + self.tp_rank
+        else:
+            config.reserve_size = actual_pool_size_bytes
+            config.alloc_size = actual_pool_size_bytes if self.tp_rank == 0 else 0
+            config.world_size = self.tp_size
+            config.rank_id = self.tp_rank
+        config.store_url = f"tcp://127.0.0.1:{OFFLOAD_STORE_PORT_BASE + store_index}"
         assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
-        self.tp_group.barrier()
+        if not self.local_host_pool:
+            self.tp_group.barrier()
+
+    @property
+    def local_host_pool(self) -> bool:
+        return getattr(getattr(self, "sparse_kv_offload_config", None), "selective_offload", False)
+
+    @property
+    def owns_host_pool(self) -> bool:
+        return self.tp_rank == 0 or self.local_host_pool
 
     def _warmup_external_lru_planner_threads(self) -> int:
         if not (self.use_fused_overlap and self.tp_rank == 0):
@@ -1172,7 +1201,7 @@ class SparseKVOffloadManager:
                 )
             self.topk_buffers_k.append(cache_or_caches[OFFLOAD_TOPK_BUFFER_K_INDEX])
             self.topk_buffers_v.append(cache_or_caches[OFFLOAD_TOPK_BUFFER_V_INDEX])
-            if self.tp_rank == 0:
+            if self.owns_host_pool:
                 self.k_caches_cpu.append(cache_or_caches[OFFLOAD_K_CACHE_CPU_INDEX])
                 self.v_caches_cpu.append(cache_or_caches[OFFLOAD_V_CACHE_CPU_INDEX])
 
@@ -1213,7 +1242,6 @@ class SparseKVOffloadManager:
                 else:
                     self.selective_followers.setdefault(leader, []).append(host_layers[index])
             self.selective_group_tails = {followers[-1] for followers in self.selective_followers.values()}
-            self.selective_writeback_fence = torch.zeros(1, dtype=torch.int32, device=device)
             self.selective_row_stride = self.topk_buffers_k[0].shape[1]
             row_blocks = self.selective_row_stride // self.block_size
             hot_blocks = self.topk_buffer_size // self.block_size
@@ -1248,7 +1276,7 @@ class SparseKVOffloadManager:
         self.d2h_src_ptrs_npu = torch.empty(d2h_descriptor_rows, dtype=torch.int64, device=device)
         self.d2h_dst_ptrs_npu = torch.empty(d2h_descriptor_rows, dtype=torch.int64, device=device)
         self.d2h_lengths_npu = torch.empty(d2h_descriptor_rows, dtype=torch.int32, device=device)
-        if self.use_fused_overlap or (selective and self.tp_rank == 0):
+        if self.use_fused_overlap or selective:
             self.current_kv_save_stream = torch_npu.npu.Stream(device=device)
         if self.use_fused_overlap:
             self.fused_plan_stream = torch_npu.npu.Stream()
@@ -1268,54 +1296,62 @@ class SparseKVOffloadManager:
         self.gvas_v_bases: list[int] = []
         # RD2H consumers need byte strides for each TP-shared host KV block.
         self.cpu_block_lens: list[tuple[int, int]] = []
-        gvas_k_tensor = torch.zeros([self.num_layers], dtype=torch.int64, device="npu")
-        gvas_v_tensor = torch.zeros([self.num_layers], dtype=torch.int64, device="npu")
-        cpu_block_lens_tensor = torch.zeros([self.num_layers, 2], dtype=torch.int64, device="npu")
-        shape_k_tensor = torch.zeros([4], dtype=torch.int64, device="npu")
-        shape_v_tensor = torch.zeros([4], dtype=torch.int64, device="npu")
-        if self.tp_rank == 0:
+        if selective:
+            for k_cpu, v_cpu in zip(self.k_caches_cpu, self.v_caches_cpu):
+                self.gvas_k_bases.append(k_cpu.data_ptr())
+                self.gvas_v_bases.append(v_cpu.data_ptr())
+                self.cpu_block_lens.append(
+                    (k_cpu.stride(0) * k_cpu.element_size(), v_cpu.stride(0) * v_cpu.element_size())
+                )
+        else:
+            gvas_k_tensor = torch.zeros([self.num_layers], dtype=torch.int64, device="npu")
+            gvas_v_tensor = torch.zeros([self.num_layers], dtype=torch.int64, device="npu")
+            cpu_block_lens_tensor = torch.zeros([self.num_layers, 2], dtype=torch.int64, device="npu")
+            shape_k_tensor = torch.zeros([4], dtype=torch.int64, device="npu")
+            shape_v_tensor = torch.zeros([4], dtype=torch.int64, device="npu")
+            if self.tp_rank == 0:
+                for layer_id in range(self.num_layers):
+                    k_cpu = self.k_caches_cpu[layer_id]
+                    v_cpu = self.v_caches_cpu[layer_id]
+                    gvas_k_tensor[layer_id] = k_cpu.data_ptr()
+                    gvas_v_tensor[layer_id] = v_cpu.data_ptr()
+                    cpu_block_lens_tensor[layer_id, 0] = (
+                        k_cpu.numel() * k_cpu.element_size() // self.kv_cache_config.num_blocks
+                    )
+                    cpu_block_lens_tensor[layer_id, 1] = (
+                        v_cpu.numel() * v_cpu.element_size() // self.kv_cache_config.num_blocks
+                    )
+                shape_k_tensor.copy_(torch.tensor(self.k_caches_cpu[0].shape, dtype=torch.int64, device="npu"))
+                shape_v_tensor.copy_(torch.tensor(self.v_caches_cpu[0].shape, dtype=torch.int64, device="npu"))
+            self.tp_group.broadcast(gvas_k_tensor, src=0)
+            self.tp_group.broadcast(gvas_v_tensor, src=0)
+            self.tp_group.broadcast(cpu_block_lens_tensor, src=0)
+            self.tp_group.broadcast(shape_k_tensor, src=0)
+            self.tp_group.broadcast(shape_v_tensor, src=0)
             for layer_id in range(self.num_layers):
-                k_cpu = self.k_caches_cpu[layer_id]
-                v_cpu = self.v_caches_cpu[layer_id]
-                gvas_k_tensor[layer_id] = k_cpu.data_ptr()
-                gvas_v_tensor[layer_id] = v_cpu.data_ptr()
-                cpu_block_lens_tensor[layer_id, 0] = (
-                    k_cpu.numel() * k_cpu.element_size() // self.kv_cache_config.num_blocks
-                )
-                cpu_block_lens_tensor[layer_id, 1] = (
-                    v_cpu.numel() * v_cpu.element_size() // self.kv_cache_config.num_blocks
-                )
-            shape_k_tensor.copy_(torch.tensor(self.k_caches_cpu[0].shape, dtype=torch.int64, device="npu"))
-            shape_v_tensor.copy_(torch.tensor(self.v_caches_cpu[0].shape, dtype=torch.int64, device="npu"))
-        self.tp_group.broadcast(gvas_k_tensor, src=0)
-        self.tp_group.broadcast(gvas_v_tensor, src=0)
-        self.tp_group.broadcast(cpu_block_lens_tensor, src=0)
-        self.tp_group.broadcast(shape_k_tensor, src=0)
-        self.tp_group.broadcast(shape_v_tensor, src=0)
-        for layer_id in range(self.num_layers):
-            self.gvas_k_bases.append(gvas_k_tensor[layer_id].item())
-            self.gvas_v_bases.append(gvas_v_tensor[layer_id].item())
+                self.gvas_k_bases.append(gvas_k_tensor[layer_id].item())
+                self.gvas_v_bases.append(gvas_v_tensor[layer_id].item())
 
-            self.cpu_block_lens.append(
-                (
-                    cpu_block_lens_tensor[layer_id, 0].item(),
-                    cpu_block_lens_tensor[layer_id, 1].item(),
+                self.cpu_block_lens.append(
+                    (
+                        cpu_block_lens_tensor[layer_id, 0].item(),
+                        cpu_block_lens_tensor[layer_id, 1].item(),
+                    )
                 )
-            )
 
-        if self.tp_rank != 0 and not selective:
-            cpu_k_shape = [int(x) for x in shape_k_tensor.tolist()]
-            cpu_v_shape = [int(x) for x in shape_v_tensor.tolist()]
-            self.k_caches_cpu = [self._restore_bfloat16_tensor(ptr, cpu_k_shape) for ptr in self.gvas_k_bases]
-            self.v_caches_cpu = [self._restore_bfloat16_tensor(ptr, cpu_v_shape) for ptr in self.gvas_v_bases]
-            logger.info(
-                "[fused_overlap_offload][init] restored shared CPU KV views on "
-                "tp_rank=%s layer_count=%s k_shape=%s v_shape=%s",
-                self.tp_rank,
-                self.num_layers,
-                cpu_k_shape,
-                cpu_v_shape,
-            )
+            if self.tp_rank != 0:
+                cpu_k_shape = [int(x) for x in shape_k_tensor.tolist()]
+                cpu_v_shape = [int(x) for x in shape_v_tensor.tolist()]
+                self.k_caches_cpu = [self._restore_bfloat16_tensor(ptr, cpu_k_shape) for ptr in self.gvas_k_bases]
+                self.v_caches_cpu = [self._restore_bfloat16_tensor(ptr, cpu_v_shape) for ptr in self.gvas_v_bases]
+                logger.info(
+                    "[fused_overlap_offload][init] restored shared CPU KV views on "
+                    "tp_rank=%s layer_count=%s k_shape=%s v_shape=%s",
+                    self.tp_rank,
+                    self.num_layers,
+                    cpu_k_shape,
+                    cpu_v_shape,
+                )
         if self.use_fused_copy_sfa:
             self._bind_copy_sfa_bases()
 
@@ -1324,29 +1360,21 @@ class SparseKVOffloadManager:
         self.selective_sdma_prefill = None
         if selective:
             rows = self.topk_buffers_k[0].shape[0]
-            self.selective_host_gather = HostGatherCoordinator(
-                self.tp_group,
-                self.tp_rank,
-                self.tp_size,
-                rows * self.topk * (self.token_size_bytes_k + self.token_size_bytes_v),
-            )
             self.selective_sdma_prefetch = SelectiveSDMATransfer(
                 rows * self.topk,
                 self.token_size_bytes_k,
                 self.token_size_bytes_v,
                 device,
-                coordinator=self.selective_host_gather,
             )
-            if self.tp_rank == 0:
-                self.selective_sdma_tail = SelectiveSDMATransfer(
-                    rows,
-                    self.block_size * self.token_size_bytes_k,
-                    self.block_size * self.token_size_bytes_v,
-                    device,
-                )
-                self.selective_sdma_prefill = SelectiveSDMATransfer(
-                    self.max_num_tokens, self.token_size_bytes_k, self.token_size_bytes_v, device
-                )
+            self.selective_sdma_tail = SelectiveSDMATransfer(
+                rows,
+                self.block_size * self.token_size_bytes_k,
+                self.block_size * self.token_size_bytes_v,
+                device,
+            )
+            self.selective_sdma_prefill = SelectiveSDMATransfer(
+                self.max_num_tokens, self.token_size_bytes_k, self.token_size_bytes_v, device
+            )
             logger.info("Selective KV uses Host gather, SDMA H2D/D2H, and device-local gather/scatter")
 
         if self.use_fused_overlap:
@@ -1743,7 +1771,7 @@ class SparseKVOffloadManager:
                 )
                 if any(value[0] is not None or value[1] != signature for value in gathered):
                     raise RuntimeError("Native selective TP group definitions differ across ranks")
-                for leader, names in groups:
+                for leader, names in [] if self.local_host_pool else groups:
                     layer_ids = tuple(self._get_offload_layer_id(name) for name in names)
                     if not layer_ids:
                         continue
@@ -1772,7 +1800,7 @@ class SparseKVOffloadManager:
                         layer_ids,
                         coordinator.total_bytes / (1 << 20),
                     )
-                if use_shared_exchange and not self._selective_native_tp_groups:
+                if use_shared_exchange and not self.local_host_pool and not self._selective_native_tp_groups:
                     raise RuntimeError("Native selective TP shared exchange requires a nonempty group")
                 self._selective_tp_exchange_epoch = 0
             except BaseException:
@@ -1856,12 +1884,12 @@ class SparseKVOffloadManager:
         layer_buffers = []
         scatter = []
         coordinator = self._selective_native_tp_groups.get(layer_ids) if self.tp_size > 1 else None
-        if self.tp_size > 1 and coordinator is None:
+        if self.tp_size > 1 and not self.local_host_pool and coordinator is None:
             raise RuntimeError("Native selective TP group does not match the registered layer roles")
         for layer_id, layer_metadata, _ in layers:
             pages_d = layer_metadata.block_table[:rows].to(torch.int32).contiguous()
             pages_h = torch.empty(pages_d.shape, dtype=torch.int32, pin_memory=True)
-            if self.tp_rank == 0:
+            if self.owns_host_pool:
                 host_k, host_v = self.k_caches_cpu[layer_id], self.v_caches_cpu[layer_id]
                 if host_k.shape[0] != host_blocks or host_v.shape[0] != host_blocks:
                     raise RuntimeError("Native selective group Host capacity disagrees with the cache plan")
@@ -2274,8 +2302,6 @@ class SparseKVOffloadManager:
             slot_mapping=device_slots,
             cache_mode="Norm",
         )
-        if self.tp_rank != 0:
-            return
 
         def submit():
             # Build stream-local temporaries from the persistent step metadata.
@@ -2309,8 +2335,6 @@ class SparseKVOffloadManager:
         context = get_forward_context()
         if capturing:
             context._selective_tail_fence_required = True
-        if self.tp_rank != 0:
-            return
         pending = context._selective_tail_writebacks
         if capturing:
             self.current_kv_save_stream.wait_stream(torch_npu.npu.current_stream())
@@ -2324,9 +2348,6 @@ class SparseKVOffloadManager:
 
     def finish_selective_tail_writeback(self) -> None:
         self.wait_for_current_kv_writeback(capturing=True)
-        if get_tensor_model_parallel_world_size() > 1:
-            # Every rank must observe TP0's Host commit before the next replay.
-            get_tp_group().all_reduce(self.selective_writeback_fence)
 
     def offload_new_kv(
         self,
@@ -2346,7 +2367,9 @@ class SparseKVOffloadManager:
             layer_id = self._get_offload_layer_id(layer_name)
             if not has_prefill and k is not None and v is not None:
                 self.current_kv_by_layer[layer_id] = (k, v)
-        use_side_stream = self.tp_rank == 0 and (selective or self.use_fused_overlap) and capturing and not has_prefill
+        use_side_stream = (
+            self.owns_host_pool and (selective or self.use_fused_overlap) and capturing and not has_prefill
+        )
         if not use_side_stream:
             self._offload_new_kv_on_current_stream(
                 slot_mapping,
@@ -2388,13 +2411,10 @@ class SparseKVOffloadManager:
     ) -> None:
         # the has_prefill path (NPU paged cache -> CPU pool D2H) only exists
         # for single-node PD-colocate debug.
-        if self.tp_rank != 0:
-            # Decode-produced K/V is replicated across TP ranks, so TP0 alone
-            # writes new decode tokens. PD pull fills disjoint parts of this
-            # shared pool from all TP ranks through the broadcast GVA.
+        if not self.owns_host_pool:
             return
         if k_cache_cpu is None or v_cache_cpu is None:
-            raise RuntimeError("Sparse KV offload TP0 CPU cache is not registered")
+            raise RuntimeError("Sparse KV offload local CPU cache is not registered")
         if has_prefill and not self.sparse_kv_offload_config.keep_device_kv_cache:
             raise RuntimeError(
                 "Sparse KV offload prefill offload requires "
@@ -2703,7 +2723,7 @@ class SparseKVOffloadManager:
 
     def wait_for_current_kv_writeback(self, capturing: bool = False) -> None:
         selective = getattr(self.sparse_kv_offload_config, "selective_offload", False)
-        if (selective or self.use_fused_overlap) and capturing and self.tp_rank == 0:
+        if (selective or self.use_fused_overlap) and capturing and self.owns_host_pool:
             torch_npu.npu.current_stream().wait_stream(self.current_kv_save_stream)
 
 

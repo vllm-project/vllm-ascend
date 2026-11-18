@@ -73,24 +73,16 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
             speculative_config=None,
         )
         sparse = SimpleNamespace(selective_offload=True, use_fused_copy_sfa=False, topk=2048, topk_buffer_size=2048)
-        for rank, expected in ((0, 10_592_384), (1, 9_699_328)):
-            with (
-                self.subTest(rank=rank),
-                patch.object(manager_module, "get_tensor_model_parallel_rank", return_value=rank),
-            ):
-                self.assertEqual(manager_module.get_selective_sdma_device_memory_bytes(config, sparse), expected)
+        expected = 10_592_384
+        self.assertEqual(manager_module.get_selective_sdma_device_memory_bytes(config, sparse), expected)
+
         sparse.indexer_types = ("full", "shared", "shared", "shared")
         config.compilation_config = SimpleNamespace(cudagraph_capture_sizes=[1, 2, 4])
-        for rank, expected in ((0, 10_592_384), (1, 9_699_328)):
-            with (
-                self.subTest(rank=rank, grouped_descriptors=True),
-                patch.object(manager_module, "get_tensor_model_parallel_rank", return_value=rank),
-            ):
-                lru_order_bytes = 3 * 4 * sparse.topk_buffer_size * 4
-                self.assertEqual(
-                    manager_module.get_selective_sdma_device_memory_bytes(config, sparse),
-                    expected + 1152 + lru_order_bytes,
-                )
+        lru_order_bytes = 3 * 4 * sparse.topk_buffer_size * 4
+        self.assertEqual(
+            manager_module.get_selective_sdma_device_memory_bytes(config, sparse),
+            expected + 1152 + lru_order_bytes,
+        )
         sparse.selective_offload = False
         self.assertEqual(manager_module.get_selective_sdma_device_memory_bytes(config, sparse), 0)
 
@@ -111,7 +103,10 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
         )
         rows = 6
         for rank in (0, 1):
-            with self.subTest(rank=rank), patch.object(manager_module, "get_tensor_model_parallel_rank", return_value=rank):
+            with (
+                self.subTest(rank=rank),
+                patch.object(manager_module, "get_tensor_model_parallel_rank", return_value=rank),
+            ):
                 sparse.indexer_types = ("full", "full", "full")
                 without_shared = manager_module.get_selective_sdma_device_memory_bytes(config, sparse)
                 sparse.indexer_types = ("full", "shared", "shared")
@@ -354,6 +349,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
             use_fused_overlap=False,
             use_fused_copy_sfa=False,
             dram_size_per_dp_GB=dram_size_per_dp_gb,
+            selective_offload=False,
         )
         return vllm_config, kv_cache_config, offload_config
 
@@ -365,7 +361,9 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
             (1, 0, 0, False),
             (0, planned_pool_size, 1, False),
             (1, 0, 1, False),
-            (0, planned_pool_size, 0, True),
+            (0, manager_module._CPU_CACHE_ALIGNMENT, 0, True),
+            (1, manager_module._CPU_CACHE_ALIGNMENT, 0, True),
+            (1, manager_module._CPU_CACHE_ALIGNMENT, 1, True),
         ):
             with self.subTest(rank=rank, dp_index=dp_index):
                 offload_config.selective_offload = selective
@@ -426,19 +424,20 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                 initialized_config = offload_backend.initialize.call_args.args[0]
                 self.assertEqual(
                     initialized_config.reserve_size,
-                    planned_pool_size,
+                    manager_module._CPU_CACHE_ALIGNMENT if selective else planned_pool_size,
                 )
                 self.assertEqual(
                     initialized_config.alloc_size,
                     expected_alloc_size,
                 )
-                self.assertEqual(initialized_config.world_size, 2)
-                self.assertEqual(initialized_config.rank_id, rank)
+                self.assertEqual(initialized_config.world_size, 1 if selective else 2)
+                self.assertEqual(initialized_config.rank_id, 0 if selective else rank)
+                store_index = dp_index * 2 + rank if selective else dp_index
                 self.assertEqual(
                     initialized_config.store_url,
-                    f"tcp://127.0.0.1:{manager_module.OFFLOAD_STORE_PORT_BASE + dp_index}",
+                    f"tcp://127.0.0.1:{manager_module.OFFLOAD_STORE_PORT_BASE + store_index}",
                 )
-                tp_group.barrier.assert_called_once_with()
+                self.assertEqual(tp_group.barrier.call_count, 0 if selective else 1)
 
     def test_manager_rejects_pool_larger_than_dram_limit(self):
         vllm_config, kv_cache_config, offload_config = self._make_manager_init_inputs()
@@ -654,19 +653,24 @@ class TestSelectiveLruState(unittest.TestCase):
                     patch.object(torch, "zeros", side_effect=cpu_zeros),
                     patch.object(torch, "tensor", side_effect=cpu_tensor),
                     patch.object(manager, "_register_offload_layers"),
-                    patch.object(manager_module, "HostGatherCoordinator"),
                     patch.object(manager_module, "SelectiveSDMATransfer"),
                     patch.object(manager_module.torch_npu.npu, "Stream"),
                     patch.object(manager_module.torch_npu.npu, "Event"),
                 ):
                     manager.register_kv_caches(caches)
 
+                manager.tp_group.broadcast.assert_not_called()
+                self.assertEqual(manager.gvas_k_bases, [caches[name][2].data_ptr() for name in names])
+                self.assertEqual(manager.gvas_v_bases, [caches[name][3].data_ptr() for name in names])
+                self.assertEqual(manager.cpu_block_lens, [(1024, 512)] * 2)
                 self.assertEqual(len(manager.selective_lru_order), 2)
                 for order in manager.selective_lru_order:
                     self.assertEqual(tuple(order.shape), (2, 128))
                     self.assertEqual(order.dtype, torch.int32)
                     self.assertEqual(order.device, caches[names[0]][4].device)
-                self.assertNotEqual(manager.selective_lru_order[0].data_ptr(), manager.selective_lru_order[1].data_ptr())
+                self.assertNotEqual(
+                    manager.selective_lru_order[0].data_ptr(), manager.selective_lru_order[1].data_ptr()
+                )
                 order_ptrs = [order.data_ptr() for order in manager.selective_lru_order]
                 for keys, requests in zip(manager.selective_hot_keys, manager.selective_hot_requests):
                     keys.fill_(7)

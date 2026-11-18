@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import msgspec
 import pytest
+import torch
 
 pytest.importorskip("torch")
 pytest.importorskip("vllm")
@@ -1501,6 +1502,59 @@ def test_member0_pulls_main_and_indexer_slice():
     assert info["d_indexer_ids"] == [10, 11]
     assert 8050 in local  # coalesced head of [10, 11]
     assert 8060 not in local and 8065 not in local
+
+
+def test_nonzero_decode_rank_stages_all_local_host_kv_before_completion():
+    thread = _make_indexer_only_read_thread([10, 11], main_dest=[20, 21])
+    thread.tp_rank = 1
+    thread._state.tp_size = 4
+    thread._state.full_layer_names = ("model.layers.1.self_attn",)
+    thread._state.shared_kv_staging = MagicMock()
+    layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000)
+    thread._resolve_read_layer = MagicMock(return_value=layer)
+    thread._read_main_via_device = MagicMock()
+    thread.engine = MagicMock()
+    thread.engine.batch_transfer_sync_read.return_value = 0
+
+    thread._do_read_batch(layer["layer_name"], [("req-0", [1, 2], [7, 8], 0, 0)], p_session="p")
+
+    thread.engine.batch_transfer_sync_read.assert_called_once_with("p", [8050], [7035], [10])
+    thread._read_main_via_device.assert_called_once_with("p", layer["layer_name"], [(3200, 1010, 20), (4400, 2020, 40)])
+
+
+def test_staged_host_reads_complete_each_copy_before_reusing_device_buffer():
+    thread = _make_read_thread()
+    staging = torch.empty(16, dtype=torch.uint8)
+    thread._state.shared_kv_staging = staging
+    thread._staging_stream = MagicMock()
+    thread.engine = MagicMock()
+    actions = []
+
+    def read(session, device, peer, sizes):
+        actions.append(("d2d", list(device), list(peer), list(sizes)))
+        return 0
+
+    def copy(device, host, sizes, direction):
+        assert direction == 1
+        actions.append(("d2h", device.tolist(), host.tolist(), sizes.tolist()))
+
+    thread.engine.batch_transfer_sync_read.side_effect = read
+    thread._staging_stream.synchronize.side_effect = lambda: actions.append(("sync",))
+    with (
+        patch("torch_npu.npu.stream"),
+        patch.object(torch.ops._C_ascend, "swap_blocks_batch", side_effect=copy, create=True),
+    ):
+        thread._read_main_via_device("p", "shared", [(1000, 2000, 12), (3000, 4000, 6)])
+
+    base = staging.data_ptr()
+    assert actions == [
+        ("d2d", [base, base + 12], [2000, 4000], [12, 4]),
+        ("d2h", [base, base + 12], [1000, 3000], [12, 4]),
+        ("sync",),
+        ("d2d", [base], [4004], [2]),
+        ("d2h", [base], [3004], [2]),
+        ("sync",),
+    ]
 
 
 def test_nonzero_member_skips_main_and_pulls_other_indexer_slice():

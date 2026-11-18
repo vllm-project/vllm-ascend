@@ -1023,14 +1023,19 @@ class NPUModelRunner(GPUModelRunner):
             if started:
                 if modified_pages:
                     ids, scan_error = None, None
-                    if native.tp_size == 1 or native.tp_rank == 0:
+                    local_host_pool = getattr(native, "local_host_pool", False)
+                    if native.tp_size == 1 or local_host_pool or native.tp_rank == 0:
                         try:
                             ids = native.selective_native_cache_ids_for_modified_pages(
                                 modified_pages, set(active.values())
                             )
                         except Exception as error:
                             scan_error = str(error)
-                    if native.tp_size > 1:
+                    if native.tp_size > 1 and local_host_pool:
+                        scans = self._selective_tp_all_gather(native, (scan_error, ids), "page scan")
+                        scan_error = next((error for error, _ in scans if error is not None), None)
+                        ids = set().union(*(rank_ids for _, rank_ids in scans if rank_ids is not None))
+                    elif native.tp_size > 1:
                         payload = (scan_error, ids) if native.tp_rank == 0 else None
                         scan_error, ids = native.tp_group.broadcast_object(payload, src=0)
                     if scan_error is not None:

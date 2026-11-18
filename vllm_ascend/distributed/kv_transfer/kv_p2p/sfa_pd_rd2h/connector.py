@@ -3,10 +3,10 @@
 """PD-disaggregated SFA Remote D2H KV-transfer connector.
 
 This connector is dedicated to decode offload. On the Decode node
-(``kv_consumer``), remote Prefill exposes its KV and Decode pulls shared MLA
-KV into a CPU pinned offload pool, while full MLA and Indexer KV land in HBM.
-The CPU pool and sparse resident-cache load path are owned by
-:class:`SparseKVOffloadManager`.
+(``kv_consumer``), remote Prefill exposes its KV. Selective offload pulls full
+MLA and Indexer KV into local HBM and stages shared MLA KV in HBM before
+copying it to a rank-local pinned Host pool. The pool and sparse resident-cache
+load path are owned by :class:`SparseKVOffloadManager`.
 """
 
 from typing import TYPE_CHECKING, Any

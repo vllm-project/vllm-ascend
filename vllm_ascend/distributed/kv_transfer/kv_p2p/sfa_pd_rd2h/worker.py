@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Worker side of the decode-offload SFA Remote D2H connector.
 
-D (``kv_consumer``): binds to :class:`SparseKVOffloadManager`'s TP-shared CPU
-KV pool and receives indexer KV into rank-local HBM. Every TP rank pulls a
-disjoint part of main MLA KV and its rank-local indexer KV. Decode KV continues
-to be written directly to the same CPU pool by the decode-offload manager.
+D (``kv_consumer``): selective offload pulls full and Indexer KV into local HBM.
+Shared KV goes through rank-local HBM staging before being written to the local
+Host pool owned by :class:`SparseKVOffloadManager`. Legacy offload uses a TP-shared
+Host pool.
 
 P (``kv_producer``): registers its HBM KV with memfabric and runs a pull-mode
 sending thread that notifies D to read (no RDMA push). A per-layer
@@ -46,6 +46,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     infer_sfa_component_group_ids,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.read_thread import (
+    SELECTIVE_PD_STAGING_BYTES,
     ConsumerReadState,
     MembPullReadThread,
 )
@@ -451,7 +452,7 @@ class SFAPDRD2HConsumerWorker:
         result = {rid: self._cpu_blocks_by_req[rid] for rid in req_ids if rid in self._cpu_blocks_by_req}
         return result or None
 
-    def _build_consumer_read_state(self) -> ConsumerReadState:
+    def _build_consumer_read_state(self, shared_kv_staging=None) -> ConsumerReadState:
         assert self.offload_manager is not None
         return ConsumerReadState(
             num_blocks=self.kv_cache_config.num_blocks,
@@ -466,6 +467,7 @@ class SFAPDRD2HConsumerWorker:
             dest_blocks_by_req=self._dest_blocks_by_req,
             get_offload_layer_id=self.offload_manager._get_offload_layer_id,
             full_layer_names=getattr(self, "_full_names", ()),
+            shared_kv_staging=shared_kv_staging,
             copy_sfa_tail_by_req=self._copy_sfa_tail_by_req,
             topk_k_bases=self._topk_k_bases,
             topk_v_bases=self._topk_v_bases,
@@ -518,7 +520,8 @@ class SFAPDRD2HConsumerWorker:
             raise RuntimeError("SparseKVOffloadManager shared CPU block-size/layer count mismatch")
         self._main_gva_bases = []
         self._main_block_lens = []
-        if self.tp_rank == 0:
+        owns_host_pool = self.tp_rank == 0 or getattr(self.offload_manager, "local_host_pool", False)
+        if owns_host_pool:
             if len(k_caches_cpu) != len(host_names) or len(v_caches_cpu) != len(host_names):
                 raise RuntimeError("SparseKVOffloadManager CPU pool/layer count mismatch")
             host_pools = dict(zip(host_names, zip(k_caches_cpu, v_caches_cpu)))
@@ -596,13 +599,17 @@ class SFAPDRD2HConsumerWorker:
 
         # Device-URMA reads require the D-side destination memory to be registered.
         self._ensure_engine()
+        shared_kv_staging = None
         if selective:
             destinations = {
                 name: cache
                 for name, cache in kv_caches.items()
                 if name in self._full_names or ("indexer" in name.lower() and name not in draft_names)
             }
-            if self.tp_rank == 0:
+            if getattr(self.offload_manager, "local_host_pool", False):
+                shared_kv_staging = torch.empty(SELECTIVE_PD_STAGING_BYTES, dtype=torch.uint8, device="npu")
+                destinations["shared_kv_staging"] = (shared_kv_staging,)
+            elif owns_host_pool:
                 destinations.update({name: pool for name, pool in zip(main_names, self._cpu_pools) if pool is not None})
             regions = collect_storage_merged_register_regions(destinations)
             if not regions.ptrs:
@@ -610,7 +617,7 @@ class SFAPDRD2HConsumerWorker:
             validate_register_region_count(regions)
             global_memfabric_te.register_buffer(regions.ptrs, regions.lengths)
         self._bind_copy_sfa_tail_destinations()
-        read_state = self._build_consumer_read_state()
+        read_state = self._build_consumer_read_state(shared_kv_staging)
         # Start MembPullReadThread (ZMQ ROUTER + memfabric read)
         self._mf_read_thread = MembPullReadThread(
             tp_rank=self.tp_rank,

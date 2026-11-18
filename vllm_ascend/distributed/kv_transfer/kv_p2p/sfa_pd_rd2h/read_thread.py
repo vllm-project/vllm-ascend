@@ -13,6 +13,8 @@ from typing import Any
 
 import msgspec
 import numpy as np
+import torch
+import torch_npu
 import zmq
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
@@ -45,6 +47,9 @@ DEST_BLOCK_WAIT_TIMEOUT = 2.0
 DEST_BLOCK_WAIT_INTERVAL = 0.001
 
 
+SELECTIVE_PD_STAGING_BYTES = 16 << 20
+
+
 @dataclass
 class ConsumerReadState:
     num_blocks: int
@@ -59,6 +64,7 @@ class ConsumerReadState:
     dest_blocks_by_req: dict[str, tuple[list[int], list[int]]]
     get_offload_layer_id: Callable[[str], int]
     full_layer_names: tuple[str, ...] = ()
+    shared_kv_staging: torch.Tensor | None = None
     copy_sfa_tail_by_req: dict[str, CopySfaTailDest] = field(default_factory=dict)
     topk_k_bases: list[int] = field(default_factory=list)
     topk_v_bases: list[int] = field(default_factory=list)
@@ -122,6 +128,8 @@ class MembPullReadThread(threading.Thread):
         self.side_channel_port = side_channel_port
         self.engine = engine
         self._state = state
+        staging = state.shared_kv_staging
+        self._staging_stream = torch_npu.npu.Stream(device=staging.device) if staging is not None else None
         self.ready_event = threading.Event()
         self._p_session: str | None = None
         self._p_layer_meta: dict[str, Any] = {}
@@ -860,12 +868,12 @@ class MembPullReadThread(threading.Thread):
         n_main = 0
         n_indexer = 0
 
-        # The selective Host pool is registered by rank 0. Full KV is local to each D rank.
+        stage_main = state.shared_kv_staging is not None and not layer.get("full_layer")
         pull_main = (
             layer["k_cpu_ptr"] is not None
             and layer["v_cpu_ptr"] is not None
             and group_member_idx == 0
-            and (not state.full_layer_names or layer.get("full_layer") or self.tp_rank == 0)
+            and (not state.full_layer_names or layer.get("full_layer") or stage_main or self.tp_rank == 0)
         )
         if pull_main and len(p_main_block_ids) != len(d_main_ids):
             raise RuntimeError(
@@ -904,6 +912,7 @@ class MembPullReadThread(threading.Thread):
             local_chunks.append(cl)
             length_chunks.append(coalesced_lengths)
 
+        host_transfers = len(local_chunks[0]) + len(local_chunks[1]) if stage_main and n_main else 0
         idx = layer["indexer"]
         if idx is not None and len(p_indexer_block_ids) != len(d_indexer_ids):
             raise RuntimeError(
@@ -1011,7 +1020,7 @@ class MembPullReadThread(threading.Thread):
         lengths = np.concatenate(length_chunks).tolist()
 
         info = None
-        if want_info:
+        if want_info or host_transfers:
             info = {
                 "layer_name": layer_name,
                 "ext_req_id": ext_req_id,
@@ -1023,6 +1032,7 @@ class MembPullReadThread(threading.Thread):
                 "n_indexer": n_indexer,
                 "num_transfers": len(local_ptrs),
                 "atomic_transfers": 2 * n_main + n_indexer,
+                "host_transfers": host_transfers,
             }
         return local_ptrs, peer_ptrs, lengths, info
 
@@ -1040,6 +1050,52 @@ class MembPullReadThread(threading.Thread):
             len(read_info["d_indexer_ids"]),
             read_info["num_transfers"],
         )
+
+    def _read_main_via_device(self, p_session, layer_name, transfers) -> None:
+        staging = self._state.shared_kv_staging
+        assert staging is not None
+        capacity = staging.numel()
+        base = staging.data_ptr()
+        device_ptrs, host_ptrs, peer_ptrs, sizes = [], [], [], []
+        stream = self._staging_stream
+        assert stream is not None
+        with torch_npu.npu.stream(stream):
+            # The read thread must finish both legs before acknowledging or reusing staging.
+            def flush():
+                ret = self.engine.batch_transfer_sync_read(p_session, device_ptrs, peer_ptrs, sizes)
+                if ret != 0:
+                    raise RuntimeError(f"memfabric staged D2D read failed for layer {layer_name}, ret={ret}")
+                try:
+                    torch.ops._C_ascend.swap_blocks_batch(
+                        torch.tensor(device_ptrs, dtype=torch.int64),
+                        torch.tensor(host_ptrs, dtype=torch.int64),
+                        torch.tensor(sizes, dtype=torch.int64),
+                        1,
+                    )
+                finally:
+                    stream.synchronize()
+                device_ptrs.clear()
+                host_ptrs.clear()
+                peer_ptrs.clear()
+                sizes.clear()
+
+            used = 0
+            for host, peer, remaining in transfers:
+                while remaining:
+                    size = min(capacity - used, remaining)
+                    device_ptrs.append(base + used)
+                    host_ptrs.append(host)
+                    peer_ptrs.append(peer)
+                    sizes.append(size)
+                    used += size
+                    host += size
+                    peer += size
+                    remaining -= size
+                    if used == capacity:
+                        flush()
+                        used = 0
+            if sizes:
+                flush()
 
     def _do_read_batch(
         self,
@@ -1064,6 +1120,7 @@ class MembPullReadThread(threading.Thread):
         all_peer_ptrs: list[int] = []
         all_lengths: list[int] = []
         read_infos: list[dict[str, Any]] = []
+        host_transfers: list[tuple[int, int, int]] = []
         for (
             ext_req_id,
             p_main_block_ids,
@@ -1096,7 +1153,8 @@ class MembPullReadThread(threading.Thread):
                     and (
                         (owned_main_end > owned_main_start)
                         if not self._state.full_layer_names
-                        else bool(p_main_block_ids) and (layer.get("full_layer") or self.tp_rank == 0)
+                        else bool(p_main_block_ids)
+                        and (layer.get("full_layer") or self._state.shared_kv_staging is not None or self.tp_rank == 0)
                     )
                 )
                 owns_requested_indexer = (
@@ -1114,14 +1172,16 @@ class MembPullReadThread(threading.Thread):
                     len(p_indexer_block_ids),
                 )
                 continue
-            all_local_ptrs.extend(local_ptrs)
-            all_peer_ptrs.extend(peer_ptrs)
-            all_lengths.extend(lengths)
+            staged = read_info.get("host_transfers", 0) if read_info else 0
+            host_transfers.extend(zip(local_ptrs[:staged], peer_ptrs[:staged], lengths[:staged]))
+            all_local_ptrs.extend(local_ptrs[staged:])
+            all_peer_ptrs.extend(peer_ptrs[staged:])
+            all_lengths.extend(lengths[staged:])
             if want_info:
                 assert read_info is not None
                 read_infos.append(read_info)
 
-        if not all_local_ptrs:
+        if not all_local_ptrs and not host_transfers:
             # This rank may own no main block in a small chunk and the layer may
             # have no rank-local indexer transfer. It still acknowledges
             # READ_DONE so its corresponding P rank can reuse the source.
@@ -1138,8 +1198,11 @@ class MembPullReadThread(threading.Thread):
                 len(all_local_ptrs),
                 atomic_total,
             )
-        ret = self.engine.batch_transfer_sync_read(p_session, all_local_ptrs, all_peer_ptrs, all_lengths)
-        if ret != 0:
-            raise RuntimeError(f"memfabric batch read failed for layer {layer_name}, ret={ret}")
+        if all_local_ptrs:
+            ret = self.engine.batch_transfer_sync_read(p_session, all_local_ptrs, all_peer_ptrs, all_lengths)
+            if ret != 0:
+                raise RuntimeError(f"memfabric batch read failed for layer {layer_name}, ret={ret}")
+        if host_transfers:
+            self._read_main_via_device(p_session, layer_name, host_transfers)
         for read_info in read_infos:
             self._log_read_result(read_info)

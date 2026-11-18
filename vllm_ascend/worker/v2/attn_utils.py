@@ -1523,13 +1523,15 @@ def _allocate_kv_cache(
                 k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, layer_spec)
                 k_factor, v_factor = calc_split_factor([k_dim, v_dim])
                 layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
+                offload_config = get_ascend_config().sparse_kv_offload_config
                 kv_cache_raw_tensors[layer_name] = allocate_kv_cache_tensors_for_sparse_kv_offload(
                     int(layer_size // k_factor),
                     int(layer_size // v_factor),
                     alignment,
                     get_tensor_model_parallel_rank(),
-                    get_ascend_config().sparse_kv_offload_config.keep_device_kv_cache,
+                    offload_config.keep_device_kv_cache,
                     lambda size, align: _allocate_int8_cache_tensor(size, align, device),
+                    local_host_pool=offload_config.selective_offload,
                 )
         elif enable_sfa(vllm_config) and kv_cache_spec_uses_packed_sfa_main_cache(example_spec):
             k_size = kv_cache_tensor_size

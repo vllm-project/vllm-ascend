@@ -92,6 +92,7 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.read_thread import SELECTIVE_PD_STAGING_BYTES
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
@@ -100,6 +101,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     get_selective_sdma_device_memory_bytes,
+    get_sparse_kv_offload_dram_limit_bytes,
     plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
@@ -624,11 +626,16 @@ class NPUWorker(WorkerBase):
             return int(available_device_memory_bytes)
 
         kv_cache_spec = getattr(self, "kv_cache_spec", None) or self.get_kv_cache_spec()
-        dram_limit_bytes = int(sparse_kv_offload_config.dram_size_per_dp_GB * GiB_bytes)
+        dram_limit_bytes = get_sparse_kv_offload_dram_limit_bytes(
+            sparse_kv_offload_config, self.vllm_config.parallel_config.tensor_parallel_size
+        )
         # These buffers are allocated after profiling, when the KV caches are registered.
         available_device_memory_bytes -= get_selective_sdma_device_memory_bytes(
             self.vllm_config, sparse_kv_offload_config
         )
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if sparse_kv_offload_config.selective_offload and kv_transfer_config and kv_transfer_config.is_kv_consumer:
+            available_device_memory_bytes -= SELECTIVE_PD_STAGING_BYTES
         budget = plan_sparse_kv_offload_memory(
             kv_cache_spec=kv_cache_spec,
             vllm_config=self.vllm_config,
