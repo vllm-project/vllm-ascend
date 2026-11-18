@@ -1,0 +1,12 @@
+pr: 20125
+entries:
+  - category: feature
+    text: >-
+      Added opt-in B1 paged verify for the Gemma4 MTP verify step on
+      head_dim=512 layers, which the default TND/PagedAttention capture cannot
+      serve. Set VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY=1 together with MTP
+      speculative decoding and FULL_DECODE_ONLY ACLGraph to capture the verify
+      step with npu_fused_infer_attention_score_v2 BNSD paged ops. The switch
+      is disabled by default and does not affect other models or layers.
+    model: gemma4
+    hardware: [A2, A3]
