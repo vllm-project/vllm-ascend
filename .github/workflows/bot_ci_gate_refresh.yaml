@@ -1,0 +1,148 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: CI Gate Refresh
+
+# Performs the ci-gate retrigger on behalf of pr_refresh_ci_gate.yaml
+# (pull_request_review). The review-event job cannot call the rerun API
+# itself: GITHUB_TOKEN is read-only for every run tied to a fork PR
+# regardless of the triggering event (#22134), and fork runs see no
+# repository secrets. `workflow_run` always executes in the base
+# repository context with a writable token, for same-repo and fork PRs
+# alike, so the actual re-run happens here.
+#
+# This workflow only reads the review-payload artifact produced by the
+# review-event job and talks to the GitHub API - it never checks out or
+# executes code from the PR, which keeps the write token out of reach of
+# untrusted input (the safe pull_request_target-style pattern; the script
+# comes from this repository's default branch, which a PR cannot alter).
+
+on:
+  workflow_run:
+    workflows:
+      - "Refresh CI Gate" # pr_refresh_ci_gate.yaml, the review-event relay
+    types:
+      - completed
+
+permissions:
+  actions: write # POST the rerun endpoints for the pull_request run
+  contents: read # checkout this repository's default branch for the script
+
+concurrency:
+  # Key by head SHA so retrigger runs for the same commit collapse into a
+  # single job: the script tolerates 409 conflicts and re-judges with live
+  # review state, so racing runs are redundant rather than harmful - but
+  # there is no point paying for two of them.
+  group: ci-gate-refresh-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: true
+
+jobs:
+  rerun-gate-jobs:
+    # Only a completed relay run ships a payload; a cancelled relay (a newer
+    # review replaced it) is covered by the replacing run.
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: linux-amd64-cpu-2-hk
+    # May wait for an in-flight pull_request CI run to finish before
+    # re-running its failed gate jobs (see refresh_ci_gate.py).
+    timeout-minutes: 360
+    steps:
+      - name: Download review payload
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          name: ci-gate-refresh-${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: payload
+
+      - name: Export review payload as env
+        run: |
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          import json
+
+          with open("payload/payload.json") as f:
+              payload = json.load(f)
+          for key, value in payload.items():
+              print(f"{key.upper()}={value}")
+          PY
+
+      - name: Checkout this repository's default branch
+        # The script must come from a tree the PR cannot alter (a PR must not
+        # be able to run its own gate logic); the default branch is the
+        # workflow_run checkout default, spelled out here for clarity.
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Re-run the pull_request gate jobs
+        id: rerun
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Maximum time (seconds) to wait for an in-flight pull_request CI
+          # run to complete before giving up.
+          GATE_WAIT_SECONDS: "7200"
+        run: |
+          # Rollout window only: until the PR that introduces this bot is
+          # itself merged, the script is not on the default branch yet and
+          # there is nothing to re-run with. Once merged this never triggers.
+          if [ ! -f ".github/workflows/scripts/refresh_ci_gate.py" ]; then
+            echo "::notice::refresh_ci_gate.py is not on the default branch yet; nothing to re-run."
+            exit 0
+          fi
+          python3 .github/workflows/scripts/refresh_ci_gate.py
+
+      - name: Package gate result
+        # Only this job's own failures (no CI run yet, wait timeout, rerun API
+        # error) need a PR comment; a successful retrigger hands the verdict
+        # back to the re-run pull_request run, whose own packaging step feeds
+        # the comment bot.
+        if: ${{ failure() }}
+        env:
+          CHECK_OUTCOME: ${{ steps.rerun.outcome }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          result_dir = os.path.join(os.environ["RUNNER_TEMP"], "ci-gate-result")
+          os.makedirs(result_dir, exist_ok=True)
+          reason_file = os.path.join(
+              os.environ["RUNNER_TEMP"], "ci_gate_failure_reason.txt")
+          try:
+              with open(reason_file) as f:
+                  reason = f.read().strip()
+          except OSError:
+              reason = ""
+          result = {
+              "conclusion": os.environ["CHECK_OUTCOME"],
+              "reason": reason,
+              "pr": int(os.environ["PR_NUMBER"]),
+              "head_sha": os.environ["HEAD_SHA"],
+          }
+          with open(os.path.join(result_dir, "ci-gate-result.json"), "w") as f:
+              json.dump(result, f)
+          PY
+
+      - name: Upload gate result for the comment bot
+        # Same artifact contract as the ci-gate job: bot_ci_gate_comment.yml
+        # (workflow_run, base repo context) posts it to the PR.
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-gate-result-${{ github.run_id }}
+          retention-days: 1
+          if-no-files-found: error
+          path: ${{ runner.temp }}/ci-gate-result/ci-gate-result.json

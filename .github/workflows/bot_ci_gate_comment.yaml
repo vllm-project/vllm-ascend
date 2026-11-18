@@ -31,7 +31,8 @@ name: CI Gate Comment
 on:
   workflow_run:
     workflows:
-      - "E2E" # pr_test.yaml
+      - "E2E" # pr_test.yaml, the gate verdict itself
+      - "CI Gate Refresh" # bot_ci_gate_refresh.yaml, failure contract of the review retrigger
     types:
       - completed
 
