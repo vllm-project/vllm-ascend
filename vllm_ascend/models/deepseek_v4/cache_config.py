@@ -120,14 +120,15 @@ def build_deepseek_v4_reuse_config(config, groups, num_blocks):
         for group_id, group in enumerate(groups)
         if all(getattr(specs[name], "sliding_window", None) is not None for name in group.layer_names)
     )
+    plan.dsv4_nominal_windows = {
+        group_id: max(
+            specs[name].sliding_window + (getattr(specs[name], "extra_retained_tokens", 0) or 0)
+            for name in groups[group_id].layer_names
+        )
+        for group_id in plan.dsv4_window_group_ids
+    }
     if getattr(config, "speculative_config", None) is None:
-        plan.dsv4_continuation_windows = {
-            group_id: max(
-                specs[name].sliding_window + (getattr(specs[name], "extra_retained_tokens", 0) or 0)
-                for name in groups[group_id].layer_names
-            )
-            for group_id in plan.dsv4_window_group_ids
-        }
+        plan.dsv4_continuation_windows = plan.dsv4_nominal_windows
     plan.dsv4_component_identity = component_layout_identity(groups)
     plan.kv_cache_allocation_alignment = 2 * 1024 * 1024
     plan.kv_transfer_config = config.kv_transfer_config

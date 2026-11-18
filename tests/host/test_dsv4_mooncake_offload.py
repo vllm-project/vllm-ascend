@@ -514,6 +514,7 @@ def test_indexer_transport_drops_only_overlapping_view(ns):
 
 
 def isolated_method(path, cls_name, method_name, ns):
+    ns.setdefault("offload_debug_enabled", lambda: False)
     tree = ast.parse((ROOT / path).read_text())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls_name)
     cls.body = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == method_name]

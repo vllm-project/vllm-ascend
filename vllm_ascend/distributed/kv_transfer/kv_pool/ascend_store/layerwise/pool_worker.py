@@ -80,7 +80,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_dcp_mismatch_info,
     is_kv_save_role,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.offload_diagnostics import offload_event
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.offload_diagnostics import offload_debug_enabled, offload_event
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
 from vllm_ascend.models.deepseek_v4.cache_transfer import transfer_cache_views
 
@@ -2596,6 +2596,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             return
         assert self.layer_load_finished_events is not None
         assert self.kv_recv_thread is not None
+        wait_start = time.monotonic_ns() if offload_debug_enabled() else None
         gate = reset_attention_compute_start_gate()
         try:
             self.kv_recv_thread.raise_if_failed()
@@ -2637,6 +2638,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             raise
         offload_event(
             "compute_release",
+            wait_ns=None if wait_start is None else time.monotonic_ns() - wait_start,
             layer=self.current_layer,
             predecessor=self.prefetch_layer_map.get(self.current_layer),
             requests=sorted(self._current_layerwise_request_ids),
@@ -2717,6 +2719,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
 
     def _wait_for_final_layer_save(self, num_local: int, send_thread: KVTransferThread) -> None:
         """Keep layerwise source buffers alive until the step's last PUT commits."""
+        wait_start = time.monotonic_ns() if offload_debug_enabled() else None
         assert self.layer_save_finished_events is not None
         save_finished_events = self.layer_save_finished_events
         # The final layer may have no save task while earlier layers still copy.
@@ -2748,6 +2751,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 while not save_finished_events[layer_id].wait(timeout=10):
                     send_thread.raise_if_failed()
             send_thread.raise_if_failed()
+        if wait_start is not None:
+            offload_event(
+                "save_drain_time",
+                wait_ns=time.monotonic_ns() - wait_start,
+                requests=sorted(self._current_layerwise_request_ids),
+            )
         pending = getattr(self, "_offload_pending_pages", None)
         if pending:
             if not hasattr(self, "_offload_active_pages"):

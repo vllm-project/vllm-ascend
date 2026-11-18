@@ -45,7 +45,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     get_physical_layer_index,
     reuse_sources,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.offload_diagnostics import offload_event
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.offload_diagnostics import offload_debug_enabled, offload_event
 from vllm_ascend.models.deepseek_v4.cache_config import is_deepseek_v4_cache, validate_dsv4_transfer_speculation
 from vllm_ascend.models.deepseek_v4.cache_transfer import transfer_cache_views
 
@@ -678,15 +678,20 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                                 + remote_offset * remote_len
                             )
                             length_list.append(local_len * heads)
+            debug = self._is_dsv4 and offload_debug_enabled()
+            ready_start = time.monotonic_ns() if debug else 0
             batch.event.synchronize()
             if src_list:
                 session = f"{worker.local_ip}:{worker.te_rpc_port}"
+                write_start = time.monotonic_ns() if debug else 0
                 ret = self.engine.batch_transfer_sync_write(session, src_list, dst_list, length_list)
-                if self._is_dsv4:
+                if debug:
                     offload_event(
                         "p2p_send",
                         requests=[req.request_id for req in batch.requests],
                         layer=batch.layer_name,
+                        ready_wait_ns=write_start - ready_start,
+                        write_ns=time.monotonic_ns() - write_start,
                         bytes=sum(length_list),
                         failed=ret < 0,
                     )
@@ -862,7 +867,15 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             writes = self._slot_writes.get(source)
             if writes is None:
                 raise RuntimeError(f"Mooncake Push is missing the shared-slot save hook for layer {source}")
+            start = time.monotonic_ns() if offload_debug_enabled() else None
             wait_futures(writes)
+            if start is not None:
+                offload_event(
+                    "push_slot_wait_time",
+                    layer=layer_idx,
+                    predecessor=source,
+                    wait_ns=time.monotonic_ns() - start,
+                )
 
     def save_kv_layer(self, layer_name: str) -> None:
         if not self.kv_transfer_config.is_kv_producer or not self._prefilling_request_ids:

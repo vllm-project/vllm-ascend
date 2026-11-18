@@ -21,6 +21,9 @@ def summarize(paths):
     released = {}
     comparisons = []
     ranges = Counter()
+    restore_samples = defaultdict(list)
+    timing = Counter()
+    sample_request = None
     for path in paths:
         with Path(path).open(errors="replace") as log:
             for number, line in enumerate(log, 1):
@@ -44,6 +47,26 @@ def summarize(paths):
                 process = (str(path), event.get("pid"))
                 counts[kind] += 1
                 layer = event.get("layer")
+                if kind == "restore" and event.get("source") == "previous_step" and event.get("shared"):
+                    if sample_request is None:
+                        sample_request = (process, event.get("request"))
+                    if sample_request == (process, event.get("request")):
+                        restore_samples[event["group"]].append(event)
+                fields = {
+                    "session_prepare_time": ("build_ns", "get_open_ns", "put_open_ns"),
+                    "compute_release": ("wait_ns",),
+                    "save_drain_time": ("wait_ns",),
+                    "slot_release": ("wait_ns",),
+                    "push_slot_wait_time": ("wait_ns",),
+                    "range_copy_time": ("copy_ns", "successful_bytes"),
+                    "model_step_time": ("execute_ns", "scheduled_tokens"),
+                    "p2p_send": ("ready_wait_ns", "write_ns"),
+                }.get(kind, ())
+                metric = f"{kind}.{event.get('direction')}" if kind == "range_copy_time" else kind
+                for field in fields:
+                    if event.get(field) is not None:
+                        timing[f"{metric}.{field}.total"] += event[field]
+                        timing[f"{metric}.{field}.samples"] += 1
                 if kind == "step_begin":
                     for table in (sources, waiting, released):
                         for key in [key for key in table if key[0] == process]:
@@ -197,6 +220,20 @@ def summarize(paths):
     )
     output.append(f"SLOT_FENCE {fence_status} blocked={evidence['blocked_waits']} ordered={evidence['ordered_fences']}")
     output.append("LIFECYCLE INSUFFICIENT (requires completion/cancellation/GET/PUT/capacity fault cases)")
+    if timing:
+        output.append("PERF_TIMING " + json.dumps(dict(timing), sort_keys=True))
+    for group, samples in sorted(restore_samples.items()):
+        for index in sorted({0, len(samples) // 2, len(samples) - 1}):
+            event = samples[index]
+            details = {
+                field: event.get(field)
+                for field in (
+                    "request", "endpoint", "target", "keys", "planned_bytes",
+                    "nominal_window_tokens", "nominal_first_page", "page_tokens",
+                    "outside_window_pages", "outside_window_bytes",
+                )
+            }
+            output.append(f"PERF_RESTORE group={group} " + json.dumps(details, sort_keys=True))
     output.append(
         "RESULT "
         + ("FAIL" if failed or comparison_failed else "INSUFFICIENT: server scenario coverage requires review")

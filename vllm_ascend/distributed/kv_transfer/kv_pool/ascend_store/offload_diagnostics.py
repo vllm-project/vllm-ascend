@@ -11,9 +11,16 @@ from vllm.logger import logger
 from vllm_ascend.ascend_config import get_ascend_config
 
 
+def offload_debug_enabled() -> bool:
+    try:
+        return bool(get_ascend_config().kv_pool_range_debug)
+    except Exception:
+        return False
+
+
 def offload_event(event: str, **fields) -> None:
     try:
-        if not get_ascend_config().kv_pool_range_debug:
+        if not offload_debug_enabled():
             return
         payload = dict(event=event, pid=os.getpid(), t_ns=time.monotonic_ns(), **fields)
         logger.info("DSV4_OFFLOAD %s", json.dumps(payload, separators=(",", ":")))
