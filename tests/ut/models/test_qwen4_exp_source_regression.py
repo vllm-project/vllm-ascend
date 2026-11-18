@@ -63,10 +63,15 @@ def test_qsa_hot_paths_do_not_add_host_tensor_syncs() -> None:
             "vllm_ascend/models/qwen4_exp/ops.py",
             "vllm_ascend/models/qwen4_exp/lightning_indexer.py",
             "vllm_ascend/ops/triton/qwen4_exp/qsa.py",
+            "vllm_ascend/ops/triton/linearnorm/qsa_rmsnorm_mrope.py",
+            "vllm_ascend/ops/triton/linearnorm/qsa_rope_utils.py",
+            "vllm_ascend/ops/triton/linearnorm/split_qkv_rmsnorm_mrope.py",
         )
     )
     assert ".item(" not in qsa_sources
     assert "torch.equal(" not in qsa_sources
+    # Position clamping may be fused into RoPE; its numerical boundary cases
+    # are covered by test_qsa_direct_rope.py on NPU, not by counting launches.
 
 
 def test_qsa_metadata_ignores_full_graph_dummy_request_boundaries() -> None:
@@ -85,8 +90,8 @@ def test_qsa_uses_fused_sparse_backends_and_upstream_qkv_projection() -> None:
     assert "return qsa_select_paged_tokens_lightning(" in qsa
     assert "return dispatch_qsa_attention(" in qsa
     assert "torch.ops.vllm.triton_qsa_rmsnorm_mrope(" in qsa
-    assert "torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(" not in qsa
-    assert "def _project_qkv_gate(" not in qsa
+    assert "torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(" in qsa
+    assert "def _project_qkv_gate(" in qsa
     for fallback in (
         "qsa_select_paged_tokens_reference",
         "qsa_select_paged_tokens_triton",
