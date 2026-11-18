@@ -1,0 +1,4 @@
+pr: 22340
+entries:
+  - category: bugfix
+    text: Prevented unwritten attention outputs in v0.30.0 speculative GDN verification windows wider than eight slots by selecting the existing Triton recurrent path with complete sequence state indices. Narrow-window behavior is unchanged.
