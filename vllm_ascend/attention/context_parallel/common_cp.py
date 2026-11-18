@@ -7,7 +7,7 @@ from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 from vllm.logger import logger
 
 import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
-from vllm_ascend.utils import enable_sfa, model_uses_kpool_indexer
+from vllm_ascend.utils import enable_sfa, is_deepseek_v41, model_uses_kpool_indexer
 
 
 def use_dcp_q_replicate(vllm_config) -> bool:
@@ -41,6 +41,17 @@ def is_pcp_decode_sharding_enabled(vllm_config) -> bool:
     if model_uses_kpool_indexer(getattr(vllm_config, "model_config", None)):
         # TODO: Adapt PCP decode request sharding for GLM-5.3-Flash, including
         # recurrent-state ownership and request ordering across PCP ranks.
+        return False
+    spec = getattr(vllm_config, "speculative_config", None)
+    model_config = getattr(vllm_config, "model_config", None)
+    if (
+        spec is not None
+        and getattr(spec, "enable_adaptive_verification", False)
+        and is_deepseek_v41(getattr(model_config, "hf_text_config", None))
+    ):
+        # Adaptive budgets change request widths after graph dispatch. Keep
+        # decode replicated so the captured request capacity remains valid;
+        # prefill still partitions across PCP ranks.
         return False
     return vllm_config.parallel_config.pcp_shard_decode_requests
 

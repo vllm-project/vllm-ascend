@@ -1844,3 +1844,76 @@ def test_draft_prefill_capture_accepts_draft_slot_mappings(dcp_size: int, num_re
     assert slot_mappings.shape == (1, 16)
     assert context.global_slot_mappings.shape == (1, 8)
     assert context.global_block_tables[0].data_ptr() == manager._local_block_tables[0].data_ptr()
+
+
+@pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY])
+@pytest.mark.parametrize("rank", [0, 1])
+def test_adaptive_verification_replicates_decode(mode, rank):
+    config = _make_pcp_config(
+        mode, speculative_config=SimpleNamespace(method="dspark", enable_adaptive_verification=True)
+    )
+    config.model_config.hf_text_config.model_type = "deepseek_v41"
+    assert not is_pcp_decode_sharding_enabled(config)
+    manager = _make_factory_pcp_manager(config, rank)
+    assert not manager.shard_decode_requests
+    # Dispatch must reserve the entire variable-width decode batch on each
+    # rank, including a zero-draft request beside a full-budget request.
+    widths = np.array([1, 4, 2], dtype=np.int32)
+    assert manager.get_num_tokens_for_dispatch(widths, np.zeros(3, dtype=bool)) == 7
+
+
+def test_v41_pcp_varlen_graph_bound():
+    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41PCPMetadataBuilder
+    from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
+
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(num_speculative_tokens=STATE_RING_ROWS + 1, parallel_drafting=True),
+        use_v2_model_runner=True,
+    )
+    bound = AscendDSAV41PCPMetadataBuilder.get_varlen_cudagraph_max_query_len(config, None)
+    assert bound == STATE_RING_ROWS
+
+
+@pytest.mark.parametrize("draft_budget", [0, 3, 9])
+def test_pcp_adaptive_budget_uses_root_selection(draft_budget):
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    local = ({"a": 3, "b": 6}, {"a": 1, "b": 1}, 1)
+    root = (local[0], local[1], draft_budget)
+    adaptive = SimpleNamespace(_batch_budget=local)
+    group = MagicMock()
+    group.broadcast_object.return_value = root
+    with patch("vllm_ascend.worker.v2.pcp_manager.get_pcp_group", return_value=group):
+        assert manager.sync_adaptive_budget(adaptive) == 2 + draft_budget
+    assert adaptive._batch_budget == root
+    group.broadcast_object.assert_called_once_with(local, src=0)
+
+
+def test_pcp_draft_confidences_sync_only_active_rows():
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    probabilities = torch.zeros(4, 3)
+    root = torch.tensor([[0.9, 0.8, 0.7], [0.6, 0.5, 0.4]])
+    group = MagicMock()
+    group.broadcast.side_effect = lambda value, src: value.copy_(root)
+    with patch("vllm_ascend.worker.v2.pcp_manager.get_pcp_group", return_value=group):
+        manager.sync_draft_confidences(probabilities, 2)
+    torch.testing.assert_close(probabilities[:2], root)
+    assert torch.count_nonzero(probabilities[2:]) == 0
+
+
+def test_adaptive_pcp_dispatch_uses_admitted_tokens_once():
+    config = _make_pcp_config(
+        CUDAGraphMode.FULL_DECODE_ONLY,
+        speculative_config=SimpleNamespace(method="dspark", enable_adaptive_verification=True),
+    )
+    config.model_config.hf_text_config.model_type = "deepseek_v41"
+    manager = _make_factory_pcp_manager(config, 0)
+    root = ({"a": 3, "b": 3}, {"a": 1, "b": 1}, 1)
+    group = MagicMock()
+    group.broadcast_object.return_value = root
+    with patch("vllm_ascend.worker.v2.pcp_manager.get_pcp_group", return_value=group):
+        manager.sync_adaptive_budget(SimpleNamespace(_batch_budget=root))
+    widths = np.array([4, 4], dtype=np.int32)
+    prefilling = np.zeros(2, dtype=bool)
+    assert manager.get_num_tokens_for_dispatch(widths, prefilling) == 3
+    # A subsequent step without adaptive drafts must use its own schedule.
+    assert manager.get_num_tokens_for_dispatch(widths, prefilling) == 8

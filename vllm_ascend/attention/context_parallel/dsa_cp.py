@@ -248,7 +248,7 @@ class AscendDSAPCPMetadataBuilder(AscendDSAMetadataBuilder):
             num_computed_tokens_cpu=torch.from_numpy(global_batch.num_computed_tokens_np),
             num_reqs=num_reqs,
             num_actual_tokens=global_batch.num_tokens,
-            max_query_len=int(global_batch.num_scheduled_tokens.max()),
+            max_query_len=global_batch.max_query_len or int(global_batch.num_scheduled_tokens.max()),
             max_seq_len=local_common_attn_metadata.max_seq_len,
             block_table_tensor=pcp_context.global_block_tables[cache_group_idx],
             slot_mapping=pcp_context.global_slot_mappings[cache_group_idx],

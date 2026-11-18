@@ -86,6 +86,7 @@ class AscendPCPManager(PCPManager):
     _is_draft_prefill_sharded: bool = False
     # The batch restore_for_sampling handed to sampling and the speculator.
     _sampling_global_batch: InputBatch | None = None
+    _adaptive_decode_num_tokens: int | None = None
     # Draft input buffers and row count overwritten by staged rank-local
     # draft prefill inputs; the rows are stashed in the _draft_*_stash buffers.
     _staged_draft_inputs: tuple[InputBuffers, int] | None = None
@@ -175,6 +176,35 @@ class AscendPCPManager(PCPManager):
             # the scheduled tokens that upstream assigns to rank segments.
             # _pad_hidden_restore_idx writes both scheduled and padding rows.
             self._hidden_restore_idx_buffer = torch.empty(max_num_tokens, dtype=torch.int64, device=device)
+
+    def sync_adaptive_budget(self, adaptive_verification) -> int:
+        """Select one PCP budget before compaction and graph dispatch.
+
+        Upstream cost curves are synchronized within TP only. PCP ranks can
+        profile different costs, so independently selected budgets can differ.
+        Keep this adapter until upstream coordinates adaptive budgets over PCP.
+        """
+        budget = get_pcp_group().broadcast_object(adaptive_verification._batch_budget, src=0)
+        assert budget is not None
+        adaptive_verification._batch_budget = budget
+        _, non_draft_tokens, draft_budget = budget
+        num_tokens = sum(non_draft_tokens.values()) + draft_budget
+        self._adaptive_decode_num_tokens = num_tokens
+        return num_tokens
+
+    def get_num_tokens_for_dispatch(self, num_scheduled_tokens: np.ndarray, is_prefilling: np.ndarray) -> int:
+        # The upstream runner asks PCP to size dispatch from scheduler upper
+        # bounds after adaptive admission. Preserve the selected decode count
+        # so reduced budgets actually select the smaller varlen graph.
+        adaptive_num_tokens = self._adaptive_decode_num_tokens
+        self._adaptive_decode_num_tokens = None
+        if adaptive_num_tokens is not None and not self.is_decode_sharded and not bool(is_prefilling.any()):
+            return adaptive_num_tokens
+        return super().get_num_tokens_for_dispatch(num_scheduled_tokens, is_prefilling)
+
+    def sync_draft_confidences(self, confidence_probs: torch.Tensor, num_reqs: int) -> None:
+        """Use identical confidence inputs to rank draft slots on every PCP rank."""
+        get_pcp_group().broadcast(confidence_probs[:num_reqs], src=0)
 
     def set_runner_state(
         self,
@@ -306,6 +336,7 @@ class AscendPCPManager(PCPManager):
     ) -> AscendInputBatch:
         """Refresh Ascend-only local metadata after upstream PCP partitioning."""
         local_batch.is_dummy = getattr(global_batch, "is_dummy", False)
+        local_batch.max_query_len = global_batch.max_query_len
         self._pad_hidden_restore_idx(global_batch)
         if not self.is_decode_sharded:
             local_batch = self._pad_replicated_decode_graph(global_batch, local_batch)

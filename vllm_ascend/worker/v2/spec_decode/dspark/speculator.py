@@ -476,6 +476,10 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 is_profile=is_profile,
                 num_speculative_tokens=num_speculative_tokens,
             )
+        if self.pcp_manager is not None and self.enable_adaptive_verification and not dummy_run:
+            # Tokens/logits are synchronized by the runner, but upstream does
+            # not broadcast the confidence head used by adaptive allocation.
+            self.pcp_manager.sync_draft_confidences(self.draft_token_confidence_probs, input_batch.num_reqs)
         # vLLM 0.33.0 needs this call; newer runners synchronize after
         # propose(). Never communicate during dummy runs.
         if vllm_version_is("0.33.0") and self.pcp_manager is not None and not dummy_run:
