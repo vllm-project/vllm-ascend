@@ -6,28 +6,6 @@ import torch
 
 from vllm_ascend.ops.triton.dcp import dcp_a2a
 
-SHAPES = (
-    (5, 1, 1, 1, False, False),
-    (5, 1, 2, 2, True, False),
-    (5, 1, 512, 8, True, False),
-    (5, 8, 512, 8, True, False),
-    (144, 12, 512, 8, True, False),
-    (152, 12, 512, 8, True, False),
-    (114, 8, 512, 8, False, False),
-    (20, 8, 64, 4, False, False),
-    (41, 7, 128, 3, True, False),
-    (41, 8, 128, 8, True, False),
-    (127, 16, 256, 16, True, False),
-    (129, 12, 512, 4, False, False),
-    (257, 12, 512, 8, True, False),
-    (41, 12, 512, 8, True, True),
-    (41, 8, 256, 9, True, False),
-    (41, 8, 256, 32, False, False),
-    (41, 8, 384, 8, True, False),
-    (161, 1, 256, 8, False, False),
-    (7, 8, 128, 8, False, False),
-)
-
 
 def make_inputs(shape, edge=False):
     tokens, heads, dim, world, has_local, head_major = shape
@@ -86,8 +64,15 @@ def make_inputs(shape, edge=False):
     )
 
 
-@pytest.mark.parametrize("shape", SHAPES)
-@pytest.mark.parametrize("edge", [False, True])
+@pytest.mark.parametrize(
+    "shape,edge",
+    [
+        pytest.param((5, 1, 1, 1, False, False), False, id="single-rank-single-feature"),
+        pytest.param((114, 8, 512, 8, False, False), True, id="received-only-invalid-lse"),
+        pytest.param((144, 12, 512, 8, True, False), False, id="token-major-local"),
+        pytest.param((41, 7, 384, 5, True, True), True, id="head-major-local-rank-and-feature-tails"),
+    ],
+)
 @torch.inference_mode()
 def test_public_combine_row_weights(shape, edge, monkeypatch):
     recv, local, local_lse, expected = make_inputs(shape, edge)

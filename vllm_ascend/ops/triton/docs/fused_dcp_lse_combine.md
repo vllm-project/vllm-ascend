@@ -78,9 +78,10 @@ compilation counts remain unmeasured.
 ### Row-weighted validation
 
 `test_dcp_combine_row_weights.py` compares public output with independently
-encoded inputs and CPU FP64 weighted reduction. It includes trace-derived logical
-shapes `(144,12,512,8)`, `(152,12,512,8)` and `(114,8,512,8)` as well as smaller
-worlds, D384, non-power-of-two worlds, invalid/extreme LSE and strided local data.
+encoded inputs and CPU FP64 weighted reduction. Four cases cover a single rank and feature, received-only reduction, and
+token-major and head-major local contributions. The head-major case also
+exercises masked rank and feature lanes. Both received-only and local modes
+include invalid and extreme LSE values.
 The test requires at least 99% of BF16 elements to satisfy
 `abs_error <= 2e-5 + 0.004 * abs(reference)`, with maximum absolute error at most
 0.02 and every output finite. Invalid-LSE cases are handled explicitly. These are
