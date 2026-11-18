@@ -201,7 +201,6 @@ If you want to deploy multi-node environment, you need to set up environment on 
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$nic_name
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-    export DYNAMIC_EPLB="true"
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && mkdir -p $PROMETHEUS_MULTIPROC_DIR
@@ -233,7 +232,9 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
-    --additional-config '{"enable_cpu_binding": "True", "multistream_overlap_shared_expert": "True", "eplb_config": {"dynamic_eplb": true, "expert_heat_collection_interval": 50, "algorithm_execution_interval": 5, "eplb_policy_type": 2, "num_redundant_experts": 0}, "enable_flashcomm1": true}'
+    --enable-eplb \
+    --eplb-config '{"num_redundant_experts":0,"window_size":50,"step_interval":50}' \
+    --additional-config '{"enable_cpu_binding": "True", "multistream_overlap_shared_expert": "True", "enable_flashcomm1": true}'
     ```
 
 === "A3 series"

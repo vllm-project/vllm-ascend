@@ -149,14 +149,8 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
     output_size = 128
     group_size = 32
 
-    @patch("vllm_ascend.quantization.methods.wna16.w4a16.get_ascend_config")
     @patch("vllm_ascend.quantization.methods.wna16.w4a16.get_current_vllm_config")
-    def setUp(self, mock_get_current_vllm_config, mock_get_ascend_config):
-        mock_ascend_config = Mock()
-        mock_ascend_config.eplb_config.dynamic_eplb = False
-        mock_ascend_config.eplb_config.expert_map_record_path = None
-        mock_get_ascend_config.return_value = mock_ascend_config
-
+    def setUp(self, mock_get_current_vllm_config):
         mock_vllm_config = Mock()
         mock_vllm_config.quant_config = Mock(
             quant_description={

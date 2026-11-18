@@ -168,11 +168,6 @@ def sync_lora_context(quant_method, lora_context):
 
 
 def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
-    if getattr(base_layer, "dynamic_eplb", False):
-        raise AssertionError(
-            "Ascend MoE LoRA is incompatible with dynamic EPLB "
-            "(expert migration would break the per-expert LoRA layout)."
-        )
     if get_ascend_config().enable_fused_mc2 != 0:
         raise AssertionError(
             "Ascend MoE LoRA cannot patch FusedMC2 path "

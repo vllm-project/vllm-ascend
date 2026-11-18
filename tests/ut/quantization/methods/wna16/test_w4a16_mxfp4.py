@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from tests.ut.base import TestBase
-from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
+from tests.ut.quantization.conftest_quantization import create_mock_vllm_config
 from vllm_ascend.quantization.methods.wna16.w4a16_mxfp4 import AscendW4A16MXFP4FusedMoEMethod
 
 
@@ -14,10 +14,8 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
     intermediate_size = 256
 
     @patch("vllm_ascend.quantization.methods.wna16.w4a16_mxfp4.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.wna16.w4a16_mxfp4.get_ascend_config")
-    def setUp(self, mock_ascend, mock_vllm):
+    def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
-        mock_ascend.return_value = create_mock_ascend_config()
         mx_profile = patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile")
         mx_profile.start().return_value.supports_weight_format.return_value = True
         self.addCleanup(mx_profile.stop)

@@ -162,8 +162,8 @@ def _apply_dynamic_int8_moe_lora(
             "MC2 and FusedMC2 are unsupported."
         )
     lora_context = mlp_compute_input.lora_context
-    if mlp_compute_input.dynamic_eplb:
-        raise NotImplementedError("Ascend quantized MoE LoRA does not support dynamic EPLB.")
+    if mlp_compute_input.use_expert_weight_list:
+        raise NotImplementedError("Ascend quantized MoE LoRA does not support per-expert weight lists.")
 
     hidden_states = mlp_compute_input.hidden_states
     if mlp_compute_input.dynamic_scale is not None or hidden_states.dtype == torch.int8:

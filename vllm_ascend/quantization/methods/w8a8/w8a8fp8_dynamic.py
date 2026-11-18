@@ -117,7 +117,7 @@ class AscendW8A8FP8DynamicFusedMoEMethod(AscendW8A8DynamicFusedMoEMethod):
         activation = mlp_compute_input.activation
         if (
             not mlp_compute_input.fusion
-            or mlp_compute_input.dynamic_eplb
+            or mlp_compute_input.use_expert_weight_list
             or activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
         ):
             return super().apply_gmm1_act_quant(mlp_compute_input)

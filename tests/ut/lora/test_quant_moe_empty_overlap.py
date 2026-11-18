@@ -40,7 +40,7 @@ class TestQuantMoELoRAEmptyOverlap(unittest.TestCase):
                 mlp_input = SimpleNamespace(
                     hidden_states=hidden_states,
                     dynamic_scale=None,
-                    dynamic_eplb=False,
+                    use_expert_weight_list=False,
                     lora_context=object(),
                     expanded_row_idx=object() if comm_type is MoECommType.ALLGATHER else None,
                     topk_ids=object() if comm_type is MoECommType.ALLGATHER else None,

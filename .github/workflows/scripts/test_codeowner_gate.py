@@ -18,8 +18,8 @@ SAMPLE = """
 # comment, ignored
 /vllm_ascend/device @alice @bob
 /vllm_ascend/ops/*.py @carol
-# TODO(owner): /vllm_ascend/eplb
-# /vllm_ascend/eplb @dave
+# TODO(owner): /vllm_ascend/example_feature
+# /vllm_ascend/example_feature @dave
 # SKIP(owner): /tests/ut/
 /docs @erin
 """
@@ -39,7 +39,7 @@ class TestParse:
     def test_todo_rule_with_owners(self, rules):
         todo = [r for r in rules if r.status == "todo"]
         assert len(todo) == 1
-        assert todo[0].pattern == "vllm_ascend/eplb"
+        assert todo[0].pattern == "vllm_ascend/example_feature"
         assert todo[0].owners == ["@dave"]
 
     def test_skip_rule(self, rules):
@@ -105,7 +105,7 @@ class TestApprovals:
         # dave is a TODO owner; the check accepts their approve (gate is
         # permission-model independent on purpose).
         failures, _unclaimed, _self_owned = gate.check_approvals(
-            1, "author", rules, ["vllm_ascend/eplb/x.py"], {"dave": "APPROVED"}
+            1, "author", rules, ["vllm_ascend/example_feature/x.py"], {"dave": "APPROVED"}
         )
         assert failures == []
 
@@ -322,7 +322,7 @@ class TestSkipInApprovals:
 
     def test_todo_owner_approval_counts(self, rules):
         failures, _unclaimed, _self_owned = gate.check_approvals(
-            1, "author", rules, ["vllm_ascend/eplb/x.py"], {"dave": "APPROVED"}
+            1, "author", rules, ["vllm_ascend/example_feature/x.py"], {"dave": "APPROVED"}
         )
         assert failures == []
 

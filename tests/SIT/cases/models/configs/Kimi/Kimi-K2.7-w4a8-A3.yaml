@@ -11,7 +11,6 @@ test_cases:
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
       HCCL_BUFFSIZE: "800"
-      DYNAMIC_EPLB: "true"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--quantization"
@@ -42,8 +41,11 @@ test_cases:
       - "--async-scheduling"
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--enable-eplb"
+      - "--eplb-config"
+      - '{"num_redundant_experts":0}'
       - "--additional-config"
-      - '{"eplb_config":{"dynamic_eplb":true},"ascend_compilation_config":{"enable_static_kernel":false},"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}'
+      - '{"ascend_compilation_config":{"enable_static_kernel":false},"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}'
       - "--profiler-config"
       - '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}'
       - "--mm-processor-cache-gb"
@@ -73,7 +75,6 @@ test_cases:
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
       HCCL_BUFFSIZE: "800"
-      DYNAMIC_EPLB: "true"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--quantization"
@@ -104,8 +105,11 @@ test_cases:
       - "--async-scheduling"
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--enable-eplb"
+      - "--eplb-config"
+      - '{"num_redundant_experts":0}'
       - "--additional-config"
-      - '{"eplb_config":{"dynamic_eplb":true},"ascend_compilation_config":{"enable_static_kernel":false},"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}'
+      - '{"ascend_compilation_config":{"enable_static_kernel":false},"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}'
       - "--profiler-config"
       - '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}'
       - "--mm-processor-cache-gb"
@@ -135,7 +139,6 @@ test_cases:
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
       HCCL_BUFFSIZE: "1300"
-      DYNAMIC_EPLB: "true"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--quantization"
@@ -166,8 +169,11 @@ test_cases:
       - "--async-scheduling"
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--enable-eplb"
+      - "--eplb-config"
+      - '{"num_redundant_experts":0}'
       - "--additional-config"
-      - '{"eplb_config":{"dynamic_eplb":true},"ascend_compilation_config":{"enable_static_kernel":false},"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}'
+      - '{"ascend_compilation_config":{"enable_static_kernel":false},"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}'
       - "--profiler-config"
       - '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}'
       - "--mm-processor-cache-gb"

@@ -60,7 +60,7 @@ def build_mlp_compute_input_fixture(
         layer=layer,
         activation=activation,
         need_trans=False,
-        dynamic_eplb=False,
+        use_expert_weight_list=False,
         lora_context=lora_context,
     )
 
@@ -471,7 +471,7 @@ class TestAllGatherCommImpl310FusedExperts(TestBase):
             topk_ids=topk_ids,
             layer=SimpleNamespace(),
             quant_type=QuantType.NONE,
-            dynamic_eplb=False,
+            use_expert_weight_list=False,
         )
         dispatch_output = SimpleNamespace(
             hidden_states=hidden_states,

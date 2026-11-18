@@ -23,7 +23,6 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import WeightFormat
@@ -178,9 +177,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         require_mx_weight_format(WeightFormat.MXFP4)
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
-        ascend_config = get_ascend_config()
-        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
-        self.use_expert_weight_list = self.dynamic_eplb or (
+        self.use_expert_weight_list = (
             vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
         )
 
@@ -227,7 +224,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 topk_ids=topk_ids,
                 layer=layer,
                 quant_type=self.quant_type,
-                dynamic_eplb=self.use_expert_weight_list,
+                use_expert_weight_list=self.use_expert_weight_list,
                 expert_map=layer.ascend_expert_map,
                 global_redundant_expert_num=layer.global_redundant_expert_num,
                 mc2_mask=layer.ascend_mc2_mask,

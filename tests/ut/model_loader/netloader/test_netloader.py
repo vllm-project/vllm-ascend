@@ -247,8 +247,6 @@ def test_init_with_invalid_config(monkeypatch):
 def test_fallback_cleanup_context_releases_references_and_restores_state(monkeypatch):
     from vllm.model_executor.layers import rotary_embedding
 
-    from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
-
     class FakeCompileWrapper(nn.Module):
         def __init__(self):
             super().__init__()
@@ -266,7 +264,6 @@ def test_fallback_cleanup_context_releases_references_and_restores_state(monkeyp
     failed_model.add_module("draft", draft_layer)
     failed_model.add_module("compiled", compile_wrapper)
     shared_moe_layers = [target_layer]
-    eplb_layers = [target_layer]
     passed_config = SimpleNamespace(
         compilation_config=SimpleNamespace(
             static_forward_context={"target.layer": target_layer, "stale.layer": stale_layer},
@@ -288,7 +285,6 @@ def test_fallback_cleanup_context_releases_references_and_restores_state(monkeyp
     target_rope = object()
     rope_cache = {target_key: target_rope}
     monkeypatch.setattr(rotary_embedding, "_ROPE_DICT", rope_cache)
-    monkeypatch.setattr(VllmEplbAdaptor, "_registered_moe_layers", eplb_layers)
     monkeypatch.setattr(
         "vllm.compilation.wrapper.TorchCompileWithNoGuardsWrapper",
         FakeCompileWrapper,
@@ -303,7 +299,6 @@ def test_fallback_cleanup_context_releases_references_and_restores_state(monkeyp
     passed_config.compilation_config.static_forward_context["draft.layer"] = draft_layer
     current_config.compilation_config.static_forward_context["current.draft"] = draft_layer
     shared_moe_layers.append(draft_layer)
-    eplb_layers.append(draft_layer)
     rope_cache[draft_key] = object()
 
     failed_model_ref = ModelNetLoaderElastic._release_failed_model_references(
@@ -313,7 +308,6 @@ def test_fallback_cleanup_context_releases_references_and_restores_state(monkeyp
     assert passed_config.compilation_config.static_forward_context == {"target.layer": target_layer}
     assert current_config.compilation_config.static_forward_context == {"current.target": target_layer}
     assert shared_moe_layers == [target_layer]
-    assert eplb_layers == [target_layer]
     assert rope_cache == {target_key: target_rope}
     assert cleanup_context.memory_baseline == (100, 200)
     assert failed_model_ref() is failed_model

@@ -18,7 +18,6 @@ _envs: &envs
 #  HCCL_INTRA_PCIE_ENABLE: "1"
   HCCL_INTRA_ROCE_ENABLE: "0"
   ASCEND_LAUNCH_BLOCKING: "0"
-  DYNAMIC_EPLB: "true"
 
 _server_cmd: &server_cmd
   - "--port"
@@ -58,8 +57,11 @@ _server_cmd: &server_cmd
   - '{"use_index_cache": true,"index_topk_frep":4}'
   - "--speculative-config"
   - '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}'
+  - "--enable-eplb"
+  - "--eplb-config"
+  - '{"num_redundant_experts":0,"window_size":50,"step_interval":50}'
   - "--additional-config"
-  - '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":"True","enable_sparse_sfa_c8":true,"enable_sparse_li_c8":true,"eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":50,"algorithm_execution_interval":5,"eplb_policy_type":2,"num_redundant_experts":0}}'
+  - '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":"True","enable_sparse_sfa_c8":true,"enable_sparse_li_c8":true}'
 
 # ==========================================
 # ACTUAL TEST CASES

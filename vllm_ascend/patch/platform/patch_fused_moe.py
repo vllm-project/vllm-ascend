@@ -39,7 +39,6 @@ import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops.fused_moe.eplb import use_allgather_eplb
 from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router
@@ -134,19 +133,6 @@ def _ascend_FusedMoE(
     image_sentinel_lo: int = 129257,
     **kwargs,
 ):
-    # RoutedExperts allocates its parameters before AscendMoERunner is
-    # constructed. Propagate Ascend EPLB capacity into the upstream factory so
-    # redundant expert slots are present when weights are created and loaded.
-    eplb_config = get_ascend_config().eplb_config
-    if eplb_config.dynamic_eplb or eplb_config.expert_map_path is not None:
-        configured_redundancy = eplb_config.num_redundant_experts
-        upstream_redundancy = num_redundant_experts
-        if configured_redundancy and upstream_redundancy not in (0, configured_redundancy):
-            raise ValueError(
-                f"Conflicting EPLB redundant expert counts: vLLM={upstream_redundancy}, Ascend={configured_redundancy}."
-            )
-        enable_eplb = True
-        num_redundant_experts = configured_redundancy or upstream_redundancy
     enable_router_eplb = enable_eplb and get_current_vllm_config().use_v2_model_runner
     if router is None:
         router = create_ascend_fused_moe_router(

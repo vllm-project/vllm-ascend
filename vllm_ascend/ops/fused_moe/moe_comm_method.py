@@ -85,7 +85,7 @@ class FusedExpertsResult:
     before_gmm2_evt: torch.npu.Event | None = None
     before_combine_evt: torch.npu.Event | None = None
     shared_activation_overlap_start_evt: torch.npu.Event | None = None
-    # For dynamic_eplb
+    # For use_expert_weight_list
     group_list_type: int = 1
     expert_tokens: torch.Tensor | None = None
 

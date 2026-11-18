@@ -92,7 +92,6 @@ def test_qkv_iproj_groups_partition_dp_ranks(mock_distributed, monkeypatch, size
         kvpp_config=SimpleNamespace(size=1),
         pd_tp_ratio=1,
         pd_head_ratio=1,
-        eplb_config=SimpleNamespace(dynamic_eplb=False),
         finegrained_tp_config=FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=size),
     )
     parallel = ParallelConfig(tensor_parallel_size=1, data_parallel_size=8)
@@ -179,13 +178,12 @@ def test_get_global_rank_defaults_to_current_config():
 def test_kvpp_group_stays_inside_pipeline_stage(monkeypatch, size, pcp_size):
     from vllm_ascend.distributed import parallel_state
 
-    for name in ("_KVPP", "_MC2", "_P_TP", "_OTP", "_LMTP", "_EMBED_TP", "_MLP_TP", "_DYNAMIC_EPLB"):
+    for name in ("_KVPP", "_MC2", "_P_TP", "_OTP", "_LMTP", "_EMBED_TP", "_MLP_TP"):
         monkeypatch.setattr(parallel_state, name, None)
     config = SimpleNamespace(
         kvpp_config=SimpleNamespace(size=size),
         pd_tp_ratio=1,
         pd_head_ratio=1,
-        eplb_config=SimpleNamespace(dynamic_eplb=False),
         finegrained_tp_config=SimpleNamespace(
             oproj_tensor_parallel_size=0,
             lmhead_tensor_parallel_size=0,
@@ -233,13 +231,12 @@ def test_kvpp_group_stays_inside_pipeline_stage(monkeypatch, size, pcp_size):
 def test_engram_dp_pcp_group_reuses_upstream_node_partition(monkeypatch, shared, pcp, shard_size):
     from vllm_ascend.distributed import parallel_state
 
-    for name in ("_KVPP", "_MC2", "_P_TP", "_OTP", "_LMTP", "_EMBED_TP", "_MLP_TP", "_DYNAMIC_EPLB"):
+    for name in ("_KVPP", "_MC2", "_P_TP", "_OTP", "_LMTP", "_EMBED_TP", "_MLP_TP"):
         monkeypatch.setattr(parallel_state, name, None)
     config = SimpleNamespace(
         kvpp_config=SimpleNamespace(size=1),
         pd_tp_ratio=1,
         pd_head_ratio=1,
-        eplb_config=SimpleNamespace(dynamic_eplb=False),
         finegrained_tp_config=SimpleNamespace(
             oproj_tensor_parallel_size=0,
             lmhead_tensor_parallel_size=0,

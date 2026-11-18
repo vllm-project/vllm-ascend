@@ -261,7 +261,7 @@ def test_token_dispatcher_with_all_gather_quant(
             topk_ids=topk_ids,
             layer=layer,
             quant_type=QuantType.W8A8,
-            dynamic_eplb=False,
+            use_expert_weight_list=False,
             expert_map=expert_map,
         ),
         token_dispatch_output=token_dispatch_output,

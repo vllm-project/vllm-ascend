@@ -49,7 +49,7 @@ class MoEMlpComputeInput:
     layer: torch.nn.Module | None = None
     activation: MoEActivation = MoEActivation.SILU
     need_trans: bool = False
-    dynamic_eplb: bool = False
+    use_expert_weight_list: bool = False
     activation_situ_beta: float | None = None
     activation_situ_linear_beta: float | None = None
     swiglu_limit: float = 0.0
@@ -104,7 +104,7 @@ def build_mlp_compute_input(
         and fusion_enabled,
         activation=activation,
         need_trans=fused_experts_input.need_trans,
-        dynamic_eplb=fused_experts_input.dynamic_eplb,
+        use_expert_weight_list=fused_experts_input.use_expert_weight_list,
         activation_situ_beta=activation_situ_beta,
         activation_situ_linear_beta=activation_situ_linear_beta,
         swiglu_limit=swiglu_limit,

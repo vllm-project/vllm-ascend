@@ -49,8 +49,6 @@ class _FallbackCleanupContext:
     context_keys: dict[int, set[Any]]
     static_all_moe_layers: dict[int, tuple[list[Any], list[Any]]]
     rope_cache: dict[Any, Any] | None
-    eplb_layers: list[nn.Module]
-    eplb_layer_count: int
     memory_baseline: tuple[int, int] | None
 
 
@@ -367,15 +365,10 @@ class ModelNetLoaderElastic(BaseModelLoader):
         vllm_config: VllmConfig,
         device_type: str,
     ) -> _FallbackCleanupContext:
-        from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
-
-        eplb_layers = VllmEplbAdaptor._registered_moe_layers
         return _FallbackCleanupContext(
             context_keys=cls._snapshot_static_forward_context_keys(vllm_config),
             static_all_moe_layers=cls._snapshot_static_all_moe_layers(vllm_config),
             rope_cache=cls._snapshot_rope_cache(),
-            eplb_layers=eplb_layers,
-            eplb_layer_count=len(eplb_layers),
             memory_baseline=cls._get_npu_memory_usage(device_type),
         )
 
@@ -392,7 +385,6 @@ class ModelNetLoaderElastic(BaseModelLoader):
         cls._remove_new_static_forward_context_keys(vllm_config, context.context_keys, model)
         cls._restore_static_all_moe_layers(context.static_all_moe_layers)
         cls._restore_rope_cache(context.rope_cache)
-        del context.eplb_layers[context.eplb_layer_count :]
         return model_ref
 
     @staticmethod

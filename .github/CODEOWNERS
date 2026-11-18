@@ -50,7 +50,6 @@
 # examples
 /examples/ @MrZ20
 /examples/rl/ @Ronald1995
-/examples/eplb/ @freyfwt
 /examples/rfork/ @yangsonglin13
 
 # c++ source code
@@ -238,13 +237,8 @@
 /tests/ut/models/test_kimi_recoverssm_metadata.py @drslark @chenxi-hh
 /tests/ut/ops/test_kimi_kda_recoverssm.py @drslark @chenxi-hh
 
-# EPLB
-/vllm_ascend/eplb @freyfwt
-
 # observability
 # /vllm_ascend/observability
-/vllm_ascend/observability/ms_metrics/config/eplb_metrics.yaml @freyfwt
-/vllm_ascend/observability/ms_metrics/handlers/eplb.py @freyfwt
 
 # profiler
 # /vllm_ascend/profiler

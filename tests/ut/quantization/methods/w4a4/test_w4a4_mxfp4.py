@@ -5,7 +5,7 @@ import torch.nn as nn
 from vllm.model_executor.layers.linear import RowParallelLinear
 
 from tests.ut.base import TestBase
-from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
+from tests.ut.quantization.conftest_quantization import create_mock_vllm_config
 from vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4 import (
     AscendW4A4MXFP4DynamicFusedMoEMethod,
     AscendW4A4MXFP4DynamicLinearMethod,
@@ -132,10 +132,8 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
     intermediate_size = 256
 
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_ascend_config")
-    def setUp(self, mock_ascend, mock_vllm):
+    def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
-        mock_ascend.return_value = create_mock_ascend_config()
         mx_profile = patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile")
         mx_profile.start().return_value.supports_weight_format.return_value = True
         self.addCleanup(mx_profile.stop)

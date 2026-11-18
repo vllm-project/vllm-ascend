@@ -70,7 +70,7 @@ class TestW8A8FusedMoEMethod(unittest.TestCase):
     def test_apply_gmm1_act_quant_custom_op_path(self):
         method = self._make_method()
         layer = _w8a8_layer()
-        mlp_compute_input = _mlp_compute_input(layer=layer, fusion=True, dynamic_eplb=True)
+        mlp_compute_input = _mlp_compute_input(layer=layer, fusion=True, use_expert_weight_list=True)
         with (
             patch(
                 "vllm_ascend.quantization.methods.w8a8.w8a8_dynamic._EXTRA_CTX",
@@ -92,7 +92,7 @@ class TestW8A8FusedMoEMethod(unittest.TestCase):
     def test_apply_gmm1_act_quant_fused_op_path(self):
         method = self._make_method()
         layer = _w8a8_layer()
-        mlp_compute_input = _mlp_compute_input(layer=layer, fusion=True, dynamic_eplb=False)
+        mlp_compute_input = _mlp_compute_input(layer=layer, fusion=True, use_expert_weight_list=False)
         with (
             patch(
                 "vllm_ascend.quantization.methods.w8a8.w8a8_dynamic._EXTRA_CTX",

@@ -104,7 +104,7 @@ class MoEFusedExpertsInput:
     layer: torch.nn.Module | None = None
     activation: MoEActivation | str = MoEActivation.SILU
     need_trans: bool = False
-    dynamic_eplb: bool = False
+    use_expert_weight_list: bool = False
     # Optional per-layer MoE LoRA state (vllm_ascend.lora MoELoRAContext).
     # ``Any`` avoids coupling the core contracts to the LoRA module; only the
     # unquant MLP path reads it, and only when a LoRA adapter is active.
@@ -118,7 +118,7 @@ def build_fused_experts_input(
     topk_ids: torch.Tensor,
     layer=None,
     quant_type: QuantType,
-    dynamic_eplb: bool,
+    use_expert_weight_list: bool,
     w1: torch.Tensor | list[torch.Tensor] | None = None,
     w2: torch.Tensor | list[torch.Tensor] | None = None,
     expert_map: torch.Tensor | None = None,
@@ -171,7 +171,7 @@ def build_fused_experts_input(
         ),
         activation=activation,
         need_trans=need_trans,
-        dynamic_eplb=dynamic_eplb,
+        use_expert_weight_list=use_expert_weight_list,
         layer=layer,
         quant=build_quant_params(
             quant_type=quant_type,
