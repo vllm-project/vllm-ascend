@@ -177,7 +177,7 @@ precision and performance validation remain outstanding.
 ## Follow-up optimization
 
 The existing `head_dim == 512` / `tokens >= 128` pack routing, 8/32-row pack
-tiles, eight-row combine tiles, rank-unroll bound, and full-vector versus tiled
+tiles, and full-vector versus tiled
 exchange thresholds are deliberately retained. Optimizing those implementation
 choices requires separate shape-range measurements on A3/A5. In particular,
 measure the dynamic merge rank-stride change against the former specialization;
