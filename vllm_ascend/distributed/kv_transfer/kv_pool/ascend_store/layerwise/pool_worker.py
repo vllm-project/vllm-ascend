@@ -1218,7 +1218,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if self.use_layerwise_transfer and self.layerwise_offload:
             end = request.target_token_len // block_size
             if partial_block_index is not None:
-                end = partial_block_index
+                end = min(end, partial_block_index)
         return end
 
     def _pool_keys_missing(self, keys: list[str]) -> set[str]:
