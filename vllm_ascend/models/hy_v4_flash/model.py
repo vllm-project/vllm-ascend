@@ -26,7 +26,6 @@ def validate_runtime(vllm_config: VllmConfig) -> None:
     config.validate_flash_config()
     parallel = vllm_config.parallel_config
     for field in (
-        "data_parallel_size",
         "pipeline_parallel_size",
         "prefill_context_parallel_size",
         "decode_context_parallel_size",

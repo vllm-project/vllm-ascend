@@ -805,6 +805,12 @@ class AscendConfig:
                 raise ValueError("Shared host Engram does not support dummy loading or sleep mode")
         if (
             engram_config is not None
+            # FlashEngram supports both private and DP-shared TP-local tables.
+            and getattr(vc.model_config, "architecture", None)
+            not in (
+                "HYV4FlashForCausalLM",
+                "HYV4FlashVLForConditionalGeneration",
+            )
             and getattr(engram_config, "cpu_offload", False)
             and not engram_config.dp_shared_memory
             and vc.use_v2_model_runner

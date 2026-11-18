@@ -4,13 +4,17 @@
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch import nn
 from vllm.distributed import (
+    get_dp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
+from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.hy_v4_flash.reference import decode_e4m3fn, hash_ngrams
@@ -151,7 +155,7 @@ class FlashNgramHashState(nn.Module):
 
 
 class FlashEmbedding(nn.Module):
-    def __init__(self, sizes, dim, dtype, cpu_offload):
+    def __init__(self, sizes, dim, dtype, cpu_offload, dp_shared_memory=False):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.head_start, self.head_end = head_range(sizes, self.tp_size, get_tensor_model_parallel_rank())
@@ -161,14 +165,24 @@ class FlashEmbedding(nn.Module):
         self.n_hash_cols = len(sizes)
         self.dim = dim
         self.cpu_offload = cpu_offload
+        self._shared_group = None
+        self._shared_buffers = {}
+        if dp_shared_memory:
+            if not cpu_offload:
+                raise ValueError("Flash Engram dp_shared_memory requires CPU offload")
+            group = get_dp_group()
+            if group.world_size <= 1:
+                raise ValueError("Flash Engram dp_shared_memory requires DP > 1")
+            if not all(in_the_same_node_as(group.cpu_group)):
+                raise ValueError("Flash Engram shared DP peers must be on the same node")
+            self._shared_group = group
         rows = self.vocab_end - self.vocab_start
-        storage = {"device": "cpu", "pin_memory": True} if cpu_offload else {}
         self.embedding = nn.Module()
         self.embedding.weight = nn.Parameter(
-            torch.empty(
+            self._allocate_storage(
                 (0,) if dtype is None else (rows, dim),
-                dtype=torch.uint8 if dtype == torch.float8_e4m3fn else torch.bfloat16,
-                **storage,
+                torch.uint8 if dtype == torch.float8_e4m3fn else torch.bfloat16,
+                "weight",
             ),
             requires_grad=False,
         )
@@ -176,10 +190,57 @@ class FlashEmbedding(nn.Module):
         self.embedding.register_parameter("weight_scale_inv", None)
         if self.fp8:
             self.embedding.weight_scale_inv = nn.Parameter(
-                torch.empty(rows, dtype=torch.bfloat16, **storage), requires_grad=False
+                self._allocate_storage((rows,), torch.bfloat16, "weight_scale_inv"), requires_grad=False
             )
         for parameter in self.embedding.parameters():
             set_weight_attrs(parameter, {"weight_loader": self._load_shard})
+
+    def _allocate_storage(self, shape, dtype, leaf):
+        if self._shared_group is not None and shape[0]:
+            from vllm_ascend.models.deepseek_v41.engram.npu import SharedUvaBuffer
+
+            buffer = SharedUvaBuffer(shape, dtype, torch.device("npu", torch.npu.current_device()), self._shared_group)
+            self._shared_buffers[leaf] = buffer
+            logger.info(
+                "HYV4 Flash Engram DP shared table: dp_rank=%d tp_rank=%d field=%s rows=%d bytes=%d backing=%s",
+                self._shared_group.rank_in_group,
+                get_tensor_model_parallel_rank(),
+                leaf,
+                shape[0],
+                buffer.tensor.numel() * buffer.tensor.element_size(),
+                buffer.shm.name,
+            )
+            return buffer.tensor
+        parameter = getattr(self.embedding, leaf, None)
+        storage = {"device": parameter.device} if parameter is not None else {}
+        if self.cpu_offload:
+            storage = {"device": "cpu", "pin_memory": True}
+        return torch.empty(shape, dtype=dtype, **storage)
+
+    def _copy_shared_weight(self, parameter, shard):
+        group = self._shared_group
+        if group is None:
+            default_weight_loader(parameter, shard)
+            return
+        error = None
+        if group.rank_in_group == 0:
+            try:
+                default_weight_loader(parameter, shard)
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+        errors = [None] * group.world_size
+        # Publish the one writer's completed copy (or error) before either DP
+        # replica can look up its own tokens from the shared CPU table.
+        dist.all_gather_object(errors, error, group=group.cpu_group)
+        if any(errors):
+            raise RuntimeError(f"Flash Engram shared table loading failed: {errors}")
+
+    def close_host_offload(self):
+        for leaf, buffer in tuple(self._shared_buffers.items()):
+            buffer.close()
+            parameter = getattr(self.embedding, leaf)
+            parameter.data = torch.empty(0, dtype=parameter.dtype, device="cpu")
+            del self._shared_buffers[leaf]
 
     def load_weight(self, leaf, value):
         if leaf == "weight_scale_inv" and self.embedding.weight_scale_inv is None:
@@ -205,16 +266,15 @@ class FlashEmbedding(nn.Module):
         elif self.embedding.weight.numel() and not self.fp8:
             raise ValueError("BF16 Engram table must not have FP8 row scales")
         if parameter.numel() == 0:
-            parameter.data = torch.empty(
+            parameter.data = self._allocate_storage(
                 (self.vocab_end - self.vocab_start, *expected[1:]),
-                dtype=storage_dtype,
-                device=parameter.device,
-                pin_memory=self.cpu_offload,
+                storage_dtype,
+                "weight" if is_weight else "weight_scale_inv",
             )
         shard = value[self.vocab_start : self.vocab_end]
         if storage_dtype == torch.uint8:
             shard = shard.view(torch.uint8)
-        default_weight_loader(parameter, shard)
+        self._copy_shared_weight(parameter, shard)
         if is_weight:
             self.fp8 = value.dtype == torch.float8_e4m3fn
         if is_weight and self.fp8 and self.embedding.weight_scale_inv is None:
@@ -243,12 +303,16 @@ class FlashEngram(nn.Module):
         index = layout.layer_ids.index(layer_id)
         sizes = [p for order in layout.primes[index] for p in order]
         storage = vllm_config.engram_config
-        if storage.disk_offload or storage.embedding_across_dp or storage.dp_shared_memory:
-            raise ValueError("Flash Engram supports TP-local tables, not DP or disk offload")
+        if storage.disk_offload or storage.embedding_across_dp:
+            raise ValueError("Flash Engram does not support DP head sharding or disk offload")
         dtype = None
         if vllm_config.load_config.load_format == "dummy":
+            if storage.dp_shared_memory:
+                raise ValueError("Flash Engram DP shared memory requires checkpoint loading")
             dtype = torch.float8_e4m3fn if config.engram_fp8_embedding else torch.bfloat16
-        self.multi_head_embedding = FlashEmbedding(sizes, layout.head_dim, dtype, storage.cpu_offload)
+        self.multi_head_embedding = FlashEmbedding(
+            sizes, layout.head_dim, dtype, storage.cpu_offload, storage.dp_shared_memory
+        )
         self.hidden_size, self.hc_mult = config.hidden_size, config.hc_mult
         local = self.multi_head_embedding.head_end - self.multi_head_embedding.head_start
         self.lookup_per_head_norms = nn.ModuleList([nn.RMSNorm(layout.head_dim) for _ in range(local)])

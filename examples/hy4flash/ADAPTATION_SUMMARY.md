@@ -2,6 +2,8 @@
 
 更新于 2026-11-18。当前实机基线为 8 张 Ascend 950DT，每卡 96 GiB HBM。运行环境为 CANN 9.2.1、`torch_npu 2.10.0.post7`、Python 3.12.16，使用 vLLM MRV2、TP8 + EP 和 Hy4 Flash 全量权重。启动示例使用 `/home/hy4nxt` 作为权重路径。
 
+下文的 TP8 精度和性能数据对应上述基线。另在 CANN 9.3.0、Python 3.12.13、相同 Torch-NPU 版本的 8 张 950DT 上，完成了 TP4 × DP2 的启动和请求验证，包括 Engram DP 共享 CPU 表；该验证不替代下文的精度评测。
+
 ## 精度差异有多大
 
 **已测的 4K 和 16K 单路样本逐值对齐。短输入的差异已经能改变贪心输出。** 两边均使用 C8 和 DFly 5，控制输入和采样设置，以 eager 为对照。logprob 差按相同生成前缀统计。
@@ -111,6 +113,7 @@ export HY4FLASH_MAX_MODEL_LEN=131072
   ```
 
 - **Engram CPU offload**。默认 `cpu_offload=true`，TP 本地表使用 pinned CPU 内存。传入 `--engram-config '{"cpu_offload":false}'` 将表放在 NPU，TP8 下仅表权重平均每卡约 15.8 GB。传入 `--engram-config '{"cpu_offload":true}'` 可显式开启。
+- **Engram DP 共享 CPU 表**。同机 TP4 × DP2 可传入 `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'`，使两个 DP 副本中相同 TP rank 的 worker 共用一份表分片。要求 DP peer 位于同一节点和共享内存命名空间，`/dev/shm` 能容纳表权重；当前 BF16 checkpoint 的 16 份共享分片合计约 118 GiB。显式传入 `dp_shared_memory:false` 时仍按 DP 副本各自存表，不再被强制改为 true。共享模式不支持 dummy checkpoint；`embedding_across_dp` 和磁盘 offload 仍未接入。
 - **文本或视觉**。默认加载视觉塔。启动追加 `--language-model-only` 可用于纯文本评测。
 - **调度对照**。启动追加 `--no-async-scheduling` 可固定到同步调度。比较精度时还要核对实际 prefill 分块和 batch。
 
@@ -154,7 +157,8 @@ C8 QSFA 和 SMLA 当前仅有算子探针。模型的 attention 使用分页读�
 - **C8 算子优化**。接入 FULL 前的对照中，融合写入与同宽 attention 优化覆盖短单路、短 BS8、混合长度和 16K 单路。336 个输出 token 的 token ID、logprob 和 top-5 逐值一致，16K 单路 TPOT 从 105.7 降至 71.0 ms。
 - **历史 GSM8K**。100 条、5-shot、最多 8 路并发，使用当时的分段图和 DFly 5。9,310 轮验证共提出 46,550 个草稿 token，接受 21,795 个。平均接受长度 `1 + 21795 / 9310 = 3.341` token/轮，草稿接受率 46.82%。
 - **Prefix cache**。先前的分段图和 eager 分别完成 10 个场景。65-token 热请求命中 64 token，2,048、2,049、2,052-token 请求分别命中 1,984、2,048、2,048 token，同图同文本命中 128 token，换图命中 0。冷热分块不同的 2,052-token 请求所选 logprob 最大差为 0.170681，冷请求强制按 `[2048, 4]` 切分后逐值一致。
-- **并行限制**。当前模型校验要求 DP、PP、PCP、DCP 均为 1，EPLB、DBO、LoRA 和 KV transfer 暂未接入。TP2 + DP4 的试验中，大张量 HCCL AllGather 报 EI0006，`HCCL_BUFFSIZE=1024` 仍复现。独立 8-rank 程序中，BF16 `[32, 1536]` 通过，`[2048, 1536]` 在 AICPU 多通道建链阶段超时。DP 试验改动已回退。TP8 + EP 是当前整网验收配置。
+- **并行限制与 DP 验证**。模型已放开 DP 校验，PP、PCP、DCP 仍要求为 1，EPLB、DBO、LoRA 和 KV transfer 暂未接入。TP4 × DP2 已在上述 CANN 9.3.0 环境完成启动、curl 和两路并发 4209-token 长输入验证；Engram 共享开启前后，短补全 32 token、长补全 16 token 的 token 和所选 logprob 逐值一致，两个 DP 都处理了请求。26 项相关单测通过。128 并发及 128K 上下文为启动配置上限，本次未做该规模压力验收。
+- **历史 HCCL 问题**。此前 CANN 9.2.1 的 TP2 + DP4 试验中，大张量 HCCL AllGather 报 EI0006，`HCCL_BUFFSIZE=1024` 仍复现；独立 8-rank 程序中，BF16 `[32, 1536]` 通过，`[2048, 1536]` 建链超时。CANN 9.3.0 下对 `[32, 1536]`、`[2048, 1536]`、`[4096, 1536]` 各重复 3 次的 8-rank 原生 AllGather 均通过，本次未修改 HCCL 库，也未将其记为底层通信缺陷修复。
 - **模型回归**。最终 FULL 版本的模型参考测试在 950DT 容器内为 `14 passed`，覆盖设备侧长度、同宽 decode padding、分页读取、C8、候选与因果边界。
 
 ### Rank 0 profiling 摘要

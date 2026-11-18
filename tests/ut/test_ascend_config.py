@@ -2484,6 +2484,29 @@ class TestEngramSharedMemoryDefaults(TestBase):
                         # when cpu_offload=False, regardless of DP/PCP/V2 topology.
                         self.assertEqual(config.engram_config.dp_shared_memory, shared)
 
+    def test_flash_engram_keeps_tp_local_tables_with_data_parallelism(self):
+        for architecture in (
+            "HYV4FlashForCausalLM",
+            "HYV4FlashVLForConditionalGeneration",
+        ):
+            for dp in (2, 4):
+                with self.subTest(architecture=architecture, dp=dp):
+                    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+                    config.model_config = SimpleNamespace(
+                        architecture=architecture,
+                        architectures=[architecture],
+                        hf_text_config=SimpleNamespace(),
+                        hf_config=SimpleNamespace(),
+                        enforce_eager=False,
+                        is_moe=True,
+                    )
+                    config.parallel_config.data_parallel_size = dp
+                    config.engram_config = SimpleNamespace(cpu_offload=True, dp_shared_memory=False)
+                    ascend_config = AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig())
+                    with patch.object(_VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=True):
+                        ascend_config.derive_and_validate(config)
+                    self.assertFalse(config.engram_config.dp_shared_memory)
+
     def test_no_engram_config_is_preserved(self):
         config = VllmConfig(device_config=DeviceConfig(device="cpu"))
         config.engram_config = None
