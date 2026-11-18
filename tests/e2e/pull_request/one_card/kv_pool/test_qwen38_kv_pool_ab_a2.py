@@ -74,9 +74,13 @@ Environment knobs:
   ``HCCL_INTRA_ROCE_ENABLE=1``); ``0`` (default) leaves HIXL on the platform
   default. Set it on hosts whose default HCCS P2P channel cannot carry
   cross-rank puts, i.e. the dev A2 boxes;
-- ``QWEN38_POOL_CASE_TIMEOUT_SECONDS``: per-case ceiling (default ``1800``,
-  ``0`` disables). A failed engine initialisation can leave the pytest process
-  alive after the failure; the watchdog turns that into a fast failure.
+- ``QWEN38_POOL_STALL_TIMEOUT_SECONDS``: no-progress ceiling for the watchdog
+  (default ``900``, ``0`` disables). A failed engine initialisation can leave the
+  pytest process alive after the failure, so the watchdog turns that into a fast
+  failure; it measures the time since the last phase reported progress, which
+  keeps it from killing a healthy run that re-measures a case. The legacy
+  ``QWEN38_POOL_CASE_TIMEOUT_SECONDS`` is honoured as an alias;
+- ``QWEN38_POOL_TOTAL_TIMEOUT_SECONDS``: whole-module ceiling (default ``5400``).
 
 Host / runner prerequisites (official KV pool guide): the mooncake legs talk to
 the pool over HIXL. The transport itself is host-specific, so the RoCE knobs are
@@ -232,11 +236,23 @@ STORE_ROCE_RESOURCE_CONFIG = json.dumps(
 # Default to the platform behaviour (HIXL auto-derives from the target) and let
 # RoCE hosts opt in with QWEN38_POOL_DEVICE_ROCE=1.
 DEVICE_ROCE = os.environ.get("QWEN38_POOL_DEVICE_ROCE", "0") == "1"
-# Hard per-case ceiling. A failed mooncake initialisation leaves client retry
-# threads and worker children behind, so the pytest process can outlive the
-# failure and burn the whole job timeout (run 43892339442 failed at 15:21 and was
-# cancelled at 17:08). 0 disables the watchdog.
-CASE_TIMEOUT_SECONDS = int(os.environ.get("QWEN38_POOL_CASE_TIMEOUT_SECONDS", "1800"))
+# One module-level watchdog guards the whole module, and it is *progress aware*.
+# A fixed per-case timer cannot work here: a case may re-measure itself
+# (PERF_ATTEMPTS) and several cases run back to back, so run 44271971490 had the
+# timer of the *first* case fire while the third case was healthy, which killed
+# pytest mid-case (`watchdog exceeded 1800s with no progress` right after a
+# successful memcache perf line). A stall now means "no phase reported progress
+# for STALL_TIMEOUT_SECONDS"; TOTAL_TIMEOUT_SECONDS bounds the whole file. That
+# keeps the original intent (do not burn the 120-minute job timeout on a hung
+# engine, e.g. run 43892339442) without killing healthy long runs. 0 disables
+# either bound.
+STALL_TIMEOUT_SECONDS = int(
+    os.environ.get(
+        "QWEN38_POOL_STALL_TIMEOUT_SECONDS",
+        os.environ.get("QWEN38_POOL_CASE_TIMEOUT_SECONDS", "900"),
+    )
+)
+TOTAL_TIMEOUT_SECONDS = int(os.environ.get("QWEN38_POOL_TOTAL_TIMEOUT_SECONDS", "5400"))
 # Measure the A/B pair once, and once more when the first pair misses the gate.
 # A shared a2-1 runner can slow the pooled leg for the whole 20-sample window
 # (observed A 442.8ms against the usual 313-340ms) while the control leg stays
@@ -648,6 +664,7 @@ def _engine_pool_shapes(runner: VllmRunner) -> tuple[int, int]:
 
 def _phase_accuracy(runner: VllmRunner, state: dict[str, Any], tag: str) -> None:
     """Phase 1: cold greedy output of the shared prefix (also the pool's R1 write)."""
+    _touch_progress()
     started = time.perf_counter()
     state["prompt_a"] = _natural_tokens(runner, SENTENCE_A, POOL_PROMPT_TOKENS)
     state["prompt_b"] = _natural_tokens(runner, SENTENCE_B, POOL_PROMPT_TOKENS)
@@ -693,6 +710,7 @@ def _print_round_hit(
 
 def _phase_hit(runner: VllmRunner, state: dict[str, Any], tag: str) -> None:
     """Phase 2: pool hit quality 鈥?R2/R3 exact hits, token identity, R4 isolation."""
+    _touch_progress()
     prompt_a, prompt_b, cold = state["prompt_a"], state["prompt_b"], state["cold"]
     block_size, lcm = state["shapes"]
     expected = expected_hit_token_count(len(prompt_a), block_size, lcm)
@@ -793,6 +811,7 @@ def _phase_hit(runner: VllmRunner, state: dict[str, Any], tag: str) -> None:
 
 def _phase_control(runner: VllmRunner, state: dict[str, Any], tag: str) -> None:
     """Leg-B hit control: the local prefix cache must serve the same prefix."""
+    _touch_progress()
     prompt_a = state["prompt_a"]
     cold = _generate(runner, prompt_a, POOL_MAX_TOKENS)
     metrics_before = runner.get_metrics()
@@ -831,6 +850,7 @@ def _percentile(values: list[float], q: float) -> float:
 
 def _phase_perf(runner: VllmRunner, prompt_ids: list[int], tag: str) -> tuple[float, float, float]:
     """Phase 3: end-to-end latency of the repeatedly-hit prefix (TTFT proxy)."""
+    _touch_progress()
     ttft: list[float] = []
     produced = 0
     measured_seconds = 0.0
@@ -982,28 +1002,53 @@ def _log_env_diagnostics(case: str) -> None:
     )
 
 
-def _install_case_watchdog(case: str) -> None:
-    """Force-exit the process if a single case overruns its ceiling.
+_LAST_PROGRESS_SECONDS = time.monotonic()
+_WATCHDOG_STARTED = False
+
+
+def _touch_progress() -> None:
+    """Mark that the test is still moving, which resets the stall detector."""
+    global _LAST_PROGRESS_SECONDS
+    _LAST_PROGRESS_SECONDS = time.monotonic()
+
+
+def _start_stall_watchdog() -> None:
+    """Force-exit only when the module stops making progress.
 
     A failed mooncake/worker initialisation leaves retry threads and child
-    processes behind, so pytest can outlive the failure instead of reporting it:
-    run 43892339442 failed at 15:21 and kept the job occupied until it was
-    cancelled at 17:08, i.e. the CI slice burned its whole 120-minute timeout on
-    an already-failed case. A daemon watchdog converts that into an immediate,
-    diagnosable failure.
+    processes behind, so pytest can outlive the failure instead of reporting it
+    (run 43892339442 failed at 15:21 and kept the job occupied until 17:08), but
+    a fixed per-case timer also fires on healthy long runs (run 44271971490).
+    This thread therefore watches the time since the last :func:`_touch_progress`
+    instead of the total runtime, with a whole-module ceiling as a backstop.
     """
-    if CASE_TIMEOUT_SECONDS <= 0:
+    global _WATCHDOG_STARTED
+    if _WATCHDOG_STARTED or (STALL_TIMEOUT_SECONDS <= 0 and TOTAL_TIMEOUT_SECONDS <= 0):
         return
+    _WATCHDOG_STARTED = True
+    started_at = time.monotonic()
 
-    def _bail() -> None:
-        time.sleep(CASE_TIMEOUT_SECONDS)
-        print(
-            f"[kv_pool_a2] {case}: watchdog exceeded {CASE_TIMEOUT_SECONDS}s with no progress, forcing exit",
-            flush=True,
-        )
-        os._exit(4)
+    def _watch() -> None:
+        while True:
+            time.sleep(20)
+            now = time.monotonic()
+            idle = now - _LAST_PROGRESS_SECONDS
+            elapsed = now - started_at
+            if STALL_TIMEOUT_SECONDS > 0 and idle > STALL_TIMEOUT_SECONDS:
+                print(
+                    f"[kv_pool_a2] watchdog: no progress for {idle:.0f}s "
+                    f"(limit {STALL_TIMEOUT_SECONDS}s), forcing exit",
+                    flush=True,
+                )
+                os._exit(4)
+            if TOTAL_TIMEOUT_SECONDS > 0 and elapsed > TOTAL_TIMEOUT_SECONDS:
+                print(
+                    f"[kv_pool_a2] watchdog: module ran {elapsed:.0f}s (limit {TOTAL_TIMEOUT_SECONDS}s), forcing exit",
+                    flush=True,
+                )
+                os._exit(4)
 
-    threading.Thread(name=f"kv-pool-watchdog-{case}", target=_bail, daemon=True).start()
+    threading.Thread(name="kv-pool-watchdog", target=_watch, daemon=True).start()
 
 
 @pytest.mark.e2e_model(MODEL)
@@ -1055,7 +1100,8 @@ def test_qwen38_kv_pool_ab_a2(backend: str, use_layerwise: bool):
             "card reports 16128). Re-enable once memcache fixes the device_count=1 path."
         )
 
-    _install_case_watchdog(case)
+    _start_stall_watchdog()
+    _touch_progress()
     _apply_cpu_isolation(case)
     _log_env_diagnostics(case)
 
