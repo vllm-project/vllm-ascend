@@ -55,6 +55,7 @@ def _categorical_prepare_mass_kernel(
     logits_cache_stride_0,
     logits_cache_stride_1,
     logits_cache_col_ptr,
+    logits_cache_row_mapping_ptr,
     logits_ptr,
     logits_stride,
     expanded_idx_mapping_ptr,
@@ -94,6 +95,12 @@ def _categorical_prepare_mass_kernel(
         )
 
         if logits_cache_ptr is not None:
+            cache_row = req_state_idx
+            if logits_cache_row_mapping_ptr is not None:
+                cache_row = tl.load(
+                    logits_cache_row_mapping_ptr + req_state_idx,
+                    mask=is_valid_req, other=-1,
+                ).to(tl.int64)
             if logits_cache_col_ptr is not None:
                 if PER_TOKEN_COL:
                     col = tl.load(logits_cache_col_ptr + token_idx)
@@ -102,9 +109,9 @@ def _categorical_prepare_mass_kernel(
             else:
                 col = 0
             tl.store(
-                logits_cache_ptr + req_state_idx * logits_cache_stride_0 + col * logits_cache_stride_1 + offsets,
+                logits_cache_ptr + cache_row * logits_cache_stride_0 + col * logits_cache_stride_1 + offsets,
                 logits,
-                mask=mask & is_valid_req,
+                mask=mask & is_valid_req & (cache_row >= 0),
             )
 
         if temp != 0.0 and APPLY_TEMPERATURE:
@@ -312,6 +319,7 @@ def _categorical_sample(
     use_fp64: bool = False,
     *,
     is_drafting: bool = False,
+    logits_cache_row_mapping: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Sample token ids from logits with categorical sampling.
 
@@ -363,6 +371,7 @@ def _categorical_sample(
         logits_cache.stride(0) if logits_cache is not None else 0,
         logits_cache.stride(1) if logits_cache is not None else 0,
         logits_cache_col,
+        logits_cache_row_mapping,
         logits,
         logits.stride(0),
         expanded_idx_mapping,
@@ -425,11 +434,7 @@ def _categorical_sample_main(
     logits_cache_source: torch.Tensor | None = None,
     logits_cache_row_mapping: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    # 0.33.0 has `logits_cache_source` (only watermarking supplies a separate
-    # source); main adds the per-row mapping for batch-sharded caches. The NPU
-    # kernels support neither.
-    if logits_cache_row_mapping is not None:
-        raise NotImplementedError("Batch-sharded draft logits are not supported on NPU.")
+    # Cache row mapping affects only writes; RNG/temperature keep request-state indices.
     if logits_cache_source is not None:
         raise NotImplementedError("A separate draft-logits cache source is not supported on NPU.")
     return _categorical_sample(
@@ -443,6 +448,7 @@ def _categorical_sample_main(
         logits_cache_col,
         use_fp64,
         is_drafting=is_drafting,
+        logits_cache_row_mapping=logits_cache_row_mapping,
     )
 
 
