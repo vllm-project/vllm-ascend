@@ -119,6 +119,7 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
+from vllm_ascend.worker.sentinel.kv_cache_region_registry import register_kv_allocations
 from vllm_ascend.worker.utils import (
     get_single_raw_mla_backing,
     make_page_strided_cache_view,
@@ -2116,6 +2117,8 @@ def _reshape_kv_cache_v2(
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
+    if vllm_config.parallel_config.enable_fault_tolerance:
+        register_kv_allocations(kv_cache_raw_tensors, kv_caches, kv_cache_config.num_blocks)
     return kv_caches
 
 

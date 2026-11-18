@@ -1,0 +1,19 @@
+pr: 22274
+entries:
+  - category: feature
+    text: >-
+      Add Ascend MC2 fault-tolerant scale-down with EPLB, redistributing failed
+      ranks' experts onto surviving ranks and reloading their weights.
+      Scale-down requires redundant expert slots and a supported checkpoint
+      and quantization format.
+  - category: feature
+    text: >-
+      Add Ascend fault-tolerance retry and recover supported KV-cache HBM UCE
+      faults by clearing affected blocks and recapturing V2 decode graphs.
+      Enable fault tolerance to use recovery; unsupported faults fail recovery
+      and require engine restart.
+  - category: config
+    text: >-
+      Add additional_config.ft_communication_abort_timeout to configure the
+      communication timeout for fault tolerance. The default of 0 disables
+      this timeout; enabled values must be at least 2 seconds.

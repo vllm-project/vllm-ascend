@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import time
 import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -37,6 +38,7 @@ _STREAM_RESOURCE_ERROR_MARKERS = (
     "stream resources are insufficient",
 )
 _OLD_HDK_CAPTURE_ERROR_MARKERS = ("alloc sq cq fail",)
+_FT_STREAM_POLL_INTERVAL_SEC = 0.001
 
 
 def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
@@ -301,13 +303,32 @@ class ACLGraphWrapper:
         is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
         if not self.enable_enpu and need_sync:
-            torch.npu.current_stream().synchronize()
+            self._synchronize_before_replay()
         if self.runtime_mode == CUDAGraphMode.FULL and use_updatable_graph(self.attn_backend):
             self._updatable_graph_replay(forward_context, entry.aclgraph)
         else:
             entry.aclgraph.replay()
         logger.info_once("ACL graph replay is active (logged once).")
         return entry.output
+
+    def _synchronize_before_replay(self) -> None:
+        stream = torch.npu.current_stream()
+        parallel = self.vllm_config.parallel_config
+        if not parallel.enable_fault_tolerance:
+            stream.synchronize()
+            return
+        timeout = parallel.cpu_distributed_timeout_seconds
+        if timeout is None:
+            timeout = parallel.fault_tolerance_config.engine_recovery_timeout_sec
+        deadline = time.monotonic() + timeout
+        # A peer UCE can leave the previous graph unfinished. Blocking here
+        # prevents this worker from ever dequeuing Motor's recovery command.
+        # Preserve the ordering barrier, but let the worker fault wrapper
+        # quarantine this step and return control to the RPC loop on timeout.
+        while not stream.query():
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"NPU stream was not ready before ACL graph replay after {timeout}s")
+            time.sleep(_FT_STREAM_POLL_INTERVAL_SEC)
 
     def _updatable_graph_replay(
         self,

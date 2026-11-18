@@ -1811,3 +1811,13 @@
 #    Future Plan:
 #      Remove when upstream adds dirty tracking to UvaBackedTensor flushes.
 #
+
+# HBM UCE recovery adapters:
+# * worker/patch_attn_utils.py wraps V2 init_kv_cache/get_kv_connector to expose
+#   flat tensor views to Core while preserving per-layer tuples for connectors.
+#   Remove when Core accepts backend-owned KV cache collections directly.
+# * worker/patch_async_output.py quarantines failed native async output objects
+#   until coordinated recovery, avoiding destruction on a failed NPU stream.
+#   Remove when Core offers backend async-output failure/lifetime hooks.
+# These adapters provide the Ascend HBM UCE backend behavior; the upstream
+# FT framework does not currently expose these backend-specific hooks.
