@@ -64,7 +64,7 @@ def build_kimi_pixel_norm(model_config, vision_tower: nn.Module) -> KimiPixelNor
     if not model_config.multimodal_config.mm_device_do_normalize or isinstance(vision_tower, StageMissingLayer):
         return None
     hf_config = model_config.hf_config
-    if hf_config.model_type not in ("kimi_k3", "kimi_k31") or not any(
+    if getattr(hf_config, "model_type", None) not in ("kimi_k3", "kimi_k31") or not any(
         architecture in ("KimiK3ForConditionalGeneration", "KimiK31ForConditionalGeneration")
         for architecture in hf_config.architectures
     ):

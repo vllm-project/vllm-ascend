@@ -840,7 +840,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         )
 
         vllm_config = get_current_vllm_config()
-        model_type = vllm_config.model_config.hf_config.model_type
+        model_type = getattr(vllm_config.model_config.hf_config, "model_type", None)
 
         if model_type in ["minimax", "minimax_m2"]:
             # Adapt to Minimax architecture: update layer names to MoE convention
