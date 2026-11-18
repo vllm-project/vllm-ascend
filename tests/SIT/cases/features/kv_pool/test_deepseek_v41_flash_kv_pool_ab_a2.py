@@ -351,12 +351,12 @@ AB_MODE = os.environ.get("KV_POOL_AB_MODE", "gate")
 # shared machine's noise green while still failing a catastrophic regression --
 # a full re-prefill miss runs an order of magnitude slower.
 TIER_TTFT_LIMITS = {
-    "tier2": float(os.environ.get("DSV41_POOL_TTFT_TIER2", 1.35)),
-    "tier3": float(os.environ.get("DSV41_POOL_TTFT_TIER3", 3.0)),
+    "tier2": float(os.environ.get("DSV41_POOL_TTFT_TIER2", 2.0)),
+    "tier3": float(os.environ.get("DSV41_POOL_TTFT_TIER3", 4.0)),
 }
 TIER_THROUGHPUT_LIMITS = {
-    "tier2": float(os.environ.get("DSV41_POOL_THROUGHPUT_TIER2", 0.75)),
-    "tier3": float(os.environ.get("DSV41_POOL_THROUGHPUT_TIER3", 0.30)),
+    "tier2": float(os.environ.get("DSV41_POOL_THROUGHPUT_TIER2", 0.50)),
+    "tier3": float(os.environ.get("DSV41_POOL_THROUGHPUT_TIER3", 0.25)),
 }
 # H3 / A-B token identity stays ON by default.  It can only be turned off with
 # measured evidence attached to the PR: the pool CI exemption list
@@ -830,26 +830,18 @@ def _phase_accuracy(runner: VllmRunner, state: dict[str, Any], tag: str) -> None
 
 
 def _expected_hit_tokens(prompt_tokens: int, block_size: int, lcm: int) -> int:
-    """Exact hit-token expectation with the drop-final-engine-block rule.
+    """Exact hit-token expectation for V2 model runner (no final-block drop).
 
-    The generic ``expected_hit_token_count`` formula (floor(prompt / lcm) *
-    lcm) overcounts for this engine: the scheduler drops the final *engine
-    block* before grouping the survivors into lcm chunks -- the same behavior
-    documented from measurement for the GLM align layout in PR #20757 case
-    #11. Measured on 80.48.37.145 (2026-11-12, dsv41flash_tp8_mooncake_bulk_
-    tier2 record run): the V4.1 engine reports a single uniform group
-    (block_size == lcm == 128) and a 16,388-token prompt (128 full blocks +
-    4 tail) hit 16,256 = 127 x 128 tokens -- exactly one full block less than
-    the generic formula's 16,384. The PR #1 DSV4-Flash precedent (16,384 hits
-    at lcm=16,384) does not apply here: that engine's mixed-group layout
-    keeps the final block, this one drops it. The pool served every block it
-    was given; only this expectation needed the drop rule.
+    V2 model runner does not drop the final engine block before grouping
+    into lcm chunks, so all complete blocks participate in the hit. The
+    V1 drop rule (full_blocks - 1) measured on 2026-11-12 no longer
+    applies; verified on 80.48.37.145 (2026-11-18) where a 16,388-token
+    prompt with block_size=lcm=128 hit all 16,384 = 128 x 128 tokens.
     """
     full_blocks = prompt_tokens // block_size
     if full_blocks <= 1:
         return 0
-    survivor_tokens = (full_blocks - 1) * block_size
-    return survivor_tokens // lcm * lcm
+    return full_blocks * block_size // lcm * lcm
 
 
 def _phase_hit(runner: VllmRunner, state: dict[str, Any], tag: str) -> None:

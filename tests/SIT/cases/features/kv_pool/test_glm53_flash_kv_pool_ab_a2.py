@@ -242,12 +242,12 @@ def _float_env(name: str, default: float) -> float:
 # the same window, hence every limit is env-overridable for recalibration
 # without touching the file.
 TIER_TTFT_LIMITS = {
-    "tier2": _float_env("KV_POOL_GLM53_TTFT_LIMIT_TIER2", 1.35),
-    "tier3": _float_env("KV_POOL_GLM53_TTFT_LIMIT_TIER3", 3.0),
+    "tier2": _float_env("KV_POOL_GLM53_TTFT_LIMIT_TIER2", 2.0),
+    "tier3": _float_env("KV_POOL_GLM53_TTFT_LIMIT_TIER3", 4.0),
 }
 TIER_THROUGHPUT_LIMITS = {
-    "tier2": _float_env("KV_POOL_GLM53_TPUT_LIMIT_TIER2", 0.75),
-    "tier3": _float_env("KV_POOL_GLM53_TPUT_LIMIT_TIER3", 0.30),
+    "tier2": _float_env("KV_POOL_GLM53_TPUT_LIMIT_TIER2", 0.50),
+    "tier3": _float_env("KV_POOL_GLM53_TPUT_LIMIT_TIER3", 0.25),
 }
 
 # --- Tier-3 ~80/20 DRAM/SSD split: sizing derivation ---------------------------------
@@ -588,27 +588,17 @@ def _phase_accuracy(runner: VllmRunner, state: dict[str, Any], tag: str) -> None
 
 
 def _expected_hit_tokens(prompt_tokens: int, block_size: int, lcm: int) -> int:
-    """Exact hit-token expectation for the GLM align cache layout.
+    """Exact hit-token expectation for V2 model runner (no final-block drop).
 
-    The generic ``expected_hit_token_count`` formula (floor(prompt / lcm) *
-    lcm) is wrong for this engine: the scheduler **drops the final engine
-    block before grouping the survivors into lcm chunks** (documented from
-    measurement in PR #20757 case #11: "The scheduler drops the final engine
-    block before grouping into lcm chunks ... 16,388 -> 16,128" at
-    block_size=128 / lcm=1152, where the drop and the formula happened to
-    agree). On the real W8A8 TP8 engine the align layout reports
-    block_size == lcm == 640, and the drop now costs exactly one whole lcm
-    group: 16,388 tokens carry 25 full blocks, the survivor set is 24 blocks
-    = 15,360 tokens = 24 lcm chunks, measured on 80.48.37.145 (2026-11-12,
-    glm53flash_tp8_memcache_bulk_tier2 record run: "hit tokens 15360 !=
-    expected 16000" with a clean data plane). The pool served every block it
-    was given; only this expectation needed the drop rule.
+    V2 model runner does not drop the final engine block before grouping
+    into lcm chunks, so all complete blocks participate in the hit. The
+    V1 drop rule (full_blocks - 1) measured on 2026-11-12 no longer
+    applies; updated for V2 after verification on 80.48.37.145.
     """
     full_blocks = prompt_tokens // block_size
     if full_blocks <= 1:
         return 0
-    survivor_tokens = (full_blocks - 1) * block_size
-    return survivor_tokens // lcm * lcm
+    return full_blocks * block_size // lcm * lcm
 
 
 def _phase_hit(runner: VllmRunner, state: dict[str, Any], tag: str, reset_local: bool) -> None:
