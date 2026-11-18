@@ -626,13 +626,16 @@ class AscendPCPManager(PCPManager):
         # make_dummy refreshes the shared RoPE tables from the global
         # positions, but the model consumes the rank-local ones.
         update_cos_sin(input_batch.positions)
+        # Capture and replay consume the same restore-index storage.
+        hidden_restore_idx = self._hidden_restore_idx_buffer[:num_tokens]
+        torch.arange(num_tokens, device=self.device, out=hidden_restore_idx)
         return AscendPCPAttentionContext(
             global_batch=global_batch,
             local_request_state_indices=input_batch.idx_mapping,
             local_num_tokens=input_batch.num_tokens_after_padding,
             global_block_tables=self._block_tables.get_dummy_block_tables(num_reqs),
             global_slot_mappings=self._global_batch_slot_mappings[:, :num_tokens].fill_(-1),
-            hidden_restore_idx=torch.arange(num_tokens, device=self.device),
+            hidden_restore_idx=hidden_restore_idx,
         )
 
     def build_attention_context(
