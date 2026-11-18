@@ -57,9 +57,9 @@ def _validate_v2_model_runner(self) -> None:
     """Reject the configurations Model Runner V2 cannot serve.
 
     The feature list comes from upstream so it keeps growing with it. Only the
-    Triton precondition is dropped: Ascend keeps Model Runner V2 available where
-    Triton is absent (the CPU test lanes, config-only hosts and the 310P lanes
-    import neither), and there is no V1 runner left to fall back to.
+    Triton precondition is dropped: an Ascend deployment always ships Triton,
+    while the CPU test lanes and config-only hosts import neither, and there
+    is no V1 runner left to fall back to.
     """
     unsupported = self._get_v2_model_runner_unsupported_features()
     if unsupported:

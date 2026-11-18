@@ -225,8 +225,10 @@ class NPUWorker(GPUWorker):
         if getattr(vllm_config.parallel_config, "enable_fault_tolerance", False):
             raise NotImplementedError("Ascend does not support the GPU fault-tolerance sentinel.")
 
-        # 310P runs Model Runner V2 without Triton. Remove this workaround once
-        # supported vLLM versions let workers override the Triton check.
+        # 310P runs Model Runner V2 without Triton. Replace this context manager
+        # with a _validate_triton() override once all supported vLLM versions
+        # include the upstream hook.
+        # https://github.com/vllm-project/vllm/pull/68320
         with allow_v2_model_runner_without_triton():
             super().__init__(
                 vllm_config=vllm_config,
