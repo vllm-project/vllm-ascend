@@ -87,7 +87,7 @@ def split_flashmla_requests(common) -> tuple[int, int, int, int]:
     if flags is None or flags.device.type != "cpu" or offsets.device.type != "cpu":
         raise RuntimeError("FlashMLA requires CPU is_prefilling and query boundaries from the runner")
     boundaries = offsets.clamp_max(common.num_actual_tokens).tolist()
-    stages = get_effective_prefill_flags(common)[: common.num_reqs].tolist()
+    stages = flags[: common.num_reqs].tolist()
     if len(stages) < common.num_reqs:
         if any(boundaries[i + 1] != boundaries[i] for i in range(len(stages), common.num_reqs)):
             raise RuntimeError("FlashMLA is_prefilling does not cover the active request batch")

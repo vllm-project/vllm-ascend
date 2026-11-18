@@ -322,8 +322,8 @@ def test_gather_batch_preserves_pd_tail_and_flashmla_request_order(uses_flashmla
     [
         (127, 0, [True, False], True, 1),
         (127, 3, [True, False], True, 4),
-        (0, 0, [False, False], False, 2),
-        (0, 3, [False, False], False, 6),
+        (0, 0, None, False, 2),
+        (0, 3, None, False, 6),
     ],
 )
 @pytest.mark.parametrize("backend", ["mla", "flashmla", "other"])
@@ -367,7 +367,12 @@ def test_gather_pcp_classifies_only_cached_one_token_prefill_as_decode(
 
     order = [1, 0] if backend == "flashmla" and computed_prefill == 0 else [0, 1]
     np.testing.assert_array_equal(gathered.is_prefilling_np, batch_state.is_prefilling_np[order])
-    np.testing.assert_array_equal(gathered.prefill_runs_as_decode_np, np.array(expected_mask)[order])
+    if expected_mask is None:
+        assert gathered.prefill_runs_as_decode_np is None
+        if backend != "flashmla":
+            assert gathered is batch_state
+    else:
+        np.testing.assert_array_equal(gathered.prefill_runs_as_decode_np, np.array(expected_mask)[order])
     assert gathered.decode_graph_eligible is expected_graph_eligible
     assert uniform == (1 + draft_tokens if expected_graph_eligible else None)
     assert (

@@ -1910,7 +1910,8 @@ def test_mla_short_prefill_uses_decode_request_ownership(num_prefill_tokens):
         prefill_runs_as_decode_np=None,
         decode_graph_eligible=False,
     )
-    batch_state = manager.prepare_mla_batch_req_state(batch_state)
+    batch_state = manager.prepare_pcp_batch_req_state(batch_state)
+    manager.set_dispatch_batch_req_state(batch_state)
     effective_prefilling = prefilling & ~batch_state.prefill_runs_as_decode_np
 
     for rank in range(8):
@@ -1920,7 +1921,7 @@ def test_mla_short_prefill_uses_decode_request_ownership(num_prefill_tokens):
     assert manager.get_num_tokens_for_dispatch(counts, prefilling) == max(4, num_prefill_tokens)
 
 
-@pytest.mark.parametrize("next_step", ["dummy", "decode", "dcp", "kpool"])
+@pytest.mark.parametrize("next_step", ["dummy", "decode", "fresh", "dcp", "kpool"])
 def test_pcp_short_prefill_dispatch_mask_does_not_leak_between_steps(next_step):
     manager = AscendPCPManager(2, 0, torch.device("cpu"), shard_decode_requests=True)
     manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
@@ -1940,11 +1941,15 @@ def test_pcp_short_prefill_dispatch_mask_does_not_leak_between_steps(next_step):
     )
     classified = manager.prepare_pcp_batch_req_state(batch_state)
     np.testing.assert_array_equal(classified.prefill_runs_as_decode_np, [True, False])
+    assert manager._dispatch_prefill_runs_as_decode_np is None
+    manager.set_dispatch_batch_req_state(classified)
 
     if next_step == "dummy":
         batch_state = None
     elif next_step == "decode":
         batch_state = batch_state._replace(is_prefilling_np=np.array([False, False]), has_prefill=False)
+    elif next_step == "fresh":
+        batch_state = batch_state._replace(num_computed_prefill_tokens_np=np.array([0, 128], dtype=np.int32))
     elif next_step == "dcp":
         manager.vllm_config.parallel_config.decode_context_parallel_size = 2
     else:
@@ -1952,10 +1957,13 @@ def test_pcp_short_prefill_dispatch_mask_does_not_leak_between_steps(next_step):
 
     result = manager.prepare_pcp_batch_req_state(batch_state)
     assert result is batch_state
+    manager.set_dispatch_batch_req_state(result)
     assert manager._dispatch_prefill_runs_as_decode_np is None
     if result is not None:
         assert result.prefill_runs_as_decode_np is None
         assert result.decode_graph_eligible is False
+    if next_step == "fresh":
+        assert manager.get_num_tokens_for_dispatch(result.num_scheduled_tokens, result.is_prefilling_np) == 2
 
 
 def _hook_manager() -> AscendPCPManager:

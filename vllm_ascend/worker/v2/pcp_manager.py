@@ -241,7 +241,6 @@ class AscendPCPManager(PCPManager):
         backend, without making a fresh one-token prompt use decode.
         PCP+DCP keeps its existing replicated-prefill policy.
         """
-        self._dispatch_prefill_runs_as_decode_np = None
         if batch_state is None or not self.is_decode_sharded or not batch_state.has_prefill:
             return batch_state
 
@@ -251,7 +250,8 @@ class AscendPCPManager(PCPManager):
             num_new_tokens = num_new_tokens - num_draft_tokens
         one_token_ext = (num_new_tokens == 1) & (batch_state.num_computed_prefill_tokens_np > 0)
         prefill_runs_as_decode = batch_state.is_prefilling_np & one_token_ext
-        self._dispatch_prefill_runs_as_decode_np = prefill_runs_as_decode
+        if not prefill_runs_as_decode.any():
+            return batch_state
         decode_graph_eligible = bool((prefill_runs_as_decode | ~batch_state.is_prefilling_np).all())
         return batch_state._replace(
             prefill_runs_as_decode_np=prefill_runs_as_decode,
