@@ -29,7 +29,19 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedE
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 
+try:
+    from vllm_ascend.observability.ms_metrics.handlers.rl_lifecycle import record_routed_experts_state
+except ImportError:
+    # ``ms_service_metric`` is an optional dependency; the handlers package
+    # imports it at module scope, so capture must work without it.
+    record_routed_experts_state = None
+
 logger = logging.getLogger(__name__)
+
+# ``capture`` runs once per MoE layer per step, so the ``capturing`` state is
+# latched after the first successful write instead of being recorded on the
+# hot path. A dropped write leaves the latch unset so a later call retries.
+_capturing_reported = False
 
 # Strategies whose ``prepare()`` splits the token dimension across the TP group.
 # ALLGATHER is absent on purpose: it gathers the batch before routing.
@@ -40,6 +52,20 @@ _TP_SHARDED_COMM_TYPES = frozenset(
         MoECommType.FUSED_MC2,
     }
 )
+
+
+def _report_capturing_once() -> None:
+    """Report ``capturing=1`` on the first successful write, then stay silent.
+
+    The recording layer drops a sample when the recorder is not available yet
+    or when the backend raises and the error is suppressed, so the latch is
+    only set after a successful write; otherwise a later ``capture`` call
+    retries and the steady state can never be exported.
+    """
+    global _capturing_reported
+    if _capturing_reported or record_routed_experts_state is None:
+        return
+    _capturing_reported = bool(record_routed_experts_state("capturing", 1))
 
 
 def _padded_batch_rows(tp_size: int) -> int:
@@ -135,6 +161,9 @@ def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
         layer_id: The layer index.
         topk_ids: Tensor of shape (batch_size, num_routed_experts).
     """
+
+    if not _capturing_reported:
+        _report_capturing_once()
 
     ctx = get_forward_context()
     if ctx.dp_metadata is None:  # single dp

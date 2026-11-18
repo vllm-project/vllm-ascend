@@ -485,6 +485,43 @@ def test_record_sleep_freed_gb_records_within_sleep(monkeypatch):
     )
 
 
+def test_record_routed_experts_state_records_0_1_gauge(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_rl_routed_experts_state", "rl_lifecycle")
+
+    handlers.record_routed_experts_state("capturing", 1)
+
+    metrics.get_or_create_metric.assert_any_call(
+        metric_name="rl:routed_experts_state",
+        metric_type="gauge",
+        label_names=["state"],
+    )
+    metrics.record_metric.assert_called_once_with(
+        "rl:routed_experts_state",
+        value=1.0,
+        labels={"state": "capturing"},
+    )
+
+
+def test_record_routed_experts_state_reports_dropped_write(monkeypatch):
+    """A write without a recorder must be reportable so callers can retry."""
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: None,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_rl_routed_experts_state_dropped", "rl_lifecycle")
+
+    assert handlers.record_routed_experts_state("capturing", 1) is False
+
+
 def test_custom_handlers_are_not_factory_created_from_yaml_metrics():
     """A custom handler entry must not declare a yaml ``metrics`` block.
 

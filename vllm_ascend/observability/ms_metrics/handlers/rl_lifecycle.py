@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Metrics for the RL 休眠与恢复 directory.
+"""Metrics for the RL sleep/wake lifecycle.
 
 Durations wrap ``NPUWorker.sleep``, ``wake_up``, and ``update_weights``.
 ``NPUWorker.sleep`` does not return the freed memory, so it reports that value
 through :func:`record_sleep_freed_gb` instead of a symbol hook.
+
+``rl:routed_experts_state`` reports router-replay state as a 0/1 gauge with the
+states ``enabled`` (aux-output config turns capture on) and ``capturing`` (the
+capture hook ran at least once). It is reported from the code that owns each
+transition instead of a symbol hook: ``capture`` is a per-MoE-layer hot path,
+and the latch keeps it to one recording per process.
 """
 
 from typing import Any
@@ -47,11 +53,23 @@ _UPDATE_WEIGHTS_SPEC = MetricSpec(
     (),
     level=METRIC_LEVEL_BASIC,
 )
-_SPECS = (_SLEEP_SPEC, _SLEEP_FREED_SPEC, _WAKE_SPEC, _UPDATE_WEIGHTS_SPEC)
+_ROUTED_EXPERTS_STATE_SPEC = MetricSpec(
+    "rl:routed_experts_state",
+    MetricType.GAUGE,
+    ("state",),
+    level=METRIC_LEVEL_BASIC,
+)
+_SPECS = (
+    _SLEEP_SPEC,
+    _SLEEP_FREED_SPEC,
+    _WAKE_SPEC,
+    _UPDATE_WEIGHTS_SPEC,
+    _ROUTED_EXPERTS_STATE_SPEC,
+)
 
 
-def _record(spec: MetricSpec, value: float, labels: dict[str, str]) -> None:
-    record_observation(_recorders, _KEY, _SPECS, spec, value, labels, "rl_lifecycle")
+def _record(spec: MetricSpec, value: float, labels: dict[str, str]) -> bool:
+    return record_observation(_recorders, _KEY, _SPECS, spec, value, labels, "rl_lifecycle")
 
 
 def _tag_label(tags) -> str:
@@ -98,3 +116,12 @@ def update_weights_handler(original_func, worker, *args, **kwargs):
     result, elapsed_ms = invoke_original(original_func, (worker, *args), kwargs)
     _record(_UPDATE_WEIGHTS_SPEC, elapsed_ms, {})
     return result
+
+
+def record_routed_experts_state(state: str, value: int) -> bool:
+    """Report one ``rl:routed_experts_state`` line; ``state`` is a 0/1 gauge.
+
+    Returns whether the sample was recorded, so a one-shot caller only latches
+    after a successful write and retries otherwise.
+    """
+    return _record(_ROUTED_EXPERTS_STATE_SPEC, value, {"state": state})

@@ -1,4 +1,4 @@
-# RL 休眠与恢复. Durations of the existing NPUWorker methods.
+# RL sleep/wake lifecycle. Durations of the existing NPUWorker methods.
 # wake has a tags argument and no sleep_opt argument.
 
 - symbol: vllm_ascend.worker.worker:NPUWorker.sleep

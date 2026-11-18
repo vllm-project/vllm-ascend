@@ -9,3 +9,9 @@ entries:
       lifecycle:sleep:freed_gb histogram reporting the memory released by each
       sleep level. All series stay at the basic metric level; recording is
       gated by the MS metric level runtime config.
+  - category: feature
+    text: >
+      Add the rl:routed_experts_state metric (basic level) to report the
+      MoE router-replay state as a 0/1 gauge labelled by state (enabled,
+      capturing), so RL workloads can tell whether routed-expert
+      capture is configured and actually running.

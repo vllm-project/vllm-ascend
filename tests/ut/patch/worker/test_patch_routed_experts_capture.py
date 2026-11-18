@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from vllm_ascend.patch.worker import patch_routed_experts_capture as capture_patch
 from vllm_ascend.patch.worker.patch_routed_experts_capture import capture
 
 
@@ -226,6 +227,30 @@ class TestRoutedExpertsCapturerCapture:
         capture(capturer, layer_id=10, topk_ids=topk_ids)
 
         assert torch.all(capturer.device_buffer == 0)
+
+
+class TestReportCapturingOnce:
+    """The ``capturing`` state is latched only after a successful write."""
+
+    def test_retries_until_the_first_write_succeeds(self, monkeypatch):
+        reporter = MagicMock(side_effect=[False, True])
+        monkeypatch.setattr(capture_patch, "record_routed_experts_state", reporter)
+        monkeypatch.setattr(capture_patch, "_capturing_reported", False)
+
+        capture_patch._report_capturing_once()
+        capture_patch._report_capturing_once()
+        capture_patch._report_capturing_once()
+
+        assert reporter.call_count == 2
+        assert capture_patch._capturing_reported is True
+
+    def test_missing_framework_does_not_latch(self, monkeypatch):
+        monkeypatch.setattr(capture_patch, "record_routed_experts_state", None)
+        monkeypatch.setattr(capture_patch, "_capturing_reported", False)
+
+        capture_patch._report_capturing_once()
+
+        assert capture_patch._capturing_reported is False
 
 
 if __name__ == "__main__":
