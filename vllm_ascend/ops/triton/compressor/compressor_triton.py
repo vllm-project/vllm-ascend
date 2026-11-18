@@ -701,18 +701,20 @@ def _pack_pcp_c2_rows_kernel(
     row = tl.program_id(0)
     columns = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     source_row = tl.load(send_indices_ptr + row)
-    valid = tl.load(valid_mask_ptr + row) & (source_row >= 0) & (source_row < num_tokens)
+    valid_flag = tl.load(valid_mask_ptr + row).to(tl.int32)
+    valid = (valid_flag != 0) & (source_row >= 0) & (source_row < num_tokens)
+    load_mask = valid & (columns < WIDTH)
     # Mask loads as well as the output values. Empty ranks and padded invalid
     # indices must never dereference an out-of-bounds projection row.
     source_row = tl.where(valid, source_row, 0)
     kv = tl.load(
         kv_ptr + source_row * KV_ROW_STRIDE + columns * KV_COL_STRIDE,
-        mask=valid & (columns < WIDTH),
+        mask=load_mask,
         other=0.0,
     )
     scores = tl.load(
         scores_ptr + source_row * SCORE_ROW_STRIDE + columns * SCORE_COL_STRIDE,
-        mask=valid & (columns < WIDTH),
+        mask=load_mask,
         other=0.0,
     )
     output = packed_output_ptr + row * (2 * WIDTH) + columns
