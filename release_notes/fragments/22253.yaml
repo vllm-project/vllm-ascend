@@ -1,4 +1,4 @@
-pr: 19430
+pr: 22253
 entries:
   - category: bugfix
     text: Fixed Qwen3.8-Flash-Next initialization with DFlash2 by allowing this draft configuration, providing its required target auxiliary hidden states, and handling its sliding-window KV caches.
