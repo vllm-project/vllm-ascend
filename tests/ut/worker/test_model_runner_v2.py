@@ -1316,6 +1316,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     runner.vllm_config = SimpleNamespace(
         attention_config=AttentionConfig(),
         compilation_config=runner.compilation_config,
+        parallel_config=runner.vllm_config.parallel_config,
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         kv_transfer_config=None,
     )
