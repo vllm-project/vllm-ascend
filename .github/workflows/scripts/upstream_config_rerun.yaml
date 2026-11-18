@@ -2,17 +2,19 @@ e2e-upstream_pr:
   - name: tests/v1/worker/test_mamba_utils.py
     estimated_time: 20
 e2e-upstream_singlecard:
-  - name: tests/models/multimodal/processing/test_qwen2_vl.py
-    estimated_time: 20
   - name: tests/v1/core/test_scheduler.py
-    estimated_time: 20
-  - name: tests/renderers/chat_utils/test_vision_chunk.py
     estimated_time: 20
   - name: tests/entrypoints/openai/decisions/test_decisions_e2e.py
     estimated_time: 20
   - name: tests/entrypoints/rl/state_transitions/test_pause_multi_frontend.py
     estimated_time: 20
-  - name: tests/models/multimodal/processing/test_nemotron_parse_35.py
+  - name: tests/entrypoints/multimodal/openai/chat_completion/test_default_mm_loras.py
+    estimated_time: 20
+  - name: tests/models/language/pooling_mteb_test/test_zerank.py
+    estimated_time: 20
+  - name: tests/models/multimodal/generation/test_transformers_video.py
+    estimated_time: 20
+  - name: tests/models/test_qwen3_5_mtp_config.py
     estimated_time: 20
 e2e-upstream_online_1:
   - name: tests/tokenizers_/test_mistral.py
