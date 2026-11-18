@@ -12,6 +12,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
@@ -343,6 +344,29 @@ def test_sliding_window_draft_caches_use_independent_physical_tensors():
     )
     tensor_layers = {tuple(get_kv_cache_tensor_layers(tensor)) for tensor in plan.kv_cache_tensors}
     assert all((name,) in tensor_layers for name in draft_names)
+
+
+def test_replicated_dflash_uses_glm_planner_before_generic_draft_pools():
+    from vllm_ascend.patch.platform import patch_kv_cache_utils as cache_patch
+
+    config = make_config()
+    config.parallel_config.decode_context_parallel_size = 2
+    specs = make_specs()
+    draft_name = "draft.layers.0.self_attn.attn"
+    specs[draft_name] = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=32, dtype=torch.bfloat16, dcp_sharded=False
+    )
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    assert cache_patch._get_replicated_draft_pools(groups) is None
+    budget = 3 * get_glm5_next_pool_bytes_per_block(groups)
+    expected = get_glm5_next_kv_cache_config(config, groups, budget)
+    actual = cache_patch._ascend_get_kv_cache_config_from_groups(config, groups, budget)
+    assert actual.num_blocks == expected.num_blocks == 3
+    assert actual.kv_cache_tensors == expected.kv_cache_tensors
+    assert sum(tensor.size for tensor in actual.kv_cache_tensors) == budget
+    draft_tensor = next(tensor for tensor in actual.kv_cache_tensors if tensor.layers == [draft_name])
+    assert draft_tensor.block_stride == specs[draft_name].page_size_bytes
+    assert not specs[draft_name].dcp_sharded
 
 
 def test_misaligned_logical_block_is_rejected():
