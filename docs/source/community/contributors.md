@@ -24,6 +24,7 @@
 | Kai Xiong | [@HF-001](https://github.com/HF-001) | 2026/07 |
 | XiaoShuang Wang | [@wxsIcey](https://github.com/wxsIcey) | 2026/11 |
 | Rong Liu | [@Ronald1995](https://github.com/Ronald1995) | 2026/11 |
+| ChunShuo Qiu | [@pisceskkk](https://github.com/pisceskkk) | 2026/11 |
 
 ## Emeritus Committers
 
