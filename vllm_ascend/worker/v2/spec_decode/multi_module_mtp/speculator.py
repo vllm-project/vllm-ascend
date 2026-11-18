@@ -221,24 +221,21 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
         fia_params = []
         for layer_name, metadata in draft_attn_metadata.items():
             decode_metadata = getattr(metadata, "decode", None)
-            if decode_metadata is not None and getattr(metadata, "external_flashmla", None) is None:
-                fia_params.append(
-                    {
-                        "layer_name": layer_name,
-                        "actual_seq_qlen": decode_metadata.actual_seq_lengths_q,
-                        "actual_seq_kvlen": decode_metadata.seq_lens_list,
-                        "block_table": decode_metadata.block_table,
-                    }
-                )
+            if decode_metadata is not None:
+                block_table = decode_metadata.block_table
             else:
-                fia_params.append(
-                    {
-                        "layer_name": layer_name,
-                        "actual_seq_lengths": metadata.actual_seq_lengths_q,
-                        "actual_seq_lengths_kv": metadata.seq_lens_list,
-                        "block_table": metadata.block_tables,
-                    }
-                )
+                decode_metadata = metadata
+                block_table = metadata.block_tables
+            fia_params.append(
+                {
+                    "layer_name": layer_name,
+                    "actual_seq_lengths": decode_metadata.actual_seq_lengths_q,
+                    "actual_seq_lengths_kv": decode_metadata.seq_lens_list,
+                    "actual_seq_qlen": decode_metadata.actual_seq_lengths_q,
+                    "actual_seq_kvlen": decode_metadata.seq_lens_list,
+                    "block_table": block_table,
+                }
+            )
         return fia_params
 
     def _build_attn_metadata(
