@@ -60,9 +60,9 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import clear_enable_sp, enable_sp, shared_expert_dp_enabled
 
 
-def test_prefix_only_checkpoint_policy_requires_checkpoint_support():
-    with pytest.raises(ValueError, match="requires gdn_internal_prefill_checkpoints"):
-        AscendConfig(gdn_checkpoint_policy="prefix_only", sparse_kv_offload_config=SparseKVOffloadConfig())
+def test_prefix_only_checkpoint_policy_is_independent_of_internal_exports():
+    baseline = AscendConfig(gdn_checkpoint_policy="prefix_only", sparse_kv_offload_config=SparseKVOffloadConfig())
+    assert not baseline.gdn_internal_prefill_checkpoints
     config = AscendConfig(
         gdn_checkpoint_policy="prefix_only",
         gdn_internal_prefill_checkpoints=True,

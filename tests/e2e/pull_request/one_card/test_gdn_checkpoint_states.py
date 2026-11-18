@@ -211,7 +211,7 @@ def test_fused_segments_preserve_checkpoint_and_restored_tail(lengths, offsets, 
 
 
 def test_cache_hit_prefill_exports_tail_in_one_model_step(
-    monkeypatch, model_name="Qwen/Qwen3.5-35B-A3B", *, prefix_only=False
+    monkeypatch, model_name="Qwen/Qwen3.5-35B-A3B", *, prefix_only=False, internal_checkpoints=True
 ):
     """Exercise private checkpoint pages through the real two-layer engine."""
     from vllm import LLM, SamplingParams
@@ -261,7 +261,7 @@ def test_cache_hit_prefill_exports_tail_in_one_model_step(
         enforce_eager=True,
         limit_mm_per_prompt={"image": 0, "video": 0},
         additional_config={
-            "gdn_internal_prefill_checkpoints": True,
+            "gdn_internal_prefill_checkpoints": internal_checkpoints,
             "gdn_checkpoint_policy": "prefix_only" if prefix_only else "all",
         },
     )
@@ -271,7 +271,7 @@ def test_cache_hit_prefill_exports_tail_in_one_model_step(
         seed = [i % 1000 + 100 for i in range(hit + 1)]
         exports.clear()
         engine.generate([{"prompt_token_ids": seed}], params, use_tqdm=False)
-        assert exports == [[hit]], exports
+        assert exports == ([[hit]] if internal_checkpoints else []), exports
         prompt = seed[:hit] + [2000 + i % 1000 for i in range(end - hit)]
         steps.clear()
         exports.clear()
@@ -291,6 +291,12 @@ def test_cache_hit_prefill_exports_tail_in_one_model_step(
 
 def test_prefix_only_hit_preserves_public_state_without_tail_exports(monkeypatch, model_name="Qwen/Qwen3.5-35B-A3B"):
     test_cache_hit_prefill_exports_tail_in_one_model_step(monkeypatch, model_name, prefix_only=True)
+
+
+def test_prefix_only_works_without_internal_checkpoint_kernels(monkeypatch, model_name="Qwen/Qwen3.5-35B-A3B"):
+    test_cache_hit_prefill_exports_tail_in_one_model_step(
+        monkeypatch, model_name, prefix_only=True, internal_checkpoints=False
+    )
 
 
 @pytest.mark.usefixtures("_init_checkpoint_prefill_ops")

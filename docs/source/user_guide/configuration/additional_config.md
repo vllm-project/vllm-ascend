@@ -381,13 +381,14 @@ Omitting `quant_dtype` selects MXFP8 on 950DT Products:
 
 Enable with `--additional-config '{"gdn_internal_prefill_checkpoints": true}'`.
 `gdn_checkpoint_policy` is a string, default `"all"`. Set it to `"prefix_only"`
-with internal checkpoints enabled to prioritize repeated public prefixes:
+to prioritize repeated public prefixes independently of the internal export path:
 
 ```bash
---additional-config '{"gdn_internal_prefill_checkpoints": true, "gdn_checkpoint_policy": "prefix_only"}'
+--additional-config '{"gdn_checkpoint_policy": "prefix_only"}'
 ```
 
-In `prefix_only` mode, a cold prefix producer still exports its checkpoint.
+In `prefix_only` mode, a cold prefix producer still materializes its checkpoint.
+With internal exports disabled, its prefill keeps the existing boundary splits.
 Requests admitted with a local prefix-cache hit reuse that immutable state,
 skip the tail checkpoint split, and publish no new recurrent states, including
 during decode. Their existing prefix remains reusable; an identical full-prompt
