@@ -30,6 +30,7 @@
 | FengLin Zhao | [@lcfenglinwan](https://github.com/lcfenglinwan) | 2026/11 |
 | JianPing He | [@winson-00178005](https://github.com/winson-00178005) | 2026/11 |
 | XinYue Zhang | [@zhangxinyuehfad](https://github.com/zhangxinyuehfad) | 2026/11 |
+| AuroraEmiya | [@AuroraEmiya](https://github.com/AuroraEmiya) | 2026/11 |
 
 ## Emeritus Committers
 
