@@ -8,6 +8,7 @@ import pytest
 import torch
 from torch import nn
 
+from vllm_ascend.ops import kimi_kda
 from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
     AscendKimiK3DeltaAttention,
@@ -20,6 +21,44 @@ from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicLinearMethod,
 )
+
+
+@pytest.mark.parametrize("run_mode", [0, 1], ids=["prefill", "decode"])
+def test_kda_convolution_uses_ascendc_without_host_sync(monkeypatch, run_mode):
+    """Kimi must bypass the upstream PyTorch convolution during FULL capture."""
+    native_op = MagicMock(side_effect=lambda *args, **kwargs: kwargs.get("out", args[0]))
+    op_name = "causal_conv1d_fn" if run_mode == 0 else "causal_conv1d_update"
+    monkeypatch.setattr(kimi_kda, op_name, native_op)
+
+    def forbid_item(self):
+        raise AssertionError("KDA convolution must not read device scalars on the host")
+
+    monkeypatch.setattr(torch.Tensor, "item", forbid_item)
+    mixed = torch.zeros((2, 12))
+    weights = torch.zeros((4, 12))
+    state = torch.zeros((3, 12, 3))
+    starts = torch.tensor([0, 1, 2], dtype=torch.int32)
+    indices = torch.tensor([1, 2], dtype=torch.int32)
+    accepted = torch.ones(2, dtype=torch.int32)
+
+    output = AscendKimiK3DeltaAttention._run_causal_conv1d(
+        mixed,
+        weights,
+        state,
+        starts,
+        indices,
+        None,
+        run_mode=run_mode,
+        max_query_len=1,
+        num_accepted_tokens=accepted,
+    )
+
+    native_op.assert_called_once()
+    assert output.shape == mixed.shape
+    assert native_op.call_args.kwargs["query_start_loc"] is starts
+    if run_mode == 1:
+        assert output is native_op.call_args.kwargs["out"]
+        assert native_op.call_args.kwargs["num_accepted_tokens"] is accepted
 
 
 class _RecordingLinear(nn.Module):

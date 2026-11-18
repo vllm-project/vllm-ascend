@@ -546,6 +546,7 @@ def build_attn_metadata(
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
             is_prefilling=common_is_prefilling,
+            pcp_context=pcp_context,
             max_seq_len=max_seq_len,
             causal=group_causal,
             req_ids_tensor=req_ids_tensor,

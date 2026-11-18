@@ -106,6 +106,38 @@ def _common_attn_metadata() -> AscendCommonAttentionMetadata:
     )
 
 
+@pytest.mark.parametrize("use_pcp", [False, True])
+@pytest.mark.parametrize("with_context", [False, True])
+def test_pcp_layout_selection_uses_optional_context(use_pcp, with_context):
+    common = _common_attn_metadata()
+    common.num_input_tokens = common.num_actual_tokens
+    if with_context:
+        common.pcp_context = object()
+
+    assert attention_utils.uses_pcp_sharded_layout(common, use_pcp) is (use_pcp and with_context)
+
+
+def test_replicated_pcp_layout_rejects_global_slot_mapping():
+    common = _common_attn_metadata()
+    common.num_input_tokens = 1
+
+    with pytest.raises(AssertionError, match="rank-local slot mapping"):
+        attention_utils.uses_pcp_sharded_layout(common, True)
+
+
+def test_unpadded_preserves_pcp_context_and_copy_sfa_restore_tails():
+    common = _common_attn_metadata()
+    common.pcp_context = object()
+    common.copy_sfa_restore_tails = True
+
+    unpadded = common.unpadded(num_actual_tokens=2, num_actual_reqs=1)
+
+    assert unpadded.pcp_context is common.pcp_context
+    assert unpadded.copy_sfa_restore_tails
+    assert unpadded.num_reqs == 1
+    assert unpadded.num_actual_tokens == 2
+
+
 def _spec_config(method: str, parallel_drafting: bool) -> MagicMock:
     spec_config = MagicMock()
     spec_config.parallel_drafting = parallel_drafting
