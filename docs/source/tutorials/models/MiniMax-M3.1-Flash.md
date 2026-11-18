@@ -2937,6 +2937,94 @@ The msmodeling tool (MindStudio-Modeling) optimizes serving and benchmark parame
 
 For the complete, step-by-step usage guide please refer to **[Optix-for-PD-disaggregation](https://gitcode.com/Ascend/msmodeling/blob/master/docs/en/quick_start/optix_agent_pd_disaggregation.md)**.
 
+#### 9.2.4 Experimental MXFP4 Index Scoring on 950DT
+
+`--attention-config '{"indexer_kv_dtype":"mxfp4"}' enables MXFP4 query/key
+operands for MSA index scoring on Ascend 950. Omitting this option preserves
+the existing path. It changes index-key cache packing and index
+scoring; the model weights and main attention cache retain their configured
+formats. Logical index head dimensions 64 and 128 are supported.
+
+This path requires the experimental `MSAIndexScore` operator and an isolated
+`cann_ops_transformer_a4c4` Python extension. A stock vendor wheel still uses
+the default torch dispatcher and plugin entry-point group. Isolate both before
+starting either a baseline or an MXFP4 service; otherwise the experimental
+entry point can override the baseline implementation.
+
+Build the operator from revision `a690c0b9bc735db673ca82e7c287b27aa509f73a`
+on branch `1117_msa_bnsd_host_split` of
+[the operator source](https://gitcode.com/yolic/transformer-readme).
+Use a separate CANN 9.3 build environment and an explicit vendor install prefix:
+
+```bash
+# Run from the operator source checkout with the CANN 9.3 build environment sourced.
+bash build.sh --pkg --soc=ascend950 --ops=msa_index_score --vendor_name=msa_a4c4 -j16
+bash build_out/cann-ops-transformer-msa_a4c4_linux-aarch64.run \
+    --quiet --install-path="${A4C4_PREFIX:?Set the experimental vendor install prefix}"
+cd torch_extension
+TORCH_EXTENSION_OPS=msa_index_score TORCH_EXTENSION_VENDOR=a4c4 \
+    python -m pip install . --no-deps --no-build-isolation
+```
+
+From the vLLM Ascend checkout, finish the Python namespace isolation:
+
+```bash
+python tools/isolate_msa_a4c4.py
+```
+
+The helper preserves backups, changes Python dispatcher/plugin names, and can
+be run again. It does not change operator kernels or scoring arithmetic.
+Before enabling the path, verify that the selected serving runtime can load
+the compiled vendor and passes the operator accuracy and graph replay tests.
+A successful source build alone does not establish runtime compatibility.
+
+Source the selected serving runtime first, then the experimental vendor, and
+pass the indexer cache option to the same model command:
+
+```bash
+source "${A4C4_PREFIX}/vendors/msa_a4c4_transformer/bin/set_env.bash"
+# Add --attention-config '{"indexer_kv_dtype":"mxfp4"}' to the model command.
+# Keep the same weights and parallelism used for the baseline.
+```
+
+Omit the MXFP4 option for the baseline and start a new worker process for
+each setting. Rebuild the index cache when switching formats.
+Measure accuracy, clean serving performance, and profiling in separate runs.
+The namespace tool isolates Python dispatch and plugin entry points. CANN
+vendor registration remains process-wide: sourcing the experimental prefix
+can also select its BF16 kernel. Verify the loaded operator provider and use
+the same vendor build for BF16/MXFP4 comparisons; record a production-vendor
+baseline separately when evaluating a deployment change.
+
+The serving integration uses the paged `BBND` layout. The experimental
+operator's packed `TND` wrapper reads sequence lengths on the host and is not
+supported by this integration for global graph capture.
+
+For supported 128-wide BF16 heads and normalization weights, MXFP4 scoring
+retains fused QK normalization, RoPE, and main KV insertion. The fused kernel
+writes index Q and new K into contiguous regions of one buffer. One native
+MXFP4 quantization call processes both, then paged cache insertion writes only
+the new K bytes and E8M0 scales. This
+keeps BF16 normalization-scale rounding consistent with the separate A5
+prepare path. Unsupported fusion configurations use the separate path.
+Compare the complete prepare-and-score chain as well as the score kernel;
+kernel speedup alone does not establish a serving throughput improvement.
+
+The model produces BF16 index Q/K before quantization. The fused path packs Q
+and new K together and passes the packed Q onward without a second quantization.
+The separate prepare fallback quantizes Q and new K separately. Both update only
+new K tokens in the paged cache. The operator receives packed Q, cached K, separate E8M0 scales,
+`block_table`, and sequence lengths. It reads the cache and returns FP32 block
+scores; it does not allocate or update the cache. TopK and GBSA retain their
+existing interfaces. The packing and cache insertion contract is documented in
+`vllm_ascend/ops/triton/docs/msa_m3_mxfp4_cache.md` in the source tree.
+
+This path is experimental. BF16-to-MXFP4 quantization can change block selection,
+generated tokens, and speculative acceptance. Exploratory serving runs showed
+mixed throughput results, and their profiling windows included residual prefill.
+Strict decode recapture and model-quality acceptance are required before claiming
+a stable end-to-end improvement.
+
 ## 10 FAQ
 
 For common environment, installation, and general parameter issues, refer to the [Public FAQs](../../faqs.md). This section covers MiniMax-M3.1-Flash-specific deployment issues.

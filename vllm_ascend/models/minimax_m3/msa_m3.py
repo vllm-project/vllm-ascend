@@ -264,6 +264,7 @@ class AscendMiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         cache_config: CacheConfig | None = None,
         kv_cache_dtype: str = "auto",
         kv_cache_torch_dtype: torch.dtype = torch.bfloat16,
+        use_mxfp4: bool = False,
     ) -> None:
         super().__init__()
         self.kv_cache = torch.tensor([])
@@ -272,18 +273,23 @@ class AscendMiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         self.kv_cache_dtype = kv_cache_dtype
         self.prefix = prefix
         self.cache_config = cache_config
+        self.use_mxfp4 = use_mxfp4
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        use_mxfp4 = self.use_mxfp4
         return AscendSFAIndexerCacheSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
-            head_size=self.head_dim,
-            dtype=self.dtype,
+            head_size=self.head_dim // 2 if use_mxfp4 else self.head_dim,
+            dtype=torch.uint8 if use_mxfp4 else self.dtype,
             cache_dtype_str=self.kv_cache_dtype,
+            scale_dim=self.head_dim // 32 if use_mxfp4 else 0,
+            scale_dtype=torch.float8_e8m0fnu if use_mxfp4 else torch.int8,
+            cache_sparse_li_c4=use_mxfp4,
         )
 
     def forward(self) -> None: ...
@@ -494,17 +500,28 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
         self.local_blocks = local_blocks
         self.num_index_heads = num_index_heads
         self.index_head_dim = index_head_dim
+        self.use_mxfp4 = get_current_vllm_config().attention_config.indexer_kv_dtype == "mxfp4"
+        if self.use_mxfp4 and get_current_hardware_profile().device_adaptor_family != DeviceAdaptorFamily.FP8_OPTIMIZED:
+            raise ValueError("MSAIndexScore A4C4 requires Ascend 950 hardware")
+        if self.use_mxfp4:
+            if index_head_dim not in (64, 128):
+                raise ValueError("MSAIndexScore MXFP4 requires index head dimension 64 or 128")
+            if not _CANN_INDEX_SCORE_AVAILABLE:
+                raise ValueError("MSAIndexScore MXFP4 requires the CANN IndexScore metadata path")
+            kv_cache_torch_dtype = torch.bfloat16
         self.index_cache = AscendMiniMaxM3IndexerCache(
             head_dim=index_head_dim,
             prefix=f"{prefix}.index_cache",
             cache_config=cache_config,
             kv_cache_dtype=kv_cache_dtype,
             kv_cache_torch_dtype=kv_cache_torch_dtype,
+            use_mxfp4=self.use_mxfp4,
         )
 
     def forward(
         self,
         index_query: torch.Tensor,
+        packed_query: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
@@ -520,6 +537,15 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
         num_tokens = index_md.num_actual_tokens
         num_decode_tokens = index_md.num_decode_tokens
         iq = index_query[:num_tokens].view(-1, self.num_index_heads, self.index_head_dim)
+        if packed_query is not None:
+            if not self.use_mxfp4:
+                raise ValueError("Prequantized queries require the MXFP4 index cache")
+            expected = (num_tokens, self.num_index_heads, self.index_head_dim // 2)
+            if packed_query[0].shape != expected or packed_query[1].shape != (
+                *expected[:-1],
+                self.index_head_dim // 32,
+            ):
+                raise ValueError("Prequantized queries do not match indexer metadata")
         kv = self.index_cache.kv_cache
 
         decode_topk: torch.Tensor | None = None
@@ -529,6 +555,8 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             d = index_md.decode
             assert d is not None
             decode_iq = iq[:num_decode_tokens]
+            if packed_query is not None:
+                decode_iq = tuple(tensor[:num_decode_tokens] for tensor in packed_query)
             if _USE_ASCENDC_INDEX_SCORE_DECODE:
                 decode_topk, decode_select_num_idx = minimax_m3_index_decode_ascendc(
                     decode_iq,
@@ -590,7 +618,9 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             assert p is not None
             if _USE_ASCENDC_INDEX_SCORE_PREFILL:
                 prefill_topk = minimax_m3_index_prefill_ascendc(
-                    iq[num_decode_tokens:],
+                    iq[num_decode_tokens:]
+                    if packed_query is None
+                    else tuple(tensor[num_decode_tokens:] for tensor in packed_query),
                     kv,
                     p.block_table,
                     p.cu_seqlens_q,
@@ -687,12 +717,15 @@ class AscendMiniMaxM3Indexer(nn.Module):
     def forward(
         self,
         index_query: torch.Tensor,
+        packed_query: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
         torch.Tensor | None,
     ]:
-        return self.impl(index_query)
+        if packed_query is None:
+            return self.impl(index_query)
+        return self.impl(index_query, packed_query)
 
 
 class AscendMiniMaxM3SparseBackend(AttentionBackend):

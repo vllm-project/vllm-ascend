@@ -364,6 +364,67 @@ def test_m3_indexer_cache_spec_follows_resolved_fp8_dtype(mock_get_vllm_config: 
     assert spec.cache_dtype_str == "fp8"
 
 
+@pytest.mark.parametrize("head_dim", [64, 128])
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("indexer_dtype", ["bf16", "mxfp4"])
+def test_m3_mxfp4_configuration_and_managed_cache(head_dim, device_type, indexer_dtype) -> None:
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(indexer_kv_dtype=indexer_dtype),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+        cache_config=SimpleNamespace(block_size=128),
+    )
+    kwargs = dict(
+        num_kv_heads=1,
+        scale=1.0,
+        topk_blocks=16,
+        sparse_block_size=128,
+        num_index_heads=1,
+        index_head_dim=head_dim,
+        prefix="layer0.attn",
+    )
+    with (
+        patch.object(msa_m3_module, "get_current_vllm_config", return_value=config),
+        patch.object(msa_m3_module, "get_current_hardware_profile", return_value=get_hardware_profile(device_type)),
+        patch.object(msa_m3_module, "_CANN_INDEX_SCORE_AVAILABLE", True),
+    ):
+        if indexer_dtype == "mxfp4" and device_type != AscendDeviceType.A5:
+            with pytest.raises(ValueError, match="requires Ascend 950"):
+                AscendMiniMaxM3IndexerImpl(**kwargs)
+            return
+        impl = AscendMiniMaxM3IndexerImpl(**kwargs)
+        spec = impl.index_cache.get_kv_cache_spec(config)
+    quantized = indexer_dtype == "mxfp4"
+    assert impl.use_mxfp4 is quantized
+    assert spec.dtype == (torch.uint8 if quantized else torch.bfloat16)
+    assert spec.head_size == (head_dim // 2 if quantized else head_dim)
+    assert spec.scale_dim == (head_dim // 32 if quantized else 0)
+    assert spec.cache_sparse_li_c4 is quantized
+    expected_bytes = 128 * (head_dim // 2 + head_dim // 32) if quantized else 128 * head_dim * 2
+    assert spec.page_size_bytes == expected_bytes
+
+
+@pytest.mark.parametrize("head_dim, cann_available", [(96, True), (128, False)])
+def test_m3_mxfp4_rejects_unsupported_configuration(head_dim, cann_available) -> None:
+    config = SimpleNamespace(attention_config=SimpleNamespace(indexer_kv_dtype="mxfp4"))
+    with (
+        patch.object(msa_m3_module, "get_current_vllm_config", return_value=config),
+        patch.object(
+            msa_m3_module, "get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A5)
+        ),
+        patch.object(msa_m3_module, "_CANN_INDEX_SCORE_AVAILABLE", cann_available),
+        pytest.raises(ValueError, match="head dimension|metadata path"),
+    ):
+        AscendMiniMaxM3IndexerImpl(
+            num_kv_heads=1,
+            scale=1.0,
+            topk_blocks=16,
+            sparse_block_size=128,
+            num_index_heads=1,
+            index_head_dim=head_dim,
+            prefix="layer0.attn",
+        )
+
+
 def test_a5_decode_topk_keeps_fused_postprocess_fast_path() -> None:
     source_path = Path(msa_m3_index_postprocess.__file__).with_name("msa_m3_index_topk.py")
     source = source_path.read_text(encoding="utf-8")
@@ -1428,6 +1489,36 @@ def test_cann_index_score_forwards_metadata_operands() -> None:
     assert kwargs["sparse_mode"] == 3
     assert kwargs["init_blocks"] == 0
     assert kwargs["local_blocks"] == 0
+
+
+@pytest.mark.parametrize("causal", [False, True])
+def test_mxfp4_index_score_forwards_paged_cache_and_metadata(causal) -> None:
+    query = torch.ones(8, 1, 128, dtype=torch.bfloat16)
+    cache = (torch.zeros(4, 128, 64, dtype=torch.uint8), torch.zeros(4, 128, 2, 2, dtype=torch.uint8))
+    table = torch.tensor([[1, 0]], dtype=torch.int32)
+    q_lengths = torch.tensor([0, 8], dtype=torch.int32)
+    k_lengths = torch.tensor([129], dtype=torch.int32)
+    start = torch.tensor([1], dtype=torch.int32)
+    mask = torch.zeros(2048, 2048, dtype=torch.int8) if causal else None
+    expected = torch.empty(1, 8, 16)
+    with patch("vllm_ascend.models.minimax_m3.ops.msa_m3_mxfp4.mxfp4_index_score", return_value=expected) as score:
+        actual = _minimax_m3_index_score(
+            query, cache, table, q_lengths, k_lengths, start, mask, init_blocks=2, local_blocks=3
+        )
+    assert actual is expected
+    score.assert_called_once_with(
+        query,
+        cache,
+        start,
+        block_table=table,
+        atten_mask=mask,
+        actual_seq_qlen=q_lengths,
+        actual_seq_klen=k_lengths,
+        layout_key="BBND",
+        sparse_mode=3 if causal else 0,
+        init_blocks=0,
+        local_blocks=0,
+    )
 
 
 def test_cann_index_score_casts_query_to_fp8_cache_dtype() -> None:

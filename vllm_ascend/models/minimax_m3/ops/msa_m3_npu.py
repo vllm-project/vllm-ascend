@@ -411,7 +411,7 @@ def _build_cu_block_lens(
 
 @torch.no_grad()
 def _minimax_m3_index_score(
-    idx_q: torch.Tensor,
+    idx_q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     index_kv_cache: torch.Tensor | tuple[torch.Tensor],
     block_table: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
@@ -429,6 +429,22 @@ def _minimax_m3_index_score(
     ``init_blocks`` and ``local_blocks`` are kept for parity with the index
     scoring interface; candidate forcing is applied by the TopK stage.
     """
+    if isinstance(index_kv_cache, tuple) and len(index_kv_cache) == 2:
+        from vllm_ascend.models.minimax_m3.ops.msa_m3_mxfp4 import mxfp4_index_score
+
+        return mxfp4_index_score(
+            idx_q,
+            index_kv_cache,
+            start_loc,
+            block_table=block_table,
+            atten_mask=causal_mask,
+            actual_seq_qlen=cu_seqlens_q,
+            actual_seq_klen=seq_lens,
+            layout_key="BBND",
+            sparse_mode=3 if causal_mask is not None else 0,
+            init_blocks=0,
+            local_blocks=0,
+        )
     from cann_ops_transformer.ops import msa_index_score
 
     index_kv_cache = _as_ascendc_index_kv_cache(index_kv_cache)
@@ -451,7 +467,7 @@ def _minimax_m3_index_score(
 
 @torch.no_grad()
 def minimax_m3_index_prefill(
-    idx_q: torch.Tensor,
+    idx_q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     index_kv_cache: torch.Tensor | tuple[torch.Tensor],
     block_table: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
@@ -498,7 +514,7 @@ def minimax_m3_index_prefill(
 
 @torch.no_grad()
 def minimax_m3_index_decode(
-    idx_q: torch.Tensor,
+    idx_q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     index_kv_cache: torch.Tensor | tuple[torch.Tensor],
     block_table: torch.Tensor,
     cu_seqlens_q: torch.Tensor,

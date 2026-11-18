@@ -1,0 +1,11 @@
+pr: 22283
+entries:
+  - category: feature
+    text: >-
+      Added experimental MXFP4 index scoring for MiniMax-M3/M3.1 on Ascend 950,
+      enabled with --attention-config '{"indexer_kv_dtype":"mxfp4"}' and a
+      separately installed experimental CANN operator. This option is disabled
+      by default; model accuracy and stable end-to-end performance remain under
+      validation.
+    model: minimax-m3
+    hardware: [A5]

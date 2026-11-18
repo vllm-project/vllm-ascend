@@ -396,6 +396,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         )
 
         idx_cache = self.indexer.index_cache.kv_cache
+        if self.indexer.impl.use_mxfp4:
+            from vllm_ascend.models.minimax_m3.ops.msa_m3_mxfp4 import insert_mxfp4_index_cache
+
+            insert_mxfp4_index_cache(idx_cache, index_key[:num_tokens], index_meta.slot_mapping[:num_tokens])
+            return
         if isinstance(idx_cache, (tuple, list)):
             idx_cache = idx_cache[0]
         _scatter_index_cache(
@@ -489,6 +494,13 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             and hidden_states.shape[0] <= _MAX_FUSED_QKNORM_ROPE_CACHE_INSERT_TOKENS
             and hidden_states.device.type == "npu"
             and hidden_states.dtype == torch.bfloat16
+            and (
+                not self.indexer.impl.use_mxfp4
+                or all(
+                    norm.weight.dtype == torch.bfloat16
+                    for norm in (self.q_norm, self.k_norm, self.index_q_norm, self.index_k_norm)
+                )
+            )
             and positions.ndim == 1
             and self.head_dim == self.idx_head_dim == 128
             and getattr(self.rotary_emb, "is_neox_style", False)
@@ -510,15 +522,30 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     ) -> None:
         # Lazy-load Triton only for the supported NPU path. Cache access stays
         # inside the opaque attention op, like _run_sparse_attention.
-        from vllm_ascend.ops.triton.msa.minimax_qknorm_rope_cache import minimax_qknorm_rope_cache
+        from vllm_ascend.ops.triton.msa.minimax_qknorm_rope_cache import (
+            minimax_qknorm_rope_cache,
+        )
 
         metadata = get_forward_context().attn_metadata
         main_meta = metadata[self.layer_name]
         index_meta = metadata[self.indexer.index_cache.prefix]
         key_cache, value_cache = self.kv_cache
         index_cache = self.indexer.index_cache.kv_cache
-        if isinstance(index_cache, (tuple, list)):
-            index_cache = index_cache[0]
+        index_key = None
+        index_query_out = None
+        index_qk_out = None
+        if self.indexer.impl.use_mxfp4:
+            # Preserve fused norm/RoPE/main KV insertion. Only the index key
+            # is materialized for the validated FP4 quantization adapter.
+            query_rows = qkv.shape[0] * self.num_idx_heads
+            index_qk_out = qkv.new_empty((qkv.shape[0] * (self.num_idx_heads + 1), self.idx_head_dim))
+            index_query_out = index_qk_out[:query_rows].view(qkv.shape[0], self.num_idx_heads * self.idx_head_dim)
+            index_key = index_qk_out[query_rows:]
+            fused_index_cache = None
+        elif isinstance(index_cache, (tuple, list)):
+            fused_index_cache = index_cache[0]
+        else:
+            fused_index_cache = index_cache
         query, index_query = minimax_qknorm_rope_cache(
             qkv,
             self.rotary_emb.cos_sin_cache,
@@ -529,7 +556,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             self.index_k_norm.weight,
             key_cache,
             value_cache,
-            index_cache,
+            fused_index_cache,
             main_meta.slot_mapping,
             index_meta.slot_mapping,
             main_meta.num_actual_tokens,
@@ -538,8 +565,23 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             self.num_idx_heads,
             self.q_norm.variance_epsilon,
             index_packed=index_qk,
+            index_key_out=index_key,
+            index_query_out=index_query_out,
         )
-        topk_idx = self.indexer(index_query)
+        if index_qk_out is not None:
+            from vllm_ascend.models.minimax_m3.ops.msa_m3_mxfp4 import (
+                pack_mxfp4_query_and_insert_cache,
+            )
+
+            packed_query = pack_mxfp4_query_and_insert_cache(
+                index_cache,
+                index_qk_out,
+                self.num_idx_heads,
+                index_meta.slot_mapping[: index_meta.num_actual_tokens],
+            )
+            topk_idx = self.indexer(index_query, packed_query)
+        else:
+            topk_idx = self.indexer(index_query)
         self.impl.forward(self, query, self.kv_cache, topk_idx, attn_output)
 
     def forward(
