@@ -80,6 +80,12 @@ full request capacity; shapes with `B` describe their active rows.
   overlaps before committing ingest stores, and replaces observer atomics
   with per-bucket reductions followed by a marker-clear launch.
   Non-power-of-two draft widths use scalar statistics accesses.
+- **A5 compatibility**: Continuations stop at the first document separator
+  using a minimum-position reduction. This avoids incorrect results from the
+  compare/cumsum/select path on narrow continuation rows with Triton-Ascend
+  3.6.0.post2. Finalize pads its internal draft width to at least two to avoid
+  a unit-width boolean gather compilation failure for `K=1`. Padding does
+  not change the requested draft width or the returned tensor shape.
 
 ## Test Cases
 
@@ -87,6 +93,12 @@ The suite compares local scan and ingest to CPU references, exercises corpus
 voting and wraparound, and checks observer counts and confidence. Integer
 outputs require exact equality; floating-point confidence uses approximate
 comparison.
+
+The feature matrix includes `K=1` with corpus lookup enabled at match depth
+two, with adaptive verification both enabled and disabled. Corpus voting,
+document-boundary and short-history cases cover the narrow-row truncation
+path. The 54-case suite passed on A3 and A5 with CANN 9.3.0 and
+Triton-Ascend 3.6.0.post2, using vLLM `ba15685ab7`.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_suffix_speculator.py
