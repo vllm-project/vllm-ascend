@@ -1020,18 +1020,15 @@ class BaseDeviceAdaptor:
         # Ascend versions make these queries safe before device selection.
         from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
-        q = l2norm_fwd(q.contiguous()).contiguous()
-        k = l2norm_fwd(k.contiguous()).contiguous()
-        v = v.contiguous()
+        # Conv1d produces head-first storage exposed to attention as BSND views.
+        # Pack only views with gaps or a different storage order. L2Norm reduces D only.
+        q, k, v = (x.transpose(1, 2).contiguous() for x in (q, k, v))
+        q = l2norm_fwd(q)
+        k = l2norm_fwd(k)
+
         g = g.to(torch.float32).contiguous()
         beta = beta.to(v.dtype).contiguous()
         initial_state = initial_state.contiguous()
-
-        # BNSD/NTD take [B, H, T, D]; q/k/v arrive sequence-major. The output is
-        # still returned sequence-major, so only the inputs are permuted.
-        q = q.transpose(1, 2).contiguous()
-        k = k.transpose(1, 2).contiguous()
-        v = v.transpose(1, 2).contiguous()
 
         cu_seqlens = prebuilt_meta.cu_seqlens_host
         chunk_indices = prebuilt_meta.chunk_indices_chunk64_host

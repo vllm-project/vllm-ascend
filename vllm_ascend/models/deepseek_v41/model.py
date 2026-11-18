@@ -757,6 +757,11 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         )
         self.v41_layer_name = f"{prefix}.v41_attn"
         context = vllm_config.compilation_config.static_forward_context
+        self.kv_transfer_cache_names = tuple(
+            name
+            for name, cache in context.items()
+            if name.startswith(f"{prefix}.") and isinstance(cache, DeepseekV41CacheLayer)
+        )
         context[self.v41_layer_name] = self
 
     def forward(self, positions, hidden_states, llama_4_scaling=None):

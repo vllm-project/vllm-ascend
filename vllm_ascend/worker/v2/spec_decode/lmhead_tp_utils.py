@@ -28,7 +28,6 @@ class LmheadTPDraftSamplingMixin:
     max_num_reqs: int
     num_speculative_steps: int
     use_local_argmax_reduction: bool
-    enable_adaptive_verification: bool
 
     # Speculators bypassing this compute_draft_logits hook need their own
     # alignment (DSpark wraps its model's compute_draft_logits). Paths without
@@ -77,8 +76,6 @@ class LmheadTPDraftSamplingMixin:
                 "get_top_tokens reduces over the local vocab shard only, which "
                 "silently produces wrong tokens under pure-DP lmhead TP."
             )
-        if self.enable_adaptive_verification:
-            raise NotImplementedError("lmhead TP does not support enable_adaptive_verification.")
 
     def compute_draft_logits(self, hidden_states: torch.Tensor, spec_step_idx: int) -> torch.Tensor:
         if not lmhead_tp_enable():
