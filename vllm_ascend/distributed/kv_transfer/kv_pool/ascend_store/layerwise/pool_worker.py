@@ -793,7 +793,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self,
         request: ReqMeta,
         group_id: int,
-        cached_tokens: int,
+        num_computed_tokens: int,
         block_hashes: Sequence[BlockHash],
     ) -> tuple[int, Callable[[int], tuple[str, bool] | None]] | None:
         if group_id not in self._reused_layers_by_group:
@@ -807,7 +807,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         def get_saved_key(block_idx: int) -> tuple[str, bool] | None:
             """Return the pool key and whether it is public."""
             block_end = (block_idx + 1) * block_size
-            end = min(block_end, cached_tokens)
+            end = min(block_end, num_computed_tokens)
             saved = snapshot.get(block_idx)
             if saved is not None:
                 saved_end_token, pool_key, is_public = saved
@@ -819,7 +819,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             logger.error("No saved KV page for request %s group %d block %d", request.req_id, group_id, block_idx)
             return None
 
-        return cached_tokens // block_size, get_saved_key
+        return num_computed_tokens // block_size, get_saved_key
 
     def _layerwise_key_batches(self, keys: list[str]) -> list[list[str]]:
         batch_size = self.layerwise_max_transfer_blocks if self.layerwise_max_transfer_blocks > 0 else max(1, len(keys))
