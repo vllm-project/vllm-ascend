@@ -122,7 +122,7 @@ def _greedy_rejection_kernel(
                 if HAS_PENALTIES:
                     t_ptr = output_bin_counts_ptr + req_state_idx.to(tl.int64) * output_bin_counts_stride + tgt_tok
                     tl.store(t_ptr, tl.load(t_ptr) + 1)
-            rejected_step += accepted.to(tl.int32)
+            rejected_step += tl.where(accepted, 1, 0)
 
     bonus_idx = start_idx + rejected_step
     bonus_tok = tl.load(target_argmax_ptr + bonus_idx).to(tl.int64)
@@ -217,6 +217,7 @@ def _greedy_rejection_sample(
     all_token_ids_stride = 0
     total_len_ptr = num_sampled
     if use_fused_reject:
+        assert seq_lens_chunk is not None and idx_mapping_chunk is not None and prefill_len is not None
         has_chunked_prefill_check = bool(getattr(_GREEDY_LOCAL, "has_prefill", True))
         _GREEDY_LOCAL.last_num_rejected = num_rejected
         req_states = getattr(_GREEDY_LOCAL, "req_states", None)

@@ -80,9 +80,8 @@ _FIA_LSE_DUMMY_BY_DEV: dict[torch.device, torch.Tensor] = {}
 
 
 def _uses_base_fia_op() -> bool:
-    return (
-        DeviceOperator.npu_fused_infer_attention_score.__func__
-        is BaseDeviceAdaptor.npu_fused_infer_attention_score.__func__
+    return getattr(DeviceOperator.npu_fused_infer_attention_score, "__func__", None) is getattr(
+        BaseDeviceAdaptor.npu_fused_infer_attention_score, "__func__", object()
     )
 
 

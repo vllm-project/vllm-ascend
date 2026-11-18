@@ -4,7 +4,7 @@
 from collections.abc import Callable, Hashable, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, fields, replace
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import torch
 import torch_npu
@@ -181,7 +181,9 @@ class UpdatableGraph(torch.npu.NPUGraph):
                 ):
                     static_sig = (
                         type(prov),
-                        tuple((f.name, getattr(prov, f.name)) for f in fields(prov) if f.name != "layer_name"),
+                        tuple(
+                            (f.name, getattr(prov, f.name)) for f in fields(cast(Any, prov)) if f.name != "layer_name"
+                        ),
                     )
                     try:
                         hash(static_sig)

@@ -151,6 +151,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             self._cached_graph_update_backend = attn_backend
             self._cached_use_updatable = use_updatable_graph(attn_backend)
         else:
+            assert self._cached_graph_update_backend is not None
             attn_backend = self._cached_graph_update_backend
         attn_metadata = self.model_runner.model_state.attn_metadata
 
