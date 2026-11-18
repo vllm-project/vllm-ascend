@@ -2947,7 +2947,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
 
         # The committed block is skipped regardless of medium; only the
         # missing block is allocated fresh within this step and transferred.
-        worker.m_store.batch_alloc.assert_called_once_with([fresh_key], [64], LAYERWISE_READ_LEASE_TTL_MS)
+        worker.m_store.batch_alloc.assert_called_once_with([fresh_key], [64], LAYERWISE_READ_LEASE_TTL_MS, ["r1"])
         self.assertEqual(request.save_keys, [fresh_key])
         self.assertNotIn(committed_key, request.save_keys)
         self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202, 0])
@@ -2980,7 +2980,9 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker._alloc_gvas_for_save([request])
 
         # Fail open: an unreadable pool costs bandwidth, never the blocks.
-        worker.m_store.batch_alloc.assert_called_once_with([key0, key1], [64, 64], LAYERWISE_READ_LEASE_TTL_MS)
+        worker.m_store.batch_alloc.assert_called_once_with(
+            [key0, key1], [64, 64], LAYERWISE_READ_LEASE_TTL_MS, ["r1", "r1"]
+        )
         self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202, 203])
 
     def test_allocation_sentinels_are_filtered_before_int64_conversion(self):
