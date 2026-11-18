@@ -27,9 +27,6 @@ from vllm_ascend.ops.triton.hisparse import (
 
 _SORT_MIN_DIRECT_TILES = 64 * 1024
 _SORT_BUFFER_LIMIT_BYTES = 768 * 1024
-_ARCH22_INVALIDATE_MAX_WRITES = 64
-# Hot-cache LRU indices use signed int16 slots, including slot zero.
-_ARCH22_MAX_HOT_ROWS = torch.iinfo(torch.int16).max + 1
 
 
 def _load_resolver():
@@ -392,17 +389,6 @@ class HiSparseNPUOps:
         if num_tokens == 0:
             return
         if region_stride == 0 or num_state_rows == 0 or groups == 0:
-            return
-        # Registered only by the arch22 build. Keep A5 and large prefill on
-        # their existing paths; graph capture records the same batched op.
-        if (
-            num_tokens <= _ARCH22_INVALIDATE_MAX_WRITES
-            and region_stride <= _ARCH22_MAX_HOT_ROWS
-            and hasattr(torch.ops._C_ascend, "hisparse_invalidate_written")
-        ):
-            torch.ops._C_ascend.hisparse_invalidate_written(
-                group_table, request_state_indices, req_id_per_token, written_slots, num_state_rows, region_stride
-            )
             return
         tile = 256
         hot_tiles = triton.cdiv(region_stride, tile)

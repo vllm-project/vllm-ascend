@@ -538,7 +538,7 @@ def test_batched_invalidation_dynamic_graph(dtype, hot_capacity):
 
 @pytest.mark.parametrize("empty", ["groups", "states", "writes", "state_count", "region"])
 @pytest.mark.parametrize("empty_view", [False, True])
-def test_native_invalidation_empty_inputs(empty, empty_view):
+def test_invalidation_empty_inputs(empty, empty_view):
     table = torch.arange(7, dtype=torch.int32, device="npu")[None]
     groups = torch.tensor([table.data_ptr()], dtype=torch.int64, device="npu")
     states = torch.zeros(1, dtype=torch.int32, device="npu")
@@ -554,29 +554,24 @@ def test_native_invalidation_empty_inputs(empty, empty_view):
     elif empty == "writes":
         requests, written = make_empty(requests), make_empty(written)
     state_count, region = (0 if empty == "state_count" else 1), (0 if empty == "region" else 7)
-    native = torch.ops._C_ascend.hisparse_invalidate_written
-    native(groups, states, requests, written, state_count, region)
+    invalidate = HiSparseNPUOps.hisparse_invalidate_written_slots
+    invalidate(groups, states, requests, written, state_count, region)
     torch.testing.assert_close(table.cpu(), torch.arange(7, dtype=torch.int32)[None])
     # Empty work must not hide an invalid tensor shape.
-    with pytest.raises(RuntimeError, match="contiguous vectors"):
-        native(groups.view(-1, 1), states, requests, written, state_count, region)
+    with pytest.raises(ValueError, match="group_table"):
+        invalidate(groups.view(-1, 1), states, requests, written, state_count, region)
 
 
 @pytest.mark.parametrize("count", [64, 65])
-def test_native_invalidation_write_limit(count):
+def test_invalidation_write_count(count):
+    """The shared Triton kernel has no native write-count ceiling."""
     table = torch.arange(count, dtype=torch.int32, device="npu")[None]
     groups = torch.tensor([table.data_ptr()], dtype=torch.int64, device="npu")
     states = torch.zeros(1, dtype=torch.int32, device="npu")
     requests = torch.zeros(count, dtype=torch.int32, device="npu")
     written = torch.arange(count, dtype=torch.int32, device="npu")
-    native = torch.ops._C_ascend.hisparse_invalidate_written
-    if count > 64:
-        with pytest.raises(RuntimeError, match="at most 64 writes"):
-            native(groups, states, requests, written, 1, count)
-        torch.testing.assert_close(table.cpu(), torch.arange(count, dtype=torch.int32)[None])
-    else:
-        native(groups, states, requests, written, 1, count)
-        assert torch.all(table.cpu() == -1)
+    HiSparseNPUOps.hisparse_invalidate_written_slots(groups, states, requests, written, 1, count)
+    assert torch.all(table.cpu() == -1)
 
 
 def test_native_resolver_empty_state_tables():

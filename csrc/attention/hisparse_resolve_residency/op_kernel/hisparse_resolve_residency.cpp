@@ -1,8 +1,95 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "kernel_operator.h"
+
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
+
+// arch22 (A2/A3) entry: the Resolver consumes the legacy pointer/geometry ABI
+// directly, keeping the classic AscendC UB path used on these SoCs. One block
+// per logical row, exactly like the former csrc/hisparse launcher. Stats
+// accumulate inline, so this entry only serves the resolve launch
+// (invalidation runs as the shared Triton kernel on every SoC).
+#include "arch22/hisparse_resolver_kernel.h"
+
+extern "C" __global__ __aicore__ void hisparse_resolve_residency(
+    GM_ADDR logical,
+    GM_ADDR hot_table,
+    GM_ADDR requests,
+    GM_ADDR states,
+    GM_ADDR source,
+    GM_ADDR resident,
+    GM_ADDR valid_rows,
+    GM_ADDR tags,
+    GM_ADDR lru,
+    GM_ADDR physical,
+    GM_ADDR resolved,
+    GM_ADDR errors,
+    GM_ADDR attention,
+    GM_ADDR counts,
+    GM_ADDR swap_host,
+    GM_ADDR swap_device,
+    GM_ADDR swap_counts,
+    GM_ADDR miss_mask,
+    GM_ADDR stats,
+    GM_ADDR workspace, GM_ADDR tiling) {
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    GET_TILING_DATA(tilingData, tiling);
+    (void)workspace;
+
+    HiSparseArch22Descriptor descriptor{};
+    descriptor.pointers[0] = reinterpret_cast<uintptr_t>(logical);
+    descriptor.pointers[1] = reinterpret_cast<uintptr_t>(requests);
+    descriptor.pointers[2] = reinterpret_cast<uintptr_t>(states);
+    descriptor.pointers[3] = reinterpret_cast<uintptr_t>(source);
+    descriptor.pointers[4] = reinterpret_cast<uintptr_t>(resident);
+    descriptor.pointers[5] = reinterpret_cast<uintptr_t>(hot_table);
+    descriptor.pointers[6] = reinterpret_cast<uintptr_t>(tags);
+    descriptor.pointers[7] = reinterpret_cast<uintptr_t>(lru);
+    descriptor.pointers[8] = reinterpret_cast<uintptr_t>(physical);
+    descriptor.pointers[9] = reinterpret_cast<uintptr_t>(attention);
+    descriptor.pointers[10] = reinterpret_cast<uintptr_t>(resolved);
+    descriptor.pointers[11] = reinterpret_cast<uintptr_t>(counts);
+    descriptor.pointers[12] = reinterpret_cast<uintptr_t>(swap_host);
+    descriptor.pointers[13] = reinterpret_cast<uintptr_t>(swap_device);
+    descriptor.pointers[14] = reinterpret_cast<uintptr_t>(swap_counts);
+    descriptor.pointers[15] = reinterpret_cast<uintptr_t>(miss_mask);
+    descriptor.pointers[16] = reinterpret_cast<uintptr_t>(stats);
+    descriptor.pointers[17] = reinterpret_cast<uintptr_t>(errors);
+    descriptor.pointers[18] = reinterpret_cast<uintptr_t>(valid_rows);
+    descriptor.geometry[0] = tilingData.rows;
+    descriptor.geometry[1] = tilingData.topk;
+    descriptor.geometry[2] = tilingData.hotSlots;
+    descriptor.geometry[3] = tilingData.hostRows;
+    descriptor.geometry[4] = tilingData.logicalStride;
+    descriptor.geometry[5] = tilingData.stateIndexCount;
+    descriptor.geometry[6] = tilingData.tagRows;
+    descriptor.geometry[7] = tilingData.sourceRows;
+    descriptor.geometry[8] = tilingData.sourceColumns;
+    descriptor.geometry[9] = tilingData.sourceStride;
+    descriptor.geometry[10] = tilingData.sourceBlockSize;
+    descriptor.geometry[11] = tilingData.residentRows;
+    descriptor.geometry[12] = tilingData.residentColumns;
+    descriptor.geometry[13] = tilingData.residentStride;
+    descriptor.geometry[14] = tilingData.residentBlockSize;
+    descriptor.geometry[15] = tilingData.residentNullBlock;
+    descriptor.geometry[16] = tilingData.hotBlockSize;
+    descriptor.geometry[17] = tilingData.hotTableStride;
+    descriptor.geometry[18] = tilingData.attentionStride;
+    descriptor.geometry[19] = tilingData.attentionBlockStride;
+    descriptor.geometry[20] = tilingData.countsStride;
+    descriptor.geometry[21] = tilingData.maxUnionRows;
+    descriptor.geometry[22] = tilingData.hashSize;
+    descriptor.geometry[23] = tilingData.attentionCapacity;
+    descriptor.geometry[24] = tilingData.byteMissMask;
+    AscendC::TPipe pipe;
+    Resolver resolver(descriptor, pipe);
+    resolver.Process();
+}
+
+#else
+
 #include "hisparse_resolver_kernel.h"
 
-extern "C" __global__ __aicore__ void hi_sparse_resolve_residency(
+extern "C" __global__ __aicore__ void hisparse_resolve_residency(
     GM_ADDR logical,
     GM_ADDR hot_table,
     GM_ADDR requests,
@@ -90,3 +177,5 @@ extern "C" __global__ __aicore__ void hi_sparse_resolve_residency(
         asc_vf_call<resolve_vf<false>>(dim3(kThreads), descriptor, scratch, block);
     }
 }
+
+#endif
