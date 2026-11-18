@@ -20,8 +20,10 @@
 import copy
 import gc
 import logging
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from fnmatch import filter as fnmatch_filter
+from threading import RLock
 from types import NoneType
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
@@ -71,6 +73,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
+from vllm.v1.worker import gpu_worker
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm.v1.worker.gpu_worker import Worker as GPUWorker
 from vllm.v1.worker.startup_plan import (
@@ -151,6 +154,26 @@ torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_grap
 torch.npu.config.allow_internal_format = True
 
 
+_GPU_WORKER_TRITON_LOCK = RLock()
+
+
+@contextmanager
+def allow_v2_model_runner_without_triton() -> Iterator[None]:
+    """Relax the GPU worker's Triton check during Ascend construction."""
+    # Serialize callers so overlapping constructors cannot restore the flag
+    # while another constructor using this context is still running.
+    with _GPU_WORKER_TRITON_LOCK:
+        has_triton = getattr(gpu_worker, "HAS_TRITON", True)
+        if has_triton:
+            yield
+            return
+        gpu_worker.HAS_TRITON = True
+        try:
+            yield
+        finally:
+            gpu_worker.HAS_TRITON = has_triton
+
+
 class NPUWorker(GPUWorker):
     def __init__(
         self,
@@ -174,10 +197,7 @@ class NPUWorker(GPUWorker):
         # Ascend V2 model runner overrides so the worker resolves the same
         # runner version as the engine. Idempotent.
         from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs
-        from vllm_ascend.mrv2_utils import (
-            allow_v2_model_runner_without_triton,
-            apply_v2_model_runner_config_patch,
-        )
+        from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
         from vllm_ascend.utils import adapt_patch
 
         apply_v2_model_runner_config_patch()

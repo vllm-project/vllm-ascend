@@ -18,17 +18,12 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
-from contextlib import contextmanager
-from threading import RLock
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:
     VllmConfig = None
-
-_GPU_WORKER_TRITON_LOCK = RLock()
 
 
 def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
@@ -69,25 +64,6 @@ def _validate_v2_model_runner(self) -> None:
     unsupported = self._get_v2_model_runner_unsupported_features()
     if unsupported:
         raise ValueError(f"Model Runner V2 does not yet support: {', '.join(unsupported)}")
-
-
-@contextmanager
-def allow_v2_model_runner_without_triton() -> Iterator[None]:
-    """Relax the GPU worker's Triton check during Ascend construction."""
-    from vllm.v1.worker import gpu_worker
-
-    # Serialize callers so overlapping constructors cannot restore the flag
-    # while another constructor using this context is still running.
-    with _GPU_WORKER_TRITON_LOCK:
-        has_triton = getattr(gpu_worker, "HAS_TRITON", True)
-        if has_triton:
-            yield
-            return
-        gpu_worker.HAS_TRITON = True
-        try:
-            yield
-        finally:
-            gpu_worker.HAS_TRITON = has_triton
 
 
 def apply_v2_model_runner_config_patch() -> None:
