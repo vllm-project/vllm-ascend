@@ -26,6 +26,23 @@ def _load_cache_views():
     return namespace
 
 
+def test_qsa_union_gbsa_uses_caller_output():
+    source = (
+        Path(__file__).resolve().parents[4]
+        / "vllm_ascend/models/qwen4_exp/gbsa_union.py"
+    )
+    tree = ast.parse(source.read_text())
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_run_union_gbsa"
+    )
+    code = ast.unparse(function)
+    assert "generic_block_sparse_attention_out(" in code
+    assert "union_ops.generic_block_sparse_attention(" not in code
+    assert "output.copy_(" not in code
+
+
 @pytest.mark.parametrize("group_ids", [(0, 1), (31, 32), (95, 96)])
 @pytest.mark.parametrize("storage_page_size", [128, 384, 768])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])

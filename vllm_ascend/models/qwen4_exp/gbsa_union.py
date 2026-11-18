@@ -6,10 +6,16 @@ Union construction stays on the device, including the exact per-query mask.
 """
 
 from types import ModuleType
+from typing import Any
 
 import torch
 
+from vllm_ascend.ops.gbsa import generic_block_sparse_attention_out
 from vllm_ascend.ops.triton.qwen4_exp.gbsa import prepare_qsa_gbsa_inputs
+from vllm_ascend.ops.triton.qwen4_exp.gbsa_union import (
+    build_qsa_union_inputs_from_compact_triton,
+    build_qsa_union_inputs_triton,
+)
 
 UNION_SIZE = 8
 BLOCK_Y = 4
@@ -23,12 +29,17 @@ def build_qsa_union_inputs(
     visible: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Group one request without altering its selected blocks or tail policy."""
+    return build_qsa_union_inputs_triton(sparse_idx, sparse_count, visible)
+
+
+def _build_qsa_union_inputs_torch(
+    sparse_idx: torch.Tensor,
+    sparse_count: torch.Tensor,
+    visible: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Group one request without altering its selected blocks or tail policy."""
     if sparse_idx.ndim != 3 or sparse_idx.shape[0] != 1:
         raise ValueError("Union preparation requires one KV head")
-    if sparse_idx.device.type == "npu":
-        from vllm_ascend.ops.triton.qwen4_exp.gbsa_union import build_qsa_union_inputs_fused
-
-        return build_qsa_union_inputs_fused(sparse_idx, sparse_count, visible)
     rows, topk = sparse_idx.shape[1:]
     groups = (rows + UNION_SIZE - 1) // UNION_SIZE
     width = UNION_SIZE * topk
@@ -135,13 +146,14 @@ def _run_union_gbsa(
         max_seqlen_kv=block_table.shape[1] * GBSA_PAGE_SIZE,
         **common,
     )
-    result, _ = union_ops.generic_block_sparse_attention(
+    generic_block_sparse_attention_out(
         query.contiguous(),
         key_cache,
         value_cache,
         union_idx,
         union_count,
         shape,
+        output,
         metadata=metadata,
         block_table=block_table.contiguous(),
         attn_mask=exact,
@@ -149,7 +161,6 @@ def _run_union_gbsa(
         return_softmax_lse=False,
         **common,
     )
-    output.copy_(result)
     return output
 
 
@@ -165,6 +176,7 @@ def qsa_union_gbsa_attention(
     output: torch.Tensor,
     *,
     request_index: int,
+    prepared: Any | None = None,
 ) -> torch.Tensor:
     # Lazy import isolates the optional vendor package from model discovery and
     # from stock decode/graph capture. Missing support must fail visibly.
@@ -174,17 +186,24 @@ def qsa_union_gbsa_attention(
         raise ValueError("Union GBSA requires one KV head and at most 16 Q heads per launch")
     if block_table.shape[1] * GBSA_PAGE_SIZE > (1 << 23):
         raise ValueError("Union index encoding exceeds exact FP32 sort range")
-    if query.device.type == "npu":
-        from vllm_ascend.ops.triton.qwen4_exp.gbsa_union import prepare_and_build_qsa_union_inputs
-
-        union_inputs = prepare_and_build_qsa_union_inputs(compact_indices, logical_positions, seq_lens, token_to_req)
-    else:
+    rows = query.shape[0]
+    if prepared is None:
         sparse_idx, sparse_count, visible, _, _ = prepare_qsa_gbsa_inputs(
             compact_indices, logical_positions, seq_lens, token_to_req, block_table, 1, write_row_metadata=False
         )
         union_inputs = build_qsa_union_inputs(sparse_idx, sparse_count, visible)
-    rows = query.shape[0]
-    cu_q = torch.tensor([0, rows], dtype=torch.int64, device=query.device)
+        cu_q = torch.tensor([0, rows], dtype=torch.int64, device=query.device)
+        selected_lengths = seq_lens[request_index : request_index + 1].contiguous()
+        selected_table = block_table[request_index : request_index + 1]
+        max_query_length = rows
+    else:
+        union_inputs = build_qsa_union_inputs_from_compact_triton(
+            compact_indices, prepared.visible_lengths, prepared.group_row_map
+        )
+        cu_q = prepared.cu_q
+        selected_lengths = prepared.seq_lens
+        selected_table = prepared.block_table
+        max_query_length = prepared.max_query_length
     return _run_union_gbsa(
         union_ops,
         query,
@@ -192,10 +211,10 @@ def qsa_union_gbsa_attention(
         value_cache,
         union_inputs,
         cu_q,
-        seq_lens[request_index : request_index + 1].contiguous(),
-        block_table[request_index : request_index + 1],
+        selected_lengths,
+        selected_table,
         output,
-        max_query_length=rows,
+        max_query_length=max_query_length,
     )
 
 
@@ -252,6 +271,7 @@ def qsa_union_gbsa_attention_batch(
     *,
     query_starts: tuple[int, ...],
     request_indices: tuple[int, ...],
+    prepared: Any | None = None,
 ) -> torch.Tensor:
     """Run adjacent packed Prefill requests in one union GBSA launch."""
     from vllm_ascend.ops import gbsa as union_ops
@@ -262,20 +282,30 @@ def qsa_union_gbsa_attention_batch(
         raise ValueError("Union GBSA requires one KV head and at most 16 Q heads")
     if block_table.shape[1] * GBSA_PAGE_SIZE > (1 << 23):
         raise ValueError("Union index encoding exceeds exact FP32 sort range")
-    sparse_idx, sparse_count, visible, _, _ = prepare_qsa_gbsa_inputs(
-        compact_indices,
-        logical_positions,
-        seq_lens,
-        token_to_req,
-        block_table,
-        1,
-        write_row_metadata=False,
-    )
-    union_inputs = build_qsa_union_batch_inputs(sparse_idx, sparse_count, visible, query_starts)
-    cu_q = torch.tensor(query_starts, dtype=torch.int64, device=query.device)
-    selected = torch.tensor(request_indices, dtype=torch.int64, device=query.device)
-    table = block_table.index_select(0, selected)
-    lengths = seq_lens.index_select(0, selected)
+    if prepared is None:
+        sparse_idx, sparse_count, visible, _, _ = prepare_qsa_gbsa_inputs(
+            compact_indices,
+            logical_positions,
+            seq_lens,
+            token_to_req,
+            block_table,
+            1,
+            write_row_metadata=False,
+        )
+        union_inputs = build_qsa_union_batch_inputs(sparse_idx, sparse_count, visible, query_starts)
+        cu_q = torch.tensor(query_starts, dtype=torch.int64, device=query.device)
+        selected = torch.tensor(request_indices, dtype=torch.int64, device=query.device)
+        table = block_table.index_select(0, selected)
+        lengths = seq_lens.index_select(0, selected)
+        max_query_length = max(b - a for a, b in zip(query_starts, query_starts[1:]))
+    else:
+        union_inputs = build_qsa_union_inputs_from_compact_triton(
+            compact_indices, prepared.visible_lengths, prepared.group_row_map
+        )
+        cu_q = prepared.cu_q
+        table = prepared.block_table
+        lengths = prepared.seq_lens
+        max_query_length = prepared.max_query_length
     return _run_union_gbsa(
         union_ops,
         query,
@@ -286,5 +316,5 @@ def qsa_union_gbsa_attention_batch(
         lengths,
         table,
         output,
-        max_query_length=max(b - a for a, b in zip(query_starts, query_starts[1:])),
+        max_query_length=max_query_length,
     )

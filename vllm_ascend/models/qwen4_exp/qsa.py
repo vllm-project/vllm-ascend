@@ -610,6 +610,7 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
     # FULL_DECODE_ONLY captures a fixed GBSA path. Unlike sequence thresholds,
     # decode phase cannot cross into FIA when a request grows during replay.
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
+    prepares_qsa_step_metadata = True
 
     def build(
         self,
