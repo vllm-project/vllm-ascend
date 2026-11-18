@@ -43,6 +43,7 @@ from vllm_ascend.models.qwen_gdn_recoverssm import (
     _uses_gdn_recoverssm,
     gdn_mamba_state_dtype_from_config,
     gdn_mamba_state_shape_from_config,
+    is_qwen4_exp_gdn,
 )
 from vllm_ascend.ops.gdn_checkpoint import initialize_gdn_checkpoints
 
@@ -431,6 +432,7 @@ else:
     def _gdn_init_with_packed_weight(self, *args, **kwargs):
         _GDN_ORIGINAL_INIT(self, *args, **kwargs)
         self.use_gdn_recoverssm = _uses_gdn_recoverssm(self.vllm_config)
+        self.use_private_gdn_replay = self.use_gdn_recoverssm and is_qwen4_exp_gdn(self.vllm_config)
         initialize_packed_conv_weight(self)
         initialize_gdn_checkpoints(self)
 

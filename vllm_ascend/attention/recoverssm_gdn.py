@@ -41,9 +41,19 @@ class GDNRecoverSSMLayerCache:
 
     @classmethod
     def from_layer(cls, layer: Any) -> "GDNRecoverSSMLayerCache":
-        if len(layer.kv_cache) != GDN_PAGE_COUNT:
+        if len(layer.kv_cache) == 2 and getattr(layer, "use_private_gdn_replay", False):
+            conv, checkpoint = layer.kv_cache
+            blocks, heads, value_dim, key_dim = checkpoint.shape
+            replay = torch.empty(
+                (blocks, heads, layer.num_spec + 1, value_dim + key_dim + 1),
+                device=checkpoint.device,
+                dtype=torch.float32,
+            )
+            layer._ascend_gdn_private_replay = replay
+        elif len(layer.kv_cache) == GDN_PAGE_COUNT:
+            conv, checkpoint, replay = layer.kv_cache
+        else:
             raise ValueError("GDN RecoverSSM requires conv, checkpoint and replay views")
-        conv, checkpoint, replay = layer.kv_cache
         if not is_conv_state_dim_first():
             conv = conv.transpose(-1, -2)
         return cls(
@@ -235,6 +245,12 @@ class GDNRecoverSSMCommitContext:
     # base address/block stride in elements, layer index.
     _state_commit_cache_address_stride_table: torch.Tensor = field(repr=False)
 
+    @staticmethod
+    def replay_for_layer(layer: Any) -> torch.Tensor:
+        if getattr(layer, "use_private_gdn_replay", False):
+            return layer._ascend_gdn_private_replay
+        return layer.kv_cache[2]
+
     @classmethod
     def create(
         cls,
@@ -298,7 +314,7 @@ class GDNRecoverSSMCommitContext:
             raise ValueError("GDN RecoverSSM commit tensors must share the cache device")
         if request_indices is not None and request_indices.device != device:
             raise ValueError("GDN RecoverSSM sampler mapping must be on the cache device")
-        if align_mode and num_computed_tokens is not None:
+        if block_table is not None and num_computed_tokens is not None:
             if block_table.device != device or num_computed_tokens.device != device:
                 raise ValueError("GDN RecoverSSM align metadata must be on the cache device")
             if request_indices is None and (block_table.shape[0] < batch or num_computed_tokens.numel() < batch):

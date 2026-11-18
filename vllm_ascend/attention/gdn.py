@@ -367,7 +367,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.conv_kernel_size,
             self.num_spec,
         )
-        if getattr(self, "use_gdn_recoverssm", False):
+        if getattr(self, "use_gdn_recoverssm", False) and not getattr(self, "use_private_gdn_replay", False):
             return (
                 *shapes,
                 (self.num_v_heads // self.tp_size, self.num_spec + 1, self.head_v_dim + self.head_k_dim + 1),
@@ -376,7 +376,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         dtypes = GatedDeltaNetAttention.get_state_dtype(self)
-        return (*dtypes, torch.float32) if getattr(self, "use_gdn_recoverssm", False) else dtypes
+        if getattr(self, "use_gdn_recoverssm", False) and not getattr(self, "use_private_gdn_replay", False):
+            return (*dtypes, torch.float32)
+        return dtypes
 
     def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
         return
@@ -762,19 +764,21 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             if use_recoverssm:
                 assert a_spec is not None
                 assert b_spec is not None
+                assert attn_metadata.recoverssm_context is not None
                 core_attn_out_spec = gdn_recoverssm_verify(
                     self.A_log,
                     a_spec,
                     b_spec,
                     self.dt_bias,
-                    query_spec,
-                    key_spec,
+                    l2norm_fwd(query_spec),
+                    l2norm_fwd(key_spec),
                     value_spec,
                     checkpoint_state=ssm_state,
-                    replay_cache=self_kv_cache[2],
+                    replay_cache=attn_metadata.recoverssm_context.replay_for_layer(self),
                     query_start_loc=spec_causal_conv1d_meta.query_start_loc,
                     state_indices=spec_state_indices_tensor[:, 0],
                     spec_query_len=self.num_spec + 1,
+                    use_qk_l2norm_in_kernel=False,
                 )
             else:
                 assert g_spec is not None

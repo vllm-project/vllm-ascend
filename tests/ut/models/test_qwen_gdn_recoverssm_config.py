@@ -5,6 +5,7 @@
 import runpy
 from pathlib import Path
 from types import SimpleNamespace as NS
+from typing import cast
 
 import pytest
 import torch
@@ -43,6 +44,18 @@ def make_config():
         ),
         kv_transfer_config=None,
     )
+
+
+@pytest.mark.parametrize("prefix,mode", [(False, "none"), (True, "align")])
+def test_qwen4_exp_selects_recoverssm_for_pd(prefix, mode):
+    config = make_config()
+    config.model_config.hf_text_config.model_type = "qwen4_exp_text"
+    config.model_config.hf_config = NS(architectures=["Qwen4ExpForConditionalGeneration"])
+    config.cache_config.enable_prefix_caching = prefix
+    config.cache_config.mamba_cache_mode = mode
+    config.kv_transfer_config = NS(kv_connector="MooncakeConnectorV2")
+    assert helpers["_uses_gdn_recoverssm"](config)
+    helpers["validate_qwen_gdn_recoverssm"](config)
 
 
 def base_shapes(config):
@@ -274,8 +287,9 @@ def test_registered_model_and_layer_descriptors_agree(tp, num_spec, enabled, ssm
     base_dtypes = MambaStateDtypeCalculator.gated_delta_net_state_dtype(torch.bfloat16, "auto", ssm_dtype)
     active = enabled and (num_spec or 0) > 0
     expected_dtypes = (*base_dtypes, torch.float32) if active else base_dtypes
-    expected_shapes = AscendGatedDeltaNetAttention.get_state_shape(layer)
-    assert AscendGatedDeltaNetAttention.get_state_dtype(layer) == expected_dtypes
+    gdn_layer = cast(AscendGatedDeltaNetAttention, layer)
+    expected_shapes = AscendGatedDeltaNetAttention.get_state_shape(gdn_layer)
+    assert AscendGatedDeltaNetAttention.get_state_dtype(gdn_layer) == expected_dtypes
     assert len(expected_shapes) == len(expected_dtypes) == (3 if active else 2)
     if active:
         assert expected_shapes[2] == (32 // tp, num_spec + 1, 257)

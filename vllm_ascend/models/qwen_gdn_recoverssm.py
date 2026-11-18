@@ -33,6 +33,14 @@ _GDN_ARCHITECTURES = frozenset(
     }
 )
 
+_QWEN4_EXP_MODEL_TYPES = frozenset({"qwen4_exp", "qwen4_exp_text"})
+_QWEN4_EXP_ARCHITECTURES = frozenset({"Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration"})
+
+
+def is_qwen4_exp_gdn(config: "VllmConfig") -> bool:
+    hf = getattr(config.model_config, "hf_text_config", None)
+    return getattr(hf, "model_type", None) in _QWEN4_EXP_MODEL_TYPES
+
 
 def is_gdn_model(config: "VllmConfig") -> bool:
     """Return whether the model has a supported Qwen GDN descriptor path.
@@ -46,6 +54,8 @@ def is_gdn_model(config: "VllmConfig") -> bool:
     if hf is None:
         return False
     architectures = getattr(getattr(model, "hf_config", hf), "architectures", None)
+    if is_qwen4_exp_gdn(config):
+        return not architectures or any(arch in _QWEN4_EXP_ARCHITECTURES for arch in architectures)
     return getattr(hf, "model_type", None) in _GDN_MODEL_TYPES and (
         not architectures or any(architecture in _GDN_ARCHITECTURES for architecture in architectures)
     )
@@ -85,14 +95,13 @@ def validate_qwen_gdn_recoverssm(config: "VllmConfig") -> None:
     if transfer is not None:
         if transfer.kv_connector not in ("MooncakeConnectorV2", "MooncakePullConnector"):
             raise ValueError("Qwen GDN RecoverSSM KV transfer requires MooncakeConnectorV2 or MooncakePullConnector")
-        if cache.mamba_cache_mode != "none" or cache.enable_prefix_caching:
+        if not is_qwen4_exp_gdn(config) and (cache.mamba_cache_mode != "none" or cache.enable_prefix_caching):
             raise ValueError("Qwen GDN RecoverSSM PD requires Mamba cache mode none and prefix caching disabled")
-    else:
-        expected_cache_mode = "align" if cache.enable_prefix_caching else "none"
-        if cache.mamba_cache_mode != expected_cache_mode:
-            raise ValueError(
-                f"Qwen GDN RecoverSSM requires Mamba cache mode {expected_cache_mode} with this prefix caching setting"
-            )
+    expected_cache_mode = "align" if cache.enable_prefix_caching else "none"
+    if cache.mamba_cache_mode != expected_cache_mode:
+        raise ValueError(
+            f"Qwen GDN RecoverSSM requires Mamba cache mode {expected_cache_mode} with this prefix caching setting"
+        )
     hf = config.model_config.hf_text_config
     if (
         hf.linear_num_key_heads % parallel.tensor_parallel_size
