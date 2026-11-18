@@ -1,11 +1,94 @@
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import torch
 import torch.nn as nn
+from vllm.model_executor.layers.linear import RowParallelLinear
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
-from vllm_ascend.quantization.methods.wna16.w4a16_mxfp4 import AscendW4A16MXFP4FusedMoEMethod
+from vllm_ascend.quantization.methods.wna16.w4a16_mxfp4 import (
+    AscendW4A16MXFP4FusedMoEMethod,
+    AscendW4A16MXFP4LinearMethod,
+    unpack_uint8_to_fp4_return_float32,
+)
+
+
+class TestAscendW4A16MXFP4LinearMethod(TestBase):
+    input_size = 128
+    output_size = 256
+
+    @patch("vllm_ascend.quantization.methods.wna16.w4a16_mxfp4.get_current_vllm_config")
+    def setUp(self, mock_vllm):
+        mock_vllm.return_value = create_mock_vllm_config()
+        self.scheme = AscendW4A16MXFP4LinearMethod()
+
+    def test_get_weight(self):
+        result = self.scheme.get_weight(self.input_size, self.output_size, torch.bfloat16)
+        self.assertEqual(result["weight"].dtype, torch.uint8)
+        self.assertEqual(result["weight"].shape, (self.output_size, self.input_size // 2))
+        self.assertEqual(len(result), 1)
+
+    def test_get_pergroup_param_based_on_group_size(self):
+        for gs in (16, 32, 64):
+            self.scheme.group_size = gs
+            result = self.scheme.get_pergroup_param(self.input_size, self.output_size, torch.bfloat16)
+            self.assertEqual(result["weight_scale"].shape, (self.output_size, self.input_size // gs))
+            self.assertEqual(result["weight_scale"].dtype, torch.uint8)
+
+    @patch("vllm_ascend.quantization.methods.wna16.w4a16_mxfp4.torch_npu")
+    def test_process_weights_unpacks_and_transposes(self, mock_npu):
+        mock_npu.npu_format_cast.side_effect = lambda x, *args, **kwargs: x
+        mock_npu.npu_convert_weight_to_int4pack.side_effect = lambda x: x
+
+        layer = nn.Module()
+        layer.weight = nn.Parameter(torch.randint(0, 255, (256, 64), dtype=torch.uint8), requires_grad=False)
+        layer.weight_scale = nn.Parameter(torch.randint(0, 255, (256, 4), dtype=torch.uint8), requires_grad=False)
+
+        self.scheme.process_weights_after_loading(layer)
+
+        self.assertEqual(layer.weight.shape, (128, 256))
+        self.assertEqual(layer.weight_scale.shape, (4, 256))
+        self.assertEqual(layer.mxfp4_tp_padding, (0, 0))
+        self.assertTrue(layer.weight.data.is_contiguous())
+        self.assertTrue(layer.weight_scale.data.is_contiguous())
+
+    @patch("vllm_ascend.quantization.methods.wna16.w4a16_mxfp4.torch_npu")
+    def test_process_weights_preserves_unaligned_tp_group_phase(self, mock_npu):
+        mock_npu.npu_format_cast.side_effect = lambda x, *args, **kwargs: x
+        mock_npu.npu_convert_weight_to_int4pack.side_effect = lambda x: x
+        layer = RowParallelLinear.__new__(RowParallelLinear)
+        nn.Module.__init__(layer)
+        original_weight = torch.randint(1, 255, (2, 264), dtype=torch.uint8)
+        layer.weight = nn.Parameter(original_weight.clone(), requires_grad=False)
+        layer.weight_scale = nn.Parameter(torch.randint(1, 255, (2, 17), dtype=torch.uint8), requires_grad=False)
+        layer.tp_rank = 3
+        layer.input_size_per_partition = 528
+
+        self.scheme.process_weights_after_loading(layer)
+
+        self.assertEqual(layer.mxfp4_tp_padding, (16, 0))
+        # packed K: 264 + 16/2 = 272 bytes -> unpacked logical K = 544
+        self.assertEqual(layer.weight.shape, (544, 2))
+        self.assertEqual(layer.weight_scale.shape, (17, 2))
+        torch.testing.assert_close(layer.weight.data[:16], torch.zeros(16, 2))
+        torch.testing.assert_close(
+            layer.weight.data[16:],
+            unpack_uint8_to_fp4_return_float32(original_weight).transpose(0, 1),
+        )
+
+    @patch("vllm_ascend.quantization.methods.wna16.w4a16_mxfp4.torch_npu")
+    def test_apply_pads_activation_with_weight_group_phase(self, mock_npu):
+        mock_npu.npu_weight_quant_batchmatmul.return_value = torch.empty(2, 4)
+        layer = MagicMock()
+        layer.mxfp4_tp_padding = (16, 0)
+        x = torch.randn(2, 528)
+
+        self.scheme.apply(layer, x)
+
+        padded_x = mock_npu.npu_weight_quant_batchmatmul.call_args.kwargs["x"]
+        self.assertEqual(padded_x.shape, (2, 544))
+        torch.testing.assert_close(padded_x[:, :16], torch.zeros(2, 16))
+        torch.testing.assert_close(padded_x[:, 16:], x)
 
 
 class TestAscendW4A16MXFP4MoEMethod(TestBase):

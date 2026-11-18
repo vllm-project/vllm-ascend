@@ -14,13 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Ascend W4A16_MXFP4 quantization helpers and fused MoE method."""
+"""Ascend W4A16_MXFP4 linear and fused MoE quantization methods."""
 
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.model_executor.layers.linear import RowParallelLinear
+from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -30,7 +33,7 @@ from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.utils import dispose_tensor
 
-from ..base import AscendMoEScheme, QuantType
+from ..base import AscendLinearScheme, AscendMoEScheme, QuantType
 from ..registry import register_scheme
 
 
@@ -47,6 +50,92 @@ def unpack_uint8_to_fp4_return_float32(packed: torch.Tensor) -> torch.Tensor:
         device=packed.device,
     )
     return fp4_values[unpacked.to(torch.long)]
+
+
+@register_scheme("W4A16_MXFP4", "linear")
+class AscendW4A16MXFP4LinearMethod(AscendLinearScheme):
+    """Linear method for Ascend W4A16_MXFP4 (weight-only MXFP4 quantization).
+
+    The checkpoint stores packed FP4 weights (uint8, two E2M1 values per
+    byte, low nibble first) and per-group E8M0 scales (uint8, exponent + 127
+    biased). Weight processing mirrors the fused MoE scheme: unpack to
+    float, transpose, cast to the int4pack-friendly format, and pack with
+    npu_convert_weight_to_int4pack; scales stay uint8 E8M0 and are consumed
+    by npu_weight_quant_batchmatmul as antiquant scales.
+    """
+
+    # Row-parallel shards may start halfway through a global MX group.
+    supports_unaligned_tp_groups = True
+
+    def __init__(self) -> None:
+        vllm_config = get_current_vllm_config()
+        self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
+
+    def get_weight(
+        self,
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype = torch.bfloat16,
+    ) -> dict[str, Any]:
+        params_dict = {"weight": torch.empty(output_size, input_size // 2, dtype=torch.uint8)}
+        return params_dict
+
+    def get_pergroup_param(
+        self, input_size: int, output_size: int, params_dtype: torch.dtype, layer_type: str | None = None
+    ) -> dict[str, Any]:
+        params_dict = {}
+        params_dict["weight_scale"] = torch.empty(output_size, cdiv(input_size, self.group_size), dtype=torch.uint8)
+        return params_dict
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        tp_rank: int | None = 0,
+    ) -> torch.Tensor:
+        # Pad the activation at the same K positions where the weight was
+        # padded to restore the global MX group phase; zero entries do not
+        # change the GEMM result.
+        prefix_padding, suffix_padding = vars(layer).get("mxfp4_tp_padding", (0, 0))
+        if prefix_padding or suffix_padding:
+            x = F.pad(x, (prefix_padding, suffix_padding), mode="constant", value=0)
+        output = torch_npu.npu_weight_quant_batchmatmul(
+            x=x,
+            weight=layer.weight,
+            antiquant_scale=layer.weight_scale,
+            bias=bias,
+        )
+        return output
+
+    def process_weights_after_loading(self, layer):
+        # Row parallelism may split K in the middle of a globally quantized MX
+        # group. Prefix padding restores that group's original phase; suffix
+        # padding completes the final group. Packed FP4 stores two logical K
+        # values per byte, so logical padding is halved when applied to the
+        # packed weight tensor.
+        prefix_padding = suffix_padding = 0
+        if isinstance(layer, RowParallelLinear):
+            global_start = layer.tp_rank * layer.input_size_per_partition
+            prefix_padding = global_start % self.group_size
+            suffix_padding = -(prefix_padding + layer.input_size_per_partition) % self.group_size
+            if prefix_padding % 2 != 0 or suffix_padding % 2 != 0:
+                raise ValueError("MXFP4 packed weight padding must be divisible by 2")
+            if prefix_padding or suffix_padding:
+                layer.weight.data = F.pad(
+                    layer.weight.data,
+                    (prefix_padding // 2, suffix_padding // 2),
+                    mode="constant",
+                    value=0,
+                )
+        layer.mxfp4_tp_padding = (prefix_padding, suffix_padding)
+
+        layer.weight.data = unpack_uint8_to_fp4_return_float32(layer.weight.data)
+        layer.weight.data = layer.weight.data.transpose(0, 1)
+        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, 29, customize_dtype=torch.bfloat16)
+        layer.weight.data = torch_npu.npu_convert_weight_to_int4pack(layer.weight.data).contiguous()
+
+        layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1).contiguous()
 
 
 @register_scheme("W4A16_MXFP4", "moe")

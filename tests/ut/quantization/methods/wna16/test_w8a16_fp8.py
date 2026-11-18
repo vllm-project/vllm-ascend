@@ -5,7 +5,68 @@ import torch.nn as nn
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
-from vllm_ascend.quantization.methods.wna16.w8a16_fp8 import AscendW8A16FP8FusedMoEMethod
+from vllm_ascend.quantization.methods.wna16.w8a16_fp8 import AscendW8A16FP8FusedMoEMethod, AscendW8A16FP8LinearMethod
+
+
+class TestAscendW8A16FP8LinearMethod(TestBase):
+    input_size = 128
+    output_size = 256
+
+    @patch("vllm_ascend.quantization.methods.wna16.w8a16_fp8.get_current_vllm_config")
+    def setUp(self, mock_vllm):
+        mock_vllm.return_value = create_mock_vllm_config()
+        self.scheme = AscendW8A16FP8LinearMethod()
+
+    def test_get_weight(self):
+        result = self.scheme.get_weight(self.input_size, self.output_size, torch.bfloat16)
+        self.assertEqual(result["weight"].dtype, torch.float8_e4m3fn)
+        self.assertEqual(result["weight"].shape, (self.output_size, self.input_size))
+        self.assertEqual(len(result), 1)
+
+    def test_get_perchannel_param_matches_modelslim_contract(self):
+        for output_size in (128, 256):
+            result = self.scheme.get_perchannel_param(output_size, torch.bfloat16)
+            self.assertEqual(result["weight_scale"].shape, (output_size, 1))
+            self.assertEqual(result["weight_scale"].dtype, torch.float32)
+            self.assertEqual(len(result), 1)
+
+    def test_process_weights_transposes_and_flattens_scales(self):
+        layer = nn.Module()
+        layer.weight = nn.Parameter(
+            torch.empty(self.output_size, self.input_size, dtype=torch.float8_e4m3fn),
+            requires_grad=False,
+        )
+        layer.weight_scale = nn.Parameter(
+            torch.ones(self.output_size, 1, dtype=torch.float32),
+            requires_grad=False,
+        )
+
+        self.scheme.process_weights_after_loading(layer)
+
+        self.assertEqual(layer.weight.shape, (self.input_size, self.output_size))
+        self.assertTrue(layer.weight.data.is_contiguous())
+        self.assertEqual(layer.weight_scale.shape, (self.output_size,))
+        self.assertEqual(layer.weight_scale.dtype, torch.bfloat16)
+
+    @patch("vllm_ascend.quantization.methods.wna16.w8a16_fp8.torch_npu")
+    def test_apply_antiquant_matmul_without_offset(self, mock_npu):
+        layer = nn.Module()
+        layer.weight = nn.Parameter(
+            torch.empty(self.input_size, self.output_size, dtype=torch.float8_e4m3fn),
+            requires_grad=False,
+        )
+        layer.weight_scale = nn.Parameter(torch.ones(self.output_size, dtype=torch.bfloat16), requires_grad=False)
+        x = torch.randn(4, self.input_size, dtype=torch.bfloat16)
+        expected = torch.randn(4, self.output_size, dtype=torch.bfloat16)
+        mock_npu.npu_weight_quant_batchmatmul.return_value = expected
+
+        output = self.scheme.apply(layer, x)
+
+        self.assertTrue(torch.equal(output, expected))
+        mock_npu.npu_weight_quant_batchmatmul.assert_called_once()
+        call_kwargs = mock_npu.npu_weight_quant_batchmatmul.call_args.kwargs
+        self.assertNotIn("antiquant_offset", call_kwargs)
+        self.assertIsNone(call_kwargs["bias"])
 
 
 class TestAscendW8A16FP8MoEMethod(TestBase):

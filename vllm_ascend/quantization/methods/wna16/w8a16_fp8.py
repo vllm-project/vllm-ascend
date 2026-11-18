@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Ascend W8A16_FP8 quantization helpers and fused MoE method."""
+"""Ascend W8A16_FP8 linear and fused MoE quantization methods."""
 
 from typing import Any
 
@@ -29,8 +29,67 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.utils import dispose_tensor
 
-from ..base import AscendMoEScheme, QuantType
+from ..base import AscendLinearScheme, AscendMoEScheme, QuantType
 from ..registry import register_scheme
+
+
+@register_scheme("W8A16_FP8", "linear")
+class AscendW8A16FP8LinearMethod(AscendLinearScheme):
+    """Linear method for Ascend W8A16_FP8 (weight-only FP8 quantization).
+
+    Key characteristics:
+    - Weights are stored in torch.float8_e4m3fn, activations remain bf16/fp16.
+    - Dequant is fused into npu_weight_quant_batchmatmul via antiquant_scale;
+      E4M3 is symmetric around 0, so no antiquant_offset is passed.
+    - Per-channel scales follow the ModelSlim checkpoint contract (the same
+      layout as W8A16 int8): ``float32`` with shape ``[N, 1]``. They are
+      converted to the activation dtype (bfloat16/float16) and flattened to
+      ``[N]`` in :meth:`process_weights_after_loading`.
+    """
+
+    def __init__(self) -> None:
+        vllm_config = get_current_vllm_config()
+        self.params_dtype = vllm_config.model_config.dtype
+
+    def get_weight(
+        self,
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype = torch.bfloat16,
+    ) -> dict[str, Any]:
+        params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.float8_e4m3fn)}
+        return params_dict
+
+    def get_perchannel_param(
+        self,
+        output_size: int,
+        params_dtype: torch.dtype,
+    ) -> dict[str, Any]:
+        params_dict = {}
+        params_dict["weight_scale"] = torch.empty(output_size, 1, dtype=torch.float32)
+        return params_dict
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        tp_rank: int | None = 0,
+    ) -> torch.Tensor:
+        output = torch_npu.npu_weight_quant_batchmatmul(
+            x=x,
+            weight=layer.weight,
+            antiquant_scale=layer.weight_scale,
+            bias=bias,
+        )
+        return output
+
+    def process_weights_after_loading(self, layer):
+        # FP8 weights stay in ND format: npu_weight_quant_batchmatmul consumes
+        # the transposed ND weight directly (see AscendW8A8DynamicLinearMethod,
+        # which skips the NZ cast for non-int8 weights).
+        layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
+        layer.weight_scale.data = torch.flatten(layer.weight_scale.data).to(self.params_dtype)
 
 
 @register_scheme("W8A16_FP8", "moe")
