@@ -19,6 +19,7 @@
 #include <torch/library.h>
 #include <torch/version.h>
 #include <torch/torch.h>
+#include <ATen/Parallel.h>
 #include <ATen/core/Formatting.h>
 #include "acl/acl.h"
 #include "acl/acl_rt.h"
@@ -67,7 +68,7 @@
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
 #include <c10/util/Logging.h>
-#ifdef VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD
+#ifdef _OPENMP
 #include <omp.h>
 #endif
 #include <algorithm>
@@ -4202,6 +4203,11 @@ class SelectiveNativeGraph {
     try {
       // Inference mode is thread-local and is not inherited from the caller.
       c10::InferenceMode inference_guard(true);
+#ifdef _OPENMP
+      // Keep tensor housekeeping serial on this worker. Request loops set their own team size.
+      (void)at::get_num_threads();  // Initialize ATen's thread-local OpenMP settings first.
+      omp_set_num_threads(1);
+#endif
       check_acl(aclrtSetCurrentContext(context_), "selective native worker context");
       for (;;) {
         wait_notify(ready_);
