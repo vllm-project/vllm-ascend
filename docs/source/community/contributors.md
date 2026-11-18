@@ -26,6 +26,9 @@
 | Rong Liu | [@Ronald1995](https://github.com/Ronald1995) | 2026/11 |
 | ChunShuo Qiu | [@pisceskkk](https://github.com/pisceskkk) | 2026/11 |
 | YingCong Wang | [@drslark](https://github.com/drslark) | 2026/11 |
+| WenQi Zhen | [@zhenwenqi2024](https://github.com/zhenwenqi2024) | 2026/11 |
+| FengLin Zhao | [@lcfenglinwan](https://github.com/lcfenglinwan) | 2026/11 |
+| JianPing He | [@winson-00178005](https://github.com/winson-00178005) | 2026/11 |
 
 ## Emeritus Committers
 
