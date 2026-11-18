@@ -1,4 +1,0 @@
-pr: 21469
-entries:
-  - category: feature
-    text: MiniMax M3 can load Transformers-format model configs with an empty or omitted `sparse_attention_config`.
