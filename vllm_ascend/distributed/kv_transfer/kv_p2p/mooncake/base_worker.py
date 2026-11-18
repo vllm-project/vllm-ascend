@@ -493,14 +493,10 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             # the pull worker can still shard it by the leading head axis.
             if shape[0] != heads:
                 raise ValueError(
-                    f"MooncakeConnector packed GQA block shape {shape} does not "
-                    f"match the spec's {heads} KV heads."
+                    f"MooncakeConnector packed GQA block shape {shape} does not match the spec's {heads} KV heads."
                 )
             if not cache[0].is_contiguous():
-                raise ValueError(
-                    "MooncakeConnector packed HND requires contiguous bytes "
-                    "within each KV block."
-                )
+                raise ValueError("MooncakeConnector packed HND requires contiguous bytes within each KV block.")
             return shape
         if len(shape) != 3:
             raise ValueError(f"MooncakeConnector expects a three-dimensional GQA KV block, got {shape}.")
