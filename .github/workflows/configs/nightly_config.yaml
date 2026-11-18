@@ -308,6 +308,12 @@ a3-560t:
         config_base_path: tests/SIT/cases/models/configs/Qwen
 
 a5:
+  multi_node:
+    test_config:
+      - name: Kimi-K3.1-Pro-W4A8-A5-Dual-Node-PD-Accuracy
+        config_file_path: Kimi-K3.1-Pro-W4A8-A5-Dual-Node-PD-Accuracy.yaml
+        config_base_path: tests/SIT/cases/models/configs/Kimi
+        size: 2
 #  multi_node:
 #    test_config:
 #      - name: DeepSeek-V4.1-Flash-A5-PD

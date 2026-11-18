@@ -1,0 +1,219 @@
+# Draft: two Ascend A5 hosts, eight NPUs per host, one prefiller and one decoder.
+# Runtime/GPQA derived from Kimi-K3.1-Pro-W4A8-A3-1M-PD.yaml.
+# Model uses the user-specified local Kimi-K3.1 EP256 weights.
+# Startup with these weights on a single 8-NPU host per role is unverified.
+# Check weight, runtime and KV-cache memory before running; do not assume this fits.
+# Context is limited to 16K and concurrency to 1 for the accuracy draft.
+# GPQA baseline 50.0 / threshold 50.0 are user-specified draft targets;
+# they are not measured dual-node A5 results.
+# No performance benchmarks or speculative decoding are included.
+
+test_name: Kimi-K3.1-Pro-W4A8-A5-Dual-Node-PD-Accuracy
+model: /root/.cache/modelscope/hub/models/Kimi-K3.1-EP256-uniform-20261116
+num_nodes: 2
+cluster_hosts:
+- 141.61.52.187
+- 141.61.52.191
+npu_per_node: 8
+dp_load_balancing: external
+routing:
+  type: disaggregated_prefill
+  groups:
+    prefiller:
+    - 0
+    decoder:
+    - 1
+config:
+- node_index: 0
+  port_start: 8080
+  dp_rpc_port: 13389
+  dp_size: 1
+  dp_size_local: 1
+  dp_rank_start: 0
+  tp_size: 8
+  cp_size: 1
+  dp_address: ${NODE_0_IP}
+- node_index: 1
+  port_start: 8080
+  dp_rpc_port: 13390
+  dp_size: 1
+  dp_size_local: 1
+  dp_rank_start: 0
+  tp_size: 8
+  cp_size: 1
+  dp_address: ${NODE_1_IP}
+templates:
+- node_index: 0
+  envs:
+    VLLM_USE_MODELSCOPE: 'true'
+    VLLM_USE_V2_MODEL_RUNNER: '1'
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
+    VLLM_HOST_IP: ${LOCAL_IP}
+    HCCL_BUFFSIZE: '1024'
+    HCCL_CONNECT_TIMEOUT: '1200'
+    HCCL_NPU_SOCKET_PORT_RANGE: auto
+    ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+    LD_LIBRARY_PATH: /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+    PYTHONHASHSEED: '0'
+    OMP_NUM_THREADS: '1'
+    OMP_PROC_BIND: 'false'
+    FLA_STABLE_DEBUG_DESC: '0'
+    TORCH_EXTENSIONS_DIR: /tmp/kimi_k31_dual_pd_accuracy/node-${NODE_INDEX}/dp-${DP_RANK}
+  server_cmd_template:
+  - --host
+  - 0.0.0.0
+  - --port
+  - ${PORT}
+  - --quantization
+  - ascend
+  - --enable-auto-tool-choice
+  - --reasoning-parser
+  - kimi_k3
+  - --tool-call-parser
+  - kimi_k3
+  - --tokenizer-mode
+  - kimi_k3
+  - --data-parallel-size
+  - ${DP_SIZE}
+  - --pipeline-parallel-size
+  - '1'
+  - --prefill-context-parallel-size
+  - '1'
+  - --decode-context-parallel-size
+  - '1'
+  - --distributed-executor-backend
+  - mp
+  - --tensor-parallel-size
+  - ${TP_SIZE}
+  - --enable-expert-parallel
+  - --seed
+  - '1024'
+  - --max-model-len
+  - '16384'
+  - --max-num-batched-tokens
+  - '8192'
+  - --max-num-seqs
+  - '1'
+  - --enforce-eager
+  - --trust-remote-code
+  - --gpu-memory-utilization
+  - '0.90'
+  - --block-size
+  - '768'
+  - --kv-cache-dtype
+  - int8
+  - --attention_config.indexer_kv_dtype
+  - int8
+  - --mm-encoder-tp-mode
+  - data
+  - --no-mm-device-do-normalize
+  - --mm-processor-cache-gb
+  - '1'
+  - --skip-mm-profiling
+  - --enable-prefix-caching
+  - --additional-config
+  - '{"enable_flashcomm1":false,"multistream_overlap_shared_expert":false,"enable_fused_mc2":0,"enable_shared_expert_dp":false}'
+  - --limit-mm-per-prompt
+  - '{"vision_chunk":2}'
+  - --kv-transfer-config
+  - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":30000,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":8,"pp_size":1,"pcp_size":1,"dcp_size":1},"decode":{"dp_size":1,"tp_size":8,"pp_size":1,"pcp_size":1,"dcp_size":8}}}'
+- node_index: 1
+  envs:
+    VLLM_USE_MODELSCOPE: 'true'
+    VLLM_USE_V2_MODEL_RUNNER: '1'
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
+    VLLM_HOST_IP: ${LOCAL_IP}
+    HCCL_BUFFSIZE: '1024'
+    HCCL_CONNECT_TIMEOUT: '1200'
+    HCCL_NPU_SOCKET_PORT_RANGE: auto
+    ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+    LD_LIBRARY_PATH: /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+    PYTHONHASHSEED: '0'
+    OMP_NUM_THREADS: '1'
+    OMP_PROC_BIND: 'false'
+    FLA_STABLE_DEBUG_DESC: '0'
+    TORCH_EXTENSIONS_DIR: /tmp/kimi_k31_dual_pd_accuracy/node-${NODE_INDEX}/dp-${DP_RANK}
+  server_cmd_template:
+  - --host
+  - 0.0.0.0
+  - --port
+  - ${PORT}
+  - --quantization
+  - ascend
+  - --enable-auto-tool-choice
+  - --reasoning-parser
+  - kimi_k3
+  - --tool-call-parser
+  - kimi_k3
+  - --tokenizer-mode
+  - kimi_k3
+  - --data-parallel-size
+  - ${DP_SIZE}
+  - --data-parallel-size-local
+  - '1'
+  - --data-parallel-rank
+  - ${DP_RANK}
+  - --data-parallel-address
+  - ${DP_ADDRESS}
+  - --data-parallel-rpc-port
+  - ${DP_RPC_PORT}
+  - --distributed-executor-backend
+  - mp
+  - --tensor-parallel-size
+  - ${TP_SIZE}
+  - --pipeline-parallel-size
+  - '1'
+  - --prefill-context-parallel-size
+  - '1'
+  - --decode-context-parallel-size
+  - '8'
+  - --cp-kv-cache-interleave-size
+  - '768'
+  - --block-size
+  - '768'
+  - --enable-expert-parallel
+  - --seed
+  - '1024'
+  - --max-model-len
+  - '16384'
+  - --max-num-batched-tokens
+  - '8192'
+  - --max-num-seqs
+  - '1'
+  - --trust-remote-code
+  - --gpu-memory-utilization
+  - '0.90'
+  - --kv-cache-dtype
+  - int8
+  - --attention_config.indexer_kv_dtype
+  - int8
+  - --mm-encoder-tp-mode
+  - data
+  - --no-mm-device-do-normalize
+  - --mm-processor-cache-gb
+  - '1'
+  - --skip-mm-profiling
+  - --compilation-config
+  - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+  - --enable-prefix-caching
+  - --additional-config
+  - '{"enable_fused_mc2":0,"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":false,"enable_mlapo":true,"scheduler_config":{"recompute_scheduler_enable":true}}'
+  - --limit-mm-per-prompt
+  - '{"vision_chunk":2}'
+  - --kv-transfer-config
+  - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":30100,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":8,"pp_size":1,"pcp_size":1,"dcp_size":1},"decode":{"dp_size":1,"tp_size":8,"pp_size":1,"pcp_size":1,"dcp_size":8}}}'
+benchmarks:
+  acc_gpqa:
+    case_type: accuracy
+    dataset_path: /root/.cache/modelscope/hub/datasets/CuiZ2007/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    max_out_len: 8192
+    batch_size: 1
+    thinking: true
+    temperature: 0
+    top_p: 0.95
+    baseline: 50.0
+    threshold: 50.0
