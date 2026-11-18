@@ -69,6 +69,20 @@ strategy_overrides:
   single_node_tp:
     tp: 4
 
+features:
+  spec_decoding:
+    label: "Eagle3 Spec Decoding"
+    description: "Optional Eagle3 speculative decoding; replace your_eagle3_model_path with the downloaded draft model path"
+    args: ["--speculative-config", '{"method": "eagle3", "model": "your_eagle3_model_path", "num_speculative_tokens": 3}']
+
+opt_in_features:
+  - spec_decoding
+
+dependencies:
+  - note: "Optional Eagle3 draft model for speculative decoding (replace your_eagle3_model_path)"
+    command: "pip install modelscope && modelscope download --model AngelSlim/Qwen3-a3B_eagle3"
+    optional: true
+
 presets:
   a3_low_latency:
     label: "Low Latency (TP4)"
@@ -230,15 +244,20 @@ guide: |
   command's model id at that directory; the canonical Hugging Face id in the builder is
   the BF16 download. The BF16 variant runs as generated.
 
+  The optional Eagle3 draft model is not part of the default weights. Download it with
+  `modelscope download --model AngelSlim/Qwen3-a3B_eagle3` and enable the opt-in
+  `spec_decoding` feature; the measured preset numbers above remain the non-Eagle3 baseline.
+
   ## Limitations
 
-  - The optional Eagle3 draft model from the tutorial was not validated because the draft
-    weights were not available in the test environment.
+  - The optional Eagle3 draft model from the tutorial is exposed as an opt-in `spec_decoding` feature. It was functionally validated on Atlas 800I A3 at TP1 (4/4 HTTP 200 responses, no ERROR/Traceback in the logs); it is not enabled in the default presets or performance baselines. Replace `your_eagle3_model_path` with the local draft-model directory before enabling it.
   - Only the W8A8 variant was benchmarked and evaluated. BF16 numbers are not claimed.
   - BBH accuracy was not completed in this validation run.
   - Multi-node and PD-separated topologies are out of scope for this recipe.
 
   ## References
+
+  - [Eagle3 draft model (ModelScope)](https://www.modelscope.cn/models/AngelSlim/Qwen3-a3B_eagle3)
 
   - [Historical vLLM Ascend tutorial (v0.23.0)](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.html)
   - [Main tutorial support status](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md)
