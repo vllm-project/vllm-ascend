@@ -1,4 +1,4 @@
-// CPU implementation of CONFIG_M4 at upstream c455af6c4fa15dd027b8388b70691df7c81af57e.
+// CPU pattern-repeat rules (upstream CONFIG_M4) at c455af6c4fa15dd027b8388b70691df7c81af57e.
 // Unsigned hashing deliberately wraps modulo 2^64. No fast-math: thresholds
 // compare double(float(feature)) to the original JSON double constants.
 #include <pybind11/pybind11.h>
@@ -64,7 +64,7 @@ struct Ngrams {
     for (auto& r : counts) r.push(0);
   }
   void push(int32_t id, int64_t answer) {
-    if (m >= (int64_t(1) << 24)) throw std::length_error("m4 position limit 2^24");
+    if (m >= (int64_t(1) << 24)) throw std::length_error("pattern position limit 2^24");
     const uint64_t incoming = mix(uint64_t(id));
     // Keep all 64 bits between updates. MASK applies to the lookup key
     // only; masking rolling itself would change future n-gram hashes.
@@ -369,7 +369,7 @@ struct Detector {
   }
 };
 
-PYBIND11_MODULE(_m4_native, m) {
+PYBIND11_MODULE(_pattern_native, m) {
   py::class_<State, std::shared_ptr<State>>(m, "State")
       .def_readonly("t", &State::t)
       .def_readonly("fired_at", &State::fired_at)

@@ -46,7 +46,7 @@ def test_from_additional_builds_overlay(tmp_path: Path):
             "runtime_config_hot_reload": False,
             "runtime_report_dir": str(tmp_path / "reports"),
             "runtime_config": {
-                "detector": {"token_repeat": {"enabled": True, "window": 12}},
+                "detector": {"token_repeat": {"enabled": True, "think_end": 12}},
             },
         }
     )
@@ -54,7 +54,7 @@ def test_from_additional_builds_overlay(tmp_path: Path):
     assert boot.hot_reload is False
     assert boot.runtime_config.hot_reload_enabled is False
     assert boot.runtime_config.detector_get("token_repeat", "enabled") is True
-    assert boot.runtime_config.detector_get("token_repeat", "window") == 12
+    assert boot.runtime_config.detector_get("token_repeat", "think_end") == 12
 
 
 def test_from_additional_hot_reload_uses_fixed_interval(tmp_path: Path):

@@ -56,12 +56,12 @@ def test_startup_overlay_enables_detector(tmp_path: Path):
         hot_reload=False,
         startup_overlay={
             "detector": {
-                "token_repeat": {"enabled": True, "window": 8, "repeat_sum_threshold": 4},
+                "token_repeat": {"enabled": True, "think_end": 8},
             }
         },
     )
     assert cfg.detector_get("token_repeat", "enabled") is True
-    assert cfg.detector_get("token_repeat", "window") == 8
+    assert cfg.detector_get("token_repeat", "think_end") == 8
 
 
 def test_malformed_json_keeps_previous(tmp_path: Path):
@@ -73,7 +73,7 @@ def test_malformed_json_keeps_previous(tmp_path: Path):
         ensure_file=True,
         hot_reload=True,
         startup_overlay={
-            "detector": {"token_repeat": {"enabled": True, "window": 16}},
+            "detector": {"token_repeat": {"enabled": True, "think_end": 16}},
         },
     )
     cfg._reload_interval = 0.01  # UT: avoid waiting fixed 3s
@@ -83,7 +83,7 @@ def test_malformed_json_keeps_previous(tmp_path: Path):
     time.sleep(0.02)
     changed = cfg.reload(force=True)
     assert changed is False or cfg.detector_get("token_repeat", "enabled") is True
-    assert cfg.detector_get("token_repeat", "window") == 16
+    assert cfg.detector_get("token_repeat", "think_end") == 16
 
 
 def test_hot_reload_picks_up_detector_enable(tmp_path: Path):
@@ -103,9 +103,7 @@ def test_hot_reload_picks_up_detector_enable(tmp_path: Path):
             "detector": {
                 "token_repeat": {
                     "enabled": True,
-                    "window": 8,
-                    "repeat_sum_threshold": 4,
-                    "min_tokens": 4,
+                    "think_end": 8,
                 }
             }
         },
@@ -181,26 +179,26 @@ def test_dump_manual_trigger_unknown_key_rejected():
         validate_runtime_config(data)
 
 
-def test_token_repeat_window_wrong_type_rejected():
+def test_token_repeat_think_end_wrong_type_rejected():
     from copy import deepcopy
 
     from vllm_ascend.observability.runtime_config._defaults import _DEFAULTS
     from vllm_ascend.observability.runtime_config.config import validate_runtime_config
 
     data = deepcopy(_DEFAULTS)
-    data["detector"]["token_repeat"]["window"] = "x"
-    with pytest.raises(ValueError, match="detector.token_repeat.window"):
+    data["detector"]["token_repeat"]["think_end"] = "x"
+    with pytest.raises(ValueError, match="detector.token_repeat.think_end"):
         validate_runtime_config(data)
 
 
-def test_token_repeat_window_non_integer_float_rejected():
+def test_token_repeat_think_end_non_integer_float_rejected():
     from copy import deepcopy
 
     from vllm_ascend.observability.runtime_config._defaults import _DEFAULTS
     from vllm_ascend.observability.runtime_config.config import validate_runtime_config
 
     data = deepcopy(_DEFAULTS)
-    data["detector"]["token_repeat"]["window"] = 2.7
+    data["detector"]["token_repeat"]["think_end"] = 2.7
     with pytest.raises(ValueError, match="must be an integer"):
         validate_runtime_config(data)
 
@@ -535,16 +533,16 @@ def test_same_mtime_content_change_reloads_via_digest(tmp_path: Path):
         hot_reload=True,
     )
     # Equal-length values so st_size can stay stable; pin mtime after rewrite.
-    _write(cfg_path, {"detector": {"token_repeat": {"enabled": False, "window": 10}}})
+    _write(cfg_path, {"detector": {"token_repeat": {"enabled": False, "think_end": 10}}})
     assert cfg.reload(force=True) is True
-    assert cfg.detector_get("token_repeat", "window") == 10
+    assert cfg.detector_get("token_repeat", "think_end") == 10
     pinned = cfg._mtime
     assert pinned is not None
 
-    _write(cfg_path, {"detector": {"token_repeat": {"enabled": False, "window": 33}}})
+    _write(cfg_path, {"detector": {"token_repeat": {"enabled": False, "think_end": 33}}})
     os.utime(cfg_path, (pinned, pinned))
     assert cfg.reload(force=False) is True
-    assert cfg.detector_get("token_repeat", "window") == 33
+    assert cfg.detector_get("token_repeat", "think_end") == 33
 
 
 def test_touch_same_content_skips_reload(tmp_path: Path):
@@ -560,16 +558,16 @@ def test_touch_same_content_skips_reload(tmp_path: Path):
         ensure_file=True,
         hot_reload=True,
     )
-    _write(cfg_path, {"detector": {"token_repeat": {"enabled": True, "window": 8}}})
+    _write(cfg_path, {"detector": {"token_repeat": {"enabled": True, "think_end": 8}}})
     assert cfg.reload(force=True) is True
-    assert cfg.detector_get("token_repeat", "window") == 8
+    assert cfg.detector_get("token_repeat", "think_end") == 8
     digest_before = cfg._content_digest
     # Bump mtime without changing bytes.
     now = _time.time() + 5
     os.utime(cfg_path, (now, now))
     assert cfg.reload(force=False) is False
     assert cfg._content_digest == digest_before
-    assert cfg.detector_get("token_repeat", "window") == 8
+    assert cfg.detector_get("token_repeat", "think_end") == 8
 
 
 # ---- JSONC (loads_jsonc lives in config.py) ---------------------------------

@@ -415,13 +415,14 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         reapable = store.list_reapable(current_wave=wave)
         if not reapable:
             return
-        # Flush M4's sub-64-token tail while IO/report context still exists.
+        # Flush token_repeat's sub-64-token tail while IO/report context still exists.
         # Forced reap may have outstanding jobs: Store identities invalidate
         # late snapshots; never flush a state still being consumed.
         drained = [rid for rid in reapable if (state := store.get_state(rid)) is not None and not state.cpu_jobs]
         if len(drained) != len(reapable):
             logger.warning(
-                "[runtime_guard] forced reap skips terminal M4 check for %d requests with outstanding CPU jobs",
+                "[runtime_guard] forced reap skips terminal token_repeat check for %d requests "
+                "with outstanding CPU jobs",
                 len(reapable) - len(drained),
             )
         try:

@@ -104,11 +104,17 @@ Per-req INFO short-log throttle is a fixed internal interval (2s), not a JSON fi
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `window` | int | `32` | Sliding content window |
-| `repeat_sum_threshold` | int | `64` | Alert when sum of repeat scores exceeds this |
-| `min_tokens` | int | `32` | Minimum content tokens before alerting |
-| `consecutive_hits` | int | `1` | Required consecutive over-threshold steps |
-| `ignore_token_ids` | list[int] | `[]` | Token ids excluded from window scoring |
+| `enabled` | bool | `false` | Master switch |
+| `think_end` | int | `-1` | `-1` chat mode, or explicit `</think>` token id for reasoning |
+
+Requires the optional native extension:
+
+```bash
+pip install ./tools/token_repeat_pattern/src
+```
+
+See [token_repeat_pattern.md](../feature_guide/token_repeat_pattern.md).
+
 
 ### logits_finite
 
@@ -151,8 +157,7 @@ Not a detector — control-plane for `dump.manual_dump`. Always runs `dump_kv` o
   "detector": {
     "token_repeat": {
       "enabled": true,
-      "window": 32,
-      "repeat_sum_threshold": 64,
+      "think_end": -1,
       "on_trigger": ["report", "dump_kv"],
       "dump_kv": { "scope": "request" }
     }

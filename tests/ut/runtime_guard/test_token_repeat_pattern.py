@@ -25,7 +25,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 from weakref import ref
 
-from vllm_ascend.observability.runtime_config.schema import validate_detector_section
 from vllm_ascend.observability.runtime_guard.detector.base import DetectorRegistry
 from vllm_ascend.observability.runtime_guard.detector.manager import AfterSampleCpuSnapshot, DetectorManager
 from vllm_ascend.observability.runtime_guard.detector.token_repeat import TokenRepeatDetector
@@ -69,12 +68,12 @@ class Backend:
         return state.received, state.received, state.fired_at, state.reason
 
 
-class _M4Fixture(unittest.TestCase):
+class _PatternFixture(unittest.TestCase):
     def setUp(self):
         RequestGuardStore.reset_for_tests()
         self.backend = Backend()
         self.loader = patch(
-            "vllm_ascend.observability.runtime_guard.detector.m4_backend.load_m4", return_value=self.backend
+            "vllm_ascend.observability.runtime_guard.detector.pattern_backend.load_pattern", return_value=self.backend
         )
         self.loader.start()
         self.addCleanup(self.loader.stop)
@@ -88,7 +87,7 @@ class _M4Fixture(unittest.TestCase):
                 super().update(*args, **kwargs)
                 self.config.config_version += 1
 
-        self.section = VersionedSection(TokenRepeatDetector.schema.defaults_dict(), enabled=True, algorithm="m4")
+        self.section = VersionedSection(TokenRepeatDetector.schema.defaults_dict(), enabled=True)
         self.config = SimpleNamespace(
             config_version=0,
             detector_section=lambda _: self.section,
@@ -130,7 +129,7 @@ class _M4Fixture(unittest.TestCase):
         return replacement.start()
 
 
-class ProductionM4Tests(_M4Fixture):
+class ProductionPatternTests(_PatternFixture):
     def test_batch_sparse_alerts_and_cumulative_dedup(self):
         alerts = self.sampled(["a", "b"], [[1, 9], [2]])
         self.assertEqual(
@@ -145,14 +144,14 @@ class ProductionM4Tests(_M4Fixture):
     def test_finish_consumes_unread_suffix_and_preserves_tail_incident(self):
         RequestIoSnapshotManager.get().append_batch(["a"], [[1, 2, 3]])
         alerts = self.manager.finish_requests(["a"])
-        self.assertEqual(alerts[0].detail, dict(algorithm="m4", fired_at=3, reason="tail", finish_only=True))
+        self.assertEqual(alerts[0].detail, dict(fired_at=3, reason="tail", finish_only=True))
         self.assertEqual(self.det._consumed_len["a"], 3)
         self.assertEqual(self.manager.finish_requests(["a"]), [])
 
     def test_cancel_is_cleanup_and_id_reuse_is_fresh(self):
         self.sampled(["a"], [[1]])
         RequestGuardStore.get().clear("a", detectors=self.manager)
-        self.assertFalse(self.det._m4_states)
+        self.assertFalse(self.det._states)
         self.assertEqual(self.sampled(["a"], [[9]])[0].detail["fired_at"], 1)
 
     def test_disable_reenable_rejects_queued_old_snapshot(self):
@@ -160,8 +159,8 @@ class ProductionM4Tests(_M4Fixture):
         epoch = self.det.epoch
         self.section["enabled"] = False
         self.det.refresh_from_config()
-        self.assertFalse(self.det._m4_states)
-        self.assertIsNone(self.det._m4)
+        self.assertFalse(self.det._states)
+        self.assertIsNone(self.det._backend)
         self.assertEqual(self.det.epoch, epoch + 1)
         state = RequestGuardStore.get().get_state("a")
         assert state is not None
@@ -184,7 +183,7 @@ class ProductionM4Tests(_M4Fixture):
         self.backend.fail = True
         alerts = self.sampled(["a", "b"], [[9], [2]])
         self.assertEqual(alerts[0].detail["fired_at"], 1)
-        self.assertFalse(self.det._m4_failed)
+        self.assertFalse(self.det._failed)
         self.backend.fail = False
         self.det.check_all(None, ["a", "b"])
         self.assertEqual(self.backend.calls, [[[9], [2]], [[2]]])
@@ -200,37 +199,12 @@ class ProductionM4Tests(_M4Fixture):
         alerts = self.sampled(["a"], [[9]])
         self.assertEqual(alerts[0].detail["fired_at"], 1)
 
-    def test_config_rejects_silent_window_knob_override(self):
-        self.section["window"] = 99
-        with self.assertRaisesRegex(ValueError, "only supported"):
-            validate_detector_section(TokenRepeatDetector.schema, dict(self.section))
-        with self.assertRaisesRegex(ValueError, "only supported"):
-            self.det.refresh_from_config()
-
-        from copy import deepcopy
-
-        from vllm_ascend.observability.runtime_config.config import RuntimeConfig
-
-        config = RuntimeConfig(ensure_file=False)
-        previous, version = config._data, config._version
-        candidate = deepcopy(previous)
-        candidate["detector"]["token_repeat"].update(enabled=True, algorithm="m4", window=99)
-        with self.assertRaisesRegex(ValueError, "only supported"):
-            config._apply_loaded(candidate, version=version + 1, announce=False)
-        self.assertIs(config._data, previous)
-        self.assertEqual(config._version, version)
-
-    def test_schema_and_old_default(self):
-        self.assertEqual(TokenRepeatDetector.schema.defaults_dict()["algorithm"], "window")
-        with self.assertRaises(ValueError):
-            validate_detector_section(TokenRepeatDetector.schema, {"algorithm": 123})
-
     def test_resource_failure_is_explicit(self):
         self.loader.stop()
-        from vllm_ascend.observability.runtime_guard.detector.m4_backend import load_m4
+        from vllm_ascend.observability.runtime_guard.detector.pattern_backend import load_pattern
 
         with self.assertRaisesRegex(ValueError, "requires"):
-            load_m4(None, -1)
+            load_pattern(None, -1)
 
     def test_old_completion_does_not_unpin_reused_id(self):
         store = RequestGuardStore.get()
@@ -261,10 +235,10 @@ class ProductionM4Tests(_M4Fixture):
         processor._reap_finished_requests()
         self.assertEqual(routed[0].detail["reason"], "tail")
         self.assertIsNone(RequestGuardStore.get().get_state("a"))
-        self.assertFalse(self.det._m4_states)
+        self.assertFalse(self.det._states)
         RequestIoSnapshotManager.get().append_batch(["bad-resource"], [[1]])
         RequestGuardStore.get().mark_finished(["bad-resource"], wave=0)
-        with patch.object(self.manager, "finish_requests", side_effect=ValueError("invalid M4 resource")):
+        with patch.object(self.manager, "finish_requests", side_effect=ValueError("invalid token_repeat resource")):
             processor._reap_finished_requests()
         self.assertIsNone(RequestGuardStore.get().get_state("bad-resource"))
 
@@ -302,7 +276,7 @@ class ProductionM4Tests(_M4Fixture):
                             "vllm_ascend.observability.runtime_guard.processor", level="WARNING"
                         ) as logs:
                             processor._reap_finished_requests()
-                        self.assertIn("forced reap skips terminal M4 check", " ".join(logs.output))
+                        self.assertIn("forced reap skips terminal token_repeat check", " ".join(logs.output))
                         self.assertIsNone(store.get_state("queued"))
                     else:
                         processor._reap_finished_requests()
@@ -314,7 +288,7 @@ class ProductionM4Tests(_M4Fixture):
                     self.assertTrue(drained.wait(2))
                     waiter.join(2)
                     self.assertIsNone(store.get_state("queued"))
-                    self.assertFalse(self.det._m4_states)
+                    self.assertFalse(self.det._states)
                     self.assertEqual([a.detail["reason"] for a in routed], [] if forced else ["tail"])
                 finally:
                     release.set()
@@ -390,23 +364,14 @@ class ProductionM4Tests(_M4Fixture):
                 action.assert_called_once()
                 detector.assert_called_once()
 
-    def test_window_cleanup_compatibility(self):
-        self.section.update(algorithm="window", min_tokens=0, repeat_sum_threshold=0)
-        self.det.refresh_from_config()
-        self.sampled(["a"], [[1, 1]])
-        self.assertTrue(self.det._states)
-        RequestGuardStore.get().clear("a", detectors=self.manager)
-        self.assertFalse(self.det._states)
-        self.assertFalse(self.det._consumed_len)
-
     def test_old_cleanup_does_not_clear_new_native_state(self):
         self.sampled(["a"], [[1]])
         old = RequestGuardStore.get().get_state("a")
         RequestGuardStore.get().clear("a", detectors=self.manager)
         self.sampled(["a"], [[2]])
-        native = self.det._m4_states["a"]
+        native = self.det._states["a"]
         self.manager.clear_finished("a", expected_state=old)
-        self.assertIs(self.det._m4_states["a"], native)
+        self.assertIs(self.det._states["a"], native)
 
     def test_finish_exception_keeps_earlier_tail_alerts(self):
         self.sampled(["a", "b"], [[1], [1, 2]])
@@ -420,17 +385,17 @@ class ProductionM4Tests(_M4Fixture):
         with patch.object(self.backend, "finish", side_effect=finish_one):
             alerts = self.manager.finish_requests(["a", "b"])
         self.assertEqual([a.req_id for a in alerts], ["a"])
-        self.assertIn("b", self.det._m4_failed)
+        self.assertIn("b", self.det._failed)
 
     def test_skipped_request_without_native_state_is_fully_cleaned(self):
         store = RequestGuardStore.get()
         RequestIoSnapshotManager.get().append_batch(["skipped"], [[1, 2]])
         self.det.check_all(None, ["skipped"], {"skipped"})
-        self.assertNotIn("skipped", self.det._m4_states)
+        self.assertNotIn("skipped", self.det._states)
         self.assertEqual(self.det._consumed_len["skipped"], 2)
         store.clear("skipped", detectors=self.manager)
         self.assertNotIn("skipped", self.det._consumed_len)
-        self.assertNotIn("skipped", self.det._m4_owners)
+        self.assertNotIn("skipped", self.det._owners)
 
     def test_reenable_does_not_replay_output_retained_for_other_detectors(self):
         self.sampled(["a"], [[1, 2]])
@@ -451,7 +416,7 @@ class ProductionM4Tests(_M4Fixture):
         RequestGuardStore.get().clear("a", detectors=self.manager)
         self.assertIsNone(old())
         self.assertEqual(self.manager.run_after_sample_cpu(snap), [])
-        self.assertNotIn("a", self.det._m4_owners)
+        self.assertNotIn("a", self.det._owners)
 
     def test_late_enqueue_cannot_recreate_or_pin_a_reused_request(self):
         store = RequestGuardStore.get()
@@ -465,7 +430,7 @@ class ProductionM4Tests(_M4Fixture):
 
     def test_resource_change_starts_at_current_output(self):
         self.sampled(["a"], [[1, 2]])
-        self.section["m4_think_end"] = 17
+        self.section["think_end"] = 17
         self.det.refresh_from_config()
         alerts = self.sampled(["a"], [[9]])
         self.assertEqual(self.backend.calls[-1], [[9]])
@@ -480,7 +445,7 @@ class ProductionM4Tests(_M4Fixture):
     def test_failed_slot_does_not_disable_untouched_or_completed_requests(self):
         self.backend.bad_slot = 1
         self.sampled(["a", "bad", "c"], [[1], [2], [3]])
-        self.assertEqual(self.det._m4_failed, {"bad"})
+        self.assertEqual(self.det._failed, {"bad"})
         self.backend.bad_slot = None
         alerts = self.sampled(["a", "bad", "c"], [[9], [9], [9]])
         self.assertEqual(self.backend.calls[-1], [[9], [3, 9]])
@@ -500,18 +465,17 @@ class ProductionM4Tests(_M4Fixture):
         with patch.object(self.backend, "feed_events", side_effect=fail_once):
             alerts = self.manager.finish_requests(["bad", "good"])
         self.assertEqual([(a.req_id, a.detail["fired_at"]) for a in alerts], [("good", 2)])
-        self.assertEqual(self.det._m4_failed, {"bad"})
+        self.assertEqual(self.det._failed, {"bad"})
 
-    def test_invalid_config_keeps_previous_enabled_algorithm_and_state(self):
+    def test_invalid_config_keeps_previous_enabled_and_state(self):
         self.sampled(["a"], [[1]])
-        state, epoch = self.det._m4_states["a"], self.det.epoch
-        self.section.update(enabled=False, algorithm="invalid")
+        state, epoch = self.det._states["a"], self.det.epoch
+        self.section.update(enabled=False, think_end=True)  # invalid type
         with self.assertRaises(ValueError):
             self.det.refresh_from_config()
         self.assertTrue(self.det.enabled)
-        self.assertEqual(self.det._algorithm, "m4")
         self.assertEqual(self.det.epoch, epoch)
-        self.assertIs(self.det._m4_states["a"], state)
+        self.assertIs(self.det._states["a"], state)
 
     def test_native_owner_does_not_pin_removed_output_buffer(self):
         self.sampled(["a"], [[1] * 1024])
@@ -530,15 +494,15 @@ class ProductionM4Tests(_M4Fixture):
         )
         self.det.check_all(None, ["a"])
         self.det.refresh_from_config()
-        self.loader.target.load_m4.assert_called_once()
+        self.loader.target.load_pattern.assert_called_once()
         self.det.rebind_runner(None)
-        self.assertEqual(self.loader.target.load_m4.call_count, 2)
-        self.loader.target.load_m4.side_effect = RuntimeError("extension unavailable")
+        self.assertEqual(self.loader.target.load_pattern.call_count, 2)
+        self.loader.target.load_pattern.side_effect = RuntimeError("extension unavailable")
         with self.assertLogs("vllm_ascend.observability.runtime_guard.detector.token_repeat", level="ERROR"):
             self.det.rebind_runner(None)
         self.det.refresh_from_config()
-        self.assertEqual(self.loader.target.load_m4.call_count, 3)
-        self.assertIsNone(self.det._m4)
+        self.assertEqual(self.loader.target.load_pattern.call_count, 3)
+        self.assertIsNone(self.det._backend)
 
 
 class ResourceValidationTests(unittest.TestCase):
@@ -550,25 +514,25 @@ class ResourceValidationTests(unittest.TestCase):
 
         import numpy as np
 
-        from vllm_ascend.observability.runtime_guard.detector.m4_backend import load_m4
+        from vllm_ascend.observability.runtime_guard.detector.pattern_backend import load_pattern
 
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "tokenizer.json"
             source.write_text("{}")
             runner = SimpleNamespace(model_config=SimpleNamespace(tokenizer=tmp))
             tables = {"norm": np.arange(16)}
-            adapter, vocab = ModuleType("m4_cpp"), ModuleType("m4_vocab")
+            adapter, vocab = ModuleType("pattern_cpp"), ModuleType("pattern_vocab")
             constructor, build = MagicMock(return_value="loaded"), MagicMock(return_value=tables)
             vars(adapter)["RepDetectorCPP"] = constructor
             vars(vocab)["build"] = build
-            with patch.dict(sys.modules, {"m4_cpp": adapter, "m4_vocab": vocab}):
-                self.assertEqual(load_m4(runner, -1), "loaded")
+            with patch.dict(sys.modules, {"pattern_cpp": adapter, "pattern_vocab": vocab}):
+                self.assertEqual(load_pattern(runner, -1), "loaded")
                 build.assert_called_once_with(str(source))
                 constructor.assert_called_once_with(tables, think_end=None)
                 with self.assertRaisesRegex(ValueError, "outside"):
-                    load_m4(runner, 16)
+                    load_pattern(runner, 16)
                 with self.assertRaisesRegex(ValueError, "think_end"):
-                    load_m4(runner, True)
+                    load_pattern(runner, True)
 
     def test_rebind_uses_new_runtime_config_even_when_versions_match(self):
         """A new runner must not inherit the previous model's detector configuration."""
@@ -580,7 +544,7 @@ class ResourceValidationTests(unittest.TestCase):
                 ensure_file=False,
                 startup_overlay={
                     "detector": {
-                        "token_repeat": {"enabled": True, "algorithm": "m4", "m4_think_end": think_end},
+                        "token_repeat": {"enabled": True, "think_end": think_end},
                         "spec_acceptance": {"enabled": bool(think_end)},
                     }
                 },
@@ -591,7 +555,7 @@ class ResourceValidationTests(unittest.TestCase):
         runners = [SimpleNamespace(ascend_config=SimpleNamespace(runtime_config=cfg)) for cfg in configs]
         try:
             with (
-                patch("vllm_ascend.observability.runtime_guard.detector.m4_backend.load_m4") as load,
+                patch("vllm_ascend.observability.runtime_guard.detector.pattern_backend.load_pattern") as load,
                 patch(
                     "vllm_ascend.observability.runtime_guard.rank_gate.should_run_anomaly_check_on_rank",
                     return_value=True,
@@ -602,7 +566,7 @@ class ResourceValidationTests(unittest.TestCase):
                 manager.rebind_runner(runners[1])
                 assert manager._runtime_config is configs[1]
                 assert all(det._runtime_config is configs[1] for det in manager._registry)
-                assert manager._token_repeat_det._m4_think_end == 7
+                assert manager._token_repeat_det._think_end == 7
                 assert manager._spec_det.enabled
                 assert manager._token_repeat_det.epoch > initial_epoch
                 assert load.call_count == 2
@@ -611,14 +575,14 @@ class ResourceValidationTests(unittest.TestCase):
             RequestGuardStore.reset_for_tests()
 
 
-class NativeM4Tests(_M4Fixture):
+class NativePatternTests(_PatternFixture):
     def setUp(self):
         import numpy as np
 
         super().setUp()
-        if importlib.util.find_spec("_m4_native") is None:
+        if importlib.util.find_spec("_pattern_native") is None:
             self.skipTest("independent native extension not built")
-        self.native = importlib.import_module("m4_cpp").RepDetectorCPP
+        self.native = importlib.import_module("pattern_cpp").RepDetectorCPP
         self.tables: dict[str, np.ndarray] = dict(
             norm=np.arange(256, dtype=np.int32),
             chars=np.ones(256, np.int16),
@@ -633,7 +597,7 @@ class NativeM4Tests(_M4Fixture):
             for width in (1, 17, 64, 129):
                 self.det.on_disabled()
                 RequestGuardStore.reset_for_tests()
-                self.det._m4 = self.native(self.tables, think_end=None)
+                self.det._backend = self.native(self.tables, think_end=None)
                 tokens = (list(range(32)) * 5)[:length]
                 alerts = []
                 for offset in range(0, length, width):
@@ -644,9 +608,9 @@ class NativeM4Tests(_M4Fixture):
                 self.assertEqual(actual, expected, (length, width))
 
     def test_native_bad_slot_preserves_other_requests(self):
-        self.det._m4 = self.native(self.tables)
+        self.det._backend = self.native(self.tables)
         self.sampled(["before", "bad", "after"], [[1], [2, 256], list(range(32)) * 3])
-        self.assertEqual(self.det._m4_failed, {"bad"})
+        self.assertEqual(self.det._failed, {"bad"})
         self.assertEqual(self.det._consumed_len["before"], 1)
         self.assertEqual(self.det._consumed_len.get("after", 0), 0)
         alerts = self.manager.finish_requests(["before", "bad", "after"])

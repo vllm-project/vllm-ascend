@@ -1,4 +1,4 @@
-"""Frozen M4 alert reasons, in native rule evaluation order."""
+"""Frozen pattern-repeat alert reasons, in native rule evaluation order."""
 
 from dataclasses import dataclass
 

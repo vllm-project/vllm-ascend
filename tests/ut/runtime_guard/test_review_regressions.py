@@ -169,7 +169,7 @@ def test_v13_jsonc_comments_and_trailing_commas(tmp_path: Path):
         """{
   // enable repeat detection
   "detector": {
-    "token_repeat": { "enabled": true, "window": 8, }, /* trailing comma above */
+    "token_repeat": { "enabled": true, "think_end": 8, }, /* trailing comma above */
   },
 }""",
         encoding="utf-8",
@@ -177,7 +177,7 @@ def test_v13_jsonc_comments_and_trailing_commas(tmp_path: Path):
     os.utime(cfg_path, (time.time() + 10, time.time() + 10))
     assert cfg.reload(force=True) is True
     assert cfg.detector_get("token_repeat", "enabled") is True
-    assert cfg.detector_get("token_repeat", "window") == 8
+    assert cfg.detector_get("token_repeat", "think_end") == 8
 
 
 # ---------------------------------------------------------------- V5 (P0-3)
@@ -1707,7 +1707,9 @@ def test_v21_bootstrap_overwrites_existing_file_with_defaults(tmp_path: Path, mo
     assert rc.persist_bootstrap_config() is True
     on_disk = json.loads(cfg_file.read_text(encoding="utf-8"))
     assert on_disk["detector"]["token_repeat"]["enabled"] is False
-    assert rc.detector_get("token_repeat", "window", 0) == int(cfg._DEFAULTS["detector"]["token_repeat"]["window"])
+    assert rc.detector_get("token_repeat", "think_end", -1) == int(
+        cfg._DEFAULTS["detector"]["token_repeat"]["think_end"]
+    )
     assert "output_substring" not in on_disk.get("detector", {})
 
 

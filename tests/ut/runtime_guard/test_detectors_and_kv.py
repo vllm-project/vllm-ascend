@@ -29,8 +29,6 @@ from vllm_ascend.observability.runtime_guard.action.actions import ActionContext
 from vllm_ascend.observability.runtime_guard.detector.manager import AfterSampleCpuSnapshot, DetectorManager
 from vllm_ascend.observability.runtime_guard.detector.token_repeat import (
     TokenRepeatDetector,
-    TokenRepeatState,
-    push_token_repeat,
 )
 from vllm_ascend.observability.runtime_guard.dump import KvCacheReader, _slice_blocks
 from vllm_ascend.observability.runtime_guard.io import RequestIoSnapshotManager
@@ -90,125 +88,11 @@ def _dump_ctx(
     )
 
 
-def test_push_token_repeat_scores_and_ignore():
-    st = TokenRepeatState()
-    ignore: set[int] = set()
-    for tid in (1, 2, 3, 4):
-        assert push_token_repeat(st, tid, window=8, ignore=ignore) == 0
-    assert push_token_repeat(st, 1, window=8, ignore=ignore) == 1
-    assert st.repeat_sum >= 1
-
-    ignored = TokenRepeatState()
-    assert push_token_repeat(ignored, 0, window=8, ignore={0}) == 0
-    assert len(ignored.content) == 0
-
-
-def test_token_repeat_detector_hit_and_miss(tmp_path: Path):
-    """S4: synthetic repeats alert; unique ids miss; disabled stays quiet."""
-    from vllm_ascend.observability.runtime_config.config import RuntimeConfig
-    from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
-
-    RequestGuardStore.reset_for_tests()
-    RequestIoSnapshotManager.reset_for_tests()
-    cfg = RuntimeConfig(
-        config_path=tmp_path / "c.json",
-        report_dir=tmp_path / "r",
-        ensure_file=True,
-        hot_reload=False,
-    )
-    tr = cfg._data["detector"]["token_repeat"]
-    tr["enabled"] = True
-    tr["window"] = 8
-    tr["repeat_sum_threshold"] = 4
-    tr["min_tokens"] = 3
-    tr["consecutive_hits"] = 1
-
-    det = TokenRepeatDetector(runtime_config=cfg, runner=SimpleNamespace(tp_rank=0))
-    det.refresh_from_config()
-
-    miss: list = []
-    for tid in range(10, 20):
-        miss = det.check_all([[tid]], req_ids=["uniq"])
-    assert miss == []
-
-    RequestGuardStore.reset_for_tests()
-    RequestIoSnapshotManager.reset_for_tests()
-    det.clear_finished("uniq")
-    # Same token repeatedly → high repeat_sum after warmup.
-    hit: list = []
-    for _ in range(12):
-        alerts = det.check_all([[7]], req_ids=["rep"])
-        if alerts:
-            hit = alerts
-            break
-    assert len(hit) == 1
-    assert hit[0].incident_type == "token_repeat"
-    assert hit[0].req_id == "rep"
-    assert hit[0].is_ill is True
-
-    # Already alerted: further repeats do not re-emit.
-    assert det.check_all([[7]], req_ids=["rep"]) == []
-
-    RequestGuardStore.reset_for_tests()
-    RequestIoSnapshotManager.reset_for_tests()
-    tr["enabled"] = False
-    det.refresh_from_config()
-    for _ in range(20):
-        assert det.check_all([[7]], req_ids=["off"]) == []
-
-
 def test_w1_1_r04_second_append_is_kept_and_seen_follows_store(tmp_path: Path):
-    """A second append of the same row is another token.
+    """A second append of the same row is another token; fold follows Store."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
 
-    MR v2 writes each step once. Folding follows Store, so
-    ``content_tokens_seen`` stays equal to ``output_token_count``.
-    """
-    from vllm_ascend.observability.runtime_config.config import RuntimeConfig
-
-    RequestGuardStore.reset_for_tests()
-    RequestIoSnapshotManager.reset_for_tests()
-    cfg = RuntimeConfig(
-        config_path=tmp_path / "c.json",
-        report_dir=tmp_path / "r",
-        ensure_file=True,
-        hot_reload=False,
-    )
-    tr = cfg._data["detector"]["token_repeat"]
-    tr["enabled"] = True
-    tr["window"] = 32
-    tr["repeat_sum_threshold"] = 9999
-    tr["min_tokens"] = 1
-
-    det = TokenRepeatDetector(runtime_config=cfg, runner=SimpleNamespace(tp_rank=0))
-    det.refresh_from_config()
-    io = RequestIoSnapshotManager.get()
-    rid = "r1"
-
-    def one_step(tok: int, *, double: bool) -> None:
-        row = [[tok]]
-        io.append_batch([rid], row)
-        det.check_all(None, req_ids=[rid])
-        if double:
-            io.append_batch([rid], row)
-            det.check_all(None, req_ids=[rid])
-
-    for i in range(5):
-        one_step(100 + i, double=False)
-    for i in range(5):
-        one_step(200 + i, double=True)
-
-    st = RequestGuardStore.get().get_state(rid)
-    assert st is not None
-    oc = len(st.output_token_ids)
-    seen = det._states[rid].content_tokens_seen
-    snap = io.snapshot(None, rid, None, include_token_ids=False, use_cache=False)
-    assert oc == 15
-    assert seen == oc
-    assert snap.output_token_count == oc
-
-
-def test_w1_1_run_after_sample_cpu_folds_store_only(tmp_path: Path):
-    """DetectorManager CPU path must not re-fold frozen sampled rows past Store."""
     from vllm_ascend.observability.runtime_config.config import RuntimeConfig
 
     RequestGuardStore.reset_for_tests()
@@ -220,30 +104,116 @@ def test_w1_1_run_after_sample_cpu_folds_store_only(tmp_path: Path):
         hot_reload=False,
     )
     cfg._data["detector"]["token_repeat"]["enabled"] = True
-    cfg._data["detector"]["token_repeat"]["repeat_sum_threshold"] = 9999
-    cfg._data["detector"]["token_repeat"]["min_tokens"] = 1
 
-    runner = SimpleNamespace(tp_rank=0, input_batch=None)
-    mgr = DetectorManager(runtime_config=cfg, runner=runner)
-    mgr.apply_runtime_config()
-    io = RequestIoSnapshotManager.get()
-    rid = "poem"
+    class Backend:
+        def start(self):
+            return SimpleNamespace(received=0, fired_at=-1, reason="", failed=False)
 
-    io.append_batch([rid], [[7]])
-    snap = AfterSampleCpuSnapshot(
-        req_ids=[rid],
-        has_nonempty_sampled=True,
-        skip_req_ids=None,
+        def feed_events(self, states, rows):
+            for state, row in zip(states, rows):
+                state.received += len(row)
+            return []
+
+        def finish(self, state):
+            return SimpleNamespace(is_ill=False, fired_at=-1, reason="")
+
+        def progress(self, state):
+            return state.received, state.received, state.fired_at, state.reason
+
+    with patch(
+        "vllm_ascend.observability.runtime_guard.detector.pattern_backend.load_pattern",
+        return_value=Backend(),
+    ):
+        det = TokenRepeatDetector(runtime_config=cfg, runner=SimpleNamespace(tp_rank=0))
+        det.refresh_from_config()
+        io = RequestIoSnapshotManager.get()
+        rid = "r1"
+
+        def one_step(tok: int, *, double: bool) -> None:
+            row = [[tok]]
+            io.append_batch([rid], row)
+            det.check_all(None, req_ids=[rid])
+            if double:
+                io.append_batch([rid], row)
+                det.check_all(None, req_ids=[rid])
+
+        for i in range(5):
+            one_step(100 + i, double=False)
+        for i in range(5):
+            one_step(200 + i, double=True)
+
+        st = RequestGuardStore.get().get_state(rid)
+        assert st is not None
+        oc = len(st.output_token_ids)
+        snap = io.snapshot(None, rid, None, include_token_ids=False, use_cache=False)
+        assert oc == 15
+        assert det._consumed_len[rid] == oc
+        assert snap.output_token_count == oc
+
+
+def test_w1_1_run_after_sample_cpu_folds_store_only(tmp_path: Path):
+    """DetectorManager CPU path must not re-fold frozen sampled rows past Store."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from vllm_ascend.observability.runtime_config.config import RuntimeConfig
+
+    RequestGuardStore.reset_for_tests()
+    RequestIoSnapshotManager.reset_for_tests()
+    cfg = RuntimeConfig(
+        config_path=tmp_path / "c.json",
+        report_dir=tmp_path / "r",
+        ensure_file=True,
+        hot_reload=False,
     )
-    mgr.run_after_sample_cpu(snap)
-    # A second append is kept. The CPU path folds Store only, so seen matches.
-    io.append_batch([rid], [[7]])
-    mgr.run_after_sample_cpu(snap)
+    cfg._data["detector"]["token_repeat"]["enabled"] = True
 
-    st = RequestGuardStore.get().get_state(rid)
-    assert st is not None
-    assert len(st.output_token_ids) == 2
-    assert mgr.get("token_repeat")._states[rid].content_tokens_seen == 2  # type: ignore[attr-defined]
+    class Backend:
+        def __init__(self):
+            self.calls = []
+
+        def start(self):
+            return SimpleNamespace(received=0, fired_at=-1, reason="", failed=False)
+
+        def feed_events(self, states, rows):
+            self.calls.append([list(r) for r in rows])
+            for state, row in zip(states, rows):
+                state.received += len(row)
+            return []
+
+        def finish(self, state):
+            return SimpleNamespace(is_ill=False, fired_at=-1, reason="")
+
+        def progress(self, state):
+            return state.received, state.received, state.fired_at, state.reason
+
+    backend = Backend()
+    with patch(
+        "vllm_ascend.observability.runtime_guard.detector.pattern_backend.load_pattern",
+        return_value=backend,
+    ):
+        runner = SimpleNamespace(tp_rank=0, input_batch=None)
+        mgr = DetectorManager(runtime_config=cfg, runner=runner)
+        mgr.apply_runtime_config()
+        io = RequestIoSnapshotManager.get()
+        rid = "poem"
+
+        io.append_batch([rid], [[7]])
+        snap = AfterSampleCpuSnapshot(
+            req_ids=[rid],
+            has_nonempty_sampled=True,
+            skip_req_ids=None,
+        )
+        mgr.run_after_sample_cpu(snap)
+        io.append_batch([rid], [[7]])
+        mgr.run_after_sample_cpu(snap)
+
+        st = RequestGuardStore.get().get_state(rid)
+        assert st is not None
+        assert len(st.output_token_ids) == 2
+        # Second CPU job feeds only the new Store suffix.
+        assert backend.calls == [[[7]], [[7]]]
+        assert mgr.get("token_repeat")._consumed_len[rid] == 2  # type: ignore[attr-defined]
 
 
 def test_slice_blocks_selects_requested_and_empty():

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Warm up the optional CPU backend using the served tokenizer."""
+"""Warm up the optional CPU pattern-repeat backend from the served tokenizer."""
 
 from __future__ import annotations
 
@@ -27,27 +27,27 @@ from vllm_ascend.logger import init_logger_ascend
 logger = init_logger_ascend(__name__)
 
 
-class M4Result(Protocol):
+class PatternResult(Protocol):
     is_ill: bool
     fired_at: int
     reason: str
 
 
-class M4Backend(Protocol):
+class PatternBackend(Protocol):
     def start(self) -> Any: ...
     def feed_events(self, states: list[Any], inputs: list[list[int]]) -> list[tuple[int, int, str]]: ...
     def progress(self, state: Any) -> tuple[int, int, int, str] | None: ...
-    def finish(self, state: Any) -> M4Result: ...
+    def finish(self, state: Any) -> PatternResult: ...
 
 
-def load_m4(runner: Any, think_end: int) -> M4Backend:
+def load_pattern(runner: Any, think_end: int) -> PatternBackend:
     """Build tables once during detector warmup; never read a separately deployed NPZ."""
     if isinstance(think_end, bool) or not isinstance(think_end, int) or think_end < -1:
-        raise ValueError("m4_think_end must be -1 (chat) or a token ID")
+        raise ValueError("think_end must be -1 (chat) or a token ID")
     model_config = getattr(runner, "model_config", None)
     served = getattr(model_config, "tokenizer", None)
     if not served:
-        raise ValueError("M4 requires runner.model_config.tokenizer")
+        raise ValueError("token_repeat requires runner.model_config.tokenizer")
     source = Path(served) / "tokenizer.json"
     if not source.is_file():
         from transformers.utils.hub import cached_file
@@ -59,24 +59,29 @@ def load_m4(runner: Any, think_end: int) -> M4Backend:
             revision=getattr(model_config, "tokenizer_revision", None),
         )
         if cached is None:
-            raise ValueError("M4 requires the served tokenizer.json in the local model cache")
+            raise ValueError("token_repeat requires the served tokenizer.json in the local model cache")
         source = Path(cached)
     try:
-        adapter = import_module("m4_cpp")
-        vocab = import_module("m4_vocab")
+        adapter = import_module("pattern_cpp")
+        vocab = import_module("pattern_vocab")
     except ImportError as exc:
-        raise RuntimeError("M4 requires the independent extension: pip install ./tools/m4_token_repeat/src") from exc
+        raise RuntimeError(
+            "token_repeat requires the independent extension: pip install ./tools/token_repeat_pattern/src"
+        ) from exc
     started = perf_counter()
     tables = vocab.build(str(source))
     if think_end >= len(tables["norm"]):
-        raise ValueError("m4_think_end is outside the served tokenizer vocabulary")
+        raise ValueError("think_end is outside the served tokenizer vocabulary")
     backend = adapter.RepDetectorCPP(tables, think_end=None if think_end == -1 else think_end)
     elapsed = perf_counter() - started
     logger.info(
-        "[runtime_guard: token_repeat] M4 table build and native init: %d tokens in %.3fs", len(tables["norm"]), elapsed
+        "[runtime_guard: token_repeat] pattern table build and native init: %d tokens in %.3fs",
+        len(tables["norm"]),
+        elapsed,
     )
     if elapsed > 5.0:
         logger.warning(
-            "[runtime_guard: token_repeat] M4 table build and native init exceeded the 5s target: %.3fs", elapsed
+            "[runtime_guard: token_repeat] pattern table build and native init exceeded the 5s target: %.3fs",
+            elapsed,
         )
     return backend

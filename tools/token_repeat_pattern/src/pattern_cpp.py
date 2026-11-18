@@ -1,10 +1,10 @@
-"""Independent CPU adapter for frozen M4 rules and model-specific tables."""
+"""Independent CPU adapter for frozen pattern-repeat rules and tables."""
 
 import operator
 
 import numpy as np
-from _m4_native import Detector
-from m4_config import REASONS, Result
+from _pattern_native import Detector
+from pattern_config import REASONS, Result
 
 
 class RepDetectorCPP:

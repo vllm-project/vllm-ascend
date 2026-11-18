@@ -1,4 +1,4 @@
-"""Build model-specific M4 lookup tables from a ByteLevel BPE tokenizer."""
+"""Build model-specific pattern-repeat lookup tables from a ByteLevel BPE tokenizer."""
 
 import json
 
@@ -66,7 +66,7 @@ def build(tokenizer_json):
         return False
 
     if not isinstance(tk.model, BPE) or not has_byte_level(definition.get("decoder")):
-        raise ValueError("M4 table builder supports ByteLevel BPE tokenizer.json only")
+        raise ValueError("Pattern table builder supports ByteLevel BPE tokenizer.json only")
     bd = _byte_decoder()
     norm = np.full(V, SEP, np.int32)
     chars = np.zeros(V, np.int16)
