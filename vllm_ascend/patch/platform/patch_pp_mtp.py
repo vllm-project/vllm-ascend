@@ -29,6 +29,8 @@ from functools import wraps
 
 from vllm.logger import logger
 
+from vllm_ascend.utils import vllm_version_is
+
 _PATCHED = False
 _PP_IN_FLIGHT_STEP = 1 << 60
 
@@ -167,6 +169,7 @@ def _patch_scheduler_make_cached_request_data() -> None:
         num_scheduled_tokens,
         spec_decode_tokens,
         req_to_new_blocks,
+        iteration_details=None,
     ):
         saved_async = self.scheduler_config.async_scheduling
         use_pp_ipc_runtime_patch = _use_pp_ipc_runtime_patch(
@@ -176,13 +179,24 @@ def _patch_scheduler_make_cached_request_data() -> None:
         try:
             if use_pp_ipc_runtime_patch:
                 self.scheduler_config.async_scheduling = False
-            cached_reqs_data = original_make_cached(
-                self,
-                running_reqs,
-                num_scheduled_tokens,
-                spec_decode_tokens,
-                req_to_new_blocks,
-            )
+            if vllm_version_is("0.34.0"):
+                # v0.34.0's helper predates the iteration-details argument.
+                cached_reqs_data = original_make_cached(
+                    self,
+                    running_reqs,
+                    num_scheduled_tokens,
+                    spec_decode_tokens,
+                    req_to_new_blocks,
+                )
+            else:
+                cached_reqs_data = original_make_cached(
+                    self,
+                    running_reqs,
+                    num_scheduled_tokens,
+                    spec_decode_tokens,
+                    req_to_new_blocks,
+                    iteration_details=iteration_details,
+                )
         finally:
             self.scheduler_config.async_scheduling = saved_async
 
