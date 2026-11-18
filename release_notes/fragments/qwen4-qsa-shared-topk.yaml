@@ -1,0 +1,5 @@
+# Rename to the Ascend PR number when submitting.
+pr: null
+entries:
+  - category: performance
+    text: Reduced Qwen3.8-Flash-Next target QSA scratch memory by sharing compatible top-k buffers across sequential layers when DBO is disabled. MTP buffers remain independent.
