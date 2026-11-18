@@ -22,7 +22,6 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.linear import RowParallelLinear
-from vllm.model_executor.utils import move_parameter, replace_parameter, retire_parameter
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -33,7 +32,6 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.quantization.nz import fp4_packed_nz
-from vllm_ascend.quantization.reload import refill_expert_list
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, COMPRESSED_TENSORS_METHOD, dispose_tensor
 
 from ..base import (
@@ -62,7 +60,15 @@ def _rename_packed_weight_parameter(layer: torch.nn.Module, weight_name: str) ->
     if not hasattr(layer, packed_weight_name):
         return
 
-    move_parameter(layer, packed_weight_name, weight_name)
+    setattr(
+        layer,
+        weight_name,
+        torch.nn.Parameter(
+            getattr(layer, packed_weight_name).data,
+            requires_grad=False,
+        ),
+    )
+    delattr(layer, packed_weight_name)
 
 
 @register_scheme("W4A4_MXFP4", "linear")
@@ -188,17 +194,18 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
             if prefix_padding % 2 != 0 or suffix_padding % 2 != 0:
                 raise ValueError("MXFP4 packed weight padding must be divisible by 2")
             if prefix_padding or suffix_padding:
-                replace_parameter(
-                    layer,
-                    "weight",
-                    F.pad(layer.weight.data, (prefix_padding // 2, suffix_padding // 2), mode="constant", value=0),
+                layer.weight.data = F.pad(
+                    layer.weight.data,
+                    (prefix_padding // 2, suffix_padding // 2),
+                    mode="constant",
+                    value=0,
                 )
         layer.mxfp4_tp_padding = (prefix_padding, suffix_padding)
 
         n_dim, k_dim = layer.weight_scale.data.shape
         # Shape should be padded if it cannot be divided by 2
         if k_dim % 2 != 0:
-            replace_parameter(layer, "weight_scale", F.pad(layer.weight_scale.data, (0, 1), mode="constant", value=0))
+            layer.weight_scale.data = F.pad(layer.weight_scale.data, (0, 1), mode="constant", value=0)
             layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2 + 1, 2)
         else:
             layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
@@ -330,17 +337,13 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         # The NPU scale layout packs two adjacent MX scales together. Append
         # one neutral entry when a valid local shard contains an odd count.
         if k_size % 2 != 0:
-            replace_parameter(
-                layer, "w13_weight_scale", F.pad(layer.w13_weight_scale.data, (0, 1), mode="constant", value=0)
-            )
+            layer.w13_weight_scale.data = F.pad(layer.w13_weight_scale.data, (0, 1), mode="constant", value=0)
             k_size += 1
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
         g_num, n_size, k_size = layer.w2_weight_scale.shape
         # Apply the same pair-alignment rule independently to the down weight.
         if k_size % 2 != 0:
-            replace_parameter(
-                layer, "w2_weight_scale", F.pad(layer.w2_weight_scale.data, (0, 1), mode="constant", value=0)
-            )
+            layer.w2_weight_scale.data = F.pad(layer.w2_weight_scale.data, (0, 1), mode="constant", value=0)
             k_size += 1
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
         # MegaMoe (FUSED_MC2 on A5) expects the weights in their original
@@ -350,34 +353,22 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         # transposes everything below.
         if use_cann_megamoe(get_current_vllm_config()):
             # MegaMoe (FUSED_MC2) on A5 uses the packed FP4 weight format directly
-            refill_expert_list(
-                layer,
-                "cann_mega_moe_w13_weight_list",
-                [torch_npu.npu_format_cast(weight.clone(), ACL_FORMAT_FRACTAL_NZ) for weight in layer.w13_weight.data],
-            )
+            layer.cann_mega_moe_w13_weight_list = [
+                torch_npu.npu_format_cast(weight.clone(), ACL_FORMAT_FRACTAL_NZ) for weight in layer.w13_weight.data
+            ]
 
-            refill_expert_list(
-                layer,
-                "cann_mega_moe_w2_weight_list",
-                [fp4_packed_nz().cast(weight.clone()) for weight in layer.w2_weight.data],
-            )
+            layer.cann_mega_moe_w2_weight_list = [
+                fp4_packed_nz().cast(weight.clone()) for weight in layer.w2_weight.data
+            ]
             # Checkpoint E8M0 scales are stored as bytes; CANN requires their semantic dtype.
-            refill_expert_list(
-                layer,
-                "cann_mega_moe_w13_weight_scale_list",
-                [
-                    w13_weight_scale.clone().view(torch.float8_e8m0fnu)
-                    for w13_weight_scale in layer.w13_weight_scale.data.unbind(dim=0)
-                ],
-            )
-            refill_expert_list(
-                layer,
-                "cann_mega_moe_w2_weight_scale_list",
-                [
-                    w2_weight_scale.clone().view(torch.float8_e8m0fnu)
-                    for w2_weight_scale in layer.w2_weight_scale.data.unbind(dim=0)
-                ],
-            )
+            layer.cann_mega_moe_w13_weight_scale_list = [
+                w13_weight_scale.clone().view(torch.float8_e8m0fnu)
+                for w13_weight_scale in layer.w13_weight_scale.data.unbind(dim=0)
+            ]
+            layer.cann_mega_moe_w2_weight_scale_list = [
+                w2_weight_scale.clone().view(torch.float8_e8m0fnu)
+                for w2_weight_scale in layer.w2_weight_scale.data.unbind(dim=0)
+            ]
             tensor_names = (
                 "w13_weight",
                 "w2_weight",
@@ -385,7 +376,7 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
                 "w2_weight_scale",
             )
             for tensor_name in tensor_names:
-                retire_parameter(layer, tensor_name)
+                dispose_tensor(getattr(layer, tensor_name))
 
         else:
             # The A5 MXFP4 fused grouped-matmul-swiglu op relies on the

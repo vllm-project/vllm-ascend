@@ -542,7 +542,7 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
             names, originals, (weights.w1, weights.w2, weights.w1_scale, weights.w2_scale)
         ):
             with self.subTest(name=name):
-                self.assertTrue(getattr(getattr(layer, name), "retired", False))
+                self.assertFalse(hasattr(layer, name))
                 self.assertEqual(len(experts), self.num_experts)
                 if name.endswith("scale"):
                     groups, channels, scale_size = original.shape
@@ -618,7 +618,7 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.scheme.process_weights_after_loading(layer)
         self.assertTrue(hasattr(layer, "_mxfp8_original_shapes"))
         self.assertIn("w13_weight", layer._mxfp8_original_shapes)
-        self.assertTrue(layer.w13_weight.retired)
+        self.assertFalse(hasattr(layer, "w13_weight"))
         self.assertEqual(len(layer.w13_weight_list), self.num_experts)
         self.assertEqual(layer.w13_weight_list[0].shape, (original_shape[2], original_shape[1]))
         self.assertTrue(all(weight.is_contiguous() for weight in layer.w13_weight_list))
@@ -691,7 +691,7 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         )
         original_w13_shape = layer.w13_weight.shape
         self.scheme.process_weights_after_loading(layer)
-        self.assertTrue(layer.w13_weight.retired)
+        self.assertFalse(hasattr(layer, "w13_weight"))
         self.scheme.restore_weights_for_rl_loading(layer)
         self.assertEqual(layer.w13_weight.shape, original_w13_shape)
 
@@ -744,7 +744,7 @@ class TestDSMXFP8OProjLayout(TestBase):
             layer = nn.Module()
             layer.prefix = "model.layers.0.attn.wo_a"
             weight = torch.arange(local_groups * 128 * 256, dtype=torch.float32).reshape(-1, 256)
-            layer.weight = nn.Parameter(weight.clone(), requires_grad=False)
+            layer.weight = nn.Parameter(weight, requires_grad=False)
             layer.weight_scale = nn.Parameter(torch.ones(local_groups, 2), requires_grad=False)
             scheme.process_weights_after_loading(layer)
             self.assertEqual(layer.weight.shape, (local_groups, 256, 128))

@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Ascend runtime storage that is not covered by checkpoint parameter views."""
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+"""Runtime allocation and checkpoint staging for unquantized BF16 reload.
+
+Quantized schemes and speculative decoding
+are outside the first-stage adaptation and validation scope.
+"""
 
 import torch
 import torch_npu
@@ -7,19 +12,10 @@ from vllm.model_executor.model_loader.reload import direct as vllm_direct
 from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
 from vllm.model_executor.utils import storage_view
 
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, _should_trans_nz
 
-
-def get_flatquant_clip_ratio(layer):
-    """A captured Kronecker kernel keeps its host scalar, not this attribute.
-
-    The operator has no tensor-valued clip_ratio input. Refuse changes during
-    direct reload instead of silently replaying a graph with the old scalar.
-    """
-    value = layer.clip_ratio.item()
-    if direct_reload_enabled() and hasattr(layer, "aclnn_clip_ratio") and value != layer.aclnn_clip_ratio:
-        raise ValueError("direct reload cannot change FlatQuant clip_ratio; rebuild the model and recapture graphs")
-    return value
+# Keep upstream ND planning and its safety checks unchanged.
+_UPSTREAM_CHECKPOINT_VIEWS = vllm_direct._checkpoint_views
 
 
 def _layout(tensor):
@@ -29,7 +25,7 @@ def _layout(tensor):
 def refill_expert_list(layer, name, tensors):
     """Keep the list and kernel-visible allocations across post-load processing.
 
-    Unlike refill_derived, incompatible layouts must fail instead of replacing
+    Incompatible layouts must fail instead of replacing
     captured allocations. Validate every element before copying any of them.
     """
     old = getattr(layer, name, None)
@@ -39,28 +35,7 @@ def refill_expert_list(layer, name, tensors):
     if len(old) != len(tensors) or any(_layout(a) != _layout(b) for a, b in zip(old, tensors)):
         raise ValueError(f"{name}: expert runtime layout changed; reload the model and recapture graphs")
     for target, source in zip(old, tensors):
-        # E8M0 scales are byte encodings, not numeric FP8 values. CANN copy
-        # does not support every semantic MX dtype; copy ND scale bytes.
-        if target.dtype == torch.float8_e8m0fnu:
-            target.view(torch.uint8).copy_(source.view(torch.uint8))
-        else:
-            target.copy_(source)
-
-
-def process_quant_weights(scheme, layer):
-    """Reuse upstream's per-finish guard; invalidate Ascend's legacy guards.
-
-    direct.finish_direct_reload clears _already_called_process_weights_after_loading
-    before each transaction's PWAL. Legacy layerwise restore keeps its own path.
-    """
-    if direct_reload_enabled():
-        if getattr(layer, "_already_called_process_weights_after_loading", False):
-            return
-        layer.__dict__.pop("_mxfp4_transformed", None)
-        layer.__dict__.pop("_mxfp8_transformed", None)
-    scheme.process_weights_after_loading(layer)
-    if direct_reload_enabled():
-        layer._already_called_process_weights_after_loading = True
+        target.copy_(source)
 
 
 def refill_runtime_parameter(layer, name, tensor):
@@ -85,6 +60,18 @@ def refill_runtime_parameter(layer, name, tensor):
         else:
             storage = torch.empty(offset + span, dtype=dtype, device=parameter.device)
             parameter._direct_reload_staging = storage.as_strided(shape, stride, offset)
+    parameter.data = refill_runtime_tensor(layer, name, tensor)
+
+
+def refill_runtime_tensor(layer, name, tensor):
+    """Retain an owned runtime allocation, including non-Module attention impls.
+
+    Store the physical-format tensor independently of public attributes: PWAL
+    may temporarily rebind an attribute (for example the padded MLAPO UK view).
+    Checkpoint parameters must use refill_runtime_parameter for ND staging.
+    """
+    if not direct_reload_enabled():
+        return tensor
     buffers = layer.__dict__.setdefault("_reload_runtime_buffers", {})
     old = buffers.get(name)
     if old is None:
@@ -100,24 +87,25 @@ def refill_runtime_parameter(layer, name, tensor):
             )
         old.copy_(tensor)
         tensor = old
-    getattr(layer, name).data = tensor
+    return tensor
 
 
-def refill_nz_weight(layer, name):
-    """Cast to a temporary NZ tensor, then refill the captured NZ allocation."""
+def refill_nz_weight(layer, name, *, force: bool = True):
+    """Refill NZ storage, optionally preserving the configured cast policy.
+
+    Fused kernels require NZ unconditionally. Optional BF16 conversions pass
+    force=False so disabled/unsupported casts keep the original ND allocation.
+    """
     # A tensor rebuilt with set_/as_strided can retain the storage's old
     # base-size descriptor. Clone before casting so NZ conversion uses the
     # final runtime shape rather than the checkpoint storage description.
     source = getattr(layer, name).data
+    if not force and not _should_trans_nz(source):
+        return
     if direct_reload_enabled():
         source = source.clone(memory_format=torch.contiguous_format)
     tensor = torch_npu.npu_format_cast(source, ACL_FORMAT_FRACTAL_NZ)
     refill_runtime_parameter(layer, name, tensor)
-
-
-# Immutable callable captured once per process; repeated worker/test setup must
-# not wrap an already-installed Ascend function or form a recursive chain.
-_UPSTREAM_CHECKPOINT_VIEWS = vllm_direct._checkpoint_views
 
 
 def checkpoint_views(
@@ -147,8 +135,8 @@ def checkpoint_views(
         if vllm_direct._layout(t) == ckpt[1]:
             continue
         if ckpt[0] is not model._ckpt_owner:
-            # shared from another model (a target lm_head in a draft): this
-            # finish would reprocess bytes a draft update does not resend
+            # Preserve upstream ownership checks for parameters shared with
+            # another model; this transaction may not reprocess their bytes.
             raise RuntimeError(
                 f"direct reload: {name} is shared from another model and its post-load processing changed its layout"
             )

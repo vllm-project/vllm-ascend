@@ -1,7 +1,6 @@
 import torch
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
-from vllm.model_executor.utils import refill_derived
 
 from ..base import AscendAttentionScheme
 
@@ -98,7 +97,10 @@ class AscendC8MXFPKVCacheAttentionMethod(AscendAttentionScheme):
         exponent = raw.to(torch.float32) - 127
         # Only the reciprocal is consumed (npu_quantize needs 1/scale); the
         # raw E8M0 bytes are broadcast into the V-scale cache as-is.
-        refill_derived(layer, "v_cache_scale_float_reciprocal", (1 / torch.exp2(exponent)).to(target_dtype))
+        layer.v_cache_scale_float_reciprocal = torch.nn.Parameter(
+            (1 / torch.exp2(exponent)).to(target_dtype),
+            requires_grad=False,
+        )
 
     def apply(
         self,

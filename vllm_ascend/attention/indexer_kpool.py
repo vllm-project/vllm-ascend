@@ -40,7 +40,7 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
-from vllm_ascend.quantization.reload import refill_derived_buffer
+from vllm_ascend.model_loader.weight_reload import refill_derived_buffer
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
 

@@ -6,6 +6,6 @@ Remove when upstream exposes a backend checkpoint-view provider hook.
 The implementation and all storage policy remain in vllm-ascend.
 """
 
-from vllm_ascend.quantization.reload import install_direct_reload_patch
+from vllm_ascend.model_loader.weight_reload import install_direct_reload_patch
 
 install_direct_reload_patch()

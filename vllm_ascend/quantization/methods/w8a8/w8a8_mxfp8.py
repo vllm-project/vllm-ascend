@@ -24,8 +24,6 @@ from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.linear import RowParallelLinear
-from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
-from vllm.model_executor.utils import replace_parameter, retire_parameter
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -36,7 +34,6 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.quantization.nz import mxfp8_nz
-from vllm_ascend.quantization.reload import refill_expert_list
 from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg, get_dynamic_mx_quant_scale_alg
 from vllm_ascend.utils import (
     FP8_METHOD,
@@ -577,7 +574,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             self._update_expert_list(layer, f"{list_prefix}{scale_name}_list", scale_list)
 
         for tensor_name, parameter in layer._mxfp8_moe_parameters.items():
-            retire_parameter(layer, tensor_name)
+            dispose_tensor(parameter)
+            delattr(layer, tensor_name)
 
         layer._mxfp8_transformed = True
         torch.npu.empty_cache()
@@ -615,9 +613,6 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
     @staticmethod
     def _update_expert_list(layer: torch.nn.Module, name: str, values: list[torch.Tensor]) -> None:
         """Install expert tensors or refresh the existing graph-stable buffers."""
-        if direct_reload_enabled():
-            refill_expert_list(layer, name, values)
-            return
         current = getattr(layer, name, None)
         if current is None:
             setattr(layer, name, values)
@@ -873,13 +868,11 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
         return params_dict
 
     def process_weights_after_loading(self, layer):
-        weight = layer.weight.data
-        scale = layer.weight_scale.data
-        if scale.dtype == torch.float8_e8m0fnu:
-            scale = scale.view(torch.uint8)
+        if layer.weight_scale.data.dtype == torch.float8_e8m0fnu:
+            layer.weight_scale.data = layer.weight_scale.data.view(torch.uint8)
         else:
-            scale = scale.view(torch.int32) >> 23 & 0xFF
-            scale = scale.to(torch.uint8)
+            layer.weight_scale.data = layer.weight_scale.data.view(torch.int32) >> 23 & 0xFF
+            layer.weight_scale.data = layer.weight_scale.data.to(torch.uint8)
         if self.block_size % self.group_size != 0:
             raise ValueError(
                 "MXFP8 weight block size must be divisible by the "
@@ -887,23 +880,28 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
                 f"group_size={self.group_size}"
             )
         input_repeat = self.block_size // self.group_size
-        scale = scale.repeat_interleave(input_repeat, dim=1)
-        scale = scale.repeat_interleave(self.block_size, dim=0)
-        n_dim, k_dim = scale.shape
-        scale = scale.reshape(n_dim, k_dim // 2, 2)
-        weight = weight.transpose(0, 1)
-        scale = scale.transpose(0, 1)
+        layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(input_repeat, dim=1)
+        layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(self.block_size, dim=0)
+        n_dim, k_dim = layer.weight_scale.data.shape
+        layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
+        layer.weight.data = layer.weight.data.transpose(0, 1)
+        layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
 
         if layer.prefix.endswith("wo_a"):
             # The layer may use OTP instead of the model's ordinary TP group.
             # Derive the group count from the loaded output shard.
-            n_local_groups = weight.shape[1] // self.o_lora_rank
-            weight = weight.T.reshape(n_local_groups, self.o_lora_rank, -1).transpose(1, 2).contiguous()
-            scale = scale.transpose(0, 1).reshape(n_local_groups, self.o_lora_rank, -1, 2).transpose(1, 2).contiguous()
+            n_local_groups = layer.weight.shape[1] // self.o_lora_rank
+            layer.weight.data = (
+                layer.weight.data.T.reshape(n_local_groups, self.o_lora_rank, -1).transpose(1, 2).contiguous()
+            )
+            layer.weight_scale.data = (
+                layer.weight_scale.data.transpose(0, 1)
+                .reshape(n_local_groups, self.o_lora_rank, -1, 2)
+                .transpose(1, 2)
+                .contiguous()
+            )
         elif layer.prefix.endswith("wo_b"):
             # DSA PCP gathers these tensors directly along the leading
             # dimension, which requires contiguous HCCL inputs.
-            weight = weight.contiguous()
-            scale = scale.contiguous()
-        replace_parameter(layer, "weight", weight)
-        replace_parameter(layer, "weight_scale", scale)
+            layer.weight.data = layer.weight.data.contiguous()
+            layer.weight_scale.data = layer.weight_scale.data.contiguous()

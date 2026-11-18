@@ -60,6 +60,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     OFFLOAD_V_CACHE_NPU_INDEX,
 )
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.model_loader.weight_reload import refill_runtime_tensor
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate, register_flash_attention_gate_warmup
 from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
@@ -1147,7 +1148,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr, ACL_FORMAT_FRACTAL_NZ)
         self.weight_uq_qr = torch_npu.npu_format_cast(weight_uq_qr, ACL_FORMAT_FRACTAL_NZ)
 
-        if qt is AscendW8A8DynamicLinearMethod:
+        if qt is None:
+            for name in ("weight_dq", "weight_dkv_kr", "weight_uq_qr"):
+                setattr(self, name, refill_runtime_tensor(self, name, getattr(self, name)))
+        elif qt is AscendW8A8DynamicLinearMethod:
             q_scl = self.fused_qkv_a_proj.weight_scale[: self.q_lora_rank].contiguous()
             kv_scl = self.fused_qkv_a_proj.weight_scale[self.q_lora_rank :].contiguous()
             self.dequant_scale_w_dq = q_scl.view(1, -1).to(torch.float)
