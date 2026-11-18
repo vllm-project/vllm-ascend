@@ -5,6 +5,8 @@ boundaries and a final partial-block flush. There is no sliding-window
 algorithm and no `algorithm` selector. The native CPU extension ships with
 vllm-ascend (`native_pattern`); no separate install step is required.
 
+Alert thresholds and reason strings live in packaged `native_pattern/pattern.json` (loaded once at detector init; not a `runtime_config` hot-reload field).
+
 **Breaking change:** former sliding-window keys (`window`,
 `repeat_sum_threshold`, `min_tokens`, `consecutive_hits`, `ignore_token_ids`,
 `algorithm`) are rejected as unknown. Migrate to:

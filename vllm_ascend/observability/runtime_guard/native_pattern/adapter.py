@@ -24,13 +24,14 @@ import operator
 import numpy as np
 
 from vllm_ascend.observability.runtime_guard.native_pattern._pattern_native import Detector
-from vllm_ascend.observability.runtime_guard.native_pattern.config import REASONS, Result
+from vllm_ascend.observability.runtime_guard.native_pattern.config import Result
+from vllm_ascend.observability.runtime_guard.native_pattern.rules import load_pattern_rules
 
 
 class PatternDetector:
     """Batched pattern-repeat detector backed by the native CPU extension."""
 
-    def __init__(self, tables, think_end=None):
+    def __init__(self, tables, think_end=None, *, rules_path: str | None = None):
         if think_end is not None:
             # int(float) silently changes token identity. Accept integer-like
             # scalars only; None explicitly disables the answer boundary.
@@ -55,7 +56,17 @@ class PatternDetector:
             if int(array.min()) < bounds.min or int(array.max()) > bounds.max:
                 raise ValueError(f"{key} values must fit int32 without truncation")
             arrays.append(np.ascontiguousarray(array, dtype=np.int32))
-        self.native = Detector(*arrays, -1 if think_end is None else think_end)
+        rules = load_pattern_rules(rules_path)
+        self.reasons = rules["reasons"]
+        self.native = Detector(
+            *arrays,
+            -1 if think_end is None else think_end,
+            rules["exact_params"],
+            int(rules["run_max_threshold"]),
+            rules["atom_meta"],
+            rules["atom_thr"],
+            rules["persist"],
+        )
 
     def start(self):
         return self.native.start()
@@ -63,7 +74,7 @@ class PatternDetector:
     def result(self, st):
         if st.failed:
             raise RuntimeError("failed detector state; discard it")
-        return Result(True, st.fired_at, REASONS[st.reason]) if st.reason >= 0 else None
+        return Result(True, st.fired_at, self.reasons[st.reason]) if st.reason >= 0 else None
 
     def progress(self, st):
         """Exceptional-path receipt, not a retry/rollback promise.
@@ -74,7 +85,12 @@ class PatternDetector:
         """
         if st.failed:
             return None
-        return (st.received, st.t, st.fired_at, REASONS[st.reason] if st.reason >= 0 else "")
+        return (
+            st.received,
+            st.t,
+            st.fired_at,
+            self.reasons[st.reason] if st.reason >= 0 else "",
+        )
 
     def feed_events(self, states, token_lists):
         """Return only new (submission_slot, fired_at, reason) events.
@@ -85,7 +101,8 @@ class PatternDetector:
         state to recover committed prefixes/events; do not replay the whole batch.
         """
         return [
-            (slot, fired_at, REASONS[reason]) for slot, fired_at, reason in self.native.feed_events(states, token_lists)
+            (slot, fired_at, self.reasons[reason])
+            for slot, fired_at, reason in self.native.feed_events(states, token_lists)
         ]
 
     def finish(self, st):

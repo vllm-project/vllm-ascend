@@ -7,3 +7,5 @@ Sources live in-tree and build with vllm-ascend:
 Install / editable install of `vllm-ascend` compiles `_pattern_native` automatically
 (pure CPU pybind11; does not require CANN custom kernels). No separate
 `pip install` step is needed.
+
+Alert thresholds: `native_pattern/pattern.json` (read once at init).

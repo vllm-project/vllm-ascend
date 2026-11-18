@@ -71,3 +71,6 @@ msgid ""
 "Focused regression tests are in `tests/ut/runtime_guard/test_token_repeat_pattern.py`.\n"
 "Native cases require a compiled install and skip when the extension is absent."
 msgstr "专项回归测试见 `tests/ut/runtime_guard/test_token_repeat_pattern.py`。原生用例需要已编译安装；扩展缺失时 skip。"
+
+msgid "Alert thresholds and reason strings live in packaged `native_pattern/pattern.json` (loaded once at detector init; not a `runtime_config` hot-reload field)."
+msgstr "告警阈值与 reason 字符串在打包的 `native_pattern/pattern.json` 中（检测器初始化时加载一次；不是 `runtime_config` 热更新字段）。"
