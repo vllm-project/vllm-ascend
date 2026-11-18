@@ -15,12 +15,6 @@ if TYPE_CHECKING:
     from .kda import Glm5NextLinearAttention
 
 
-def projection_capacity(hidden: torch.Tensor) -> int:
-    """Runner DP synchronization has already aligned graph buckets across peers."""
-    synced = _EXTRA_CTX.max_tokens_across_dp
-    return max(hidden.shape[0], synced or 0)
-
-
 class KDAInputProjectionTPLayout:
     def __init__(self, group: GroupCoordinator | None, num_heads: int, head_dim: int):
         self.group = group
@@ -32,8 +26,10 @@ class KDAInputProjectionTPLayout:
 
     @staticmethod
     def prepare_input(hidden: torch.Tensor) -> tuple[torch.Tensor, int]:
-        capacity = projection_capacity(hidden)
-        return F.pad(hidden, (0, 0, 0, capacity - hidden.shape[0])), capacity
+        local_tokens = hidden.shape[0]
+        dp_tokens = _EXTRA_CTX.max_tokens_across_dp
+        capacity = max(local_tokens, dp_tokens) if dp_tokens is not None else local_tokens
+        return F.pad(hidden, (0, 0, 0, capacity - local_tokens)), capacity
 
     def restore_qkv_beta(self, received: torch.Tensor, capacity: int) -> tuple[torch.Tensor, torch.Tensor]:
         qkv, beta = received.view(self.size, capacity, -1).split((3 * self.width, self.heads), dim=-1)

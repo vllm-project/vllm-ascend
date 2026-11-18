@@ -44,7 +44,6 @@ from vllm_ascend.distributed.parallel_state import get_gproj_tp_group, get_qkv_i
 from vllm_ascend.models.glm5next.kda_input_projection_tp import (
     KDAInputProjectionTP,
     KDAInputProjectionTPLayout,
-    projection_capacity,
 )
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
 from vllm_ascend.ops.kda_parallel import (
@@ -206,8 +205,11 @@ class KDAProjectionTP:
         self.qkv_uses_aiv = uses_aiv_communication(qkv_group)
         self.gate_uses_aiv = uses_aiv_communication(gate_group)
 
-    def project(self, layer, hidden, *, aux_stream: torch.npu.Stream):
+    def project(self, layer, hidden) -> PendingKDAProjection | None:
         owner, capacity = self.qkv_layout.prepare_input(hidden)
+        if capacity == 0:
+            return None
+        aux_stream = _kda_bfg_stream()
         q_input = self.communication.gather(owner, self.qkv_group) if self.qkv_group is not None else None
         if self.gate_group is self.qkv_group:
             g_input = q_input
@@ -1216,12 +1218,10 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 @eager_break_during_capture
 def kimi_kda_finegrained_forward(hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str) -> None:
     layer = get_forward_context().no_compile_layers[layer_name]
-    if projection_capacity(hidden_states) == 0:
+    pending = layer.projection_tp.project(layer, hidden_states)
+    if pending is None:
         output.zero_()
         return
-    # Reuse the same worker-local stream as the original fused BFG path;
-    # do not allocate a separate F/beta compute stream for every layer.
-    pending = layer.projection_tp.project(layer, hidden_states, aux_stream=_kda_bfg_stream())
     capacity = pending.capacity
     # Non-AIV exchanges may overlap this independent Vector initialization.
     # In AIV mode project() has already joined both communication operations.

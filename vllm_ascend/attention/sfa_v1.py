@@ -25,6 +25,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
@@ -61,7 +62,6 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     OFFLOAD_V_CACHE_NPU_INDEX,
 )
 from vllm_ascend.distributed.utils import all_gather_async
-from vllm_ascend.models.glm5next.kda_input_projection_tp import projection_capacity
 from vllm_ascend.ops.linear_op import OProjRowParallelOp
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate, register_flash_attention_gate_warmup
@@ -2069,7 +2069,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.turboquant._initialize(hidden_states.device)
         o_capacity = None
         if isinstance(getattr(self.o_proj, "custom_op", None), OProjRowParallelOp):
-            o_capacity = projection_capacity(hidden_states)
+            o_capacity = hidden_states.shape[0]
+            dp_tokens = _EXTRA_CTX.max_tokens_across_dp
+            if dp_tokens is not None:
+                o_capacity = max(o_capacity, dp_tokens)
         gate_tp = getattr(self, "gproj_tp", None)
         if attn_metadata is None:
             if gate_tp is not None:

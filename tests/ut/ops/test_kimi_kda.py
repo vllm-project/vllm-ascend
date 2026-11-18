@@ -830,13 +830,15 @@ def test_projection_communication_mode_honors_pg_override(monkeypatch, env_mode,
 
 
 @pytest.mark.parametrize("aiv", [True, False])
-def test_kda_g_precedes_quant_and_aiv_exchanges_join_before_vector(monkeypatch, aiv):
+@pytest.mark.parametrize("local_tokens,dp_tokens", [(2, None), (0, 2)])
+def test_kda_g_precedes_quant_and_aiv_exchanges_join_before_vector(monkeypatch, aiv, local_tokens, dp_tokens):
     trace: list[str] = []
     main = _RecordingStream("main", ["owner_ready", "input_ready"], trace)
     aux = _RecordingStream("aux", ["forget_ready", "beta_ready"], trace)
     group = SimpleNamespace(world_size=2)
     monkeypatch.setattr(projection_module, "uses_aiv_communication", lambda group: aiv)
-    monkeypatch.setattr(common_projection, "projection_capacity", lambda hidden: hidden.shape[0])
+    monkeypatch.setattr(common_projection, "_EXTRA_CTX", SimpleNamespace(max_tokens_across_dp=dp_tokens))
+    monkeypatch.setattr(projection_module, "_kda_bfg_stream", lambda: aux)
     monkeypatch.setattr(projection_module.torch.npu, "current_stream", lambda: main)
     monkeypatch.setattr(projection_module, "npu_stream_switch", lambda stream: nullcontext())
     monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: None)
@@ -886,7 +888,8 @@ def test_kda_g_precedes_quant_and_aiv_exchanges_join_before_vector(monkeypatch, 
     )
     executor = projection_module.KDAProjectionTP(group, group, 2, 2)
     executor.communication = Communication()
-    pending = executor.project(layer, torch.ones(2, 3), aux_stream=aux)
+    pending = executor.project(layer, torch.ones(local_tokens, 3))
+    assert pending is not None
     trace.append("zeros-vector")
     qkv, forget, beta, gate = pending.wait()
     trace.append("core-vector")
@@ -908,6 +911,19 @@ def test_kda_g_precedes_quant_and_aiv_exchanges_join_before_vector(monkeypatch, 
         assert trace.index("core-vector") < trace.index("wait-G")
     assert trace.count("wait-G") == trace.count("wait-QKV") == 1
     assert qkv.shape == (2, 12) and beta.shape == (1, 2, 2) and forget.shape == (1, 2, 2, 2)
+
+
+@pytest.mark.parametrize("dp_tokens", [None, 0])
+def test_kda_projection_skips_streams_and_collectives_when_capacity_is_zero(monkeypatch, dp_tokens):
+    monkeypatch.setattr(common_projection, "_EXTRA_CTX", SimpleNamespace(max_tokens_across_dp=dp_tokens))
+    stream = MagicMock()
+    monkeypatch.setattr(projection_module, "_kda_bfg_stream", stream)
+    executor = projection_module.KDAProjectionTP(None, None, 2, 2)
+    executor.communication = MagicMock()
+
+    assert executor.project(None, torch.empty(0, 3)) is None
+    stream.assert_not_called()
+    assert not executor.communication.mock_calls
 
 
 def test_pending_kda_projection_restores_owner_heads_once(monkeypatch):
