@@ -1,0 +1,8 @@
+pr: 22351
+entries:
+  - category: feature
+    text: >-
+      Qwen3.8 QSA on Ascend 950 supports MXFP8 KV caches with compatible checkpoints
+      and CANN GBSA mode 6. Set `--kv-cache-dtype mxfp8` on both prefill and decode
+      workers. Separate contiguous K and V pools can reduce available cache capacity
+      when recurrent states require additional storage.
