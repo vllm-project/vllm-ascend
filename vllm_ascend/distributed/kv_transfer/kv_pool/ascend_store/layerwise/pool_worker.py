@@ -807,14 +807,16 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         def get_saved_key(block_idx: int) -> tuple[str, bool] | None:
             """Return the pool key and whether it is public."""
             block_end = (block_idx + 1) * block_size
-            end = min(block_end, num_computed_tokens)
+            restore_token_limit = min(block_end, num_computed_tokens)
             saved = snapshot.get(block_idx)
             if saved is not None:
-                saved_end_token, pool_key, is_public = saved
-                if saved_end_token == end or (not uses_align_state and saved_end_token > end):
+                block_saved_end_token, pool_key, is_public = saved
+                if block_saved_end_token == restore_token_limit or (
+                    not uses_align_state and block_saved_end_token > restore_token_limit
+                ):
                     # A hash can become available after the preceding save.
                     return pool_key, is_public
-            if end == block_end and block_idx < len(block_hashes):
+            if restore_token_limit == block_end and block_idx < len(block_hashes):
                 return self._make_layerwise_full_key(group_id, block_hash_to_str(block_hashes[block_idx])), True
             logger.error("No saved KV page for request %s group %d block %d", request.req_id, group_id, block_idx)
             return None
