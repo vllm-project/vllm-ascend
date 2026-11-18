@@ -16,7 +16,6 @@ from typing import Any
 import torch
 
 from vllm_ascend.ops.gbsa import generic_block_sparse_attention_metadata
-from vllm_ascend.ops.lightning_indexer_v2 import lightning_indexer_v2_metadata
 
 from .gbsa import GBSA_COMPRESS_RATIO, GBSA_PAGE_SIZE
 
@@ -225,7 +224,6 @@ class Qwen4ExpPreparedInputAdapter:
             self._prepare_lightning(
                 layer,
                 compressed,
-                full_graph=full_graph,
                 prepared_this_step=prepared_this_step,
             )
             # Mixed Prefill/Decode dispatch slices GBSA rows dynamically.  Keep
@@ -261,17 +259,18 @@ class Qwen4ExpPreparedInputAdapter:
         layer: Any,
         metadata: Any,
         *,
-        full_graph: bool,
         prepared_this_step: dict[tuple[object, ...], torch.Tensor],
     ) -> None:
-        live_requests = int(getattr(metadata, "qsa_num_live_requests", metadata.seq_lens.shape[0]))
-        requests = int(metadata.seq_lens.shape[0]) if full_graph else live_requests
+        # QSA forward slices query rows to this existing metadata field.
+        # Keep padded request capacity and use the same device boundaries as LI.
+        rows = metadata.num_actual_tokens
+        requests = metadata.seq_lens.shape[0]
         lengths = metadata.seq_lens[:requests]
         query_start_loc = metadata.query_start_loc[: requests + 1]
         compressed_lengths = lengths.floor_divide(GBSA_COMPRESS_RATIO)
         residual_lengths = lengths.remainder(GBSA_COMPRESS_RATIO)
         common = dict(
-            cu_seqlens_q=query_start_loc,
+            cu_seqlens_q=query_start_loc.clamp_max(rows),
             seqused_k=compressed_lengths,
             cmp_residual_k=residual_lengths,
             layout_q="TND",
@@ -289,7 +288,7 @@ class Qwen4ExpPreparedInputAdapter:
             head_dim,
             block_topk,
             requests,
-            int(metadata.token_to_req.shape[0]),
+            rows,
             _tensor_storage_signature(lengths),
             _tensor_storage_signature(query_start_loc),
         )
@@ -297,7 +296,9 @@ class Qwen4ExpPreparedInputAdapter:
         if prepared is not None:
             metadata.qsa_lightning_v2_metadata = prepared
             return
-        generated = lightning_indexer_v2_metadata(
+        import cann_ops_transformer  # noqa: F401
+
+        generated = torch.ops.cann_ops_transformer.lightning_indexer_metadata(
             layer.indexer.index_n_heads,
             1,
             head_dim,
