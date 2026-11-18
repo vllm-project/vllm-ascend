@@ -4,6 +4,7 @@
 
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.kv_cache_planning import create_kv_cache_group_specs
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -11,8 +12,6 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
-
-from vllm.v1.core.kv_cache_planning import create_kv_cache_group_specs
 
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."

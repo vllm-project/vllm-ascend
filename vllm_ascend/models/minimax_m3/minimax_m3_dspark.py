@@ -32,6 +32,7 @@ from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkModel
 
 from vllm_ascend.models.minimax_m3.minimax_m3 import MiniMaxM3MLP
 from vllm_ascend.models.qwen3_dspark import AscendQwen3DSparkForCausalLM
+
 PREFIX = "language_model.model.dspark."
 ADAPTER_ARCHITECTURE = "DSparkMiniMaxDraftModel"
 MAX_SAFETENSORS_HEADER_BYTES = 10 * 1024 * 1024

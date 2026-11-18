@@ -18,11 +18,10 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
     try:
         # The inventories and these worker-only dependencies exist only after
         # model/KV initialization. Keep CPU-only module imports lightweight.
-        from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpQSAMetadataBuilder
-
         # main renamed the QSA side-cache module and its builder/backend; the
         # release tree still ships qsa_cache.py.
         import vllm.models.qwen4_exp.common.qsa_indexer as qsa_indexer
+        from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpQSAMetadataBuilder
 
         QSAIndexerMetadataBuilder = qsa_indexer.QSAIndexerMetadataBuilder
         QSAIndexerBackend = qsa_indexer.QSAIndexerBackend

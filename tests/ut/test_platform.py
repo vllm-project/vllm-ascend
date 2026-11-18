@@ -1130,9 +1130,7 @@ class TestNPUPlatform(TestBase):
                         # Engine handshakes re-enter the native config resolver.
                         config._set_cudagraph_sizes()
                         config._set_cudagraph_sizes()
-                        self.assertEqual(
-                            config.compilation_config.decode_cudagraph_capture_request_sizes, decode_sizes
-                        )
+                        self.assertEqual(config.compilation_config.decode_cudagraph_capture_request_sizes, decode_sizes)
                         prefill_sizes = config.compilation_config.prefill_cudagraph_capture_token_sizes
                         self.assertTrue(all(size % 4 == 0 for size in prefill_sizes))
                         if max_num_seqs == 1:

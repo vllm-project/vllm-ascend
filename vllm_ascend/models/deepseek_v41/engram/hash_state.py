@@ -118,23 +118,6 @@ class AscendNgramHashState(NgramHashState):
             query_start_loc.stride(0),
             BLOCK_T=32,
         )
-        if self.use_slot_cache:
-            assert cache is not None and slot_mapping is not None
-            assert block_table is not None
-            # Finish writes before other thread blocks read fallback history.
-            _write_hash_cache_kernel[(triton.cdiv(num_tokens, 256),)](
-                input_ids,
-                self.token_map,
-                dead_mask,
-                slot_mapping,
-                cache,
-                num_tokens,
-                input_ids.stride(0),
-                dead_mask.stride(0),
-                slot_mapping.stride(0),
-                256,
-                DEAD_ID,
-            )
         from vllm_ascend.ops.triton.engram_hash import _hash_ids_kernel
 
         _hash_ids_kernel[(triton.cdiv(num_tokens, 32), num_layers)](

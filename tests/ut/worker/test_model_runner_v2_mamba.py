@@ -282,8 +282,7 @@ def test_ensure_align_ctx_lazily_recreates_mamba_ctx():
     # Enforce the installed upstream signature, rather than accepting any
     # keyword/omitted argument through an unconstrained MagicMock.
     assert (
-        mock_create.call_args.kwargs["forward_context"]
-        is state.vllm_config.compilation_config.static_forward_context
+        mock_create.call_args.kwargs["forward_context"] is state.vllm_config.compilation_config.static_forward_context
     )
     ctx.initialize_from_forward_context.assert_called_once_with(
         kv_cache_config,

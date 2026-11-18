@@ -82,7 +82,6 @@ from vllm_ascend.utils import (
     enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
-    vllm_version_is,
 )
 
 BUILD_METADATA_STEP_PREFILL = 0

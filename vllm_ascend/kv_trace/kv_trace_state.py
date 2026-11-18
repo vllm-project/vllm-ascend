@@ -7,8 +7,6 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-from vllm_ascend.utils import vllm_version_is
-
 BlockTable = tuple[tuple[int, ...], ...]
 
 

@@ -11,10 +11,9 @@ and the layerwise cross-chunk behaviour are unchanged.
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 import torch
-from typing_extensions import Self
 from vllm.distributed.weight_transfer.base import (
     ParamMeta,
     VLLMWeightSyncClient,

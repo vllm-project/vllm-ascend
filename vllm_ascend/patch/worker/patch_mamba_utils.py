@@ -1,6 +1,5 @@
 # mypy: ignore-errors
 
-import torch
 from vllm.v1.worker import mamba_utils
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile

@@ -59,8 +59,7 @@ def _materialize_attention_layout(forward):
 
     def forward_with_contiguous_layout(module, query, key, value, attention_mask, **kwargs):
         query, key, value = (
-            x.transpose(1, 2).clone(memory_format=torch.contiguous_format).transpose(1, 2)
-            for x in (query, key, value)
+            x.transpose(1, 2).clone(memory_format=torch.contiguous_format).transpose(1, 2) for x in (query, key, value)
         )
         return forward(module, query, key, value, attention_mask, **kwargs)
 
