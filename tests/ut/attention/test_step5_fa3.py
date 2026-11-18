@@ -9,6 +9,7 @@ import torch
 
 from tests.ut.attention import test_minimax_fa3
 
+fa3 = test_minimax_fa3.fa3
 profiles = test_minimax_fa3.profiles
 selection = test_minimax_fa3.selection
 
@@ -72,3 +73,33 @@ def test_step5_unsupported_configurations_fall_back(selection, fault):
         assert fault in ("use_sparse", "use_compress")
     else:
         assert "flash_attention_v3" not in result
+
+
+@pytest.mark.parametrize("num_reqs", [1, 2, 4])
+def test_step5_mtp_graph_padding_bounds_scheduler_batch(fa3, num_reqs):
+    builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
+    builder.capture_sizes, builder.capture_query_len = {16}, 4
+    builder.max_num_reqs, builder.block_size = 16, 128
+    spec = (16, 1, 128, torch.bfloat16, 0.1, 0.0, None)
+    builder.scheduler_specs, builder.scheduler_buffers = {spec}, {}
+    common = NS(
+        num_reqs=num_reqs,
+        num_actual_tokens=16,
+        num_input_tokens=16,
+        max_query_len=1,
+        query_start_loc=torch.arange(num_reqs + 1, dtype=torch.int32),
+        query_start_loc_cpu=torch.arange(num_reqs + 1, dtype=torch.int32),
+        seq_lens=torch.ones(num_reqs, dtype=torch.int32),
+        block_table_tensor=torch.zeros((num_reqs, 1), dtype=torch.int32),
+        slot_mapping=torch.arange(16),
+        causal=True,
+    )
+
+    def scheduler(**kwargs):
+        assert kwargs["batch_size"] == num_reqs
+        assert kwargs["cu_seqlens_q"].numel() == num_reqs + 1
+        assert kwargs["cache_seqlens"].numel() == num_reqs
+        return torch.zeros(8, dtype=torch.uint8)
+
+    fa3.get_scheduler_metadata.side_effect = scheduler
+    builder.build(0, common)
