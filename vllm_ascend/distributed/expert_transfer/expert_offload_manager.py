@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from dataclasses import replace
 from functools import partial
+from itertools import takewhile
 from typing import TYPE_CHECKING, cast
 
 import torch
@@ -332,6 +333,13 @@ class ExpertOffloadManager:
             key: [desc for desc in descs if self._supports_graph_descriptor(desc)]
             for key, descs in graph_manager._candidates.items()
         }
+        # Main also dispatches uniform decode through a request-indexed table.
+        # Capacity excludes a suffix; keep the surviving indices unchanged.
+        if hasattr(graph_manager, "_decode_descs"):
+            graph_manager._decode_descs = {
+                key: list(takewhile(self._supports_graph_descriptor, descs))
+                for key, descs in graph_manager._decode_descs.items()
+            }
         if needs_capture():
             self.device = graph_manager.device
             self.graph_load_stream = torch.npu.Stream(device=graph_manager.device)

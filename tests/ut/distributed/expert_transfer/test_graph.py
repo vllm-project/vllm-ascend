@@ -8,6 +8,8 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, CudaGraphManager
 
 from vllm_ascend.distributed.expert_transfer.expert_offload_manager import ExpertOffloadManager
 
@@ -23,6 +25,36 @@ def test_graph_capacity_includes_speculative_and_padding_rows():
     manager.prepare_graph_capture(graph, lambda: False)
     assert graph._capture_descs["full"] == descs[:2]
     assert graph._candidates[(3, 0)] == []
+
+
+@pytest.mark.parametrize("uniform_token_count", [1, 4])
+def test_decode_dispatch_respects_filtered_graph_capacity(uniform_token_count):
+    manager = ExpertOffloadManager()
+    manager.bindings = {"layer": SimpleNamespace(top_k=2, num_slots=4 * uniform_token_count)}
+    descs = {
+        n: BatchExecutionDescriptor(
+            cg_mode=CUDAGraphMode.FULL,
+            num_tokens=n * uniform_token_count,
+            num_reqs=n,
+            uniform_token_count=uniform_token_count,
+        )
+        for n in (1, 2, 4)
+    }
+    graph = object.__new__(CudaGraphManager)
+    graph._capture_descs = {CUDAGraphMode.FULL: list(descs.values())}
+    graph._candidates = {(n * uniform_token_count, 0): [descs[n if n < 3 else 4]] for n in range(1, 5)}
+    graph._decode_descs = {(uniform_token_count, 0, 1): [descs[1], descs[1], descs[2], descs[4], descs[4]]}
+    graph._graphs_captured = True
+    graph._lora_dispatch_map = {}
+    manager.prepare_graph_capture(graph, lambda: False)
+
+    for n in (1, 2, 3, 4):
+        actual = graph.dispatch(n, n * uniform_token_count, uniform_token_count, 0)
+        if n <= 2:
+            assert actual == descs[n]
+        else:
+            assert actual.cg_mode == CUDAGraphMode.NONE
+            assert actual.num_tokens == n * uniform_token_count
 
 
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
