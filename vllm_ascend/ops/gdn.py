@@ -72,7 +72,10 @@ def _is_padded_state_cache(ssm_state: torch.Tensor) -> bool:
     costs one full-cache allocation per prefill step, so such views are read and
     written row by row instead.
     """
-    return ssm_state.stride(0) != ssm_state[0].numel()
+    # One state row is ``numel() // shape[0]`` for both packed and padded views, and deriving it
+    # from the shape metadata keeps this check free of tensor indexing, which would create a
+    # Python tensor through the dispatcher on every prefill step of every GDN layer.
+    return ssm_state.stride(0) != ssm_state.numel() // ssm_state.shape[0]
 
 
 def _get_base_conv1d(layer: nn.Module) -> nn.Module:
