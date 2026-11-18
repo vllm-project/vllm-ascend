@@ -7,6 +7,8 @@ import torch
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import identity
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w4a8.w4a8 import (
     AscendW4A8DynamicFusedMoEMethod,
@@ -20,11 +22,19 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
     input_size = 16
     output_size = 56
 
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.use_cann_megamoe", return_value=False)
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_ascend_config")
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config")
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_mc2_group")
     @patch("torch.distributed.get_rank", return_value=0)
-    def setUp(self, mock_get_rank, mock_get_mc2_group, get_current_vllm_config, mock_get_ascend_config):
+    def setUp(
+        self,
+        mock_get_rank,
+        mock_get_mc2_group,
+        get_current_vllm_config,
+        mock_get_ascend_config,
+        mock_use_cann_megamoe,
+    ):
         # Mock ascend config
         mock_ascend_config = Mock()
         mock_ascend_config.eplb_config.dynamic_eplb = False
@@ -41,9 +51,15 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         get_current_vllm_config.return_value = mock_vllm_config
         self.quant_method = AscendW4A8DynamicFusedMoEMethod()
 
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.use_cann_megamoe", return_value=False)
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_tensor_model_parallel_world_size")
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config")
-    def test_init_raise_error(self, get_current_vllm_config, mock_tp_size):
+    def test_init_raise_error(
+        self,
+        get_current_vllm_config,
+        mock_tp_size,
+        mock_use_cann_megamoe,
+    ):
         # test init rejects per-group quantization
         mock_vllm_config = Mock()
         mock_vllm_config.quant_config = Mock(quant_description={"group_size": 256})
@@ -253,6 +269,72 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
 
         with self.assertRaisesRegex(AssertionError, re.escape(expected_message)):
             self.quant_method._pack_to_int32(weight)
+
+    def _build_method_with_megamoe_gate(self, device_type, use_cann_megamoe):
+        mock_vllm_config = Mock()
+        mock_vllm_config.quant_config = Mock(quant_description={"group_size": 0})
+        mock_vllm_config.quant_config.get_name.return_value = ASCEND_QUANTIZATION_METHOD
+        mock_vllm_config.parallel_config = Mock(enable_expert_parallel=True, enable_eplb=False)
+        mock_vllm_config.use_v2_model_runner = True
+        with (
+            patch(
+                "vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config",
+                return_value=mock_vllm_config,
+            ),
+            patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_mc2_group"),
+            patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_ascend_config"),
+            patch("torch.distributed.get_rank", return_value=0),
+            patch(
+                "vllm_ascend.quantization.methods.w4a8.w4a8.get_current_hardware_profile",
+                return_value=get_hardware_profile(device_type),
+            ),
+            patch(
+                "vllm_ascend.quantization.methods.w4a8.w4a8.use_cann_megamoe",
+                return_value=use_cann_megamoe,
+            ),
+        ):
+            return AscendW4A8DynamicFusedMoEMethod()
+
+    def test_a2_megamoe_selects_expert_weight_list(self):
+        method = self._build_method_with_megamoe_gate(AscendDeviceType.A2, True)
+        self.assertTrue(method.use_expert_weight_list)
+
+    def test_a2_ordinary_route_keeps_packed_weight_layout(self):
+        method = self._build_method_with_megamoe_gate(AscendDeviceType.A2, False)
+        self.assertFalse(method.use_expert_weight_list)
+
+    def test_a2_layout_gate_does_not_fire_on_a3_policy(self):
+        # A3/A5 own different MoE policies; the A2 layout gate must stay scoped
+        # to the capacity-and-expert-density policy even when MegaMoe is active.
+        method = self._build_method_with_megamoe_gate(AscendDeviceType.A3, True)
+        self.assertFalse(method.use_expert_weight_list)
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_hardware_profile")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.use_cann_megamoe")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.torch_npu.npu_format_cast")
+    @patch("torch.Tensor.npu", new=lambda self: self, create=True)
+    def test_process_weights_lazily_enables_a2_expert_weight_list(
+        self,
+        mock_format_cast,
+        mock_get_ascend_config,
+        mock_get_vllm_config,
+        mock_use_cann_megamoe,
+        mock_get_profile,
+    ):
+        mock_format_cast.side_effect = identity
+        mock_get_profile.return_value = get_hardware_profile(AscendDeviceType.A2)
+        mock_use_cann_megamoe.return_value = True
+        self.assertFalse(self.quant_method.use_expert_weight_list)
+
+        layer = self.build_layer()
+        self.quant_method.process_weights_after_loading(layer)
+
+        self.assertTrue(self.quant_method.use_expert_weight_list)
+        self.assertFalse(hasattr(layer, "w13_weight"))
+        self.assertEqual(len(layer.w13_weight_list), self.experts)
+        self.assertTrue(all(weight.dtype == torch.float32 for weight in layer.w13_scale_bias_list))
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8._EXTRA_CTX")
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.build_fused_experts_input")

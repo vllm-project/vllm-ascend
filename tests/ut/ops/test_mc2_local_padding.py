@@ -33,7 +33,11 @@ def test_prepare_preserves_mask_and_global_shape(monkeypatch, num_tokens, padded
     hidden = torch.arange(num_tokens * 8, dtype=torch.float32).reshape(num_tokens, 8)
     logits = torch.arange(num_tokens * 4, dtype=torch.float32).reshape(num_tokens, 4)
     mask = torch.arange(padded_len) < num_tokens
-    monkeypatch.setattr(module, "_EXTRA_CTX", SimpleNamespace(mc2_mask=mask, padded_num_tokens=padded_len))
+    monkeypatch.setattr(
+        module,
+        "_EXTRA_CTX",
+        SimpleNamespace(mc2_mask=mask, padded_num_tokens=padded_len, use_mega_moe=False),
+    )
     for rank in range(tp_size):
         prepare = object.__new__(module.PrepareAndFinalizeWithMC2)
         prepare.tp_size, prepare.tp_rank = tp_size, rank
