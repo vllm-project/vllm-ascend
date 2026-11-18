@@ -333,14 +333,14 @@ PCP gathers prefill KV before cache writes. KVPP layer broadcasts restore prior-
 
 Quantized communication is lossy and may reduce model accuracy; it is not a lossless speedup. The feature is disabled by default. If accuracy degradation is unacceptable, explicitly set `quantized_all_reduce_config.enable=false` or omit `quantized_all_reduce_config` from `--additional-config` on every worker.
 
-Configure `quantized_all_reduce_config` to enable quantized communication for large BF16 inputs. A2 supports INT8; A5 supports INT8 and MXFP8. A3 is unsupported.
+Configure `quantized_all_reduce_config` to enable quantized communication for large BF16 inputs. A2 supports INT8; 950DT Products support INT8 and MXFP8. A3 is unsupported.
 
 #### Recommended parameter values
 
 | Parameter | Valid values and default | Recommendation |
 | --- | --- | --- |
 | `enable` | `true` or `false`; default `false` | Set `true` to enable quantized all-reduce. |
-| `quant_dtype` | `"int8"` or `"mxfp8"`; defaults to `"int8"` on A2 and `"mxfp8"` on A5 | Use INT8 on A2 and MXFP8 on A5. A5 can explicitly select `"int8"`. |
+| `quant_dtype` | `"int8"` or `"mxfp8"`; defaults to `"int8"` on A2 and `"mxfp8"` on 950DT Products | Use INT8 on A2 and MXFP8 on 950DT Products. Users of 950DT Products can explicitly select `"int8"`. |
 | `min_numel` | Positive integer; default `16777216` | Start with `16777216` (32 MiB BF16) for both INT8 and MXFP8. If enabling quantized communication degrades performance, raise it to `41943040` (80 MiB) or `83886080` (160 MiB) and compare again. |
 
 The threshold counts elements in each rank's original full BF16 tensor. Quantized communication requires `numel >= min_numel`. Use the same configuration on every worker.
@@ -364,9 +364,9 @@ The threshold counts elements in each rank's original full BF16 tensor. Quantize
 }
 ```
 
-#### MXFP8 example (A5)
+#### MXFP8 example (950DT Products)
 
-Omitting `quant_dtype` selects MXFP8 on A5:
+Omitting `quant_dtype` selects MXFP8 on 950DT Products:
 
 ```json
 {
