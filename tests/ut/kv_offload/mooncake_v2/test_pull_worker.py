@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import ctypes
 import queue
 import threading
 from concurrent.futures import Future
@@ -13,7 +14,7 @@ import pytest
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import HiddenStateCacheSpec, KVCacheSpec, MLAAttentionSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, pull_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
@@ -1460,8 +1461,64 @@ def test_worker_run_marks_only_failed_requests_and_finishes_the_batch(
     request_queue.task_done.assert_called_once_with()
 
 
-def test_whole_block_mla_address_generation_uses_independent_stride() -> None:
-    spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)
+def test_flash_hidden_cache_tp4_to_tp1_preserves_complete_packed_rows() -> None:
+    # Include arbitrary KV, FP8 scale, IndexPool, and position bytes in each row.
+    spec = HiddenStateCacheSpec(block_size=16, num_kv_heads=1, head_size=1024, dtype=torch.uint8)
+    shape = (1, 16, 1024)
+    producers = [torch.randint(0, 256, (3, *shape), dtype=torch.uint8) for _ in range(4)]
+    for cache in producers[1:]:
+        cache.copy_(producers[0])
+    consumer = torch.zeros_like(producers[0])
+    page_bytes = spec.page_size_bytes
+    thread = make_thread(
+        kv_cache_specs=[spec],
+        kv_caches_base_addr=[[consumer.data_ptr()]],
+        block_shapes=[[shape]],
+        block_strides=[[page_bytes]],
+        block_lens=[[page_bytes]],
+    )
+    remote = make_pp_metadata(
+        block_shapes=[[shape]],
+        block_strides=[[page_bytes]],
+        block_lens=[[page_bytes]],
+        tp_base_addrs={rank: [[cache.data_ptr()]] for rank, cache in enumerate(producers)},
+    )
+    groups = thread._get_layer_remote_tp_rank_groups(
+        0,
+        0,
+        spec,
+        remote,
+        remote_pcp_size=1,
+        remote_tp_size=4,
+        remote_dcp_size=1,
+    )
+    assert groups == [[0, 1, 2, 3]]
+    for remote_rank in groups[0]:
+        consumer.zero_()
+        src, dst, lengths = [], [], []
+        thread._append_spec_transfer_addresses(
+            0,
+            0,
+            remote_rank,
+            1,
+            4,
+            1,
+            {(0, 0): [("request", [1], [2])]},
+            remote,
+            src,
+            dst,
+            lengths,
+        )
+        assert lengths == [page_bytes]
+        for local_ptr, remote_ptr, length in zip(src, dst, lengths):
+            ctypes.memmove(local_ptr, remote_ptr, length)
+        torch.testing.assert_close(consumer[1], producers[remote_rank][2], atol=0, rtol=0)
+        assert consumer[0].count_nonzero() == consumer[2].count_nonzero() == 0
+
+
+@pytest.mark.parametrize("spec_cls", [MLAAttentionSpec, HiddenStateCacheSpec])
+def test_whole_block_mla_address_generation_uses_independent_stride(spec_cls) -> None:
+    spec = spec_cls(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)
     thread = make_thread(
         kv_cache_specs=[spec],
         kv_caches_base_addr=[[1000]],

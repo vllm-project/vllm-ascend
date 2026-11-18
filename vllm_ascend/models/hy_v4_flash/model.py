@@ -55,8 +55,15 @@ def validate_runtime(vllm_config: VllmConfig) -> None:
         getattr(spec, "custom_method", None) != METHOD or vllm_config.cache_config.enable_prefix_caching
     ):
         raise ValueError("HYV4 Flash Ascend requires DFly with prefix caching disabled for speculative decoding")
-    if vllm_config.kv_transfer_config is not None or vllm_config.lora_config is not None:
-        raise ValueError("HYV4 Flash Ascend does not support KV transfer or LoRA")
+    # Packed cache pages include IndexPool and position state. Mooncake V2 pull
+    # copies these replicated MLA pages whole, including across unequal TP sizes.
+    transfer = vllm_config.kv_transfer_config
+    if transfer is not None and (
+        transfer.kv_connector != "MooncakeConnectorV2" or transfer.get_from_extra_config("use_layerwise", False)
+    ):
+        raise ValueError("HYV4 Flash Ascend PD requires MooncakeConnectorV2 in pull mode")
+    if vllm_config.lora_config is not None:
+        raise ValueError("HYV4 Flash Ascend does not support LoRA")
     if config.kv_lora_rank != 512 or config.qk_rope_head_dim != 64:
         raise ValueError("HYV4 Flash requires a 512-wide MLA latent and 64 rotary dimensions")
     if config.engram_layer_ids and not config.enable_ihc:
