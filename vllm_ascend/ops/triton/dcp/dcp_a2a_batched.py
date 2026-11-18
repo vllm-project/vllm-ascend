@@ -194,10 +194,10 @@ def _fused_dcp_lse_combine_head_scatter_kernel(
         lse_bits = (tl.maximum(tl.abs(code).to(tl.int32) - 2, 0) << FP32_FRACTION_BITS) + significand.to(tl.int32)
         lse_bits = tl.where(significand != 0.0, lse_bits, 0)
         lses = tl.where(code < 0.0, -1.0, 1.0) * lse_bits.to(tl.float32, bitcast=True)
-        valid = (ranks < DCP_SIZE) & (code != 0.0) & (tl.abs(lses) < float("inf"))
+        valid = (ranks < DCP_SIZE) & (code != 0.0) & (lses == lses) & (lses != float("inf")) & (lses != -float("inf"))
         if HAS_LOCAL:
             local_lse = tl.load(local_lse_ptr + token * local_lse_stride_t + head * local_lse_stride_h).to(tl.float32)
-            local_valid = tl.abs(local_lse) < float("inf")
+            local_valid = (local_lse == local_lse) & (local_lse != float("inf")) & (local_lse != -float("inf"))
             lses = tl.where(ranks == DCP_SIZE, local_lse, lses)
             valid = tl.where(ranks == DCP_SIZE, local_valid, valid)
         maximum = tl.max(tl.where(valid, lses, -float("inf")), 0)
