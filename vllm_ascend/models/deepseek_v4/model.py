@@ -82,6 +82,7 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
+from vllm_ascend.attention.kv_cache_page import KVCachePageBinding
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import (
@@ -114,7 +115,7 @@ from vllm_ascend.worker.v2.pp_transport import (
 sequence_parallel_chunk = sp_shard
 
 
-class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
+class AscendDeepseekV4SWACache(KVCachePageBinding, VllmDeepseekV4SWACache):
     def __init__(
         self,
         head_dim: int,

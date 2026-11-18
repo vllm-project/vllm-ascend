@@ -316,14 +316,14 @@ def allocate_cache_views(config, device="cpu"):
     from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
     from vllm_ascend.worker.v2.attn_utils import (
         _get_cache_attention_groups,
-        create_kv_cache_runtime_views,
+        create_kv_cache_page_views,
     )
 
     specs = {n: s for g in config.kv_cache_groups for n, s in g.kv_cache_spec.kv_cache_specs.items()}
     context = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
     layers = {name: DeepseekV41CacheLayer(context, name, spec) for name, spec in specs.items()}
     raw = torch.zeros(config.kv_cache_tensors[0].size, dtype=torch.int8, device=device)
-    caches = create_kv_cache_runtime_views(
+    caches = create_kv_cache_page_views(
         config,
         raw,
         _get_cache_attention_groups(config, layers, {}),

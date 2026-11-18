@@ -30,6 +30,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend, build_dspark_swa_indices, dsv4_dsa_overlap_stream
+from vllm_ascend.attention.kv_cache_page import KVCachePage
 from vllm_ascend.attention.utils import (
     KVCacheRuntimeShapes,
     maybe_save_kv_layer_to_connector,
@@ -1813,8 +1814,11 @@ class DeepseekV41CacheLayer(nn.Module, AttentionLayerBase):
         context = vllm_config.compilation_config.static_forward_context
         context[prefix] = self
 
-    def bind_kv_cache(self, kv_cache: torch.Tensor | tuple[torch.Tensor, ...]) -> None:
-        """Bind a single cache view or a tuple of component views."""
+    def bind_kv_cache(self, kv_cache: KVCachePage | torch.Tensor | tuple[torch.Tensor, ...]) -> None:
+        """Interpret a manager page as the views this cache layer consumes."""
+        if isinstance(kv_cache, KVCachePage):
+            components = kv_cache.component_views()
+            kv_cache = components[0] if len(components) == 1 else tuple(components)
         self.kv_cache = kv_cache
 
     def get_kv_cache_spec(self, vllm_config):

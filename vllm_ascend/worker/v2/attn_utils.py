@@ -67,7 +67,8 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV41CacheBackend
+from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
+from vllm_ascend.attention.kv_cache_page import KVCachePage
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -1416,10 +1417,7 @@ def create_cache_component_views(
 ) -> list[torch.Tensor]:
     """Create dense page-internal components with a fixed physical page stride.
 
-    Shared by DeepSeek attention and Mamba state views, whose component shapes
-    can have different ranks. Keep this tensor operation separate from
-    create_kv_cache_runtime_views, which resolves attention backends, layer
-    placements and shared-layer aliases for the unified allocation path.
+    Used by legacy cache layouts whose component shapes can have different ranks.
     """
     base = raw_tensor.storage_offset() * raw_tensor.element_size()
     offset = base
@@ -1458,21 +1456,21 @@ def create_kv_cache_page_view(
     )
 
 
-def create_kv_cache_runtime_views(
+def create_kv_cache_page_views(
     kv_cache_config: KVCacheConfig,
     backing: torch.Tensor,
     attn_groups: Sequence[AttentionGroup],
     kernel_block_sizes: Sequence[int],
     shared_layers: Mapping[str, str],
     layout: Any = None,
-) -> dict[str, Any]:
-    """Delegate component views to backends using the descriptor block strides."""
+) -> dict[str, KVCachePage]:
+    """Build manager page views and carry their layout inputs to binding."""
     placements = {
         name: (descriptor, layer_index)
         for descriptor in kv_cache_config.kv_cache_tensors
         for layer_index, name in enumerate(descriptor.layers)
     }
-    caches: dict[str, Any] = {}
+    caches: dict[str, KVCachePage] = {}
     for group in attn_groups:
         if group.kv_cache_group_id >= len(kernel_block_sizes):
             continue
@@ -1481,35 +1479,8 @@ def create_kv_cache_runtime_views(
             descriptor, layer_index = placements[name]
             num_blocks = kv_cache_config.num_blocks_of(descriptor)
             start = descriptor.offset + layer_index * descriptor.layer_stride
-            pages = create_kv_cache_page_view(
-                backing, start, num_blocks, descriptor.block_stride, spec.page_size_bytes
-            )
-            shapes = group.backend.get_runtime_shapes(
-                spec,
-                num_blocks,
-                layout,
-                kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
-            )
-            dtypes: tuple[torch.dtype, ...] = (spec.dtype,)
-            if getattr(spec, "scale_dim", 0):
-                dtypes += (spec.scale_dtype,)
-            # Backend shapes describe bytes in [B,H,N,C]; kernels consume NHD
-            # views with the content dimension expressed in dtype elements.
-            components = []
-            page_rows = pages[:, 0, 0, :]
-            offset = 0
-            for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes, strict=True):
-                itemsize = get_dtype_size(dtype)
-                if blocks != num_blocks or content_bytes % itemsize:
-                    raise ValueError("Backend shape is incompatible with the manager page view.")
-                size = heads * tokens * content_bytes
-                component = page_rows.narrow(1, offset, size).view(dtype)
-                components.append(component.unflatten(1, (tokens, heads, content_bytes // itemsize)))
-                offset += size
-            if issubclass(group.backend, DeepseekV41CacheBackend):
-                caches[name] = components[0] if len(components) == 1 else tuple(components)
-            else:
-                caches[name] = components
+            pages = create_kv_cache_page_view(backing, start, num_blocks, descriptor.block_stride, spec.page_size_bytes)
+            caches[name] = KVCachePage(pages, group.backend, spec, layout, kernel_block_sizes[group.kv_cache_group_id])
     for name, target in shared_layers.items():
         caches[name] = caches[target]
     return caches
@@ -1523,8 +1494,7 @@ def unified_allocate_kv_cache(
 ) -> dict[str, Any]:
     """Materialize the shared pool described by upstream byte placements.
 
-    Backends interpret each layer's page through their runtime view interface;
-    allocation and component construction do not use the legacy reshape path.
+    Layers interpret the returned pages during binding.
     """
     if not kv_cache_config.kv_cache_tensors:
         return {}
@@ -1540,7 +1510,7 @@ def unified_allocate_kv_cache(
     alignment = 2 * 1024 * 1024
     logger.info("Allocating unified KV cache: %d bytes", backing_size)
     buf = _allocate_int8_cache_tensor(backing_size, alignment, device)
-    return create_kv_cache_runtime_views(
+    return create_kv_cache_page_views(
         kv_cache_config,
         buf,
         _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers),

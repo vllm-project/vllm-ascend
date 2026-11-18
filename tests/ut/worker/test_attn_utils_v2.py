@@ -42,6 +42,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
     AscendDSASWABackend,
 )
+from vllm_ascend.attention.kv_cache_page import KVCachePage
 from vllm_ascend.attention.mla_v1 import AscendMLAAttention, AscendMLABackend, AscendMLAImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import (
@@ -57,6 +58,7 @@ from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
+from vllm_ascend.patch.worker.patch_bind_kv_cache import bind_kv_cache_to_layers
 from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2 import model_runner as v2_model_runner
@@ -1271,7 +1273,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     scale_dtype,
     component_dims,
 ):
-    """Exercise DSV4 discovery, allocation, reshape, and binding as one flow."""
+    """Exercise DSV4 discovery, page allocation, and layer binding as one flow."""
     layer_name = "model.layers.0.self_attn.indexer.k_cache"
     cache_config = SimpleNamespace(
         block_size=32,
@@ -1330,76 +1332,81 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     assert get_storage_block_size(merged_spec) == cache_config.block_size
 
     num_blocks = 2
+    offset = 32
+    block_stride = spec.page_size_bytes + 32
+    alias = "model.layers.1.self_attn.indexer.k_cache"
+    alias_layer = deepseek_v4_indexer.AscendDeepseekV4IndexerCache.__new__(
+        deepseek_v4_indexer.AscendDeepseekV4IndexerCache
+    )
+    torch.nn.Module.__init__(alias_layer)
+    context = {layer_name: cache_layer, alias: alias_layer}
+    vllm_config.compilation_config.static_forward_context = context
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
-            _make_kv_cache_tensor(
-                num_blocks * spec.page_size_bytes,
-                [layer_name],
-                spec.page_size_bytes,
-            ),
-        ],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                layer_names=[layer_name],
-                kv_cache_spec=spec,
+            KVCacheTensor(
+                size=offset + num_blocks * block_stride,
+                layers=[layer_name],
+                layer_stride=spec.page_size_bytes,
+                block_stride=block_stride,
+                offset=offset,
             )
         ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name, alias], kv_cache_spec=spec)],
     )
-    runner_kv_caches: list[Any] = []
 
-    # Exercise the unified allocator and backend runtime views through
-    # upstream initialization, including its binding/connector handoff.
-    def _ascend_allocate_kv_cache(
-        _kv_cache_config: KVCacheConfig,
-        _device: torch.device,
-        _layout: Any,
-        _kernel_block_sizes: list[int],
-        *,
-        allocate=None,
-    ) -> dict[str, Any]:
+    monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda _: {alias: layer_name})
+    monkeypatch.setattr(upstream_attn_utils, "get_shared_kv_cache_layers", lambda _: {alias: layer_name})
+
+    def allocate_pages(config, device, layout, kernel_block_sizes, *, allocate=None):
         assert allocate is None
-        return attn_utils.unified_allocate_kv_cache(_kv_cache_config, _device, _layout, _kernel_block_sizes)
+        return attn_utils.unified_allocate_kv_cache(config, device, layout, kernel_block_sizes)
 
-    def _ascend_bind_kv_cache(
-        kv_caches: dict[str, Any],
-        forward_context: dict[str, Any],
-        num_attn_module: int = 1,
-        kv_cache_groups: Any = None,
-    ) -> None:
-        del num_attn_module, kv_cache_groups
-        assert len(runner_kv_caches) == 0
-        for kv_cache in kv_caches.values():
-            runner_kv_caches.append(kv_cache)
-        for layer_name_, kv_cache in kv_caches.items():
-            forward_context[layer_name_].kv_cache = kv_cache
+    layer_bind = cache_layer.bind_kv_cache
+    bound_page = None
 
-    monkeypatch.setattr(upstream_attn_utils, "allocate_kv_cache", _ascend_allocate_kv_cache)
-    # vLLM main (#53781) routes init_kv_cache through bind_kv_cache_to_layers
-    # and dropped the runner_kv_caches parameter.
-    monkeypatch.setattr(upstream_attn_utils, "bind_kv_cache_to_layers", _ascend_bind_kv_cache)
+    def record_bind(page):
+        nonlocal bound_page
+        assert isinstance(page, KVCachePage)
+        assert cache_layer.kv_cache.numel() == 0
+        bound_page = page
+        layer_bind(page)
+
+    monkeypatch.setattr(cache_layer, "bind_kv_cache", record_bind)
+    monkeypatch.setattr(upstream_attn_utils, "allocate_kv_cache", allocate_pages)
+    monkeypatch.setattr(upstream_attn_utils, "bind_kv_cache_to_layers", bind_kv_cache_to_layers)
     kv_caches = upstream_attn_utils.init_kv_cache(
-        forward_context={layer_name: cache_layer},
+        forward_context=context,
         kv_cache_config=kv_cache_config,
         device=torch.device("cpu"),
         kernel_block_sizes=[spec.block_size],
         vllm_config=vllm_config,
     )
 
-    cache_components = kv_caches[layer_name]
-    assert len(runner_kv_caches) == 1
-    assert runner_kv_caches[0] is cache_components
-    # On main the layer cache is replaced by the freshly allocated views, so
-    # the returned structure is validated by the checks below instead.
+    page = kv_caches[layer_name]
+    assert page is bound_page is kv_caches[alias]
+    cache_components = cache_layer.kv_cache
+    assert alias_layer.kv_cache is cache_components
+    pages = page.pages
+    assert pages.shape == (num_blocks, 1, 1, spec.page_size_bytes)
+    assert pages.stride(0) == block_stride
     assert [component.shape for component in cache_components] == [
         (num_blocks, get_storage_block_size(spec), 1, dim) for dim in component_dims
     ]
-    assert [component.dtype for component in cache_components] == [
-        cache_dtype,
-        scale_dtype,
-    ]
-    backing_storage = cache_components[0].untyped_storage().data_ptr()
-    assert all(component.untyped_storage().data_ptr() == backing_storage for component in cache_components)
+    assert [component.dtype for component in cache_components] == [cache_dtype, scale_dtype]
+    assert all(
+        component.untyped_storage().data_ptr() == pages.untyped_storage().data_ptr() for component in cache_components
+    )
+    data, scale = cache_components
+    assert data[1].data_ptr() - pages[0].data_ptr() == block_stride
+    assert scale[1].data_ptr() - data[1].data_ptr() == data[1].nbytes
+
+    pages.zero_()
+    data[1].fill_(7)
+    scale[1].fill_(2)
+    assert torch.all(pages[1, 0, 0, : data[1].nbytes] == 7)
+    assert torch.all(pages[0] == 0)
+    assert torch.all(pages[1, 0, 0, data[1].nbytes : data[1].nbytes + scale[1].nbytes].view(scale_dtype) == 2)
 
 
 class _RecordingDSAMetadataBuilder(AscendDSAMetadataBuilder):
