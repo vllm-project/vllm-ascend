@@ -36,7 +36,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     KeyMetadata,
     LoadSpec,
-    PoolCacheGeometry,
     PoolKey,
     ReqMeta,
     RequestTracker,
@@ -48,23 +47,18 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_cache_transfer_granularity,
     infer_dcp_mismatch_info,
     infer_group_block_sizes,
+    resolve_pool_hit_alignment,
     uses_hybrid_kv_cache,
 )
 
 
 class TestCacheLayoutHelpers(unittest.TestCase):
-    def test_partial_hits_exclude_layerwise_and_whole_page_modes(self):
-        for alignment, layerwise, expected in ((32, False, True), (640, False, False), (32, True, False)):
-            with self.subTest(alignment=alignment, layerwise=layerwise):
-                geometry = PoolCacheGeometry(
-                    block_sizes=(640,),
-                    cacheable_group_ids=(0,),
-                    hash_block_size=32,
-                    core_hit_alignment=alignment,
-                    transfer_granularity=640,
-                    use_layerwise=layerwise,
-                )
-                self.assertEqual(geometry.partial_hits, expected)
+    def test_hit_alignment_consumes_core_value_without_mutating_config(self):
+        for alignment, expected in ((32, 32), (640, 640), (None, 640)):
+            with self.subTest(alignment=alignment):
+                cache = SimpleNamespace(cache_hit_alignment_tokens=alignment)
+                self.assertEqual(resolve_pool_hit_alignment(cache, 640), expected)
+                self.assertEqual(cache.cache_hit_alignment_tokens, alignment)
 
     def test_engine_transfer_config_uses_planner_then_core_context_then_child(self):
         child, engine, planner = object(), object(), object()

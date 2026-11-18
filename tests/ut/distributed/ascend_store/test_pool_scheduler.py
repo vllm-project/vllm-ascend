@@ -479,7 +479,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         self.assertEqual(scheduler.swa_group_ids, {0})
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata.infer_cacheable_group_ids")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.infer_cacheable_group_ids")
     def test_noncacheable_swa_group_is_not_retained(self, mock_cacheable_groups, mock_client_cls):
         mock_cacheable_groups.return_value = [0]
         groups = [

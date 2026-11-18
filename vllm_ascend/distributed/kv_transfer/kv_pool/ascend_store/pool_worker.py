@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import math
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -65,11 +66,16 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_engine_transfer_config,
     get_group_cache_family,
     get_sharded_mamba_group_ids,
+    infer_cacheable_group_ids,
     infer_group_block_sizes,
     infer_group_cache_families,
     infer_tp_mismatch_info,
-    resolve_pool_cache_geometry,
+    pool_uses_eagle,
+    resolve_pool_block_sizes,
+    resolve_pool_cache_groups,
+    resolve_pool_hit_alignment,
     uses_hybrid_kv_cache,
+    validate_pool_cache_config,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
@@ -211,22 +217,37 @@ class BaseKVPoolWorker(ABC):
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
-        self.pool_cache_geometry = resolve_pool_cache_geometry(
-            vllm_config, kv_cache_config, use_layerwise=use_layerwise
+        self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
+        self.grouped_block_size = resolve_pool_block_sizes(vllm_config, kv_cache_config)
+        self.hash_block_size = kv_cache_config.hash_block_size
+        self.lcm_block_size = math.lcm(*(self.grouped_block_size[i] for i in self.cacheable_group_ids))
+        hit_alignment = resolve_pool_hit_alignment(kv_cache_config, self.lcm_block_size)
+        self.enable_partial_hash_hits = not use_layerwise and hit_alignment < self.lcm_block_size
+        validate_pool_cache_config(
+            vllm_config,
+            self.grouped_block_size,
+            self.cacheable_group_ids,
+            self.hash_block_size,
+            self.enable_partial_hash_hits,
         )
-        self.cacheable_group_ids = list(self.pool_cache_geometry.cacheable_group_ids)
-        self.enable_partial_hash_hits = self.pool_cache_geometry.partial_hits
         if self.enable_partial_hash_hits:
-            self.use_eagle = self.pool_cache_geometry.use_eagle
-        self.grouped_block_size = list(self.pool_cache_geometry.block_sizes)
-        self.hash_block_size = self.pool_cache_geometry.hash_block_size
+            self.use_eagle = pool_uses_eagle(vllm_config, kv_cache_config)
+        logger.info(
+            "AscendStore prefix geometry: requested_pmu=%s core_hash=%d core_hit_alignment=%d "
+            "pool_transfer_alignment=%d mode=%s group_pages=%s",
+            vllm_config.cache_config.prefix_match_unit,
+            self.hash_block_size,
+            hit_alignment,
+            self.lcm_block_size,
+            "hash" if self.enable_partial_hash_hits else "existing",
+            tuple(self.grouped_block_size),
+        )
         self.block_size = self.grouped_block_size[0]
-        self.lcm_block_size = self.pool_cache_geometry.transfer_granularity
         self.num_kv_cache_groups = len(self.grouped_block_size)
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
         self.group_uses_align_state = self._infer_group_uses_align_state()
         self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
-        self.cache_transfer_granularity = self.pool_cache_geometry.transfer_granularity
+        self.cache_transfer_granularity = self.lcm_block_size
         self.h2d_stagger_us = int(extra_config.get("h2d_stagger_us", 0))
 
         logger.info(
@@ -414,15 +435,13 @@ class BaseKVPoolWorker(ABC):
         use_eagle = bool(use_eagle_fn()) if callable(use_eagle_fn) else False
         retention_interval = self.kv_cache_config.prefix_cache_retention_interval
         return AscendStoreCoordinator(
-            list(self.pool_cache_geometry.groups),
+            resolve_pool_cache_groups(vllm_config, self.kv_cache_config),
             scheduler_block_size=self.cache_transfer_granularity,
             hash_block_size=self.hash_block_size,
             group_block_sizes=self.grouped_block_size,
             group_cache_families=self.kv_cache_group_families,
-            use_eagle=self.pool_cache_geometry.use_eagle if self.enable_partial_hash_hits else use_eagle,
-            retention_interval=self.pool_cache_geometry.retention_interval
-            if self.enable_partial_hash_hits
-            else retention_interval,
+            use_eagle=self.use_eagle if self.enable_partial_hash_hits else use_eagle,
+            retention_interval=retention_interval,
             enable_partial_hash_hits=self.enable_partial_hash_hits,
         )
 

@@ -52,7 +52,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_wor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     LoadSpec,
-    PoolCacheGeometry,
     ReqMeta,
 )
 
@@ -209,38 +208,63 @@ def test_cache_coordinator_uses_kv_cache_config_retention_interval(retention_int
     )
     worker.use_hybrid = True
     worker.enable_partial_hash_hits = partial_hits
-    worker.pool_cache_geometry = PoolCacheGeometry(
-        block_sizes=(16,),
-        cacheable_group_ids=(0,),
-        hash_block_size=8 if partial_hits else 16,
-        core_hit_alignment=8 if partial_hits else 16,
-        transfer_granularity=16,
-        groups=tuple(worker.kv_cache_config.kv_cache_groups),
-        retention_interval=retention_interval,
-    )
+    worker.use_eagle = False
     worker.cache_transfer_granularity = 16
     worker.hash_block_size = 16
     worker.grouped_block_size = [16]
     worker.kv_cache_group_families = ["mamba"]
     config = SimpleNamespace(speculative_config=None)
-    with patch.object(pool_worker, "AscendStoreCoordinator") as coordinator_cls:
+    with (
+        patch.object(pool_worker, "AscendStoreCoordinator") as coordinator_cls,
+        patch.object(pool_worker, "resolve_pool_cache_groups", return_value=worker.kv_cache_config.kv_cache_groups),
+    ):
         coordinator = worker._build_cache_coordinator(config)
     assert coordinator is coordinator_cls.return_value
     assert coordinator_cls.call_args.kwargs["retention_interval"] == retention_interval
 
 
 class TestPCPPoolWorker(unittest.TestCase):
-    def test_partial_hits_follow_core_alignment(self):
-        for alignment, expected in ((32, True), (640, False)):
-            with self.subTest(alignment=alignment):
-                geometry = PoolCacheGeometry(
-                    block_sizes=(640,),
-                    cacheable_group_ids=(0,),
-                    hash_block_size=32,
-                    core_hit_alignment=alignment,
-                    transfer_granularity=640,
+    def test_scheduler_and_worker_share_resolved_cache_policy(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
+
+        for dcp, alignment in ((1, 4), (2, 4), (2, None), (4, 64)):
+            with self.subTest(dcp=dcp, alignment=alignment):
+                spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=4, dtype=torch.bfloat16)
+                cache = SimpleNamespace(
+                    kv_cache_groups=[KVCacheGroupSpec(["layer.0"], spec)],
+                    hash_block_size=4,
+                    cache_hit_alignment_tokens=alignment,
+                    prefix_cache_retention_interval=None,
                 )
-                self.assertEqual(geometry.partial_hits, expected)
+                worker = make_worker(self, dcp_size=dcp, kv_cache_config=cache)
+                with patch(
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend."
+                    "MooncakeBackend.create_scheduler_client"
+                ):
+                    scheduler = KVPoolScheduler(worker.vllm_config, False, worker.kv_cache_config)
+                for field in (
+                    "grouped_block_size",
+                    "cacheable_group_ids",
+                    "hash_block_size",
+                    "lcm_block_size",
+                    "cache_transfer_granularity",
+                    "enable_partial_hash_hits",
+                    "use_eagle",
+                ):
+                    self.assertEqual(getattr(scheduler, field), getattr(worker, field), field)
+
+    def test_partial_hits_follow_core_alignment(self):
+        for alignment, layerwise, expected in ((32, False, True), (640, False, False), (32, True, False)):
+            with self.subTest(alignment=alignment, layerwise=layerwise):
+                spec = FullAttentionSpec(block_size=640, num_kv_heads=1, head_size=4, dtype=torch.bfloat16)
+                cache = SimpleNamespace(
+                    kv_cache_groups=[KVCacheGroupSpec(["layer.0"], spec)],
+                    hash_block_size=32,
+                    cache_hit_alignment_tokens=alignment,
+                    prefix_cache_retention_interval=None,
+                )
+                worker = make_worker(self, kv_cache_config=cache, use_layerwise=layerwise)
+                self.assertEqual(worker.enable_partial_hash_hits, expected)
 
     def test_hash_hits_use_core_geometry_and_keep_physical_pages(self):
         spec = FullAttentionSpec(block_size=640, num_kv_heads=1, head_size=4, dtype=torch.bfloat16)

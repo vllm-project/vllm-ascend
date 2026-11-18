@@ -14,7 +14,13 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core import kv_cache_utils
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
@@ -324,23 +330,6 @@ def infer_cache_transfer_granularity(
     return math.lcm(*granularities)
 
 
-@dataclass(frozen=True)
-class PoolCacheGeometry:
-    block_sizes: tuple[int, ...]
-    cacheable_group_ids: tuple[int, ...]
-    hash_block_size: int
-    core_hit_alignment: int
-    transfer_granularity: int
-    groups: tuple = ()
-    use_eagle: bool = False
-    retention_interval: int | None = None
-    use_layerwise: bool = False
-
-    @property
-    def partial_hits(self) -> bool:
-        return not self.use_layerwise and self.core_hit_alignment < self.transfer_granularity
-
-
 def get_engine_transfer_config(vllm_config, kv_cache_config):
     # MultiConnector replaces the child's transfer config, not the engine's.
     # The planner retains it; worker RPCs use Core's current-config context.
@@ -351,68 +340,65 @@ def get_engine_transfer_config(vllm_config, kv_cache_config):
     return (current if current is not None else vllm_config).kv_transfer_config
 
 
-def resolve_pool_cache_geometry(
-    vllm_config, kv_cache_config: KVCacheConfig, *, use_layerwise: bool
-) -> PoolCacheGeometry:
-    """Consume Core's resolved hit alignment; never infer partial-hit support."""
-    cache = vllm_config.cache_config
-    parallel = vllm_config.parallel_config
-    dcp = parallel.decode_context_parallel_size
+def resolve_pool_block_sizes(vllm_config, kv_cache_config: KVCacheConfig) -> list[int]:
+    """Resolve each physical group's token span using Core's DCP rules."""
+    dcp = vllm_config.parallel_config.decode_context_parallel_size
     groups = kv_cache_config.kv_cache_groups
-    group_ids = tuple(infer_cacheable_group_ids(groups))
-    block_sizes = (
-        tuple(kv_cache_utils.resolve_dcp_kv_block_size(g.kv_cache_spec, dcp) for g in groups)
+    return (
+        [kv_cache_utils.resolve_dcp_kv_block_size(group.kv_cache_spec, dcp) for group in groups]
         if groups
-        else (cache.block_size * dcp,)
+        else [vllm_config.cache_config.block_size * dcp]
     )
-    page_alignment = math.lcm(*(block_sizes[i] for i in group_ids))
-    hash_size = kv_cache_config.hash_block_size
-    hit_alignment = kv_cache_config.cache_hit_alignment_tokens
-    if hit_alignment is None:
-        hit_alignment = page_alignment
-    if any(block_sizes[i] % hash_size for i in group_ids):
-        raise ValueError(
-            f"AscendStore cannot fold Core hash size {hash_size} into cacheable pages "
-            f"{tuple(block_sizes[i] for i in group_ids)}"
-        )
-    extra = vllm_config.kv_transfer_config.kv_connector_extra_config
+
+
+def resolve_pool_hit_alignment(kv_cache_config: KVCacheConfig, page_alignment: int) -> int:
+    """Read Core's resolved alignment; an absent value keeps whole-page hits."""
+    alignment = kv_cache_config.cache_hit_alignment_tokens
+    return page_alignment if alignment is None else alignment
+
+
+def _pool_is_producer_only(vllm_config, kv_cache_config: KVCacheConfig) -> bool:
+    transfer = get_engine_transfer_config(vllm_config, kv_cache_config)
+    return bool(transfer and transfer.is_kv_producer and not transfer.is_kv_consumer)
+
+
+def pool_uses_eagle(vllm_config, kv_cache_config: KVCacheConfig) -> bool:
+    """Apply the engine's producer exemption to Core's EAGLE block-drop policy."""
     speculative = getattr(vllm_config, "speculative_config", None)
     eagle = getattr(speculative, "use_eagle_block_drop", None)
-    engine_transfer = get_engine_transfer_config(vllm_config, kv_cache_config)
-    producer_only = bool(engine_transfer and engine_transfer.is_kv_producer and not engine_transfer.is_kv_consumer)
-    use_eagle = bool(callable(eagle) and eagle() is True and not producer_only)
-    resolved_groups = tuple(
+    return bool(callable(eagle) and eagle() is True and not _pool_is_producer_only(vllm_config, kv_cache_config))
+
+
+def resolve_pool_cache_groups(vllm_config, kv_cache_config: KVCacheConfig) -> list[KVCacheGroupSpec]:
+    """Build coordinator specs with DCP resolution and producer group flags."""
+    dcp = vllm_config.parallel_config.decode_context_parallel_size
+    producer_only = _pool_is_producer_only(vllm_config, kv_cache_config)
+    return [
         replace(
             group,
             kv_cache_spec=kv_cache_utils.resolve_dcp_kv_cache_spec(group.kv_cache_spec, dcp),
             is_eagle_group=False if producer_only else group.is_eagle_group,
         )
-        for group in groups
-    )
-    geometry = PoolCacheGeometry(
-        block_sizes=block_sizes,
-        cacheable_group_ids=group_ids,
-        hash_block_size=hash_size,
-        core_hit_alignment=hit_alignment,
-        transfer_granularity=page_alignment,
-        groups=resolved_groups,
-        use_eagle=use_eagle,
-        retention_interval=kv_cache_config.prefix_cache_retention_interval,
-        use_layerwise=use_layerwise,
-    )
-    if geometry.partial_hits and extra.get("discard_partial_chunks", True) is not True:
+        for group in kv_cache_config.kv_cache_groups
+    ]
+
+
+def validate_pool_cache_config(
+    vllm_config,
+    block_sizes: Sequence[int],
+    cacheable_group_ids: Sequence[int],
+    hash_block_size: int,
+    enable_partial_hash_hits: bool,
+) -> None:
+    """Validate hash/page compatibility and the partial-hit connector contract."""
+    if any(block_sizes[i] % hash_block_size for i in cacheable_group_ids):
+        raise ValueError(
+            f"AscendStore cannot fold Core hash size {hash_block_size} into cacheable pages "
+            f"{tuple(block_sizes[i] for i in cacheable_group_ids)}"
+        )
+    extra = vllm_config.kv_transfer_config.kv_connector_extra_config
+    if enable_partial_hash_hits and extra.get("discard_partial_chunks", True) is not True:
         raise ValueError("AscendStore hash recovery requires discard_partial_chunks=true")
-    logger.info(
-        "AscendStore prefix geometry: requested_pmu=%s core_hash=%d core_hit_alignment=%d "
-        "pool_transfer_alignment=%d mode=%s group_pages=%s",
-        cache.prefix_match_unit,
-        hash_size,
-        hit_alignment,
-        page_alignment,
-        "hash" if geometry.partial_hits else "existing",
-        block_sizes,
-    )
-    return geometry
 
 
 class ChunkedTokenDatabase:
