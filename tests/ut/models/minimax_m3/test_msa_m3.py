@@ -1601,7 +1601,6 @@ def test_ascendc_index_decode_returns_fused_select_counts() -> None:
             init_blocks=1,
             local_blocks=1,
             decode_query_len=1,
-
         )
 
     assert actual is expected
@@ -1998,7 +1997,6 @@ def test_ascendc_index_decode_uses_fused_topk_for_speculative_decode(fused_index
             init_blocks=0,
             local_blocks=0,
             decode_query_len=2,
-
             sort_indices=True,
         )
 
@@ -2043,7 +2041,6 @@ def test_ascendc_index_decode_uses_fused_sorted_topk(fused_index_ops: MagicMock)
             init_blocks=0,
             local_blocks=0,
             decode_query_len=1,
-
             sort_indices=True,
         )
 
@@ -2074,7 +2071,6 @@ def test_ascendc_index_decode_passes_fused_slots_through(fused_index_ops: MagicM
             init_blocks=0,
             local_blocks=0,
             decode_query_len=1,
-
             sort_indices=True,
         )
 
@@ -2142,7 +2138,6 @@ def test_ascendc_index_decode_keeps_separate_helpers_when_unsorted(
             init_blocks=1,
             local_blocks=1,
             decode_query_len=1,
-
         )
 
     assert actual is expected
