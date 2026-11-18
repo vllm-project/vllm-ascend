@@ -123,8 +123,8 @@ class QwenPLERecoverSSMMetadata(PleShortConvAttentionMetadata, RecoverSSMMetadat
         align = self.ple_recoverssm_align
         self.ple_recoverssm_context.commit(
             num_accepted_tokens,
-            self.spec_state_indices_tensor[: self.num_spec_decodes],
-            self.spec_query_start_loc[: self.num_spec_decodes + 1],
+            self.spec_state_indices_tensor[: align.num_spec_decodes],
+            self.spec_query_start_loc[: align.num_spec_decodes + 1],
             request_indices=align.request_indices,
             block_table=align.block_table,
             num_computed_tokens=align.num_computed_tokens,
@@ -157,6 +157,7 @@ class QwenPLERecoverSSMMetadataBuilder(_QwenPLEMetadataBuilder):
         *,
         num_accepted_tokens=None,
         num_decode_draft_tokens_cpu=None,
+        num_actual_reqs=None,
         **kwargs,
     ):
         metadata = super().build(
@@ -169,6 +170,14 @@ class QwenPLERecoverSSMMetadataBuilder(_QwenPLEMetadataBuilder):
         )
         if not metadata.num_spec_decodes:
             return metadata
+        # Graph padding may carry full speculative query spans. The sampler
+        # and its request-state mapping contain only real requests.
+        m = common_attn_metadata
+        count = m.num_reqs if num_actual_reqs is None else num_actual_reqs
+        mask = (num_decode_draft_tokens_cpu[:count] >= 0) & (m.query_start_loc_cpu[: count + 1].diff() > 0)
+        rows = mask.nonzero(as_tuple=True)[0]
+        if not rows.numel():
+            return metadata
         if self._commit_context is None:
             layers = self.compilation_config.static_forward_context
             self._commit_context = PLERecoverSSMCommitContext.create(
@@ -180,15 +189,10 @@ class QwenPLERecoverSSMMetadataBuilder(_QwenPLEMetadataBuilder):
             **{field.name: getattr(metadata, field.name) for field in fields(PleShortConvAttentionMetadata)}
         )
         result.__dict__.update(metadata.__dict__)
-        m = common_attn_metadata
-        # Match the parent's CPU request classification, excluding zero-length padding.
-        mask = (num_decode_draft_tokens_cpu[: m.num_reqs] >= 0) & (m.query_start_loc_cpu.diff() > 0)
-        request_indices = mask.nonzero(as_tuple=True)[0][: metadata.num_spec_decodes].to(
-            m.query_start_loc.device, non_blocking=True
-        )
+        request_indices = rows.to(m.query_start_loc.device, non_blocking=True)
         result.ple_recoverssm_context = self._commit_context
         result.ple_recoverssm_align = RecoverSSMPostprocessMetadata(
-            num_spec_decodes=metadata.num_spec_decodes,
+            num_spec_decodes=rows.numel(),
             request_indices=request_indices,
             block_table=m.block_table_tensor,
             num_computed_tokens=m.compute_num_computed_tokens(),

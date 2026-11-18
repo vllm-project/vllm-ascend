@@ -18,7 +18,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import torch
 from vllm.models.qwen4_exp.amd.model_state import Qwen4ExpModelState
+from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.states import RequestState
 
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
@@ -36,6 +39,22 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
     """
 
     _skip_spec_cpu_length_sync: bool
+
+    def _prepare_ngram_context(self, input_batch: InputBatch, req_states: RequestState) -> torch.Tensor:
+        context = self.ngram_context[: input_batch.num_reqs_after_padding]
+        count = input_batch.num_reqs
+        context[count:].fill_(self.ngram_eos_token_id)
+        if count:
+            slots = input_batch.idx_mapping[:count].long()
+            ends = req_states.num_computed_tokens.gpu.index_select(0, slots).long()
+            positions = ends[:, None] + self.ngram_context_offsets
+            history = req_states.all_token_ids.gpu
+            # On A3, two-axis advanced indexing of the mapped host history
+            # can return -1 for valid tokens. Gather from its contiguous view.
+            offsets = slots[:, None] * history.shape[1] + positions.clamp_min(0)
+            tokens = history.view(-1).index_select(0, offsets.reshape(-1)).view_as(positions)
+            context[:count].copy_(torch.where(positions >= 0, tokens, self.ngram_eos_token_id))
+        return context
 
     def initialize_spec_cpu_length_sync(self, runner: Any) -> None:
         """Bind length consumers once, after target and draft KV initialization."""

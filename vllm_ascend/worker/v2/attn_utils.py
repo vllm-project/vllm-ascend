@@ -106,6 +106,7 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     make_qsa_kernel_page_cache,
     make_slab_view,
 )
+from vllm_ascend.models.qwen4_exp.recoverssm_ple import QwenPLERecoverSSMMetadataBuilder
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant.cache import uses_turboquant_groups
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -572,7 +573,9 @@ def build_attn_metadata(
                         **attn_metadata_extra_kwargs,
                     )
                 else:
-                    if isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder):
+                    if isinstance(
+                        attn_metadata_builder, (GDNAttentionMetadataBuilder, QwenPLERecoverSSMMetadataBuilder)
+                    ):
                         attn_metadata_extra_kwargs["num_actual_reqs"] = num_actual_reqs
                     metadata = attn_metadata_builder.build(
                         common_prefix_len=0,

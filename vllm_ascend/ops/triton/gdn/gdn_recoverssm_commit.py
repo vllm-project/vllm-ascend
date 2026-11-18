@@ -127,8 +127,6 @@ def _commit_gdn_state_kernel(
     layer_head_tiles = num_layers * NUM_HEADS
     pid_b = pid_lh // layer_head_tiles
     pid_lh %= layer_head_tiles
-    # Walk accepted records backwards, composing decay-weighted rank-one
-    # updates before combining them with the unchanged initial checkpoint.
     pid_l = pid_lh // NUM_HEADS
     pid_h = pid_lh % NUM_HEADS
 
@@ -171,13 +169,12 @@ def _commit_gdn_state_kernel(
     else:
         mask_state = (offs_v < V)[:, None] & (offs_k < K)[None, :]
     state_ptrs = source_state_ptr + offs_v[:, None] * stride_state_v + offs_k[None, :] * stride_state_k
-    final_decay = tl.full([BK], 1.0, tl.float32)
-    final_correction = tl.zeros([BV, BK], tl.float32)
-    boundary_decay = tl.full([BK], 1.0, tl.float32)
-    boundary_correction = tl.zeros([BV, BK], tl.float32)
-
-    # A3 runtime iteration bounds UB use; A5 retains its faster static expansion.
     if UNROLL_COMMIT:
+        # Compose decay-weighted updates in reverse order for the A5 path.
+        final_decay = tl.full([BK], 1.0, tl.float32)
+        final_correction = tl.zeros([BV, BK], tl.float32)
+        boundary_decay = tl.full([BK], 1.0, tl.float32)
+        boundary_correction = tl.zeros([BV, BK], tl.float32)
         for token_offset in tl.static_range(SPEC_QUERY_LEN):
             if token_offset < commit_len:
                 final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_gdn_commit_step(
@@ -199,30 +196,31 @@ def _commit_gdn_state_kernel(
                     K,
                     V,
                 )
+        initial_state = tl.load(state_ptrs, mask=mask_state, other=0.0 if mask_state is not None else None).to(
+            tl.float32
+        )
+        state = initial_state * final_decay[None, :] + final_correction
+        boundary_state = initial_state * boundary_decay[None, :] + boundary_correction
     else:
+        # Match verify's FP32 operation order before casting the checkpoint.
+        # Composing the decays first can change BF16 rounding on A3.
+        state = tl.load(state_ptrs, mask=mask_state, other=0.0 if mask_state is not None else None).to(tl.float32)
+        boundary_state = state
         for token_offset in range(tl.minimum(commit_len, SPEC_QUERY_LEN)):
-            if token_offset < commit_len:
-                final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_gdn_commit_step(
-                    replay_ptr,
-                    commit_len - token_offset - 1,
-                    offs_k,
-                    offs_v,
-                    mask_k,
-                    mask_v,
-                    stride_replay_pos,
-                    stride_replay_dim,
-                    boundary_recovery_len,
-                    need_boundary,
-                    final_decay,
-                    final_correction,
-                    boundary_decay,
-                    boundary_correction,
-                    ALIGN_MODE,
-                    K,
-                    V,
-                )
-    initial_state = tl.load(state_ptrs, mask=mask_state, other=0.0 if mask_state is not None else None).to(tl.float32)
-    state = initial_state * final_decay[None, :] + final_correction
+            correction, key, decay = _load_gdn_commit_record(
+                record_ptr=replay_ptr + token_offset * stride_replay_pos,
+                offs_k=offs_k,
+                offs_v=offs_v,
+                mask_k=mask_k,
+                mask_v=mask_v,
+                stride_replay_dim=stride_replay_dim,
+                K=K,
+                V=V,
+            )
+            state = state * decay + correction[:, None] * key[None, :]
+            if ALIGN_MODE:
+                if need_boundary & (token_offset + 1 == boundary_recovery_len):
+                    boundary_state = state
     if ALIGN_MODE:
         if need_boundary:
             boundary_ptrs = (
@@ -232,7 +230,6 @@ def _commit_gdn_state_kernel(
                 + offs_v[:, None] * stride_state_v
                 + offs_k[None, :] * stride_state_k
             )
-            boundary_state = initial_state * boundary_decay[None, :] + boundary_correction
             tl.store(boundary_ptrs, boundary_state, mask=mask_state)
 
     final_ptrs = (
