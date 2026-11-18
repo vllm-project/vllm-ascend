@@ -15,3 +15,9 @@ entries:
       FA3 0.5.1 supports this full-attention graph path with the default window.
     model: qwen3.5-dflash2
     hardware: [A2, A3]
+  - category: bugfix
+    text: >-
+      Fixed FA3 graph replay for MiniMax DSpark when the draft and target use
+      different query lengths and the request batch changes.
+    model: minimax-m3-dspark
+    hardware: [A2, A3]

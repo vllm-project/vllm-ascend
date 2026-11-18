@@ -28,7 +28,7 @@ def ops(monkeypatch):
 def make_builder(mode, eager=False, target=False, method="dflash"):
     impl = AscendFlashAttentionImpl(8, 192, 192**-0.5, num_kv_heads=2)
     config = NS(
-        speculative_config=NS(method=method, enforce_eager=eager, num_speculative_tokens=7),
+        speculative_config=NS(method=method, enforce_eager=eager, num_speculative_tokens=7) if method else None,
         scheduler_config=NS(max_num_seqs=4),
         compilation_config=NS(
             cudagraph_mode=mode,
@@ -57,7 +57,7 @@ def make_common():
     )
 
 
-@pytest.mark.parametrize("method,target", [("dflash", False), ("dflash", True), ("dspark", False)])
+@pytest.mark.parametrize("method,target", [("dflash", False), ("dflash", True), ("dspark", False), (None, True)])
 @pytest.mark.parametrize(
     "offsets,num_actual_tokens,active_reqs",
     [
@@ -83,24 +83,28 @@ def test_active_requests_exclude_graph_padding(ops, method, target, offsets, num
 
 
 @pytest.mark.parametrize("eager", [False, True])
-def test_dflash_rounded_bucket_preserves_exact_device_lengths_and_tiling_storage(ops, eager):
-    builder, _ = make_builder(CUDAGraphMode.FULL_DECODE_ONLY, eager)
+@pytest.mark.parametrize("method,query_len", [("dflash", 8), ("dspark", 7)])
+def test_speculative_bucket_preserves_exact_device_lengths_and_tiling_storage(ops, eager, method, query_len):
+    builder, _ = make_builder(CUDAGraphMode.FULL_DECODE_ONLY, eager, method=method)
     common = make_common()
+    common.query_start_loc_cpu.copy_(torch.arange(5) * query_len)
+    common.query_start_loc.copy_(common.query_start_loc_cpu)
+    common.num_actual_tokens = common.num_input_tokens = 4 * query_len
+    common.max_query_len = query_len
     captured = builder.build_for_graph_capture(common)
     spec = next(iter(captured.scheduler_metadata))
-    for offsets in ([0, 4, 4, 4, 4], [0, 4, 8, 12, 12], [0, 4, 8, 12, 16]):
-        common.query_start_loc_cpu.copy_(torch.tensor(offsets))
+    for active in (1, 3, 4):
+        common.query_start_loc_cpu.copy_(torch.arange(5).clamp(max=active) * query_len)
         common.query_start_loc.copy_(common.query_start_loc_cpu)
         common.seq_lens.sub_(1)
         metadata = builder.build(0, common)
-        active = offsets.index(offsets[-1])
         arguments = ops.get_scheduler_metadata.call_args.kwargs
         assert arguments["batch_size"] == active
-        assert arguments["max_seqlen_q"] == 4
+        assert arguments["max_seqlen_q"] == query_len
         assert arguments["cache_seqlens"].data_ptr() == common.seq_lens.data_ptr()
         torch.testing.assert_close(metadata.seq_lens, common.seq_lens[:active])
         torch.testing.assert_close(metadata.query_start_loc, common.query_start_loc[: active + 1])
-        # The target's 15-token bucket rounds to a 16-token draft graph.
+        # Actual draft graph sizes need not appear in the target's size list.
         assert (metadata.scheduler_metadata[spec] is captured.scheduler_metadata[spec]) is not eager
     assert ops.get_scheduler_metadata.call_count == 4  # Shared by two equivalent layers.
     assert bool(builder.scheduler_buffers) is not eager
