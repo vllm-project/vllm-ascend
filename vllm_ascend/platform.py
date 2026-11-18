@@ -1607,22 +1607,10 @@ def _setup_worker_and_scheduler(
     _downgrade_swa_bounded_replay(vllm_config, ascend_config)
 
 
-def _copied_scheduler_mode(ascend_config) -> str | None:
-    """Name a mode that replaces upstream's schedule implementation."""
-    scheduler_config = ascend_config.scheduler_config
-    if scheduler_config.recompute_scheduler_enable:
-        return "recompute_scheduler_enable"
-    if scheduler_config.dyntra_lb_config.enabled:
-        return "dyntra_lb_config"
-    if scheduler_config.enable_balance_scheduling:
-        return "enable_balance_scheduling"
-    return None
-
-
 def _swa_bounded_replay_unsupported_mode(ascend_config) -> str | None:
     """Name the Ascend mode that cannot honor SWA bounded replay.
 
-    Upstream implements the rewind inside ``Scheduler.schedule()``. Three Ascend
+    Upstream implements the rewind inside ``Scheduler.schedule()``. Four Ascend
     modes replace that method with a verbatim copy of an older upstream body, so
     they neither rewind a prefix hit nor realize that the chunk they scheduled
     is a replay; activating any of them therefore has to turn the switch off.
@@ -1635,7 +1623,14 @@ def _swa_bounded_replay_unsupported_mode(ascend_config) -> str | None:
     its ``super().schedule()`` fallback only applies while balancing is off.
 
     """
-    return _copied_scheduler_mode(ascend_config)
+    scheduler_config = ascend_config.scheduler_config
+    if scheduler_config.recompute_scheduler_enable:
+        return "recompute_scheduler_enable"
+    if scheduler_config.dyntra_lb_config.enabled:
+        return "dyntra_lb_config"
+    if scheduler_config.enable_balance_scheduling:
+        return "enable_balance_scheduling"
+    return None
 
 
 def _downgrade_swa_bounded_replay(vllm_config: VllmConfig, ascend_config) -> None:
