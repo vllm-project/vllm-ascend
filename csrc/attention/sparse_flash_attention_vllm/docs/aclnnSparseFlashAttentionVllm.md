@@ -1,6 +1,6 @@
 # aclnnSparseFlashAttentionVllm
 
-[📄 查看源码](https://gitcode.com/cann/ops-transformer/tree/master/attention/sparse_flash_attention_vllm)
+[📄 查看源码](https://gitcode.com/cann/ops-transformer/tree/master/attention/sparse_flash_attention)
 
 ## 产品支持情况
 
