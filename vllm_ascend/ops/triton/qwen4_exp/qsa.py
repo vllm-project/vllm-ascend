@@ -261,12 +261,16 @@ def _compress_qsa_groups_kernel(
         normalized = (pooled * tl.rsqrt(variance + NORM_EPS) * weight).to(tl.bfloat16)
         HALF_ROPE: tl.constexpr = ROTARY_DIM // 2
         offsets = dims % HALF_ROPE
+        # MRoPE assigns rotary pairs to interleaved t/h/w axes (0/1/2).
+        # Multiplying section counts by 3 converts them to interleaved cutoffs.
         axis = tl.where(
             (offsets % 3 == 1) & (offsets < 3 * MROPE_SECTION_H),
             1,
             tl.where((offsets % 3 == 2) & (offsets < 3 * MROPE_SECTION_W), 2, 0),
         )
         if LOAD_ROPE_POSITIONS:
+            # The three position axes occupy a power-of-two vector of 4 lanes;
+            # axis is always 0/1/2, so the padded fourth lane is never selected.
             rotary_position = tl.gather(position_values, axis, axis=0)
         else:
             rotary_position = position_values
@@ -498,6 +502,8 @@ def qsa_compress_groups_with_ratio(
         load_rope_positions = False
     else:
         load_rope_positions = True
+    # Reuse the pooling path's fixed 4-warp launch for the fused row program;
+    # this change does not introduce or claim a new hardware-tuned setting.
     _compress_qsa_groups_kernel[(rows,)](
         raw_keys,
         raw_positions,

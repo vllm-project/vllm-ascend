@@ -63,6 +63,8 @@ def _qsa_rmsnorm_mrope_kernel(
     rotary_offsets = tl.arange(0, half_rope_dim)
     if GATHER_CACHE:
         if has_mrope:
+            # Pair indices cycle through t/h/w (0/1/2); each section count
+            # becomes an interleaved index cutoff after multiplying by 3.
             h_mask = (rotary_offsets % 3 == 1) & (rotary_offsets < mrope_section_h * 3)
             w_mask = (rotary_offsets % 3 == 2) & (rotary_offsets < mrope_section_w * 3)
             axis = tl.where(h_mask, 1, tl.where(w_mask, 2, 0))
