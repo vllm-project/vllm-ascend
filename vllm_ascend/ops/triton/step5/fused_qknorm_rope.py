@@ -35,12 +35,7 @@ BLOCK_R = 128
 
 
 # TODO: This will be deleted after qkv_rmsnorm_rope_simt supported head_dim=192
-# Tune the tokens-per-program tile; the winning config is keyed on the
-# token count.
-@triton.autotune(
-    configs=[triton.Config({"BLOCK_M": bm}) for bm in [4, 8, 16, 32]],
-    key=["tokens"],
-)
+# Use a fixed tokens-per-program tile.
 @triton.jit(do_not_specialize=["tokens"])
 def _split_qkv_norm_rope_192_kernel(
     qkv_ptr,
@@ -191,7 +186,9 @@ def _fused_qknorm_rope_impl(
     if tokens == 0:
         return q_out, k_out, v_out
 
-    grid = lambda meta: (triton.cdiv(tokens, meta["BLOCK_M"]),)
+    BLOCK_M = 16
+    grid = (triton.cdiv(tokens, BLOCK_M),)
+    
     _split_qkv_norm_rope_192_kernel[grid](
         qkv,
         q_out,
@@ -216,6 +213,7 @@ def _fused_qknorm_rope_impl(
         HEAD_DIM=HEAD_DIM,
         BLOCK_D=BLOCK_D,
         BLOCK_R=BLOCK_R,
+        BLOCK_M=BLOCK_M
     )
     return q_out, k_out, v_out
 
