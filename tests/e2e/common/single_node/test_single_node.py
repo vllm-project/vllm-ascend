@@ -416,11 +416,13 @@ _PERF_METRIC_RENAME: dict[str, str] = {
 
 
 def _extract_dtype(config: SingleNodeConfig) -> str:
-    """Determine weight dtype: w8a8 if model name contains 'w8a8' and --quantization ascend is set, else bf16."""
+    """Report the quantization named by the selected Ascend checkpoint."""
     server_cmd: list[str] = _primary_server_cmd(config)
-    has_w8a8 = "w8a8" in config.model.lower()
-    has_quant_ascend = _extract_server_cmd_value(server_cmd, "--quantization") == "ascend"
-    return "w8a8" if (has_w8a8 and has_quant_ascend) else "bf16"
+    if _extract_server_cmd_value(server_cmd, "--quantization") == "ascend":
+        for dtype in ("w4a8-mxfp", "w4a8", "w8a8"):
+            if dtype in config.model.lower():
+                return dtype
+    return "bf16"
 
 
 def _parse_json_flag(cmd_list: list[str], flag: str) -> dict[str, Any]:
@@ -542,16 +544,27 @@ def _build_task_entry(case_key: str, case_config: dict[str, Any], result: Any) -
     elif case_type == "accuracy" and isinstance(result, (int, float)):
         metrics["accuracy"] = round(float(result), 4)
     elif case_type == "performance" and isinstance(result, list) and len(result) == 2:
-        _, result_json = result
+        result_csv, result_json = result
         for metric_name, metric_data in result_json.items():
             if not isinstance(metric_data, dict):
                 continue
             total_str = metric_data.get("total", "")
             try:
-                value = float(total_str.replace("token/s", "").replace("ms", "").replace("s", "").strip())
+                value = float(
+                    str(total_str)
+                    .strip()
+                    .removesuffix("token/s")
+                    .removesuffix("req/s")
+                    .removesuffix("ms")
+                    .removesuffix("s")
+                )
                 metrics[_PERF_METRIC_RENAME.get(metric_name, metric_name)] = round(value, 4)
-            except (ValueError, AttributeError):
+            except ValueError:
                 pass
+        if case_config.get("pd_phase"):
+            total = result_csv[result_csv["Stage"] == "total"]
+            for metric in ("TTFT", "TPOT") if case_config["pd_phase"] == "decode" else ("TTFT",):
+                metrics[f"{metric}(ms)"] = float(total.loc[metric, "Average"].removesuffix("ms").strip())
     elif case_type == "spec_decode" and isinstance(result, list):
         metrics.update(
             {f"acceptance_rate_pos_{position}": round(float(rate), 4) for position, rate in enumerate(result)}
@@ -567,6 +580,8 @@ def _build_task_entry(case_key: str, case_config: dict[str, Any], result: Any) -
         target["threshold"] = case_config["threshold"]
 
     entry: dict[str, Any] = {"name": task_name, "metrics": metrics, "test_input": test_input}
+    if case_config.get("pd_phase"):
+        entry.update(name=case_key, dataset=dataset_path)
     if target:
         entry["target"] = target
     entry["pass_fail"] = "pass" if _task_passed(case_config, result) else "fail"
@@ -631,6 +646,7 @@ def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
         model=config.model,
         port=port,
         aisbench_cases=aisbench_cases,
+        prefill_ports=_pd_ports_by_role(config.pd_server_cmds)[0] if config.service_mode == "pd" else (),
     )
 
     _save_benchmark_results_json(config, benchmark_keys, result)

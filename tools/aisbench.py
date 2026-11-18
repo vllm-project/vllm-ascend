@@ -17,6 +17,7 @@
 import hashlib
 import json
 import logging
+import math
 import os
 import subprocess
 import tempfile
@@ -27,8 +28,11 @@ import filelock
 import huggingface_hub
 import pandas as pd
 import regex as re
+import requests
 from modelscope import snapshot_download  # type: ignore
+from prometheus_client.parser import text_string_to_metric_families
 
+from tools.pd_results import aggregate_decode_windows
 from tools.profiling import safe_name
 from tools.profiling.capture import (
     ProfileController,
@@ -73,18 +77,37 @@ class AisbenchRunner:
                 "--mode",
                 "perf",
             ]
-        if self.num_prompts:
+        if self.num_prompts and self.pd_range is None:
             aisbench_cmd.extend(["--num-prompts", str(self.num_prompts)])
         self.stdout_file = f"output_{self.task_type}.txt"
-        aisbench_cmd = " ".join(aisbench_cmd) + f" --debug > {self.stdout_file} 2>&1 &"
-        print(f"running aisbench cmd: {aisbench_cmd}")
+        if self.pd_cache_client:
+            stage = self.pd_cache_client["stage"]
+            if stage == "warmup":
+                stage += f"_rank{self.pd_cache_client['prefill_rank']}"
+            start, end = self.pd_range or (0, self.num_prompts)
+            directory = Path("outputs", safe_name(self.benchmark_artifact_name), f"rows_{start}_{end}", stage)
+            directory.mkdir(parents=True, exist_ok=True)
+            # All prewarming happens outside the timed formal AISBench window.
+            aisbench_cmd.extend(["--num-warmups", "0", "--work-dir", str(directory)])
+            self.stdout_file = str(directory / f"console_{time.time_ns()}.log")
         env = None
-        if self.profile_marker is not None:
+        if self.profile_marker is not None or self.pd_cache_client:
             env = os.environ.copy()
             repo_root = str(Path(__file__).resolve().parents[1])
             env["PYTHONPATH"] = os.pathsep.join(filter(None, (repo_root, env.get("PYTHONPATH", ""))))
+        if self.profile_marker is not None:
             env["ASCEND_PROFILE_REQUEST_MARKER"] = str(self.profile_marker)
             env["ASCEND_PROFILE_ENABLED"] = str(bool(self.profile_targets)).lower()
+        if self.pd_cache_client:
+            # Finish and check each phase before the next one rewrites the AISBench configs.
+            print(f"Running {' '.join(aisbench_cmd)} --debug (log: {self.stdout_file})", flush=True)
+            with open(self.stdout_file, "w", encoding="utf-8") as log:
+                completed = subprocess.run([*aisbench_cmd, "--debug"], stdout=log, stderr=subprocess.STDOUT, env=env)
+            if completed.returncode:
+                raise RuntimeError(f"AISBench exited with code {completed.returncode}. See {self.stdout_file}")
+            return
+        aisbench_cmd = " ".join(aisbench_cmd) + f" --debug > {self.stdout_file} 2>&1 &"
+        print(f"running aisbench cmd: {aisbench_cmd}")
         self.proc: subprocess.Popen = subprocess.Popen(aisbench_cmd, shell=True, env=env)
 
     def __init__(self, model: str, port: int, aisbench_config: dict, host_ip: str = "localhost", verify=True):
@@ -93,6 +116,8 @@ class AisbenchRunner:
         self.host_ip = host_ip
         self.proc = None
         self.task_type = aisbench_config["case_type"]
+        self.pd_cache_client = aisbench_config.get("_pd_cache_client")
+        self.pd_range = aisbench_config.get("_pd_range")
         self.exp_folder = None
         self.result_line = None
         if self.task_type == "curl_cmd":
@@ -139,8 +164,6 @@ class AisbenchRunner:
         self.no_pred = aisbench_config.get("no_pred")
         self.thinking = aisbench_config.get("thinking")
         self.reasoning_effort = aisbench_config.get("reasoning_effort")
-        self.input_throughput_threshold = aisbench_config.get("input_throughput_threshold")
-        self.tpot_threshold = aisbench_config.get("tpot_threshold")
         self.spec_decode_baseline = aisbench_config.get("baseline", [])
         self.exp_folder = None
         self.result_line = None
@@ -166,18 +189,19 @@ class AisbenchRunner:
             self._finish_profiling(controller)
         if verify:
             self.baseline = aisbench_config.get("baseline", 1)
-            self.input_throughput_baseline = aisbench_config.get("input_throughput_baseline", 1)
             if self.task_type == "accuracy":
                 self.threshold = aisbench_config.get("threshold", 1)
                 self.verify_mode = aisbench_config.get("verify_mode", "range")
-                if self.verify_mode == "ge":
+                if self.baseline is None:
+                    self._get_result_accuracy()
+                    if not math.isfinite(self.result):
+                        raise ValueError(f"AISBench returned a non-finite accuracy score: {self.result}")
+                elif self.verify_mode == "ge":
                     self._accuracy_verify_ge()
                 else:
                     self._accuracy_verify()
             if self.task_type == "performance":
-                self.threshold = aisbench_config.get("threshold")
-                self.input_throughput_threshold = aisbench_config.get("input_throughput_threshold")
-                self._performance_verify()
+                self._performance_verify(aisbench_config)
             if self.task_type == "spec_decode":
                 self.threshold = aisbench_config.get("threshold", 0.05)
                 self._spec_decode_verify()
@@ -238,7 +262,10 @@ class AisbenchRunner:
                 self.dataset_path = os.path.join(self.dataset_path, "textvqa_val.jsonl")
             with open(conf_path, encoding="utf-8") as f:
                 content = f.read()
-            content = re.sub(r"path=.*", f'path="{self.dataset_path}",', content)
+            content = re.sub(r"path=.*", lambda _: f"path={str(self.dataset_path)!r},", content)
+            if self.pd_range is not None:
+                start, end = self.pd_range
+                content += f'\ngsm8k_reader_cfg["test_range"] = "[{start}:{end}]"\n'
             if self.profile_marker is not None:
                 content, replacements = re.subn(r"\btype\s*=\s*GenInferencer\b", "type=TimedGenInferencer", content)
                 if replacements == 0:
@@ -286,7 +313,7 @@ class AisbenchRunner:
                 content,
             )
         if self.task_type == "performance":
-            content = re.sub(r"path=.*", f'path="{self.model_path}",', content)
+            content = re.sub(r"path=.*", lambda _: f"path={str(self.model_path)!r},", content)
             content = re.sub(r"request_rate.*", f"request_rate={self.request_rate},", content)
             content = re.sub(r"temperature.*", "temperature=0,", content)
             content = re.sub(r"ignore_eos.*", "ignore_eos=True,", content)
@@ -296,6 +323,9 @@ class AisbenchRunner:
             content = re.sub(r"temperature.*", f"temperature={self.temperature},", content)
         if self.no_pred:
             content = re.sub(r"pred_postprocessor.*", "#pred_postprocessor", content)
+        if self.pd_cache_client:
+            content = "from tools.aisbench_pd import PDCacheChat\n" + content
+            content += f"\nmodels[0].update(type=PDCacheChat, **{self.pd_cache_client!r})\n"
         conf_path_new = os.path.join(REQUEST_CONF_DIR, f"{self.request_conf}_custom.py")
         with open(conf_path_new, "w", encoding="utf-8") as f:
             f.write(content)
@@ -322,6 +352,14 @@ class AisbenchRunner:
             self._check_runtime_error(line)
 
     def _wait_for_task(self):
+        if self.pd_cache_client:
+            with open(self.stdout_file, encoding="utf-8", errors="replace") as log:
+                for line in log:
+                    if self.RESULT_MSG[self.task_type] in line:
+                        self.result_line = line.rstrip()
+            if self.result_line is None:
+                raise RuntimeError(f"AISBench did not report a performance result. See {self.stdout_file}")
+            return
         self._wait_for_exp_folder()
         result_msg = self.RESULT_MSG[self.task_type]
         while True:
@@ -365,31 +403,16 @@ class AisbenchRunner:
         else:
             self.result = float(df.iloc[0, -1])
 
-    def _performance_verify(self):
+    def _performance_verify(self, case):
         self._get_result_performance()
-        if self.threshold is not None:
-            output_throughput = self.result_json["Output Token Throughput"]["total"].replace("token/s", "")
-            assert float(output_throughput) >= self.threshold * self.baseline, (
-                "Performance verification failed. "
-                f"The current Output Token Throughput is {output_throughput} token/s, "
-                f"which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
-            )
-        if self.input_throughput_threshold is not None:
-            input_throughput = self.result_json["Input Token Throughput"]["total"].replace("token/s", "")
-            assert float(input_throughput) >= float(self.input_throughput_threshold) * float(
-                self.input_throughput_baseline
-            ), (
-                "Input Token verification failed. "
-                f"The current Input Token Throughput is {input_throughput} token/s, "
-                f"which is not greater than or equal to "
-                f"{self.input_throughput_threshold} * baseline {self.input_throughput_baseline}."
-            )
-        if self.tpot_threshold is not None:
-            tpot = float(str(self.result_csv.loc["TPOT", "Average"]).replace("ms", ""))
-            assert tpot <= float(self.tpot_threshold), (
-                f"TPOT verification failed. The current TPOT is {tpot} ms, "
-                f"which is greater than {self.tpot_threshold} ms."
-            )
+        if self.pd_cache_client:
+            successes = self.result_json["Success Requests"]["total"]
+            failures = self.result_json["Failed Requests"]["total"]
+            if successes != self.num_prompts or failures:
+                raise AssertionError(
+                    f"PD benchmark expected {self.num_prompts} successes; got {successes=}, {failures=}"
+                )
+        _verify_throughput_and_tpot(self.result, case)
 
     def _accuracy_verify(self):
         self._get_result_accuracy()
@@ -435,7 +458,87 @@ class _MetricsServer:
         return f"http://{self.host}:{self.port}/{path}"
 
 
-def run_aisbench_cases(model, port, aisbench_cases, server_args="", host_ip="localhost"):
+def _verify_throughput_and_tpot(result, case):
+    for metric, key_prefix in (("Output Token Throughput", ""), ("Input Token Throughput", "input_throughput_")):
+        threshold = case.get(f"{key_prefix}threshold")
+        if threshold is not None:
+            actual = float(str(result[1][metric]["total"]).replace("token/s", ""))
+            baseline = float(case.get(f"{key_prefix}baseline", 1))
+            assert actual >= float(threshold) * baseline, f"{metric} {actual} token/s is below {threshold} * {baseline}"
+    if case.get("tpot_threshold") is not None:
+        tpot = float(str(result[0].loc["TPOT", "Average"]).replace("ms", ""))
+        assert tpot <= float(case["tpot_threshold"]), f"Average TPOT {tpot} ms exceeds {case['tpot_threshold']} ms"
+
+
+def _run_pd_performance(model, proxy_port, host, case, prefill_ports):
+    if len(prefill_ports) != 1 or case["request_conf"] != "vllm_api_stream_chat" or case["case_type"] != "performance":
+        raise ValueError("PD cache benchmarks require one Prefill API and vllm_api_stream_chat performance requests")
+    prefill_port = prefill_ports[0]
+    if case["pd_phase"] == "prefill":
+        if case["max_out_len"] != 1:
+            raise ValueError("Cold Prefill requires one output token")
+        config = {**case, "_pd_cache_client": {"stage": "prefill"}}
+        with AisbenchRunner(model, prefill_port, config, host) as run:
+            return run.result
+    if case["pd_phase"] != "decode":
+        raise ValueError(f"Unknown pd_phase: {case['pd_phase']!r}")
+    if case["dataset_conf"] != "gsm8k/gsm8k_gen_0_shot_cot_str_perf":
+        raise ValueError("PD replay requires the GSM8K performance reader for exact prompt slices")
+
+    # The proxy's Prefill API can internally dispatch to any DP engine. Populate
+    # each replica with the identical AISBench-selected rows before starting D.
+    response = requests.get(f"http://{host}:{prefill_port}/metrics", timeout=30)
+    response.raise_for_status()
+    replicas = {
+        int(sample.labels["engine"]): sample.labels
+        for metric in text_string_to_metric_families(response.text)
+        for sample in metric.samples
+        if sample.name == "vllm:cache_config_info"
+    }
+    if not replicas:
+        raise ValueError("Prefill /metrics does not expose per-engine vllm:cache_config_info")
+    tail_tokens = 0
+    for rank, labels in replicas.items():
+        # Hybrid engines report actual worker block sizes via cache_config_info.
+        # Allow one aligned tail for the last-logit token, and one additional
+        # block when MTP drops its final matched checkpoint.
+        blocks = [int(labels[key]) for key in ("block_size", "mamba_block_size") if labels.get(key, "None") != "None"]
+        if not blocks or min(blocks) <= 0:
+            raise ValueError(f"Missing positive Prefill cache block size for DP rank {rank}")
+        tail_tokens = max(tail_tokens, 2 * math.lcm(*blocks))
+
+    results = []
+    num_prompts, batch_size = case["num_prompts"], case["batch_size"]
+    if min(num_prompts, batch_size) < 1:
+        raise ValueError("PD replay requires positive num_prompts and batch_size")
+    for start in range(0, num_prompts, batch_size):
+        end = min(start + batch_size, num_prompts)
+        window = {
+            **case,
+            "num_prompts": end - start,
+            "_pd_range": (start, end),
+            "threshold": None,
+            "input_throughput_threshold": None,
+            "tpot_threshold": None,
+        }
+        for rank in sorted(replicas):
+            logging.info("Warming prompt rows [%s:%s] on Prefill DP rank %s", start, end, rank)
+            warmup = {
+                **window,
+                "max_out_len": 1,
+                "_pd_cache_client": {"stage": "warmup", "prefill_rank": rank},
+            }
+            with AisbenchRunner(model, prefill_port, warmup, host):
+                pass
+        config = {**window, "_pd_cache_client": {"stage": "decode", "replay_tail_tokens": tail_tokens}}
+        with AisbenchRunner(model, proxy_port, config, host) as run:
+            results.append(run.result)
+    aggregate = aggregate_decode_windows(results)
+    _verify_throughput_and_tpot(aggregate, case)
+    return aggregate
+
+
+def run_aisbench_cases(model, port, aisbench_cases, server_args="", host_ip="localhost", prefill_ports=()):
     aisbench_results = []
     aisbench_errors = []
     total = sum(1 for c in aisbench_cases if c)
@@ -450,8 +553,12 @@ def run_aisbench_cases(model, port, aisbench_cases, server_args="", host_ip="loc
         logging.info("[%d/%d] Starting benchmark: %s (type=%s)", idx, total, benchmark_name, case_type)
         logging.info("=" * 60)
         try:
-            with AisbenchRunner(model=model, port=port, host_ip=host_ip, aisbench_config=aisbench_case) as aisbench:
-                aisbench_results.append(aisbench.result)
+            if "pd_phase" in aisbench_case:
+                result = _run_pd_performance(model, port, host_ip, aisbench_case, prefill_ports)
+            else:
+                with AisbenchRunner(model=model, port=port, host_ip=host_ip, aisbench_config=aisbench_case) as aisbench:
+                    result = aisbench.result
+            aisbench_results.append(result)
             logging.info("[%d/%d] Finished benchmark: %s", idx, total, benchmark_name)
         except Exception as e:
             aisbench_results.append("")
