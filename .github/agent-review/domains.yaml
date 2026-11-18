@@ -1,0 +1,22 @@
+# Knowledge base domain registry (RFC #21451).
+#
+# Bridges the fine-grained CODEOWNERS entries and the coarse knowledge-base
+# domains: one PR file maps to at most a few review domains via the globs
+# below, and the agent is told which L2 checklists to read.
+#
+# Ownership:
+# - This file is maintained by the repo maintainers (the /.github owner in
+#   CODEOWNERS). Domains must stay coarse; do not split per-file.
+# - Each L2/<domain>/ directory is owned by the same owners as the code it
+#   governs: add a CODEOWNERS entry for the directory when the domain is
+#   created (later entries win, so append at the end of CODEOWNERS).
+#   Until such an entry exists, the /.github owner is the fallback owner.
+#
+# First glob that matches wins; order matters.
+domains:
+  - name: ci
+    description: CI workflows, bot jobs, runner images, test selection
+    paths:
+      - ".github/**"
+      - "tools/**"
+      - "tests/**"
