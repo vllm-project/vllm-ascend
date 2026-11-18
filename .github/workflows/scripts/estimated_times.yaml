@@ -10,10 +10,13 @@
 
 estimated_times:
   tests/e2e/pull_request/one_card/test_sparse_kv_offload_lifecycle.py: 600
+  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_ple_host_lookup.py: 30
   tests/e2e/pull_request/one_card/test_mc2_local_padding.py: 60
   tests/e2e/pull_request/one_card/test_mla_prolog_head_padding.py: 30
   tests/e2e/pull_request/one_card/model_runner_v2/test_uva_prefix.py: 30
   tests/e2e/pull_request/one_card/test_kv_pool_accuracy.py: 410
+  # Initial estimate for four eager/FULL and trace OFF/ON engine starts.
+  tests/e2e/pull_request/one_card/test_kv_trace.py: 600
   tests/e2e/pull_request/one_card/test_flash_attn_precision.py: 30
   tests/e2e/pull_request/one_card/test_swiglu_mx_quant.py: 30
   tests/e2e/pull_request/one_card/test_hisparse_attention.py: 30
@@ -89,7 +92,6 @@ estimated_times:
   tests/e2e/pull_request/two_card/rlhf/state_transitions/test_weight_checker.py: 1200
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_wake.py: 300
   tests/e2e/pull_request/one_card/test_sampler.py: 190
-  tests/e2e/pull_request/one_card/test_simple_cpu_offload.py: 170
   tests/e2e/pull_request/one_card/test_turboquant_finalize.py: 30
   tests/e2e/pull_request/one_card/test_vlm.py: 480
   tests/e2e/pull_request/one_card/test_xlite.py: 215
@@ -133,6 +135,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_shared_expert_dp_graph.py: 540
   tests/e2e/pull_request/two_card/rlhf/weight_transfer/ipc/test_qwen_ipc.py: 450
   tests/e2e/pull_request/two_card/rlhf/weight_transfer/ipc/test_glm_ipc.py: 450
+  tests/e2e/pull_request/two_card/rlhf/weight_transfer/ipc/test_deepseek_ipc.py: 300
   tests/e2e/pull_request/two_card/rlhf/weight_transfer/hccl/test_qwen_hccl.py: 400
   tests/e2e/pull_request/two_card/test_xlite.py: 840
   tests/e2e/pull_request/two_card/_310p/test_dense_model_310p.py: 250
@@ -148,7 +151,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/model_runner_v2/test_qwen38_pp_mtp_prefix_cache.py: 300
   tests/e2e/pull_request/four_card/model_runner_v2/test_spec_pp_accuracy.py: 900
   tests/e2e/pull_request/four_card/model_runner_v2/test_spec_decode_data_parallel.py: 540
-  tests/e2e/pull_request/four_card/rlhf/consistency/test_batch_invariant_tp4.py: 160
+  tests/e2e/pull_request/four_card/rlhf/consistency/batch_invariant/test_qwen.py: 360
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py: 520
   tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 1140
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 30

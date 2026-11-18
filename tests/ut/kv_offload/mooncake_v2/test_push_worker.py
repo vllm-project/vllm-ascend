@@ -16,8 +16,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import Moon
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import MooncakeConnectorMetadata
 
 
-@pytest.fixture
-def worker(monkeypatch):
+@pytest.fixture(params=[1, 2])
+def worker(monkeypatch, request):
     def initialize(self, *args):
         self.vllm_config = SimpleNamespace(speculative_config=None)
         self.engine_id = "d"
@@ -30,7 +30,14 @@ def worker(monkeypatch):
     monkeypatch.setattr(MooncakeBaseConnectorWorker, "__init__", initialize)
     monkeypatch.setattr(MooncakeBaseConnectorWorker, "register_kv_caches", lambda *args: None)
     obj = push_worker.MooncakePushConnectorWorker(
-        SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1)), "d", None
+        SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                decode_context_parallel_size=request.param, prefill_context_parallel_size=1, tensor_parallel_size=2
+            ),
+            kv_transfer_config=SimpleNamespace(is_kv_producer=False),
+        ),
+        "d",
+        None,
     )
     obj.register_kv_caches({})
     yield obj
