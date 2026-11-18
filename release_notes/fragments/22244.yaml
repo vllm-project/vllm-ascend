@@ -1,0 +1,4 @@
+pr: 22244
+entries:
+  - category: breaking
+    text: Removed the retired Model Runner V1 EPLB package, configuration controls, and expert-hotness metrics. Use Model Runner V2 with --enable-eplb and --eplb-config; additional_config.eplb_config supports load_collection_phase and stair_config. Existing V2 EPLB configurations continue to work.
