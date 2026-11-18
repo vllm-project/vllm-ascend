@@ -236,9 +236,19 @@ a3-560t:
         os: linux-aarch64-a3-800i-16
         config_file_path: GLM-5.2-W4A8-MTP-A3-V2.yaml
         config_base_path: tests/SIT/cases/models/configs/GLM
+      - name: DeepSeek-V4-Flash-w8a8-sleep-wakeup
+        os: linux-aarch64-a3-800i-16
+        config_file_path: DeepSeek-V4-Flash-w8a8-sleep-wakeup.yaml
+        config_base_path: tests/SIT/cases/models/configs/DeepSeek
   multi_card:
     test_config:
       # pytest-driven tests
+      - name: structured_output_qwen3
+        os: linux-aarch64-a3-800i-2
+        tests: tests/SIT/cases/features/structured_output
+      - name: test_qwen3_grid_exceed_65536
+        os: linux-aarch64-a3-800i-2
+        tests: tests/SIT/cases/features/test_qwen3_grid_exceed_65536.py
       - name: qwen3-30b-acc
         os: linux-aarch64-a3-800i-4
         tests: tests/SIT/cases/features/kv_pool/test_qwen3_30b_acc.py
@@ -275,6 +285,10 @@ a3-560t:
         os: linux-aarch64-a3-800i-8
         config_file_path: Qwen3-30B-A3B-VWN-eagle3-PCP.yaml
         config_base_path: tests/SIT/cases/features/context_parallel
+      - name: Qwen3.8-27B-w8a8-PP2-TP2
+        os: linux-aarch64-a3-800i-4
+        config_file_path: Qwen3.8-27B-w8a8-PP2-TP2.yaml
+        config_base_path: tests/SIT/cases/features/pp
 310p:
   single_node:
     test_config:
@@ -332,6 +346,10 @@ a5:
 #        size: 2
   single_node:
     test_config:
+      - name: Kimi-K3-W4A8-E256-A5-GSM8K-First100
+        os: linux-aarch64-a5-8
+        config_file_path: Kimi-K3-W4A8-E256-A5.yaml
+        config_base_path: tests/SIT/cases/models/configs/Kimi
       - name: qwen3.6-27B-w8a8c8-A5
         os: linux-aarch64-a5-8
         config_file_path: qwen3.6-27B-w8a8c8-A5.yaml
