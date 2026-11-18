@@ -959,7 +959,7 @@ class NPUWorker(GPUWorker):
         # TODO: The Step-3.5/3.7 models will be sunset in the future. Once they
         # are, remove this is_step_model exemption: this line and the
         # `or is_step_model` budget gate below.
-        is_step_model = self.model_config.hf_text_config.model_type in (
+        is_step_model = getattr(getattr(self.model_config, "hf_text_config", None), "model_type", None) in (
             "step3p5",
             "step3p7",
             "step5",

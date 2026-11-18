@@ -33,7 +33,7 @@ if hasattr(DeepseekV2Config, "__class_validators__"):
     _orig_validate_architecture = DeepseekV2Config.validate_architecture
 
     def _validate_dspark_architecture(config):
-        if config.model_type != "k3_dspark":
+        if getattr(config, "model_type", None) != "k3_dspark":
             _orig_validate_architecture(config)
 
     DeepseekV2Config.__class_validators__ = [
@@ -94,9 +94,10 @@ def _normalize_kimi_dflash_rope(hf_config: PretrainedConfig) -> None:
 
 
 def _is_minimax_dspark_draft_config(hf_config: PretrainedConfig) -> bool:
-    return hf_config.model_type in ("minimax_m3_vl", "minimax_m3_text") and _MINIMAX_DRAFT_ARCHITECTURE in (
-        getattr(hf_config, "architectures", None) or ()
-    )
+    return getattr(hf_config, "model_type", None) in (
+        "minimax_m3_vl",
+        "minimax_m3_text",
+    ) and _MINIMAX_DRAFT_ARCHITECTURE in (getattr(hf_config, "architectures", None) or ())
 
 
 def _normalize_legacy_qwen3_dspark_config(
@@ -120,7 +121,9 @@ def _normalize_legacy_qwen3_dspark_config(
 
         return draft_hf_override(hf_config)
     # #63205 renames this legacy architecture before returning to our hook.
-    legacy_qwen3_dspark = hf_config.model_type == "qwen3" and "DSparkDraftModel" in (hf_config.architectures or ())
+    legacy_qwen3_dspark = getattr(hf_config, "model_type", None) == "qwen3" and "DSparkDraftModel" in (
+        hf_config.architectures or ()
+    )
     hf_config = _orig_hf_config_override(hf_config)
     _normalize_kimi_dflash_rope(hf_config)
     # Plain glm5_next MTP remapping is handled natively by upstream
@@ -228,7 +231,7 @@ def _dspark_post_init(self):
     _orig_post_init(self)
     if draft_checkpoint is not None:
         hf_config = self.draft_model_config.hf_config
-        if hf_config.model_type in ("deepseek_v4", "deepseek_v41"):
+        if getattr(hf_config, "model_type", None) in ("deepseek_v4", "deepseek_v41"):
             # Core's dspark normalization rewrites every architecture it
             # does not know into the generic DeepSeek DSpark draft (model
             # type, architectures and target-quantization inheritance).

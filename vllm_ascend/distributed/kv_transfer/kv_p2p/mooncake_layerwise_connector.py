@@ -1503,7 +1503,7 @@ class MooncakeLayerwiseConnectorWorker:
         if kv_buffer is not None:
             self.create_kv_buffer(kv_buffer)
 
-        model_type = self.vllm_config.model_config.hf_text_config.model_type
+        model_type = getattr(getattr(self.vllm_config.model_config, "hf_text_config", None), "model_type", None)
         num_attn_module = 2 if model_type in ("longcat_flash", "longcat_flash_ngram") else 1
         mtp_layer_name = ""
         for layer_name in kv_caches:

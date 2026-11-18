@@ -86,7 +86,7 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
         prefix: str,
     ) -> QuantizeMethodBase | None:
         vllm_config = get_current_vllm_config()
-        model_type = vllm_config.model_config.hf_config.model_type
+        model_type = getattr(vllm_config.model_config.hf_config, "model_type", None)
 
         self._update_packed_modules_mapping(model_type)
 

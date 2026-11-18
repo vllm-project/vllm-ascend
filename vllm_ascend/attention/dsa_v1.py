@@ -932,7 +932,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
     def _init_hadamard(self, layer_names: list[str]) -> None:
         hf_config = self.model_config.hf_config
-        if hf_config.model_type != "deepseek_v4":
+        if getattr(hf_config, "model_type", None) != "deepseek_v4":
             return
 
         indexer_head_dim = hf_config.index_head_dim

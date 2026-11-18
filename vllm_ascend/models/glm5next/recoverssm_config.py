@@ -12,7 +12,10 @@ if TYPE_CHECKING:
 
 def is_glm_recoverssm_model(vllm_config: VllmConfig) -> bool:
     model_config = vllm_config.model_config
-    return model_config is not None and model_config.hf_text_config.model_type in ("glm5_next", "glm5_next_text")
+    return model_config is not None and getattr(getattr(model_config, "hf_text_config", None), "model_type", None) in (
+        "glm5_next",
+        "glm5_next_text",
+    )
 
 
 def use_glm_recoverssm(vllm_config: VllmConfig) -> bool:
