@@ -32,6 +32,7 @@ from vllm.model_executor.utils import replace_parameter
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.distributed.expert_transfer.expert_offload_utils import expert_offload_weights
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
@@ -418,7 +419,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         n_shared_experts: int = 0,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        with expert_offload_weights(self, get_ascend_config()):
+            super().__init__(*args, **kwargs)
         if self.quant_config is None:
             # Preserve the pre-refactor BF16 lifecycle: let upstream create
             # weights first, then install the Ascend execution method.
