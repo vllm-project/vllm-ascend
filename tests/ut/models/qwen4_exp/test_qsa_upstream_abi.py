@@ -694,6 +694,7 @@ def test_target_topk_sharing_respects_parallel_modes(monkeypatch, enable_dbo, ub
     parallel_config.tensor_parallel_size = 1
     config = SimpleNamespace(
         parallel_config=parallel_config,
+        cache_config=SimpleNamespace(cache_dtype="auto", kv_cache_dtype_skip_layers=[]),
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(linear_num_key_heads=4, linear_num_value_heads=4)),
     )
 
@@ -703,9 +704,17 @@ def test_target_topk_sharing_respects_parallel_modes(monkeypatch, enable_dbo, ub
         self.indexer = SimpleNamespace(configure_pcp_cache_backends=Mock())
         self.register_buffer("topk_indices_buffer", torch.empty(8, 4, dtype=torch.int32), persistent=False)
 
+    def make_attention(layer_id):
+        return qsa.AscendQwen4ExpQSAAttention(
+            vllm_config=config,
+            config=SimpleNamespace(head_dim=256),
+            layer_id=layer_id,
+            prefix=f"model.layers.{layer_id}.self_attn",
+        )
+
     def init_backbone(self, **kwargs):
         torch.nn.Module.__init__(self)
-        self.layers = torch.nn.ModuleList(qsa.AscendQwen4ExpQSAAttention(vllm_config=config) for _ in range(3))
+        self.layers = torch.nn.ModuleList(make_attention(i) for i in range(3))
         self.start_layer, self.end_layer = 0, len(self.layers)
 
     monkeypatch.setattr(qsa.upstream_qsa.Qwen4ExpQSAAttention, "__init__", init_attention)
@@ -729,7 +738,7 @@ def test_target_topk_sharing_respects_parallel_modes(monkeypatch, enable_dbo, ub
     assert all(buffer is buffers[0] for buffer in buffers)
     assert not hasattr(first, "topk_indices_buffer")
     second = model.AscendQwen4ExpModel(vllm_config=config)
-    draft = [qsa.AscendQwen4ExpQSAAttention(vllm_config=config) for _ in range(2)]
+    draft = [make_attention(i) for i in range(2)]
     assert all(attention.topk_indices_buffer is not buffers[0] for attention in [*second.layers, *draft])
     assert draft[0].topk_indices_buffer is not draft[1].topk_indices_buffer
 

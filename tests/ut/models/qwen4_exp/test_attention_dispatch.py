@@ -200,6 +200,7 @@ def load_builder():
     )
 
     class Base:
+        kv_cache_spec = None
         def build(self, _, common, *args, **kwargs):
             return SimpleNamespace(
                 block_table=getattr(common, "block_table_tensor", "kept"),
@@ -218,6 +219,7 @@ def load_builder():
         upstream_qsa=SimpleNamespace(Qwen4ExpQSAMetadataBuilder=Base),
         AttentionCGSupport=SimpleNamespace(UNIFORM_BATCH="uniform"),
         CommonAttentionMetadata=object,
+        QSAMXFP8Spec=SimpleNamespace,
         torch=torch,
         build_qsa_request_plan=plan,
     )

@@ -15,7 +15,7 @@ from typing import Any
 
 import torch
 
-from vllm_ascend.ops.gbsa import generic_block_sparse_attention_metadata
+from vllm_ascend.ops.gbsa import GBSAQuantMode, generic_block_sparse_attention_metadata
 
 from .gbsa import GBSA_COMPRESS_RATIO, GBSA_PAGE_SIZE
 
@@ -141,11 +141,11 @@ class Qwen4ExpPreparedInputAdapter:
     """Prepare model-specific replay inputs without changing public MRV2."""
 
     def __init__(self, model: torch.nn.Module) -> None:
+        self._graph_query_offsets: dict[tuple[torch.device, int], torch.Tensor] = {}
         self._layers = tuple(
             module for module in model.modules() if module.__class__.__name__ == "AscendQwen4ExpQSAAttention"
         )
         self._rope_buffers: dict[tuple[int, tuple[int, ...], torch.dtype, torch.device], torch.Tensor] = {}
-        self._graph_query_offsets: dict[tuple[torch.device, int], torch.Tensor] = {}
         self._metadata_buffers: dict[tuple[object, ...], torch.Tensor] = {}
         for layer in self._layers:
             rotary = layer.rotary_emb
@@ -268,6 +268,29 @@ class Qwen4ExpPreparedInputAdapter:
         requests = metadata.seq_lens.shape[0]
         lengths = metadata.seq_lens[:requests]
         query_start_loc = metadata.query_start_loc[: requests + 1]
+        head_dim = int(layer.indexer.index_head_dim)
+        block_topk = int(layer.indexer.token_topk // layer.indexer.compress_ratio)
+        if int(layer.indexer.compress_ratio) != GBSA_COMPRESS_RATIO:
+            raise ValueError("QSA prepared metadata requires compression ratio 4")
+        compressed_cache = layer.indexer.compressed_key_cache
+        quantized = getattr(compressed_cache, "dtype", None) == torch.uint8
+        field = "qsa_quant_lightning_v2_metadata" if quantized else "qsa_lightning_v2_metadata"
+        signature = (
+            field,
+            int(layer.indexer.index_n_heads),
+            head_dim,
+            block_topk,
+            requests,
+            rows,
+            _tensor_storage_signature(lengths),
+            _tensor_storage_signature(query_start_loc),
+        )
+        prepared = prepared_this_step.get(signature)
+        if prepared is not None:
+            setattr(metadata, field, prepared)
+            return
+        import cann_ops_transformer  # noqa: F401
+
         compressed_lengths = lengths.floor_divide(GBSA_COMPRESS_RATIO)
         residual_lengths = lengths.remainder(GBSA_COMPRESS_RATIO)
         common = dict(
@@ -279,27 +302,11 @@ class Qwen4ExpPreparedInputAdapter:
             mask_mode=3,
             cmp_ratio=GBSA_COMPRESS_RATIO,
         )
-        head_dim = int(layer.indexer.index_head_dim)
-        block_topk = int(layer.indexer.token_topk // layer.indexer.compress_ratio)
-        if int(layer.indexer.compress_ratio) != GBSA_COMPRESS_RATIO:
-            raise ValueError("QSA prepared metadata requires compression ratio 4")
-        signature = (
-            "lightning_v2",
-            int(layer.indexer.index_n_heads),
-            head_dim,
-            block_topk,
-            requests,
-            rows,
-            _tensor_storage_signature(lengths),
-            _tensor_storage_signature(query_start_loc),
-        )
-        prepared = prepared_this_step.get(signature)
-        if prepared is not None:
-            metadata.qsa_lightning_v2_metadata = prepared
-            return
-        import cann_ops_transformer  # noqa: F401
-
-        generated = torch.ops.cann_ops_transformer.lightning_indexer_metadata(
+        ops = torch.ops.cann_ops_transformer
+        metadata_op = ops.quant_lightning_indexer_metadata if quantized else ops.lightning_indexer_metadata
+        if quantized:
+            common["quant_mode"] = 1
+        generated = metadata_op(
             layer.indexer.index_n_heads,
             1,
             head_dim,
@@ -307,11 +314,12 @@ class Qwen4ExpPreparedInputAdapter:
             batch_size=requests,
             **common,
         )
-        metadata.qsa_lightning_v2_metadata = self._persistent_metadata(
+        prepared = self._persistent_metadata(
             signature,
             generated,
         )
-        prepared_this_step[signature] = metadata.qsa_lightning_v2_metadata
+        setattr(metadata, field, prepared)
+        prepared_this_step[signature] = prepared
 
     def _prepare_gbsa(
         self,
@@ -325,19 +333,12 @@ class Qwen4ExpPreparedInputAdapter:
         live_rows = int(main.num_actual_tokens)
         rows = int(raw.token_to_req.shape[0]) if full_graph else live_rows
         requests = int(raw.seq_lens.shape[0])
-        token_to_req = raw.token_to_req[:rows].to(torch.int64)
+        token_to_req = raw.token_to_req[:rows]
         positions = raw.logical_positions[:rows]
-        # Match both Python indexing and the Triton preparation kernel: a
-        # negative request index addresses from the end, so graph-padding -1
-        # rows use the final request rather than request zero.
-        visible = torch.minimum(
-            positions.add(1).clamp_min(0),
-            raw.seq_lens[token_to_req],
-        ).to(torch.int32)
-        counts = visible.add(GBSA_COMPRESS_RATIO - 1).floor_divide(GBSA_COMPRESS_RATIO)
         max_groups = int(layer.indexer.token_topk // layer.indexer.compress_ratio)
-        counts = counts.clamp_max(max_groups)
         num_kv_heads = int(layer.num_kv_heads)
+        mx = getattr(layer, "kv_cache_dtype", None) == "mxfp8"
+        field = "qsa_mxfp8_gbsa_metadata" if mx else "qsa_gbsa_metadata"
         graph_offsets = getattr(main, "qsa_graph_query_offsets", None)
         if graph_offsets is not None:
             # Capture and replay use the same int64 buffer. The runner supplies
@@ -354,7 +355,7 @@ class Qwen4ExpPreparedInputAdapter:
         request_layout = cu_q is not None
         max_query_len = main.max_query_len if request_layout else 1
         signature = (
-            "gbsa",
+            field,
             max_query_len if graph_offsets is None else None,
             _tensor_storage_signature(cu_q) if cu_q is not None else None,
             int(layer.num_heads),
@@ -364,16 +365,25 @@ class Qwen4ExpPreparedInputAdapter:
             requests,
             rows,
             int(main.block_table.shape[1]),
-            _tensor_storage_signature(raw.token_to_req[:rows]),
+            _tensor_storage_signature(token_to_req),
             _tensor_storage_signature(positions),
             _tensor_storage_signature(raw.seq_lens),
         )
         prepared = prepared_this_step.get(signature)
         if prepared is not None:
-            main.qsa_gbsa_metadata = prepared
+            setattr(main, field, prepared)
             return
         if graph_offsets is not None:
             cu_q.copy_(graph_offsets)
+        # Match both Python indexing and the Triton preparation kernel: a
+        # negative request index addresses from the end, so graph-padding -1
+        # rows use the final request rather than request zero.
+        visible = torch.minimum(
+            positions.add(1).clamp_min(0),
+            raw.seq_lens[token_to_req.to(torch.int64)],
+        ).to(torch.int32)
+        counts = visible.add(GBSA_COMPRESS_RATIO - 1).floor_divide(GBSA_COMPRESS_RATIO)
+        counts = counts.clamp_max(max_groups)
         sparse_count = counts.unsqueeze(0).expand(num_kv_heads, -1).contiguous()
         # Metadata generation consumes the GBSA geometry and counts.  Selected
         # indices are produced later by LI and passed to the attention operator.
@@ -382,10 +392,12 @@ class Qwen4ExpPreparedInputAdapter:
             dtype=torch.int32,
             device=positions.device,
         )
-        kv_lengths = raw.seq_lens
+        grouped_prefill = cu_q is not None
         if cu_q is None:
             cu_q = torch.arange(rows + 1, dtype=torch.int64, device=positions.device)
             kv_lengths = visible
+        else:
+            kv_lengths = raw.seq_lens
         common = dict(
             cu_seqlens_q=cu_q,
             seqused_kv=kv_lengths,
@@ -393,7 +405,7 @@ class Qwen4ExpPreparedInputAdapter:
             layout_kv="PA_BBND",
             layout_sparse_pattern=4,
             mask_mode=1,
-            quant_mode=0,
+            quant_mode=GBSAQuantMode.MXFP8 if mx else 0,
             softmax_precision=0,
             residual_block_mode=0,
             is_consistent_topk=False,
@@ -409,10 +421,10 @@ class Qwen4ExpPreparedInputAdapter:
             max_seqlen_kv=int(main.block_table.shape[1] * GBSA_PAGE_SIZE),
             **common,
         )
-        main.qsa_gbsa_metadata = (
-            generated if request_layout and graph_offsets is None else self._persistent_metadata(signature, generated)
-        )
-        prepared_this_step[signature] = main.qsa_gbsa_metadata
+        # Eager prefill lengths vary per step; only graph replay needs persistent storage.
+        prepared = generated if grouped_prefill and graph_offsets is None else self._persistent_metadata(signature, generated)
+        setattr(main, field, prepared)
+        prepared_this_step[signature] = prepared
 
 
 __all__ = ["Qwen4ExpPreparedInputAdapter"]

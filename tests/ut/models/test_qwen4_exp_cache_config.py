@@ -321,6 +321,7 @@ def _allocate_mrv2_kv_cache(
     use_main: bool = False,
     kernel_block_sizes: list[int] | None = None,
     kv_transfer_config=None,
+    forward_context=None,
 ):
     """Allocate and materialize Qwen4Exp cache views through MRV2 only."""
     vllm_config = SimpleNamespace(
@@ -349,6 +350,9 @@ def _allocate_mrv2_kv_cache(
         "get_layers_from_vllm_config",
         lambda *_: layers,
     )
+    if forward_context is not None:
+        forward_context.update(layers)
+        vllm_config.compilation_config = SimpleNamespace(static_forward_context=forward_context)
     raw = attn_utils_v2._allocate_kv_cache(config, {}, torch.device("cpu"))
     if use_main:
         monkeypatch.setattr(attn_utils_v2, "_allocate_kv_cache", lambda *_, **__: raw)
