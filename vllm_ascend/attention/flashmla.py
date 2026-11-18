@@ -312,6 +312,8 @@ class FlashMLAMetadataBuilder:
         max_num_reqs: int,
         attn_mask: torch.Tensor,
         adapter: Any | None = None,
+        *,
+        max_query_len: int | None = None,
     ):
         self.dcp_size = getattr(impl, "dcp_size", 1)
         self.dcp_rank = getattr(impl, "dcp_rank", 0)
@@ -347,6 +349,13 @@ class FlashMLAMetadataBuilder:
         self.quant_max_cache_len = (
             impl.vllm_config.model_config.max_model_len if getattr(impl, "use_quant_flashmla", False) else None
         )
+        # Use the parent's stable decode/speculative capacity for every graph
+        # shape and replay. Batch/padding storage capacity is not a query length.
+        self.quant_max_query_len = max_query_len if self.quant_max_cache_len is not None else None
+        if self.quant_max_cache_len is not None and (
+            not isinstance(max_query_len, int) or isinstance(max_query_len, bool) or max_query_len < 1
+        ):
+            raise ValueError("QuantFlashMLA requires a positive per-request decode query capacity")
         self.buffers: dict[tuple, FlashMLADecode] = {}
         self.attn_mask = attn_mask
 
@@ -357,8 +366,8 @@ class FlashMLAMetadataBuilder:
         # tiling extent in QuantFlashMlaMetadata. These are capacity bounds;
         # cache_lens/used_q still carry the actual lengths, including zero.
         return {
-            "max_seqlen_q": tokens,
-            "max_seqlen_kv": tokens if current else self.quant_max_cache_len,
+            "max_seqlen_q": self.quant_max_query_len,
+            "max_seqlen_kv": self.quant_max_query_len if current else self.quant_max_cache_len,
         }
 
     def _allocate(self, tokens: int, rows: int, columns: int, causal: bool) -> FlashMLADecode:
@@ -424,6 +433,18 @@ class FlashMLAMetadataBuilder:
     def build(
         self, common, num_decodes: int, num_decode_tokens: int, has_prefill: bool, *, retain_for_graph: bool = False
     ) -> FlashMLADecode:
+        if self.quant_max_query_len is not None:
+            # Use only decode rows: a mixed batch's global max_query_len may
+            # belong to FIA prefill. CPU boundaries also exclude graph padding.
+            decode_cu = common.query_start_loc_cpu[: num_decodes + 1].clamp_max(num_decode_tokens)
+            query_lengths = decode_cu[1:] - decode_cu[:-1]
+            if query_lengths.numel() and (
+                int(query_lengths.min()) < 0 or int(query_lengths.max()) > self.quant_max_query_len
+            ):
+                raise ValueError(
+                    "QuantFlashMLA decode query length exceeds configured per-request capacity "
+                    f"{self.quant_max_query_len}: {query_lengths.tolist()}"
+                )
         # Mixed batches run outside FULL graph. Do not retain every prefill
         # shape. Retain only explicitly captured decode capacities: retaining
         # every eager token count grows total query storage quadratically.

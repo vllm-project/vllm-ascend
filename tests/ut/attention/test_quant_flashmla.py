@@ -12,7 +12,6 @@ from vllm_ascend.attention import mla_v1
 from vllm_ascend.attention.flashmla import FlashMLAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.attention.quant_flashmla import (
-    QUANT_FLASHMLA_FP8_MODE,
     QuantFlashMLAConfig,
     QuantFlashMLAImpl,
 )
@@ -57,7 +56,7 @@ def test_quant_flashmla_uses_delivered_metadata_and_attention_abi():
         lengths,
         8,
         1,
-        QUANT_FLASHMLA_FP8_MODE,
+        QuantFlashMLAConfig.FP8_QUANT_MODE,
         cu_seqlens_q=cu,
         seqused_q=used,
         max_seqlen_q=-1,
@@ -88,7 +87,7 @@ def test_quant_flashmla_uses_delivered_metadata_and_attention_abi():
         k_scale,
         table,
         lengths,
-        QUANT_FLASHMLA_FP8_MODE,
+        QuantFlashMLAConfig.FP8_QUANT_MODE,
         cu_seqlens_q=cu,
         seqused_q=used,
         attn_mask=None,
@@ -185,12 +184,13 @@ def test_quant_flashmla_metadata_buffers_keep_rope_bf16():
         vllm_config=SimpleNamespace(
             speculative_config=None,
             parallel_config=SimpleNamespace(),
-            model_config=SimpleNamespace(dtype=torch.bfloat16),
+            model_config=SimpleNamespace(dtype=torch.bfloat16, max_model_len=4096),
         ),
         num_heads=8,
         scale=0.125,
         dtype=torch.float8_e4m3fn,
         use_mla_rope=True,
+        use_quant_flashmla=True,
     )
     builder = FlashMLAMetadataBuilder(
         impl,
@@ -198,6 +198,7 @@ def test_quant_flashmla_metadata_buffers_keep_rope_bf16():
         max_num_reqs=2,
         attn_mask=torch.zeros((2048, 2048), dtype=torch.int8),
         adapter=adapter,
+        max_query_len=1,
     )
 
     buffers = builder._allocate(tokens=2, rows=2, columns=1, causal=True)

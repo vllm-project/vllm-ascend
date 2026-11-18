@@ -11,6 +11,7 @@ import ast
 import runpy
 import sys
 from contextlib import contextmanager
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
@@ -182,23 +183,55 @@ def runtime(monkeypatch):
     )
 
     def builder(
-        *, size=8, rank=0, interleave=1, heads=8, dtype=torch.float16, use_rope=False, speculative=True, pcp_size=1
+        *,
+        size=8,
+        rank=0,
+        interleave=1,
+        heads=8,
+        dtype=torch.float16,
+        use_rope=False,
+        speculative=True,
+        quantized=False,
+        query_capacity=None,
+        max_requests=8,
+        pcp_size=1,
     ):
         impl = SimpleNamespace(
             num_heads=heads,
             scale=0.125,
             dtype=dtype,
             use_mla_rope=use_rope,
+            use_quant_flashmla=quantized,
             dcp_size=size,
             dcp_rank=rank,
             pcp_group=SimpleNamespace(world_size=pcp_size),
             vllm_config=SimpleNamespace(
                 parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=interleave),
+                model_config=SimpleNamespace(max_model_len=140000),
                 speculative_config=SimpleNamespace(method="dspark") if speculative else None,
             ),
         )
+        adapter = None
+        if quantized:
+
+            @dataclass(frozen=True)
+            class MetadataAdapter:
+                config: object
+
+                def build_metadata(self, lengths, cu, used, **bounds):
+                    # Model the delivered metadata ABI, not the attention kernel.
+                    max_native_query_length = 16
+                    assert 1 <= bounds["max_seqlen_q"] <= max_native_query_length
+                    return metadata_op(lengths, cu_seqlens_q=cu, seqused_q=used, **bounds)
+
+            adapter = MetadataAdapter(api.FlashMLAConfig(heads, 0.125, return_softmax_lse=True))
         return api.FlashMLAMetadataBuilder(
-            impl, torch.device("cpu"), 8, torch.triu(torch.ones(2048, 2048, dtype=torch.int8), diagonal=1)
+            impl,
+            torch.device("cpu"),
+            max_requests,
+            torch.triu(torch.ones(2048, 2048, dtype=torch.int8), diagonal=1),
+            adapter=adapter,
+            max_query_len=query_capacity,
         )
 
     class AttentionKind(Enum):
@@ -269,6 +302,7 @@ def common(lengths, queries, *, tokens=None, causal=True):
     return SimpleNamespace(
         seq_lens=torch.tensor(lengths, dtype=torch.int32),
         query_start_loc=torch.tensor(boundaries, dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor(boundaries, dtype=torch.int32),
         block_table_tensor=torch.tensor([[0, 1, 2]] * len(lengths), dtype=torch.int32),
         slot_mapping=torch.full((actual,), -1, dtype=torch.int64),
         positions=torch.arange(actual),
@@ -460,8 +494,9 @@ def test_noncausal_draft_metadata_ignores_rejected_cpu_upper_bound(runtime):
         (False, True, 4, torch.float16, True),
     ],
 )
+@pytest.mark.parametrize("placeholder_descale", [False, True])
 def test_forward_matches_dense_with_strided_history_and_empty_ranks(
-    runtime, monkeypatch, causal, speculative, interleave, dtype, capturing
+    runtime, monkeypatch, causal, speculative, interleave, dtype, capturing, placeholder_descale
 ):
     runtime.context.capturing = capturing
     torch.manual_seed(41)
@@ -568,7 +603,7 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
         preprocessed = SimpleNamespace(
             ql_nope=query[..., :512],
             q_pe=query[..., 512:],
-            dequant_scale_q_nope=None,
+            dequant_scale_q_nope=torch.zeros(1) if placeholder_descale else None,
             current_k_nope=current_kv[..., :512] if split else None,
             current_k_pe=current_kv[..., 512:] if split else None,
         )
@@ -676,3 +711,97 @@ def test_causal_target_and_noncausal_draft_do_not_share_schedules(runtime):
     assert target.schedule.data_ptr() != draft.schedule.data_ptr()
     assert target.current is not None and draft.current is None
     assert target.cache_lens[0] == 1 and draft.cache_lens[0] == 2
+
+
+@pytest.mark.parametrize("causal", [False, True])
+def test_quant_metadata_uses_request_capacity_not_padded_batch(runtime, causal):
+    builder = runtime.builder(quantized=True, query_capacity=4, max_requests=64)
+    inputs = common([4] * 64, [4] * 64, tokens=256, causal=causal)
+    cu_before = inputs.query_start_loc_cpu.clone()
+    flash = builder.build(inputs, 64, 256, False, retain_for_graph=True)
+    original_addresses = addresses(flash)
+    torch.testing.assert_close(inputs.query_start_loc_cpu, cu_before)
+    assert flash.used_q.tolist() == [4] * 64 + [0]
+    for call in runtime.metadata_op.call_args_list:
+        assert call.kwargs["max_seqlen_q"] == 4
+        assert call.kwargs["max_seqlen_kv"] in (4, 140000)
+
+    # Same captured storage, fewer live tokens, and empty sharded history.
+    shorter = common([3] * 64, [3] * 64, tokens=256, causal=causal)
+    replay = builder.build(shorter, 64, 192, False)
+    assert replay is flash and addresses(replay) == original_addresses
+    assert replay.used_q.tolist() == [3] * 64 + [0]
+    if causal:
+        assert not replay.cache_lens.any()
+        assert replay.current is not None
+    empty = builder.build(common([0] * 64, [0] * 64, tokens=256, causal=causal), 64, 0, False)
+    assert empty is flash and not empty.used_q.any() and not empty.cache_lens.any()
+
+
+def test_quant_metadata_excludes_mixed_prefill_and_padding(runtime):
+    builder = runtime.builder(quantized=True, query_capacity=4, max_requests=64)
+    inputs = common([4, 128], [4, 128], causal=False)
+    inputs.max_query_len = 128  # Prefill is handled by FIA, not this decode adapter.
+    flash = builder.build(inputs, 1, 4, True)
+    assert flash.used_q.tolist() == [4, 0]
+    assert all(c.kwargs["max_seqlen_q"] == 4 for c in runtime.metadata_op.call_args_list)
+
+
+@pytest.mark.parametrize("length", [5, 17])
+def test_quant_metadata_rejects_actual_query_above_capacity(runtime, length):
+    builder = runtime.builder(quantized=True, query_capacity=4)
+    with pytest.raises(ValueError, match="per-request capacity"):
+        builder.build(common([length], [length]), 1, length, False)
+    runtime.metadata_op.assert_not_called()
+
+
+@pytest.mark.parametrize("capacity", [None, 0, -1, True])
+def test_quant_metadata_requires_positive_request_capacity(runtime, capacity):
+    with pytest.raises(ValueError, match="positive per-request"):
+        runtime.builder(quantized=True, query_capacity=capacity)
+
+
+@pytest.mark.parametrize("heads", [12, 48, 96])
+def test_quant_adapter_class_constraints_and_native_abi(runtime, monkeypatch, heads):
+    monkeypatch.setattr(
+        sys.modules["vllm_ascend.attention.utils"], "get_quant_flashmla_ops", lambda: None, raising=False
+    )
+    path = ROOT / "vllm_ascend/attention/quant_flashmla.py"
+    module = runpy.run_path(str(path))
+    config_type, impl_type = module["QuantFlashMLAConfig"], module["QuantFlashMLAImpl"]
+    config = config_type(heads, 0.125, mask_mode=config_type.NON_CAUSAL_MASK_MODE, return_softmax_lse=True)
+    assert config.quant_mode == 1
+    assert config_type.NUM_KV_HEADS == 1 and config_type.METADATA_PLANES == 2
+    for kwargs in (dict(num_heads=3), dict(quant_mode=2), dict(mask_mode=1)):
+        with pytest.raises(ValueError):
+            config_type(**dict(dict(num_heads=heads, softmax_scale=0.125), **kwargs))
+    meta = torch.zeros((2, 64), dtype=torch.int32)
+    operation = Mock(
+        return_value=(torch.zeros(heads, 2, 512, dtype=torch.bfloat16), torch.zeros(heads, 2, dtype=torch.float32))
+    )
+    metadata = Mock(return_value=meta)
+    adapter = impl_type(config, operation, metadata)
+    lengths = torch.tensor([0, 4], dtype=torch.int32)
+    cu = torch.tensor([0, 1, 2], dtype=torch.int32)
+    used = torch.ones(2, dtype=torch.int32)
+    adapter.build_metadata(lengths, cu, used, max_seqlen_q=4, max_seqlen_kv=140000)
+    assert metadata.call_args.args[1:] == (heads, 1, 1)
+    assert metadata.call_args.kwargs["max_seqlen_q"] == 4
+    q = torch.zeros(2, heads, 576, dtype=torch.float8_e4m3fn)
+    cache = torch.zeros(1, 128, 1, 576, dtype=torch.float8_e4m3fn)
+    q_scale = torch.ones(2, heads, dtype=torch.float32)
+    k_scale = torch.ones(1, dtype=torch.float32)
+    output, lse = adapter.attention(
+        q,
+        cache,
+        q_descale=q_scale,
+        k_descale=k_scale,
+        block_table=torch.zeros(2, 1, dtype=torch.int32),
+        cache_seqlens=lengths,
+        cu_seqlens_q=cu,
+        seqused_q=used,
+        metadata=meta,
+    )
+    assert output.shape == (heads, 2, 512) and lse.shape == (heads, 2)
+    assert operation.call_args.args[6] == 1
+    assert operation.call_args.kwargs["return_softmax_lse"]

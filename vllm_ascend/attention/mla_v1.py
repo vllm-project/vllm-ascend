@@ -27,7 +27,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode, MLAAttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -45,7 +45,6 @@ from vllm_ascend.attention.flashmla import (
     split_flashmla_requests,
 )
 from vllm_ascend.attention.quant_flashmla import (
-    QUANT_FLASHMLA_SUPPORTED_Q_HEADS,
     QuantFlashMLAConfig,
     QuantFlashMLAImpl,
 )
@@ -194,6 +193,7 @@ class AscendMLAAttention(MLAAttention):
             # The target may request FP8 while the draft is unquantized. Keep
             # the layer's floating format before the backend customizes pages.
             dtype, cache_dtype_str = self.impl.dtype, None
+            values["kv_quant_mode"] = KVQuantMode.NONE
 
         # Preserve upstream metadata and apply all owner fields together.
         # Reuse the physical packing selected by the execution implementation.
@@ -474,6 +474,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 scheduler_config.max_num_seqs,
                 self.attn_mask_builder.get_splitfuse_attn_mask(),
                 adapter=adapter,
+                max_query_len=self.decode_threshold,
             )
 
     def _build_external_flashmla(self, common_prefix_len, common, *, retain_for_graph: bool = False):
@@ -1183,7 +1184,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         hardware = get_current_hardware_profile()
         if not hardware.supports(HardwareCapability.MLA_FLASH) or not self.support_fp8_attention:
             return False
-        if self.num_heads not in QUANT_FLASHMLA_SUPPORTED_Q_HEADS or self.num_kv_heads != 1:
+        if self.num_heads not in QuantFlashMLAConfig.SUPPORTED_Q_HEADS or self.num_kv_heads != 1:
             return False
         if self.kv_lora_rank != FLASHMLA_V_DIM or self.qk_rope_head_dim != FLASHMLA_QK_DIM - FLASHMLA_V_DIM:
             return False
@@ -1197,7 +1198,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # DCP history consumes all group heads; the current chunk keeps the
         # local heads. Both adapters must accept their actual head counts.
         dcp_size = config.parallel_config.decode_context_parallel_size
-        if self.use_pcp or self.num_heads * dcp_size not in QUANT_FLASHMLA_SUPPORTED_Q_HEADS:
+        if self.use_pcp or self.num_heads * dcp_size not in QuantFlashMLAConfig.SUPPORTED_Q_HEADS:
             return False
         if not supports_component_major_mla_pd(config):
             return False

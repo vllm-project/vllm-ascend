@@ -1,19 +1,18 @@
 # Kimi DSpark C8 with QuantFlashMLA
 
-This integration uses the existing CANN `quant_flash_mla_metadata` and
-`quant_flash_mla` interfaces for compatible Kimi dense-MLA draft decode on
-Ascend A5. It builds on [PR #21569](https://github.com/vllm-project/vllm-ascend/pull/21569)
-and includes follow-up fixes for real weight loading, query quantization and
-cache writing. It does not add a native operator.
+This integration uses the existing CANN QuantFlashMLA attention and metadata
+operators for Kimi DSpark C8 decode on Ascend A5 with Model Runner V2. It builds
+on [PR #21569](https://github.com/vllm-project/vllm-ascend/pull/21569). It does not
+introduce a model, native operator, environment variable or ModelRunner override.
 
 ## Configuration and scope
 
-Use Model Runner V2, a compatible BF16-compute target/draft pair, and a draft
-checkpoint containing the attention quantization recipe and scales. The draft's
-linear projections may remain floating point: C8 cache storage does not imply
-quantized linear weights.
+Use a compatible target and a draft checkpoint containing its own ModelSlim
+attention recipe and KV scales. The draft's linear projections may remain BF16:
+FP8 KV storage does not imply quantized linear weights. An unquantized draft
+must not inherit the target's FP8 cache format.
 
-A minimal eager configuration, with paths replaced for the deployment, is:
+A minimal eager example (replace deployment paths) is:
 
 ```bash
 VLLM_USE_V2_MODEL_RUNNER=1 vllm serve /path/to/target \
@@ -22,168 +21,154 @@ VLLM_USE_V2_MODEL_RUNNER=1 vllm serve /path/to/target \
   --tensor-parallel-size 2 \
   --kv-cache-dtype fp8 \
   --enforce-eager \
-  --speculative-config '{"method":"dspark","model":"/path/to/draft-c8","quantization":"ascend","num_speculative_tokens":7,"draft_sample_method":"greedy","rejection_sample_method":"standard","enable_adaptive_verification":false}'
+  --speculative-config '{"method":"dspark","model":"/path/to/draft-c8","quantization":"ascend","num_speculative_tokens":3,"draft_sample_method":"greedy"}'
 ```
 
-The example does not require a `--block-size` override. Quantized writer staging
-uses the backend's supported kernel page size, independently of the manager's
-provisional block size. Existing floating-writer page limits are preserved.
+Compatible DCP configurations additionally use
+`--decode-context-parallel-size` and the target's required indexer configuration.
+Both local/current and gathered/history query-head counts must be supported by
+the delivered QuantFlashMLA operator. PCP greater than one remains excluded.
+No `--block-size=128` workaround is required for the quantized staging workspace.
 
-Both QuantFlashMLA interfaces must be available with the expected ABI. An image
-tag, installation-directory name, or Python wheel version alone does not
-identify those interfaces. Check the selected attention backend; unavailable
-operators or unsupported geometry do not exercise this integration.
-
-DCP is supported when both the local current-query head count and the gathered
-history-query head count are supported by QuantFlashMLA. PCP greater than one
-remains excluded. The DCP path propagates query descales along the same head
-axes as the query, uses the writer's actual FP8 rows for replicated current KV,
-and requests LSE for the existing distributed attention merge.
-
-For the bounded TP2/DCP2 eager validation, add
-`--decode-context-parallel-size 2 --attention_config.indexer_kv_dtype fp8`
-and use `num_speculative_tokens=3`. This is not a claim that arbitrary TP/DCP
-head geometries or PD/graph combinations are validated.
-
-Real prefill attention retains the existing FIA path. Draft context-KV writes
-may produce FP8 cache through the writer, but this is not a QuantFlashMLA
-prefill-attention call. Multi-token speculative decode remains decode.
+Both QuantFlashMLA APIs must be present and ABI-compatible with the runtime.
+Image tags, directory names and wheel version strings alone do not establish
+compatibility. Existing floating-writer page limits and upstream cache-spec
+customization remain in effect. Real prefill attention retains its existing
+path; writing FP8 context KV is not a QuantFlashMLA prefill-attention call.
 
 ## Integration contracts
 
-- Resolve the draft quantization configuration and local recipe layer IDs under
-  the draft loader context, without changing target ownership or the recipe.
-- Keep unquantized draft cache storage in the implementation's floating dtype,
-  even when the target requests FP8 storage.
-- Classify both projection weight methods during fused postprocessing; reject
-  incompatible pairs instead of inventing a `weight_scale`.
-- Supply persistent FP32 RoPE and latent scale vectors to the KV writer. Refresh
-  their values in place on weight reload.
-- Scatter quantized staging rows into the persistent cache using real slots.
-  Preserve optional unquantized BF16 returns for their existing consumers.
-- For the full-quant backend, quantize the complete query in the cache's units:
-  `[latent_query, rope_query / kv_descale]`. Use the returned per-token/head
-  descale for both components. Keep the other MLA preprocessing path unchanged.
-- Preserve the existing raw-cache layout, metadata and execution extension
-  points. No new environment variable or inference-time CPU inspection is added.
+- Resolve the draft's recipe using its local layer namespace without mutating
+  target configuration or checkpoint names.
+- Publish floating draft cache dtype and quantization metadata at the attention
+  owner before upstream backend/page customization.
+- Classify both fused projection methods; reject unsupported combinations
+  instead of inventing linear weight scales.
+- Keep persistent RoPE/latent scale buffers and refresh them in place on reload.
+- Scatter the writer's quantized staging rows, not its optional BF16 return
+  tensors. The DCP current cache uses the same actual FP8 rows.
+- Jointly quantize the complete query in the existing cache units, keeping its
+  descale aligned with the gathered/history or local/current head axes.
+- Request LSE for the existing DCP merge. Floating attention must not slice or
+  consume the quantized path's descale, including one-dimensional placeholders.
+- Separate total token-buffer capacity from per-request query capacity. The
+  parent's decode threshold supplies a stable metadata bound across capture and
+  replay. A 256-token padded batch is not a 256-token individual query.
+- Validate decode rows using existing CPU query boundaries; mixed-batch prefill
+  lengths and graph padding do not set the decode bound. Actual cache lengths,
+  query boundaries and used counts remain unchanged, including empty histories.
 
-## Validation provenance
+## Current-main integration checks
 
-**This main-rebased Draft must be validated at its own revision.** The evidence
-below is historical evidence for an isolated R5 source snapshot, not proof that
-all subsequent main dependencies or the new image combination have passed.
+The PR was rebased onto Ascend main
+`eafc123647e17d9c4332d92f792914aa1be585f5`. That baseline moves MLA cache-spec
+construction into the attention owner. The floating-draft fix follows that
+extension point instead of restoring the removed worker implementation, and
+clears inherited KV quantization metadata for an unquantized draft.
 
-Historical sources were PR #21569 head
-`51a96c8180c33f249fd77f64f71201e5f7180044` plus the follow-up fixes, paired with
-vLLM `24420b7a341af37a9bc3186e6fc6062512e0aa58`. The tested MLA SHA256 was
-`3d606c53c2dff5948395f4316c2ba3aaa94470940ec7146e41ed99f4c05b4452`.
-The fixed image ID was
-`sha256:04c836f810f42a03639e7831a1b1fedc51f1375cb55f9c2626d21cd0b70e5c7a`.
-Its Python framework sources were overlaid; native libraries and dependencies
-were retained from that image. An image release label is not the source revision.
+The query-capacity and nonquantized-descale fixes below were transferred from
+sealed device-tested sources. Operator ABI constants are class-local immutable
+configuration constants, not new module-level variables.
 
-### Historical single-node evidence
+The two standalone DCP CPU suites passed **52 tests** on the rebased source.
+Targeted CPU contracts cover DCP orchestration, BF16 placeholders, quantized
+scale selection, batch/padding/empty-history bounds, graph buffer reuse, mixed
+prefill exclusion and the relocated cache-owner scope. They execute production
+methods with mocked runtime/kernel dependencies; they are not NPU acceptance.
+Ruff lint/format passed for all 17 changed Python files; Python parsing,
+release-note YAML parsing and `git diff --check` passed. `bash format.sh ci`
+was attempted but requires the unavailable `pre-commit` executable.
 
-A 93-layer reduced target with eight experts/top-k eight was tested on Ascend
-950 DT, TP2, with a five-layer DSpark draft. Runs used standard greedy
-verification, fixed seed, and no entropy, synthetic or adaptive acceptance.
-All model configurations omitted user `block_size`.
+Full framework collection against the pinned vLLM revision currently encounters
+an upstream `patch_kimi_k25` import incompatibility involving
+`get_rope_shape_decorate`; the unmodified upstream baseline reproduces the
+same collection failure. Exact rebased-revision framework and NPU reruns remain
+required before merging. Do not treat the older device run as whole-tree parity.
 
-| Test | Observed result | Limit |
-| --- | --- | --- |
-| Writer workspace CPU/mock tests | 17 passed | Not native execution |
-| Native writer boundaries | Eight cases completed, including expected over-capacity rejection | Empty, page-boundary, nonsequential-slot and unwritten-row checks |
-| Eager target-only/BF16/C8 | 64 requests per state, all paired final token sequences equal | 30 unique inputs; repetition is not extra independent data |
-| Cache lifecycle | 33 requests per state, actual peak four live requests, no observed live-block collision | Controlled cache budget; no forced preemption |
-| Decode-only graph | Ten requests per state matched its eager reference; actual target/draft capture and replay observed | Intermediate values were not inspected on every replay |
+## Eight-node device evidence (2026-11-18)
 
-For the 24 ordinary unique inputs, BF16 accepted 2479/4522 draft tokens
-(54.8209%) and C8 accepted 2465/4592 (53.6803%). Six paired per-request ARs
-improved, twelve were unchanged and six decreased. Artificial page-boundary
-inputs are reported separately and must not be pooled into representative AR.
-Counts include verification before final output-length trimming.
+### Provenance
 
-The target-only baseline itself produced whitespace-only text for five of the
-24 ordinary inputs and repetitive text for others. Inputs were frozen raw token
-IDs, not chat-template requests. Matching these outputs is evidence about
-execution/cache consistency, not answer-quality acceptance. No production AR,
-full-expert model quality or performance claim follows from these results.
+The tested runtime used vLLM
+`4ba787ec9959e566d3b587a796dff07673324da5`, Ascend
+`568d12495214ea4a06bbc4721d40ca4a01d7621c` plus the integration and fixes, and image
+`sha256:b235e6cd7795575ff26289c2fac5a77e691ea07ab29c44637474e8caeb4efc30`.
+The operator package was ops-transformer 9.3.0 (`20261031_220309764`). These are
+provenance pins, not minimum supported versions.
 
-### Historical single-node PD evidence
+Final tested source SHA256:
 
-Separate Prefill TP2 and Decode TP2 instances, with DCP/PCP one, used the same
-frozen sources and target through MooncakePullConnector/Ascend Direct. Three
-states completed eleven requests each. Two core raw completions matched a
-no-PD baseline token for token, and actual transfer parameters plus native
-receive completion were recorded. Boundary requests had transfer evidence,
-not paired no-PD token baselines. A separate two-request simultaneous-scheduling
-check completed for BF16/C8. The online containers additionally installed
-`orjson==3.11.4`; this was not part of the unchanged historical offline image.
+| File | SHA256 |
+| --- | --- |
+| `attention/context_parallel/mla_cp.py` | `f6544c7bce60d87b563eb0cfbbc15aca65dbe68e23a0cb042311bfe9fc116b58` |
+| `attention/flashmla.py` | `4b61c1e5538ee55d7b7f3fbe66487c98a3ed4c29131b09440e7107dcaf184a9e` |
+| `attention/mla_v1.py` | `3bcaa9f8cdd60896da3e4921d03728f8234477f39de54d669e2ab3f591f7c883` |
 
-The raw completions were repetitive. Chat requests returned HTTP 400 because
-the tokenizer had no chat template; those were retained as failures. No
-multi-node, PD+DCP, graph-PD or service-performance acceptance is claimed.
+### Service and cases
 
-## Tests and remaining checks
+- Eight hosts / 64 Ascend 950DT devices: four prefill and four decode hosts;
+  TP8 per host, DP4 per role, P DCP1 / D DCP8, PP1 / PCP1, MooncakeConnectorV2.
+- Full 93-layer, 896-expert W4A8_MXFP target; the same target weights and
+  target FP8 KV/indexer configuration in both variants. Only draft checkpoint,
+  explicit draft quantization and draft cache precision differ materially.
+- Same-source five-layer Block7 BF16/C8 drafts, three speculative tokens.
+  This is not the original three-layer Block5 draft configuration.
+- Both roles: max model length 140000, max sequences 64; P batch tokens 16384,
+  memory utilization 0.90 and eager; D batch tokens 768, memory utilization
+  0.92, block/interleave 768 and FULL_DECODE_ONLY. P block size was not forced.
+  EP, prefix caching and the role-specific optimization flags were retained.
+- GPQA diamond: the same fixed 30 questions, thinking enabled, temperature 1.0,
+  top-p 0.95, output limit 24576, client concurrency 32. Identical prompt/reference
+  ordering was verified. ModelScope revision
+  `1b5d04fbb4c58adc1be8ec92bc339e84c5fab826`.
+- Performance: 16 requests from `GSM8K_prefix0_in16384_bs200_kimi`, each with
+  16472 rendered input tokens and 1024 output tokens, client concurrency four.
+  ModelScope revision `0dc81652f368433cd9b4059194d363d86ff17fec`.
+- AISBench 3.1.20260630; all eight endpoints became healthy, all 32 decode ranks
+  completed graph capture and actual PD transfer/request evidence was retained.
 
-Focused tests cover API detection, descale forwarding, draft recipe ownership,
-projection methods, joint query quantization, cache specs and staging geometry.
-The tensor-view test checks shape, dtype, shared address and values rather than
-requiring Python object identity. Cache-spec fixtures explicitly configure
-unrelated sparse-offload/HiSparse settings. Floating staging tests preserve the
-current main PROLOG page limit.
+### Single paired measurement
 
-Before leaving Draft, run the affected pytest suites with the main-pinned vLLM
-revision, native writer and QuantFlashMLA checks, and the default-configuration
-three-state model comparison on the exact proposed revision and native package.
-Also complete repository format/CI checks. Expanded DCP and combined PD/graph
-validation, package compatibility beyond the checks below, random-sampling distribution tests, long
-contexts, full-expert acceptance rates and uninstrumented performance remain
-separate validation work. Raw model data and deployment logs are not included
-in this repository.
+| Metric | BF16 draft | C8 draft |
+| --- | ---: | ---: |
+| GPQA correct / total | 28 / 30 | 29 / 30 |
+| GPQA accuracy | 93.3333% | 96.6667% |
+| GPQA accepted / drafted / rounds | 81212 / 185622 / 61874 | 70083 / 156849 / 52283 |
+| GPQA acceptance fraction | 43.7513% | 44.6818% |
+| Performance requests successful / total | 16 / 16 | 16 / 16 |
+| Performance accepted / drafted / rounds | 11788 / 16917 / 5639 | 11704 / 17181 / 5727 |
+| Performance acceptance fraction | 69.6814% | 68.1218% |
+| Output throughput (tokens/s) | 167.2521 | 170.4117 |
+| Mean TTFT (ms) | 8677.5 | 8446.2 |
+| Mean TPOT (ms) | 13.9 | 14.1 |
+| Mean request latency (ms) | 22921.1 | 22884.6 |
 
-## Current integration checks
+Acceptance counters cover each complete stage including native warmup; native
+performance timing excludes warmup. Counters were separated by role, deduplicated
+by logical DP and not multiplied by TP. All prefill acceptance deltas were zero.
+TTFT/TPOT retain AISBench's native streaming definitions, not a claim of strict
+per-token ITL. Execution order was C8 then BF16, without alternating reruns.
+These small samples do not establish statistical significance, general quality
+non-regression or stable speedup. The 140000 setting does not mean 140000-token
+requests were exercised. Actual prefix-cache hit coverage and maximum-throughput
+capacity were not established.
 
-The two DCP CPU contract suites were rerun against this integrated source in an
-isolated CPU-only container: 29 passed. The four changed production files are
-AST-identical to the sealed device-tested DCP overlay (formatting may differ).
-This is not whole-tree equivalence or a new model/NPU run. Ruff lint/format and
-`git diff --check` passed. `bash format.sh ci` was attempted but blocked because
-`pre-commit` is unavailable.
+### Earlier bounded evidence and remaining work
 
-## Bounded DCP validation (2026-11-17)
+Earlier R1-R5 testing covered real writer boundaries, reduced-target eager
+output parity, cache reuse and small graph/PD cases. A small TP2/DCP2 eager run
+also matched same-topology target tokens. Those results use older source/runtime
+combinations and are not additional full-model samples for the table above.
 
-The isolated tested source used vLLM
-`4ba787ec9959e566d3b587a796dff07673324da5` and Ascend main
-`568d12495214ea4a06bbc4721d40ca4a01d7621c`, with R1-R5 and the DCP
-increment. Its image was
-`sha256:b235e6cd7795575ff26289c2fac5a77e691ea07ab29c44637474e8caeb4efc30`,
-using ops-transformer 9.3.0 (`20261031_220309764`). These are experimental
-provenance pins, not minimum supported versions. This PR is based on a different
-main commit; exact-revision framework/NPU reruns remain required.
+The expanded tests reproduced two integration bugs before the fixes: BF16 DCP
+sliced a one-dimensional descale placeholder, and C8 graph metadata passed the
+whole padded batch size as the per-request query bound. A real 64-request /
+256-token metadata/current-attention probe passed after the latter repair with
+zero output and causal-LSE error against its constant-value oracle.
 
-- TP2/DCP2, eager, 93-layer/eight-expert target, five-layer draft and three
-  speculative tokens: target-only, BF16 draft and C8 draft each completed four
-  requests (two raw-token inputs repeated twice), 64 output tokens, and exit 0.
-  Both draft states matched the same-topology target tokens and repeated exactly.
-- Both C8 ranks executed QuantFlashMLA with LSE for history (96 heads) and current
-  (48 heads), 190 calls per path per rank. FP8 query/cache and corresponding
-  descale shapes were observed; no floating FlashMLA calls were recorded.
-- 29 CPU contracts, ten native LSE cases including empty histories, and actual
-  FP8 current-writer byte checks passed on the isolated source. CPU contracts
-  extract production methods with mocked dependencies; they are not full
-  framework or native-kernel tests.
-- Metadata uses explicit query/cache capacity bounds while retaining actual
-  zero cache lengths and used-query counts. It does not insert a fake key.
-- In a separate target-only four-group comparison, original main and the R1-R5
-  candidate matched tokens and returned top-five logprobs at each matching DCP
-  setting. Both exhibited the same DCP1-versus-DCP2 difference on one input.
-  This is not an explanation of the numerical difference or a quality claim.
-
-The later TP4/DCP4 BF16 MooncakeConnectorV2 PD experiment completed requests,
-real KV transfers and decode graph replay, but some outputs differed from the
-matched non-PD reference. Input/transfer attribution was interrupted before
-requests completed. C8 PD+DCP4+graph, effective prefix hits and expanded boundary
-coverage remain unvalidated. No deployment/observer scripts from those
-experiments are included here. The DCP eager result must not be presented as
-acceptance of that combined PD case.
+Before leaving Draft, run exact-revision framework and NPU validation against
+the current main-pinned vLLM, complete format/CI checks and obtain required owner
+review. Wider datasets, repeated performance measurements, random-distribution
+quality, actual long-context requests and additional topology coverage remain
+separate work. Native traces, model weights, operational scripts and deployment
+endpoints are not included in this PR.
