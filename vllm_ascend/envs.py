@@ -99,7 +99,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # default backend. Default: 0 (disabled); Gemma4 MTP users on A2/A3 must
     # opt in explicitly. Valid values: 0 or 1.
     # This configuration is not sensitive.
-    "VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY", "0"))),
+    "VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY": lambda: _bool_env("VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY", False),
 }
 
 # end-env-vars-definition
