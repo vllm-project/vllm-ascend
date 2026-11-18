@@ -21,7 +21,7 @@ scipy
 soundfile
 pytest_mock
 mindstudio-probe>=8.3.0
-xlite==0.2.0rc3
+xlite==0.2.0rc5
 uc-manager
 ninja
 coverage

@@ -41,6 +41,7 @@ def _make_pp_layer_count_worker(pp_rank, pp_size=2, initial_num_layers=4, use_la
         for group_id in range(num_groups)
     ]
     worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
+    worker.mamba_state_sharding = {}
     attention_spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.uint8)
     worker.kv_cache_config = KVCacheConfig(
         num_blocks=2,

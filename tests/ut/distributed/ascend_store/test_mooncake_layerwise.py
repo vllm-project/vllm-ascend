@@ -197,6 +197,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
     @staticmethod
     def _make_worker() -> KVPoolWorker:
         worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
+        worker.mamba_state_sharding = {}
         worker.kv_role = "kv_producer"
         worker.consumer_is_to_put = False
         worker.dcp_size = 1

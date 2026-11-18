@@ -1,0 +1,4 @@
+pr: 21557
+entries:
+  - category: bugfix
+    text: KV Pool refreshes SWA block IDs before saving and skips released blocks to prevent stale-slot writes. Non-layerwise saves now wait for queued transfers to finish before returning.

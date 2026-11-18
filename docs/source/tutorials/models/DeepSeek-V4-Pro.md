@@ -34,7 +34,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 | `DeepSeek-V4-Pro-w4a8-mtp`  | 2 Atlas 800I A3 (128GB × 8) nodes or 4 Atlas 800I A2 (64GB × 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp) |
 | `DeepSeek-V4-Pro-0813-w4a8` | 2 Atlas 800I A3 (128GB × 8) nodes or 4 Atlas 800I A2 (64GB × 8) nodes | [ModelScope](https://modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-0813-w4a8)    |
 | `DeepSeek-V4-Pro-0813-w4a4c8` | 950PR&950DT products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_pro_w4a4c8.yaml) |
-| `DeepSeek-V4-Pro-0813` | 950DT products | [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813) |
+| `DeepSeek-V4-Pro-0813` | 950DT products | [ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4-Pro-0813) \| [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813)|
 
 - `DeepSeek-V4-Pro-0813-w4a8` (Official release with DSpark after quantization): This checkpoint includes the DSpark draft weights, so no separate draft-model path is required.
 
@@ -2288,8 +2288,8 @@ Select the tab that matches the deployment hardware.
     ```
 
     On every Prefill and Decode node, set `MOONCAKE_CONFIG_PATH` to the full path of
-    `mooncake.json` and preload jemalloc. The pooled startup scripts below export both
-    from `MOONCAKE_CONFIG_DIR`.
+    `mooncake.json`. The pooled startup scripts below set this path using
+    `MOONCAKE_CONFIG_DIR`.
 
     Reuse `launch_online_dp.py` from [Section 5.2](#dsv4pro-5-2-a2).
 
@@ -2326,7 +2326,6 @@ Select the tab that matches the deployment hardware.
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export VLLM_USE_V2_MODEL_RUNNER=1
     export MOONCAKE_CONFIG_PATH="$MOONCAKE_CONFIG_DIR/mooncake.json"
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
 
     vllm serve /path/to/DeepSeek-V4-Pro-0813-w4a8 \
       --host 0.0.0.0 \
@@ -2441,7 +2440,6 @@ Select the tab that matches the deployment hardware.
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export VLLM_USE_V2_MODEL_RUNNER=1
     export MOONCAKE_CONFIG_PATH="$MOONCAKE_CONFIG_DIR/mooncake.json"
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
     export HCCL_HOST_SOCKET_PORT_RANGE=auto
     export HCCL_NPU_SOCKET_PORT_RANGE=auto
 

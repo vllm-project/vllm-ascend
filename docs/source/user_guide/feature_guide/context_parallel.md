@@ -9,6 +9,10 @@ Context Parallel (CP) serves long-context requests by splitting work or KV-cache
 
 For a general introduction to these two strategies, see the upstream [vLLM Context Parallel Deployment](https://docs.vllm.ai/en/latest/serving/context_parallel_deployment/) guide.
 
+!!! warning "Deprecation Notice for GQA Models"
+
+    Decode Context Parallelism (DCP) for **GQA models** is **deprecated** as of v0.32.0 and has entered the sunset process (will be removed in a future release). GQA models naturally shard KV heads across TP ranks, and in speculative decoding, GQA draft models maintain native TP sharding under target DCP. Maintaining dedicated GQA DCP metadata and communication paths is no longer justified. Note that DCP for **MLA and SFA models** remains fully supported and recommended. For more details, see [RFC #21305](https://github.com/vllm-project/vllm-ascend/issues/21305).
+
 ## Supported Scenarios
 
 ### Prefill Context Parallel { #prefill-context-parallel }

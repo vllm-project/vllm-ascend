@@ -22,6 +22,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.models.qwen4_exp.amd import mtp as upstream_mtp
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.config import iter_rope_parameters
 
 from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 
@@ -30,6 +31,44 @@ from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_sh
 from . import model as _model  # noqa: F401
 
 _MTP_LAYER_PREFIX = re.compile(r"^mtp\.layers\.(\d+)(?=\.)")
+
+
+def _align_qwen4_exp_mtp_position_cache(vllm_config: VllmConfig) -> None:
+    """Size Qwen4Exp's MTP RoPE cache for the target position space."""
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None:
+        return
+
+    draft_model_config = speculative_config.draft_model_config
+    target_model_config = speculative_config.target_model_config
+    if draft_model_config is None or target_model_config is None:
+        return
+
+    architectures = set(draft_model_config.architectures or ())
+    if "Qwen4ExpMTP" not in architectures:
+        return
+
+    draft_text_config = draft_model_config.hf_text_config
+    draft_max_position_embeddings = getattr(
+        draft_text_config,
+        "max_position_embeddings",
+        None,
+    )
+    target_max_model_len = target_model_config.max_model_len
+    if draft_max_position_embeddings is None or draft_max_position_embeddings >= target_max_model_len:
+        return
+
+    # Dict-style target HF overrides are not applied to the nested MTP draft.
+    # Only grow Qwen4Exp's plain RoPE cache; copying target YaRN parameters would
+    # change the draft's rotary frequencies rather than just its cache capacity.
+    if not all(params.get("rope_type", "default") == "default" for params in iter_rope_parameters(draft_text_config)):
+        return
+
+    draft_text_config.max_position_embeddings = target_max_model_len
+    draft_model_config.max_model_len = max(
+        draft_model_config.max_model_len,
+        target_max_model_len,
+    )
 
 
 def _remap_modelslim_mtp_layer_ids(
@@ -72,6 +111,9 @@ def _make_draft_vllm_config(
     vllm_config: VllmConfig,
     mtp_start_layer_idx: int,
 ) -> VllmConfig:
+    # Run before the Qwen4Exp MTP layers construct their rotary embeddings so
+    # graph capture cannot retain an undersized cache.
+    _align_qwen4_exp_mtp_position_cache(vllm_config)
     draft_vllm_config = _upstream_make_draft_vllm_config(
         vllm_config,
         mtp_start_layer_idx,

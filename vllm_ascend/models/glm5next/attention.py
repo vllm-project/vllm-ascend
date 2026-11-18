@@ -49,6 +49,16 @@ class Indexer(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
+        indexer_kv_dtype = vllm_config.attention_config.indexer_kv_dtype
+        if indexer_kv_dtype not in ("auto", "bf16", "fp8", "int8"):
+            raise ValueError(f"GLM KPool indexer_kv_dtype must be auto, bf16, fp8 or int8, got {indexer_kv_dtype!r}.")
+        if indexer_kv_dtype == "fp8":
+            kv_transfer_config = vllm_config.kv_transfer_config
+            if kv_transfer_config is not None and any(
+                kv_transfer_config.has_connector(connector)
+                for connector in ("OffloadingConnector", "PreemptOffloadConnector")
+            ):
+                raise NotImplementedError("GLM KPool FP8 LI cache does not support KV offloading.")
         self.vllm_config = vllm_config
         self.config = config
         self.quant_config = quant_config
@@ -98,10 +108,10 @@ class Indexer(nn.Module):
         self.scale_fmt = None
         self.quant_block_size = self.head_dim
         self.topk_indices_buffer = topk_indices_buffer
-        # Completed pools store BF16 vectors without quantization scales.
+        # Completed pools store BF16, FP8 with FP32 scales, or INT8 with FP16 scales.
         self.k_cache = Glm5NextIndexerCache(
             head_dim=self.head_dim,
-            dtype=torch.bfloat16,
+            dtype={"fp8": torch.float8_e4m3fn, "int8": torch.int8}.get(indexer_kv_dtype, torch.bfloat16),
             cache_role="indexer",
             prefix=f"{prefix}.k_cache",
             cache_config=cache_config,

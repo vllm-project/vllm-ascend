@@ -26,6 +26,7 @@ def _select_metadata() -> SimpleNamespace:
         logical_positions=torch.zeros(1, dtype=torch.int64),
         seq_lens=torch.ones(1, dtype=torch.int32),
         query_start_loc=torch.arange(2, dtype=torch.int32),
+        num_actual_tokens=1,
     )
 
 
@@ -33,11 +34,11 @@ def test_select_always_uses_cann_lightning_v2(monkeypatch) -> None:
     sentinel = torch.zeros(1, 2051, dtype=torch.int32)
     calls: list[tuple] = []
 
-    def lightning(*args):
+    def lightning(*args, **kwargs):
         calls.append(args)
         return sentinel
 
-    monkeypatch.setattr(ascend_qsa, "qsa_select_paged_tokens_lightning", lightning)
+    monkeypatch.setattr(ascend_qsa, "qsa_select_paged_tokens_lightning_v2", lightning)
     result = _make_indexer()._select(torch.zeros(1, 4, 128), _select_metadata(), None)
 
     assert result is sentinel

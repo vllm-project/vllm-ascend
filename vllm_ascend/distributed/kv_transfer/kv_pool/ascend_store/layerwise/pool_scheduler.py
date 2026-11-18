@@ -17,6 +17,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     get_layerwise_kv_cache_specs,
     get_layerwise_reuse_config,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mamba_state_sharding import (
+    resolve_mamba_state_sharding,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_str,
     get_block_hashes,
@@ -43,6 +46,9 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
+        self.mamba_state_sharding = (
+            resolve_mamba_state_sharding(vllm_config, kv_cache_config) if self.num_speculative_blocks_by_group else {}
+        )
         cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
         if (
             self.use_layerwise
@@ -285,13 +291,7 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
         return num_hit_blocks * self._block_size
 
     def _make_layerwise_hit_check_keys(self, group_id: int, block_hash_hex: str) -> list[str]:
-        """All-rank keys for scheduler-side hit check, built by the
-        backend's protocol module.
-
-        Single-group uses PR #11585 format; multi-group includes group_id.
-        A block is a hit only when every PP stage has saved it, so the
-        protocol helper enumerates all stages and head/TP ranks.
-        """
+        """Build the complete target and optional draft snapshot key set."""
         assert self.layerwise_keys is not None
         draft_keys = self.dspark_prefix_keys
         if draft_keys is not None and group_id in self.dspark_draft_only_group_ids:
@@ -300,7 +300,12 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
         head_or_tp_ranks = (
             self.tp_size if group_id in self.num_speculative_blocks_by_group else self.tp_size // self.put_step
         )
-        keys = self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, head_or_tp_ranks)
+        keys = self.layerwise_keys.make_hit_check_keys(
+            group_id,
+            block_hash_hex,
+            head_or_tp_ranks,
+            sharding=self.mamba_state_sharding.get(group_id),
+        )
         if draft_keys is not None:
             keys.extend(draft_keys.make_hit_check_keys(block_hash_hex))
         return keys

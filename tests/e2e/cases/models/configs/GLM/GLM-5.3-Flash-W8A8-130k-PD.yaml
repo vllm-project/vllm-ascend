@@ -148,7 +148,7 @@ templates:
       - --speculative-config
       - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": false}'
       - --additional_config
-      - '{"multistream_overlap_shared_expert": true, "enable_shared_expert_dp": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": true}, "enable_flashcomm1": true}'
+      - '{"multistream_overlap_shared_expert": true, "enable_shared_expert_dp": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "enable_flashcomm1": true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "36580", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 1}, "decode": {"dp_size": 8, "tp_size": 2}}}'
 

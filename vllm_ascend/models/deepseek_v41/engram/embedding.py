@@ -161,10 +161,12 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         self._codes_uva = HostUvaBuffer(codes_shape, self.storage_dtype, device)
         if quantized:
             self._scales_uva = HostUvaBuffer(scales_shape, self.scale_dtype, device)
+            assert self._scales_uva.tensor is not None
             self._scales_uva.tensor.zero_()
         # Same reason as the device path: aclrtMallocHost hands back whatever
         # was in the pages, and the profiling forward looks up before the
         # checkpoint load fills them.
+        assert self._codes_uva.tensor is not None
         self._codes_uva.tensor.zero_()
         return self._codes_uva.tensor, self._scales_uva.tensor if self._scales_uva is not None else None
 

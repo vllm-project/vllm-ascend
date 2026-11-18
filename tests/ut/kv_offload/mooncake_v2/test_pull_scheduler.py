@@ -479,6 +479,52 @@ def test_zero_external_tokens_acknowledges_without_worker_transfer() -> None:
     scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
 
 
+def test_request_finished_acks_unallocated_remote_prefill() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._recving_thread = MagicMock()
+    request = make_request(
+        request_id="request-d",
+        status=RequestStatus.FINISHED_ABORTED,
+        kv_transfer_params={
+            "do_remote_prefill": True,
+            "remote_host": "10.0.0.1",
+            "remote_port": 6000,
+            "remote_request_id": "request-p",
+            "remote_block_ids": ([20, 21],),
+        },
+    )
+
+    delay_free, params = scheduler.request_finished(request, ([],))
+
+    assert delay_free is False
+    assert params is None
+    assert request.kv_transfer_params["do_remote_prefill"] is False
+    scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
+    assert "request-d" not in scheduler._reqs_need_recv
+
+
+def test_request_finished_does_not_ack_prefill_already_queued_for_workers() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._recving_thread = MagicMock()
+    request = make_request(
+        request_id="request-d",
+        status=RequestStatus.FINISHED_ABORTED,
+        kv_transfer_params={
+            "do_remote_prefill": False,
+            "remote_host": "10.0.0.1",
+            "remote_port": 6000,
+            "remote_request_id": "request-p",
+        },
+    )
+    scheduler._reqs_need_recv["request-d"] = (request, ([10],), ([10],), 16)
+
+    delay_free, params = scheduler.request_finished(request, ([],))
+
+    assert (delay_free, params) == (False, None)
+    scheduler._recving_thread.add_request.assert_not_called()
+    assert scheduler._reqs_need_recv["request-d"][3] == 16
+
+
 def test_request_finished_delays_blocks_and_builds_remote_params() -> None:
     scheduler = make_pull_scheduler()
     scheduler._sending_thread = MagicMock()
@@ -553,6 +599,7 @@ def test_truncate_request_for_prefill_is_idempotent_for_token_ids() -> None:
         max_tokens=8,
     )
 
+    request.block_hashes = ["full-prompt-hash"]
     scheduler._truncate_request_for_prefill(request)
     scheduler._truncate_request_for_prefill(request)
 
@@ -561,6 +608,7 @@ def test_truncate_request_for_prefill_is_idempotent_for_token_ids() -> None:
     assert request.num_prompt_tokens == 2
     assert request.max_tokens == 1
     assert request.kv_transfer_params["_p_side_truncated"] is True
+    assert request.block_hashes == [(1, 2)]
 
 
 def test_truncate_request_for_prefill_supports_prompt_embeddings() -> None:

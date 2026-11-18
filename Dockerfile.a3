@@ -70,6 +70,12 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[a
 # Dependency versions used by the vllm-ascend build.
 ARG SOC_VERSION="ascend910_9391"
 ENV DEBIAN_FRONTEND=noninteractive
+# Cap opc/c++/rust build parallelism to bound memory on shared buildkitd nodes:
+# the heavy vllm-ascend compile otherwise spawns unbounded jobs and can exhaust
+# a 128Gi node (OOM-killing kubelet). CI passes --build-arg MAX_JOBS=32 /
+# CARGO_BUILD_JOBS=32; leaving them unset keeps the default nproc parallelism.
+ARG MAX_JOBS
+ARG CARGO_BUILD_JOBS
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
     OMP_NUM_THREADS=1
@@ -142,12 +148,12 @@ RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
     python3 -m pip install /tmp/${MOONCAKE_WHL} --force-reinstall --no-deps && \
 # Install memfabric_hybrid kernels (A3/A5)
     case "${SOC_VERSION:-}" in \
-        ascend950dt_9582) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A5 ;; \
-        ascend910_9391) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A3 ;; \
-        ascend910b1) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A2 ;; \
+        ascend950dt_9582) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A5 --install-for-all ;; \
+        ascend910_9391) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A3 --install-for-all ;; \
+        ascend910b1) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A2 --install-for-all ;; \
     esac && \
 # Install flash-linear-attention-npu
-    URL="https://mirrors.huaweicloud.com/ascend/repos/pypi/flash_linear_attention_npu_a3/${FLA_WHL}" && \
+    URL="https://mirrors.huaweicloud.com/ascend/repos/pypi/flash-linear-attention-npu-a3/${FLA_WHL}" && \
     if [[ -n "${GIT_PROXY}" ]]; then \
       wget --quiet --proxy="${GIT_PROXY}" "${URL}" -O "/tmp/${FLA_WHL}"; \
     else \

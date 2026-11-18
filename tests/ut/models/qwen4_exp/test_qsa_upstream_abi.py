@@ -21,9 +21,11 @@ def test_main_uses_ascend_projection_and_draft_uses_upstream(monkeypatch) -> Non
     monkeypatch.setattr(
         qsa,
         "get_forward_context",
-        lambda: SimpleNamespace(is_draft_model=True),
+        lambda: SimpleNamespace(),
     )
     layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.layer_name = "mtp.layers.48.self_attn.attn"
     qkv = torch.empty((2, 8))
     positions = torch.arange(2)
 

@@ -135,8 +135,8 @@ TITLES = {
     "tutorials/models/MiniMax-M2.md": {"en": "MiniMax-M2", "zh": "MiniMax-M2"},
     "tutorials/models/MiniMax-M3.md": {"en": "MiniMax-M3", "zh": "MiniMax-M3"},
     "tutorials/models/MiniMax-M3.1-Flash.md": {
-        "en": "MiniMax-M3.1-Flash (Experimental)",
-        "zh": "MiniMax-M3.1-Flash（实验性支持）",
+        "en": "MiniMax-M3.1-Flash",
+        "zh": "MiniMax-M3.1-Flash",
     },
     "tutorials/models/Minitron-8B-Base.md": {"en": "Minitron-8B-Base", "zh": "Minitron-8B-Base"},
     "tutorials/models/Mixtral-8x7B-Instruct-v0.1.md": {
@@ -156,8 +156,8 @@ TITLES = {
     },
     "tutorials/models/Qwen3-Next.md": {"en": "Qwen3-Next", "zh": "Qwen3-Next"},
     "tutorials/models/Qwen3.8-Flash-Next.md": {
-        "en": "Qwen3.8-Flash-Next (Experimental)",
-        "zh": "Qwen3.8-Flash-Next（实验性支持）",
+        "en": "Qwen3.8-Flash-Next",
+        "zh": "Qwen3.8-Flash-Next",
     },
     "tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md": {
         "en": "Qwen3-Omni-30B-A3B-Thinking",

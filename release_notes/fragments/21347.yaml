@@ -1,0 +1,7 @@
+pr: 21347
+entries:
+  - category: bugfix
+    text: >-
+      Fixed Qwen4Exp MTP speculative decoding crashes when a long-context
+      target uses overridden RoPE scaling by safely extending the draft
+      model's positional cache without changing its RoPE parameters.

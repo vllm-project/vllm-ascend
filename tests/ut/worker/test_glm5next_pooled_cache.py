@@ -356,6 +356,50 @@ def test_glm5_next_runner_splits_main_mla_components_within_each_page():
     assert k_pe_cache.data_ptr() - raw_caches[MAIN].data_ptr() == kv_c_cache[0].numel() * kv_c_cache.element_size()
 
 
+@pytest.mark.parametrize("kernel_size", [4, 8])
+def test_glm_fp8_indexer_keys_and_scales_share_padded_pages_without_overlapping(monkeypatch, kernel_size):
+    config = _make_config()
+    specs = _make_specs()
+    specs[INDEXER] = replace(
+        specs[INDEXER],
+        head_size=128,
+        dtype=torch.float8_e4m3fn,
+        scale_dim=1,
+        scale_dtype=torch.float32,
+        page_size_padded=640,
+    )
+    register_all_kvcache_specs(None)
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    plan = get_glm5_next_kv_cache_config(config, groups, 3 * get_glm5_next_pool_bytes_per_block(groups))
+    runner = _make_runner(config)
+    raw = runner._allocate_kv_cache_tensors(plan)
+    caches = runner._reshape_kv_cache_tensors(plan, raw, [kernel_size, 2, 0])
+    key, scale = caches[INDEXER]
+    page_bytes = next(
+        d.size // plan.num_blocks for d in plan.kv_cache_tensors if INDEXER in get_kv_cache_tensor_layers(d)
+    )
+    rows = kernel_size // 2
+    assert key.shape == (3 * 8 // kernel_size, rows, 1, 128)
+    assert scale.shape == (3 * 8 // kernel_size, rows, 1, 1)
+    assert key.dtype == torch.float8_e4m3fn and scale.dtype == torch.float32
+    assert key.stride(0) == scale.stride(0) * scale.element_size() == page_bytes // (8 // kernel_size)
+    assert scale.data_ptr() - key.data_ptr() == rows * 128
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
+    group = SimpleNamespace(
+        kv_cache_group_id=0, kv_cache_spec=specs[INDEXER], layer_names=[INDEXER], backend=_AttentionBackend
+    )
+    v2_key, v2_scale = attn_utils._reshape_kv_cache_v2([group], raw, "fp8", [kernel_size], {}, plan)[INDEXER]
+    assert v2_key.shape == key.shape and v2_scale.shape == scale.shape
+    assert v2_key.stride() == key.stride() and v2_scale.stride() == scale.stride()
+    assert v2_key.data_ptr() == key.data_ptr() and v2_scale.data_ptr() == scale.data_ptr()
+    key[1].view(torch.uint8).fill_(23)
+    scale[2].fill_(7)
+    assert torch.count_nonzero(key[2].view(torch.uint8)) == 0
+    assert torch.count_nonzero(scale[:2]) == 0
+    assert torch.all(key[1].view(torch.uint8) == 23)
+
+
 def test_standalone_mtp_uses_existing_compressed_cache_allocator():
     config = _make_config()
     specs = {name: spec for name, spec in _make_specs().items() if not isinstance(spec, MambaSpec)}

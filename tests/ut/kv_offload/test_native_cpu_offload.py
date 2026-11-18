@@ -244,10 +244,12 @@ def test_ascend_connector_worker_accepts_separate_kv_tensors(
         head_size=3,
         dtype=torch.bfloat16,
     )
-    kv_cache_config = KVCacheConfig(
+    kv_cache_config = SimpleNamespace(
         num_blocks=4,
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+        kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
         kv_cache_tensors=[],
+        hisparse_host_num_blocks=None,
+        prefix_cacheable_group_ids=(0,),
     )
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
     worker.kv_cache_config = kv_cache_config
@@ -288,10 +290,12 @@ def test_ascend_connector_worker_accepts_aligned_mamba_states(
         dtypes=(torch.int8, torch.int8),
         page_size_padded=8,
     )
-    kv_cache_config = KVCacheConfig(
+    kv_cache_config = SimpleNamespace(
         num_blocks=4,
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+        kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
         kv_cache_tensors=[],
+        hisparse_host_num_blocks=None,
+        prefix_cacheable_group_ids=(0,),
     )
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
     worker.kv_cache_config = kv_cache_config
@@ -320,12 +324,18 @@ def test_ascend_connector_worker_accepts_aligned_mamba_states(
 
 
 @pytest.mark.parametrize("selection", ["non_cacheable", "transfer_disabled", "hisparse"])
+@pytest.mark.parametrize("excluded_group_index", [0, 1])
 @pytest.mark.parametrize("include_excluded_cache", [False, True])
-def test_ascend_connector_worker_registers_only_offloadable_groups(
+@pytest.mark.parametrize("split_selected_cache", [False, True])
+def test_ascend_connector_worker_skips_non_offload_groups(
     monkeypatch: pytest.MonkeyPatch,
     selection: str,
+    excluded_group_index: int,
     include_excluded_cache: bool,
+    split_selected_cache: bool,
 ) -> None:
+    """Excluded caches must not affect layout detection or canonical refs."""
+
     class ScratchSpec(FullAttentionSpec):
         @property
         def prefix_cacheable(self) -> bool:
@@ -333,27 +343,34 @@ def test_ascend_connector_worker_registers_only_offloadable_groups(
 
     spec_kwargs = dict(block_size=2, num_kv_heads=1, head_size=3, dtype=torch.bfloat16)
     spec = FullAttentionSpec(**spec_kwargs)
-    excluded_spec = ScratchSpec(**spec_kwargs) if selection == "non_cacheable" else spec
     selected_role = KVCacheGroupRole.HISPARSE_INDEXER if selection == "hisparse" else KVCacheGroupRole.DEFAULT
+    groups = [
+        KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec, role=selected_role) for name in ("first", "last")
+    ]
+    groups.insert(
+        excluded_group_index,
+        KVCacheGroupSpec(
+            layer_names=["excluded"],
+            kv_cache_spec=ScratchSpec(**spec_kwargs) if selection == "non_cacheable" else spec,
+            enable_kv_transfer=selection != "transfer_disabled",
+        ),
+    )
     kv_cache_config = KVCacheConfig(
         num_blocks=4,
+        kv_cache_groups=groups,
         kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=["first"], kv_cache_spec=spec, role=selected_role),
-            KVCacheGroupSpec(
-                layer_names=["excluded"],
-                kv_cache_spec=excluded_spec,
-                enable_kv_transfer=selection != "transfer_disabled",
-            ),
-            KVCacheGroupSpec(layer_names=["last"], kv_cache_spec=spec, role=selected_role),
-        ],
         hisparse_host_num_blocks=8 if selection == "hisparse" else None,
     )
     kv_caches = {
-        name: tuple(torch.empty((4, 2, 1, 3), dtype=torch.bfloat16) for _ in range(2))
+        name: (
+            tuple(torch.empty((4, 2, 1, 3), dtype=torch.bfloat16) for _ in range(2))
+            if split_selected_cache
+            else torch.empty((4, 2, 2, 1, 3), dtype=torch.bfloat16)
+        )
         for name in ("first", "last")
     }
     if include_excluded_cache:
+        # This split cache must not force adaptation of packed selected caches.
         kv_caches["excluded"] = tuple(torch.empty((4, 2, 1, 3), dtype=torch.bfloat16) for _ in range(2))
 
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
@@ -363,8 +380,22 @@ def test_ascend_connector_worker_registers_only_offloadable_groups(
     worker._init_worker = captured.append
     monkeypatch.setattr(connector_mod, "derive_canonical_mappings", lambda *args: {})
 
+    upstream_calls = []
+    monkeypatch.setattr(
+        connector_mod.OffloadingConnectorWorker,
+        "register_kv_caches",
+        lambda self, caches: upstream_calls.append((self, caches)),
+    )
     worker.register_kv_caches(kv_caches)
 
+    if not split_selected_cache:
+        assert len(upstream_calls) == 1
+        assert upstream_calls[0][0] is worker
+        assert upstream_calls[0][1] is kv_caches
+        assert not captured
+        return
+
+    assert not upstream_calls
     assert len(captured) == 1
     canonical = captured[0]
     assert len(canonical.tensors) == 4

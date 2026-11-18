@@ -25,7 +25,7 @@ from vllm.forward_context import ForwardContext
 from vllm.logger import logger
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
@@ -339,16 +339,13 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.register_kv_caches(kv_caches)
 
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
-        """Fence only the saves of requests whose blocks this step may reuse.
+        """Fence the previous save before this step can reuse KV blocks.
 
-        Blocks are freed immediately when a request finishes or is preempted.
-        Before this step's forward can reallocate them, the in-flight puts of
-        exactly those requests are awaited (released_req_ids carried in the
-        connector metadata), instead of the whole previous save batch.
+        This hook is temporarily reused for deferred KV cache save
+        synchronization and will be replaced by a dedicated mechanism.
         """
         assert self.connector_worker is not None
-        released_req_ids = getattr(kv_connector_metadata, "released_req_ids", None)
-        self.connector_worker.handle_released_saves(released_req_ids)
+        self.connector_worker.wait_for_previous_save()
 
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         super().bind_connector_metadata(connector_metadata)
@@ -502,6 +499,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         ascend_store_kv_events = AscendStoreKVEvents(num_workers=1)
         ascend_store_kv_events.add_events(events)
         return ascend_store_kv_events
+
+    def bind_kv_cache_manager(self, kv_cache_manager: KVCacheManager) -> None:
+        super().bind_kv_cache_manager(kv_cache_manager)
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.bind_kv_cache_manager(kv_cache_manager)
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         assert self.connector_scheduler is not None

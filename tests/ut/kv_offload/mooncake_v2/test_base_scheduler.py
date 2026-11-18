@@ -272,6 +272,7 @@ def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_tru
         _all_token_ids=[1, 2, 3],
         kv_transfer_params=None if params is None else dict(params),
         max_tokens=8,
+        block_hashes=["full-prompt-hash"],
     )
 
     scheduler.on_new_request(request)
@@ -282,3 +283,9 @@ def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_tru
     assert request._all_token_ids == request.prompt_token_ids
     assert request.num_prompt_tokens == (2 if truncated else 3)
     assert request.max_tokens == (1 if truncated else 8)
+    # Keep the two list literals in separate statements. A conditional
+    # expression would join list[tuple[int, int]] with list[str] and fail mypy.
+    if truncated:
+        assert request.block_hashes == [(1, 2)]
+    else:
+        assert request.block_hashes == ["full-prompt-hash"]

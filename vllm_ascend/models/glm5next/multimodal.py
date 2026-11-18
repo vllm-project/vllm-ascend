@@ -19,6 +19,7 @@ from vllm.distributed import utils as dist_utils
 from vllm.model_executor.layers.activation import SiluAndMulWithClamp
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
+from vllm.model_executor.layers.fusion.mm_input_norm import IdentityInputNorm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -374,6 +375,7 @@ class Glm5NextVisionTransformer(nn.Module):
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        input_norm: nn.Module | None = None,
     ) -> None:
         super().__init__()
         use_data_parallel = is_vit_use_data_parallel()
@@ -389,6 +391,7 @@ class Glm5NextVisionTransformer(nn.Module):
         self.patch_size = vision_config.patch_size
         self.spatial_merge_size = vision_config.spatial_merge_size
         self.out_hidden_size = vision_config.out_hidden_size
+        self.input_norm = input_norm if input_norm is not None else IdentityInputNorm()
 
         swiglu_limit = vision_config.swiglu_limit
         if swiglu_limit is None:
@@ -570,7 +573,7 @@ class Glm5NextVisionTransformer(nn.Module):
         encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         # patchify
-        x = x.to(device=self.device, dtype=self.dtype)
+        x = self.input_norm(x.to(device=self.device), self.dtype)
         x = self.patch_embed(x)
 
         if encoder_metadata is not None:

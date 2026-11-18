@@ -637,7 +637,18 @@ class NPUModelRunner(GPUModelRunner):
         if isinstance(zeroer, C8KVBlockZeroer):
             zeroer.entries.clear()
             self.kv_block_zeroer = zeroer.delegate
+        # Retain owners on the runner across graph teardown and failed closes.
+        if not hasattr(self, "_pending_host_offload"):
+            model = getattr(self, "model", None)
+            self._pending_host_offload = (
+                [module for module in model.modules() if callable(getattr(module, "close_host_offload", None))]
+                if model is not None
+                else []
+            )
         super().shutdown()
+        while self._pending_host_offload:
+            self._pending_host_offload[-1].close_host_offload()
+            self._pending_host_offload.pop()
 
     def _register_sparse_kv_caches(self, kv_caches: dict[str, Any]) -> None:
         """Bind host pools before the V2 KV connector registers its destinations."""
@@ -1356,6 +1367,25 @@ class NPUModelRunner(GPUModelRunner):
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or [])
         ):
             return True
+
+        if (
+            spec is not None
+            and self.speculator is not None
+            and spec.method == "dspark"
+            and spec.draft_model_config is not None
+            and {"MiniMaxM31FlashA3DSparkModel", "DSparkMiniMaxDraftModel"}.intersection(
+                spec.draft_model_config.architectures or ()
+            )
+            and self.model_config.hf_text_config.model_type == "minimax_m3_text"
+        ):
+            # Flash's sparse target uses device lengths, but a mixed target
+            # GQA backend still consumes the shared CPU length mirror.
+            backends = [group.backend for groups in self.attn_groups for group in groups]
+            return AscendFlashAttentionBackend in backends and all(
+                backend is AscendFlashAttentionBackend
+                or backend.get_name() in ("ASCEND_MINIMAX_M3_SPARSE", "ASCEND_MINIMAX_M3_SPARSE_INDEXER")
+                for backend in backends
+            )
 
         if (
             spec is None

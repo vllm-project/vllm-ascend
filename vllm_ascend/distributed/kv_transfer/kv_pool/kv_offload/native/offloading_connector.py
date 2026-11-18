@@ -163,9 +163,14 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
         ],
     ) -> None:
         kv_cache_config = self.kv_cache_config
-        selected_groups = tuple(
-            kv_cache_config.kv_cache_groups[group_id] for group_id in get_offloading_group_ids(kv_cache_config)
-        )
+
+        # The scheduler only builds GPULoadStoreSpec.group_sizes / block_indices
+        # for the offload-eligible groups, and SingleDirectionNPUOffloadingHandler
+        # zips them positionally against CanonicalKVCaches.group_data_refs.
+        # Use the same groups for layout detection and registration: excluded
+        # caches may be absent or have layouts that do not need offloading.
+        selected_group_ids = get_offloading_group_ids(kv_cache_config)
+        selected_groups = tuple(kv_cache_config.kv_cache_groups[group_id] for group_id in selected_group_ids)
 
         requires_layout_adaptation = False
         for group in selected_groups:
@@ -304,6 +309,9 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                 else:
                     raise NotImplementedError(f"Unsupported KV cache spec: {type(layer_spec).__name__}")
 
+        # Iterate in the order returned by get_offloading_group_ids (an ordered
+        # tuple, never a set): the transfer handler resolves each group by
+        # position, so ordering must match the scheduler's kv_group_configs.
         group_data_refs: list[list[CanonicalKVCacheRef]] = []
         for group in selected_groups:
             group_refs: list[CanonicalKVCacheRef] = []

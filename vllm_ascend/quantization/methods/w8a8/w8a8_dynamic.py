@@ -136,7 +136,7 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
     def process_weights_after_loading(self, layer):
         layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
         # cast quantized weight tensors in NZ format for higher inference speed
-        if self.act_quant_type == torch.int8:
+        if self.act_quant_type == torch.int8 and not getattr(layer, "_fused_preprocess_managed", False):
             layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = layer.weight_scale.data.flatten()
         layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)

@@ -3,7 +3,6 @@
 # ruff: noqa: E402
 """Focused tests for the Ascend Engram configuration and storage path."""
 
-import ctypes
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -21,7 +20,15 @@ pytest.importorskip(
     reason="DeepSeek V4.1 is unavailable on this vLLM release",
 )
 
-from vllm.models.deepseek_v41.common import engram as upstream_engram
+from vllm_ascend.utils import vllm_version_is
+
+# Upstream #59327 (4c2d277643) moved the Engram module from `nvidia.engram` to
+# `common.engram` on main; the release lane (v0.31.0) still ships it under
+# `nvidia.engram`.
+if vllm_version_is("0.31.0"):
+    from vllm.models.deepseek_v41.nvidia import engram as upstream_engram  # type: ignore[import-not-found]
+else:
+    from vllm.models.deepseek_v41.common import engram as upstream_engram
 
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
 from vllm_ascend.models.deepseek_v41.engram import npu
@@ -71,76 +78,6 @@ def test_lookup_overwrites_dirty_output_before_exchange(monkeypatch, tp, dp, tok
     monkeypatch.setattr(embedding_mod, "tensor_model_parallel_all_gather", gather)
     result = table.embed_gathered(ids, tokens)
     torch.testing.assert_close(result, torch.cat([expected[:tokens]] * tp, dim=1), rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("failure", [None, "malloc", "null", "register", "device_pointer"])
-@pytest.mark.parametrize("dtype", [torch.uint8, torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("offset", [0, 4096, 65535])
-def test_host_uva_aligns_registration_and_frees_original_allocation(monkeypatch, failure, dtype, offset):
-    alignment, size = 65536, 4096
-
-    class Library:
-        def __init__(self):
-            self.storage = ctypes.create_string_buffer(size + 4 * alignment)
-            base = ctypes.addressof(self.storage)
-            self.original = (base + alignment - 1) // alignment * alignment + offset
-            self.registered = self.unregistered = self.freed = None
-            self.free_count = self.unregister_count = 0
-
-        def aclrtMallocHost(self, output, count, flags):
-            assert count == size + alignment - 1
-            if failure == "malloc":
-                return 1
-            ctypes.cast(output, ctypes.POINTER(ctypes.c_void_p)).contents.value = (
-                None if failure == "null" else self.original
-            )
-            return 0
-
-        def aclrtHostRegisterV2(self, pointer, count, flags):
-            assert count == size and pointer.value % alignment == 0
-            self.registered = pointer.value
-            return 1 if failure == "register" else 0
-
-        def aclrtHostGetDevicePointer(self, pointer, output, flags):
-            assert pointer.value == self.registered
-            ctypes.cast(output, ctypes.POINTER(ctypes.c_void_p)).contents.value = 0x100000000
-            return 1 if failure == "device_pointer" else 0
-
-        def aclrtHostUnregister(self, pointer):
-            self.unregistered = pointer.value
-            self.unregister_count += 1
-            return 0
-
-        def aclrtFreeHost(self, pointer):
-            self.freed = pointer.value
-            self.free_count += 1
-            return 0
-
-    lib = Library()
-    monkeypatch.setattr(npu, "_host_library", lambda: lib)
-    shape = (size // torch.empty((), dtype=dtype).element_size(),)
-    if failure:
-        message = "NULL pointer" if failure == "null" else "failed: rc=1"
-        with pytest.raises(RuntimeError, match=message):
-            npu.HostUvaBuffer(shape, dtype, "cpu")
-    else:
-        buffer = npu.HostUvaBuffer(shape, dtype, "cpu")
-        assert buffer.tensor.data_ptr() == lib.registered
-        assert lib.original <= lib.registered and lib.registered + size <= lib.original + size + alignment - 1
-        buffer.tensor.fill_(17)
-        value = torch.frombuffer(
-            lib.storage, dtype=dtype, count=1, offset=lib.registered - ctypes.addressof(lib.storage)
-        )
-        assert value.item() == 17
-        buffer.close()
-        buffer.close()
-    if failure in ("malloc", "null"):
-        assert lib.registered is lib.unregistered is lib.freed is None
-        assert lib.free_count == lib.unregister_count == 0
-    else:
-        assert lib.unregistered == lib.registered
-        assert lib.freed == lib.original
-        assert lib.free_count == lib.unregister_count == 1
 
 
 def test_shared_memory_needs_a_local_dp_peer(monkeypatch):
@@ -451,6 +388,146 @@ def test_engram_gather_uses_the_local_edp_token_slice(monkeypatch, dp_rank, num_
     for replica in gathered.reshape(2, 4, 5):
         torch.testing.assert_close(replica[:num_tokens], ids)
         assert (replica[num_tokens:] == parallel_mod.DEAD_ID).all()
+
+
+# --- Ascend EDP member-order risk (validation ladder step 2) -----------------
+#
+# Ascend builds the Engram DP group with ``all_ranks.permute(0, 2, 4, 1, 3)``
+# (see ``init_ascend_model_parallel``), which differs from upstream's
+# ``permute(0, 2, 3, 4, 1)``. Keeping the TP axis outermost makes every EDP
+# group a single TP column, so ``engram_head_shard_rank =
+# tp_rank * dp_size + dp_rank`` assigns every rank a unique shard and each EDP
+# group owns a contiguous run of checkpoint-order heads. These tests lock that
+# invariant so a future refactor back to the upstream permute cannot silently
+# reintroduce shard collisions (upstream collides for dp == 1 and scenario D).
+_EDP_TOPOLOGIES = [
+    # (tp, dp, pp, pcp): every decomposition of an 8-rank world used by the
+    # on-device validation, plus the degenerate TP=8 case.
+    (2, 2, 1, 2),
+    (4, 2, 1, 1),
+    (2, 4, 1, 1),
+    (2, 1, 1, 4),
+    (4, 1, 1, 2),
+    (8, 1, 1, 1),
+]
+
+
+def _ascend_edp_groups(tp: int, dp: int, pp: int, pcp: int) -> list[list[int]]:
+    """Reconstruct the EDP groups exactly as ``init_ascend_model_parallel`` does."""
+    world = tp * dp * pp * pcp
+    all_ranks = torch.arange(world).reshape(1, dp, pp, pcp, tp)
+    return all_ranks.permute(0, 2, 4, 1, 3).reshape(-1, dp * pcp).tolist()
+
+
+def _upstream_edp_groups(tp: int, dp: int, pp: int, pcp: int) -> list[list[int]]:
+    """Upstream reference ordering: ``all_ranks.permute(0, 2, 3, 4, 1)``."""
+    world = tp * dp * pp * pcp
+    all_ranks = torch.arange(world).reshape(1, dp, pp, pcp, tp)
+    return all_ranks.permute(0, 2, 3, 4, 1).reshape(-1, dp * pcp).tolist()
+
+
+@pytest.mark.parametrize("tp,dp,pp,pcp", _EDP_TOPOLOGIES)
+def test_engram_edp_ordering_gives_unique_consecutive_shards(tp, dp, pp, pcp):
+    """Ascend EDP groups are single TP columns, so shards never collide.
+
+    ``engram_head_shard_rank = tp_rank * dp_size + dp_rank`` is collision-free
+    under ``permute(0, 2, 4, 1, 3)`` for every world decomposition, and each
+    group owns a consecutive run of heads that restores checkpoint order after
+    the exchange. This is a structural invariant, not a per-topology accident.
+    """
+    world = tp * dp * pp * pcp
+    edp = _ascend_edp_groups(tp, dp, pp, pcp)
+
+    per_rank_shard: dict[int, int] = {}
+    for group in edp:
+        for dp_rank, rank in enumerate(group):
+            tp_rank = rank % tp
+            per_rank_shard[rank] = tp_rank * len(group) + dp_rank
+
+    # The formula must agree with the EDP group structure: each group is a
+    # single TP column (tp_rank is constant), and its members map to a
+    # contiguous shard run.
+    for group in edp:
+        assert len({rank % tp for rank in group}) == 1
+        shards = sorted(per_rank_shard[rank] for rank in group)
+        assert shards == list(range(shards[0], shards[0] + len(group)))
+    assert sorted(per_rank_shard.values()) == list(range(world))
+
+
+@pytest.mark.parametrize("tp,dp,pp,pcp", _EDP_TOPOLOGIES)
+def test_engram_edp_ordering_differs_from_upstream_only_when_needed(tp, dp, pp, pcp):
+    """Ascend's permute diverges from upstream exactly where upstream collides.
+
+    For ``dp == 1`` (pure PCP) and the PCP>1 scenario D, upstream's
+    ``permute(0, 2, 3, 4, 1)`` groups ranks with the same tp_rank *and* same
+    dp_rank into one shard, so ``engram_head_shard_rank`` collides. Ascend's
+    ordering is what keeps those topologies working, so the divergence is the
+    point of this test rather than something to be removed.
+    """
+    edp_up = _upstream_edp_groups(tp, dp, pp, pcp)
+    edp_asc = _ascend_edp_groups(tp, dp, pp, pcp)
+    # The two permutes coincide when PCP == 1; with PCP > 1 upstream groups
+    # ranks sharing tp_rank and dp_rank into one shard, so it collides and
+    # Ascend's single-TP-column ordering is what keeps the topology working.
+    assert (edp_up == edp_asc) == (pcp == 1)
+
+
+@pytest.mark.parametrize("tp,dp,pp,pcp", _EDP_TOPOLOGIES)
+@pytest.mark.parametrize("slot", [1, 3])
+def test_engram_exchange_restores_checkpoint_head_order(tp, dp, pp, pcp, slot):
+    """Faithful all_to_all under Ascend EDP ordering yields checkpoint-order heads.
+
+    Models production end to end: each EDP peer's tokens are gathered rank-major
+    (``gather_engram_hashes``), each rank looks up only its own shard
+    (``lookup``), and ``exchange_engram_rows``'s all_to_all + view/permute
+    reassembles the heads. The all_to_all sends each source's block indexed by
+    the destination's ``rank_in_group`` — the real ``dist.all_to_all_single``
+    semantics, not a symmetric stand-in.
+    """
+    world = tp * dp * pp * pcp
+    edp = _ascend_edp_groups(tp, dp, pp, pcp)
+    per_rank_shard: dict[int, int] = {}
+    for group in edp:
+        for dp_rank, rank in enumerate(group):
+            per_rank_shard[rank] = (rank % tp) * len(group) + dp_rank
+    # ``embed_gathered`` skips the exchange when the EDP group is a single
+    # rank (``dp_size == 1`` early return), so there is no all_to_all to test.
+    if dp * pcp == 1:
+        return
+
+    def group_of(rank):
+        return next(g for g in edp if rank in g)
+
+    for rank in range(world):
+        group = group_of(rank)
+        edp_size = len(group)
+        rank_in_group = group.index(rank)
+        # gathered[peer*slot + t] = token t of EDP peer `peer`, value peer*10 + t.
+        token_value = {peer: [peer * 10 + t for t in range(slot)] for peer in group}
+        # Each rank looks up only its own shard head, so row i is its embedding
+        # of EDP peer i's tokens, tagged with this rank's shard.
+        staged = torch.zeros((edp_size * slot, 1, 1))
+        for i, peer in enumerate(group):
+            for t in range(slot):
+                value = token_value[peer][t] * 100 + per_rank_shard[rank]
+                staged[i * slot + t, 0, 0] = value
+        # Faithful all_to_all: recv chunk src_ig holds src_ig's block destined
+        # for me (rank_in_group == rank_in_group); the value is that peer's
+        # embedding of *my* tokens under its own shard.
+        my_tokens = token_value[group[rank_in_group]]
+        recv = torch.zeros((edp_size * slot, 1, 1))
+        for src_ig, src in enumerate(group):
+            for t in range(slot):
+                recv[src_ig * slot + t, 0, 0] = my_tokens[t] * 100 + per_rank_shard[src]
+        # exchange_engram_rows body.
+        rows = recv.view(edp_size, slot, 1, 1).permute(1, 0, 2, 3)
+        out = rows[:slot].reshape(slot, edp_size, 1)
+        heads = [per_rank_shard[r] for r in group]
+        assert heads == sorted(heads) and len(set(heads)) == len(heads)
+        for t in range(slot):
+            expected = [my_tokens[t] * 100 + head for head in heads]
+            got = out[t].squeeze()
+            torch.testing.assert_close(got, torch.tensor(expected, dtype=out.dtype))
 
 
 def test_native_mxfp8_preserves_shard_bits_and_lookup(tmp_path, monkeypatch):

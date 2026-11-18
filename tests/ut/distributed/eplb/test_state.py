@@ -221,6 +221,33 @@ def test_allgather_history_snapshot_tracks_elastic_active_width(old_width, new_w
     assert model_state._load_mapping_generation == 1
 
 
+def test_async_allgather_refresh_invalidates_history_without_comparing_device_maps(monkeypatch):
+    physical = torch.tensor([[1, 0], [0, 1]])
+    snapshot = torch.tensor([[0, 1], [0, 1]])
+    layer_states = [AscendEplbLayerState(), AscendEplbLayerState()]
+    refreshes = [MagicMock(), MagicMock()]
+    for layer_state, refresh in zip(layer_states, refreshes):
+        monkeypatch.setattr(layer_state, "refresh_expert_replica_routing_table", refresh)
+    model_state = SimpleNamespace(
+        model=SimpleNamespace(moe_layers=[SimpleNamespace(eplb_state=layer) for layer in layer_states]),
+        physical_to_logical_map=physical,
+        _allgather_physical_map=snapshot,
+        expert_load_pass=torch.ones(2, 2),
+        expert_load_window=torch.ones(2, 2, 2),
+        _load_mapping_generation=0,
+    )
+    with patch.object(torch, "equal", side_effect=AssertionError("device map comparison synchronizes")):
+        eplb_state.refresh_model_routing_tables(model_state, layer_idx=0)
+
+    refreshes[0].assert_called_once_with()
+    refreshes[1].assert_not_called()
+    assert model_state._allgather_physical_map is snapshot
+    torch.testing.assert_close(snapshot, physical)
+    assert not model_state.expert_load_pass.any()
+    assert not model_state.expert_load_window.any()
+    assert model_state._load_mapping_generation == 1
+
+
 def test_sync_rearrange_refreshes_all_model_routing_tables(monkeypatch):
     sentinel = object()
     model_states = {"model": object()}

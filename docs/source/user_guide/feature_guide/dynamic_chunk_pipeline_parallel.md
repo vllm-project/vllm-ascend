@@ -1,5 +1,9 @@
 # Dynamic Chunked Pipeline Parallel
 
+!!! warning "Sunset and Deprecation Notice"
+
+    Dynamic Chunked Pipeline Parallel (CPP) with dynamic chunk size is **deprecated** as of v0.32.0 and has entered the sunset process. It will be removed in a future release. With the architectural evolution towards sparse (MoE/SFA) and linear attention models, dynamic chunking offers negligible performance benefit while adding significant scheduling complexity and profiling overhead. Users are advised to use static chunked prefill or Prefill Context Parallelism (PCP). For more details, see [RFC #21304](https://github.com/vllm-project/vllm-ascend/issues/21304).
+
 !!! note
 
     For design details and mathematical models, see [Design Document](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md).

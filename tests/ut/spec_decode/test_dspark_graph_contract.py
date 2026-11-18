@@ -160,6 +160,34 @@ def test_update_draft_metadata_refreshes_all_padded_query_lengths(query_count, n
         assert value.seq_lens is seq_lens[name]
 
 
+@pytest.mark.parametrize("num_reqs_padded", [1, 2, 4, 16])
+@pytest.mark.parametrize("extra_request", [False, True])
+def test_gqa_full_graph_kv_extent_matches_captured_query_batch(num_reqs_padded, extra_request):
+    speculator = _speculator(attn_architecture="GQA", num_query_per_req=8)
+    size = num_reqs_padded + int(extra_request)
+    lengths = torch.arange(1, size + 1, dtype=torch.int32)
+    blocks = torch.arange(size * 4, dtype=torch.int32).reshape(size, 4)
+    metadata = SimpleNamespace(
+        actual_seq_lengths_q=[8],
+        seq_lens_list=lengths.tolist(),
+        seq_lens=lengths,
+        seq_lens_cpu=lengths,
+        seq_lens_gpu=lengths,
+        block_tables=blocks,
+    )
+
+    speculator._update_draft_attn_metadata({"draft.0": metadata}, num_reqs_padded)
+
+    assert metadata.actual_seq_lengths_q == [8 * (i + 1) for i in range(num_reqs_padded)]
+    assert metadata.seq_lens_list == lengths[:num_reqs_padded].tolist()
+    for name in ("seq_lens", "seq_lens_cpu", "seq_lens_gpu"):
+        value = getattr(metadata, name)
+        torch.testing.assert_close(value, lengths[:num_reqs_padded])
+        assert value.data_ptr() == lengths.data_ptr()
+    torch.testing.assert_close(metadata.block_tables, blocks[:num_reqs_padded])
+    assert metadata.block_tables.data_ptr() == blocks.data_ptr()
+
+
 def test_replay_installs_forward_context_before_accessing_extra_ctx(monkeypatch):
     class _ContextProxy:
         active = False

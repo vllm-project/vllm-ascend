@@ -565,9 +565,7 @@ class AscendDeepseekV41SWACache(DeepseekV41CacheLayer):
     """Ascend SWA cache registered with the V4.1 allocator."""
 
     def __init__(self, head_dim, window_size, dtype, prefix, cache_config, bounded_replay=False):
-        from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
-
-        block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
+        block_size = cache_config.block_size
         spec = make_swa_cache_spec(
             block_size=block_size,
             window_size=window_size,
