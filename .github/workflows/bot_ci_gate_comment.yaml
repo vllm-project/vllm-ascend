@@ -17,7 +17,7 @@
 
 name: CI Gate Comment
 
-# Posts (or removes) the ci-gate failure comment on the PR.
+# Posts (or removes, or updates in place) the ci-gate failure comment on the PR.
 #
 # Why a separate workflow_run workflow: fork PRs get a read-only
 # GITHUB_TOKEN under `pull_request`, so the ci-gate job itself cannot post
@@ -31,7 +31,8 @@ name: CI Gate Comment
 on:
   workflow_run:
     workflows:
-      - "E2E" # pr_test.yaml
+      - "E2E" # pr_test.yaml, the gate verdict itself
+      - "CI Gate Refresh" # bot_ci_gate_refresh.yaml, failure contract of the review retrigger
     types:
       - completed
 
@@ -43,9 +44,9 @@ permissions:
 concurrency:
   # Key by head SHA so multiple E2E runs on the same commit (opened /
   # synchronize / labeled / review) collapse into a single comment job: the
-  # comment is delete-then-repost, so only the latest verdict matters and the
-  # rest are no-ops (older commits are additionally skipped by the staleness
-  # guard below). Do NOT key by workflow_run.id (one job per run, no dedup, so
+  # comment is posted once per failure and updated in place afterwards, so
+  # only the latest verdict matters and the rest are no-ops (older commits
+  # are additionally skipped by the staleness guard below). Do NOT key by workflow_run.id (one job per run, no dedup, so
   # they pile up in the runner queue) or by pull_requests[0].number (that array
   # is unreliable/empty for workflow_run, which would collapse every PR into
   # one group and cancel unrelated PRs' comments).
@@ -139,6 +140,7 @@ jobs:
           # Find the previous failure comment (hidden marker). Comments are
           # paginated: a busy PR can push the marker comment past page 1.
           old_id = None
+          old_body = None
           url = f"/repos/{repo}/issues/{pr}/comments?per_page=100"
           while url and old_id is None:
               request = urllib.request.Request(
@@ -154,6 +156,7 @@ jobs:
               for comment in comments:
                   if comment.get("body", "").startswith(marker):
                       old_id = comment["id"]
+                      old_body = comment.get("body", "")
                       break
               nxt = None
               for part in link.split(","):
@@ -175,7 +178,7 @@ jobs:
               "**ci-gate failed.** Reason:\n\n"
               f"> {reason}\n\n"
               f"See the [workflow run]({run_url}) for full logs. This "
-              "comment is deleted and re-posted on each new failure and "
+              "comment is updated in place on each new failure and "
               "removed once the gate passes."
           )
           # Per-file CODEOWNERS details: files still missing owner
@@ -225,12 +228,20 @@ jobs:
                   f"{listing}"
               )
 
-          # Delete the previous failure comment (if any), then post a fresh
-          # one at the bottom of the timeline so it is visible and notifies
-          # participants.
+          # First failure of this streak: post a fresh comment so it lands at
+          # the bottom of the timeline and notifies participants. A repeated
+          # failure only edits the existing comment in place - edits are
+          # silent on GitHub, so maintainers are notified once per failure
+          # streak instead of on every failing push.
           if old_id:
-              api(f"/repos/{repo}/issues/comments/{old_id}", method="DELETE")
-          api(f"/repos/{repo}/issues/{pr}/comments", method="POST",
-              payload={"body": body})
-          print(f"posted failure comment on PR {pr}")
+              if body == old_body:
+                  print("failure unchanged; existing comment already up to date")
+              else:
+                  api(f"/repos/{repo}/issues/comments/{old_id}", method="PATCH",
+                      payload={"body": body})
+                  print(f"updated failure comment in place on PR {pr}")
+          else:
+              api(f"/repos/{repo}/issues/{pr}/comments", method="POST",
+                  payload={"body": body})
+              print(f"posted failure comment on PR {pr}")
           PY

@@ -19,29 +19,26 @@ name: E2E
 
 on:
   pull_request:
-    # `synchronize` is temporarily kept so that pushing a commit still starts
-    # E2E while `/run` (see pr_run_command.yml) is being validated on main. It
-    # will be removed once /run is proven, after which a commit is tested only
-    # on opened/reopened, on a label, or when a `/run` comment re-emits the
-    # `labeled` event.
+    # `synchronize` is deliberately absent: pushing a new commit does not start
+    # E2E, so intermediate commits no longer occupy the NPU runner pool. A
+    # commit is tested on opened/reopened, when a label is added, or when a
+    # `/run` comment re-emits the `labeled` event (see pr_run_command.yml).
+    # `ci-gate` is a required check, so a commit that was never tested stays
+    # blocked rather than being merged untested.
     types:
       - opened
-      - synchronize
       - reopened
       - labeled
     branches:
       - 'main'
       - '*-dev'
       - 'releases/v*'
-  # Re-run the original pull_request run's gate jobs when a state-changing
-  # review is submitted or dismissed: the required `ci-gate` check itself
-  # flips green in place once a late owner approval arrives, and re-arms red
-  # on a veto. Heavy jobs are gated on github.event_name == 'pull_request',
-  # so a review event only runs the lightweight refresh-ci-gate job below.
-  pull_request_review:
-    types:
-      - submitted
-      - dismissed
+  # NOTE: this workflow must NOT also trigger on `pull_request_review`. A
+  # review-event run would create a skipped `ci-gate` check-run under the
+  # same context name on the head SHA, and GitHub treats the latest check by
+  # name as the verdict - a skipped required check counts as satisfied, which
+  # lets the PR merge in the window before the real gate rewrites it (see
+  # pr_refresh_ci_gate.yaml for the standalone review retrigger).
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -51,20 +48,17 @@ defaults:
     shell: bash -el {0}
 
 concurrency:
-  # Split the group by event so a `pull_request_review` run never cancels the
-  # in-flight `pull_request` CI run. The review-event ci-gate carries the
-  # pull_request run's verdict forward (see the ci-gate job), so cancelling
-  # that run here used to leave the review gate with only a `cancelled`
-  # conclusion to read, deadlocking it until a manual re-run.
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  # This workflow only sees pull_request events, so one group per PR is
+  # enough: a new run (opened / synchronize / labeled) cancels the stale one.
+  # The review-event retrigger lives in pr_refresh_ci_gate.yaml, which keeps
+  # its own concurrency group so it never cancels the in-flight CI run here
+  # (the review retrigger waits for that run to finish before re-running its
+  # gate jobs).
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   pre-commit:
-    # Only real PR events run the CI pipeline. On pull_request_review events
-    # every job in this workflow is skipped (they all transitively depend on
-    # pre-commit) except codeowner-approval and ci-gate.
-    if: ${{ github.event_name == 'pull_request' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -800,9 +794,7 @@ jobs:
       test_groups: ${{ needs.select-tests.outputs.test_groups_a5 }}
 
   # Lightweight CODEOWNERS gate: every changed file needs an approval from one
-  # of its CODEOWNERS owners. Runs on pull_request AND pull_request_review
-  # events so submitting/dismissing a review re-evaluates the gate without
-  # re-running the heavy CI jobs. Owners without org membership or write
+  # of its CODEOWNERS owners. Owners without org membership or write
   # access count as approvers on purpose (this is why the native
   # require_code_owner_review is not used).
   codeowner-approval:
@@ -810,9 +802,14 @@ jobs:
     # job on purpose: codeowner approval is a merge-review concern and is
     # evaluated when reviews are submitted, not when tests are requested
     # manually. Review events re-evaluate the gate by re-running this job
-    # inside the original pull_request run (see refresh-ci-gate), so this job itself
-    # only runs on pull_request events.
-    if: ${{ github.event_name == 'pull_request' && github.event.label.name != 'ci-run' }}
+    # inside the original pull_request run (see pr_refresh_ci_gate.yaml),
+    # never through a second check under the same name.
+    # Runs after pre-commit on purpose: a lint failure forces a new push that
+    # re-runs everything anyway, so skipping the gate on those runs keeps it
+    # off the CPU pool without delaying merge readiness (ci-gate waits on
+    # pre-commit regardless, and checks pre-commit before the owner gate).
+    needs: [pre-commit]
+    if: ${{ github.event.label.name != 'ci-run' }}
     runs-on: linux-amd64-cpu-2-hk
     permissions:
       pull-requests: read
@@ -827,6 +824,11 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.ref }}
           persist-credentials: false
+          # The gate only needs the gate script and CODEOWNERS, both under
+          # .github/: skip the rest of the tree to keep this high-frequency
+          # job off the CPU pool as briefly as possible.
+          sparse-checkout: .github
+          fetch-depth: 1
 
       - name: CODEOWNERS coverage check
         env:
@@ -890,11 +892,16 @@ jobs:
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
     needs: [pre-commit, cpu-ut, select-tests, run-selected-tests, run-selected-tests-a5, codeowner-approval]
-    # Runs on pull_request events only. Review events re-evaluate the gate by
-    # re-running this job inside the original pull_request run (see refresh-ci-gate),
-    # so the required check itself flips in place instead of spawning a
-    # second verdict under a pull_request_review event name.
-    if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+    # The only producer of the required `ci-gate` check. Review events
+    # re-evaluate the gate by re-running this job inside the original
+    # pull_request run (see pr_refresh_ci_gate.yaml), so the required check
+    # flips in place - and no second check-run under this name is ever
+    # created: a skipped same-name check would shadow the real verdict and
+    # let the PR merge before the gate rewrites it. `!cancelled()` is what
+    # makes the gate run even when a needed job failed - without it, the
+    # default success() would skip ci-gate, and a skipped required check
+    # counts as satisfied on GitHub.
+    if: ${{ !cancelled() }}
     runs-on: linux-amd64-cpu-2-hk
     timeout-minutes: 360
     permissions:
@@ -1067,97 +1074,3 @@ jobs:
           path: ${{ runner.temp }}/ci-gate-result/ci-gate-result.json
 
 
-  # Review-event retrigger: a state-changing review from a CODEOWNERS owner
-  # of the changed files re-runs the gate jobs of the original pull_request
-  # run, so the required `E2E / ci-gate (pull_request)` check itself flips
-  # green in place once a (then missing) owner approval arrives, and re-arms
-  # red on a veto. No separate pull_request_review verdict is produced. See
-  # refresh_ci_gate.py for the exact conditions; COMMENTED reviews, bot
-  # reviews and reviews from non-owners are no-ops.
-  refresh-ci-gate:
-    if: ${{ github.event_name == 'pull_request_review' && github.event.review.user.type != 'Bot' }}
-    runs-on: linux-amd64-cpu-2-hk
-    # May wait for an in-flight pull_request CI run to finish before re-running
-    # its failed gate jobs (see refresh_ci_gate.py).
-    timeout-minutes: 360
-    permissions:
-      # POST the rerun endpoints for the pull_request run (Actions REST API).
-      actions: write
-    env:
-      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      REVIEW_STATE: ${{ github.event.review.state }}
-      REVIEW_ACTION: ${{ github.event.action }}
-      REVIEWER: ${{ github.event.review.user.login }}
-      PR_NUMBER: ${{ github.event.pull_request.number }}
-      PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-      BASE_REF: ${{ github.event.pull_request.base.ref }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # Maximum time (seconds) to wait for an in-flight pull_request CI run to
-      # complete before giving up.
-      GATE_WAIT_SECONDS: "7200"
-    steps:
-      - name: Checkout the base branch
-        # The base branch, never the merge ref: this job holds actions:write,
-        # so the script it executes must come from a trusted tree the PR
-        # cannot alter (a PR must not be able to run its own gate logic).
-        # Without a checkout the step would also depend on whatever the
-        # runner's persistent workspace happens to hold.
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.pull_request.base.ref }}
-          persist-credentials: false
-
-      - name: Re-run the pull_request gate jobs
-        id: rerun
-        run: |
-          # Rollout window only: while the PR that introduces this job is
-          # itself under review, the script is not on the base branch yet and
-          # there is nothing to re-run with. Once merged this never triggers.
-          if [ ! -f ".github/workflows/scripts/refresh_ci_gate.py" ]; then
-            echo "::notice::refresh_ci_gate.py is not on the base branch yet; nothing to re-run."
-            exit 0
-          fi
-          python3 .github/workflows/scripts/refresh_ci_gate.py
-
-      - name: Package gate result
-        # Only this job's own failures (no CI run yet, wait timeout, rerun API
-        # error) need a PR comment; a successful retrigger hands the verdict
-        # back to the re-run pull_request run, whose own packaging step feeds
-        # the comment bot.
-        if: ${{ failure() }}
-        env:
-          CHECK_OUTCOME: ${{ steps.rerun.outcome }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-
-          result_dir = os.path.join(os.environ["RUNNER_TEMP"], "ci-gate-result")
-          os.makedirs(result_dir, exist_ok=True)
-          reason_file = os.path.join(
-              os.environ["RUNNER_TEMP"], "ci_gate_failure_reason.txt")
-          try:
-              with open(reason_file) as f:
-                  reason = f.read().strip()
-          except OSError:
-              reason = ""
-          result = {
-              "conclusion": os.environ["CHECK_OUTCOME"],
-              "reason": reason,
-              "pr": int(os.environ["PR_NUMBER"]),
-              "head_sha": os.environ["HEAD_SHA"],
-          }
-          with open(os.path.join(result_dir, "ci-gate-result.json"), "w") as f:
-              json.dump(result, f)
-          PY
-
-      - name: Upload gate result for the comment bot
-        # Same artifact contract as the ci-gate job: bot_ci_gate_comment.yml
-        # (workflow_run, base repo context) posts it to the PR.
-        if: ${{ failure() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-gate-result-${{ github.run_id }}
-          retention-days: 1
-          if-no-files-found: error
-          path: ${{ runner.temp }}/ci-gate-result/ci-gate-result.json
