@@ -1,0 +1,6 @@
+pr: 22273
+entries:
+  - category: bugfix
+    text: >-
+      Fixed incorrect block-verification acceptance in Model Runner V2 with
+      draft logits on vLLM v0.32.0 by computing the final draft row's residual mass.
