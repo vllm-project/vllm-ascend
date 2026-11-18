@@ -97,6 +97,10 @@ The following code configures vLLM Ascend to use speculative decoding where prop
 
 ## Speculating using Suffix Decoding
 
+This NPU suffix decoding implementation is available only with Model Runner V2.
+It differs from the earlier Model Runner V1 CPU implementation based on Arctic
+Inference and does not require Arctic Inference.
+
 Suffix decoding generates draft tokens by matching repeated token sequences,
 without loading an additional draft model. Like n-gram decoding, it searches
 within a request's prompt and generated output. It can also reuse completed

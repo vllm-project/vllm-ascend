@@ -171,7 +171,10 @@ def _corpus_draft(
         mask=ok[:, None] & (k_iota[None, :] < K) & (cont_pos < corpus_len),
         other=-1,
     ).to(tl.int64)
-    cont = tl.where(tl.cumsum((cont < 0).to(tl.int32), axis=1) == 0, cont, -1)
+    # A5 can miscompile the compare/cumsum/select path for narrow rows
+    # (K_PO2=2 or 4). Find the first separator instead of scanning its mask.
+    stop = tl.min(tl.where(cont < 0, k_iota[None, :], K), axis=1)
+    cont = tl.where(k_iota[None, :] < stop[:, None], cont, -1)
 
     # Candidates sharing a match length draft identical chains; score each
     # distinct length once.
@@ -584,7 +587,9 @@ def launch_suffix_finalize(
     **launch_options,
 ) -> None:
     """Select history/corpus drafts and emit confidence with NPU kernels."""
-    launch_options["K_PO2"] = triton.next_power_of_2(launch_options["K"])
+    # Keep corpus voting matrices two-dimensional for a one-token draft;
+    # A5 cannot lower the unit-width boolean gather in that path.
+    launch_options["K_PO2"] = max(2, triton.next_power_of_2(launch_options["K"]))
     launch_options["DEPTH_PO2"] = triton.next_power_of_2(launch_options["MAX_DEPTH"])
     launch_options["NB_PO2"] = triton.next_power_of_2(num_blocks)
     _suffix_finalize_kernel[(grid[0],)](

@@ -164,7 +164,14 @@ def test_local_scan_matches_reference(depth, max_len):
 
 @pytest.mark.parametrize(
     "k,depth,max_len,corpus_enabled",
-    [(1, 1, 300, False), (3, 8, 300, False), (3, 8, 300, True), (8, 24, 2048, False), (8, 24, 2048, True)],
+    [
+        (1, 1, 300, False),
+        (1, 2, 300, True),
+        (3, 8, 300, False),
+        (3, 8, 300, True),
+        (8, 24, 2048, False),
+        (8, 24, 2048, True),
+    ],
 )
 @pytest.mark.parametrize("adaptive", [False, True])
 def test_kernel_feature_combinations(k, depth, max_len, corpus_enabled, adaptive):
