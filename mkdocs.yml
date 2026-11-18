@@ -308,6 +308,7 @@ nav:
         - user_guide/feature_guide/quantization.md
         - user_guide/feature_guide/sleep_mode.md
         - user_guide/feature_guide/runtime_guard.md
+        - user_guide/feature_guide/kv_trace.md
         - user_guide/feature_guide/structured_output.md
         - user_guide/feature_guide/lora.md
         - user_guide/feature_guide/expert_parallelism_load_balancer.md
@@ -346,8 +347,10 @@ nav:
         - developer_guide/contribution/nightly_ci_test.md
         - developer_guide/contribution/e2e_ci_test.md
         - developer_guide/contribution/dependency_version_management.md
+        - developer_guide/contribution/triton_operators.md
     - Design Documents:
         - developer_guide/Design_Documents/index.md
+        - developer_guide/Design_Documents/triton_jit_warmup.md
         - developer_guide/Design_Documents/persistent_csrc_build_cache.md
         - developer_guide/Design_Documents/patch.md
         - developer_guide/Design_Documents/cpu_binding.md

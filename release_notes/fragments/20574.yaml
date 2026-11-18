@@ -1,0 +1,4 @@
+pr: 20574
+entries:
+  - category: feature
+    text: Added QKV IProj tensor parallelism for GLM-5.3-Flash PD decode nodes. Enable it with qkv_iproj_tensor_parallel_size.
