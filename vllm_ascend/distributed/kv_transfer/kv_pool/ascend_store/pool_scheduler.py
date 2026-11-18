@@ -425,7 +425,11 @@ class BaseKVPoolScheduler(ABC):
         prompt_token_ids: list[int],
         skip_save: bool | None,
     ):
-        last_chunk_tokens_num = self._get_last_chunk_tokens_num(prompt_token_ids)
+        if self.layerwise_offload:
+            # A trailing partial chunk still needs the previous step's checkpoint.
+            last_chunk_tokens_num = request_tracker.prefill_end_tokens or len(prompt_token_ids)
+        else:
+            last_chunk_tokens_num = self._get_last_chunk_tokens_num(prompt_token_ids)
         return ReqMeta.from_request_tracker(
             request_tracker,
             self.cache_transfer_granularity,

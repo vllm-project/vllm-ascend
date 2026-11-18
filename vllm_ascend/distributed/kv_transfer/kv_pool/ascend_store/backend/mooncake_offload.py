@@ -107,7 +107,12 @@ def _load_entries(worker, request, group, hashes, mask):
         if checkpoint is not None:
             endpoint, pages = checkpoint
             if endpoint != tokens or index not in pages:
-                raise ValueError("Mooncake offload has no committed version for a live continuation page")
+                raise ValueError(
+                    "Mooncake offload has no committed version for a live continuation page "
+                    f"(request={request.req_id}, incarnation={request.layerwise_request_id}, group={group}, "
+                    f"checkpoint_endpoint={endpoint}, restore_endpoint={tokens}, "
+                    f"page_index={index}, page_present={index in pages})"
+                )
             entries.append((pages[index], index))
             continue
         if snapshot_start is not None and index >= snapshot_start:

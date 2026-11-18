@@ -493,6 +493,27 @@ def isolated_method(path, cls_name, method_name, ns):
     return ns[cls_name]
 
 
+@pytest.mark.parametrize(
+    ("offload", "target", "is_last_chunk"),
+    [(True, 1024, False), (True, 1030, True), (False, 1024, True)],
+)
+def test_layerwise_prefill_keeps_checkpoint_for_partial_tail(ns, offload, target, is_last_chunk):
+    ns["ReqMeta"] = NS(from_request_tracker=lambda *args, **kwargs: NS(**kwargs))
+    cls = isolated_method(STORE + "pool_scheduler.py", "BaseKVPoolScheduler", "_build_req_meta", ns)
+    scheduler = NS(
+        layerwise_offload=offload,
+        _get_last_chunk_tokens_num=lambda tokens: len(tokens) // 128 * 128,
+        cache_transfer_granularity=128,
+        _discard_partial_chunks=True,
+        original_block_size=128,
+        kv_cache_group_families=(),
+        hash_block_size=128,
+    )
+    tracker = NS(prefill_end_tokens=1030, token_len=target)
+    meta = cls._build_req_meta(scheduler, tracker, [], None, [0] * 1030, False)
+    assert meta.is_last_chunk is is_last_chunk
+
+
 @pytest.mark.parametrize("fault", [None, "put", "commit"])
 def test_publication_requires_all_layer_copies_and_failures_revoke(ns, fault):
     ns.update(
