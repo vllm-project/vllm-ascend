@@ -1,6 +1,0 @@
-pr: 22215
-entries:
-  - category: bugfix
-    text: >-
-      Fixed missing SFA indexer cache transfers in MooncakeConnector when only
-      the decode service uses DCP.
