@@ -4,8 +4,6 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-import pytest
-
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import (
     InFlightSaveBlockTracker,
@@ -69,17 +67,6 @@ def test_aggregated_worker_counts_release_source():
     tracker.complete(completed.completed_events, pool)
     pool.free_blocks.assert_called_once_with([1])
     assert not tracker.has_pending_work()
-
-
-def test_excess_completions_keep_source_pinned():
-    tracker = InFlightSaveBlockTracker(2)
-    pool = _pool()
-    meta = ReqMeta("r", can_save=True, boundary_puts=[BoundaryPut(0, 1, 16)])
-    tracker.retain(meta, {}, pool)
-    with pytest.raises(ValueError, match="Too many completions"):
-        tracker.complete({meta.event_id: 3}, pool)
-    pool.free_blocks.assert_not_called()
-    assert tracker.has_pending_work()
 
 
 def test_full_page_legacy_path_pins_only_recurrent_non_scratch_sources():

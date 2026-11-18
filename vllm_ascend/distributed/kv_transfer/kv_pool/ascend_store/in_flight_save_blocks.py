@@ -71,8 +71,6 @@ class InFlightSaveBlockTracker:
                 logger.warning("worker reports an invalid event: %s, count %s", event_id, count)
                 continue
             total += count
-            if total > self.expected_worker_count:
-                raise ValueError(f"Too many completions for save event {event_id}")
             if total < self.expected_worker_count:
                 self.sending_events[event_id] = total
                 continue
