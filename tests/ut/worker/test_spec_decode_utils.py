@@ -5,12 +5,8 @@
 from __future__ import annotations
 
 import numpy as np
-import torch
 
-from vllm_ascend.worker.spec_decode_utils import (
-    correct_optimistic_seq_lens_cpu,
-    update_num_computed_tokens_for_batch_change,
-)
+from vllm_ascend.worker.spec_decode_utils import correct_optimistic_seq_lens_cpu
 
 
 def _build_optimistic_seq_lens(
@@ -138,45 +134,3 @@ def test_correct_optimistic_seq_lens_cpu_partial_batch():
     # req 1: correction = 1 + 1 - 2 = 0, → 200 unchanged
     # tail (idx 2,3) untouched
     np.testing.assert_array_equal(optimistic, np.array([99, 200, 999, 999]))
-
-
-def test_cpu_and_gpu_corrections_agree():
-    """The CPU helper must agree with ``update_num_computed_tokens_for_batch_change``.
-
-    They live on different sides of the device boundary, but both implement
-    the same correction. We compare the post-correction seq_lens (= corrected
-    num_computed_tokens + num_scheduled_step_n) on each path.
-    """
-    num_reqs = 6
-    prev_step_computed = np.array([100, 250, 80, 0, 410, 5], dtype=np.int32)
-    prev_drafts = np.array([2, 4, 0, 0, 3, 1], dtype=np.int32)
-    accepted = np.array([2, 1, 0, 0, 0, 1], dtype=np.int32)
-    valid_count = (accepted + 1).astype(np.int32)
-    num_scheduled_step_n = np.array([3, 5, 1, 1, 4, 2], dtype=np.int32)
-    prev_positions = np.array([0, 1, 2, -1, 4, 5], dtype=np.int32)
-
-    # CPU path
-    optimistic = _build_optimistic_seq_lens(prev_step_computed, prev_drafts, num_scheduled_step_n).astype(np.int32)
-    correct_optimistic_seq_lens_cpu(optimistic, prev_positions, prev_drafts, valid_count, num_reqs)
-
-    # GPU path on CPU device for portability
-    cpu_num_computed = torch.from_numpy(
-        prev_step_computed + prev_drafts + 1  # scheduler-bumped optimistic
-    ).to(torch.int32)
-    num_computed_gpu = torch.from_numpy(prev_step_computed.copy()).to(torch.int32)
-    num_accepted_gpu = torch.zeros(num_reqs, dtype=torch.int32)
-    valid_count_t = torch.from_numpy(valid_count)
-    prev_positions_t = torch.from_numpy(prev_positions)
-    prev_drafts_t = torch.from_numpy(prev_drafts)
-    update_num_computed_tokens_for_batch_change(
-        num_computed_gpu,
-        num_accepted_gpu,
-        prev_positions_t,
-        valid_count_t,
-        prev_drafts_t,
-        cpu_num_computed,
-    )
-
-    gpu_seq_lens = num_computed_gpu.numpy() + num_scheduled_step_n
-
-    np.testing.assert_array_equal(optimistic, gpu_seq_lens)

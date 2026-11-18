@@ -49,6 +49,9 @@ class MemoryRangeStore:
         self.complete = set()
         self.open_reads = set()
 
+    def set_device(self):
+        pass
+
     def register_buffer(self, ptrs, lengths):
         assert all(length > 0 for length in lengths)
 
@@ -162,7 +165,7 @@ class TestMooncakeHybrid(unittest.TestCase):
             groups.append(KVCacheGroupSpec([name], UniformTypeKVCacheSpecs.from_specs({name: tail})))
         config = SimpleNamespace(num_blocks=8, kv_cache_groups=groups)
         with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVPoolWorker._build_cache_coordinator",
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.BaseKVPoolWorker._build_cache_coordinator",
             return_value=None,
         ):
             worker = make_worker(
@@ -273,7 +276,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         config.parallel_config.tensor_parallel_size = 8
         config.model_config.use_mla = True
         config.scheduler_config.disable_hybrid_kv_cache_manager = False
-        with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib"):
+        with patch.object(mooncake_backend.MooncakeBackend, "create_scheduler_client"):
             scheduler = create_kv_pool_scheduler(config, use_layerwise=True, kv_cache_config=worker.kv_cache_config)
         self.assertEqual(scheduler.cacheable_group_ids, [0, 1, 2])
         self.assertEqual(scheduler.hash_block_size, 16)
@@ -447,6 +450,7 @@ class TestMooncakeHybrid(unittest.TestCase):
 
     def test_coordinator_queries_all_heads_using_mooncake_existence(self):
         scheduler = object.__new__(LayerwiseKVPoolScheduler)
+        scheduler.sharded_mamba_group_ids = set()
         scheduler.dspark_prefix_keys = None
         scheduler.num_speculative_blocks_by_group = {}
         scheduler.block_key_hybrid = True
@@ -655,7 +659,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         config.scheduler_config.disable_hybrid_kv_cache_manager = False
         with (
             patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient"),
-            patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib") as importer,
+            patch.object(mooncake_backend.MooncakeBackend, "create_scheduler_client"),
             patch(
                 "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
                 side_effect=lambda spec: (
@@ -665,7 +669,6 @@ class TestMooncakeHybrid(unittest.TestCase):
                 ),
             ),
         ):
-            importer.import_module.return_value = MagicMock()
             scheduler = create_kv_pool_scheduler(config, kv_cache_config=group_config, use_layerwise=True)
             self.assertTrue(scheduler.block_key_hybrid)
             request = SimpleNamespace(request_id="r", block_hashes=[bytes([i]) * 32 for i in range(4)])

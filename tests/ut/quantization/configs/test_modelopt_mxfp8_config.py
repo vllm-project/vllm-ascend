@@ -103,7 +103,6 @@ class TestAscendModelOptMxFp8Config(TestBase):
         layer.moe_config = MagicMock()
         scheme = MagicMock()
         expected_method = MagicMock()
-        tid2eid = MagicMock()
 
         with (
             patch(
@@ -122,11 +121,10 @@ class TestAscendModelOptMxFp8Config(TestBase):
             method = config.get_quant_method(
                 layer,
                 "model.layers.0.block_sparse_moe",
-                tid2eid,
             )
 
         self.assertIs(method, expected_method)
-        mock_fused_method.assert_called_once_with(scheme, layer.moe_config, tid2eid)
+        mock_fused_method.assert_called_once_with(scheme, layer.moe_config)
 
     def test_bf16_kv_cache_and_embedding_keep_native_methods(self):
         config = self._from_minimax_config()

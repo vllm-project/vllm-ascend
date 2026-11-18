@@ -23,238 +23,64 @@ import pytest
 import vllm_ascend.mrv2_utils as mrv2_utils
 from vllm_ascend.mrv2_utils import use_v2_model_runner
 
-
-@pytest.mark.parametrize("env_value", [True, False])
-def test_environment_override_wins(monkeypatch, env_value):
-    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", env_value)
-
-    assert use_v2_model_runner(SimpleNamespace()) is env_value
+_CONFIGS = [SimpleNamespace(), MagicMock()]
+_CONFIG_IDS = ["empty-config", "magicmock-config"]
 
 
-@pytest.mark.parametrize(
-    "config",
-    [
-        SimpleNamespace(),
-        SimpleNamespace(model_config=None),
-        SimpleNamespace(
-            model_config=SimpleNamespace(
-                runner_type="generate",
-                is_attention_free=True,
-                architecture="UnknownModel",
-                architectures=["UnknownModel"],
-            )
-        ),
-        SimpleNamespace(
-            speculative_config=SimpleNamespace(
-                method="unknown_method",
-                num_speculative_tokens_per_batch_size=[[1, 256, 4]],
-            )
-        ),
-        SimpleNamespace(lora_config=object()),
-        SimpleNamespace(speculative_config=SimpleNamespace(parallel_drafting=True)),
-        SimpleNamespace(speculative_config=SimpleNamespace(method="eagle3", parallel_drafting=False)),
-        SimpleNamespace(model_config=SimpleNamespace(architectures=["HYV3ForCausalLM"])),
-        SimpleNamespace(model_config=SimpleNamespace(architecture="HYV3ForCausalLM")),
-        SimpleNamespace(model_config=SimpleNamespace(architectures=["Gemma4ForCausalLM"])),
-        SimpleNamespace(model_config=SimpleNamespace(architectures=["Gemma4ForConditionalGeneration"])),
-        SimpleNamespace(model_config=SimpleNamespace(architectures=["Gemma4UnifiedForConditionalGeneration"])),
-        SimpleNamespace(
-            model_config=SimpleNamespace(hf_config=SimpleNamespace(architectures=["Gemma4ForCausalLM"])),
-        ),
-        SimpleNamespace(
-            kv_transfer_config=SimpleNamespace(kv_connector="MooncakeConnectorV2"),
-        ),
-        SimpleNamespace(additional_config={"enable_kvpp": True}),
-        SimpleNamespace(model_config=SimpleNamespace(is_encoder_decoder=True)),
-        SimpleNamespace(additional_config={"enable_reduce_sample": False}),
-        SimpleNamespace(additional_config={"enable_reduce_sample": "false"}),
-        SimpleNamespace(additional_config={"enable_reduce_sample": True}),
-        SimpleNamespace(additional_config={"enable_reduce_sample": "true"}),
-        SimpleNamespace(additional_config={"enable_reduce_sample": 1}),
-        SimpleNamespace(additional_config={"eplb_config": {"dynamic_eplb": True}}),
-        SimpleNamespace(model_config=SimpleNamespace(runner_type="pooling")),
-        SimpleNamespace(model_config=SimpleNamespace(is_pooling_model=True)),
-        SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector="AscendStoreConnector")),
-        SimpleNamespace(
-            kv_transfer_config=SimpleNamespace(
-                kv_connector="AscendStoreConnector",
-                kv_connector_extra_config={"backend": "memcache"},
-            )
-        ),
-        SimpleNamespace(ec_transfer_config=object()),
-        SimpleNamespace(
-            model_config=SimpleNamespace(multimodal_config=SimpleNamespace(mm_encoder_only=True)),
-        ),
-    ],
-    ids=[
-        "empty-config",
-        "no-model",
-        "unknown-attention-free-generate",
-        "dynamic-unsupported-speculation",
-        "lora",
-        "parallel-drafting",
-        "eagle3-without-parallel-drafting",
-        "hy3-preview",
-        "hy3-preview-architecture",
-        "gemma4-causal",
-        "gemma4-conditional",
-        "gemma4-unified",
-        "gemma4-hf-config",
-        "mooncake-pd",
-        "kvpp",
-        "encoder-decoder",
-        "reduce-sample-disabled",
-        "reduce-sample-string-false",
-        "reduce-sample-enabled",
-        "reduce-sample-string-true",
-        "reduce-sample-int",
-        "dynamic-eplb",
-        "pooling-runner",
-        "pooling-model",
-        "kv-pool-connector",
-        "kv-pool-memcache",
-        "vl-encoder-disaggregation",
-        "vl-encoder-only",
-    ],
-)
-def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
-    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
-
+@pytest.mark.parametrize("config", _CONFIGS, ids=_CONFIG_IDS)
+def test_v2_is_the_only_runner(config):
     assert use_v2_model_runner(config) is True
 
 
-@pytest.mark.parametrize("enforce_eager", [None, False, True], ids=["unset", "graph", "eager"])
-@pytest.mark.parametrize("env_value", [None, False, True], ids=["default", "force-v1", "force-v2"])
-def test_dflash2_defaults_to_v2_and_honors_environment(monkeypatch, enforce_eager, env_value):
-    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", env_value)
-    config = SimpleNamespace(
-        speculative_config=SimpleNamespace(
-            method="dflash",
-            enforce_eager=enforce_eager,
-            draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
-        ),
-        compilation_config=SimpleNamespace(cudagraph_mode="FULL_DECODE_ONLY"),
-    )
+def test_validate_v2_model_runner_keeps_the_upstream_feature_list():
+    config = SimpleNamespace(_get_v2_model_runner_unsupported_features=lambda: ["suffix"])
 
-    assert use_v2_model_runner(config) is (env_value is not False)
+    with pytest.raises(ValueError, match="suffix"):
+        mrv2_utils._validate_v2_model_runner(config)
 
 
-@pytest.mark.parametrize(
-    "config",
-    [
-        SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mm_encoder=True)),
-        SimpleNamespace(additional_config={"draft_window_size": 512}),
-        SimpleNamespace(speculative_config=SimpleNamespace(method="suffix")),
-        SimpleNamespace(speculative_config=SimpleNamespace(method="ngram")),
-        SimpleNamespace(speculative_config=SimpleNamespace(method="ngram_gpu")),
-        SimpleNamespace(speculative_config=SimpleNamespace(method="draft_model", parallel_drafting=True)),
-        SimpleNamespace(speculative_config=SimpleNamespace(method="eagle3", parallel_drafting=True)),
-        SimpleNamespace(speculative_config=SimpleNamespace(method="eagle", parallel_drafting=True)),
-    ],
-    ids=[
-        "vl-encoder-graph",
-        "draft-window-size",
-        "suffix-speculative-decoding",
-        "ngram-speculative-decoding",
-        "ngram-gpu-speculative-decoding",
-        "draft-model-speculative-decoding",
-        "p-eagle",
-        "p-eagle-method-eagle",
-    ],
-)
-def test_blacklisted_features_default_to_v1(monkeypatch, config):
-    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+def test_validate_v2_model_runner_accepts_a_supported_config():
+    config = SimpleNamespace(_get_v2_model_runner_unsupported_features=lambda: [])
 
-    assert use_v2_model_runner(config) is False
+    mrv2_utils._validate_v2_model_runner(config)
 
 
-def test_310p_follows_default_v2_path(monkeypatch):
-    """Runner selection must not blacklist device identity (HAL)."""
-    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+def test_explicit_v1_request_is_rejected(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
 
-    assert use_v2_model_runner(SimpleNamespace()) is True
-
-
-def test_310p_env_override_still_wins(monkeypatch):
-    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", False)
-
-    assert use_v2_model_runner(SimpleNamespace()) is False
-
-    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", True)
-    assert use_v2_model_runner(SimpleNamespace()) is True
+    with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=0"):
+        mrv2_utils.apply_v2_model_runner_config_patch()
 
 
-def test_magicmock_config_does_not_trip_the_blacklist(monkeypatch):
-    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+def test_v1_request_is_rejected_after_upstream_drops_the_entry(monkeypatch):
+    from vllm import envs
 
-    assert use_v2_model_runner(MagicMock()) is True
+    # Upstream removes the env entry together with Model Runner V1.
+    monkeypatch.setattr(envs, "VLLM_USE_V2_MODEL_RUNNER", None)
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
 
-
-def test_blacklist_does_not_override_explicit_env(monkeypatch):
-    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", True)
-
-    assert use_v2_model_runner(SimpleNamespace(lora_config=object())) is True
-    assert use_v2_model_runner(SimpleNamespace(model_config=SimpleNamespace(architectures=["HYV3ForCausalLM"]))) is True
-    assert (
-        use_v2_model_runner(SimpleNamespace(model_config=SimpleNamespace(architectures=["Gemma4ForCausalLM"]))) is True
-    )
-    assert use_v2_model_runner(SimpleNamespace(model_config=SimpleNamespace(runner_type="pooling"))) is True
-    assert use_v2_model_runner(SimpleNamespace(model_config=SimpleNamespace(is_encoder_decoder=True))) is True
-    assert use_v2_model_runner(SimpleNamespace(additional_config={"enable_kvpp": True})) is True
-    assert use_v2_model_runner(SimpleNamespace(ec_transfer_config=object())) is True
-    assert use_v2_model_runner(SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mm_encoder=True))) is True
-    assert use_v2_model_runner(SimpleNamespace(additional_config={"draft_window_size": 512})) is True
-    assert use_v2_model_runner(SimpleNamespace(additional_config={"enable_reduce_sample": True})) is True
-    assert (
-        use_v2_model_runner(SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector="AscendStoreConnector")))
-        is True
-    )
-
-
-def test_default_v2_logs_selection(monkeypatch):
-    info_calls = []
-    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
-    monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: info_calls.append(args))
-
-    assert use_v2_model_runner(SimpleNamespace()) is True
-    assert len(info_calls) == 1
-
-
-def test_blacklist_logs_fallback(monkeypatch):
-    warning_calls = []
-    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
-    monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args, **kwargs: warning_calls.append(args))
-
-    config = SimpleNamespace(speculative_config=SimpleNamespace(method="suffix"))
-    assert use_v2_model_runner(config) is False
-    assert len(warning_calls) == 1
-    assert "suffix speculative decoding" in warning_calls[0][1]
-
-
-def test_validation_is_decoupled_from_upstream():
-    mrv2_utils._validate_v2_model_runner(object())
-    mrv2_utils._validate_v2_model_runner(SimpleNamespace())
+    with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=0"):
+        mrv2_utils.apply_v2_model_runner_config_patch()
 
 
 def test_apply_config_patch_is_wired(monkeypatch):
     from vllm.config.vllm import VllmConfig
 
     original_property = VllmConfig.use_v2_model_runner
-    original_validate = VllmConfig._validate_v2_model_runner
-
-    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", False)
+    original_validate = getattr(VllmConfig, "_validate_v2_model_runner", None)
 
     mrv2_utils.apply_v2_model_runner_config_patch()
     assert isinstance(VllmConfig.use_v2_model_runner, property)
     assert VllmConfig.use_v2_model_runner.fget is mrv2_utils.use_v2_model_runner
-
-    # Upstream GPU-specific validation must not change Ascend's default.
-    VllmConfig._validate_v2_model_runner(object())
+    if original_validate is not None:
+        # Ascend owns this hook so the GPU-only Triton precondition does not
+        # reject configs built in environments without Triton.
+        assert VllmConfig._validate_v2_model_runner is mrv2_utils._validate_v2_model_runner
 
     # Re-applying is harmless.
     mrv2_utils.apply_v2_model_runner_config_patch()
-    VllmConfig._validate_v2_model_runner(object())
 
     # Restore the upstream class state so later tests are unaffected.
     monkeypatch.setattr(VllmConfig, "use_v2_model_runner", original_property)
-    monkeypatch.setattr(VllmConfig, "_validate_v2_model_runner", original_validate)
+    if original_validate is not None:
+        monkeypatch.setattr(VllmConfig, "_validate_v2_model_runner", original_validate)

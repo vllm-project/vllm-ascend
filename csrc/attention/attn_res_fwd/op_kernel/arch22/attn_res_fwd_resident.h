@@ -19,6 +19,7 @@
 
 #include "kernel_operator.h"
 #include "../attn_res_fwd_tiling_data.h"
+#include "../attn_res_fwd_ub_layout.h"
 #include "reduce_common.h"
 #include "attn_res_fwd_reload.h" // AttnResFwdInitParams
 
@@ -119,13 +120,18 @@ private:
     {
         pipe_->InitBuffer(inQue_, BUFFER_NUM_RESIDENT, hiddenSizeAlignBf16_ * sizeof(D_IN));
         pipe_->InitBuffer(outQue_, BUFFER_NUM_RESIDENT, hiddenSizeAlignBf16_ * sizeof(D_IN));
-        pipe_->InitBuffer(vBf16Buf_, blockCount_ * hiddenSizeAlignBf16_ * sizeof(D_IN));
+        const uint32_t residentRows = LegacyResidentRows(blockCount_, fuseAdd_ || tiling_->fusedChain != 0);
+        if (residentRows != 0) {
+            pipe_->InitBuffer(vBf16Buf_, residentRows * hiddenSizeAlignBf16_ * sizeof(D_IN));
+        }
         pipe_->InitBuffer(scoreWeightBuf_, hiddenSizeAlignFp32_ * sizeof(float));
         pipe_->InitBuffer(vRowBuf_, hiddenSizeAlignFp32_ * sizeof(float));
         pipe_->InitBuffer(outFp32Buf_, hiddenSizeAlignFp32_ * sizeof(float));
         metaAlign_ = (blockCount_ + ELEM_PER_BLK_FP32 - 1U) / ELEM_PER_BLK_FP32 * ELEM_PER_BLK_FP32;
         pipe_->InitBuffer(vecMetaBuf_, metaAlign_ * sizeof(float));
-        pipe_->InitBuffer(metaSoftmaxBuf_, metaAlign_ * sizeof(float));
+        // Brcb(repeat=1) writes eight 32-byte blocks, even for one scalar.
+        const uint32_t scratchElems = metaAlign_ < ELEM_PER_REP_FP32 ? ELEM_PER_REP_FP32 : metaAlign_;
+        pipe_->InitBuffer(metaSoftmaxBuf_, scratchElems * sizeof(float));
         pipe_->InitBuffer(metaBrcBuf_, metaAlign_ * ELEM_PER_BLK_FP32 * sizeof(float));
         pipe_->InitBuffer(scalarBuf_, SCALAR_LOCAL_ELEMS * sizeof(float));
 
@@ -134,7 +140,9 @@ private:
             fusedPrefix_ = fusedPrefixBuf_.Get<D_IN>();
         }
 
-        vBf16_ = vBf16Buf_.Get<D_IN>();
+        if (residentRows != 0) {
+            vBf16_ = vBf16Buf_.Get<D_IN>();
+        }
         scoreWeight_ = scoreWeightBuf_.Get<float>();
         vRow_ = vRowBuf_.Get<float>();
         outFp32_ = outFp32Buf_.Get<float>();
@@ -190,6 +198,9 @@ private:
 
     __aicore__ inline LocalTensor<D_IN> GetResidentRow(uint32_t n)
     {
+        if (n == numBlocks_ && (fuseAdd_ || tiling_->fusedChain != 0)) {
+            return fusedPrefix_;
+        }
         return vBf16_[n * hiddenSizeAlignBf16_];
     }
 
@@ -208,15 +219,19 @@ private:
             } else {
                 inLocal = CopyInRow(prefixSumGm_, static_cast<uint64_t>(tokenIdx) * hiddenSize_);
             }
-            LocalTensor<D_IN> dstRow = GetResidentRow(n);
-            // UB→UB：用 Vector Copy，勿用 DataCopy / DataCopyParams
-            constexpr uint32_t copyElemsPerRepeat = 256U / sizeof(D_IN);
-            for (uint32_t offset = 0; offset < hiddenSizeAlignBf16_; offset += copyElemsPerRepeat) {
-                const uint32_t remaining = hiddenSizeAlignBf16_ - offset;
-                const uint64_t mask = remaining < copyElemsPerRepeat ? remaining : copyElemsPerRepeat;
-                Copy(dstRow[offset], inLocal[offset], mask, 1, {1, 1, 8, 8});
+            // Prefix storage remains live until weighted output has consumed it.
+            // Bank rows still need their own resident copy after the input queue is freed.
+            if (n < numBlocks_ || (!fuseAdd_ && tiling_->fusedChain == 0)) {
+                LocalTensor<D_IN> dstRow = GetResidentRow(n);
+                // UB→UB：用 Vector Copy，勿用 DataCopy / DataCopyParams
+                constexpr uint32_t copyElemsPerRepeat = 256U / sizeof(D_IN);
+                for (uint32_t offset = 0; offset < hiddenSizeAlignBf16_; offset += copyElemsPerRepeat) {
+                    const uint32_t remaining = hiddenSizeAlignBf16_ - offset;
+                    const uint64_t mask = remaining < copyElemsPerRepeat ? remaining : copyElemsPerRepeat;
+                    Copy(dstRow[offset], inLocal[offset], mask, 1, {1, 1, 8, 8});
+                }
+                PipeBarrier<PIPE_V>();
             }
-            PipeBarrier<PIPE_V>();
             Cast(vRow_, inLocal, RoundMode::CAST_NONE, hiddenSize_);
             PipeBarrier<PIPE_V>();
             if (n < numBlocks_ || (!fuseAdd_ && tiling_->fusedChain == 0)) {
@@ -224,6 +239,7 @@ private:
             }
 
             // 非原地平方：outFp32=v²，保留 vRow=v，省去 DataCopy 备份
+            ClearFp32TailBlock(outFp32_, hiddenSize_);
             Mul(outFp32_, vRow_, vRow_, hiddenSize_);
             PipeBarrier<PIPE_V>();
             ReduceSumHalfInterval(scalarLocal_, outFp32_, static_cast<int32_t>(hiddenSize_));
@@ -242,6 +258,7 @@ private:
             }
             BroadcastScalarMulTensor(vRow_, vRow_, scalarLocal_, metaSoftmax_, metaBrc_, hiddenSize_,
                                      hiddenSizeAlignFp32_);
+            ClearFp32TailBlock(outFp32_, hiddenSize_);
             Mul(outFp32_, vRow_, scoreWeight_, hiddenSize_);
             PipeBarrier<PIPE_V>();
             // Reduce directly into the compact score slot. WholeReduceSum emits
@@ -259,10 +276,7 @@ private:
         Duplicate(metaSoftmax_, 0.0f, metaAlign_);
         PipeBarrier<PIPE_V>();
         CopyCompactFloatsUb(metaSoftmax_, vecMeta_, blockCount_);
-        const uint8_t brcRepeat =
-            static_cast<uint8_t>((blockCount_ + ELEM_PER_BLK_FP32 - 1U) / ELEM_PER_BLK_FP32);
-        Brcb(metaBrc_, metaSoftmax_, brcRepeat, {1, MOV_8});
-        PipeBarrier<PIPE_V>();
+        BroadcastCompactScores(metaBrc_, metaSoftmax_, metaAlign_);
     }
 
     __aicore__ inline void WriteProbsQue(uint32_t tokenIdx)
@@ -313,6 +327,7 @@ private:
         if (tiling_->fusedChain != 0 && tiling_->outputNormEps > 0.0f) {
             Cast(outFp32_, outLocal, RoundMode::CAST_NONE, hiddenSize_);
             PipeBarrier<PIPE_V>();
+            ClearFp32TailBlock(vRow_, hiddenSize_);
             Mul(vRow_, outFp32_, outFp32_, hiddenSize_);
             PipeBarrier<PIPE_V>();
             ReduceSumHalfInterval(scalarLocal_, vRow_, static_cast<int32_t>(hiddenSize_));
@@ -390,10 +405,17 @@ private:
     __aicore__ inline void CopyB16Row(const LocalTensor<D_IN> &dst, const LocalTensor<D_IN> &src)
     {
         constexpr uint32_t elems = 256U / sizeof(D_IN);
-        for (uint32_t offset = 0; offset < hiddenSizeAlignBf16_; offset += elems) {
-            const uint32_t remaining = hiddenSizeAlignBf16_ - offset;
-            const uint64_t mask = remaining < elems ? remaining : elems;
-            Copy(dst[offset], src[offset], mask, 1, {1, 1, 8, 8});
+        constexpr uint32_t maxRepeats = 255;
+        uint32_t offset = 0;
+        uint32_t repeats = hiddenSizeAlignBf16_ / elems;
+        while (repeats != 0) {
+            const uint8_t batch = static_cast<uint8_t>(repeats > maxRepeats ? maxRepeats : repeats);
+            Copy(dst[offset], src[offset], elems, batch, {1, 1, 8, 8});
+            offset += static_cast<uint32_t>(batch) * elems;
+            repeats -= batch;
+        }
+        if (offset < hiddenSizeAlignBf16_) {
+            Copy(dst[offset], src[offset], hiddenSizeAlignBf16_ - offset, 1, {1, 1, 8, 8});
         }
         PipeBarrier<PIPE_V>();
     }

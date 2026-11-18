@@ -1,13 +1,25 @@
-"""SFA-specific CP helpers shared by the attention and indexer builders.
+"""SFA-specific CP cache and address helpers.
 
-These helpers encode the replicated SFA indexer-cache layout, so they stay
-outside ``common_cp`` while avoiding a dependency between the two builders.
+These helpers encode SFA cache transport and the replicated indexer-cache
+layout without depending on the attention implementation or metadata builders.
 """
 
 from typing import Any
 
 import torch
 from vllm.utils.math_utils import cdiv
+
+
+def as_byte_view(x: torch.Tensor) -> torch.Tensor:
+    """Return a byte view for FP8 tensors, preserving their bit patterns."""
+    if x.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+        return x.view(torch.uint8)
+    return x
+
+
+def _index_select_kv_blocks(cache: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    # FP8 block movement must preserve bytes, including NaN bit patterns.
+    return torch.index_select(as_byte_view(cache), 0, indices).view(cache.dtype)
 
 
 def get_sfa_pcp_global_metadata(
@@ -44,14 +56,32 @@ def get_sfa_dcp_max_local_block_table_cols(
     return cdiv(max_model_len, physical_block_size * dcp_size) * blocks_per_physical_block
 
 
+def get_sfa_max_num_reqs(vllm_config: Any) -> int:
+    """Include PCP's two prefill segments and one graph-padding request."""
+    segments = 2 if vllm_config.parallel_config.prefill_context_parallel_size > 1 else 1
+    return vllm_config.scheduler_config.max_num_seqs * segments + 1
+
+
 def get_sfa_dcp_local_block_table(
     block_table: torch.Tensor,
     num_reqs: int,
     max_local_block_table_cols: int,
+    *,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Select the rank-local physical block-table view."""
-    local_cols = min(block_table.shape[1], max_local_block_table_cols)
-    return block_table[:num_reqs, :local_cols]
+    if block_table.shape[1] < max_local_block_table_cols:
+        raise ValueError(
+            f"SFA DCP block table needs {max_local_block_table_cols} columns, "
+            f"but only {block_table.shape[1]} were provided."
+        )
+    # The operator uses the logical width as its row stride. A slice of a
+    # wider backing table must not retain that backing table's stride.
+    local = block_table[:num_reqs, :max_local_block_table_cols]
+    if out is not None:
+        out.copy_(local)
+        return out
+    return local.contiguous()
 
 
 def build_sfa_dcp_replicated_block_table(

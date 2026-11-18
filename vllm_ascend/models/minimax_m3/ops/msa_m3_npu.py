@@ -149,6 +149,8 @@ def _build_cu_seqlens_q(query_lens: torch.Tensor) -> torch.Tensor:
 def _gbsa_softmax_precision(kv_cache_dtype: torch.dtype) -> int:
     if kv_cache_dtype == torch.float8_e4m3fn:
         return _GBSA_FP8_SOFTMAX_PRECISION
+    if kv_cache_dtype == torch.bfloat16:
+        return get_current_hardware_profile().minimax_m3_gbsa_bf16_softmax_precision
     return _GBSA_SOFTMAX_PRECISION
 
 
@@ -311,7 +313,7 @@ def _run_generic_block_sparse_attention(
             raise TypeError("MiniMax-M3 FP8 sparse attention requires both K and V caches in E4M3")
         q = _to_fp8_e4m3(q)
         quant_mode = _GBSA_FP8_STATIC_CAST_P
-        # GBSA quant mode 5 requires precision 1. BF16 retains FP32 softmax.
+        # GBSA quant mode 5 requires precision 1. BF16 follows the hardware policy.
         quant_kwargs = {"attention_out_dtype": torch.bfloat16}
     elif q.dtype != key.dtype or value.dtype != key.dtype:
         raise TypeError("MiniMax-M3 sparse attention requires Q, K, and V to have the same dtype")

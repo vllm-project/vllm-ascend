@@ -29,9 +29,12 @@ if [[ -n "${GITHUB_BASE_REF}" ]]; then
     # base branch instead, so a leaked credential in the diff fails the job.
     BASE_REF="refs/remotes/origin/${GITHUB_BASE_REF}"
     if ! git rev-parse --verify --quiet "${BASE_REF}" > /dev/null; then
-        echo "::error::Cannot resolve the base branch ref '${BASE_REF}'."
-        echo "::error::The secret scan cannot determine which commits to scan."
-        exit 1
+        echo "Base ref '${BASE_REF}' is missing; fetching '${GITHUB_BASE_REF}' from origin."
+        if ! git fetch --no-tags origin "+refs/heads/${GITHUB_BASE_REF}:${BASE_REF}"; then
+            echo "::error::Cannot resolve the base branch ref '${BASE_REF}'."
+            echo "::error::The secret scan cannot determine which commits to scan."
+            exit 1
+        fi
     fi
     # `set -e` aborts the script when the command substitution fails, so the
     # failure has to be captured in the condition to keep the error message.

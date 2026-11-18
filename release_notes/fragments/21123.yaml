@@ -1,0 +1,7 @@
+pr: 21123
+entries:
+  - category: bugfix
+    text: >-
+      Adjusted MRV2 PCP startup profiling for MTP/Eagle and target-only
+      configurations to use a local prefill token budget while retaining
+      speculative request capacity and the configured global token limit.
