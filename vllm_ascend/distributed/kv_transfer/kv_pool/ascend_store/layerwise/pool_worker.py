@@ -880,6 +880,35 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         batch_size = self.layerwise_max_transfer_blocks if self.layerwise_max_transfer_blocks > 0 else max(1, len(keys))
         return [keys[start : start + batch_size] for start in range(0, len(keys), batch_size)]
 
+    def _lease_step_load_gvas(self, plans: list[_LoadPlan]) -> Iterable[list[list[int]] | None]:
+        public_keys: dict[str, None] = {}
+        for _, _, keys in plans:
+            public_keys.update(keys)
+        public_gvas: dict[str, int] = {}
+        for keys in self._layerwise_key_batches(list(public_keys)):
+            addresses = self._lease_load_gvas(keys)
+            if addresses is not None:
+                public_gvas.update((key, gva) for key, gva in zip(keys, addresses, strict=True) if gva)
+
+        for _, groups, request_public_keys in plans:
+            if any(key not in public_gvas for key in request_public_keys):
+                yield None
+                continue
+            private_keys = list(
+                dict.fromkeys(key for _, _, keys, _ in groups for key in keys if key not in request_public_keys)
+            )
+            partial_keys = {keys[-1] for _, _, keys, has_partial in groups if has_partial}
+            partial_slots = {index for index, key in enumerate(private_keys) if key in partial_keys}
+            addresses = self._lease_load_gvas(private_keys, partial_slots)
+            if addresses is None or not all(addresses):
+                yield None
+                continue
+            private_gvas = dict(zip(private_keys, addresses, strict=True))
+            yield [
+                [public_gvas[key] if key in request_public_keys else private_gvas[key] for key in keys]
+                for _, _, keys, _ in groups
+            ]
+
     def _filter_pool_existing_keys(self, keys: list[str]) -> list[str]:
         """Drop keys whose block is already readable in the pool.
 
