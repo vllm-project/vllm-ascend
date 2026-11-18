@@ -10,7 +10,7 @@ moving cache or scheduler knowledge back into the model.
 
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
@@ -55,8 +55,14 @@ from vllm_ascend.worker.device_metadata import (
     wait_for_device_metadata,
 )
 
+if TYPE_CHECKING:
+    from vllm_ascend.ops.triton.dsv41_swa_cache import DSV41SWACacheLayout
+
 V41_METADATA_BUFFER_SIZE = 1024
 MAX_FUSED_DSV41_SWA_TOKENS = 8192
+_SWA_CACHE_FUSION_AVAILABLE = HAS_TRITON and get_current_hardware_profile().supports(
+    HardwareCapability.DSV41_SWA_CACHE_FUSION
+)
 
 
 @eager_break_during_capture
@@ -346,6 +352,7 @@ class AscendDSAV41Impl:
 
     def __init__(self, prefix, role, topology, long_kv_source_prefix, index_k_source_prefix):
         self.multistream_dsv4_dsa_overlap = get_ascend_config().multistream_dsv4_dsa_overlap
+        self._swa_fused_layout: DSV41SWACacheLayout | None = None
         self.prefix = prefix
         self.layer_name = f"{prefix}.attn"
         self.role = role
@@ -405,81 +412,45 @@ class AscendDSAV41Impl:
             and (metadata.num_prefills > 0 or metadata.num_decodes != metadata.num_reqs)
         )
 
-    @staticmethod
-    def _can_fuse_swa_cache(attn, metadata, projected_kv, cos, sin):
-        """Whether the A2 (910B) Triton store exactly matches this SWA layout."""
-        if not HAS_TRITON or not get_current_hardware_profile().supports(HardwareCapability.DSV41_SWA_CACHE_FUSION):
-            return False
-        # Replicated PCP writes must pass through ``_write_swa_cache`` so the
-        # subclass can gather local rows before publishing the global cache.
+    def _try_write_fused_swa_cache(self, attn, metadata, projected_kv, cos, sin) -> bool:
+        # Replicated PCP must gather through the baseline cache writer.
         if (
-            getattr(attn, "packed_cache_ops", None) is not None
-            or getattr(metadata, "global_metadata", None) is not None
+            not _SWA_CACHE_FUSION_AVAILABLE
+            or metadata.global_metadata is not None
+            or projected_kv.ndim == 0
+            or projected_kv.shape[0] > MAX_FUSED_DSV41_SWA_TOKENS
         ):
             return False
-        cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
         norm = attn.kv_norm
+        if getattr(norm, "bias_loaded", False):
+            return False
         weight = getattr(norm, "weight", None)
-        rope_dim = attn.head_dim - attn.nope_head_dim
-        return (
-            projected_kv.device.type == "npu"
-            and projected_kv.dtype == torch.bfloat16
-            and projected_kv.ndim == 2
-            and projected_kv.shape[0] <= MAX_FUSED_DSV41_SWA_TOKENS
-            and projected_kv.shape[1] == attn.head_dim
-            and projected_kv.stride(1) == 1
-            and attn.head_dim == 512
-            and 0 < rope_dim <= attn.head_dim
-            and rope_dim % 2 == 0
-            and isinstance(weight, torch.Tensor)
-            and weight.shape == (attn.head_dim,)
-            and weight.device == projected_kv.device
-            and weight.is_contiguous()
-            and hasattr(norm, "variance_epsilon")
-            and not getattr(norm, "bias_loaded", False)
-            and cos.device == projected_kv.device
-            and sin.device == projected_kv.device
-            and cos.shape[0] >= projected_kv.shape[0]
-            and sin.shape[0] >= projected_kv.shape[0]
-            and cos.shape[-1] == rope_dim
-            and sin.shape[-1] == rope_dim
-            and cos.stride(-1) == 1
-            and sin.stride(-1) == 1
-            and cache.device == projected_kv.device
-            and cache.dtype == projected_kv.dtype
-            and cache.ndim == 4
-            and cache.shape[-2:] == (1, attn.head_dim)
-            and cache.stride(-1) == 1
-            and metadata.slot_mapping.device == projected_kv.device
-            and metadata.slot_mapping.ndim == 2
-            and metadata.slot_mapping.shape[0] >= projected_kv.shape[0]
-            and metadata.slot_mapping.shape[1] == 2
-            and metadata.slot_mapping.stride(1) == 1
-            and metadata.slot_mapping.dtype in (torch.int32, torch.int64)
-        )
+        eps = getattr(norm, "variance_epsilon", None)
+        cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
+        if weight is None or eps is None or cache is None:
+            return False
 
-    @classmethod
-    def _write_projected_swa_cache(cls, attn, metadata, projected_kv, cos, sin):
+        layout = self._swa_fused_layout
+        if layout is None or layout.cache_ref() is not cache or layout.weight_ref() is not weight:
+            if getattr(attn, "packed_cache_ops", None) is not None:
+                return False
+            # Prepare after weights and cache buffers are available, and
+            # validate again if a subsequent binding replaces either tensor.
+            from vllm_ascend.ops.triton.dsv41_swa_cache import DSV41SWACacheLayout
+
+            layout = DSV41SWACacheLayout.prepare(cache, weight, attn.head_dim, attn.nope_head_dim)
+            self._swa_fused_layout = layout
+            if layout is None:
+                return False
+        return layout.try_store(projected_kv, weight, cos, sin, cache, metadata.slot_mapping, eps)
+
+    def _write_projected_swa_cache(self, attn, metadata, projected_kv, cos, sin):
         """Publish raw WKV output through the fused path or its baseline."""
-        if cls._can_fuse_swa_cache(attn, metadata, projected_kv, cos, sin):
-            # Keep Triton out of unsupported processes (notably 310P), and
-            # import only once the exact NPU/cache contract has been checked.
-            from vllm_ascend.ops.triton.dsv41_swa_cache import dsv41_rmsnorm_rope_cache
-
-            dsv41_rmsnorm_rope_cache(
-                projected_kv,
-                attn.kv_norm.weight,
-                cos,
-                sin,
-                attn.dsa_attn.swa_cache_layer.kv_cache[0],
-                metadata.slot_mapping,
-                attn.kv_norm.variance_epsilon,
-                attn.nope_head_dim,
-            )
+        if self._try_write_fused_swa_cache(attn, metadata, projected_kv, cos, sin):
             return
         value = attn.kv_norm(projected_kv).view(-1, 1, attn.head_dim)
-        cls._apply_rotary(attn, value, cos, sin)
-        cls._write_swa_cache(attn, metadata, value.squeeze(1))
+        self._apply_rotary(attn, value, cos, sin)
+        self._write_swa_cache(attn, metadata, value.squeeze(1))
 
     @classmethod
     def _project_kv(cls, attn, hidden_states, cos, sin):
@@ -487,9 +458,8 @@ class AscendDSAV41Impl:
         cls._apply_rotary(attn, kv, cos, sin)
         return kv.squeeze(1)
 
-    @classmethod
-    def _project_and_write_swa_cache(cls, attn, hidden_states, cos, sin, metadata):
-        cls._write_projected_swa_cache(attn, metadata, attn.wkv(hidden_states), cos, sin)
+    def _project_and_write_swa_cache(self, attn, hidden_states, cos, sin, metadata):
+        self._write_projected_swa_cache(attn, metadata, attn.wkv(hidden_states), cos, sin)
 
     def _update_caches(self, attn, hidden_states, metadata):
         if hidden_states.shape[0] == 0:

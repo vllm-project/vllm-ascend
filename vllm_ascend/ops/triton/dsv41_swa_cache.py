@@ -8,8 +8,13 @@ the result directly to the builder-prepared physical SWA cache coordinate.
 No normalized/rotated KV tensor is materialized.
 """
 
+from dataclasses import dataclass
+from weakref import ReferenceType, ref
+
 import torch
 from vllm.triton_utils import tl, triton
+
+HEAD_DIM = 512
 
 
 @triton.jit
@@ -76,6 +81,101 @@ def _dsv41_rmsnorm_rope_cache_kernel(
     tl.store(cache + cache_offsets, output, mask=valid)
 
 
+@dataclass(frozen=True, slots=True)
+class DSV41SWACacheLayout:
+    """Validated layout for one bound SWA cache and RMSNorm weight."""
+
+    cache_ref: ReferenceType[torch.Tensor]
+    weight_ref: ReferenceType[torch.Tensor]
+    device: torch.device
+    nope_dim: int
+    cache_strides: tuple[int, int, int]
+
+    @classmethod
+    def prepare(
+        cls, cache: torch.Tensor, weight: torch.Tensor, head_dim: int, nope_dim: int
+    ) -> "DSV41SWACacheLayout | None":
+        if (
+            head_dim != HEAD_DIM
+            or not 0 <= nope_dim < head_dim
+            or (head_dim - nope_dim) % 2
+            or not isinstance(cache, torch.Tensor)
+            or cache.device.type != "npu"
+            or cache.dtype != torch.bfloat16
+            or cache.ndim != 4
+            or cache.shape[-2:] != (1, head_dim)
+            or cache.stride(-1) != 1
+            or not isinstance(weight, torch.Tensor)
+            or weight.shape != (head_dim,)
+            or weight.device != cache.device
+            or not weight.is_contiguous()
+        ):
+            return None
+        return cls(ref(cache), ref(weight), cache.device, nope_dim, (cache.stride(0), cache.stride(1), 1))
+
+    def try_store(
+        self,
+        projected_kv: torch.Tensor,
+        norm_weight: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        eps: float,
+    ) -> bool:
+        """Validate the batch and submit a write for the bound cache and weight."""
+        if (
+            projected_kv.ndim != 2
+            or projected_kv.dtype != torch.bfloat16
+            or projected_kv.device != self.device
+            or projected_kv.shape[1] != HEAD_DIM
+            or projected_kv.stride(1) != 1
+        ):
+            return False
+        num_tokens = projected_kv.shape[0]
+        rope_dim = HEAD_DIM - self.nope_dim
+        for rotary in (cos, sin):
+            if (
+                rotary.ndim < 2
+                or rotary.shape[0] < num_tokens
+                or rotary.shape[-1] != rope_dim
+                or rotary.stride(-1) != 1
+                or rotary.device != self.device
+            ):
+                return False
+        if (
+            slot_mapping.ndim != 2
+            or slot_mapping.shape[0] < num_tokens
+            or slot_mapping.shape[1] != 2
+            or slot_mapping.device != self.device
+            or slot_mapping.dtype not in (torch.int32, torch.int64)
+            or slot_mapping.stride(1) != 1
+        ):
+            return False
+        if num_tokens:
+            _dsv41_rmsnorm_rope_cache_kernel[(num_tokens,)](
+                projected_kv,
+                norm_weight,
+                cos,
+                sin,
+                cache.squeeze(-2),
+                slot_mapping,
+                projected_kv.stride(0),
+                cos.stride(0),
+                1,
+                sin.stride(0),
+                1,
+                slot_mapping.stride(0),
+                1,
+                *self.cache_strides,
+                HEAD_DIM,
+                self.nope_dim,
+                eps,
+                enable_fp_fusion=False,
+            )
+        return True
+
+
 def dsv41_rmsnorm_rope_cache(
     projected_kv: torch.Tensor,
     norm_weight: torch.Tensor,
@@ -93,46 +193,6 @@ def dsv41_rmsnorm_rope_cache(
     rows.  Cache offsets use the tensor's real strides, so a cache plane may
     remain a view into a layer-outermost allocation.
     """
-    assert projected_kv.ndim == 2 and projected_kv.stride(1) == 1
-    num_tokens, head_dim = projected_kv.shape
-    rope_dim = head_dim - nope_dim
-    assert head_dim == 512
-    assert 0 <= nope_dim < head_dim and rope_dim % 2 == 0
-    assert projected_kv.dtype == torch.bfloat16
-    assert norm_weight.device == projected_kv.device
-    assert norm_weight.shape == (head_dim,) and norm_weight.is_contiguous()
-    assert cos.shape[0] >= num_tokens and sin.shape[0] >= num_tokens
-    assert cos.shape[-1] == sin.shape[-1] == rope_dim
-    assert cos.device == sin.device == projected_kv.device
-    assert cos.stride(-1) == sin.stride(-1) == 1
-    assert cache.ndim == 4 and cache.shape[-2:] == (1, head_dim)
-    assert cache.device == projected_kv.device
-    assert cache.dtype == projected_kv.dtype and cache.stride(-1) == 1
-    assert slot_mapping.ndim == 2 and slot_mapping.shape[0] >= num_tokens and slot_mapping.shape[1] == 2
-    assert slot_mapping.device == projected_kv.device
-    assert slot_mapping.dtype in (torch.int32, torch.int64)
-    assert slot_mapping.stride(1) == 1
-    if num_tokens == 0:
-        return
-
-    cache_rows = cache.squeeze(-2)
-    _dsv41_rmsnorm_rope_cache_kernel[(num_tokens,)](
-        projected_kv,
-        norm_weight,
-        cos,
-        sin,
-        cache_rows,
-        slot_mapping,
-        projected_kv.stride(0),
-        cos.stride(0),
-        cos.stride(-1),
-        sin.stride(0),
-        sin.stride(-1),
-        slot_mapping.stride(0),
-        slot_mapping.stride(1),
-        *cache_rows.stride(),
-        head_dim,
-        nope_dim,
-        eps,
-        enable_fp_fusion=False,
-    )
+    layout = DSV41SWACacheLayout.prepare(cache, norm_weight, HEAD_DIM, nope_dim)
+    if layout is None or not layout.try_store(projected_kv, norm_weight, cos, sin, cache, slot_mapping, eps):
+        raise ValueError("Unsupported tensors for the DeepSeek V4.1 fused SWA cache write")

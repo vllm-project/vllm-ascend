@@ -5,6 +5,7 @@ import sys
 from contextlib import contextmanager
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
+from weakref import ref
 
 import pytest
 import torch
@@ -17,24 +18,23 @@ from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 
 
 def test_fused_swa_cache_store_rejects_pcp_global_metadata(monkeypatch):
-    profile = SimpleNamespace(supports=lambda _capability: True)
-    monkeypatch.setattr(dsa_v41, "HAS_TRITON", True)
-    monkeypatch.setattr(dsa_v41, "get_current_hardware_profile", lambda: profile)
+    monkeypatch.setattr(dsa_v41, "_SWA_CACHE_FUSION_AVAILABLE", True)
 
+    impl = dsa_v41.AscendDSAV41Impl.__new__(dsa_v41.AscendDSAV41Impl)
     attn = SimpleNamespace(packed_cache_ops=None)
     metadata = SimpleNamespace(global_metadata=object())
 
-    assert not dsa_v41.AscendDSAV41Impl._can_fuse_swa_cache(attn, metadata, None, None, None)
+    assert not impl._try_write_fused_swa_cache(attn, metadata, None, None, None)
 
 
-def test_fused_swa_cache_store_consumes_raw_projection(monkeypatch):
+def test_fused_swa_cache_reuses_layout_until_rebinding(monkeypatch):
     projected = torch.randn(3, 512, dtype=torch.bfloat16)
     weight = torch.randn(512, dtype=torch.bfloat16)
     cos = torch.randn(3, 1, 1, 64)
     sin = torch.randn_like(cos)
     cache = torch.zeros(2, 8, 1, 512, dtype=torch.bfloat16)
     slots = torch.tensor([[0, 2], [-1, -1], [1, 7]], dtype=torch.int32)
-    norm = Mock(side_effect=AssertionError("baseline RMSNorm must not run"))
+    norm = Mock(side_effect=AssertionError("baseline RMSNorm must not run"), bias_loaded=False)
     norm.weight = weight
     norm.variance_epsilon = 1e-6
     attn = SimpleNamespace(
@@ -43,37 +43,54 @@ def test_fused_swa_cache_store_consumes_raw_projection(monkeypatch):
         head_dim=512,
         dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(kv_cache=[cache])),
     )
-    metadata = SimpleNamespace(slot_mapping=slots)
-    calls = []
+    metadata = SimpleNamespace(slot_mapping=slots, global_metadata=None)
+    store = Mock(return_value=True)
     module = ModuleType("vllm_ascend.ops.triton.dsv41_swa_cache")
 
-    def fused(*args):
-        calls.append(args)
+    def prepare(cache, weight, _head_dim, _nope_dim):
+        return SimpleNamespace(cache_ref=ref(cache), weight_ref=ref(weight), try_store=store)
 
-    monkeypatch.setattr(module, "dsv41_rmsnorm_rope_cache", fused, raising=False)
+    layout_cls = SimpleNamespace(prepare=Mock(side_effect=prepare))
+    monkeypatch.setattr(module, "DSV41SWACacheLayout", layout_cls, raising=False)
     monkeypatch.setitem(sys.modules, module.__name__, module)
-    monkeypatch.setattr(dsa_v41.AscendDSAV41Impl, "_can_fuse_swa_cache", staticmethod(lambda *args: True))
-    monkeypatch.setattr(
-        dsa_v41.AscendDSAV41Impl,
-        "_apply_rotary",
-        staticmethod(lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("baseline RoPE must not run"))),
-    )
-    monkeypatch.setattr(
-        dsa_v41.AscendDSAV41Impl,
-        "_write_swa_cache",
-        staticmethod(lambda *args: (_ for _ in ()).throw(AssertionError("baseline scatter must not run"))),
-    )
+    monkeypatch.setattr(dsa_v41, "_SWA_CACHE_FUSION_AVAILABLE", True)
+    impl = dsa_v41.AscendDSAV41Impl.__new__(dsa_v41.AscendDSAV41Impl)
+    impl._swa_fused_layout = None
 
-    dsa_v41.AscendDSAV41Impl._write_projected_swa_cache(attn, metadata, projected, cos, sin)
+    impl._write_projected_swa_cache(attn, metadata, projected, cos, sin)
+    store.assert_called_once_with(projected, weight, cos, sin, cache, slots, 1e-6)
+    layout_cls.prepare.assert_called_once_with(cache, weight, 512, 448)
+    impl._write_projected_swa_cache(attn, metadata, projected, cos, sin)
+    assert layout_cls.prepare.call_count == 1
 
-    assert len(calls) == 1
-    actual = calls[0]
-    assert actual[0] is projected
-    assert actual[1] is weight
-    assert actual[2] is cos and actual[3] is sin
-    assert actual[4] is cache and actual[5] is slots
-    assert actual[6:] == (1e-6, 448)
+    new_cache = torch.empty_like(cache)
+    attn.dsa_attn.swa_cache_layer.kv_cache = [new_cache]
+    impl._write_projected_swa_cache(attn, metadata, projected, cos, sin)
+    assert layout_cls.prepare.call_count == 2
+    assert store.call_args.args[4] is new_cache
+
+    norm.weight = torch.empty_like(weight)
+    impl._write_projected_swa_cache(attn, metadata, projected, cos, sin)
+    assert layout_cls.prepare.call_count == 3
+    assert store.call_args.args[1] is norm.weight
     norm.assert_not_called()
+
+    norm.bias_loaded = True
+    assert not impl._try_write_fused_swa_cache(attn, metadata, projected, cos, sin)
+    assert store.call_count == 4
+
+    norm.bias_loaded = False
+    norm.side_effect = None
+    norm.return_value = projected
+    store.return_value = False
+    apply_rotary, write_cache = Mock(), Mock()
+    monkeypatch.setattr(impl, "_apply_rotary", apply_rotary)
+    monkeypatch.setattr(impl, "_write_swa_cache", write_cache)
+    impl._write_projected_swa_cache(attn, metadata, projected, cos, sin)
+    assert layout_cls.prepare.call_count == 3
+    norm.assert_called_once_with(projected)
+    assert apply_rotary.call_count == write_cache.call_count == 1
+    assert write_cache.call_args.args[:2] == (attn, metadata)
 
 
 def test_dsa_v41_custom_op_forwards_its_output_buffer(monkeypatch):
@@ -258,6 +275,7 @@ def test_preprocess_equivalence_and_stream_dependencies(
     )
     impl_class = dsa_v41.AscendDSAV41Impl
     impl = impl_class.__new__(impl_class)
+    impl._swa_fused_layout = None
     impl.multistream_dsv4_dsa_overlap = overlap
     impl.role = SimpleNamespace(is_kv_source=False, has_long_context=False)
 
