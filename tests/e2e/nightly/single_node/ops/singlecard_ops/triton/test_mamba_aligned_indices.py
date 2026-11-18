@@ -93,7 +93,7 @@ def test_aligned_state_indices_match_torch_gather(case):
         seq_lens,
         output,
         num_reqs,
-        storage.stride(0),
+        storage.stride(1),
         table_cols,
         case["cache_block_size"],
     )
