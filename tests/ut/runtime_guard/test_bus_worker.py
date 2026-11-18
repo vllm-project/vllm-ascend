@@ -438,6 +438,7 @@ def test_run_sample_phase_drains_bus_before_sample_fn():
     assert order == ["drain", "sample"]
     p.end_of_wave.assert_called_once()
 
+
 def test_tp0_drain_uses_pre_reload_hooks_for_soft_purge():
     """TP0 bus-worker reload must not make drain see already-False hooks.
 
