@@ -56,6 +56,13 @@ def test_block_verification_residual_rows_are_initialized(
     covered by the NPU tests. Poison the actual output buffer so missing the
     last request's final draft row fails independently of allocator contents.
     """
+    # CPU CI uses Triton placeholders whose constexpr is not a type. Keep
+    # integer grid helpers local to this test instead of the patched runtime.
+    monkeypatch.setattr(
+        rejection_sampler_utils,
+        "triton",
+        SimpleNamespace(cdiv=lambda x, y: (x + y - 1) // y, next_power_of_2=lambda n: 1 << (n - 1).bit_length()),
+    )
     num_speculative_steps = 3
     num_reqs = len(lengths)
     num_logits = sum(lengths)
