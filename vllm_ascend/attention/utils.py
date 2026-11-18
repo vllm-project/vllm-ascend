@@ -319,12 +319,12 @@ def in_full_cudagraph_mode(vllm_config: VllmConfig | None = None) -> bool:
         from vllm.config import get_current_vllm_config_or_none
 
         vllm_config = get_current_vllm_config_or_none()
-    compilation_config = getattr(vllm_config, "compilation_config", None)
-    if getattr(compilation_config, "cudagraph_mode", None) is None:
+    cudagraph_mode = getattr(getattr(vllm_config, "compilation_config", None), "cudagraph_mode", None)
+    if cudagraph_mode is None:
         return False
     from vllm.config.compilation import CUDAGraphMode
 
-    return compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+    return cudagraph_mode == CUDAGraphMode.FULL
 
 
 def expand_pa_per_token_rows(metadata) -> bool:

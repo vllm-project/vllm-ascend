@@ -26,7 +26,7 @@ capture paths cannot serve this geometry.
 """
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch_npu
@@ -262,7 +262,11 @@ class AscendB1AttentionMetadataBuilder(AscendAttentionMetadataBuilder):
         common_attn_metadata,
         fast_build: bool = False,
     ) -> AscendB1Metadata:
-        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build=fast_build)
+        # The base build instantiates self.metadata_cls, i.e. AscendB1Metadata.
+        metadata = cast(
+            AscendB1Metadata,
+            super().build(common_prefix_len, common_attn_metadata, fast_build=fast_build),
+        )
         if getattr(self.kv_cache_spec, "head_size", None) != FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
             return metadata
         if in_full_cudagraph_mode(self.vllm_config):
@@ -298,10 +302,13 @@ class AscendB1AttentionMetadataBuilder(AscendAttentionMetadataBuilder):
         # rebinds the runtime mask (or keeps the placeholder for single-query
         # draft steps). ``kwargs`` carries builder-specific capture extras the
         # generic builder does not take (e.g. the V4.1 indexer arguments).
-        metadata = AscendAttentionMetadataBuilder.build(
-            self,
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata,
+        metadata = cast(
+            AscendB1Metadata,
+            AscendAttentionMetadataBuilder.build(
+                self,
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+            ),
         )
         uses_large_head = getattr(self.kv_cache_spec, "head_size", None) == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
         if uses_large_head and in_full_cudagraph_mode(self.vllm_config):
@@ -419,7 +426,8 @@ class AscendB1AttentionBackendImpl(AscendAttentionBackendImpl):
         # that re-reads the static query buffer on every replay.
         q_bnsd = query.view(num_reqs, qlen, self.num_heads, self.head_size).permute(0, 2, 1, 3).contiguous()
         block_table = attn_metadata.block_tables
-        verify_mask = attn_metadata.paged_verify_mask
+        # This impl only ever receives metadata from its own builder.
+        verify_mask = cast(AscendB1Metadata, attn_metadata).paged_verify_mask
         if verify_mask is None or verify_mask.shape[2] != qlen:
             # Capture-time dummy metadata carries no mask, and single-query
             # draft steps get one sized for k+1 queries. The real mask needs a
