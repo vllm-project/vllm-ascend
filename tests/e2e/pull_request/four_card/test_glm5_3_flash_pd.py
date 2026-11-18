@@ -109,9 +109,10 @@ def serve_args(model, port, kv_port, producer, eager, prefix_caching):
     return args
 
 
-def complete(url, prompt, **kwargs):
+def complete(url, prompt, dp_rank=None, **kwargs):
     response = requests.post(
         url + "/v1/completions",
+        headers={"X-data-parallel-rank": str(dp_rank)} if dp_rank is not None else {},
         json={
             "model": MODEL_NAME,
             "prompt": prompt,
@@ -124,7 +125,7 @@ def complete(url, prompt, **kwargs):
         },
         timeout=180,
     )
-    response.raise_for_status()
+    assert response.ok, f"HTTP {response.status_code}: {response.text}"
     result = response.json()
     assert "error" not in result, result
     return result
@@ -133,7 +134,9 @@ def complete(url, prompt, **kwargs):
 def rpc(url, method, *args):
     response = requests.post(url + "/collective_rpc", json={"method": method, "args": list(args)}, timeout=60)
     response.raise_for_status()
-    return response.json()["results"]
+    return [
+        item for result in response.json()["results"] for item in (result if isinstance(result, list) else [result])
+    ]
 
 
 @pytest.mark.parametrize("eager,prefix_caching", [(True, False), (False, True)], ids=["eager", "graph-prefix"])
@@ -169,23 +172,29 @@ def test_glm53flash_pcp2_dp2(tmp_path, eager, prefix_caching):
         for url, expected in ((p_url, (1, 2, 1, 2)), (d_url, (1, 1, 2, 2))):
             workers = rpc(url, "flash_pd_inspect")
             assert workers
+            assert len(workers) == 2
+            assert {worker["dp_rank"] for worker in workers} == set(range(expected[2]))
             for worker in workers:
                 assert tuple(worker[key] for key in ("tp", "pcp", "dp", "ep")) == expected
                 assert worker["kda_heads"] == [64 // expected[1]] * 7
+                assert worker["replayssm"] and worker["has_speculator"]
+                assert worker["mtp_tokens"] == 3
+                assert worker["prefix_caching"] == prefix_caching
+                assert worker["graph_mode"] == ("NONE" if url == p_url or eager else "FULL_DECODE_ONLY")
         rpc(d_url, "flash_pd_probe")
 
-        def generate(length):
+        def generate(length, dp_rank=0):
             prompt = [10 + i % 1000 for i in range(length)]
             prefill = complete(p_url, prompt, max_tokens=1, kv_transfer_params={"do_remote_decode": True})
             transfer = prefill.get("kv_transfer_params")
             assert transfer and transfer.get("do_remote_prefill"), prefill
             assert any(transfer.get("remote_block_ids", [])), transfer
-            result = complete(d_url, prompt, kv_transfer_params=transfer)
+            result = complete(d_url, prompt, dp_rank=dp_rank, kv_transfer_params=transfer)
             check_completion(result, OUTPUT_TOKENS)
             return result
 
         prompt = [10 + i % 1000 for i in range(128)]
-        reference = complete(d_url, prompt)
+        reference = complete(d_url, prompt, dp_rank=0)
         reset = requests.post(d_url + "/reset_prefix_cache", timeout=30)
         reset.raise_for_status()
         assert reset.json()["success"] is True
@@ -199,8 +208,14 @@ def test_glm53flash_pcp2_dp2(tmp_path, eager, prefix_caching):
                 check_same_completion(reference, corrupted, OUTPUT_TOKENS)
         check_state_pulls(rpc(d_url, "flash_pd_records"))
         with ThreadPoolExecutor(max_workers=3) as pool:
-            list(pool.map(generate, [127, 129, 511, 512, 513]))
-        check_state_pulls(rpc(d_url, "flash_pd_records"))
+            futures = [
+                pool.submit(generate, length, index % 2) for index, length in enumerate([127, 129, 511, 512, 513])
+            ]
+            for future in futures:
+                future.result()
+        records = rpc(d_url, "flash_pd_records")
+        assert all(worker["copies"] for worker in records), "Both decode DP ranks must receive remote state"
+        check_state_pulls(records)
         # An actual receiver-side omission, confined to this isolated test.
         # HTTP success is explicitly insufficient: the same normal oracle must
         # reject the omitted copies. Restore it and verify recovery afterwards.
