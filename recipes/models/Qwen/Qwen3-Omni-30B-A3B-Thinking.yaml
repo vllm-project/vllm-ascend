@@ -1,0 +1,247 @@
+# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json
+meta:
+  title: "Qwen3-Omni-30B-A3B-Thinking (Ascend)"
+  slug: "qwen3-omni-30b-a3b-thinking"
+  provider: "Qwen"
+  description: "Omni-modal Qwen3 Mixture-of-Experts model (30.5B total / 3.3B active) served with vLLM Ascend on Atlas 800I A3, with validated W8A8 presets for high throughput, low latency, and 128K long context."
+  date_added: "2026-11-19"
+  date_updated: "2026-11-19"
+  tasks:
+    - multimodal
+  performance_headline: "Atlas 800I A3 W8A8: 906 tok/s output at concurrency 32, 17.85 ms TPOT in the TP4 low-latency preset"
+  default_hardware: ascend_910c
+  hardware:
+    ascend_910c: verified
+
+model:
+  model_id: "Qwen/Qwen3-Omni-30B-A3B-Thinking"
+  min_vllm_version: "0.30.0"
+  docker_image:
+    ascend_910c: "quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler"
+  install:
+    docker:
+      command: "docker pull quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler"
+      note: "Official Ascend all-in-one image. Install the host driver and firmware separately."
+    pip: false
+  architecture: moe
+  parameter_count: "30.5B"
+  active_parameters: "3.3B"
+  context_length: 65536
+  base_args:
+    - "--trust-remote-code"
+  base_env:
+    HCCL_OP_EXPANSION_MODE: "AIV"
+    HCCL_BUFFSIZE: "1024"
+    OMP_PROC_BIND: "false"
+    OMP_NUM_THREADS: "1"
+    PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+
+variants:
+  default:
+    precision: int8
+    label: "W8A8 (Ascend A3)"
+    vram_minimum_gb: 32
+    supported_hardware: [ascend_910c]
+    hardware_overrides:
+      ascend_910c:
+        docker_image: "quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler"
+        docker_serve_command: "vllm serve"
+    extra_args:
+      - "--quantization"
+      - "ascend"
+    description: "W8A8 weights produced from the official BF16 checkpoint with msmodelslim; point the model id at the local quantized directory."
+  bf16:
+    precision: bf16
+    vram_minimum_gb: 60
+    supported_hardware: [ascend_910c]
+    hardware_overrides:
+      ascend_910c:
+        docker_image: "quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler"
+        docker_serve_command: "vllm serve"
+    description: "Official BF16 checkpoint; no quantization flag is added."
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides:
+  single_node_tp:
+    tp: 4
+
+presets:
+  a3_low_latency:
+    label: "Low Latency (TP4)"
+    hardware: ascend_910c
+    strategy: single_node_tp
+    variants: [default]
+    workload: "200 input / 128 output tokens, 1 request per second"
+    default: true
+    description: "TP4 with expert parallelism; lowest measured per-token latency."
+    tp: 4
+    args:
+      - "--max-num-seqs"
+      - "100"
+      - "--max-model-len"
+      - "37364"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--enable-expert-parallel"
+      - "--distributed-executor-backend"
+      - "mp"
+      - "--no-enable-prefix-caching"
+      - "--async-scheduling"
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_flashcomm1": false, "weight_nz_mode": 2}'
+      - "--gpu-memory-utilization"
+      - "0.95"
+    runbook: |
+      Measured on one Atlas 800I A3 with `quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler`
+      (4 of 16 chips, TP4) and locally quantized W8A8 weights.
+
+      - 200/200 requests completed at 1 request per second.
+      - Output throughput **126.71 tok/s**.
+      - Mean TTFT **187.63 ms**, mean TPOT **17.85 ms**.
+
+  a3_high_throughput:
+    label: "High Throughput (TP1)"
+    hardware: ascend_910c
+    strategy: single_node_tp
+    variants: [default]
+    workload: "200 input / 512 output tokens, concurrency 32"
+    description: "Single-chip deployment without expert parallelism; maximizes concurrent request processing."
+    tp: 1
+    args:
+      - "--max-num-seqs"
+      - "100"
+      - "--max-model-len"
+      - "37364"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--distributed-executor-backend"
+      - "mp"
+      - "--no-enable-prefix-caching"
+      - "--async-scheduling"
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"weight_nz_mode": 2}'
+      - "--gpu-memory-utilization"
+      - "0.95"
+    runbook: |
+      Measured on one Atlas 800I A3 with `quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler`
+      (1 of 16 chips, TP1) and locally quantized W8A8 weights.
+
+      - 200/200 requests completed at concurrency 32.
+      - Output throughput **906.42 tok/s**.
+      - Mean TTFT **278.16 ms**, mean TPOT **32.26 ms**.
+
+  a3_long_context:
+    label: "Long Context (TP4, 128K)"
+    hardware: ascend_910c
+    strategy: single_node_tp
+    variants: [default]
+    workload: "60025-token prompt functional check"
+    description: "TP4 with a 131072-token limit, YaRN scaling, and a smaller sequence budget for KV cache."
+    tp: 4
+    args:
+      - "--max-num-seqs"
+      - "14"
+      - "--max-model-len"
+      - "131072"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--enable-expert-parallel"
+      - "--distributed-executor-backend"
+      - "mp"
+      - "--no-enable-prefix-caching"
+      - "--async-scheduling"
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_flashcomm1": false, "weight_nz_mode": 2}'
+      - "--gpu-memory-utilization"
+      - "0.95"
+      - "--hf-overrides"
+      - '{"rope_parameters": {"rope_type": "yarn", "factor": 4, "original_max_position_embeddings": 32768}}'
+    env:
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+    runbook: |
+      Measured on one Atlas 800I A3 with `quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler`
+      (4 of 16 chips, TP4) and locally quantized W8A8 weights.
+
+      - A 60025-token prompt returned the correct answer (`Fox`) in 5.27 s.
+      - No multi-request throughput run was performed for this context length.
+      - `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` is required because the checkpoint declares
+        65536 positions while the preset requests 131072.
+
+guide: |
+  ## Overview
+
+  Qwen3-Omni-30B-A3B-Thinking is the thinker variant of Qwen3-Omni: a native
+  end-to-end omni-modal Mixture-of-Experts model with 30.5B total parameters and 3.3B
+  activated per token. It accepts text, images, audio, and video, produces text output,
+  and exposes chain-of-thought reasoning.
+
+  ## Validation scope and support status
+
+  The main vLLM Ascend tutorial marks this model discontinued since v0.30.0 and points at
+  the v0.23.0 documentation. This recipe migrates that tutorial content to the recipes
+  format and re-validates it end to end on the v0.30.0 A3 image. All results below were
+  collected on one Atlas 800I A3 node with
+  `quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler`. The node exposes 16 chips; the
+  presets use one chip (TP1) or four chips (TP4).
+
+  ## Validated presets
+
+  | Preset | Chips | Workload | Requests | Output tok/s | Mean TTFT | Mean TPOT |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | High Throughput (TP1) | 1 | 200 in / 512 out, concurrency 32 | 200/200 | 906.42 | 278.16 ms | 32.26 ms |
+  | Low Latency (TP4) | 4 | 200 in / 128 out, 1 request/s | 200/200 | 126.71 | 187.63 ms | 17.85 ms |
+  | Long Context (TP4) | 4 | 60025-token prompt | 1/1 | not measured | not measured | not measured |
+
+  The long-context preset returned the correct answer in 5.27 s. These numbers are
+  reproducibility measurements on the stated image, not an official performance baseline.
+
+  ## Accuracy
+
+  EvalScope 1.15.0, 100 samples per dataset, W8A8, TP1 service:
+
+  | Dataset | Metric | Score |
+  | --- | --- | --- |
+  | OmniBench (image) | accuracy | 49.00% |
+  | GSM8K | accuracy | 99.00% |
+  | BBH | accuracy | not completed |
+
+  OmniBench and GSM8K match the tutorial reference (0.44 and 0.98). BBH was not completed:
+  EvalScope expands `--limit 100` to 100 samples per BBH subtask (2700 total), which
+  exceeded the validation time budget. The tutorial reference for BBH is 0.9148.
+
+  ## Weights
+
+  No public W8A8 checkpoint exists for this model. The validated W8A8 weights were
+  produced from the official BF16 checkpoint with **msmodelslim**, using the hybrid layout
+  described in the historical quantization guide: BF16 embeddings, BF16 Q/K norms and MoE
+  gates, static W8A8 attention projections, and dynamic W8A8 expert projections.
+
+  The W8A8 variant therefore requires a local quantized directory. Point the generated
+  command's model id at that directory; the canonical Hugging Face id in the builder is
+  the BF16 download. The BF16 variant runs as generated.
+
+  ## Limitations
+
+  - The optional Eagle3 draft model from the tutorial was not validated because the draft
+    weights were not available in the test environment.
+  - Only the W8A8 variant was benchmarked and evaluated. BF16 numbers are not claimed.
+  - BBH accuracy was not completed in this validation run.
+  - Multi-node and PD-separated topologies are out of scope for this recipe.
+
+  ## References
+
+  - [Historical vLLM Ascend tutorial (v0.23.0)](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.html)
+  - [Main tutorial support status](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md)
+  - [Qwen3-Omni-30B-A3B-Thinking on ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B-Thinking)
+  - [msmodelslim](https://gitcode.com/Ascend/msmodelslim)
+
