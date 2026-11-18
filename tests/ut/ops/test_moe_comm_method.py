@@ -203,6 +203,40 @@ class TestMoECommMethod(TestBase):
         self.assertEqual(captured["glu_bias"], 0.0)
         self.assertIsNone(captured["activation_clamp"])
 
+    def test_apply_cann_mega_moe_passes_packed_fp4_without_copying(self):
+        comm = self._make_fused_mc2_comm_for_buffer_init()
+        comm.mega_moe_symm_buffer = MagicMock()
+        comm.mega_moe = MagicMock(return_value=(torch.empty(2, 8), torch.empty(2)))
+
+        inp = MagicMock()
+        inp.hidden_states = torch.empty(2, 8)
+        inp.topk_ids = torch.zeros(2, 2, dtype=torch.int32)
+        inp.topk_weights = torch.ones(2, 2)
+        inp.quant.quant_type = QuantType.W4A8MXFP
+        inp.layer.mega_moe_activation_kwargs = {}
+
+        packed = torch.arange(16, dtype=torch.uint8).reshape(4, 4)
+        w1 = packed.view(torch.float4_e2m1fn_x2)
+        w2 = packed.clone().view(torch.float4_e2m1fn_x2)
+        weights = MoEWeights(w1=[w1, packed], w2=[w2, packed])
+
+        with patch(
+            "vllm_ascend.ops.fused_moe.moe_comm_method.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A5),
+        ):
+            comm._apply_cann_mega_moe(inp, weights, is_decode_only_node=False)
+
+        comm.mega_moe.assert_called_once()
+        args, kwargs = comm.mega_moe.call_args
+        for passed, original in zip(args[3:5], (w1, w2)):
+            torch.testing.assert_close(passed[0], packed)
+            self.assertEqual(passed[0].data_ptr(), original.data_ptr())
+            self.assertEqual(passed[0].stride(), original.stride())
+            self.assertEqual(original.dtype, torch.float4_e2m1fn_x2)
+            self.assertIs(passed[1], packed)
+        self.assertEqual(kwargs["weight1_type"], 296)
+        self.assertEqual(kwargs["weight2_type"], 296)
+
     def test_situ_activation_is_bound_at_initialization(self):
         self.mock_ascend_config.enable_fused_mc2 = 1
         self.moe_config.activation = "situ"

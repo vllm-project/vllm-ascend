@@ -48,12 +48,12 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
 
 from vllm_ascend.distributed.parallel_state import (
     get_mlp_tp_group,
     get_otp_group,
 )
+from vllm_ascend.models.common.ops.sequence_parallel import sp_reduce_scatter
 from vllm_ascend.utils import (
     enable_dsa_cp,
     mlp_tp_enable,
@@ -217,6 +217,14 @@ class KimiOProjMMReduceScatterOp(CustomRowParallelOp):
             comm_mode="ai_cpu",
         )
         return output, None
+
+    def reduce_projected_output(self, output: torch.Tensor) -> torch.Tensor:
+        """Apply this op's token-shard contract to an already projected delta.
+
+        MegaKDA includes OProj, so running apply_impl again would duplicate
+        the GEMM. The decoder still skips its RS when this op is installed.
+        """
+        return sp_reduce_scatter(output)
 
     def apply_into(self, input_: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         """Write the ordinary decode projection directly into its TP shard."""

@@ -54,11 +54,14 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
     MoECommType,
+    _is_kv_consumer_only,
     get_mc2_tokens_capacity,
+    log_kimi_megamoe_config,
     override_mrv2_in_profile_run,
     select_moe_comm_method,
     set_mc2_mask,
     set_mc2_tokens_capacity,
+    uses_kimi_prefill_megamoe,
 )
 from vllm_ascend.attention.attention_c8_mxfp import (
     AscendC8MXFPAttentionBackendImpl,
@@ -66,7 +69,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
-from vllm_ascend.attention.mla_v1 import AscendMLABackend, all_mla_use_flashmla
+from vllm_ascend.attention.mla_v1 import AscendFlashMLABackend, AscendMLABackend, all_mla_use_flashmla
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
@@ -114,6 +117,7 @@ from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
+from vllm_ascend.worker.v2.moe_utils import clear_v2_moe_padding, record_v2_moe_batch_phase, v2_moe_batch_context
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_transport import (
     bypass_upstream_spec_pp_guard,
@@ -304,6 +308,7 @@ class NPUModelRunner(GPUModelRunner):
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
         aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
         super().load_model(load_dummy_weights, *args, **kwargs)
+        log_kimi_megamoe_config(self.vllm_config)
         self.pd_dspark_aux_layer_ids = aux_layers
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
@@ -530,7 +535,7 @@ class NPUModelRunner(GPUModelRunner):
         # is used for adaptive verification handling.
         draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
         self.use_fia = any(
-            (group.backend is AscendAttentionBackend or group.backend is AscendMLABackend)
+            group.backend in (AscendAttentionBackend, AscendMLABackend, AscendFlashMLABackend)
             and any(layer_name not in draft_layer_names for layer_name in group.layer_names)
             for groups in self.attn_groups
             for group in groups
@@ -645,7 +650,18 @@ class NPUModelRunner(GPUModelRunner):
             skip_dp_coordination() if should_skip_allreduce_across_dp_group(self.vllm_config) else nullcontext()
         )
         forward_failed = True
-        with dp_coordination_context:
+        moe_context = (
+            v2_moe_batch_context(
+                self.vllm_config,
+                scheduler_output.total_num_scheduled_tokens,
+                dummy_run=dummy_run,
+                is_profile=is_profile or getattr(self.input_buffers, "profile_cpp", False),
+                allow_megamoe=not self._finegrained_tp_requires_graph,
+            )
+            if uses_kimi_prefill_megamoe(self.vllm_config) and not _is_kv_consumer_only(self.vllm_config)
+            else nullcontext()
+        )
+        with dp_coordination_context, moe_context:
             try:
                 output = super().execute_model(
                     scheduler_output,
@@ -752,13 +768,22 @@ class NPUModelRunner(GPUModelRunner):
             if (
                 mc2_tokens_capacity is not None
                 and self.max_num_tokens > mc2_tokens_capacity
-                and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
+                and select_moe_comm_method(
+                    mc2_tokens_capacity, self.vllm_config, batch_contains_decode=False, v2_prefill_ready=True
+                )
                 in {MoECommType.MC2, MoECommType.FUSED_MC2}
             ):
                 # Use a call-scoped bypass because skip_compiled would require runner-specific ForwardContext plumbing.
                 with disable_compilation(self.get_model()):
                     self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
             super().profile_run()
+        # Release the PD-decode ND KDA projections only after the profile
+        # forward, so the measured peak activation keeps its conservative
+        # (weights-resident) baseline. The worker subtracts the stashed byte
+        # count from the weights accounting before sizing the KV cache pool.
+        from vllm_ascend.ops.kimi_kda import release_mega_kda_nd_weights
+
+        self.mega_kda_nd_released_bytes = release_mega_kda_nd_weights(self.model)
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
@@ -786,6 +811,7 @@ class NPUModelRunner(GPUModelRunner):
         if self._uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
+        record_v2_moe_batch_phase(batch_state)
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
@@ -1006,6 +1032,7 @@ class NPUModelRunner(GPUModelRunner):
             # prompt_lens is only used in R-SWA case.
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
+        clear_v2_moe_padding(self.input_buffers, num_tokens, num_tokens_after_padding)
         input_batch = AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,

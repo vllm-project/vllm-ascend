@@ -602,6 +602,7 @@ class NPUPlatform(Platform):
         )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
         from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
+        from vllm_ascend.worker.v2.moe_utils import get_v2_moe_batch_state
         from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
 
         # NOTE(Ronald1995): avoid circular import, cudagraph_runtime_mode is
@@ -653,16 +654,21 @@ class NPUPlatform(Platform):
 
         # NOTE: Must use max_tokens_across_dp instead of num_tokens for MoE comm method selection
         # to ensure consistent communication method across all DP ranks
+        moe_batch_state = get_v2_moe_batch_state(vllm_config)
+        v2_prefill_ready = moe_batch_state is not None and moe_batch_state.prefill_ready
         moe_comm_type = select_moe_comm_method(
             max_tokens_across_dp,
             vllm_config,
+            batch_contains_decode=moe_batch_state.batch_contains_decode if moe_batch_state is not None else True,
+            aclgraph_runtime_mode=cudagraph_runtime_mode,
+            v2_prefill_ready=v2_prefill_ready,
         )
         moe_comm_method = get_moe_comm_method(moe_comm_type)
 
         mc2_mask = None
         padded_num_tokens = None
         if num_tokens is not None:
-            num_actual_tokens = num_tokens
+            num_actual_tokens = moe_batch_state.num_actual_tokens if v2_prefill_ready else num_tokens
             # NOTE: token num which need to pad to when mc2
             padded_num_tokens = math.ceil(max_tokens_across_dp / tp_world_size) * tp_world_size
             reserved_mc2_mask = get_mc2_mask()

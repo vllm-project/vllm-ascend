@@ -37,6 +37,71 @@ _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", defa
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 16384
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
+_KIMI_MEGA_MOE_GROUP_SIZE = 32
+
+
+def _is_kimi_moe_model(vllm_config: VllmConfig) -> bool:
+    architectures = getattr(vllm_config.model_config, "architectures", None) or []
+    return any(
+        name in ("KimiK3ForCausalLM", "KimiLinearForCausalLM", "KimiK3ForConditionalGeneration")
+        for name in architectures
+    )
+
+
+def register_kimi_moe_quant_type(vllm_config: VllmConfig, quant_type: QuantType) -> None:
+    """Record actual routed layouts during loading, scoped to this model config.
+
+    A mixed model must not select one batch-wide backend from its first layer's
+    dtype. The immutable set is complete before profiling/capture and avoids
+    inspecting all model modules on each inference step.
+    """
+    if _is_kimi_moe_model(vllm_config):
+        config = vllm_config.model_config
+        layouts = getattr(config, "_ascend_kimi_moe_quant_types", frozenset())
+        config._ascend_kimi_moe_quant_types = layouts | frozenset((quant_type,))
+
+
+def _kimi_megamoe_weights_supported(vllm_config: VllmConfig, *, allow_unknown: bool = False) -> bool:
+    if not _is_kimi_moe_model(vllm_config) or not get_current_hardware_profile().supports(
+        HardwareCapability.CANN_MEGAMOE_MXFP
+    ):
+        return True
+    # PR20's Kimi path requires both MegaMoE and ordinary Decode weight views.
+    # Unknown, BF16, mixed and other quantizations conservatively use ordinary
+    # MoE; their 0.30 weight loaders must not discard the ordinary storage.
+    layouts = getattr(vllm_config.model_config, "_ascend_kimi_moe_quant_types", None)
+    if layouts is None:
+        # Runner capacity is reserved before constructing any MoE layers.
+        # Preserve the 0.30 reservation then, but never select MegaMoE for
+        # execution until the actual layouts have been registered.
+        return allow_unknown
+    description = getattr(getattr(vllm_config, "quant_config", None), "quant_description", None)
+    group_size = description.get("group_size", _KIMI_MEGA_MOE_GROUP_SIZE) if isinstance(description, dict) else None
+    config = get_ascend_config()
+    eplb = getattr(config, "eplb_config", None)
+    parallel_eplb = getattr(vllm_config.parallel_config, "eplb_config", None)
+    use_v2_eplb = bool(
+        getattr(vllm_config, "use_v2_model_runner", False)
+        and getattr(vllm_config.parallel_config, "enable_eplb", False)
+    )
+    activation = getattr(vllm_config.model_config.hf_text_config, "hidden_act", None)
+    return (
+        layouts == frozenset((QuantType.W4A8MXFP,))
+        and group_size == _KIMI_MEGA_MOE_GROUP_SIZE
+        and activation in ("silu", "situ")
+        and not getattr(config, "mix_placement", False)
+        and not getattr(eplb, "dynamic_eplb", False)
+        and not getattr(eplb, "num_redundant_experts", 0)
+        and (not getattr(parallel_eplb, "num_redundant_experts", 0) or use_v2_eplb)
+    )
+
+
+def _is_kv_consumer_only(vllm_config: VllmConfig) -> bool:
+    kv_config = getattr(vllm_config, "kv_transfer_config", None)
+    role = getattr(kv_config, "kv_role", None)
+    if role is not None:
+        return role == "kv_consumer"
+    return bool(getattr(kv_config, "is_kv_consumer", False) and not getattr(kv_config, "is_kv_producer", False))
 
 
 def _is_decode_only_node(vllm_config: VllmConfig) -> bool:
@@ -94,6 +159,57 @@ def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
         and vllm_config.parallel_config.enable_expert_parallel
         and 1 < get_ep_group().world_size <= 64
         and getattr(vllm_config, "lora_config", None) is None
+        and _kimi_megamoe_weights_supported(vllm_config, allow_unknown=True)
+    )
+
+
+def uses_kimi_prefill_megamoe(vllm_config: VllmConfig) -> bool:
+    """Whether Kimi's A5 MegaMoE phase agreement is needed for this model."""
+    architectures = getattr(getattr(vllm_config, "model_config", None), "architectures", None) or []
+    return (
+        any(
+            name in ("KimiK3ForCausalLM", "KimiLinearForCausalLM", "KimiK3ForConditionalGeneration")
+            for name in architectures
+        )
+        and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+        and get_ascend_config().enable_fused_mc2 == 1
+        and is_mega_moe_supported()
+    )
+
+
+def log_kimi_megamoe_config(vllm_config: VllmConfig) -> None:
+    """Report model gates once per configuration in each worker process."""
+    if not _is_kimi_moe_model(vllm_config):
+        return
+    description = getattr(getattr(vllm_config, "quant_config", None), "quant_description", None)
+    group_size = description.get("group_size", _KIMI_MEGA_MOE_GROUP_SIZE) if isinstance(description, dict) else None
+    layouts = getattr(vllm_config.model_config, "_ascend_kimi_moe_quant_types", None) or ()
+    parallel_eplb = getattr(vllm_config.parallel_config, "eplb_config", None)
+    config = get_ascend_config()
+    ascend_eplb = getattr(config, "eplb_config", None)
+    logger.info_once(
+        "Kimi %s MegaMoE config: fused_mc2=%s, runtime_available=%s, hardware_mxfp=%s, "
+        "capable=%s, weights_supported=%s, layouts=%s, group_size=%s, ep_size=%s, pcp_size=%s, kv_role=%s, "
+        "eplb_enabled=%s, redundant_experts=%s, dynamic_eplb=%s, ascend_redundant_experts=%s, "
+        "mix_placement=%s, activation=%s",
+        "V2" if getattr(vllm_config, "use_v2_model_runner", False) else "V1",
+        config.enable_fused_mc2,
+        is_mega_moe_supported(),
+        get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP),
+        use_cann_megamoe(vllm_config),
+        _kimi_megamoe_weights_supported(vllm_config),
+        str(sorted(layout.name for layout in layouts)),
+        group_size,
+        get_ep_group().world_size,
+        getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1),
+        getattr(getattr(vllm_config, "kv_transfer_config", None), "kv_role", None),
+        getattr(vllm_config.parallel_config, "enable_eplb", False),
+        getattr(parallel_eplb, "num_redundant_experts", 0),
+        getattr(ascend_eplb, "dynamic_eplb", False),
+        getattr(ascend_eplb, "num_redundant_experts", 0),
+        getattr(config, "mix_placement", False),
+        getattr(vllm_config.model_config.hf_text_config, "hidden_act", None),
+        scope="process",
     )
 
 
@@ -115,6 +231,7 @@ def set_ascend_forward_context(
     device_metadata_executor=None,
     has_sinks=False,
     eplb_heat_collection_status: bool = False,
+    batch_contains_decode: bool = True,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -154,6 +271,8 @@ def set_ascend_forward_context(
             vllm_config,
             is_draft_model=is_draft_model,
             draft_moe_quant_type=draft_moe_quant_type,
+            batch_contains_decode=batch_contains_decode or (is_draft_model and not in_profile_run),
+            aclgraph_runtime_mode=aclgraph_runtime_mode,
         )
 
         forward_context.moe_comm_type = moe_comm_type
@@ -339,8 +458,10 @@ def _select_capacity_and_world_size_moe_comm_method(
     mc2_tokens_capacity: int,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
+    *,
+    allow_fused: bool = True,
 ) -> MoECommType:
-    if get_ascend_config().enable_fused_mc2 == 1:
+    if allow_fused and get_ascend_config().enable_fused_mc2 == 1:
         if is_mega_moe_supported():
             if is_draft_model and draft_moe_quant_type not in A5_SUPPORT_MEGA_MOE_QUANT_TYPES:
                 # The A5 mega moe (FUSED_MC2) operator only supports a subset of
@@ -375,6 +496,10 @@ def select_moe_comm_method(
     vllm_config: VllmConfig,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
+    *,
+    batch_contains_decode: bool | None = None,
+    aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+    v2_prefill_ready: bool = False,
 ) -> MoECommType | None:
     """Select the MoE communication method from the active hardware policy,
     parallel settings, and token count.
@@ -385,6 +510,13 @@ def select_moe_comm_method(
         is_draft_model (bool): Whether the model runs in MTP mode.
         draft_moe_quant_type (QuantType): The draft model's MoE quantization
             type, used on A5 to decide whether the draft can use mega moe.
+        batch_contains_decode (bool | None): DP-agreed real Decode flag.
+            None is reserved for construction/capacity estimation; runtime
+            contexts default to True until the v1 runner supplies the phase.
+        aclgraph_runtime_mode (CUDAGraphMode): Agreed execution mode. Kimi
+            MegaMoE is restricted to prefill outside graph capture/replay.
+        v2_prefill_ready (bool): Whether V2 completed target-only phase,
+            capacity and uniform-input agreement for this forward.
     Returns:
         MoECommType | None: The selected MoE communication method.
     """
@@ -402,6 +534,32 @@ def select_moe_comm_method(
         # is a single fused C++ op. This covers both normal model
         # forward and _dummy_run during profile_run.
         moe_comm_type = MoECommType.ALLTOALL
+    elif uses_kimi_prefill_megamoe(vllm_config) and (
+        batch_contains_decode
+        or not use_cann_megamoe(vllm_config)
+        or not _kimi_megamoe_weights_supported(vllm_config)
+        or (num_tokens is not None and num_tokens > mc2_tokens_capacity)
+        or aclgraph_runtime_mode != CUDAGraphMode.NONE
+        or is_draft_model
+        or (
+            getattr(vllm_config, "use_v2_model_runner", False)
+            and (not v2_prefill_ready or batch_contains_decode is None)
+        )
+        or _is_kv_consumer_only(vllm_config)
+    ):
+        # Metadata=None is only for model construction/profile capacity
+        # estimation. Runtime callers pass an explicit synchronized phase.
+        moe_comm_type = _select_capacity_and_world_size_moe_comm_method(
+            num_tokens,
+            vllm_config,
+            min(
+                mc2_tokens_capacity,
+                _MC2_TOKENS_PER_RANK_LIMIT * getattr(vllm_config.parallel_config, "tensor_parallel_size", 1),
+            ),
+            is_draft_model,
+            draft_moe_quant_type,
+            allow_fused=False,
+        )
     elif moe_comm_policy is MoECommPolicy.ALLGATHER:
         moe_comm_type = MoECommType.ALLGATHER
     else:
@@ -412,15 +570,33 @@ def select_moe_comm_method(
             is_draft_model,
             draft_moe_quant_type,
         )
+    if _is_kimi_moe_model(vllm_config):
+        use_v2 = getattr(vllm_config, "use_v2_model_runner", False)
+        if not use_v2:
+            log_kimi_megamoe_config(vllm_config)
+        logger.info_once(
+            "Kimi %s MoE selection: method=%s, contains_decode=%s, graph_mode=%s, "
+            "v2_prefill_ready=%s, over_capacity=%s, is_draft=%s",
+            "V2" if use_v2 else "V1",
+            moe_comm_type,
+            batch_contains_decode,
+            aclgraph_runtime_mode,
+            v2_prefill_ready,
+            num_tokens > mc2_tokens_capacity if num_tokens is not None and mc2_tokens_capacity is not None else None,
+            is_draft_model,
+        )
     logger.debug(
         "MoE comm method selected: policy=%s, method=%s, num_tokens=%d, mc2_capacity=%s, "
-        "is_draft_model=%s, draft_moe_quant_type=%r",
+        "is_draft_model=%s, draft_moe_quant_type=%r, batch_contains_decode=%s, graph_mode=%s, v2_prefill_ready=%s",
         moe_comm_policy,
         moe_comm_type,
         num_tokens,
         mc2_tokens_capacity,
         is_draft_model,
         draft_moe_quant_type,
+        batch_contains_decode,
+        aclgraph_runtime_mode,
+        v2_prefill_ready,
     )
     return moe_comm_type
 

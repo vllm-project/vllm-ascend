@@ -179,6 +179,7 @@ def _make_defer_state(kv_cache_config):
     state._align_mode = True
     state._mamba_group_ids = [0]
     state._mamba_spec = _mamba_spec()
+    state._mamba_state_copy_funcs = {"layer": state.model.get_mamba_state_copy_func()}
     state._mamba_state_idx_gpu = torch.zeros(4, dtype=torch.int32)
     state._mamba_src_col_gpu = torch.full((4,), -1, dtype=torch.int32)
     state._mamba_src_off_gpu = torch.zeros(4, dtype=torch.int32)

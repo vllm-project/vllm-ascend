@@ -30,7 +30,7 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import Un
 from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, register_kimi_moe_quant_type, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
@@ -46,7 +46,7 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
 )
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz, npu_stream_switch
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -429,6 +429,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.router: FusedMoERouter | None = None
         ascend_config = get_ascend_config()
         vllm_config = get_current_vllm_config()
+        register_kimi_moe_quant_type(vllm_config, self.quant_type)
         self.n_shared_experts = n_shared_experts
         self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
@@ -690,12 +691,47 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         return topk_weights, topk_ids
 
+    def _select_experts_with_stream(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        enable_force_load_balance: bool,
+        input_ids: torch.Tensor | None,
+        router_stream: torch.npu.Stream | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # PR45 keeps TopK on the Router stream. Retain 0.30's common prepare
+        # (including SP padding/masks) and join its actual producer here.
+        if (
+            router_stream is None
+            or _EXTRA_CTX.moe_comm_type != MoECommType.MC2
+            or not self.moe_config.is_sequence_parallel
+        ):
+            return self._select_experts(hidden_states, router_logits, enable_force_load_balance, input_ids)
+        main_stream = torch.npu.current_stream()
+        prepared = main_stream.record_event()
+        for tensor in (hidden_states, router_logits, input_ids):
+            if tensor is not None:
+                tensor.record_stream(router_stream)
+        with npu_stream_switch(router_stream):
+            torch.npu.current_stream().wait_event(prepared)
+            topk_weights, topk_ids = self._select_experts(
+                hidden_states, router_logits, enable_force_load_balance, input_ids
+            )
+            router_done = torch.npu.current_stream().record_event()
+        topk_weights.record_stream(main_stream)
+        topk_ids.record_stream(main_stream)
+        main_stream.wait_event(router_done)
+        return topk_weights, topk_ids
+
     def forward_impl(
         self,
         *,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        shared_expert_schedule=None,
+        router_stream: torch.npu.Stream | None = None,
+        precomputed_topk: tuple[torch.Tensor, torch.Tensor, torch.npu.Event] | None = None,
     ):
         forward_context = get_forward_context()
         # When static kernels are enabled, the forward pass runs twice
@@ -728,14 +764,25 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         pertoken_scale = prepare_output.pertoken_scale
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
-        topk_weights, topk_ids = self._select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            enable_force_load_balance=enable_force_load_balance,
-            input_ids=input_ids,
-        )
+        if precomputed_topk is not None:
+            topk_weights, topk_ids, topk_done = precomputed_topk
+            if topk_weights.shape[0] != hidden_states.shape[0] or topk_ids.shape != topk_weights.shape:
+                raise RuntimeError("Precomputed Kimi TopK does not match MC2 prepared token padding")
+            main_stream = torch.npu.current_stream()
+            main_stream.wait_event(topk_done)
+            topk_weights.record_stream(main_stream)
+            topk_ids.record_stream(main_stream)
+        else:
+            topk_weights, topk_ids = self._select_experts_with_stream(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                enable_force_load_balance=enable_force_load_balance,
+                input_ids=input_ids,
+                router_stream=router_stream,
+            )
         self.ascend_pertoken_scale = pertoken_scale
         self.ascend_mc2_mask = mc2_mask
+        self._ascend_shared_schedule = shared_expert_schedule
         try:
             fused_experts_results: FusedExpertsResult = self.quant_method.apply(
                 layer=self,
@@ -748,6 +795,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         finally:
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
+            self._ascend_shared_schedule = None
 
         if self._use_v2_model_runner:
             _record_v2_eplb_load(self.router, fused_experts_results)

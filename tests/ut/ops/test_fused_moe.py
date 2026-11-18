@@ -263,6 +263,7 @@ def test_ascend_routed_experts_initializes_only_matching_eplb_path(
     def parent_init(instance, *args, **kwargs):
         nn.Module.__init__(instance)
         instance.quant_config = object()
+        instance.quant_method = SimpleNamespace(quant_method=None)
         instance.custom_routing_function = None
         instance.e_score_correction_bias = None
 
@@ -2016,6 +2017,8 @@ def test_early_all_gather_only_runs_for_sp_with_tp_sharded_weights(
     monkeypatch.setattr(shared_experts_module, "shared_experts_calculation_stream", lambda: auxiliary_stream)
     monkeypatch.setattr(shared_experts_module.torch.npu, "current_stream", lambda: stream_state["current"])
 
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: None)
+
     prepared = shared_experts.prepare_input_async(hidden_states)
 
     if starts_all_gather:
@@ -2184,7 +2187,7 @@ def test_sp_multistream_all_gather_starts_before_routed_input_transform(monkeypa
     current_stream = MagicMock()
     current_stream.wait_event.side_effect = lambda event: operation_order.append("wait_all_gather")
 
-    def prepare_input(states):
+    def prepare_input(states, *, comm_stream=None):
         operation_order.append("all_gather")
         assert states is hidden_states
         return PreparedSharedExpertInput(gathered_states, is_gathered=True, ready_event=all_gather_done)
@@ -2509,9 +2512,7 @@ def test_forward_impl_returns_current_runner_contract(monkeypatch, has_shared_ex
     if has_shared_experts:
         ascend_shared_experts.prepare_input_before_routed.assert_called_once_with(hidden_states)
         runner.routed_experts.forward_impl.assert_called_once_with(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            input_ids=input_ids,
+            hidden_states=hidden_states, router_logits=router_logits, input_ids=input_ids, router_stream=None
         )
         assert result[0] is shared_out
         assert result[1] is routed_out
@@ -2524,9 +2525,7 @@ def test_forward_impl_returns_current_runner_contract(monkeypatch, has_shared_ex
         )
     else:
         runner.routed_experts.forward_impl.assert_called_once_with(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            input_ids=input_ids,
+            hidden_states=hidden_states, router_logits=router_logits, input_ids=input_ids, router_stream=None
         )
         assert result is routed_out
         ascend_shared_experts.forward.assert_not_called()
@@ -2972,9 +2971,7 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
     )
 
     runner.routed_experts.forward_impl.assert_called_once_with(
-        hidden_states=routed_hidden_states,
-        router_logits=router_logits,
-        input_ids=None,
+        hidden_states=routed_hidden_states, router_logits=router_logits, input_ids=None, router_stream=None
     )
     current_stream.wait_event.assert_not_called()
     assert milestones.routed_finalize_done is current_stream.record_event.return_value
@@ -3127,9 +3124,7 @@ def test_forward_impl_uses_gate_weight_fp32(monkeypatch):
     assert result is routed_out
     weight.to.assert_not_called()
     runner.routed_experts.forward_impl.assert_called_once_with(
-        hidden_states=hidden_states,
-        router_logits=recomputed_logits,
-        input_ids=None,
+        hidden_states=hidden_states, router_logits=recomputed_logits, input_ids=None, router_stream=None
     )
 
 
@@ -3174,9 +3169,7 @@ def test_forward_impl_routes_gate_without_weight_fp32(monkeypatch):
     # compare by identity instead.
     assert gate.call_args[0][0] is hidden_states
     runner.routed_experts.forward_impl.assert_called_once_with(
-        hidden_states=hidden_states,
-        router_logits=gate_logits,
-        input_ids=None,
+        hidden_states=hidden_states, router_logits=gate_logits, input_ids=None, router_stream=None
     )
 
 
@@ -3226,9 +3219,7 @@ def test_forward_impl_shared_experts_uses_gate_weight_fp32(monkeypatch):
     assert result == (shared_out, routed_out)
     weight.to.assert_not_called()
     runner.routed_experts.forward_impl.assert_called_once_with(
-        hidden_states=hidden_states,
-        router_logits=recomputed_logits,
-        input_ids=None,
+        hidden_states=hidden_states, router_logits=recomputed_logits, input_ids=None, router_stream=None
     )
     runner.ascend_shared_experts.forward.assert_called_once_with(
         prepared_shared_input,

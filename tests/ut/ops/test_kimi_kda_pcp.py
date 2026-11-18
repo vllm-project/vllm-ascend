@@ -52,6 +52,46 @@ def test_kda_state_shapes_delegate_to_upstream_without_mutating_config(pcp, mode
     assert (effective is config) == (pcp == 1)
 
 
+@pytest.mark.parametrize("num_spec", [0, 3])
+@pytest.mark.parametrize("multimodal", [False, True])
+def test_replayssm_planner_and_layer_agree_on_five_state_pages(num_spec, multimodal):
+    """The K3.1 PCP hooks must retain cann's ReplaySSM allocation contract."""
+    text_config = SimpleNamespace(
+        linear_attn_config={"num_heads": 32, "head_dim": 4, "short_conv_kernel_size": 4},
+    )
+    config = SimpleNamespace(
+        additional_config={"enable_mega_kda_replayssm": True},
+        parallel_config=SimpleNamespace(tensor_parallel_size=8, prefill_context_parallel_size=1),
+        model_config=SimpleNamespace(hf_config=text_config, dtype=torch.bfloat16),
+        cache_config=SimpleNamespace(mamba_cache_dtype="auto", mamba_ssm_cache_dtype="float32"),
+        speculative_config=SimpleNamespace(num_speculative_tokens=num_spec),
+    )
+    layer = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
+    torch.nn.Module.__init__(layer)
+    layer.use_mega_kda_replayssm = True
+    layer.model_config, layer.cache_config = config.model_config, config.cache_config
+    layer.tp_size, layer.num_heads, layer.local_num_heads = 8, 32, 4
+    layer.head_dim, layer.conv_size, layer.num_spec = 4, 4, num_spec
+    model = kimi_k3.AscendKimiLinearForCausalLM
+    planner_config = config
+    if multimodal:
+        model = kimi_k3.AscendKimiK3ForConditionalGeneration
+        planner_config = SimpleNamespace(
+            additional_config=config.additional_config,
+            model_config=SimpleNamespace(hf_config=SimpleNamespace(text_config=text_config)),
+            with_hf_config=lambda _: config,
+        )
+
+    shapes = model.get_mamba_state_shape_from_config(planner_config)
+    dtypes = model.get_mamba_state_dtype_from_config(planner_config)
+
+    assert shapes == layer.get_state_shape()
+    assert dtypes == layer.get_state_dtype()
+    assert len(shapes) == len(dtypes) == 5
+    assert shapes[2:] == ((4, num_spec + 1, 4),) * 3
+    assert dtypes[2:] == (torch.float32, torch.float16, torch.float32)
+
+
 @pytest.mark.parametrize(("tp", "pcp"), [(1, 2), (2, 2), (2, 4)])
 def test_kda_projections_cover_global_heads_once(tp, pcp):
     size, width, hidden = tp * pcp, 64, 8

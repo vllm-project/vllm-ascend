@@ -89,6 +89,7 @@ def _construct_impl(pcp_size: int, dcp_size: int) -> AscendMLAImpl:
     )
     with (
         patch.object(mla_v1, "get_current_vllm_config", return_value=config),
+        patch.object(mla_v1, "get_dcp_group", return_value=SimpleNamespace(rank_in_group=0)),
         patch.object(
             mla_v1,
             "get_current_hardware_profile",

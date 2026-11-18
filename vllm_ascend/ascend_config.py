@@ -53,6 +53,19 @@ def is_mega_moe_supported() -> bool:
     return _MEGA_MOE_SUPPORTED
 
 
+def _supports_kimi_megamoe_overlap(vllm_config: VllmConfig) -> bool:
+    """Kimi's SP shared executor joins collectives after routed finalize."""
+    architectures = getattr(vllm_config.model_config, "architectures", None) or []
+    return (
+        is_mega_moe_supported()
+        and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+        and any(
+            name in ("KimiK3ForCausalLM", "KimiLinearForCausalLM", "KimiK3ForConditionalGeneration")
+            for name in architectures
+        )
+    )
+
+
 def validate_additional_config_bool(value: Any, path: str) -> bool:
     """Apply the same pydantic bool rules to values read before config init."""
     try:
@@ -426,6 +439,7 @@ class AscendConfig:
             "enable_prefill_mc2": false,
             "multistream_overlap_shared_expert": false,
             "enable_kv_nz": false,
+            "mla_cache_mode": "C16",
             "enable_mc2_hierarchy_comm": false,
             "enable_dsa_cp": false,
             "sfa_dcp_force_tmajor_restore": false,
@@ -434,6 +448,7 @@ class AscendConfig:
             "enable_pcp_embedding_lmhead_weight_sharding": true,
             "draft_window_size": null,
             "mix_placement": false,
+            "enable_mega_kda_replayssm": false,
             "pa_shape_list": [],
             "mega_moe_max_tokens": 65536,
             "ascend_log_path": "~/ascend/log/vllm_ascend",
@@ -574,6 +589,8 @@ class AscendConfig:
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
+    # Static E4M3 PA_NZ is opt-in; C16 preserves the existing MLA KV path.
+    mla_cache_mode: Literal["C16", "C8"] = "C16"
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     enable_dsa_cp: bool = False
     sfa_dcp_force_tmajor_restore: bool = False
@@ -582,6 +599,10 @@ class AscendConfig:
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
     draft_window_size: int | None = None
     mix_placement: bool = False
+    # Opt-in ReplaySSM MegaKDA (commit_recurrent_kda + keyword MegaKDA ABI).
+    # This is an Ascend-specific switch and is intentionally independent of
+    # vLLM's generic cache_config.use_replayssm setting.
+    enable_mega_kda_replayssm: bool = False
     # When non-zero, force the MC2 combine stage's comm quant_mode to this
     # value (e.g. 4 = MXFP float8_e4m3 communication quantization) regardless of the
     # model's quant_type, 0 means disabled (use the model's own quant).
@@ -650,6 +671,47 @@ class AscendConfig:
     _sparse_li_c4_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_layer_filter_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
 
+    @field_validator("mla_cache_mode", mode="before")
+    @classmethod
+    def _normalize_mla_cache_mode(cls, value: Any) -> str:
+        if not isinstance(value, str) or value.strip().upper() not in ("C16", "C8"):
+            raise ValueError("additional_config.mla_cache_mode must be C16 or C8")
+        return value.strip().upper()
+
+    def _validate_mla_cache_mode(self, vllm_config: VllmConfig) -> None:
+        if self.mla_cache_mode != "C8":
+            return
+        model = getattr(vllm_config, "model_config", None)
+        hf = getattr(model, "hf_text_config", None) or getattr(model, "hf_config", None)
+        architectures = getattr(hf, "architectures", None) or getattr(model, "architectures", ())
+        is_kimi = getattr(hf, "model_type", "") in ("kimi_linear", "kimi_k3") or any(
+            name in ("KimiK3ForCausalLM", "KimiLinearForCausalLM", "KimiK3ForConditionalGeneration")
+            for name in architectures
+        )
+        if not is_kimi or (getattr(hf, "kv_lora_rank", None), getattr(hf, "qk_rope_head_dim", None)) != (512, 64):
+            raise ValueError("mla_cache_mode=C8 requires Kimi K3 MLA with kv_lora_rank=512 and qk_rope_head_dim=64")
+        if not getattr(vllm_config, "use_v2_model_runner", False):
+            raise ValueError("mla_cache_mode=C8 requires RunnerV2; enable use_v2_model_runner")
+        speculative = getattr(vllm_config, "speculative_config", None)
+        if speculative is not None and getattr(speculative, "method", None) != "dspark":
+            raise ValueError("mla_cache_mode=C8 currently supports DSpark speculative decoding only")
+        parallel = getattr(vllm_config, "parallel_config", None)
+        if getattr(parallel, "prefill_context_parallel_size", 1) != 1:
+            raise ValueError("mla_cache_mode=C8 currently requires prefill_context_parallel_size=1")
+        dcp = getattr(parallel, "decode_context_parallel_size", 1)
+        if dcp not in (1, 8):
+            raise ValueError("mla_cache_mode=C8 currently supports decode_context_parallel_size=1 or 8")
+        if dcp == 8 and getattr(parallel, "cp_kv_cache_interleave_size", None) != 1664:
+            raise ValueError("mla_cache_mode=C8 with DCP8 requires cp_kv_cache_interleave_size=1664")
+        kv_transfer = getattr(vllm_config, "kv_transfer_config", None)
+        if kv_transfer is not None:
+            if getattr(kv_transfer, "is_kv_producer", False) and dcp != 1:
+                raise ValueError("mla_cache_mode=C8 KV producer requires decode_context_parallel_size=1")
+            if kv_transfer.kv_connector not in ("MooncakeConnectorV2", "MooncakePullConnector"):
+                raise ValueError("mla_cache_mode=C8 P/D requires MooncakeConnectorV2 or MooncakePullConnector")
+            if dcp == 8 and getattr(vllm_config.cache_config, "block_size", None) != 1664:
+                raise ValueError("mla_cache_mode=C8 P/D with DCP8 requires block_size=1664")
+
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
         if self.weight_nz_mode not in (0, 1, 2):
@@ -676,6 +738,7 @@ class AscendConfig:
     # multi-step downgrades are order-dependent (e.g. profiling_chunk reads
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
+        self._validate_mla_cache_mode(vllm_config)
         vc = vllm_config
         engram_config = getattr(vc, "engram_config", None)
         if (
@@ -847,7 +910,11 @@ class AscendConfig:
             "MiniMax M3 does not support enable_fused_mc2=1 (dispatch_ffn_combine). "
             "Set additional_config.enable_fused_mc2 to 2 to enable MegaMoe, or 0 to disable fused MC2."
         )
-        if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
+        if (
+            self.enable_fused_mc2 == 1
+            and self.multistream_overlap_shared_expert
+            and not _supports_kimi_megamoe_overlap(vc)
+        ):
             self.multistream_overlap_shared_expert = False
             logger.warning_once(
                 "enable_fused_mc2 and multistream_overlap_shared_expert "
@@ -976,8 +1043,34 @@ class AscendConfig:
         self._check_mix_placement()
 
         # sparse KV offload vs packed SFA main cache mutex
+        self._validate_mega_kda(vllm_config)
         self._validate_sparse_packed_kv_offload_compatibility()
         return self
+
+    def _validate_mega_kda(self, vllm_config: VllmConfig) -> None:
+        """Validate the opt-in ReplaySSM MegaKDA switch against the model config."""
+        replay_enabled = bool(getattr(self, "enable_mega_kda_replayssm", False))
+        if not replay_enabled:
+            return
+        if not bool(getattr(vllm_config, "use_v2_model_runner", False)):
+            raise ValueError("additional_config.enable_mega_kda_replayssm requires VLLM_USE_V2_MODEL_RUNNER=1.")
+        hf_config = getattr(vllm_config.model_config, "hf_text_config", None)
+        linear_attn = getattr(hf_config, "linear_attn_config", None)
+        outer_config = getattr(vllm_config.model_config, "hf_config", hf_config)
+        architectures = tuple(getattr(outer_config, "architectures", None) or ())
+        is_kimi = "kimi" in getattr(hf_config, "model_type", "").lower() or any(
+            name in ("KimiLinearForCausalLM", "KimiK3ForCausalLM", "KimiK3ForConditionalGeneration")
+            for name in architectures
+        )
+        if not is_kimi or not isinstance(linear_attn, dict) or "num_heads" not in linear_attn:
+            raise ValueError(
+                "additional_config.enable_mega_kda_replayssm requires a Kimi K3 model "
+                "with linear_attn_config.num_heads."
+            )
+        if not linear_attn.get("use_full_rank_gate", False):
+            raise ValueError(
+                "additional_config.enable_mega_kda_replayssm requires linear_attn_config.use_full_rank_gate=true."
+            )
 
     @property
     def uses_packed_sfa_main_cache(self) -> bool:
@@ -1962,6 +2055,12 @@ def clear_ascend_config():
     from vllm_ascend.utils import clear_enable_sp
 
     clear_enable_sp()
+
+
+def is_kimi_c8_config(vllm_config) -> bool:
+    """Select the opt-in C8 path; all other configs retain the base path."""
+    additional = getattr(vllm_config, "additional_config", None)
+    return isinstance(additional, dict) and str(additional.get("mla_cache_mode", "C16")).strip().upper() == "C8"
 
 
 def get_ascend_config():

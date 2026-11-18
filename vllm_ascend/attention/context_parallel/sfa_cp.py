@@ -1642,6 +1642,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 tp_group.unique_name,
                 pcp_group.unique_name,
                 softmax_sum=softmax_sum,
+                use_sfa_fast_exchange=True,
             )
 
         scatter_dim = 1
@@ -1678,6 +1679,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             scatter_dim,
             self.dcp_group.unique_name,
             softmax_sum=softmax_sum,
+            use_sfa_fast_exchange=True,
         )
 
     def _start_dcp_query_gather(

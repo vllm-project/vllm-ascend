@@ -2,24 +2,131 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
 from contextlib import AbstractContextManager
+from dataclasses import replace
 
+import torch
+import torch.distributed as dist
+from vllm.distributed import get_dp_group
+from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as upstream
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp as _dispatch_cg_and_sync_dp
 
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import (
+    _is_kv_consumer_only,
+    _kimi_megamoe_weights_supported,
+    get_mc2_tokens_capacity,
+    use_cann_megamoe,
+)
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
+from vllm_ascend.worker.v2.moe_utils import (
+    V2MoEPhaseMetadata,
+    agree_v2_moe_batch,
+    get_v2_moe_batch_state,
+)
+
+
+def _sync_v2_moe_phase(num_tokens, dp_size, dp_rank, allow_ubatching):
+    state = get_v2_moe_batch_state()
+    if state is None:
+        return None
+    vllm_config = state.vllm_config
+    parallel = vllm_config.parallel_config
+    capacity = min(get_mc2_tokens_capacity() or 0, vllm_config.scheduler_config.max_num_batched_tokens)
+    eligible = (
+        state.allow_megamoe
+        and not allow_ubatching
+        and parallel.prefill_context_parallel_size == 1
+        and not _is_kv_consumer_only(vllm_config)
+        and use_cann_megamoe(vllm_config)
+        and _kimi_megamoe_weights_supported(vllm_config)
+    )
+    local = V2MoEPhaseMetadata(
+        num_tokens, state.has_real_work, state.batch_contains_decode, state.is_profile, eligible, capacity
+    )
+    if dp_size > 1:
+        metadata = torch.zeros((dp_size, len(local)), dtype=torch.int32, device="cpu")
+        metadata[dp_rank] = torch.tensor(local, dtype=torch.int32, device="cpu")
+        dist.all_reduce(metadata, group=get_dp_group().cpu_group)
+        peers = metadata.tolist()
+    else:
+        peers = [list(local)]
+    agreed = agree_v2_moe_batch(peers, parallel.tensor_parallel_size)
+    if agreed.prefill_ready:
+        reason = "ready"
+    elif agreed.batch_contains_decode:
+        reason = "decode_or_unknown_phase"
+    elif not all(V2MoEPhaseMetadata(*peer).eligible for peer in peers):
+        reason = "ineligible_rank"
+    else:
+        reason = "token_capacity_or_padding"
+    logger.info_once("Kimi V2 MegaMoE phase agreement: %s", reason)
+    logger.debug(
+        "Kimi V2 MegaMoE phase: rank=%s, local=%s, peers=%s, allow_megamoe=%s, "
+        "allow_ubatching=%s, pcp_size=%s, padded_tokens=%s, decision=%s",
+        dp_rank,
+        local,
+        peers,
+        state.allow_megamoe,
+        allow_ubatching,
+        parallel.prefill_context_parallel_size,
+        agreed.padded_num_tokens,
+        reason,
+    )
+    return agreed
 
 
 # TODO: Remove once upstream GPUModelRunner dispatches sharded PCP decode with
 # rank-local request counts.
-def dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_token_count, *args, **kwargs):
+def dispatch_cg_and_sync_dp(
+    cudagraph_manager,
+    num_reqs,
+    num_tokens,
+    uniform_token_count,
+    dp_size,
+    dp_rank,
+    max_query_len=None,
+    need_eager=False,
+    num_active_loras=0,
+    parallel_config=None,
+    allow_ubatching=False,
+    uniform_decode=False,
+    dp_sync=None,
+    **kwargs,
+):
     vllm_config = getattr(cudagraph_manager, "vllm_config", None)
     if uniform_token_count and vllm_config is not None and is_pcp_decode_sharding_enabled(vllm_config):
         # num_tokens is already the largest rank-local count, and each sharded
         # decode request stays whole on one rank.
         num_reqs = num_tokens // uniform_token_count
-    return _dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_token_count, *args, **kwargs)
+    state = _sync_v2_moe_phase(num_tokens, dp_size, dp_rank, allow_ubatching)
+    prefill_ready = state is not None and state.prefill_ready
+    batch_desc, dp_sync = _dispatch_cg_and_sync_dp(
+        cudagraph_manager,
+        num_reqs,
+        num_tokens,
+        uniform_token_count,
+        dp_size,
+        dp_rank,
+        max_query_len=max_query_len,
+        need_eager=need_eager or prefill_ready,
+        num_active_loras=num_active_loras,
+        parallel_config=parallel_config,
+        allow_ubatching=allow_ubatching,
+        uniform_decode=uniform_decode,
+        dp_sync=dp_sync,
+        **kwargs,
+    )
+    if prefill_ready:
+        batch_desc = replace(batch_desc, num_tokens=state.padded_num_tokens)
+        if dp_sync is not None:
+            dp_sync = replace(
+                dp_sync,
+                num_tokens_across_dp=torch.full_like(dp_sync.num_tokens_across_dp, state.padded_num_tokens),
+            )
+    return batch_desc, dp_sync
 
 
 # Adapted from vLLM ced6857afa GPUModelRunner.initialize_kv_cache.
@@ -207,7 +314,16 @@ def initialize_kv_cache(
         self.kv_connector = upstream.get_kv_connector(self.vllm_config, kv_caches_dict)
 
 
-upstream.copy_kv_cache_blocks_inplace = copy_kv_cache_blocks_inplace
+def _copy_ascend_cache_blocks(kv_caches, num_blocks, copies):
+    return copy_kv_cache_blocks_inplace(
+        kv_caches,
+        num_blocks,
+        copies,
+        static_c8=getattr(get_ascend_config(), "mla_cache_mode", "C16") == "C8",
+    )
+
+
+upstream.copy_kv_cache_blocks_inplace = _copy_ascend_cache_blocks
 
 upstream.dispatch_cg_and_sync_dp = dispatch_cg_and_sync_dp
 

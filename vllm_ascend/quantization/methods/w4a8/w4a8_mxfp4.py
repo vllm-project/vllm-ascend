@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
@@ -240,8 +241,8 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             if _EXTRA_CTX.use_mega_moe:
                 w1 = layer.w13_weight_list
                 w2 = layer.w2_weight_list
-                w1_scale = layer.w13_weight_scale_list
-                w2_scale = layer.w2_weight_scale_list
+                w1_scale = [scale.view(torch.float8_e8m0fnu) for scale in layer.w13_weight_scale_list]
+                w2_scale = [scale.view(torch.float8_e8m0fnu) for scale in layer.w2_weight_scale_list]
             else:
                 w1, w1_scale, w2, w2_scale = self._get_mlp_weights(layer)
             return MoEWeights(
@@ -448,6 +449,16 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         layer._mxfp4_transformed = False
 
     def _get_mlp_weights(self, layer):
+        if hasattr(layer, "cann_mega_moe_w13_weight_list"):
+            # MegaMoE owns the live (out, in) lists; its loader released the
+            # dense parameters. Decode/graph fallback still needs GMM views.
+            # Reuse storage, as in the existing expert-list path below.
+            return (
+                [weight.transpose(0, 1) for weight in layer.cann_mega_moe_w13_weight_list],
+                [scale.transpose(0, 1) for scale in layer.cann_mega_moe_w13_weight_scale_list],
+                [weight.transpose(0, 1) for weight in layer.cann_mega_moe_w2_weight_list],
+                [scale.transpose(0, 1) for scale in layer.cann_mega_moe_w2_weight_scale_list],
+            )
         if self.use_expert_weight_list:
             return (
                 [weight.transpose(0, 1) for weight in layer.w13_weight_list],
@@ -462,13 +473,33 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             [layer.w2_weight_scale],
         )
 
+    def _use_grouped_situ(self, mlp_compute_input: MoEMlpComputeInput) -> bool:
+        return (
+            get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+            and mlp_compute_input.activation == MoEActivation.SITU
+            and mlp_compute_input.group_list_type in (0, 1)
+            and self.group_size == 32
+            and not self.use_expert_weight_list
+            and mlp_compute_input.lora_context is None
+            and (mlp_compute_input.activation_situ_beta is None or mlp_compute_input.activation_situ_beta > 0)
+            and (mlp_compute_input.activation_situ_linear_beta or 0.0) > 0
+            and hasattr(torch.ops.custom, "grouped_situ_mx_quant")
+        )
+
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
+        use_grouped_situ = self._use_grouped_situ(mlp_compute_input)
         hidden_states = mlp_compute_input.hidden_states
         hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
         layer = mlp_compute_input.layer
         assert layer is not None
         if (
-            mlp_compute_input.activation == MoEActivation.SITU
+            not use_grouped_situ
+            # A5 SiTU keeps PR35's separate GMM1 + activation/quant path
+            # even when the optional grouped SiTU operator is unavailable.
+            and not get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+            and mlp_compute_input.shared_expert_schedule is None
+            and not hasattr(layer, "cann_mega_moe_w13_weight_list")
+            and mlp_compute_input.activation == MoEActivation.SITU
             and mlp_compute_input.group_list_type in (0, 1)
             and self.group_size == 32
             and (mlp_compute_input.activation_situ_linear_beta or 0.0) > 0.0
@@ -512,6 +543,17 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             output_dtype=torch.bfloat16,
         )[0]
         dispose_tensor(mlp_compute_input.hidden_states)
+        if mlp_compute_input.shared_expert_schedule is not None:
+            mlp_compute_input.shared_expert_schedule.after_gmm1()
+        if use_grouped_situ:
+            activated, scale = torch.ops.custom.grouped_situ_mx_quant(
+                hidden_states,
+                cumsum_group_list(mlp_compute_input.group_list.to(torch.int64), mlp_compute_input.group_list_type, 1),
+                beta=1.0 if mlp_compute_input.activation_situ_beta is None else mlp_compute_input.activation_situ_beta,
+                alpha=mlp_compute_input.activation_situ_linear_beta,
+                high_precision=False,
+            )
+            return activated, maybe_normalize_mxfp_scale_layout(scale)
         if mlp_compute_input.activation == MoEActivation.SITU:
             # SituAndMul: run the dequantized gmm1 first, then fuse the situ
             # activation with MXFP output quantization (Kimi K3 SITU activation).

@@ -38,6 +38,7 @@ def make_model(tp_size=1, tp_rank=0, fused_gate=False):
     model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
     nn.Module.__init__(model)
     model.config = SimpleNamespace(
+        attn_res_block_size=None,
         is_moe=False,
         is_linear_attn=True,
         linear_attn_config={"use_full_rank_gate": True},

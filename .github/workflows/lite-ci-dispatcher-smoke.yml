@@ -1,0 +1,158 @@
+name: lite-ci-dispatcher-smoke
+run-name: lite-ci-dispatcher-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_case:
+        description: 'Optional test ID; leave empty to run all dispatch Smoke cases'
+        required: false
+        type: string
+      pr:
+        description: 'Optional PR number; tests its verified merge commit'
+        required: false
+        type: string
+      commit:
+        description: 'Optional full commit SHA; empty uses the selected branch latest commit'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: >-
+    ${{ format('lite-vllm-{0}', inputs.pr || github.run_id) }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    if: >-
+      github.repository == 'cann-framework/vllm-ascend'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      sha: ${{ steps.plan.outputs.sha }}
+      source_sha: ${{ steps.plan.outputs.source_sha }}
+      plan_digest: ${{ steps.plan.outputs.plan_digest }}
+      native_source: ${{ steps.plan.outputs.native_source }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: cann-framework/vllm-ascend
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Resolve the immutable tested source
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_SOURCE_PR: ${{ inputs.pr }}
+          CI_COMMIT: ${{ inputs.commit }}
+          CI_RESOLVE_ONLY: '1'
+        run: PYTHONPATH="$PWD" python3 .github/scripts/lite_actions/prepare_request.py
+      - name: Check out the tested Smoke definitions
+        uses: actions/checkout@v4
+        with:
+          repository: cann-framework/vllm-ascend
+          ref: ${{ steps.source.outputs.source_sha }}
+          path: .lite-ci-source
+          persist-credentials: false
+      - name: Create trusted smoke plan and immutable Blue merge source
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_TEST_CASE: ${{ inputs.test_case }}
+          CI_SOURCE_PR: ${{ inputs.pr }}
+          CI_COMMIT: ${{ inputs.commit }}
+          CI_CHECKED_SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: PYTHONPATH="$PWD/.lite-ci-source" python3 .github/scripts/lite_actions/prepare_request.py
+      - name: Publish versioned Blue pending status
+        if: steps.plan.outputs.native_source == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: PYTHONPATH="$PWD/.lite-ci-source" python3 .github/scripts/lite_actions/native_result.py --source .ci-request/source.json --state pending
+      - uses: actions/upload-artifact@v4
+        if: steps.plan.outputs.native_source == 'true'
+        with:
+          name: lite-ci-source-${{ github.run_attempt }}
+          path: .ci-request/source.json
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lite-ci-request-${{ github.run_attempt }}
+          path: .ci-request/ci-request.json
+          if-no-files-found: error
+          retention-days: 7
+
+  smoke:
+    needs: prepare
+    runs-on: ubuntu-latest
+    name: ${{ matrix.case_id }}
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: cann-framework/vllm-ascend
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        if: needs.prepare.outputs.native_source == 'true'
+        with:
+          name: lite-ci-source-${{ github.run_attempt }}
+          path: .ci-source
+      - name: Wait for assigned Lite Actions worker
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
+          CI_RESULT_AUTHOR: ${{ vars.LITE_CI_RESULT_ACTOR || 'depeng1994' }}
+          CI_PLAN_DIGEST: ${{ needs.prepare.outputs.plan_digest }}
+          CI_CASE: ${{ toJSON(matrix) }}
+          CI_WORKFLOW: lite-ci-dispatcher-smoke.yml
+          CI_NATIVE_SOURCE: ${{ needs.prepare.outputs.native_source == 'true' && '.ci-source/source.json' || '' }}
+        run: PYTHONPATH="$PWD" python3 .github/scripts/lite_actions/wait_result.py
+
+  result:
+    if: always() && needs.prepare.result != 'skipped'
+    needs: [prepare, smoke]
+    runs-on: ubuntu-latest
+    name: Lite-Actions-Smoke
+    steps:
+      - uses: actions/checkout@v4
+        if: needs.prepare.outputs.native_source == 'true'
+        with:
+          repository: cann-framework/vllm-ascend
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        if: needs.prepare.outputs.native_source == 'true'
+        with:
+          name: lite-ci-source-${{ github.run_attempt }}
+          path: .ci-source
+      - uses: actions/checkout@v4
+        if: needs.prepare.outputs.native_source == 'true'
+        with:
+          repository: cann-framework/vllm-ascend
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          path: .lite-ci-source
+          persist-credentials: false
+      - name: Publish versioned Blue result without granting atomic merge permission
+        if: needs.prepare.outputs.native_source == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SMOKE: ${{ needs.smoke.result }}
+        run: |
+          state=failure
+          if test "$SMOKE" = success; then state=success; fi
+          PYTHONPATH="$PWD/.lite-ci-source" python3 .github/scripts/lite_actions/native_result.py --source .ci-source/source.json --state "$state"
+      - env:
+          PREPARE: ${{ needs.prepare.result }}
+          SMOKE: ${{ needs.smoke.result }}
+        run: test "$PREPARE" = success && test "$SMOKE" = success

@@ -22,6 +22,7 @@ from typing import cast
 import torch
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -46,6 +47,30 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithMC2,
 )
 from vllm_ascend.quantization.quant_type import QuantType
+
+
+def _prefer_expert_token_counts_for_situ(moe_config: FusedMoEConfig, fused_input: MoEFusedExpertsInput) -> bool:
+    if (
+        not get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+        or moe_config.activation != MoEActivation.SITU
+        or fused_input.lora_context is not None
+        or fused_input.dynamic_eplb
+    ):
+        return False
+
+    beta = moe_config.activation_situ_beta
+    alpha = moe_config.activation_situ_linear_beta
+    if (beta is not None and beta <= 0) or alpha is None or alpha <= 0:
+        return False
+
+    if fused_input.quant.quant_type == QuantType.W4A8MXFP:
+        return not fused_input.quant.is_per_channel_weight and hasattr(torch.ops.custom, "grouped_situ_mx_quant")
+    if fused_input.quant.quant_type == QuantType.NONE:
+        return fused_input.hidden_states.dtype in (torch.float16, torch.bfloat16) and hasattr(
+            torch.ops.custom, "npu_situ_and_mul_sparse"
+        )
+    return False
+
 
 _MoECommMethods: dict[tuple[MoECommType | None, tuple[int, ...]], MoECommMethod] = {}
 
@@ -146,12 +171,17 @@ class MoECommMethod(ABC):
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
 
-        before_dispatch_evt = torch.npu.current_stream().record_event()
-
         token_dispatch_input = build_token_dispatch_input(
             fused_experts_input=fused_experts_input,
+            prefer_expert_token_counts=isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
+            and _prefer_expert_token_counts_for_situ(self.moe_config, fused_experts_input),
         )
+        before_dispatch_evt = torch.npu.current_stream().record_event()
+        if fused_experts_input.shared_expert_schedule is not None:
+            fused_experts_input.shared_expert_schedule.before_dispatch(before_dispatch_evt)
         token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+        if fused_experts_input.shared_expert_schedule is not None:
+            fused_experts_input.shared_expert_schedule.after_dispatch()
 
         mlp_compute_input = build_mlp_compute_input(
             fused_experts_input=fused_experts_input,
@@ -483,9 +513,15 @@ class FusedMC2CommImpl(MoECommMethod):
         # they are passed through as-is here. W8A8 weights are already int8 + FRACTAL_NZ, also as-is.
         weight_scales1 = weights.w1_scale
         weight_scales2 = weights.w2_scale
+        quant_type = fused_experts_input.quant.quant_type
         dispatch_quant_mode, dispatch_quant_out_dtype, weight_type = moe_utils._get_cann_mega_moe_quant_settings(
-            fused_experts_input.quant.quant_type
+            quant_type
         )
+        if quant_type in (QuantType.W4A8MXFP, QuantType.W4A4MXFP):
+            # CANN expects packed FP4 bytes with an explicit weight_type. Keep the
+            # native FP4 dtype needed by SiTU on the original weights.
+            weight1 = [w.view(torch.uint8) if w.dtype == torch.float4_e2m1fn_x2 else w for w in weight1]
+            weight2 = [w.view(torch.uint8) if w.dtype == torch.float4_e2m1fn_x2 else w for w in weight2]
 
         if self.mega_moe_symm_buffer is None:
             self.mega_moe_symm_buffer = self._init_mega_moe_symm_buffer(
