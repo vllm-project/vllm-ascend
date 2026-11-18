@@ -1,0 +1,10 @@
+# AI review POC gray-release allowlist (RFC #21451)
+#
+# One GitHub username per line. Only PR authors listed here can trigger the
+# ai-review agent; a reviewer applying the `ai-review` label to any other PR
+# results in a single notice comment and the label is removed.
+#
+# To join the POC (author side): ask in RFC #21451 or ping a maintainer.
+# To shrink/roll back the POC: remove lines here — no code change needed.
+#
+# Maintainers: keep this list small (3–5) during the POC.

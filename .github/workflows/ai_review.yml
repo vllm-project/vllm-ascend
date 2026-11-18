@@ -1,0 +1,59 @@
+name: AI Review
+on:
+  pull_request_target:
+    types: [labeled, unlabeled, synchronize]
+  issue_comment:
+    types: [created]
+
+# One agent round per PR at a time; a new trigger while a round is running
+# queues behind it instead of producing two interleaved agent comments.
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  ai-review:
+    # POC gray release: the workflow only reacts to the explicit `ai-review`
+    # label / @ai-review mentions, and only for allowlisted PR authors.
+    # It runs on the self-hosted CPU pool and never consumes NPU runners.
+    runs-on: linux-amd64-cpu-2-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:ai-review
+    steps:
+      # pull_request_target / issue_comment both resolve to the BASE branch,
+      # so the instructions, knowledge base and allowlist read here cannot be
+      # tampered with by the PR under review.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Persist comment body to file
+        # The comment body travels through a file, never through argv or a
+        # shell variable interpolated into a command line.
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: printf '%s' "$COMMENT_BODY" > /tmp/comment-body.md
+
+      - name: Orchestrate ai-review round
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          AI_REVIEW_EVENT_NAME: ${{ github.event_name }}
+          AI_REVIEW_EVENT_ACTION: ${{ github.event.action }}
+          AI_REVIEW_ACTOR: ${{ github.actor }}
+          AI_REVIEW_PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          # The agent command is kept configurable so the engine stays
+          # pluggable (RFC: engine swap without workflow surgery). Override
+          # the repo variable to switch engines.
+          AI_REVIEW_DSH_CMD: ${{ vars.AI_REVIEW_DSH_CMD || 'dsh --profile headless' }}
+          # Model for the review agent, passed through to dsh once its
+          # config surface is confirmed in the smoke test (runner precheck).
+          # Same API endpoint/key as the doc-translate job (DEEPSEEK_API_KEY).
+          AI_REVIEW_MODEL: deepseek-v4.1-flash
+        run: |
+          python3 .github/workflows/scripts/ai_review.py \
+            --comment-body-file /tmp/comment-body.md \
+            --workspace . \
+            --pr "${AI_REVIEW_PR_NUMBER}" \
+            --event "${AI_REVIEW_EVENT_NAME}/${AI_REVIEW_EVENT_ACTION}" \
+            --actor "${AI_REVIEW_ACTOR}"
