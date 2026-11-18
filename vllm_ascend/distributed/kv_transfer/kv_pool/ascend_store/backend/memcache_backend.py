@@ -129,7 +129,10 @@ def _iter_kv_connector_configs(kv_transfer_config: Any) -> Iterator[tuple[str, A
         yield top_name, top_extra
     if not isinstance(top_extra, dict):
         return
-    for sub_config in top_extra.get("connectors", []):
+    connectors = top_extra.get("connectors")
+    if not isinstance(connectors, list):
+        return
+    for sub_config in connectors:
         if isinstance(sub_config, dict) and sub_config.get("kv_connector"):
             yield sub_config["kv_connector"], sub_config.get("kv_connector_extra_config")
 

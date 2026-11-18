@@ -109,6 +109,10 @@ class TestShouldPrecheckMemcacheBackend(unittest.TestCase):
         config = _kv_transfer_config("MultiConnector", extra)
         self.assertTrue(should_precheck_memcache_backend(_vllm_config(config)))
 
+    def test_connectors_set_to_null_is_handled(self):
+        config = _kv_transfer_config("MultiConnector", {"connectors": None})
+        self.assertFalse(should_precheck_memcache_backend(_vllm_config(config)))
+
     def test_ascend_store_default_backend_is_not_memcache(self):
         config = _kv_transfer_config("AscendStoreConnector", {})
         self.assertFalse(should_precheck_memcache_backend(_vllm_config(config)))
