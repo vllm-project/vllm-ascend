@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-"""B1 paged verify for Model Runner V2.
+"""B1 paged verify for the Gemma4 512-dim MTP verify step.
 
-The V1 lane serves the Gemma4-style head_dim=512 MTP verify step with the
-FIA-v2 BNSD paged op (the B1 blocks of the V1 patch). Model Runner V2 shares
-``attention_v1`` with every other GQA backend and must not be specialized
-there, so this V2 lane keeps the same op contract in a dedicated backend that
+The Gemma4 target runs its MTP verify step with k+1 queries per request on
+head_dim=512 global-attention layers. On A2/A3, FIA TND rejects head_dim=512,
+and the model-runner capture metadata never emits SpecDecoding, so neither the
+TND nor the PagedAttention capture path can serve this geometry.
+``attention_v1`` is shared with every other GQA backend and must not be
+specialized there, so this module provides a dedicated backend that
 ``AscendPlatform.get_attn_backend_cls`` selects per layer:
 
 * only when ``VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY`` is on,
-* only on Model Runner V2 with speculative decoding (MTP),
+* only with speculative decoding (MTP),
 * only for decoder self-attention with ``head_dim == 512`` and
   ``sliding_window is None``, and with no MLA/sparse/compress/PCP/DCP/
   KV-connector/sinks,

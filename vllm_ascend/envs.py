@@ -96,10 +96,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # on Model Runner V2 for A2/A3. Only the exact geometry that cannot be
     # captured by the default TND/PA paths is switched over (see
     # platform._want_b1_paged_verify); every other layer/model keeps the
-    # default backend. Default: 1 (enabled) because the default V2 path cannot
-    # run this geometry at all. Valid values: 0 or 1.
+    # default backend. Default: 0 (disabled); Gemma4 MTP users on A2/A3 must
+    # opt in explicitly. Valid values: 0 or 1.
     # This configuration is not sensitive.
-    "VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY", "1"))),
+    "VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY", "0"))),
 }
 
 # end-env-vars-definition

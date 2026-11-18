@@ -2007,12 +2007,12 @@ def _validate_fa3_backend(key, _attn_selector_config):
 def _want_b1_paged_verify(attn_selector_config) -> bool:
     """Select the B1 paged-verify backend for the exact geometry it serves.
 
-    Model Runner V2 runs every other GQA layer through the shared Ascend
-    backend, but the Gemma4-style head_dim=512 MTP verify step cannot be
-    captured by its TND/PA paths. Keep this narrowly scoped: MTP, decoder
-    self-attention, head_dim=512, no sliding window, no MLA/sparse/compress/
-    PCP/DCP/KV-connector/sinks, Model Runner V2, and not A5 (where the stock
-    PagedAttention capture works). Otherwise keep the default backend.
+    The shared Ascend backend runs every other GQA layer, but the
+    Gemma4-style head_dim=512 MTP verify step cannot be captured by its
+    TND/PA paths. Keep this narrowly scoped: MTP, decoder self-attention,
+    head_dim=512, no sliding window, no MLA/sparse/compress/PCP/DCP/
+    KV-connector/sinks, and not A5 (where the stock PagedAttention capture
+    works). Otherwise keep the default backend.
     """
     from vllm.config import get_current_vllm_config_or_none
     from vllm.v1.attention.backend import AttentionType
