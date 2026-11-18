@@ -536,4 +536,5 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             pcp_context=pcp_context,
             full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
             for_cudagraph_capture=for_capture,
+            excluded_metadata_layer_names=getattr(self, "_target_metadata_excluded_layers", None),
         )

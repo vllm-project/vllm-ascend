@@ -32,9 +32,26 @@ from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner, _kimi_dspark_target_metadata_exclusions
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.utils import C8KVBlockZeroer
+
+
+@pytest.mark.parametrize(
+    ("model_arch", "method", "draft_arch", "expected"),
+    [
+        ("KimiK31ForConditionalGeneration", "dspark", "K3DSparkModel", {"draft.0"}),
+        ("KimiK31ForConditionalGeneration", "dspark", "OtherDraft", set()),
+        ("KimiK31ForConditionalGeneration", "mtp", "K3DSparkModel", set()),
+        ("OtherModel", "dspark", "K3DSparkModel", set()),
+    ],
+)
+def test_kimi_dspark_target_metadata_exclusions(model_arch, method, draft_arch, expected):
+    model = SimpleNamespace(architecture=model_arch)
+    spec = SimpleNamespace(method=method, draft_model_config=SimpleNamespace(architectures=[draft_arch]))
+    speculator = SimpleNamespace(draft_attn_layer_names={"draft.0"})
+    assert _kimi_dspark_target_metadata_exclusions(model, spec, speculator) == expected
+    assert not _kimi_dspark_target_metadata_exclusions(model, None, speculator)
 
 
 def _make_runner(*args, **kwargs):

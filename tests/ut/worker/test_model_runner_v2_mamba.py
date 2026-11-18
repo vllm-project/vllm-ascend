@@ -403,6 +403,7 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(
         device_metadata=None,
         num_accepted_tokens_gpu=torch.tensor([2, 3], dtype=torch.int32),
         max_model_len=1024,
+        _target_metadata_excluded_layers={"draft.layer"},
         recoverssm=SimpleNamespace(record_step=MagicMock()) if recover else None,
     )
     input_batch = SimpleNamespace(
@@ -438,6 +439,7 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(
     if recover:
         state.recoverssm.record_step.assert_called_once_with(expected_metadata, [], for_capture=False)
     kwargs = mock_build_attn_metadata.call_args.kwargs
+    assert kwargs["excluded_metadata_layer_names"] == {"draft.layer"}
     assert kwargs["num_actual_reqs"] == 2
     assert kwargs["num_actual_tokens"] == 2 * (num_spec + 1)
     graph_requests = 4 if graph_mode == CUDAGraphMode.FULL else 2
