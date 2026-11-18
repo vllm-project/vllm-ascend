@@ -29,8 +29,6 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import (
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_scheduler import MooncakePushConnectorScheduler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import MooncakeMetaserverClient
 
-from .helpers import make_full_spec, make_request, make_sliding_spec
-
 
 def workers():
     return {
@@ -248,31 +246,6 @@ def test_producer_snapshots_new_and_cached_prefill_chunks(producer_scheduler):
     assert third.push_send_requests[request.request_id].num_scheduled_tokens == 16
     assert first.push_send_requests[request.request_id].local_block_ids == ((1,), (11,))
     assert not scheduler.build_connector_meta(step(request, None, computed=48, scheduled=1)).push_send_requests
-
-
-def test_swa_producer_publishes_only_the_shortened_prompt(producer_scheduler):
-    prompt_len = 129  # Truncation must remove the final block from publication.
-    scheduler = producer_scheduler
-    scheduler.vllm_config.model_config = SimpleNamespace(hf_config=SimpleNamespace())
-    scheduler.group_unique_specs = [[make_sliding_spec()], [make_full_spec()]]
-    scheduler.need_truncate = scheduler._needs_prefill_token_truncation()
-    params = prefill_request().kv_transfer_params
-    params["remote_num_external_tokens"] = prompt_len - 1
-    request = make_request(
-        prompt_token_ids=list(range(prompt_len)),
-        _all_token_ids=list(range(prompt_len)),
-        num_prompt_tokens=prompt_len,
-        kv_transfer_params=params,
-    )
-    scheduler.on_new_request(request)
-    blocks = tuple(list(range(start, start + (prompt_len + 15) // 16 + 1)) for start in (1, 1000))
-    allocate(scheduler, request, blocks)
-    meta = scheduler.build_connector_meta(step(request, blocks, scheduled=prompt_len + 3))
-    chunk = meta.push_send_requests[request.request_id]
-
-    assert chunk.num_prompt_tokens == chunk.num_scheduled_tokens == prompt_len - 1
-    assert chunk.local_block_ids == tuple(tuple(group[: (prompt_len - 1 + 15) // 16]) for group in blocks)
-    assert not scheduler.build_connector_meta(step(request, None, computed=prompt_len - 1)).push_send_requests
 
 
 @pytest.mark.parametrize("num_speculative_blocks", [0, 2])

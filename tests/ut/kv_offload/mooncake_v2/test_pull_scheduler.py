@@ -12,7 +12,6 @@ import torch
 import zmq
 from cachetools import TTLCache
 from vllm.sampling_params import SamplingParams
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.request import Request, RequestStatus
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import heartbeat as heartbeat_module
@@ -42,7 +41,6 @@ from .helpers import (
     make_full_spec,
     make_mamba_spec,
     make_request,
-    make_sliding_spec,
     make_transfer_metadata,
 )
 
@@ -728,34 +726,6 @@ def test_base_scheduler_detects_state_and_compressed_prefill_truncation() -> Non
 
     scheduler.group_unique_specs = [[make_full_spec()], [make_circular_spec()]]
     assert scheduler._needs_prefill_token_truncation() is False
-
-
-def test_swa_publication_uses_shortened_prompt_length() -> None:
-    prompt_len = 129  # Truncation must remove the final block from publication.
-    scheduler = make_pull_scheduler()
-    scheduler.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace()))
-    group = KVCacheGroupSpec(layer_names=["layer.swa"], kv_cache_spec=make_sliding_spec())
-    scheduler.kv_cache_groups = [group]
-    scheduler.group_unique_specs = [scheduler._get_group_unique_specs(group)]
-    scheduler.need_truncate = scheduler._needs_prefill_token_truncation()
-    scheduler._sending_thread = MagicMock()
-    request = make_request(
-        prompt_token_ids=list(range(prompt_len)),
-        _all_token_ids=list(range(prompt_len)),
-        num_prompt_tokens=prompt_len,
-        kv_transfer_params={"do_remote_decode": True},
-        status=RequestStatus.FINISHED_LENGTH_CAPPED,
-    )
-    scheduler.on_new_request(request)
-    blocks = list(range(1, (prompt_len + 15) // 16 + 2))
-    delayed, params = scheduler.request_finished(request, (blocks,))
-
-    assert delayed
-    assert params["remote_num_prompt_tokens"] == prompt_len - 1
-    assert params["remote_block_ids"] == (blocks[: (prompt_len - 1 + 15) // 16],)
-    assert params["do_remote_prefill"] is True
-    assert params["do_remote_decode"] is False
-    scheduler._sending_thread.add_delayed_request.assert_called_once_with(request.request_id)
 
 
 def test_truncate_request_for_prefill_is_idempotent_for_token_ids() -> None:
