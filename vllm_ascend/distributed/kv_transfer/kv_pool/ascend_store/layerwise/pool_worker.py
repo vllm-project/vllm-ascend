@@ -131,8 +131,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.use_block_key_layerwise = self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = self.layerwise_data_plane == "gva"
         self._step_load_keys: set[str] = set()
-        # Request ID -> cache group ID -> request block index -> (saved end token, pool key, is public).
-        self._snapshot_keys: dict[str, dict[int, dict[int, tuple[int, str, bool]]]] = {}
+        # Request ID -> cache group ID -> request block index -> (pool key, is public).
+        self._snapshot_keys: dict[str, dict[int, dict[int, tuple[str, bool]]]] = {}
         super()._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self._dspark_draft_layer_names = (
@@ -800,7 +800,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             # Resident pages remain available for the running request.
             return None
 
-        block_size = self.grouped_block_size[group_id]
+        full_blocks = num_computed_tokens // self.grouped_block_size[group_id]
         snapshot = self._snapshot_keys.get(request.req_id, {}).get(group_id, {})
 
         def get_saved_key(block_idx: int) -> tuple[str, bool] | None:
@@ -808,16 +808,14 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             saved = snapshot.get(block_idx)
             if saved is not None:
                 # A hash can become available after the preceding save.
-                _, pool_key, is_public = saved
-                return pool_key, is_public
-            block_end = (block_idx + 1) * block_size
-            restore_token_limit = min(block_end, num_computed_tokens)
-            if restore_token_limit == block_end and block_idx < len(block_hashes):
-                return self._make_layerwise_full_key(group_id, block_hash_to_str(block_hashes[block_idx])), True
+                return saved
+            if block_idx < full_blocks and block_idx < len(block_hashes):
+                block_hash = block_hash_to_str(block_hashes[block_idx])
+                return self._make_layerwise_full_key(group_id, block_hash), True
             logger.error("No saved KV page for request %s group %d block %d", request.req_id, group_id, block_idx)
             return None
 
-        return num_computed_tokens // block_size, get_saved_key
+        return full_blocks, get_saved_key
 
     def _layerwise_key_batches(self, keys: list[str]) -> list[list[str]]:
         batch_size = self.layerwise_max_transfer_blocks if self.layerwise_max_transfer_blocks > 0 else max(1, len(keys))
@@ -1382,11 +1380,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 if self.layerwise_offload:
                     pages = self._snapshot_keys.setdefault(request.req_id, {}).setdefault(group_id, {})
                     pages.update(
-                        (index, ((index + 1) * effective_block_size, key, index < len(group_block_hashes)))
+                        (index, (key, index < len(group_block_hashes)))
                         for index, key in zip(candidate_blocks, candidate_keys)
                     )
                     if partial_key is not None:
-                        pages[partial_block_index] = (request.target_token_len, partial_key, False)
+                        pages[partial_block_index] = (partial_key, False)
                 if not save_owner:
                     all_group_gvas.append(np.zeros(len(block_ids_by_group), dtype=np.int64))
                     all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
