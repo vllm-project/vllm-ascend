@@ -1,0 +1,4 @@
+pr: 22230
+entries:
+  - category: performance
+    text: W8A8 MoE prefill transfers fewer activation bytes across PCP ranks by gathering INT8 activations and their per-token scales.
