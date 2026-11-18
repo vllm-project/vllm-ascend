@@ -153,6 +153,9 @@ from vllm import SamplingParams
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
 
+from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
+from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.kv_pool_watch import (
     AB_ARTIFACT,
     AB_LEG_GAP_SECONDS,
@@ -164,9 +167,6 @@ from tests.e2e.pull_request.kv_pool_watch import (
     assert_output_identical,
     snapshot_metrics,
 )
-from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
-from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
-from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 # Default checkpoint: the requant dir is the complete W8A8 export (82/82
 # shards plus the full tokenizer set). The plain GLM-5.3-Flash-w8a8 dir has
