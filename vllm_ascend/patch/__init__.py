@@ -306,6 +306,8 @@
 #       worker pickle IPC), read the PD role back in the coordinator, and
 #       skip the EAGLE drop in both lookup entry points on a pure producer.
 #       The EAGLE-group fallback marks FullAttention groups only.
+#       Checkpoint writes apply the role-gated drop to all Mamba managers,
+#       including unmarked target groups, matching the scheduler boundary.
 #    Related PR (if no, explain why):
 #       No upstream PR; producer-side drop exemption for hybrid PD.
 #    Future Plan:

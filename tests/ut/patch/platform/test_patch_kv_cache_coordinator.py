@@ -96,11 +96,15 @@ def _fake_manager_factory(**kwargs):
     return _FakeFAManager(**kwargs)
 
 
-def _hybrid_config(*, mamba_eagle: bool = False, retention_interval: int | None = None) -> KVCacheConfig:
+def _hybrid_config(
+    *, mamba_eagle: bool = False, retention_interval: int | None = None, extra_mamba: bool = False
+) -> KVCacheConfig:
     groups = [
         KVCacheGroupSpec(["fa-layer"], FA_SPEC, False),
         KVCacheGroupSpec(["mamba-layer"], MAMBA_SPEC, mamba_eagle),
     ]
+    if extra_mamba:
+        groups.append(KVCacheGroupSpec(["other-mamba-layer"], MAMBA_SPEC, False))
     return KVCacheConfig(
         num_blocks=8,
         kv_cache_tensors=[],
@@ -116,11 +120,14 @@ def _make_coordinator(
     kv_transfer_config=None,
     mamba_eagle: bool = False,
     retention_interval: int | None = None,
+    extra_mamba: bool = False,
 ):
     monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
     monkeypatch.setattr(mod, "MambaManager", _FakeMambaManager)
     monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
-    kv_cache_config = _hybrid_config(mamba_eagle=mamba_eagle, retention_interval=retention_interval)
+    kv_cache_config = _hybrid_config(
+        mamba_eagle=mamba_eagle, retention_interval=retention_interval, extra_mamba=extra_mamba
+    )
     # The kv-transfer config is attached by the
     # get_kv_cache_config_from_groups builder in real engine startup.
     kv_cache_config.kv_transfer_config = kv_transfer_config
@@ -234,17 +241,22 @@ def test_skips_eagle_block_drop_role_semantics(kv_transfer_config, expected):
 )
 @pytest.mark.parametrize("use_eagle", [False, True])
 @pytest.mark.parametrize("mamba_eagle", [False, True])
+@pytest.mark.parametrize("extra_mamba", [False, True])
 def test_mamba_checkpoint_drop_follows_lookup_policy(
-    monkeypatch, kv_transfer_config, drop_for_role, use_eagle, mamba_eagle
+    monkeypatch, kv_transfer_config, drop_for_role, use_eagle, mamba_eagle, extra_mamba
 ):
     coordinator = _make_coordinator(
         monkeypatch,
         use_eagle=use_eagle,
         kv_transfer_config=kv_transfer_config,
         mamba_eagle=mamba_eagle,
+        extra_mamba=extra_mamba,
     )
-    manager = coordinator.single_type_managers[1]
-    assert manager.drop_eagle_checkpoint_block is (use_eagle and mamba_eagle and drop_for_role)
+    # Lookup EAGLE markers do not limit checkpoint writes: even an unmarked
+    # target Mamba group must share the scheduler's replay boundary.
+    for manager in coordinator.single_type_managers[1:]:
+        assert manager.drop_eagle_checkpoint_block is (use_eagle and drop_for_role)
+    assert coordinator.single_type_managers[0].drop_eagle_checkpoint_block is False
 
 
 @pytest.mark.parametrize(

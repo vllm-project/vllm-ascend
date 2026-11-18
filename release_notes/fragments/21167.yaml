@@ -1,0 +1,4 @@
+pr: 21167
+entries:
+  - category: bugfix
+    text: Aligned Mamba checkpoint writes across recurrent groups during MTP replay, restoring fine-grained prefix reuse on consumer and mixed-role instances while preserving producer and standalone exemptions.
