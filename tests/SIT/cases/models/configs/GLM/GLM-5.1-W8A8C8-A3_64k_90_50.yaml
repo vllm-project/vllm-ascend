@@ -30,6 +30,7 @@ deployment:
       --data-parallel-rpc-port 12981
       --tensor-parallel-size 1
       --prefill-context-parallel-size 4
+      --enforce-eager
       --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}'
       --seed 1024
       --tool-call-parser glm47
@@ -63,6 +64,7 @@ deployment:
       --data-parallel-rpc-port 12981
       --tensor-parallel-size 1
       --prefill-context-parallel-size 4
+      --enforce-eager
       --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}'
       --seed 1024
       --tool-call-parser glm47
