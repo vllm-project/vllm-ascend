@@ -29,7 +29,9 @@ class KDAInputProjectionTPLayout:
         local_tokens = hidden.shape[0]
         dp_tokens = _EXTRA_CTX.max_tokens_across_dp
         capacity = max(local_tokens, dp_tokens) if dp_tokens is not None else local_tokens
-        return F.pad(hidden, (0, 0, 0, capacity - local_tokens)), capacity
+        if capacity > local_tokens:
+            hidden = F.pad(hidden, (0, 0, 0, capacity - local_tokens))
+        return hidden, capacity
 
     def restore_qkv_beta(self, received: torch.Tensor, capacity: int) -> tuple[torch.Tensor, torch.Tensor]:
         qkv, beta = received.view(self.size, capacity, -1).split((3 * self.width, self.heads), dim=-1)
