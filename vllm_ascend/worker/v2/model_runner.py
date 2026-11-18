@@ -175,9 +175,9 @@ class NPUModelRunner(GPUModelRunner):
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
             offload_config = vllm_config.offload_config
-            # ND-to-NZ prefetch copies can use ACLop, which torch_npu rejects
-            # during ACL Graph capture. Keep the upstream offloader's ND
-            # prefetch buffers in graph mode.
+            # FIXME: Enable NZ weight prefetch in graph mode once ND-to-NZ copies
+            # support ACL Graph capture. These copies can currently invoke ACLop,
+            # which torch_npu rejects during capture.
             if self.model_config.enforce_eager and offload_config.offload_backend == "prefetch":
                 set_offloader(create_offloader(offload_config))
         if self.use_pp:
