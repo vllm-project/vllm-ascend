@@ -10,7 +10,7 @@ concurrency:
   # The push event keeps its own group per branch on purpose - every main
   # push must re-check all PRs against the new base and must not cancel
   # unrelated in-flight checks on other branches.
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head_ref || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
