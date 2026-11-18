@@ -101,20 +101,6 @@ Suffix decoding generates draft tokens by matching repeated token sequences,
 without loading an additional draft model. Like n-gram decoding, it searches
 within a request's prompt and generated output. It can also reuse completed
 responses from other requests and use frequency counts to choose continuations.
-This makes it useful for workloads with repeated content, such as code editing,
-agent loops and RL rollouts.
-
-The Ascend Model Runner V2 implementation performs matching and corpus updates
-on the NPU and supports synchronous and asynchronous scheduling. It follows the
-[upstream suffix implementation](https://github.com/vllm-project/vllm/blob/main/docs/features/speculative_decoding/suffix.md)
-introduced in [vLLM #60339](https://github.com/vllm-project/vllm/pull/60339).
-Unlike the earlier CPU implementation, it does not require Arctic Inference.
-
-!!! note "Version requirement"
-
-    This experimental feature requires an aligned vLLM main revision containing
-    the Model Runner V2 suffix implementation. vLLM v0.33.0 does not include it.
-    Follow the vLLM revision specified by your vllm-ascend checkout.
 
 The following examples use `Qwen2.5-7B-Instruct` on one NPU. Replace
 `/path/to/Qwen2.5-7B-Instruct` with your local model directory. The examples use
@@ -123,28 +109,34 @@ four draft tokens and a reduced corpus of 65,536 tokens for a small setup.
 - Offline inference
 
     ```python
+    import os
+
     from vllm import LLM, SamplingParams
 
-    llm = LLM(
-        model="/path/to/Qwen2.5-7B-Instruct",
-        tensor_parallel_size=1,
-        max_model_len=2048,
-        max_num_seqs=8,
-        max_num_batched_tokens=1024,
-        gpu_memory_utilization=0.5,
-        enforce_eager=True,
-        enable_prefix_caching=False,
-        speculative_config={
-            "method": "suffix",
-            "num_speculative_tokens": 4,
-            "suffix_decoding_corpus_tokens": 65536,
-        },
-    )
-    sampling_params = SamplingParams(temperature=0, max_tokens=128)
-    prompts = ["Continue the sequence: red blue green red blue green red blue"]
 
-    for output in llm.generate(prompts, sampling_params):
-        print(output.outputs[0].text)
+    if __name__ == "__main__":
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+        llm = LLM(
+            model="/path/to/Qwen2.5-7B-Instruct",
+            tensor_parallel_size=1,
+            max_model_len=2048,
+            max_num_seqs=8,
+            max_num_batched_tokens=1024,
+            gpu_memory_utilization=0.5,
+            enforce_eager=True,
+            enable_prefix_caching=False,
+            speculative_config={
+                "method": "suffix",
+                "num_speculative_tokens": 4,
+                "suffix_decoding_corpus_tokens": 65536,
+            },
+        )
+        sampling_params = SamplingParams(temperature=0, max_tokens=128)
+        prompts = ["Continue the sequence: red blue green red blue green red blue"]
+
+        for output in llm.generate(prompts, sampling_params):
+            print(output.outputs[0].text)
     ```
 
 - Online inference
@@ -165,23 +157,21 @@ four draft tokens and a reduced corpus of 65,536 tokens for a small setup.
       --speculative-config '{"method":"suffix","num_speculative_tokens":4,"suffix_decoding_corpus_tokens":65536}'
     ```
 
-These examples use eager execution for a simple starting point. Suffix decoding
-also supports `FULL_DECODE_ONLY` graphs; remove `--enforce-eager` and set
-`--compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","decode_cudagraph_capture_request_sizes":[1,2,4,8]}'`
-to use decode graphs with the online example.
-
 ### Configuration
 
 Set these options inside `speculative_config`:
 
-| Parameter | Default | Description |
-| --------- | ------- | ----------- |
-| `method` | Required | Set to `"suffix"`. |
-| `num_speculative_tokens` | Set explicitly | Number of draft slots per request per step; the examples use `4`. |
-| `suffix_decoding_max_tree_depth` | `24` | Maximum suffix match length. A value of `1` uses request history only; corpus matching requires at least `2`. |
-| `suffix_decoding_corpus_tokens` | `1048576` | Token capacity of the shared corpus. Set to `0` to disable cross-request retrieval. |
-| `suffix_decoding_max_cached_requests` | `10000` | Set to `0` to disable the corpus. Positive values do not limit the number of cached requests in this implementation. |
-| `enable_adaptive_verification` | `false` | Supply per-slot acceptance estimates for adaptive verification; see below for requirements. |
+- **`num_speculative_tokens`**: Set explicitly. Number of draft slots per request
+  per step; the examples use `4`.
+- **`suffix_decoding_max_tree_depth`**: Default `24`. Maximum suffix match length.
+  A value of `1` uses request history only; corpus matching requires at least `2`.
+- **`suffix_decoding_corpus_tokens`**: Default `1048576`. Token capacity of the
+  shared corpus. Set to `0` to disable cross-request retrieval.
+- **`suffix_decoding_max_cached_requests`**: Default `10000`. Set to `0` to disable
+  the corpus. Positive values do not limit the number of cached requests in this
+  implementation.
+- **`enable_adaptive_verification`**: Default `false`. Supply per-slot acceptance
+  estimates for adaptive verification; see below for requirements.
 
 `suffix_decoding_max_spec_factor` and `suffix_decoding_min_token_prob` are
 upstream deprecated options and have no effect on this implementation.
@@ -197,16 +187,6 @@ Suffix decoding combines two sources of draft tokens:
    preceding prompt tokens, in an NPU-resident ring buffer. Hash indexes based
    on two-token and four-token contexts locate candidate positions. Matches
    are extended, and prefix-consistent frequency voting selects continuations.
-
-The longer history or corpus match wins; request history wins ties. Finished
-requests are ingested before their state slots are released. Preempted requests
-are not ingested. Warmup resets the corpus and acceptance statistics before
-serving.
-
-The speculator always returns `num_speculative_tokens` draft slots. Slots
-without a continuation contain the last sampled token and are verified as
-ordinary drafts. Consequently, draft-slot metrics include these filler slots
-and do not measure only tokens retrieved by matching.
 
 ### Memory usage
 
@@ -235,10 +215,6 @@ in place.
 A fixed sampling seed alone does not make outputs reproducible with a shared
 corpus or adaptive verification. For reproducible seeded sampling, disable the
 corpus and leave adaptive verification off.
-
-Under asynchronous scheduling, a finished request may contribute tokens beyond
-the scheduler's final stop point: ingestion follows upstream device-visible
-lengths.
 
 ### Adaptive verification
 
