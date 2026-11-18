@@ -401,6 +401,12 @@
 #
 # ** 17. File: platform/patch_pp_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   NOTE (V2-only): the PP IPC runtime branches below only applied to Model
+#   Runner V1. With V1 removed, _use_pp_ipc_runtime_patch() always returns
+#   False and the V1 scheduler update hooks are no longer installed. Their
+#   bodies are kept for now and should be deleted in the follow-up V1
+#   patch-body cleanup.
+#
 #   1. `vllm.v1.outputs.ModelRunnerOutput`
 #    Why:
 #       PP + MTP mixed deployment needs the model runner to return the draft

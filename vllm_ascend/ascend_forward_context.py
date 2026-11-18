@@ -16,7 +16,6 @@ from vllm_ascend.device.hardware_profile import (
     MoECommPolicy,
     get_current_hardware_profile,
 )
-from vllm_ascend.mrv2_utils import use_v2_model_runner
 from vllm_ascend.quantization.quant_type import A5_SUPPORT_MEGA_MOE_QUANT_TYPES, QuantType
 from vllm_ascend.utils import (
     get_pcp_profile_num_tokens,
@@ -25,19 +24,20 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 
-# Dynamo constant-folds this like VLLM_USE_V2_MODEL_RUNNER. Sync from eager
-# setup so compiled FIA/MoE never traces use_v2_model_runner (warning_once).
-_USE_V2_EXTRA_KWARGS = False
+# Model Runner V2 is the only runner, so Ascend extras are always part of
+# ``additional_kwargs``. Keep this as a module constant so compiled FIA/MoE
+# never traces a config lookup.
+_USE_V2_EXTRA_KWARGS = True
 
 
 def sync_v2_extra_kwargs(vllm_config: VllmConfig) -> None:
-    """Cache whether Ascend extras belong in ``additional_kwargs``.
+    """Refresh the eager/compiled constant for Ascend extras.
 
     Call this from eager config / forward-context setup, not from compiled
-    attention. Require an actual bool: MagicMock configs can be truthy.
+    attention.
     """
     global _USE_V2_EXTRA_KWARGS
-    _USE_V2_EXTRA_KWARGS = use_v2_model_runner(vllm_config) is True
+    _USE_V2_EXTRA_KWARGS = True
 
 
 class MoECommType(Enum):
@@ -476,7 +476,7 @@ def select_moe_comm_method(
 
 
 class _ExtraForwardContextProxy:
-    """Unified forward-context access for v1/v2 model runners."""
+    """Unified forward-context access for the Model Runner V2 pipeline."""
 
     extra_attrs = (
         "capturing",

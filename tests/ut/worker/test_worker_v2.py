@@ -18,8 +18,7 @@ from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("enforce_eager", [False, True])
-@pytest.mark.parametrize("use_v2", [False, True])
-def test_triton_warmup_follows_dummy_runs_before_capture(enforce_eager, use_v2):
+def test_triton_warmup_follows_dummy_runs_before_capture(enforce_eager):
     from vllm_ascend.worker.worker import NPUWorker
 
     events: list[tuple[str] | tuple[str, int]] = []
@@ -30,7 +29,6 @@ def test_triton_warmup_follows_dummy_runs_before_capture(enforce_eager, use_v2):
         compilation_time=0.0,
     )
     worker = SimpleNamespace(
-        use_v2_model_runner=use_v2,
         vllm_config=SimpleNamespace(compilation_config=compilation_config),
         model_config=SimpleNamespace(enforce_eager=enforce_eager, seed=0),
         cache_config=SimpleNamespace(kv_cache_memory_bytes=1),
@@ -56,12 +54,10 @@ def test_triton_warmup_follows_dummy_runs_before_capture(enforce_eager, use_v2):
     assert events == expected
 
 
-@pytest.mark.parametrize("use_v2", [False, True])
-def test_triton_warmup_failure_prevents_capture(use_v2):
+def test_triton_warmup_failure_prevents_capture():
     from vllm_ascend.worker.worker import NPUWorker
 
     worker = SimpleNamespace(
-        use_v2_model_runner=use_v2,
         vllm_config=SimpleNamespace(
             compilation_config=SimpleNamespace(
                 compile_sizes=[2, 4],
@@ -135,7 +131,6 @@ class TestNPUWorkerV2(TestBase):
 
         with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
             worker = NPUWorker()
-        worker.use_v2_model_runner = True
         worker.model_runner = MagicMock()
         worker.vllm_config = MagicMock()
         worker.vllm_config.model_config.enable_sleep_mode = False
@@ -174,7 +169,6 @@ class TestNPUWorkerV2(TestBase):
             ) as mm_encoder_runner,
         ):
             worker = NPUWorker()
-            worker.use_v2_model_runner = True
             worker.vllm_config = SimpleNamespace(is_mm_encoder_only=True)
             worker.rank = 1
 
@@ -256,7 +250,6 @@ class TestNPUWorkerV2(TestBase):
             worker.vllm_config = MagicMock()
             worker.vllm_config.parallel_config = MagicMock()
             worker.vllm_config.parallel_config.distributed_executor_backend = "ray"
-            worker.use_v2_model_runner = True
             worker.profiler = None
             worker._pp_send_work = []
 
@@ -301,7 +294,6 @@ class TestNPUWorkerV2(TestBase):
             worker.model_runner = MagicMock()
             worker.model_runner.is_pooling_model = True
             worker.vllm_config = MagicMock()
-            worker.use_v2_model_runner = True
             worker.profiler = None
             worker._pp_send_work = []
 
@@ -349,7 +341,6 @@ def test_mrv2_block_outermost_hybrid_budget_respects_shared_backing(with_kv_tran
         ),
     ]
     worker = NPUWorker.__new__(NPUWorker)
-    worker.use_v2_model_runner = True
     worker.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen4_exp"))
     worker.vllm_config = SimpleNamespace(
         attention_config=AttentionConfig(),

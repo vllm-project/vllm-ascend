@@ -58,9 +58,8 @@ def _use_pp_mtp_runtime_patch(vllm_config, use_pp: bool) -> bool:
 
 
 def _use_pp_ipc_runtime_patch(vllm_config, use_pp: bool) -> bool:
-    if not use_pp or _is_pd_prefill_node(vllm_config):
-        return False
-    return not getattr(vllm_config, "use_v2_model_runner", False)
+    # The PP IPC runtime patch only applied to Model Runner V1, which was removed.
+    return False
 
 
 def _patch_model_runner_output() -> None:
@@ -342,11 +341,8 @@ def _apply_patch() -> None:
         return
     _PATCHED = True
     _patch_model_runner_output()
-    # The patch for engine core has been moved to patch_engine_core.py
-    _patch_scheduler_update_after_schedule()
-    if vllm_version_is("0.33.0"):
-        _patch_scheduler_make_cached_request_data()
-    _patch_scheduler_update_from_output()
+    # The patch for engine core has been moved to patch_engine_core.py.
+    # The V1-only scheduler update hooks are not installed any more.
     _patch_model_config_validation()
 
 

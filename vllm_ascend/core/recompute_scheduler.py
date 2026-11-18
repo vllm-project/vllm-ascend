@@ -924,27 +924,17 @@ class RecomputeScheduler(Scheduler):
         new_request_kwargs = {
             "uses_mrope": self.model_uses_mrope,
         }
-        if not vllm_version_is("0.33.0") or self.use_v2_model_runner:
-            scheduled_new_reqs.extend(scheduled_resumed_reqs)
-            scheduled_resumed_reqs.clear()
-            new_reqs_data = [
-                NewRequestData.from_request(
-                    req,
-                    req_to_new_blocks[req.request_id].get_block_ids(),
-                    req._all_token_ids,
-                    **new_request_kwargs,
-                )
-                for req in scheduled_new_reqs
-            ]
-        else:
-            new_reqs_data = [
-                NewRequestData.from_request(
-                    req,
-                    req_to_new_blocks[req.request_id].get_block_ids(),
-                    **new_request_kwargs,
-                )
-                for req in scheduled_new_reqs
-            ]
+        scheduled_new_reqs.extend(scheduled_resumed_reqs)
+        scheduled_resumed_reqs.clear()
+        new_reqs_data = [
+            NewRequestData.from_request(
+                req,
+                req_to_new_blocks[req.request_id].get_block_ids(),
+                req._all_token_ids,
+                **new_request_kwargs,
+            )
+            for req in scheduled_new_reqs
+        ]
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = make_cached_request_data(
@@ -967,11 +957,6 @@ class RecomputeScheduler(Scheduler):
                 iteration_details.num_encoder_inputs = num_scheduled_encoder_inputs
                 iteration_details.num_encoder_output_tokens = self.max_num_encoder_input_tokens - encoder_compute_budget
             schedule_metadata = {"iteration_details": iteration_details}
-
-        # Record the request ids that were scheduled in this step (MRV1-only).
-        if vllm_version_is("0.33.0") and not self.use_v2_model_runner:
-            self.prev_step_scheduled_req_ids.clear()
-            self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
         kv_connector_block_state = None
         # #51358 drains boundary offers even without a connector.

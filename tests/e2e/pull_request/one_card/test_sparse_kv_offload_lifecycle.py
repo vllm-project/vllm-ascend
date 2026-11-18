@@ -253,7 +253,6 @@ def _run_in_worker_process(model_path):
         },
     ) as runner:
         engine = runner.model.llm_engine
-        assert engine.vllm_config.use_v2_model_runner
         model_runner = engine.model_executor.driver_worker.model_runner
         state = model_runner.model_state
         probe = AttentionProbe(state._offload_request_identity)
