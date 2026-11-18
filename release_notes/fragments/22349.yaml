@@ -1,0 +1,8 @@
+pr: 22349
+entries:
+  - category: bugfix
+    text: >-
+      Fixed Kimi structured JSON generation losing its grammar constraint when a
+      speculative draft closes reasoning and later reopens thinking. JSON
+      constraints now remain active from the first completed close marker.
+    model: Kimi-K3
