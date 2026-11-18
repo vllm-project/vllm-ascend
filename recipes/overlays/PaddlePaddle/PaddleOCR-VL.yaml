@@ -183,6 +183,14 @@ guide_sections:
     leaked semaphores. The graph run additionally logged an eight-line
     `EngineDeadError` traceback. Strict shutdown validation failed.
 
+    The archived CANN 9.1 layout OM failed to load in this container. After
+    recompiling with CANN 9.2.1, the graph remote PNG, graph single-page PDF
+    and eager PNG each produced 31 layout blocks. Content, bounds, JSON and
+    Markdown checks passed, with 84 recognition requests returning HTTP 200.
+    The two document frontends exited with code 0 after SIGTERM and still logged
+    forced EngineCore cleanup and leaked semaphores. The document runs did not
+    measure full-dataset accuracy or benchmark performance.
+
     ## Ascend 310P: original PaddleOCR-VL-0.9B
 
     The 310P variants use one logical NPU (TP=1), FP16, a 16384-token context, a 2048-token
