@@ -99,6 +99,7 @@ from .engram.embedding import (
 from .engram.layer import AscendEngram
 from .engram.parallel import gather_engram_hashes, resolve_dp_shared_memory
 from .engram.shared_pool import rollback_shared_engram
+from .engram_lifecycle import close_engram_on_init_failure
 from .indexer import DeepseekV41Indexer
 
 
@@ -787,6 +788,11 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         )
         self.v41_layer_name = f"{prefix}.v41_attn"
         context = vllm_config.compilation_config.static_forward_context
+        self.kv_transfer_cache_names = tuple(
+            name
+            for name, cache in context.items()
+            if name.startswith(f"{prefix}.") and isinstance(cache, DeepseekV41CacheLayer)
+        )
         context[self.v41_layer_name] = self
 
     def forward(self, positions, hidden_states, llama_4_scaling=None):
@@ -975,6 +981,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
 
     decoder_layer_cls = DeepseekV41DecoderLayer
 
+    @close_engram_on_init_failure(("_engram_remote_reader",))
     def __init__(self, *, vllm_config, prefix=""):
         super().__init__()
 
@@ -1090,7 +1097,39 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         )
         self.engram_layout = EngramLayout.from_config(config) if self.has_engram else None
         shared_config = get_ascend_config().shared_engram
-        shared_pool_endpoint = shared_config.endpoint if shared_config is not None else None
+        remote_engram = shared_config if shared_config is not None and shared_config.backend in ("a2", "a5") else None
+        remote_reader = None
+        if remote_engram is not None:
+            if self.engram_layout is None or not cpu_offload or not self.engram_dp_shared_memory:
+                raise ValueError("shared_engram requires Engram cpu_offload and local DP sharing enabled")
+            if vllm_config.load_config.load_format not in (
+                "auto",
+                "safetensors",
+            ) or vllm_config.load_config.safetensors_load_strategy not in (None, "lazy"):
+                raise ValueError("shared_engram requires lazy safetensors loading")
+            from .engram.shared_rdma import RemoteReader, capacity_for_batch
+
+            max_tokens = max(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                vllm_config.compilation_config.max_cudagraph_capture_size or 0,
+            )
+            layer_head_counts = [sum(len(order) for order in layer) for layer in self.engram_layout.primes]
+            capacity = capacity_for_batch(
+                remote_engram.capacity, max_tokens, layer_head_counts, get_tensor_model_parallel_world_size()
+            )
+
+            remote_reader = RemoteReader(
+                self.engram_weight_root,
+                remote_engram.endpoint,
+                capacity=capacity,
+                library_path=remote_engram.library_path,
+                listen_port=remote_engram.listen_port,
+                local_comm_res=remote_engram.local_comm_res,
+            )
+        self._engram_remote_reader = remote_reader
+        shared_pool_endpoint = (
+            shared_config.endpoint if shared_config is not None and shared_config.backend == "a3" else None
+        )
         shared_pool_identity = None
         if shared_pool_endpoint:
             from .engram.shared_pool import checkpoint_identity
@@ -1126,6 +1165,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                         storage_dtype=storage_dtype,
                         cpu_offload=cpu_offload,
                         dp_shared_memory=self.engram_dp_shared_memory,
+                        remote_reader=remote_reader,
                         shared_pool_endpoint=shared_pool_endpoint,
                         shared_pool_identity=shared_pool_identity,
                         shared_pool_key=f"layers.{layer_id}.engram.embed" if shared_pool_endpoint else None,
@@ -1298,18 +1338,38 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             assert hashes is not None
             # One DP gather feeds every layer sharing the split table.
             gathered = gather_engram_hashes(hashes, dp_shared_memory=self.engram_dp_shared_memory)
+            cpu_hashes = None
+            batch_values = None
+            reader = getattr(self, "_engram_remote_reader", None)
+            if reader is not None:
+                layout = (tables[0].head_start, tables[0].part_n_hash_cols)
+                if any(
+                    getattr(table, "_remote_reader", None) is not reader
+                    or (table.head_start, table.part_n_hash_cols) != layout
+                    for table in tables
+                ):
+                    raise ValueError("Shared remote Engram layers require one uniform reader/head layout")
+                cpu_hashes = reader.copy_hashes(gathered, *layout)
+                direct = output_buffers is not None and tables[0].dp_size == 1 and tables[0].tp_size == 1
+                if not direct:
+                    batch_values = reader.lookup_layers(tables, gathered, cpu_hashes)
             for slot, (layer_id, table) in enumerate(zip(config.engram_layer_ids, tables)):
+                lookup_options = {} if cpu_hashes is None else {"cpu_ids": cpu_hashes[:, slot]}
                 direct = output_buffers is not None and table.dp_size == 1 and table.tp_size == 1
                 if direct:
                     target = output_buffers[layer_id]
                     count = hashes.shape[0]
                     table.lookup(
-                        gathered[:, slot].contiguous(), target[:count].view(count, table.n_hash_cols, table.dim)
+                        gathered[:, slot].contiguous(),
+                        target[:count].view(count, table.n_hash_cols, table.dim),
+                        **lookup_options,
                     )
                     target[count:output_tokens].zero_()
                     lookups[layer_id] = target
                 else:
-                    values = table.embed_gathered(gathered[:, slot], hashes.shape[0]).flatten(1)
+                    if batch_values is not None:
+                        lookup_options["local_values"] = batch_values[slot]
+                    values = table.embed_gathered(gathered[:, slot], hashes.shape[0], **lookup_options).flatten(1)
                     if output_buffers is None:
                         lookups[layer_id] = values
                     else:
@@ -1350,6 +1410,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         """MRV2 slotless, local/shared tables need no graph-side collectives."""
         return (
             self.has_engram
+            and getattr(self, "_engram_remote_reader", None) is None
             and self._engram_overlap_enabled
             and self.engram_hash is not None
             and not self.engram_hash.use_slot_cache
@@ -1653,7 +1714,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             if self.decoder_replay_layers is not None and layer.layer_idx == self.decoder_replay_start:
                 assert self.decoder_replay_layer_name is not None
                 num_late_aux = sum(
-                    self.decoder_replay_start < layer_idx <= self.end_layer
+                    self.decoder_replay_start <= layer_idx < self.end_layer
                     for layer_idx in self.aux_hidden_state_layers
                 )
                 replay_outputs = torch.ops.vllm.dsv41_decoder_replay_forward(
@@ -1669,9 +1730,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 last_layer = self.layers[self.end_layer - 1]
                 break
             last_layer = layer
-            # DSpark consumes the residual stream entering its configured
-            # target layers. The runner expresses checkpoint IDs as one-based.
-            if layer.layer_idx + 1 in self.aux_hidden_state_layers:
+            # Checkpoint IDs are zero-based. Capture the residual entering
+            # the selected layer, before its Engram and attention updates.
+            if layer.layer_idx in self.aux_hidden_state_layers:
                 aux_hidden_state = hidden_states.mean(dim=1)
                 if use_sequence_parallel:
                     aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
@@ -1725,7 +1786,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         aux = []
         for layer_idx in range(self.decoder_replay_start, self.end_layer):
             layer = self.layers[layer_idx]
-            if layer.layer_idx + 1 in self.aux_hidden_state_layers:
+            if layer.layer_idx in self.aux_hidden_state_layers:
                 residual = hidden_states.mean(dim=1)
                 if self.use_sequence_parallel:
                     residual = sp_all_gather(residual)[: positions.shape[0]]
@@ -1738,12 +1799,27 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
     packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     model_cls = DeepseekV41Model
 
+    def close_shared_engram(self) -> None:
+        reader = getattr(self.model, "_engram_remote_reader", None)
+        if reader is not None:
+            reader.close()
+
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        return self.filter_unused_checkpoint_weights and any(
+            name.endswith(f"layers.{layer}.engram.embed.{suffix}")
+            for layer in self.config.engram_layer_ids
+            for suffix in ("weight", "scale")
+        )
+
+    @close_engram_on_init_failure(("model", "_engram_remote_reader"))
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = normalize_deepseek_v41_config(vllm_config.model_config.hf_config)
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        shared_config = get_ascend_config().shared_engram
+        self.filter_unused_checkpoint_weights = shared_config is not None and shared_config.backend in ("a2", "a5")
         # A5's packaged cache operators are qualified for eager prefill and
         # full-graph decode. Runtime NONE must bypass the compiled model rather
         # than entering a piecewise torch.compile path.
@@ -1949,6 +2025,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         return getattr(self.model, "_mtp_hidden_buffer", None)
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        """Select zero-based target layer inputs, using checkpoint IDs as-is."""
         self.model._set_aux_hidden_state_layers(layers)
 
     def _load_model_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -2034,9 +2111,16 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
+                # Route the write through the parameter's loader, like
+                # deepseek_v4 does (see vllm-ascend#16958).  A live weight update
+                # runs inside vLLM's layerwise reload, which parks the layer on
+                # the meta device and only replays loads made through
+                # ``weight_loader``; a direct ``param.data.copy_`` bypasses that
+                # buffer and is lost.
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 # Handle attention sinks (distributed across ranks)
                 narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                param.data.copy_(narrow_weight)
+                weight_loader(param, narrow_weight)
                 loaded_params.add(name)
                 continue
 

@@ -22,7 +22,7 @@ HEARTBEAT_ACK_TIMEOUT = 1.0
 @dataclass
 class _Peer:
     socket: Any
-    pending: deque[bytes] = field(default_factory=deque)
+    pending: deque[tuple[bytes, int]] = field(default_factory=deque)
     ack_deadline: float = 0.0
 
 
@@ -91,7 +91,10 @@ class MooncakeHeartbeatThread(threading.Thread):
                             if not peer.pending:
                                 ids_list = tuple(ids)
                                 peer.pending = deque(
-                                    encoder.encode((HEARTBEAT_MSG, ids_list[i : i + MAX_HEARTBEAT_REQUESTS]))
+                                    (
+                                        encoder.encode((HEARTBEAT_MSG, ids_list[i : i + MAX_HEARTBEAT_REQUESTS])),
+                                        min(MAX_HEARTBEAT_REQUESTS, len(ids_list) - i),
+                                    )
                                     for i in range(0, len(ids_list), MAX_HEARTBEAT_REQUESTS)
                                 )
                         next_send = now + self.interval
@@ -108,13 +111,24 @@ class MooncakeHeartbeatThread(threading.Thread):
                                     raise ValueError(f"Unexpected heartbeat ACK: {response!r}")
                                 peer.ack_deadline = 0.0
                             if peer.pending:
-                                peer.socket.send(peer.pending[0], flags=zmq.NOBLOCK)  # type: ignore[attr-defined]
+                                payload, request_count = peer.pending[0]
+                                peer.socket.send(payload, flags=zmq.NOBLOCK)  # type: ignore[attr-defined]
                                 peer.pending.popleft()
                                 peer.ack_deadline = now + HEARTBEAT_ACK_TIMEOUT
+                                logger.debug(
+                                    "MooncakeHeartbeat event=send producer=%s:%d request_count=%d",
+                                    *endpoint,
+                                    request_count,
+                                )
                         except zmq.Again:  # type: ignore[attr-defined]
                             continue
-                        except (zmq.ZMQError, TimeoutError, ValueError):  # type: ignore[attr-defined]
-                            logger.warning("Mooncake heartbeat failed for %s:%d; retrying next interval", *endpoint)
+                        except (zmq.ZMQError, TimeoutError, ValueError) as exc:  # type: ignore[attr-defined]
+                            logger.warning(
+                                "Mooncake heartbeat failed for %s:%d; retrying next interval: %s: %s",
+                                *endpoint,
+                                type(exc).__name__,
+                                exc,
+                            )
                             self._close_peer(peers.pop(endpoint), poller)
                     if peers:
                         poller.poll(100)

@@ -362,7 +362,7 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas 300I DUO.
     - `--no-enable-prefix-caching` is the default recommendation for this Atlas 300I DUO example to reduce memory pressure.
     - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
-    - To enable MTP speculative decoding, use `--speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'`. We recommend setting num_speculative_tokens to 1. If your usage scenario involves fewer than two concurrent requests, it is recommended to enable MTP. Otherwise, it is recommended not to enable MTP.
+    - To enable MTP speculative decoding, use `--speculative-config '{"method": "mtp", "num_speculative_tokens": 1}'`. We recommend setting `num_speculative_tokens` to 1. If your usage scenario involves fewer than two concurrent requests, it is recommended to enable MTP. Otherwise, it is recommended not to enable MTP.
 
 Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in [Section 10](#10-faq).
 
