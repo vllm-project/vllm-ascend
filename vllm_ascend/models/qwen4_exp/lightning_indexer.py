@@ -10,6 +10,8 @@ from __future__ import annotations
 import math
 
 import torch
+from vllm.config import CUDAGraphMode
+from vllm.forward_context import get_forward_context, is_forward_context_available
 
 from vllm_ascend.ops.triton.qwen4_exp.qsa import pack_qsa_group_indices_npu
 
@@ -19,6 +21,7 @@ _HEAD_DIM = 128
 _COMPRESS_RATIO = 4
 _TOKEN_TOPK = 2048
 _SUPPORTED_HEAD_COUNTS = (8, 16, 24, 32, 64)
+_QLI_METADATA_CACHE_KEY = "qsa_c8_indexer_metadata"
 
 
 def is_qsa_lightning_cache_compatible(cache: torch.Tensor) -> bool:
@@ -173,6 +176,56 @@ def qsa_select_paged_tokens_lightning(
     return out
 
 
+def _prepare_quantized_indexer_metadata(
+    block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    query_positions: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+    group_topk: int,
+    compress_ratio: int,
+    max_seqlen_k: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    cache = None
+    cache_key = (block_table, token_to_req, query_positions, sequence_lengths, group_topk, compress_ratio, max_seqlen_k)
+    context = get_forward_context() if is_forward_context_available() else None
+    if context is not None and context.cudagraph_runtime_mode != CUDAGraphMode.PIECEWISE:
+        # The scheduler keeps these tensors unchanged during a forward.
+        # Tensor identity distinguishes cache groups, and each MTP substep
+        # gets its own context. PIECEWISE capture can split producers from
+        # consumers, so metadata stays local in that mode.
+        cache = context.additional_kwargs.setdefault(_QLI_METADATA_CACHE_KEY, {})
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+    rows = query_positions.shape[0]
+    requests = token_to_req.long()
+    visible_groups = torch.minimum(
+        (query_positions + 1).clamp_min(0).floor_divide(compress_ratio),
+        sequence_lengths[requests].floor_divide(compress_ratio),
+    ).to(torch.int32)
+    cu_query = torch.arange(rows + 1, dtype=torch.int32, device=query_positions.device)
+    metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+        num_heads_q=64,
+        num_heads_k=1,
+        head_dim=_HEAD_DIM,
+        topk=group_topk,
+        batch_size=rows,
+        max_seqlen_q=1,
+        max_seqlen_k=max_seqlen_k,
+        quant_mode=2,
+        cu_seqlens_q=cu_query,
+        seqused_k=visible_groups,
+        layout_q="TND",
+        layout_k="PA_BBND",
+        mask_mode=0,
+        cmp_ratio=1,
+    )
+    inputs = cu_query, visible_groups, block_table[requests].contiguous(), metadata
+    if cache is not None:
+        cache[cache_key] = inputs
+    return inputs
+
+
 def qsa_select_paged_tokens_quantized(
     query: torch.Tensor,
     compressed_key_cache: torch.Tensor,
@@ -216,12 +269,18 @@ def qsa_select_paged_tokens_quantized(
     padded_scales[:, :original_heads].copy_(query_scales)
     weights = torch.zeros((rows, 64), dtype=torch.float16, device=query.device)
     weights[:, :original_heads] = 1.0 / math.sqrt(_HEAD_DIM)
-    requests = token_to_req.long()
-    visible_groups = torch.minimum(
-        (query_positions + 1).clamp_min(0).floor_divide(compress_ratio),
-        sequence_lengths[requests].floor_divide(compress_ratio),
-    ).to(torch.int32)
-    cu_query = torch.arange(rows + 1, dtype=torch.int32, device=query.device)
+    # Preserve explicit causal visibility in compressed-key units. The
+    # per-row lengths, page table and CANN metadata are shared across layers.
+    group_topk = token_topk // compress_ratio
+    cu_query, visible_groups, row_table, metadata = _prepare_quantized_indexer_metadata(
+        block_table,
+        token_to_req,
+        query_positions,
+        sequence_lengths,
+        group_topk,
+        compress_ratio,
+        block_table.shape[1] * key.shape[1],
+    )
     common = dict(
         quant_mode=2,
         cu_seqlens_q=cu_query,
@@ -231,19 +290,6 @@ def qsa_select_paged_tokens_quantized(
         mask_mode=0,
         cmp_ratio=1,
     )
-    # Causality is fully expressed by visible_groups for each one-token
-    # sequence. Applying compression again here would truncate valid keys.
-    group_topk = token_topk // compress_ratio
-    metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
-        num_heads_q=64,
-        num_heads_k=1,
-        head_dim=_HEAD_DIM,
-        topk=group_topk,
-        batch_size=rows,
-        max_seqlen_q=1,
-        max_seqlen_k=block_table.shape[1] * key.shape[1],
-        **common,
-    )
     groups, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
         query=padded_query,
         key=key,
@@ -251,7 +297,7 @@ def qsa_select_paged_tokens_quantized(
         query_dequant_scale=padded_scales,
         key_dequant_scale=key_scales,
         topk=group_topk,
-        block_table=block_table[requests].contiguous(),
+        block_table=row_table,
         metadata=metadata,
         return_value=0,
         **common,
