@@ -1020,10 +1020,8 @@ class AscendStep5DecoderLayer(Step5DecoderLayer):
         padding: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.use_moe:
-            ffn_output = self.moe(hidden_states, input_is_sequence_parallel=self.use_sequence_parallel)
-            if self.moe.experts.moe_config.is_sequence_parallel:
-                return ffn_output
-            return self._cast_for_residual(ffn_output)
+            # The next layer or the final residual add handles FP32 promotion.
+            return self.moe(hidden_states, input_is_sequence_parallel=self.use_sequence_parallel)
         return self.mlp(hidden_states)
 
     def _add_rms_norm(

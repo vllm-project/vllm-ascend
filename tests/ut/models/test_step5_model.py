@@ -515,12 +515,30 @@ def test_update_physical_experts_metadata_updates_moe_layers():
         moe.experts.update_expert_map.assert_called_once_with()
 
 
+def test_decoder_preserves_moe_output_dtype_until_residual_add():
+    hidden_states = torch.ones((2, 3), dtype=torch.bfloat16)
+    moe_output = torch.full_like(hidden_states, 2)
+    moe = MagicMock(return_value=moe_output)
+    moe.experts.moe_config.is_sequence_parallel = False
+    layer = SimpleNamespace(
+        use_moe=True,
+        use_sequence_parallel=False,
+        moe=moe,
+        _cast_for_residual=MagicMock(side_effect=lambda x: x.float()),
+    )
+    output = step5_model.AscendStep5DecoderLayer._forward_ffn(layer, hidden_states)
+
+    assert output is moe_output
+    moe.assert_called_once_with(hidden_states, input_is_sequence_parallel=False)
+    layer._cast_for_residual.assert_not_called()
+
+
 @pytest.mark.parametrize("use_sequence_parallel", [False, True])
 @pytest.mark.parametrize("use_fused", [False, True])
 @pytest.mark.parametrize("has_residual", [False, True])
 def test_decoder_add_rms_norm(monkeypatch, use_sequence_parallel, use_fused, has_residual):
-    hidden_states = torch.ones((2, 3), dtype=torch.float32)
-    incoming_residual = torch.full_like(hidden_states, 3) if has_residual else None
+    hidden_states = torch.ones((2, 3), dtype=torch.bfloat16 if has_residual else torch.float32)
+    incoming_residual = torch.full_like(hidden_states, 3, dtype=torch.float32) if has_residual else None
     attention_shard = torch.full((2, 3), 2, dtype=torch.bfloat16)
     attention_output = torch.cat((attention_shard, attention_shard)) if use_sequence_parallel else attention_shard
     positions = torch.arange(attention_output.shape[0])
