@@ -5,7 +5,6 @@ import threading
 import time
 from collections.abc import Callable, Generator, Sequence
 from contextlib import suppress
-from itertools import chain
 from typing import Any, cast
 
 import numpy as np
@@ -2385,10 +2384,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if self.current_layer == num_local - 1:
             # Recurrent state may be cleared or copied before the next load
             # hook. Finish reading shared state before returning from forward.
-            if (
-                _LW_DEFER_LAST_SAVE
-                and self._recurrent_layers.isdisjoint(self.prefetch_layer_map)
-                and self._recurrent_layers.isdisjoint(chain.from_iterable(self.prefetch_layer_map.values()))
+            if _LW_DEFER_LAST_SAVE and not any(
+                self.group_uses_align_state[group_id] for group_id in self._reused_layers_by_group
             ):
                 # PERF-TUNE(2): move the last layer's save drain off the forward
                 # critical path. The drain (host wait + event reset) runs at the
