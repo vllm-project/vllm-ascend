@@ -156,7 +156,6 @@ def ring_state_update_skipped() -> bool:
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
     kv_cache_spec: dict[str, KVCacheSpec] = {}
-    mamba_specs: dict[str, MambaSpec] = {}
     layer_type = AttentionLayerBase
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
     for layer_name, attn_module in attn_layers.items():
@@ -184,12 +183,6 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         if attn_module.is_draft_layer:
             spec = replace(spec, is_draft=True)
 
-        if isinstance(spec, MambaSpec):
-            # Keep Mamba groups after attention groups. Ascend graph parameter
-            # updates rely on this stable backend ordering.
-            mamba_specs[layer_name] = spec
-            continue
-
         if isinstance(attn_module, MLAAttention) and vllm_config.attention_config.hisparse_config is not None:
             # Keep Core's row-packed source spec and actual index-group ownership.
             source_layout: dict[str, Any] = {}
@@ -207,8 +200,6 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         if type(spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(vllm_config):
             spec = mxfp_cache_spec(spec)
         kv_cache_spec[layer_name] = spec
-
-    kv_cache_spec.update(mamba_specs)
 
     if vllm_config.attention_config.hisparse_config is not None:
         from vllm.v1.hisparse.binding import resolve_hisparse_specs
