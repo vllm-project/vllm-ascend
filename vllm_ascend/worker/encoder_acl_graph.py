@@ -339,17 +339,20 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
     def _capture_budget_graph(self, token_budget: int, path: str = "default", axis_keys: CaptureAxisKeys = ()):
         _ensure_graph_params(_graph_key(token_budget, path, axis_keys))
 
+        # Every frame yields at least one token, so a batch that fits the
+        # budget has at most token_budget frames.
+        max_frames_per_batch = min(self.max_frames_per_batch, token_budget)
         logger.debug(
             "Capturing encoder aclgraph for budget=%d, max_batch_size=%d, max_frames_per_batch=%d",
             token_budget,
             self.max_batch_size,
-            self.max_frames_per_batch,
+            max_frames_per_batch,
         )
 
         capture_args = (
             token_budget,
             self.max_batch_size,
-            self.max_frames_per_batch,
+            max_frames_per_batch,
             self.device,
             self.dtype,
             path,
@@ -372,7 +375,7 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
         graph_meta = BudgetGraphMetadata(
             token_budget=token_budget,
             max_batch_size=self.max_batch_size,
-            max_frames_per_batch=self.max_frames_per_batch,
+            max_frames_per_batch=max_frames_per_batch,
             graph=graph,
             input_buffers=values,
             output_buffer=output,
@@ -400,7 +403,7 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
         replay = self.model.prepare_encoder_cudagraph_replay_buffers(
             mm_kwargs,
             self.max_batch_size,
-            self.max_frames_per_batch,
+            graph_meta.max_frames_per_batch,
             path,
         )
         buffer_items = graph_meta.input_buffers.items()

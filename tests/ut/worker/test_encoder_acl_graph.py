@@ -230,11 +230,21 @@ def test_mrv2_model_state_uses_ascend_encoder_graph_manager():
     assert interface.EncoderCudaGraphManager is EncoderAclGraphManager
 
 
-def test_capture_budget_graph_npu():
+@pytest.mark.parametrize(
+    "token_budget, max_frames_per_batch, expected_max_frames",
+    [
+        (128, 1000, 128),
+        (1000, 1000, 1000),
+        (2048, 1000, 1000),
+        (128, 64, 64),
+        (2048, 0, 0),
+    ],
+)
+def test_capture_budget_graph_npu(token_budget, max_frames_per_batch, expected_max_frames):
     mgr, model = _make_manager()
-    set_encoder_graph_params({"default": [2048]})
+    set_encoder_graph_params({"default": [token_budget]})
     mgr.max_batch_size = 2
-    mgr.max_frames_per_batch = 0
+    mgr.max_frames_per_batch = max_frames_per_batch
     capture_values = {"cu_seqlens": torch.zeros(3, dtype=torch.int32)}
     model.prepare_encoder_cudagraph_capture_inputs.return_value = MagicMock(
         values=capture_values,
@@ -250,9 +260,16 @@ def test_capture_budget_graph_npu():
             side_effect=lambda tensor: tensor,
         ) as weak_ref,
     ):
-        mgr._capture_budget_graph(2048, axis_keys=())
+        mgr._capture_budget_graph(token_budget, axis_keys=())
 
-    graph_meta = mgr._get_graph_set("default")[2048]
+    graph_meta = mgr._get_graph_set("default")[token_budget]
+    assert model.prepare_encoder_cudagraph_capture_inputs.call_args.args[:3] == (
+        token_budget,
+        mgr.max_batch_size,
+        expected_max_frames,
+    )
+    assert graph_meta.max_frames_per_batch == expected_max_frames
+    assert mgr.max_frames_per_batch == max_frames_per_batch
     assert graph_meta.graph is fake_graph
     assert graph_meta.input_buffers is capture_values
     assert isinstance(graph_meta.output_buffer, torch.Tensor)
@@ -285,13 +302,16 @@ def test_capture_budget_graph_with_axis_keys():
     assert model.prepare_encoder_cudagraph_capture_inputs.call_args.args[-1] == axis_keys
 
 
-def test_replay_selects_capture_axis_graph():
+@pytest.mark.parametrize("axis_keys", [(), ((14, 14),)])
+def test_replay_selects_capture_axis_graph(axis_keys):
     mgr, model = _make_manager()
-    axis_keys = ((14, 14),)
+    mgr.max_frames_per_batch = 1000
     graph_meta = MagicMock()
+    graph_meta.max_frames_per_batch = 64
     graph_meta.input_buffers = {"cu_seqlens": torch.zeros(3, dtype=torch.int32)}
     graph_meta.output_buffer = torch.zeros(2, 64)
-    mgr._get_graph_set("default")[(128, axis_keys)] = graph_meta
+    graph_key = (128, axis_keys) if axis_keys else 128
+    mgr._get_graph_set("default")[graph_key] = graph_meta
     mgr._get_item_specs = MagicMock(return_value=[MagicMock()])
     model.prepare_encoder_cudagraph_replay_buffers.return_value = MagicMock(
         values={"cu_seqlens": torch.tensor([0, 4, 8], dtype=torch.int32)},
@@ -314,6 +334,9 @@ def test_replay_selects_capture_axis_graph():
         result = mgr._run_budget_graph({}, 128, axis_keys=axis_keys)
 
     graph_meta.graph.replay.assert_called_once()
+    model.prepare_encoder_cudagraph_replay_buffers.assert_called_once_with(
+        {}, mgr.max_batch_size, graph_meta.max_frames_per_batch, "default"
+    )
     update.assert_called_once_with(mgr.update_stream, 128, path="default", axis_keys=axis_keys)
     assert call_order == [("wait_stream", current_stream), ("replay", None)]
     assert result is graph_meta.output_buffer
