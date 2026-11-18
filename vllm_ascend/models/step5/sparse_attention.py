@@ -34,6 +34,12 @@ from typing import Any, ClassVar
 import torch
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.models.step5.common.csa_tail_ring import Step5CSATailRing  # type: ignore[import-not-found]
+from vllm.models.step5.common.sparse_summary_cache import (  # type: ignore[import-not-found]
+    Step5SparseSummaryBackend,
+    Step5SparseSummaryCacheLayer,
+    Step5SparseSummaryMetadataBuilder,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -59,22 +65,6 @@ from vllm_ascend.ops.triton.step5.summary_update import (
     update_prefill,
     update_verify,
 )
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.33.0"):
-    from vllm.models.step5.nvidia.csa_tail_ring import Step5CSATailRing  # type: ignore[import-not-found]
-    from vllm.models.step5.nvidia.sparse_summary_cache import (  # type: ignore[import-not-found]
-        Step5SparseSummaryBackend,
-        Step5SparseSummaryCacheLayer,
-        Step5SparseSummaryMetadataBuilder,
-    )
-else:
-    from vllm.models.step5.common.csa_tail_ring import Step5CSATailRing  # type: ignore[import-not-found]
-    from vllm.models.step5.common.sparse_summary_cache import (  # type: ignore[import-not-found]
-        Step5SparseSummaryBackend,
-        Step5SparseSummaryCacheLayer,
-        Step5SparseSummaryMetadataBuilder,
-    )
 
 
 class AscendStep5CSATailRing(Step5CSATailRing):
