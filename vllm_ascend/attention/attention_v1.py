@@ -1633,7 +1633,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
         output_padded = None
-        if key is not None and value is not None:
+        _m19_done_layers = getattr(attn_metadata, "_m19_kv_done_layers", None)
+        if _m19_done_layers is not None and layer.layer_name in _m19_done_layers:
+            _m19_done_layers.discard(layer.layer_name)
+            output_padded = output
+            notify_kv_cache_written()
+        elif key is not None and value is not None:
             output_padded = output
             # Only PCP-context metadata expands the slot mapping to every
             # rank's tokens; a replicated draft decode writes its local slots.

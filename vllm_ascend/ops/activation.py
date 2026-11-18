@@ -25,6 +25,7 @@ from vllm.model_executor.layers.activation import (
     SwigluStepAndMul,
 )
 
+import vllm_ascend.ops.triton.fast_elementwise  # noqa: F401
 from vllm_ascend.device.device_op import DeviceOperator
 
 
@@ -36,6 +37,16 @@ class AscendQuickGELU(QuickGELU):
 
 class AscendSiluAndMul(SiluAndMul):
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
+        if (
+            x.dtype == torch.bfloat16
+            and x.ndim == 2
+            and x.shape[-1] >= 4096
+            and x.shape[-1] % 2 == 0
+            and (x.shape[-1] // 2) <= 32768
+            and x.is_contiguous()
+            and x.device.type == "npu"
+        ):
+            return torch.ops.vllm.npu_fast_swiglu(x)
         out = torch_npu.npu_swiglu(x)
         return out
 

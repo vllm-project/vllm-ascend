@@ -16,10 +16,12 @@
 
 
 import torch
+import vllm.envs as vllm_envs
 from torch import nn
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
 
+import vllm_ascend.ops.triton.fast_elementwise  # noqa: F401
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
 from vllm_ascend.utils import enable_custom_op
@@ -71,9 +73,9 @@ class AscendRMSNorm(RMSNorm):
             # "broadcast" instead of copy
             param.data.fill_(loaded_weight.item())
         else:
-            assert param.size() == loaded_weight.size(), (
-                f"Attempted to load weight ({loaded_weight.size()}) into parameter ({param.size()})"
-            )
+            assert (
+                param.size() == loaded_weight.size()
+            ), f"Attempted to load weight ({loaded_weight.size()}) into parameter ({param.size()})"
 
             param.data.copy_(loaded_weight)
         self.bias_loaded = True
@@ -86,6 +88,28 @@ class AscendRMSNorm(RMSNorm):
         import torch_npu
 
         if residual is not None:
+            if (
+                not self.bias_loaded
+                and self.bias is None
+                and x.dtype == torch.bfloat16
+                and residual.dtype == torch.bfloat16
+                and self.weight.dtype == torch.bfloat16
+                and x.ndim == 2
+                and residual.shape == x.shape
+                and 0 < x.shape[-1] <= 8192
+                and (x.shape[-1] & (x.shape[-1] - 1)) == 0
+                and x.is_contiguous()
+                and residual.is_contiguous()
+                and x.device.type == "npu"
+                and not vllm_envs.VLLM_BATCH_INVARIANT
+            ):
+                return torch.ops.vllm.npu_fast_add_rms_norm(
+                    x,
+                    residual,
+                    self.weight,
+                    float(self.variance_epsilon),
+                )
+
             if enable_custom_op():
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, self.weight, self.bias, self.variance_epsilon
