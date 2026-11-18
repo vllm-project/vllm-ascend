@@ -59,6 +59,22 @@ Run staging after checkout and use the same `if` condition as the action call.
 For a subdirectory checkout, set staging `working-directory` to that directory
 and pass `.` to the script; adjust the action's `source-root` accordingly.
 
+## Lint Images
+
+Pre-commit and its cache builder use images from
+`quay.io/atlas-ci/vllm-ascend-ci`:
+
+- Main/development branches: `lint-main`.
+- Release branches: `lint-releases-v*`, selected from the PR target branch or
+  cache workflow branch.
+
+Run **Image Build Lint** (`schedule_lint_image_build.yaml`) to build an AMD64
+lint image for the selected branch.
+
+Both image builders use the repository variable `QUAY_ASCEND_CI_USERNAME` and
+secret `QUAY_ASCEND_CI_PASSWORD`.
+Other CI helper jobs use the [lightweight tools image](../docs/source/developer_guide/contribution/testing.md#lightweight-ci-images).
+
 ## Selective Testing System
 
 When a PR changes source files, the precision-testing pipeline

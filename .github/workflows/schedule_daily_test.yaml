@@ -69,7 +69,7 @@ jobs:
   select-all-tests:
     runs-on: linux-amd64-cpu-8-hk
     container:
-      image: quay.io/ascend-ci/vllm-ascend:lint
+      image: quay.io/atlas-ci/vllm-ascend-ci:lite-tools
     outputs:
       has_tests: ${{ steps.full-scope.outputs.has_tests }}
       test_groups: ${{ steps.full-scope.outputs.test_groups }}
@@ -122,7 +122,6 @@ jobs:
       - name: Select all tests
         id: full-scope
         run: |
-          pip install regex pyyaml
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           python3 .github/workflows/scripts/select_tests.py --all-tests
 
@@ -160,7 +159,7 @@ jobs:
   daily-select-tests:
     runs-on: linux-amd64-cpu-2-hk
     container:
-      image: quay.io/ascend-ci/vllm-ascend:lint
+      image: quay.io/atlas-ci/vllm-ascend-ci:lite-tools
     outputs:
       has_daily_a2: ${{ steps.resolve.outputs.has_daily_a2 }}
       daily_a2_tests: ${{ steps.resolve.outputs.daily_a2_tests }}
@@ -189,7 +188,6 @@ jobs:
             }}
         run: |
           set -euo pipefail
-          pip install pyyaml -q
           if [ -n "$DAILY_CONFIG_INPUT" ]; then
             printf '%s' "$DAILY_CONFIG_INPUT" > daily_config.yaml
             echo "source=inline" >> "$GITHUB_OUTPUT"
