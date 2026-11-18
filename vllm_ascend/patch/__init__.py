@@ -1811,3 +1811,17 @@
 #    Future Plan:
 #      Remove when upstream adds dirty tracking to UvaBackedTensor flushes.
 #
+
+# ** File: platform/patch_kimi_structured_boundary.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.structured_output.StructuredOutputManager`
+#    Why:
+#       A later think-open draft must not remove an earlier JSON boundary.
+#    How:
+#       For Kimi only, preserve the earliest close using a context-free fast
+#       lookup or singleton checks over a bounded, non-copying token view.
+#       Delegate other parsers and early exits to the upstream method.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/68112
+#    Future Plan:
+#       Remove when all supported vLLM versions include the upstream fix.
