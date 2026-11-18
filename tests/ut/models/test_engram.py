@@ -127,12 +127,14 @@ def test_host_uva_aligns_registration_and_frees_original_allocation(monkeypatch,
     lib = Library()
     monkeypatch.setattr(npu, "_host_library", lambda: lib)
     shape = (size // torch.empty((), dtype=dtype).element_size(),)
+    owner = torch.nn.Module()
     if failure:
         message = "NULL pointer" if failure == "null" else "failed: rc=1"
         with pytest.raises(RuntimeError, match=message):
-            npu.HostUvaBuffer(shape, dtype, "cpu")
+            npu.HostUvaBuffer(shape, dtype, "cpu", "_codes_uva", owner)
     else:
-        buffer = npu.HostUvaBuffer(shape, dtype, "cpu")
+        buffer = npu.HostUvaBuffer(shape, dtype, "cpu", "_codes_uva", owner)
+        assert buffer.tensor is not None
         assert buffer.tensor.data_ptr() == lib.registered
         assert lib.original <= lib.registered and lib.registered + size <= lib.original + size + alignment - 1
         buffer.tensor.fill_(17)
@@ -146,9 +148,10 @@ def test_host_uva_aligns_registration_and_frees_original_allocation(monkeypatch,
         assert lib.registered is lib.unregistered is lib.freed is None
         assert lib.free_count == lib.unregister_count == 0
     else:
-        assert lib.unregistered == lib.registered
+        assert lib.unregistered == (None if failure == "register" else lib.registered)
         assert lib.freed == lib.original
-        assert lib.free_count == lib.unregister_count == 1
+        assert lib.free_count == 1
+        assert lib.unregister_count == int(failure != "register")
 
 
 def test_shared_memory_needs_a_local_dp_peer(monkeypatch):
@@ -424,7 +427,8 @@ def test_shared_uva_uses_one_python_shared_memory_segment(monkeypatch, leader_ra
 
     def create(rank):
         group = SimpleNamespace(cpu_group=None, rank_in_group=rank, world_size=2)
-        return npu.SharedUvaBuffer((8, 32), torch.int8, "cpu", group)
+        owner = torch.nn.Module()
+        return npu.SharedUvaBuffer((8, 32), torch.int8, "cpu", group, "shared", owner)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         leader, follower = list(pool.map(create, (0, 1)))
@@ -446,13 +450,13 @@ def test_shared_table_skips_per_step_dp_gather(monkeypatch):
 
     monkeypatch.setattr(embedding_mod, "gather_engram_hashes", gather)
     table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
-    table.embed_gathered = lambda ids, count: ids[:count]
+    setattr(table, "embed_gathered", lambda ids, count: ids[:count])  # noqa: B010 - instance stub
     table._shared_group = object()
     ids = torch.tensor([[7, 8]])
     assert table.forward(ids).tolist() == [[7, 8]]
     table._shared_group = None
     table.dp_size = 2
-    table.embed_gathered = lambda gathered, count: gathered[count : 2 * count]
+    setattr(table, "embed_gathered", lambda gathered, count: gathered[count : 2 * count])  # noqa: B010
     assert table.forward(ids).tolist() == [[7, 8]]
     assert calls == [True, False]
 
