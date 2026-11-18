@@ -20,16 +20,21 @@ The companion vLLM checkout is `releases/v0.30.0`
 `ascend-moonep` `urma_dev` (`6de30d77d0f21721bce35a73018160e56fb9d656`).
 The validation container uses `urma_dev_vllm_ascend_v0.30.0` with the CANN 9.2
 header-layout compatibility commit `5a312f186bc6bf197df223f67d2cd4f7c9b1274d`.
-This migration changes vllm-ascend source only. It does not install packages,
-rebind editable installations, rebuild native libraries, or update submodules.
+The original migration changed vllm-ascend source only. The SHMEM compatibility
+fix described below additionally requires rebuilding the SDK's SHMEM library.
 
 The workspace used for that migration was
 `/mnt/share/x00893896/vllm_ascend_moonep_integration_latest`.
 The previous workspace and source branch remain separate baselines.
 
-**Status: MoonEP CPU regression and fresh-process native-loader checks pass.
-NPU operators, multirank collectives, model correctness, and performance remain
-unvalidated.** Successful loading does not establish device numerical correctness.
+**Status: CPU regression and fresh-process native-loader checks pass.** On A5-118
+in `xzx_moonep_latest`, two-rank SHMEM initialization/finalization passes in both
+memfabric/SHMEM load orders. Eight-rank eager model smoke tests pass for
+Qwen3-30B-A3B-Instruct-2507 with MoonEP BF16 transport, and DeepSeek-V4-Flash
+with MoonEP MXFP8 transport and auto/BF16 attention KV. Each model configuration
+completes 11 short-decode, long-prefill, concurrent-completion and chat requests,
+with memfabric loaded normally in all workers. These are smoke checks, not a
+numerical-equivalence, sparse-offload feature, or performance qualification.
 
 ## Execution integration
 
@@ -119,6 +124,14 @@ the companion SDK. Collective settings must agree across EP ranks.
 UDMA overlap retains the dedicated-QP requirement. The existing SDK runtime
 rejects expandable NPU allocator segments; keep
 `PYTORCH_NPU_ALLOC_CONF=expandable_segments:False` for MoonEP.
+
+## SHMEM compatibility with memfabric
+
+SHMEM's device-state getter must have local symbol binding when memfabric is
+loaded in the same worker. Both libraries otherwise export the legacy
+`HybmGetInitDeviceId()` name, allowing SHMEM to read memfabric's uninitialized
+device number and fail initialization. Build the SDK with the SHMEM internal
+visibility fix; keep memfabric installed and normally importable.
 
 ## Previous v0.30.0 validation environment
 
