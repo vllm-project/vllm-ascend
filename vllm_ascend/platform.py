@@ -1946,6 +1946,12 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
     if spec is not None and model_config is spec.draft_model_config:
         model_config = spec.target_model_config
     if model_config is not None and model_config.architecture in (
+        "HYV4FlashForCausalLM",
+        "HYV4FlashVLForConditionalGeneration",
+    ):
+        # FlashEngram allocates and validates its own TP-local tables.
+        return
+    if model_config is not None and model_config.architecture in (
         "Qwen4ExpForCausalLM",
         "Qwen4ExpForConditionalGeneration",
     ):

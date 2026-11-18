@@ -67,7 +67,10 @@ def apply_moe_mlp(
                 quant_method=quant_method,
             )
 
-    if quant_method.supports_fused_activation(mlp_compute_input.activation):
+    # A pre-activation clamp needs a kernel with explicit clamp support.
+    needs_clamped_silu = mlp_compute_input.activation == MoEActivation.SILU and mlp_compute_input.swiglu_limit > 0
+    can_apply_clamp = not needs_clamped_silu or getattr(quant_method, "fused_clamped_silu", False) is True
+    if can_apply_clamp and quant_method.supports_fused_activation(mlp_compute_input.activation):
         hidden_states, act_out_scale = quant_method.apply_gmm1_act_quant(mlp_compute_input)
     else:
         hidden_states = quant_method.apply_gmm1(mlp_compute_input)

@@ -6,7 +6,9 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.distributed.device_communicators.base_device_communicator import DeviceCommunicatorBase
 
+from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.models.common.ops import sequence_parallel as sp
 
 
@@ -44,3 +46,26 @@ def test_reduce_scatter_padding(monkeypatch, custom_collective, num_tokens, tp_s
         fallback.assert_not_called()
     else:
         fallback.assert_called_once_with(inputs[0], 0)
+
+
+def test_chunked_sequence_collectives_preserve_rank_and_row_order(monkeypatch):
+    comm = object.__new__(NPUCommunicator)
+    comm.world_size = 2
+    comm.max_sequence_collective_peer_bytes = 16
+    input_rows = torch.arange(15, dtype=torch.float32).view(5, 3)
+    peer_rows = input_rows + 100
+    full_rows = torch.cat((input_rows, peer_rows), dim=0)
+
+    def gather(self, chunk, dim):
+        assert dim == 0 and chunk.numel() * chunk.element_size() <= comm.max_sequence_collective_peer_bytes
+        return torch.cat((chunk, chunk + 100))
+
+    def reduce(self, chunks, dim):
+        rank_chunks = chunks.view(self.world_size, -1)
+        assert dim == 0 and rank_chunks[0].numel() * chunks.element_size() <= comm.max_sequence_collective_peer_bytes
+        return rank_chunks[1]
+
+    monkeypatch.setattr(DeviceCommunicatorBase, "all_gather", gather)
+    monkeypatch.setattr(DeviceCommunicatorBase, "reduce_scatter", reduce)
+    torch.testing.assert_close(comm.all_gather(input_rows, dim=0), full_rows)
+    torch.testing.assert_close(comm.reduce_scatter(full_rows, dim=0), peer_rows)

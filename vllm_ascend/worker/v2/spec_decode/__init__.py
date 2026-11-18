@@ -104,6 +104,10 @@ def init_speculator(
 
         return AscendEagleSpeculator(vllm_config, device)
     if speculative_config.uses_draft_model():
+        if getattr(speculative_config, "custom_method", None) is not None:
+            from vllm.v1.worker.gpu.spec_decode import init_speculator as init_custom_speculator
+
+            return init_custom_speculator(vllm_config, device, req_states)
         from vllm_ascend.worker.v2.spec_decode.standalone_ar.speculator import (
             AscendStandaloneARSpeculator,
         )

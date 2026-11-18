@@ -1,7 +1,22 @@
 from vllm import ModelRegistry
 
+try:
+    from vllm.v1.worker.gpu.spec_decode.speculator_config import register_speculative_method
+except ImportError:
+    register_speculative_method = None
+
 
 def register_model():
+    if register_speculative_method is not None:
+        register_speculative_method("dfly", "vllm_ascend.models.hy_v4_flash.dfly_config.FlashDFlyConfig")
+    ModelRegistry.register_model(
+        "HYV4FlashForCausalLM",
+        "vllm_ascend.models.hy_v4_flash.model:AscendHYV4FlashForCausalLM",
+    )
+    ModelRegistry.register_model(
+        "HYV4FlashVLForConditionalGeneration",
+        "vllm_ascend.models.hy_v4_flash.vl_model:HYV4FlashVLForConditionalGeneration",
+    )
     ModelRegistry.register_model(
         "Qwen4ExpForCausalLM",
         "vllm_ascend.models.qwen4_exp:AscendQwen4ExpForCausalLM",

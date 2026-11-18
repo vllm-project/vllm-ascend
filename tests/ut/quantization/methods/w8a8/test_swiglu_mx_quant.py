@@ -13,11 +13,12 @@ from vllm_ascend.quantization.methods.w8a8 import w8a8_mxfp8 as module
 from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg
 
 
-def make_method(scale_alg, enable_eplb=False):
+def make_method(scale_alg, enable_eplb=False, model_type=None):
     config = SimpleNamespace(
         quant_config=SimpleNamespace(),
         use_v2_model_runner=True,
         parallel_config=SimpleNamespace(enable_eplb=enable_eplb),
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type)),
     )
     with (
         patch.object(module, "get_current_vllm_config", return_value=config),
@@ -27,6 +28,11 @@ def make_method(scale_alg, enable_eplb=False):
         method = module.AscendW8A8MXFP8DynamicFusedMoEMethod()
     get_scale_alg.assert_called_once_with(config)
     return method
+
+
+def test_clamped_silu_defaults_to_fused_for_hy4flash():
+    assert make_method(0, model_type="hy_v4_flash").fused_clamped_silu
+    assert not make_method(0, model_type="minimax_m3").fused_clamped_silu
 
 
 @pytest.mark.parametrize("enable_eplb", [False, True])

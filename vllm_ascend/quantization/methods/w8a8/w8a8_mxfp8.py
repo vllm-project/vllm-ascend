@@ -375,6 +375,9 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
         self.use_expert_weight_list = self.dynamic_eplb or vllm_config.parallel_config.enable_eplb
         self._dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
+        model_config = getattr(vllm_config, "model_config", None)
+        text_config = getattr(model_config, "hf_text_config", None)
+        self.fused_clamped_silu = getattr(text_config, "model_type", None) == "hy_v4_flash"
 
     def supports_fused_activation(self, activation: MoEActivation) -> bool:
         # Only MiniMax's A5 CEIL-scale MXFP8 path has been validated with the
@@ -712,12 +715,16 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         return [getattr(layer, name)]
 
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
-        if mlp_compute_input.activation in (MoEActivation.SWIGLUOAI_UNINTERLEAVE, MoEActivation.SWIGLUSTEP):
+        activation = mlp_compute_input.activation
+        clamped_silu = (
+            self.fused_clamped_silu and activation == MoEActivation.SILU and mlp_compute_input.swiglu_limit > 0
+        )
+        if clamped_silu or activation in (MoEActivation.SWIGLUOAI_UNINTERLEAVE, MoEActivation.SWIGLUSTEP):
             # Both modes consume GMM's contiguous [gate | up] BF16 output;
             # mode 1 would instead interpret alternating gate/up elements.
             hidden_states = self.apply_gmm1(mlp_compute_input)
             activation_kwargs: dict[str, Any]
-            if mlp_compute_input.activation == MoEActivation.SWIGLUSTEP:
+            if activation == MoEActivation.SWIGLUSTEP:
                 # Mode 3 clamps gate after SiLU, matching SwigluStepAndMul
                 # without alpha/bias or interleaving.
                 activation_kwargs = dict(
@@ -732,8 +739,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 activation_kwargs = dict(
                     swiglu_mode=2,
                     clamp_limit=mlp_compute_input.swiglu_limit,
-                    glu_alpha=mlp_compute_input.swiglu_alpha,
-                    glu_bias=mlp_compute_input.swiglu_beta,
+                    glu_alpha=1.0 if clamped_silu else mlp_compute_input.swiglu_alpha,
+                    glu_bias=0.0 if clamped_silu else mlp_compute_input.swiglu_beta,
                 )
             hidden_states, out_scale = torch_npu.npu_swiglu_mx_quant(
                 hidden_states,

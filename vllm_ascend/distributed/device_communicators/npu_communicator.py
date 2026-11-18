@@ -44,6 +44,8 @@ class _NpuAll2AllManager:
 
 
 class NPUCommunicator(DeviceCommunicatorBase):
+    max_sequence_collective_peer_bytes: int | None = None
+
     def __init__(
         self,
         cpu_group: dist.ProcessGroup,
@@ -88,3 +90,35 @@ class NPUCommunicator(DeviceCommunicatorBase):
         if self.quantized_ar is not None and self.world_size > 1:
             return self.quantized_ar.all_reduce(input_)
         return super().all_reduce(input_)
+
+    def _sequence_chunk_size(self, input_: torch.Tensor, dim: int, shards: int = 1) -> int | None:
+        limit = self.max_sequence_collective_peer_bytes
+        if limit is None or dim != 0 or self.world_size == 1:
+            return None
+        chunk_size = limit // input_.element_size()
+        return chunk_size if input_.numel() > chunk_size * shards else None
+
+    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        chunk_size = self._sequence_chunk_size(input_, dim)
+        gather = super().all_gather
+        if chunk_size is None:
+            return gather(input_, dim)
+
+        chunks = []
+        for chunk in input_.reshape(-1).split(chunk_size):
+            chunks.append(gather(chunk, dim=0).view(self.world_size, -1))
+        return torch.cat(chunks, dim=1).reshape(self.world_size * input_.shape[0], *input_.shape[1:])
+
+    def reduce_scatter(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        chunk_size = self._sequence_chunk_size(input_, dim, self.world_size)
+        scatter = super().reduce_scatter
+        if chunk_size is None:
+            return scatter(input_, dim)
+
+        assert input_.shape[0] % self.world_size == 0
+        # Split the same offset range out of every destination's shard.
+        shards = input_.reshape(self.world_size, -1)
+        chunks = []
+        for chunk in shards.split(chunk_size, dim=1):
+            chunks.append(scatter(chunk.contiguous().view(-1), dim=0))
+        return torch.cat(chunks).reshape(input_.shape[0] // self.world_size, *input_.shape[1:])
