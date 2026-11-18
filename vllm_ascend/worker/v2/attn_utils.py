@@ -322,6 +322,69 @@ def _get_parallel_config_for_attn_metadata(attn_groups: list[list[AttentionGroup
     return vllm_config.parallel_config if vllm_config is not None else None
 
 
+def _gdn_cache_key(builder: object) -> tuple[KVCacheSpec, type]:
+    return (builder.kv_cache_spec, type(builder))  # type: ignore[attr-defined]
+
+
+def _gdn_reuse_eligible(
+    builder: object,
+    kv_cache_spec: KVCacheSpec,
+    model_specific_attn_metadata: ModelSpecificAttnMetadata | None,
+    extra_kwargs: dict,
+    pcp_context: object,
+) -> bool:
+    return (
+        isinstance(builder, AscendGDNAttentionMetadataBuilder)
+        and builder.supports_update_block_table
+        and isinstance(kv_cache_spec, MambaSpec)
+        and (model_specific_attn_metadata is None or type(model_specific_attn_metadata) is MambaHybridAttnMetadata)
+        and not extra_kwargs
+        and pcp_context is None
+    )
+
+
+def _gdn_reuse_enabled(
+    builder: object,
+    kv_cache_spec: KVCacheSpec,
+    model_specific_attn_metadata: ModelSpecificAttnMetadata | None,
+    extra_kwargs: dict,
+    pcp_context: object,
+    for_cudagraph_capture: bool,
+) -> bool:
+    if not isinstance(builder, AscendGDNAttentionMetadataBuilder):
+        return False
+    eligible = _gdn_reuse_eligible(
+        builder,
+        kv_cache_spec,
+        model_specific_attn_metadata,
+        extra_kwargs,
+        pcp_context,
+    )
+    captured_reuse = getattr(builder, "_gdn_reuse_at_capture", None)
+    if for_cudagraph_capture:
+        builder._gdn_reuse_at_capture = eligible
+        return eligible
+    if captured_reuse is False:
+        return False
+    if captured_reuse is True and not eligible:
+        raise ValueError("Captured GDN metadata reuse requires a batch-global Mamba provider")
+    return eligible
+
+
+def _gdn_update_cached(
+    builder: AscendGDNAttentionMetadataBuilder,
+    key: tuple[KVCacheSpec, type],
+    cached_metadata: object,
+    block_table: torch.Tensor,
+    slot_mapping: torch.Tensor | None,
+    graph_updates: dict,
+):
+    update_kwargs = {}
+    if key in graph_updates:
+        update_kwargs["graph_state_updates"] = graph_updates[key][1]
+    return builder.update_block_table(cached_metadata, block_table, slot_mapping, **update_kwargs)
+
+
 def build_attn_metadata(
     *,
     attn_groups: list[list[AttentionGroup]],
@@ -490,29 +553,28 @@ def build_attn_metadata(
         if len(attn_groups[i]) == 1:
             group = attn_groups[i][0]
             builder = group.get_metadata_builder(0)
-            if (
-                isinstance(builder, AscendGDNAttentionMetadataBuilder)
-                and builder.supports_update_block_table
-                and isinstance(group.kv_cache_spec, MambaSpec)
-                and (
-                    model_specific_attn_metadata is None
-                    or type(model_specific_attn_metadata) is MambaHybridAttnMetadata
-                )
-                and not common_attn_metadata_extra_kwargs
-                and pcp_context is None
-                and (for_cudagraph_capture or getattr(builder, "_gdn_reuse_at_capture", None) is not False)
-            ):
-                key = (builder.kv_cache_spec, type(builder))
+            reuse_gdn_single = _gdn_reuse_enabled(
+                builder,
+                group.kv_cache_spec,
+                model_specific_attn_metadata,
+                common_attn_metadata_extra_kwargs,
+                pcp_context,
+                for_cudagraph_capture,
+            )
+            if reuse_gdn_single:
+                key = _gdn_cache_key(builder)
                 if key in cached_gdn_metadata:
-                    if for_cudagraph_capture:
-                        builder._gdn_reuse_at_capture = True
                     # GDN consumes only its physical state table here. Reusing
                     # the batch view avoids constructing common metadata and a
                     # slot-mapping view for every recurrent cache group.
-                    update_kwargs = {}
-                    if key in gdn_graph_updates:
-                        update_kwargs["graph_state_updates"] = gdn_graph_updates[key][1]
-                    metadata = builder.update_block_table(cached_gdn_metadata[key], block_table, **update_kwargs)
+                    metadata = _gdn_update_cached(
+                        builder,
+                        key,
+                        cached_gdn_metadata[key],
+                        block_table,
+                        None,
+                        gdn_graph_updates,
+                    )
                     for layer_name in group.layer_names:
                         attn_metadata[layer_name] = metadata
                     continue
@@ -577,25 +639,14 @@ def build_attn_metadata(
                     ]
             # Standard Mamba providers expose batch-global GDN inputs. As in
             # upstream, only the first build needs to fetch the extra tensors.
-            reuse_gdn_metadata = (
-                isinstance(attn_metadata_builder, AscendGDNAttentionMetadataBuilder)
-                and attn_metadata_builder.supports_update_block_table
-                and isinstance(attn_group.kv_cache_spec, MambaSpec)
-                and (
-                    model_specific_attn_metadata is None
-                    or type(model_specific_attn_metadata) is MambaHybridAttnMetadata
-                )
-                and not common_attn_metadata_extra_kwargs
-                and pcp_context is None
+            reuse_gdn_metadata = _gdn_reuse_enabled(
+                attn_metadata_builder,
+                attn_group.kv_cache_spec,
+                model_specific_attn_metadata,
+                common_attn_metadata_extra_kwargs,
+                pcp_context,
+                for_cudagraph_capture,
             )
-            if isinstance(attn_metadata_builder, AscendGDNAttentionMetadataBuilder):
-                captured_reuse = getattr(attn_metadata_builder, "_gdn_reuse_at_capture", None)
-                if for_cudagraph_capture:
-                    attn_metadata_builder._gdn_reuse_at_capture = reuse_gdn_metadata
-                elif captured_reuse is False:
-                    reuse_gdn_metadata = False
-                elif captured_reuse is True and not reuse_gdn_metadata:
-                    raise ValueError("Captured GDN metadata reuse requires a batch-global Mamba provider")
             attn_metadata_extra_kwargs = (
                 model_specific_attn_metadata.get_extra_attn_kwargs(
                     attn_metadata_builder,
@@ -637,9 +688,7 @@ def build_attn_metadata(
                 )
 
             for variant_names, variant_common in metadata_variants:
-                gdn_cache_key = (
-                    (attn_metadata_builder.kv_cache_spec, type(attn_metadata_builder)) if reuse_gdn_metadata else None
-                )
+                gdn_cache_key = _gdn_cache_key(attn_metadata_builder) if reuse_gdn_metadata else None
                 # Model-specific common fields can differ between groups. Only
                 # reuse the unmodified dense batch view. is_prefilling is not
                 # consumed by the non-PCP dense builder. Preserve group
@@ -658,14 +707,13 @@ def build_attn_metadata(
                     else None
                 )
                 if gdn_cache_key is not None and gdn_cache_key in cached_gdn_metadata:
-                    update_kwargs = {}
-                    if gdn_cache_key in gdn_graph_updates:
-                        update_kwargs["graph_state_updates"] = gdn_graph_updates[gdn_cache_key][1]
-                    metadata = attn_metadata_builder.update_block_table(
+                    metadata = _gdn_update_cached(
+                        attn_metadata_builder,
+                        gdn_cache_key,
                         cached_gdn_metadata[gdn_cache_key],
                         variant_common.block_table_tensor,
                         variant_common.slot_mapping,
-                        **update_kwargs,
+                        gdn_graph_updates,
                     )
                 elif for_cudagraph_capture:
                     metadata = attn_metadata_builder.build_for_cudagraph_capture(
