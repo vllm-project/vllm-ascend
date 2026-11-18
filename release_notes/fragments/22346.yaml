@@ -1,0 +1,4 @@
+pr: 22346
+entries:
+  - category: performance
+    text: Reduced redundant candidate and attention buffer writes in Kimi K3.1 decode on A3. Eligible BF16 output projections now write directly into the attention output buffer.
