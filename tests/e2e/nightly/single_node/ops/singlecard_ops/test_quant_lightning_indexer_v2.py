@@ -547,9 +547,14 @@ def test_quant_lightning_indexer_v2_accuracy(arch, enable_dcp):
     if quant_mode == 1:
         scores = scores.bfloat16().float()
 
+    assert values.dtype == torch.bfloat16
+    if enable_dcp:
+        from vllm_ascend.ops.triton.sharded_indexer import normalize_dcp_candidates
+
+        normalized_indices, normalized_values = normalize_dcp_candidates(indices, values, cu_seqlens_q)
+        assert normalized_indices is indices and normalized_values is values
     indices_cpu = indices.cpu().reshape(rows, topk).long()
     values_cpu = values.cpu().reshape(rows, topk).float()
-    assert values.dtype == (torch.bfloat16 if quant_mode == 1 else torch.float32)
     for row in range(rows):
         visible_end = global_length - rows + row + 1
         visible = sum(position < visible_end for position in local_positions)

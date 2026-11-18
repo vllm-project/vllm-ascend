@@ -172,8 +172,8 @@ Key 和 scale 的 leading-axis stride 分别显式传入 native tiling，支持 
 `candidate_mode=3`，每个 rank 输出完整本地 K 个候选，K 不超过 2048。
 可见长度的含义、因果前缀裁剪、无效行以及仅交换候选的契约与上述 A5 入口一致。
 
-A3 直接输出其原有 Sort/MrgSort 使用的 FP32 比较值，分别覆盖普通输出和 LD
-分核归并输出；不将这些比较值转成 BF16。保留原有 Cube 的 INT32 QK、
+A3 在 `return_value=2` 本地候选模式直接输出其原有 Sort/MrgSort 使用的 FP32
+比较值，分别覆盖普通输出和 LD 分核归并输出；不将这些比较值转成 BF16。保留原有 Cube 的 INT32 QK、
 `1/1024` 归一化、FP16 ReLU/weight 中间值及 FP32 归约过程。
 A5 的 FP8 和 BF16 派生比较键路径保持原有行为。
 
@@ -191,9 +191,8 @@ A3 硬件精度回归：`tests/e2e/nightly/single_node/ops/singlecard_ops/test_q
 ## A3/A5 兼容边界与框架适配说明
 
 - Host 注册沿用 `kv_quant_sparse_flash_attention_vllm` 的结构：默认签名用于
-  Arch22，`aicore_config_95` 完整覆盖 Arch35 的输入输出类型。A3 的 score 输出
-  在 return_value!=0 时统一为 FP32（DCP score 与本地候选共用），return_value=0 的
-  空占位输出仍为 BF16。A5 的
+  Arch22，`aicore_config_95` 完整覆盖 Arch35 的输入输出类型。A3 的 BF16
+  score 输出用于普通和 DCP 路径，FP32 score 输出用于本地候选。A5 的
   dtype 列表和 `return_value` 约束保持原样，不依据 INT8 输入推断设备型号。
   `sparse_values` 的类型由调用方张量和产品注册确定，tiling 按架构和模式校验；
   不在共享 InferDataType 中覆盖它。A3 新增的本地长度和完整 score 形状校验

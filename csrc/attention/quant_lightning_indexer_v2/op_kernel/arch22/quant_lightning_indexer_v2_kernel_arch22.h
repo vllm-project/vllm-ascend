@@ -123,7 +123,7 @@ protected:
     GlobalTensor<half> weightsGm;
     GlobalTensor<uint32_t> metadataGm;
     GlobalTensor<int32_t> indiceOutGm;
-    GlobalTensor<float> valueOutGm;  // return_value 分数输出 (arch22 统一 FP32)
+    GlobalTensor<bfloat16_t> valueOutGm;  // return_value: BF16 分数输出
     __gm__ uint8_t *sparseValuesPtr = nullptr;  // ProcessInvalid 全量清理用
     GlobalTensor<int32_t> candidateTopkIndexInGm;
     GlobalTensor<int32_t> candidateTopkIndexOutGm;
@@ -545,10 +545,14 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::Init(
         qScaleGm.SetGlobalBuffer((__gm__ half *)queryScale);
         kScaleGm.SetGlobalBuffer((__gm__ half *)keyScale);
         blockTableGm.SetGlobalBuffer((__gm__ int32_t *)blockTable);
-        GlobalTensor<float> valueOutGm;
-        // return_value=1 (DCP score) 与 return_value=2 (A3 本地候选) 都直接输出 FP32 比较值
-        if (constInfo.useLocalVisibleLengths || constInfo.returnValue != 0U) {
-            valueOutGm.SetGlobalBuffer((__gm__ float *)sparseValues);
+        GlobalTensor<bfloat16_t> valueOutGm;
+        GlobalTensor<float> valueOutFp32Gm;
+        if (constInfo.useLocalVisibleLengths) {
+            // return_value=2 (A3 本地候选): 原生 FP32 比较值直出
+            valueOutFp32Gm.SetGlobalBuffer((__gm__ float *)sparseValues);
+        } else if (constInfo.returnValue != 0U) {
+            // return_value=1 (DCP score): BF16 输出
+            valueOutGm.SetGlobalBuffer((__gm__ bfloat16_t *)sparseValues);
         }
         if (constInfo.candidateMode == CANDIDATE_MODE_CONSUMER && candidateTopkIndex != nullptr) {
             candidateTopkIndexInGm.SetGlobalBuffer((__gm__ int32_t *)candidateTopkIndex);
@@ -561,7 +565,7 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::Init(
         }
         // A15: 有效标志须与 tensor 一并传给 vector (InitParams 已先值拷贝 constInfo, 此处再改标志不生效)
         bool outputIdxOffsetValid = (outputIdxOffset != nullptr);
-        vectorService.InitVecInputTensor(weightsGm, qScaleGm, kScaleGm, indiceOutGm, blockTableGm, valueOutGm);
+        vectorService.InitVecInputTensor(weightsGm, qScaleGm, kScaleGm, indiceOutGm, blockTableGm, valueOutGm, valueOutFp32Gm);
         vectorService.InitVecCandidateTensor(candidateTopkIndexInGm, candidateTopkIndexOutGm, outputIdxOffsetGm,
                                              outputIdxOffsetValid);
         vectorService.InitVecWorkspaceTensor(weightWorkspaceGm, mm1ResGm, vec1ResGm);
@@ -761,14 +765,20 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::ProcessInvalid()
                 (baseSize + singleCoreSize <= totalOutputSize) ? singleCoreSize : totalOutputSize - baseSize;
             GlobalTensor<OUT_T> output = indiceOutGm[baseSize];
             AscendC::InitGlobalMemory(output, dealSize, constInfo.INVALID_IDX);
-            // return_value: sparse_values 同步填 FP32 -inf (无效槽, 位型 0xFF800000)
+            // Fill the score output with the sentinel for its return_value dtype.
             if (constInfo.useLocalVisibleLengths || constInfo.returnValue != 0U) {
                 // The second fill reuses UB; finish the index DMA first.
                 SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
-                GlobalTensor<uint32_t> valueOutput;
-                valueOutput.SetGlobalBuffer((__gm__ uint32_t *)sparseValuesPtr + baseSize);
-                AscendC::InitGlobalMemory(valueOutput, dealSize,
-                                          static_cast<uint32_t>(QLIV2ServiceVec::NEG_INF));
+                if (constInfo.useLocalVisibleLengths) {
+                    GlobalTensor<uint32_t> valueOutput;
+                    valueOutput.SetGlobalBuffer((__gm__ uint32_t *)sparseValuesPtr + baseSize);
+                    AscendC::InitGlobalMemory(valueOutput, dealSize,
+                                              static_cast<uint32_t>(QLIV2ServiceVec::NEG_INF));
+                } else {
+                    GlobalTensor<uint16_t> valueOutput;
+                    valueOutput.SetGlobalBuffer((__gm__ uint16_t *)sparseValuesPtr + baseSize);
+                    AscendC::InitGlobalMemory(valueOutput, dealSize, constInfo.NEG_INF_BFLOAT);
+                }
             }
         }
     }

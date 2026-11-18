@@ -39,7 +39,7 @@ def _pack_candidates(
     row = tl.program_id(0) * ROWS_PER_PROGRAM + tl.arange(0, ROWS_PER_PROGRAM)[:, None]
     mask = (col < K) & (row < ROWS)
     local = tl.load(indices + row * index_row_stride + col * index_col_stride, mask, -1)
-    # A5 exposes its native BF16 comparator; A3 already produces FP32.
+    # Pack either BF16 or FP32 QLI scores as FP32 comparison keys.
     score = tl.load(scores + row * score_row_stride + col * score_col_stride, mask, -float("inf")).to(tl.float32)
     valid = (local >= 0) & (tl.abs(score) < float("inf"))
     local = tl.where(valid, local, 0).to(tl.int32)
@@ -816,13 +816,13 @@ def _normalize_dcp_candidates(indices, scores, query_start_loc, REQUESTS, K: tl.
 
 
 def normalize_dcp_candidates(indices, scores, query_start_loc):
-    """Clear invalid candidates and graph padding in native FP32 outputs in place.
+    """Clear invalid candidates and graph padding in BF16 or FP32 outputs in place.
 
     QLI does not initialize rows beyond the cumulative query endpoint. Each
     kernel lane owns its index/score slot, so no extra transport buffer is needed.
     """
-    if scores.dtype != torch.float32:
-        raise TypeError("DCP candidate normalization requires native FP32 QLI scores")
+    if scores.dtype not in (torch.bfloat16, torch.float32):
+        raise TypeError("DCP candidate normalization requires BF16 or FP32 QLI scores")
     rows, _, topk = indices.shape
     if rows:
         _normalize_dcp_candidates[(rows, triton.cdiv(topk, 256))](

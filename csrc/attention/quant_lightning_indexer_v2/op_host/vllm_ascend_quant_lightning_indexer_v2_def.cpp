@@ -20,8 +20,8 @@ class VllmAscendQuantLightningIndexerV2 : public OpDef {
 public:
     explicit VllmAscendQuantLightningIndexerV2(const char *name) : OpDef(name)
     {
-        // Arch22 default signatures: legacy empty BF16 scores, or native FP32
-        // local scores. Arch35 overrides these signatures below.
+        // Arch22 supports BF16 for return_value=0/1 and FP32 for
+        // return_value=2 local candidates. Arch35 overrides this below.
         this->Input("q").ParamType(REQUIRED).DataType({ge::DT_INT8, ge::DT_INT8}).FormatList({ge::FORMAT_ND}).AutoContiguous();
         this->Input("k").ParamType(REQUIRED).DataType({ge::DT_INT8, ge::DT_INT8}).FormatList({ge::FORMAT_ND}).IgnoreContiguous();
         this->Input("w").ParamType(REQUIRED).DataType({ge::DT_FLOAT16, ge::DT_FLOAT16}).FormatList({ge::FORMAT_ND}).AutoContiguous();
