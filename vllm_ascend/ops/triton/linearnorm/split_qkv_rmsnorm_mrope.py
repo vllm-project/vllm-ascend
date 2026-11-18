@@ -20,8 +20,26 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ops.triton.linearnorm.qsa_rmsnorm_mrope import validate_qsa_rope_positions
 from vllm_ascend.ops.triton.triton_utils import extract_slice, get_vectorcore_num, insert_slice
+
+
+def _validate_rope_positions(
+    positions: torch.Tensor,
+    cache: torch.Tensor,
+    tensor: torch.Tensor,
+    rope_dim: int,
+) -> None:
+    """Check the direct-gather ABI using metadata only (safe during capture)."""
+    if positions.ndim not in (1, 2) or (positions.ndim == 2 and positions.shape[0] != 3):
+        raise ValueError("QKV RoPE positions must have one or three axes")
+    if positions.shape[-1] != tensor.shape[0] or positions.dtype not in (torch.int32, torch.int64):
+        raise ValueError("QKV RoPE positions must be integer positions for every token")
+    if cache.ndim != 2 or cache.shape[0] == 0 or cache.shape[1] != rope_dim or cache.stride(1) != 1:
+        raise ValueError("QKV rotary cache must have nonempty, contiguous rotary rows")
+    if tensor.dtype != torch.bfloat16 or cache.dtype != tensor.dtype:
+        raise ValueError("QKV direct rotary gathering requires a BF16 cache and input")
+    if positions.device != tensor.device or cache.device != tensor.device:
+        raise ValueError("QKV RoPE positions, rotary cache and input must share a device")
 
 
 @triton.jit(
@@ -334,7 +352,7 @@ def triton_split_qkv_rmsnorm_mrope(
     if rope_dim is None:
         rope_dim = head_size
     if positions is not None:
-        validate_qsa_rope_positions(positions, cos_sin, qkv, rope_dim)
+        _validate_rope_positions(positions, cos_sin, qkv, rope_dim)
         if not qkv.is_contiguous() or qkv.shape[1] != q_size + gate_size + 2 * kv_size:
             raise ValueError("QSA QKV projection must be packed and contiguous")
         if any(

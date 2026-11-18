@@ -3,7 +3,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
-def validate_qsa_rope_positions(
+def _validate_rope_positions(
     positions: torch.Tensor,
     cache: torch.Tensor,
     tensor: torch.Tensor,
@@ -135,7 +135,7 @@ def triton_qsa_rmsnorm_mrope(
         raise ValueError("QSA norm+RoPE token and rotary rows must match")
 
     if positions is not None:
-        validate_qsa_rope_positions(positions, cos_sin, tensor, rope_dim)
+        _validate_rope_positions(positions, cos_sin, tensor, rope_dim)
     has_mrope = cos_sin.ndim == 3 if positions is None else positions.ndim == 2
     if has_mrope:
         if (positions is None and cos_sin.shape[0] != 3) or len(mrope_section) != 3:
