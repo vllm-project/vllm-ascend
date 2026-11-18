@@ -239,7 +239,7 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch, num_layers, rep
         def __init__(self, index):
             self.layer_idx = index
 
-        def __call__(self, positions, hidden, mix, unused, input_ids):
+        def __call__(self, positions, hidden, mix, unused, input_ids, image_mask=None):
             seen.append((self.layer_idx, positions.tolist()))
             return hidden + 1, mix
 
@@ -252,6 +252,7 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch, num_layers, rep
 
     model = DeepseekV41Model.__new__(DeepseekV41Model)
     torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace()
     model.hc_mult = 1
     model.use_sequence_parallel = False
     model._mtp_hidden_buffer = None
