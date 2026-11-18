@@ -164,10 +164,13 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel, EagleModelMixin):
             )
             if layer_idx + 1 in self.aux_hidden_state_layers:
                 # This DFlash2 checkpoint consumes the mean of the completed
-                # layer's HC streams. Keep the delayed-combine backbone state
-                # untouched so the ordinary target output follows the same path.
+                # layer's HC streams. Reuse the materialized BF16 state in the
+                # backbone instead of combining the same pending output again.
                 combined = layer.mlp_hyper_connection.combine(hidden_states, block_output, injection)
                 aux_hidden_states.append(combined.view(-1, self.config.hc_count, self.config.hidden_size).mean(dim=-2))
+                hidden_states = combined
+                block_output = None
+                injection = None
             if deepstack_input_embeds is not None and layer_idx < len(deepstack_input_embeds):
                 deepstack_embed = deepstack_input_embeds[f"deepstack_input_embeds_{layer_idx}"]
                 if self.use_hc_sequence_parallel:
@@ -181,9 +184,10 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel, EagleModelMixin):
                     )
                     .flatten(-2)
                 )
-                hidden_states = layer.mlp_hyper_connection.combine(hidden_states, block_output, injection)
-                block_output = None
-                injection = None
+                if block_output is not None:
+                    hidden_states = layer.mlp_hyper_connection.combine(hidden_states, block_output, injection)
+                    block_output = None
+                    injection = None
                 hidden_states = hidden_states + deepstack_embed
 
         if not get_pp_group().is_last_rank:
@@ -193,7 +197,10 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel, EagleModelMixin):
 
         final_mixer = self.hyper_connection_mixer
         assert final_mixer is not None
-        multi_hidden, sample_hidden_states, _ = final_mixer.combine_and_mix(hidden_states, block_output, injection)
+        if block_output is None:
+            multi_hidden, sample_hidden_states, _ = final_mixer.mix(hidden_states)
+        else:
+            multi_hidden, sample_hidden_states, _ = final_mixer.combine_and_mix(hidden_states, block_output, injection)
         if self.use_hc_sequence_parallel:
             if aux_hidden_states:
                 hidden_size = self.config.hidden_size

@@ -13,9 +13,16 @@ class _Layer:
     def __init__(self):
         self.mlp_hyper_connection = SimpleNamespace(combine=self._combine)
         self.combine_calls = 0
+        self.received_hidden_states = None
+        self.received_prev_block_output = None
+        self.received_prev_injection = None
 
     def __call__(self, *, hidden_states, prev_block_output, prev_injection, **kwargs):
-        return hidden_states, torch.ones_like(hidden_states), None
+        self.received_hidden_states = hidden_states
+        self.received_prev_block_output = prev_block_output
+        self.received_prev_injection = prev_injection
+        injection = hidden_states.new_ones(hidden_states.shape[0], 4)
+        return hidden_states, torch.ones_like(hidden_states), injection
 
     def _combine(self, hidden_states, block_output, injection):
         self.combine_calls += 1
@@ -35,7 +42,12 @@ def _model(monkeypatch, aux_layers):
             hidden + block,
             torch.zeros(hidden.shape[0], 8),
             None,
-        )
+        ),
+        mix=lambda hidden: (
+            hidden,
+            torch.zeros(hidden.shape[0], 8),
+            None,
+        ),
     )
     monkeypatch.setattr(
         qwen4_exp,
@@ -64,6 +76,20 @@ def test_dflash2_aux_outputs_are_completed_layer_stream_means(monkeypatch):
     assert aux_hidden[0].shape == (2, 8)
     torch.testing.assert_close(aux_hidden[0], torch.ones(2, 8))
     assert model.layers[0].combine_calls == 1
+
+
+def test_dflash2_reuses_aux_combined_state_for_next_layer(monkeypatch):
+    model = _model(monkeypatch, (1,))
+    model.layers.append(_Layer())
+    model.end_layer = 2
+
+    _forward(model)
+
+    next_layer = model.layers[1]
+    assert model.layers[0].combine_calls == 1
+    assert next_layer.received_prev_block_output is None
+    assert next_layer.received_prev_injection is None
+    torch.testing.assert_close(next_layer.received_hidden_states, torch.ones(2, 32))
 
 
 def test_default_qwen4_exp_output_is_unchanged_without_aux_layers(monkeypatch):
