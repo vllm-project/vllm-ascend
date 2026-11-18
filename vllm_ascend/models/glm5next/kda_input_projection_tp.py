@@ -115,6 +115,7 @@ class KDAInputProjectionTPLayout:
         )
 
     def _all_to_all(self, tensor: torch.Tensor) -> torch.Tensor:
+        assert self.group is not None
         output = torch.empty_like(tensor)
         dist.all_to_all_single(output, tensor, group=self.group.device_group)
         return output
@@ -162,6 +163,7 @@ class KDAInputProjectionTP(KDAInputProjectionTPLayout):
         hidden, capacity = self.prepare_input(hidden)
         if capacity == 0:
             return None
+        assert self.group is not None
         gathered = self.group.all_gather(hidden, dim=0)
         projected = layer.in_proj_qkvbfg_a(gathered)[0]
         qkv_beta, forget_a, gate_a = projected.split(
