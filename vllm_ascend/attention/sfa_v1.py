@@ -1917,9 +1917,15 @@ class AscendSFAImpl(MLAAttentionImpl):
             attn_output = nn.functional.pad(attn_output, (0, 0, 0, capacity - attn_output.shape[0]))
         output.copy_(self.o_proj(attn_output)[0][: output.shape[0]])
 
-    def _run_dummy_o_proj(self, hidden_states: torch.Tensor, capacity: int) -> None:
-        attn_output = hidden_states.new_zeros((capacity, self.local_num_heads * self.v_head_dim))
-        self.o_proj(attn_output)
+    def _forward_dummy(
+        self, hidden_states: torch.Tensor, output: torch.Tensor, gate_input, o_capacity: int | None
+    ) -> torch.Tensor:
+        if gate_input is not None:
+            self.gproj_tp.project(gate_input, self.g_proj).wait()
+        if o_capacity is not None:
+            attn_output = hidden_states.new_zeros((o_capacity, self.local_num_heads * self.v_head_dim))
+            self.o_proj(attn_output)
+        return output.zero_()
 
     def _get_sfa_kv_slot_mapping(
         self,
@@ -2074,12 +2080,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             if dp_tokens is not None:
                 o_capacity = max(o_capacity, dp_tokens)
         gate_tp = getattr(self, "gproj_tp", None)
+        # Gather before NoPE trims live rows so idle and active ranks send the same shape.
+        gate_input = gate_tp.gather(hidden_states) if gate_tp is not None else None
         if attn_metadata is None:
-            if gate_tp is not None:
-                gate_tp.project(gate_tp.gather(hidden_states), self.g_proj).wait()
-            if o_capacity is not None:
-                self._run_dummy_o_proj(hidden_states, o_capacity)
-            return output.zero_()
+            return self._forward_dummy(hidden_states, output, gate_input, o_capacity)
 
         if self.qk_rope_head_dim == 0:
             num_tokens = min(hidden_states.shape[0], attn_metadata.slot_mapping.shape[0])
@@ -2093,16 +2097,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                 else:
                     num_tokens = min(num_tokens, attn_metadata.num_actual_tokens)
             if num_tokens == 0:
-                if gate_tp is not None:
-                    gate_tp.project(gate_tp.gather(hidden_states), self.g_proj).wait()
-                if o_capacity is not None:
-                    self._run_dummy_o_proj(hidden_states, o_capacity)
-                return output.zero_()
+                return self._forward_dummy(hidden_states, output, gate_input, o_capacity)
 
             hidden_states = hidden_states[:num_tokens]
         gate_hidden_states = hidden_states if self.g_proj is not None else None
-        # AG reads owner hidden while the prolog runs. Do not wait here.
-        gate_input = gate_tp.gather(hidden_states) if gate_tp is not None else None
 
         composed_kv_cache = self._compose_sfa_kv_cache(kv_cache)
         assert composed_kv_cache is not None

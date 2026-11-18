@@ -19,7 +19,7 @@ from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, PreprocessType
 from vllm_ascend.models.glm5next.kda_input_projection_tp import KDAInputProjectionTPLayout
 from vllm_ascend.ops import linear_op
-from vllm_ascend.ops.kimi_kda import PendingGate, PendingTensor
+from vllm_ascend.ops.kimi_kda import FullRankGateTP, PendingGate, PendingTensor
 from vllm_ascend.ops.linear import AscendRowParallelLinear, AscendUnquantizedLinearMethod
 
 
@@ -630,26 +630,22 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     torch.testing.assert_close(output, torch.full_like(output, float(actual_tokens > 0)))
 
 
-@pytest.mark.parametrize(
-    "graph_mode,idle_has_metadata",
-    [(CUDAGraphMode.PIECEWISE, True), (CUDAGraphMode.PIECEWISE, False), (CUDAGraphMode.FULL, True)],
-)
-def test_sfa_oproj_tp_aligns_uneven_and_idle_owners(monkeypatch, graph_mode, idle_has_metadata):
-    token_counts = (12, 3, 0)
-    group_size = len(token_counts)
-    capacity, hidden_size, head_dim = 16, 4, 2
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
+@pytest.mark.parametrize("gate_tp_enabled", [False, True])
+def test_sfa_oproj_tp_aligns_uneven_and_idle_owners(monkeypatch, graph_mode, gate_tp_enabled):
+    # In PIECEWISE, rank 2 is idle without metadata, then idle with metadata, then active.
+    # FULL supplies metadata on every step.
+    steps = [(16, (12, 3, 0)), (8, (2, 7, 0)), (16, (0, 3, 9))]
+    group_size, hidden_size, head_dim = 3, 4, 2
     width = group_size * head_dim
     generator = torch.Generator().manual_seed(51)
     weight = torch.randn(hidden_size, width, generator=generator)
-    values = [torch.randn(count, width, generator=generator) for count in token_counts]
+    gate_weight = torch.randn(hidden_size, width, generator=generator)
+    inputs = [[torch.randn(count, hidden_size, generator=generator) for count in counts] for _, counts in steps]
     collective = CollectiveReference(group_size)
     thread = local()
-    forward_context = SimpleNamespace(
-        cudagraph_runtime_mode=graph_mode,
-        additional_kwargs={"max_tokens_across_dp": max(token_counts)},
-    )
-    monkeypatch.setattr(sparse_mla, "get_forward_context", lambda: forward_context)
-    monkeypatch.setattr(ascend_forward_context, "get_forward_context", lambda: forward_context)
+    monkeypatch.setattr(sparse_mla, "get_forward_context", lambda: thread.context)
+    monkeypatch.setattr(ascend_forward_context, "get_forward_context", lambda: thread.context)
     monkeypatch.setattr(ascend_forward_context, "_USE_V2_EXTRA_KWARGS", True)
     monkeypatch.setattr(
         "vllm.distributed.parallel_state.get_tp_group", lambda: SimpleNamespace(world_size=1, rank_in_group=0)
@@ -665,21 +661,38 @@ def test_sfa_oproj_tp_aligns_uneven_and_idle_owners(monkeypatch, graph_mode, idl
         monkeypatch.setattr(sparse_mla, hook, lambda *args: None)
     monkeypatch.setattr(sparse_mla, "attention_transfer_window", nullcontext)
 
-    def all_to_all(recv, send, group):
-        assert send.shape == recv.shape == (capacity * width,)
-        thread.calls.append("all_to_all")
+    monkeypatch.setattr(sparse_mla, "flash_attention_gate", lambda values, gate: values.mul_(gate.sigmoid()))
+    monkeypatch.setattr(torch.npu, "current_stream", MagicMock())
+    monkeypatch.setattr(torch.npu, "Stream", MagicMock())
+    monkeypatch.setattr(torch.npu, "stream", lambda _: nullcontext())
+
+    def all_gather(recv, send, group, async_op):
+        assert async_op and send.shape == (thread.capacity, hidden_size)
+        thread.calls.append("G gather")
+        return SimpleNamespace(wait=lambda: recv.copy_(collective.exchange(group.rank_in_group, "gather", send)))
+
+    def all_to_all(recv, send, group, async_op=False):
+        if async_op:
+            assert send.shape == recv.shape == (thread.capacity * group_size, head_dim)
+            thread.calls.append("G all_to_all")
+
+            def wait():
+                thread.calls.append("G wait")
+                recv.copy_(collective.exchange(group.rank_in_group, "all_to_all", send))
+
+            return SimpleNamespace(wait=wait)
+        assert send.shape == recv.shape == (thread.capacity * width,)
+        thread.calls.append("O all_to_all")
         recv.copy_(collective.exchange(group.rank_in_group, "all_to_all", send))
 
+    monkeypatch.setattr(linear_op.dist, "all_gather_into_tensor", all_gather)
     monkeypatch.setattr(linear_op.dist, "all_to_all_single", all_to_all)
 
     @torch.no_grad()
     def worker(rank):
-        count = token_counts[rank]
-        thread.calls = []
-
         def reduce_scatter(partial, dim):
-            assert dim == 0 and partial.shape == (capacity * group_size, hidden_size)
-            thread.calls.append("reduce_scatter")
+            assert dim == 0 and partial.shape == (thread.capacity * group_size, hidden_size)
+            thread.calls.append("O reduce_scatter")
             return collective.exchange(rank, "scatter", partial)
 
         thread.group = SimpleNamespace(world_size=group_size, rank_in_group=rank, reduce_scatter=reduce_scatter)
@@ -699,6 +712,9 @@ def test_sfa_oproj_tp_aligns_uneven_and_idle_owners(monkeypatch, graph_mode, idl
         impl.enable_sparse_sfa_c8 = impl.enable_sparse_sfa_turboquant = False
         impl.preprocess_type = PreprocessType.NATIVE
         impl.g_proj = impl.layerwise_kv_cache_hook = None
+        if gate_tp_enabled:
+            impl.gproj_tp = FullRankGateTP(thread.group, group_size, head_dim)
+            impl.g_proj = _Linear(gate_weight.chunk(group_size, dim=1)[rank])
         impl.has_indexer = False
         impl.skip_topk = True
         impl.layer_name = "layer"
@@ -707,32 +723,41 @@ def test_sfa_oproj_tp_aligns_uneven_and_idle_owners(monkeypatch, graph_mode, idl
         impl.exec_kv = lambda *args: (None, args[0])
         impl._q_proj_and_k_up_proj = lambda q: (q, None)
         impl._get_indexcache_topk_indices = lambda rows: torch.zeros(rows, 1, 1, dtype=torch.int32)
-        padded_values = torch.nn.functional.pad(values[rank], (0, 0, 0, capacity - count))
-        impl._execute_sparse_flash_attention_process = MagicMock(
-            side_effect=lambda q, *args: padded_values[: q.size(0)]
-        )
+        impl._execute_sparse_flash_attention_process = MagicMock(side_effect=lambda q, *args: q.repeat(1, group_size))
         impl._v_up_proj = lambda x: x
 
-        metadata = None
-        if count or idle_has_metadata:
-            metadata = SimpleNamespace(
-                cos=None,
-                sin=None,
-                num_actual_tokens=count,
-                slot_mapping=torch.arange(capacity),
-                cum_query_lens=torch.tensor([count]),
-                seq_lens=torch.tensor([count]),
+        for step, (capacity, counts) in enumerate(steps):
+            count = counts[rank]
+            thread.capacity = capacity
+            thread.calls = []
+            thread.context = SimpleNamespace(
+                cudagraph_runtime_mode=graph_mode, additional_kwargs={"max_tokens_across_dp": max(counts)}
             )
-        hidden = torch.zeros(capacity, hidden_size)
-        output = torch.full_like(hidden, 123.0)
-        assert impl.forward("layer", hidden, (torch.empty(1),), metadata, output) is output
-        assert thread.calls == ["all_to_all", "reduce_scatter"]
-        assert impl._execute_sparse_flash_attention_process.call_count == int(count > 0)
+            metadata = None
+            if count or step > 0 or graph_mode == CUDAGraphMode.FULL:
+                metadata = SimpleNamespace(
+                    cos=None,
+                    sin=None,
+                    num_actual_tokens=count,
+                    slot_mapping=torch.arange(capacity),
+                    cum_query_lens=torch.tensor([count]),
+                    seq_lens=torch.tensor([count]),
+                )
+            hidden = torch.nn.functional.pad(inputs[step][rank], (0, 0, 0, capacity - count))
+            output = torch.full_like(hidden, 123.0)
+            impl._execute_sparse_flash_attention_process.reset_mock()
+            assert impl.forward("layer", hidden, (torch.empty(1),), metadata, output) is output
+            gate_calls = ["G gather", "G all_to_all", "G wait"] if gate_tp_enabled else []
+            assert thread.calls == [*gate_calls, "O all_to_all", "O reduce_scatter"]
+            assert impl._execute_sparse_flash_attention_process.call_count == int(count > 0)
 
-        expected = torch.nn.functional.linear(padded_values, weight)
-        if count and graph_mode == CUDAGraphMode.PIECEWISE:
-            expected[count:] = 123.0
-        torch.testing.assert_close(output, expected)
+            values = hidden[:, :head_dim].repeat(1, group_size)
+            if gate_tp_enabled:
+                values *= (hidden @ gate_weight).sigmoid()
+            expected = torch.nn.functional.linear(values, weight)
+            if count and graph_mode == CUDAGraphMode.PIECEWISE:
+                expected[count:] = 123.0
+            torch.testing.assert_close(output, expected)
 
     with ThreadPoolExecutor(max_workers=group_size) as executor:
         list(executor.map(worker, range(group_size)))
