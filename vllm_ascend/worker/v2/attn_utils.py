@@ -62,7 +62,7 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
 from vllm_ascend.attention.attention_a3_qfa import (
     qfa_int8_cache_spec,
-    qfa_int8_paged_cache_views,
+    qfa_int8_sectioned_cache_views,
 )
 from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_cache_spec,
@@ -1771,14 +1771,18 @@ def _reshape_kv_cache_v2(
                 if not isinstance(raw_cache, torch.Tensor):
                     raise ValueError("QFA INT8 requires one combined raw allocation per layer.")
                 ratio = kv_cache_spec.block_size // kernel_block_size
-                page_pitch = raw_cache.numel() // (kv_cache_config.num_blocks * ratio)
-                kv_caches[layer_name] = qfa_int8_paged_cache_views(
+                # Sectioned layout (K blocks | K descale | V blocks, each
+                # section contiguous): the fused ScatterPaKvCache write path
+                # derives addresses from the shape's inner product and
+                # ignores the dim0 stride, so the per-page packet views are
+                # not writable by the operator (probe 2026-11-18). Any
+                # physical-page padding bytes are simply left unused.
+                kv_caches[layer_name] = qfa_int8_sectioned_cache_views(
                     raw_cache,
                     kv_cache_config.num_blocks * ratio,
                     kv_cache_spec.num_kv_heads,
                     kv_cache_spec.head_size,
                     kernel_block_size,
-                    page_stride_bytes=page_pitch,
                 )
                 continue
 
