@@ -19,6 +19,7 @@ from vllm.utils.network_utils import get_ip, make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -452,7 +453,12 @@ class MooncakeBaseConnectorScheduler:
         has_state_group = any(
             isinstance(spec, MambaSpec) for group_specs in self.group_unique_specs for spec in group_specs
         )
-        return uses_compressed_cache or has_state_group
+        has_sliding_window_group = any(
+            isinstance(spec, SlidingWindowSpec) for group_specs in self.group_unique_specs for spec in group_specs
+        )
+        # D replays the final prompt token. P must retain SWA pages for that
+        # same position rather than retire them for the next token's window.
+        return uses_compressed_cache or has_state_group or has_sliding_window_group
 
     @staticmethod
     def _get_group_unique_specs(group: Any) -> list[Any]:

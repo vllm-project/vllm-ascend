@@ -1,0 +1,6 @@
+pr: 22270
+entries:
+  - category: bugfix
+    text: >-
+      Fixed incorrect output in Mooncake PD serving with sliding-window caches
+      at prompt/block boundaries. No new configuration is required.

@@ -50,11 +50,14 @@ def make_scheduler_config(
     )
 
 
+@pytest.mark.parametrize("sliding_window", [False, True])
 def test_base_scheduler_initializes_parallel_layout_and_control_port(
     monkeypatch: pytest.MonkeyPatch,
+    sliding_window: bool,
 ) -> None:
     config = make_scheduler_config()
-    group = KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=make_full_spec())
+    spec = make_sliding_spec() if sliding_window else make_full_spec()
+    group = KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)
     kv_cache_config = SimpleNamespace(kv_cache_groups=[group])
     ascend_config = object()
     init_ascend_config = MagicMock()
@@ -85,7 +88,7 @@ def test_base_scheduler_initializes_parallel_layout_and_control_port(
     assert scheduler.side_channel_port == 6025
     assert scheduler.group_block_size == [16]
     assert scheduler.group_unique_specs == [[group.kv_cache_spec]]
-    assert scheduler.need_truncate is False
+    assert scheduler.need_truncate is sliding_window
     init_ascend_config.assert_called_once_with(config)
 
 
