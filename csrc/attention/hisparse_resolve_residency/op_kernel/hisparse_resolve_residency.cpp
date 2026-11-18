@@ -6,7 +6,7 @@
 // arch22 (A2/A3) entry: the Resolver consumes the legacy pointer/geometry ABI
 // directly, keeping the classic AscendC UB path used on these SoCs. One block
 // per logical row, exactly like the former csrc/hisparse launcher. Stats
-// accumulate inline, so this entry only serves the resolve launch
+// accumulate in the adapter, so this entry only serves the resolve launch
 // (invalidation runs as the shared Triton kernel on every SoC).
 #include "arch22/hisparse_resolver_kernel.h"
 

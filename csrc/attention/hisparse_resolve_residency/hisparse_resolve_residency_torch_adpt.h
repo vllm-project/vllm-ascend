@@ -51,8 +51,8 @@ inline void validate_resolver_scratch(int64_t hot, int64_t union_rows)
  * wrapper signature (inputs, attributes, outputs). Invalidation runs as the
  * shared Triton kernel on every SoC, so it never reaches this aclnn wrapper.
  * The aclnn wrapper selects the arch22 scalar-UB kernel or the A5 SIMT kernel
- * through the registered SoC configs; both accumulate stats inline, so one
- * resolve launch serves every SoC.
+ * through the registered SoC configs. arch22 stats are accumulated below
+ * with INT64 tensor operations; the SIMT kernel accumulates stats inline.
  */
 inline void resolve_residency(
     const at::Tensor &logical, const at::Tensor &hot_table,
@@ -107,8 +107,11 @@ inline void resolve_residency(
         swap_host_t, swap_device_t,
         swap_counts_t, miss_mask_t,
         stats_t);
-    // Stats accumulate inline in both the arch22 and the A5 kernel, so a
-    // single resolve launch serves every SoC and no second launch is needed.
+    if (stats_t.defined() && is_arch22_soc()) {
+        // arch22 DMA atomics cannot carry between the words of an INT64 counter.
+        // Reduce per-request counts on the same stream, including during replay.
+        stats_t.add_(errors.slice(1, 1, 3).sum(at::IntArrayRef{0}, false, at::kLong));
+    }
 }
 
 }  // namespace vllm_ascend::hisparse

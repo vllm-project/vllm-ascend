@@ -9,7 +9,7 @@
 namespace optiling {
 
 // One resolve-only launch serves the HiSparse native kernel on every SoC
-// (invalidation runs as a shared Triton kernel); stats accumulate inline.
+// (invalidation runs as a shared Triton kernel).
 
 BEGIN_TILING_DATA_DEF(HisparseResolveResidencyTilingData)
 TILING_DATA_FIELD_DEF(uint64_t, rows);

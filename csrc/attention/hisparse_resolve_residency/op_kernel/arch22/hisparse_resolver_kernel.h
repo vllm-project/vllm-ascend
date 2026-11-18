@@ -6,8 +6,8 @@
 // Migrated from the former standalone csrc/hisparse directory: the kernels are
 // now compiled as standard aclnn ops (op_host + op_kernel). The entry points
 // live in the op_kernel .cpp files; this header only carries the shared
-// Resolver implementation. Stats accumulate inline through 32-bit atomic
-// adds, so every SoC shares one resolve-only launch flavor.
+// Resolver implementation. The adapter accumulates per-request counts
+// using INT64 tensor operations to preserve carry between counter words.
 #pragma once
 
 #include "kernel_operator.h"
@@ -609,24 +609,6 @@ public:
                 io.SetValue(2, error ? 0 : misses);
             }
             Store(d.pointers[17], int64_t(row) * 8, io, 8);
-            if (row == first && d.pointers[16]) {
-                // Fold the ordered int64 stats accumulation into the launch.
-                // Both counters are non-negative and far below 2^31, so 32-bit
-                // atomic adds on the low words (the high words only ever add
-                // zero) equal the legacy mode=2 single-block walk.
-                auto statsOut = io[kTile];
-                statsOut.SetValue(0, error ? 0 : references - misses);
-                statsOut.SetValue(1, 0);
-                statsOut.SetValue(2, error ? 0 : misses);
-                statsOut.SetValue(3, 0);
-                GlobalTensor<int32_t> statsGm;
-                statsGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(d.pointers[16]));
-                Sync<HardEvent::S_MTE3>();
-                SetAtomicAdd<int32_t>();
-                DataCopyPad(statsGm, statsOut, DataCopyExtParams{1, 16, 0, 0, 0});
-                SetAtomicNone();
-                Sync<HardEvent::MTE3_S>();
-            }
         }
     }
 

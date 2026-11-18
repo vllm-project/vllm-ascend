@@ -574,6 +574,83 @@ def test_invalidation_write_count(count):
     assert torch.all(table.cpu() == -1)
 
 
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("request_count", [1, 4, 128])
+@pytest.mark.parametrize("initial", [(1 << 32) - 2, (1 << 33) - 2, (1 << 53) + 1])
+def test_native_resolver_int64_stats_carry(capture, request_count, initial):
+    """Both counters preserve carry across requests, launches and graph replay."""
+    block = 8
+    logical = torch.tensor([[0, 0, 0, 1, 2, 3]], dtype=torch.int32, device="npu").repeat(request_count, 1)
+    table = torch.arange(1, request_count + 1, dtype=torch.int32, device="npu")[:, None]
+    tags = torch.full((request_count, block), -1, dtype=torch.int32, device="npu")
+    order = torch.arange(block, dtype=torch.int32, device="npu").to(torch.int16).repeat(request_count, 1)
+    out, resolved = torch.empty_like(logical), torch.empty_like(logical)
+    errors = torch.empty((request_count, 8), dtype=torch.int32, device="npu")
+    backing = torch.full((6,), -73, dtype=torch.int64, device="npu")
+    stats = backing[1:3]
+
+    def forward():
+        torch.ops._C_ascend.hisparse_resolve_residency(
+            logical,
+            table,
+            None,
+            None,
+            None,
+            None,
+            None,
+            tags,
+            order,
+            out,
+            resolved,
+            errors,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            stats,
+            block,
+            block,
+            block,
+            block,
+            0,
+            block,
+            block,
+            0,
+        )
+
+    graph = None
+    try:
+        if capture:
+            forward()
+            torch.npu.synchronize()
+            graph = torch.npu.NPUGraph()
+            with torch.npu.graph(graph):
+                forward()
+        stats.fill_(initial)
+        for iteration in range(1, 4):
+            # One cached row and three missing rows yield three hits/misses per request.
+            tags.fill_(-1)
+            tags[:, 0] = 0
+            order.copy_(torch.arange(block, dtype=torch.int16)[None, :].expand(request_count, -1))
+            errors.fill_(123)
+            if graph is None:
+                forward()
+            else:
+                graph.replay()
+            torch.npu.synchronize()
+            expected = torch.full((2,), initial + iteration * request_count * 3, dtype=torch.int64)
+            torch.testing.assert_close(stats.cpu(), expected, rtol=0, atol=0)
+            torch.testing.assert_close(errors[:, :3].cpu(), torch.tensor([[0, 3, 3]]).repeat(request_count, 1).int())
+            torch.testing.assert_close(out.cpu(), logical.cpu() + table.cpu() * block)
+            torch.testing.assert_close(resolved.cpu(), logical.cpu())
+            assert backing[0].item() == -73 and torch.all(backing[3:].cpu() == -73)
+    finally:
+        if graph is not None:
+            graph.reset()
+
+
 def test_native_resolver_empty_state_tables():
     logical = torch.zeros((1, 4), dtype=torch.int32, device="npu")
     table = torch.empty((0, 1), dtype=torch.int32, device="npu")

@@ -3,7 +3,7 @@
 
 namespace ops {
 // Single HiSparse residency op. The resolve launch carries every input and
-// output; stats accumulate inline through atomic adds. Invalidation is
+// output; stats are accumulated by the kernel or adapter. Invalidation is
 // implemented by the shared Triton kernel in vllm_ascend/ops/triton/hisparse.py
 // on every SoC, so there is no native mode for it. All tensors are optional at
 // the def level; each tiling/kernel path validates the bound geometry.
