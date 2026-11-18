@@ -198,26 +198,31 @@ def _impl(role):
     return impl
 
 
-def _attn(selected):
+def _attn(selected, packed=False):
     shared = SimpleNamespace(
         topk_indices=torch.full((TOKENS, TOPK), 7, dtype=torch.int32),
         candidates=torch.full((TOKENS, 1, 8), 7, dtype=torch.int32),
         candidate_lengths=None,
-        topk_lengths=None,
+        topk_lengths=torch.zeros(TOKENS, 1, dtype=torch.int32),
     )
 
-    def select_projected(*args, indices_output, **kwargs):
+    def select_projected(*args, indices_output, topk_lengths, **kwargs):
+        if packed:
+            assert topk_lengths.data_ptr() == shared.topk_lengths.data_ptr()
+        else:
+            assert topk_lengths is None
         if selected.shape[1] != 0:
             indices_output.copy_(selected)
             return indices_output, None
         return selected, None
 
     indexer = SimpleNamespace(select_projected=select_projected)
-    return SimpleNamespace(shared_state=shared, indexer=indexer), shared
+    return SimpleNamespace(shared_state=shared, indexer=indexer, packed_cache_ops=object() if packed else None), shared
 
 
 @pytest.mark.parametrize("empty_cache", [True, False])
-def test_index_selection_publishes_shared_output(monkeypatch, empty_cache):
+@pytest.mark.parametrize("packed", [True, False])
+def test_index_selection_publishes_shared_output(monkeypatch, empty_cache, packed):
     prefix = "model.layers.2.attn"
     monkeypatch.setattr(
         dsa_v41,
@@ -225,7 +230,7 @@ def test_index_selection_publishes_shared_output(monkeypatch, empty_cache):
         lambda: SimpleNamespace(no_compile_layers={prefix: SimpleNamespace(kv_cache=[None])}),
     )
     selected = torch.full((TOKENS, 0 if empty_cache else TOPK), 3, dtype=torch.int32)
-    attn, shared = _attn(selected)
+    attn, shared = _attn(selected, packed)
     impl = _impl(
         SimpleNamespace(
             has_long_context=True,

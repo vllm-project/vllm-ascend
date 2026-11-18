@@ -677,7 +677,11 @@ class AscendDSAV41Impl:
             candidate_block_size=self.topology.candidate_block_size,
             candidates=shared.candidates[:num_tokens],
             candidate_lengths=(None if shared.candidate_lengths is None else shared.candidate_lengths[:num_tokens]),
-            topk_lengths=(None if shared.topk_lengths is None else shared.topk_lengths[:num_tokens]),
+            topk_lengths=(
+                shared.topk_lengths[:num_tokens]
+                if getattr(attn, "packed_cache_ops", None) is not None and shared.topk_lengths is not None
+                else None
+            ),
             indices_output=shared.topk_indices[:num_tokens],
         )
         # An empty long-context cache does not write the stable output buffer.
