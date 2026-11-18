@@ -104,4 +104,4 @@ def test_public_combine_row_weights(shape, edge, monkeypatch):
     assert torch.isfinite(actual).all()
     assert (error <= 2e-5 + 0.004 * expected.abs()).double().mean() >= 0.99
     assert error.max() <= 0.02
-    assert launches == ["_fused_dcp_lse_combine_bf16_head_scatter_kernel"]
+    assert launches == ["_fused_dcp_lse_combine_head_scatter_kernel"]

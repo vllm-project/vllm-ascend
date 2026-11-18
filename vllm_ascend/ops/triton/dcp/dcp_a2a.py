@@ -10,7 +10,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
     _encode_lse_fields,
-    _fused_dcp_lse_combine_bf16_head_scatter_kernel,
+    _fused_dcp_lse_combine_head_scatter_kernel,
     _pack_dcp_output_lse_batched_kernel,
 )
 from vllm_ascend.ops.triton.dcp.dcp_jit import _launch_kernel
@@ -449,6 +449,7 @@ def _launch_fused_dcp_lse_combine(
     lse_pack_dim = _lse_pack_dim(recv.dtype)
     total_rows = num_tokens * num_heads
     grid_size = total_rows if total_rows < vector_cores else vector_cores
+    # TODO: Merge the packed DCP combine kernels into one generic kernel.
     vector_compatible = (
         recv.dtype == torch.bfloat16
         and scatter_dim == 1
@@ -458,7 +459,7 @@ def _launch_fused_dcp_lse_combine(
     )
     if vector_compatible:
         launch(
-            _fused_dcp_lse_combine_bf16_head_scatter_kernel,
+            _fused_dcp_lse_combine_head_scatter_kernel,
             (grid_size,),
             recv,
             output,

@@ -136,7 +136,7 @@ def _pack_dcp_output_lse_batched_kernel(
 
 
 @triton.jit
-def _fused_dcp_lse_combine_bf16_head_scatter_kernel(
+def _fused_dcp_lse_combine_head_scatter_kernel(
     recv_ptr,
     output_ptr,
     local_output_ptr,

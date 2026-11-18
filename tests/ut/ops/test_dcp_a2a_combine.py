@@ -56,7 +56,7 @@ def test_combine_launch_supports_generic_rows(tokens, heads, dim, world, has_loc
     dcp_a2a._launch_fused_dcp_lse_combine(recv, output, dim, 1, False, local, local_lse, 40, launch)
     launch.assert_called_once()
     kernel, grid, *args = launch.call_args.args
-    assert kernel is dcp_a2a._fused_dcp_lse_combine_bf16_head_scatter_kernel
+    assert kernel is dcp_a2a._fused_dcp_lse_combine_head_scatter_kernel
     assert grid == (min(tokens * heads, 40),)
     assert "BLOCK_ROWS" not in launch.call_args.kwargs
     assert "RANK_UNROLL" not in launch.call_args.kwargs
