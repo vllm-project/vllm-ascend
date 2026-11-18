@@ -18,7 +18,8 @@ def prepare_pcp_query_metadata(metadata, states, local_states, world_size):
     states.fill_(-1)
     states[: local_states.numel()].copy_(local_states)
     count = metadata.num_input_tokens * world_size
-    metadata.hisparse_request_state_indices = states
+    # Keep the fixed backing address, but expose only this batch's request rows.
+    metadata.hisparse_request_state_indices = states[: local_states.numel()]
     metadata.hisparse_num_write_tokens = count
     # Gathered slots already mark padding with -1; scatter needs no row counter.
     metadata.hisparse_num_valid_write_rows = None
