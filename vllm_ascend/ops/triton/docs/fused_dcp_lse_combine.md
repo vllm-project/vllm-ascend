@@ -71,7 +71,7 @@ Sizes and strides remain runtime scalars, subject to ordinary Triton integer
 specialization classes; pointer dtype/alignment and compiler options can also
 create variants. Tensor contents and the grid alone do not create variants.
 The existing DCP warmup uses the same production launcher and now includes
-`_fused_dcp_lse_combine_row_weights` in its wrapper inventory. Unit tests check
+`_fused_dcp_lse_combine_bf16_head_scatter_kernel` in its wrapper inventory. Unit tests check
 that runtime and warmup select the same combine kernel for small and large row counts. Serving
 compilation counts remain unmeasured.
 

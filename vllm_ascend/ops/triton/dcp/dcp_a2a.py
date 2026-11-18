@@ -10,7 +10,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
     _encode_lse_fields,
-    _fused_dcp_lse_combine_row_weights,
+    _fused_dcp_lse_combine_bf16_head_scatter_kernel,
     _pack_dcp_output_lse_batched_kernel,
 )
 from vllm_ascend.ops.triton.dcp.dcp_jit import _launch_kernel
@@ -458,7 +458,7 @@ def _launch_fused_dcp_lse_combine(
     )
     if vector_compatible:
         launch(
-            _fused_dcp_lse_combine_row_weights,
+            _fused_dcp_lse_combine_bf16_head_scatter_kernel,
             (grid_size,),
             recv,
             output,

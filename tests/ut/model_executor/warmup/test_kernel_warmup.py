@@ -231,10 +231,12 @@ def test_runtime_combine_matches_registered_warmup(dtype, tokens):
     dcp_a2a._launch_fused_dcp_lse_combine(recv, output, dim, 1, False, None, None, 24, launch)
     launch.assert_called_once()
     expected = (
-        dcp_a2a._fused_dcp_lse_combine_row_weights if dtype == torch.bfloat16 else dcp_a2a._fused_dcp_lse_combine_kernel
+        dcp_a2a._fused_dcp_lse_combine_bf16_head_scatter_kernel
+        if dtype == torch.bfloat16
+        else dcp_a2a._fused_dcp_lse_combine_kernel
     )
     assert launch.call_args.args[0] is expected
-    combine_kernels = {dcp_a2a._fused_dcp_lse_combine_kernel, dcp_a2a._fused_dcp_lse_combine_row_weights}
+    combine_kernels = {dcp_a2a._fused_dcp_lse_combine_kernel, dcp_a2a._fused_dcp_lse_combine_bf16_head_scatter_kernel}
     assert {owner.kernel for owner in registry._registrations} & combine_kernels == {expected}
 
 
