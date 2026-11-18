@@ -2990,6 +2990,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         flash.query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
         flash.query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
         record_attention_compute_start()
+        output_kwargs = {"output_mask": flash.output_mask} if getattr(flash, "output_mask", None) is not None else {}
         latent, _ = flash.adapter.attention(
             flash.query,
             fused_cache,
@@ -2999,6 +3000,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             seqused_q=flash.used_q,
             metadata=flash.schedule,
             attn_mask=flash.attn_mask,
+            **output_kwargs,
         )
         return self._v_up_proj(latent)
 

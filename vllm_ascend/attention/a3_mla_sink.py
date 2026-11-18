@@ -172,14 +172,50 @@ class A3MLAAdapter:
             raise ValueError("A3 provider metadata must be nonempty and remain on the input device")
         return metadata
 
+    def build_output_mask(self, cache_seqlens, cu_seqlens_q, num_tokens):
+        """Rows without visible KV, shared across layers for one refreshed batch."""
+        token = torch.arange(num_tokens, device=cache_seqlens.device, dtype=torch.int32)
+        request = torch.searchsorted(cu_seqlens_q[1:].contiguous(), token, right=True).long()
+        lengths = cache_seqlens[request]
+        invalid = lengths <= 0
+        if self.config.mask_mode == 3:
+            query_start = cu_seqlens_q[request]
+            query_lengths = cu_seqlens_q[request + 1] - query_start
+            invalid |= lengths - query_lengths + token - query_start < 0
+        return invalid
+
     def attention(
-        self, q, k_cache, *, block_table, cache_seqlens, cu_seqlens_q, metadata, seqused_q=None, attn_mask=None
+        self,
+        q,
+        k_cache,
+        *,
+        block_table,
+        cache_seqlens,
+        cu_seqlens_q,
+        metadata,
+        output_mask,
+        seqused_q=None,
+        attn_mask=None,
+        normalize_output=True,
     ):
         del attn_mask  # Mask semantics are explicit in cfg.mask_mode, never inferred from a tensor.
         batch = self._check_lengths(cache_seqlens, cu_seqlens_q, seqused_q)
         cfg = self.config
-        if q.ndim != 3 or q.shape[1:] != (cfg.num_heads, QK_DIM) or q.dtype != cfg.dtype:
-            raise ValueError("normalized A3 Query must be TND [T,H,576] with the configured dtype")
+        if isinstance(q, tuple):
+            qv, q_rope = q
+            if qv.ndim != 3 or qv.shape[1:] != (cfg.num_heads, LATENT_DIM):
+                raise ValueError("A3 content Query must be TND [T,H,512]")
+            if q_rope.shape != (*qv.shape[:2], ROPE_DIM) or q_rope.device != qv.device:
+                raise ValueError("A3 RoPE Query must be same-device TND [T,H,64]")
+        else:
+            if q.ndim != 3 or q.shape[1:] != (cfg.num_heads, QK_DIM):
+                raise ValueError("normalized A3 Query must be TND [T,H,576]")
+            qv, q_rope = q[..., :LATENT_DIM], q[..., LATENT_DIM:]
+        if qv.dtype != cfg.dtype or q_rope.dtype != cfg.dtype:
+            raise ValueError("A3 Query must have the configured dtype")
+        tokens, device = qv.shape[0], qv.device
+        if output_mask.shape != (tokens,) or output_mask.dtype != torch.bool or output_mask.device != device:
+            raise ValueError("A3 output mask must be same-device bool [T] prepared with the metadata")
         if not isinstance(k_cache, tuple) or len(k_cache) != 2:
             raise ValueError("A3 MLA requires (content_cache, rope_cache)")
         v_cache, rope_cache = k_cache
@@ -190,15 +226,15 @@ class A3MLAAdapter:
         if block_table.shape != (batch, cfg.max_seqlen_k // cfg.page_size) or block_table.dtype != torch.int32:
             raise ValueError("A3 page table does not match the prepared metadata capacity")
         for tensor in (v_cache, rope_cache, block_table, cache_seqlens, metadata):
-            if tensor.device != q.device:
+            if tensor.device != device:
                 raise ValueError("A3 attention inputs must share one device")
         if v_cache.dtype != cfg.dtype or rope_cache.dtype != cfg.dtype:
             raise ValueError("A3 Query and KV dtype must match")
         result = self.attention_op(
-            q[..., LATENT_DIM:].contiguous(),
+            q_rope.contiguous(),
             rope_cache,
             v_cache,
-            qv=q[..., :LATENT_DIM].contiguous(),
+            qv=qv.contiguous(),
             cache_seqlens=cache_seqlens,
             page_table=block_table,
             cu_seqlens_q=cu_seqlens_q,
@@ -212,24 +248,17 @@ class A3MLAAdapter:
         if not isinstance(result, (tuple, list)) or len(result) != 4:
             raise ValueError("A3 MLA must return (out, lse, out_accum, lse_accum)")
         output, lse, _, _ = result
-        expected_output = (q.shape[0], cfg.num_heads, LATENT_DIM)
-        if output.shape != expected_output or output.dtype != cfg.dtype or output.device != q.device:
+        expected_output = (tokens, cfg.num_heads, LATENT_DIM)
+        if output.shape != expected_output or output.dtype != cfg.dtype or output.device != device:
             raise ValueError("A3 provider output must be TND and match Query dtype/device")
-        if lse.shape != (cfg.num_heads, q.shape[0]) or lse.dtype != torch.float32 or lse.device != q.device:
+        if lse.shape != (cfg.num_heads, tokens) or lse.dtype != torch.float32 or lse.device != device:
             raise ValueError("A3 provider LSE must be FP32 [H,T] on the Query device")
-        if q.shape[0]:
-            token = torch.arange(q.shape[0], device=q.device, dtype=torch.int32)
-            request = torch.searchsorted(cu_seqlens_q[1:].contiguous(), token, right=True).long()
-            live = cache_seqlens[request] > 0
-            if cfg.mask_mode == 3:
-                # Right-aligned causal attention can mask an entire query row
-                # when Q is longer than KV. Normalize the provider's +inf LSE
-                # sentinel so that DCP merging gives this row zero weight.
-                query_lengths = cu_seqlens_q[request + 1] - cu_seqlens_q[request]
-                offset = token - cu_seqlens_q[request]
-                live &= cache_seqlens[request] - query_lengths + offset >= 0
-            output = output.masked_fill(~live[:, None, None], 0)
-            lse = lse.masked_fill(~live[None, :], -torch.inf)
+        if normalize_output and tokens:
+            # The provider's empty/all-masked rows may carry +inf LSE.
+            # Ordinary MLA needs normalized rows before V-up. DCP defers this
+            # to its existing pack/combine kernels using the same output mask.
+            output.masked_fill_(output_mask[:, None, None], 0)
+            lse.masked_fill_(output_mask[None, :], -torch.inf)
         # Existing MLA V-up and DCP adaptation consume NTD output and NT LSE.
         return output.transpose(0, 1), lse
 

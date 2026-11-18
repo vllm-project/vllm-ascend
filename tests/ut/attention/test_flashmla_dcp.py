@@ -766,6 +766,78 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
     runtime.scope["torch_npu"]._npu_fused_infer_attention_score_get_max_workspace.assert_not_called()
 
 
+@pytest.mark.parametrize("causal", [False, True])
+def test_a3_dcp_defers_normalization_to_matching_consumers(runtime, monkeypatch, causal):
+    a3 = sys.modules["vllm_ascend.attention.a3_mla_sink"]
+    monkeypatch.setattr(a3.A3MLAAdapter, "_check_lengths", lambda self, lengths, cu, used: lengths.numel())
+
+    def provider(q, *args, **kwargs):
+        tokens, heads = q.shape[:2]
+        return torch.ones(tokens, heads, 512, dtype=q.dtype), torch.zeros(heads, tokens), None, None
+
+    adapter = a3.A3MLAAdapter(
+        a3.A3MLAConfig(8, 0.125, dtype=torch.bfloat16),
+        provider,
+        lambda *args, **kwargs: torch.zeros(32, dtype=torch.uint8),
+    )
+    flash = runtime.builder(size=2, dtype=torch.bfloat16, a3_adapter=adapter).build(
+        common([1, 3], [1, 1], tokens=4, causal=causal),
+        2,
+        2,
+        False,
+    )
+    cache = adapter.allocate_cache(8, device="cpu")
+    exchanged = object()
+
+    def exchange(output, lse, *args, output_mask, **kwargs):
+        assert output_mask is flash.output_mask
+        assert torch.all(output == 1) and torch.all(lse == 0)
+        assert kwargs["defer_combine"]
+        return exchanged
+
+    def combine(recv, *args, local_output, local_lse, local_output_mask=None, **kwargs):
+        assert recv is exchanged
+        if causal:
+            assert local_output_mask is flash.current.output_mask
+            assert torch.all(local_output == 1) and torch.all(local_lse == 0)
+            assert local_output_mask.tolist() == [False, False, True, True]
+        else:
+            assert local_output is local_lse is local_output_mask is None
+        return torch.zeros(4, 8, 512, dtype=torch.bfloat16)
+
+    def forbidden_mask(*args, **kwargs):
+        pytest.fail("DCP attention must not launch standalone output normalization")
+
+    monkeypatch.setattr(torch.Tensor, "masked_fill_", forbidden_mask)
+    monkeypatch.setattr(torch.ops.vllm, "dcp_a2a_fused", exchange, raising=False)
+    runtime.scope["fused_dcp_lse_combine"] = combine
+    impl = runtime.bind(
+        SimpleNamespace(
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            num_kv_heads=1,
+            num_heads=8,
+            dcp_size=2,
+            dcp_rank=0,
+            dcp_group=SimpleNamespace(unique_name="cpu-dcp"),
+            use_a3_mla_sink=True,
+            _v_up_proj_batch_major=lambda value: value,
+        )
+    )
+    if causal:
+        runtime.current_query_storages.add(flash.current.query.untyped_storage().data_ptr())
+    preprocessed = SimpleNamespace(
+        ql_nope=torch.zeros(4, 16, 512, dtype=torch.bfloat16),
+        q_pe=torch.zeros(4, 16, 64, dtype=torch.bfloat16),
+        current_k_nope=torch.zeros(4, 1, 512, dtype=torch.bfloat16),
+        current_k_pe=torch.zeros(4, 1, 64, dtype=torch.bfloat16),
+    )
+    runtime.forward(impl, preprocessed, cache, SimpleNamespace(external_flashmla=flash, decode=SimpleNamespace()))
+    assert not any(event[0] == "query_copy" for event in runtime.events)
+    if causal:
+        assert any(t is flash.current.output_mask and stream.name == "attn" for t, stream in runtime.recorded_streams)
+
+
 @pytest.mark.parametrize("draft", [False, True])
 def test_external_dcp_graph_skips_fia_parameter_updates(draft):
     metadata = {"flash": SimpleNamespace(decode=object(), external_flashmla=object())}

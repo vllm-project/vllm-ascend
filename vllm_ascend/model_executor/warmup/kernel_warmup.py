@@ -148,11 +148,12 @@ def _register_dcp_warmup(worker: NPUWorker) -> None:
                 max(scheduler.max_num_batched_tokens, scheduler.max_num_seqs * query_len),
                 False if mla else not impl.enable_sparse_sfa_turboquant,
                 mla,
+                mla and getattr(impl, "use_a3_mla_sink", False),
             )
             if layout in seen:
                 continue
             seen.add(layout)
-            dtype, local_heads, head_dim, scatter_size, pcp_size, max_tokens, from_stats, mla = layout
+            dtype, local_heads, head_dim, scatter_size, pcp_size, max_tokens, from_stats, mla, masked_output = layout
             register_dcp_warmup(
                 dtype=dtype,
                 local_heads=local_heads,
@@ -162,6 +163,7 @@ def _register_dcp_warmup(worker: NPUWorker) -> None:
                 max_tokens=max_tokens,
                 from_stats=from_stats,
                 mla=mla,
+                masked_output=masked_output,
             )
 
 

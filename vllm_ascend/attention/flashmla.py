@@ -304,6 +304,7 @@ class FlashMLACurrent:
     block_table: torch.Tensor
     slots: torch.Tensor
     attn_mask: torch.Tensor
+    output_mask: torch.Tensor | None = None
 
 
 @dataclass
@@ -323,6 +324,7 @@ class FlashMLADecode:
     cos: torch.Tensor | None
     sin: torch.Tensor | None
     current: FlashMLACurrent | None = None
+    output_mask: torch.Tensor | None = None
 
 
 class FlashMLAMetadataBuilder:
@@ -396,6 +398,9 @@ class FlashMLAMetadataBuilder:
             attn_mask=self.attn_mask if adapter.config.mask_mode == 3 else None,
             cos=torch.empty(rope_shape, dtype=self.dtype, device=self.device) if self.use_rope else None,
             sin=torch.empty(rope_shape, dtype=self.dtype, device=self.device) if self.use_rope else None,
+            output_mask=torch.empty(tokens, dtype=torch.bool, device=self.device)
+            if isinstance(adapter, A3MLAAdapter)
+            else None,
         )
         if self.dcp_size > 1 and causal and self.use_spec_decode:
             # As in split DCP attention, each rank retains every current row.
@@ -424,6 +429,9 @@ class FlashMLAMetadataBuilder:
                 block_table=torch.zeros((rows, block_columns), **ints),
                 slots=torch.full_like(flash.slots, -1),
                 attn_mask=self.attn_mask,
+                output_mask=torch.empty(tokens, dtype=torch.bool, device=self.device)
+                if isinstance(current_adapter, A3MLAAdapter)
+                else None,
             )
         return flash
 
@@ -493,6 +501,8 @@ class FlashMLAMetadataBuilder:
                 flash.cos.copy_(cos)
                 flash.sin.copy_(sin)
             flash.schedule.copy_(flash.adapter.build_metadata(flash.cache_lens, flash.cu, flash.used_q))
+            if flash.output_mask is not None:
+                flash.output_mask.copy_(flash.adapter.build_output_mask(flash.cache_lens, flash.cu, tokens))
             if flash.current is not None:
                 current = flash.current
                 page_counts = (flash.used_q + FLASHMLA_BLOCK_SIZE - 1) // FLASHMLA_BLOCK_SIZE
@@ -505,6 +515,10 @@ class FlashMLAMetadataBuilder:
                 current.slots.copy_(page_starts[requests] * FLASHMLA_BLOCK_SIZE + indices - flash.cu[requests])
                 current.slots.masked_fill_(~flash.token_live, -1)
                 current.schedule.copy_(current.adapter.build_metadata(flash.used_q, flash.cu, flash.used_q))
+                if current.output_mask is not None:
+                    # Replicated current KV has exactly used_q rows. Active
+                    # segments are fully visible; dummy segments are not.
+                    current.output_mask.copy_(~flash.token_live)
 
         # Refresh on the caller's stream before return; captured buffer caching
         # preserves the addresses used by graph replay.

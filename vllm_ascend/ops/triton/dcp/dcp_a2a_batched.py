@@ -60,6 +60,8 @@ def _pack_dcp_output_lse_batched_kernel(
     BLOCK_D: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
     OUTPUT_HEAD_MAJOR: tl.constexpr = False,
+    output_mask_ptr=None,
+    HAS_OUTPUT_MASK: tl.constexpr = False,
 ):
     program_idx = tl.program_id(0)
     num_programs = tl.num_programs(0)
@@ -103,6 +105,9 @@ def _pack_dcp_output_lse_batched_kernel(
         output_offsets = token_idx * output_stride_t + head_idx * output_stride_h + d_offsets * output_stride_d
         d_mask = (d_offsets < head_dim) & row_mask
         output = tl.load(output_ptr + output_offsets, mask=d_mask, other=0.0)
+        if HAS_OUTPUT_MASK:
+            invalid = tl.load(output_mask_ptr + token_idx, mask=row_mask, other=True).to(tl.int1)
+            output = tl.where(invalid, 0.0, output)
         tl.store(send_ptr + send_base + d_offsets * send_stride_d, output, mask=d_mask)
 
         lse = tl.load(lse_ptr + token_idx * lse_stride_t + head_idx * lse_stride_h, mask=row_mask, other=0.0).to(
@@ -113,6 +118,8 @@ def _pack_dcp_output_lse_batched_kernel(
                 tl.float32
             )
             lse = lse + tl.log(total)
+        if HAS_OUTPUT_MASK:
+            lse = tl.where(invalid, -float("inf"), lse)
         if LSE_PACK_DIM == 1:
             tl.store(send_ptr + send_base + head_dim * send_stride_d, lse.to(send_ptr.dtype.element_ty), mask=row_mask)
         else:
@@ -165,6 +172,8 @@ def _fused_dcp_lse_combine_batched_kernel(
     BLOCK_ROWS: tl.constexpr,
     HAS_LOCAL: tl.constexpr = True,
     RANK_UNROLL: tl.constexpr = 1,
+    local_output_mask_ptr=None,
+    HAS_LOCAL_OUTPUT_MASK: tl.constexpr = False,
 ):
     # The caller selects BF16, scatter-head, no-return-LSE cases.
     # Each received row therefore ends with four packed LSE values.
@@ -187,6 +196,9 @@ def _fused_dcp_lse_combine_batched_kernel(
                 mask=row_mask,
                 other=0.0,
             ).to(tl.float32)
+            if HAS_LOCAL_OUTPUT_MASK:
+                invalid = tl.load(local_output_mask_ptr + token_idx, mask=row_mask, other=True).to(tl.int1)
+                local_lse = tl.where(invalid, -float("inf"), local_lse)
             local_valid = tl.abs(local_lse) < float("inf")
             lse_max = tl.where(local_valid, local_lse, -float("inf"))
         for rank_idx in tl.range(0, DCP_SIZE, loop_unroll_factor=RANK_UNROLL):

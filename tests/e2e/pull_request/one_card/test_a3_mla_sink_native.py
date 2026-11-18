@@ -101,7 +101,8 @@ def reference(q, cache, table, qlens, klens, causal, scale):
 def invoke(adapter, data):
     metadata = adapter.build_metadata(data["cache_seqlens"], data["cu_seqlens_q"], data["seqused_q"])
     assert metadata.dtype == torch.uint8 and metadata.numel() == 2376
-    return adapter.attention(**data, metadata=metadata)
+    output_mask = adapter.build_output_mask(data["cache_seqlens"], data["cu_seqlens_q"], data["q"].shape[0])
+    return adapter.attention(**data, metadata=metadata, output_mask=output_mask)
 
 
 def compare(actual, expected):
@@ -140,22 +141,65 @@ def test_native_explicit_scale_and_dcp_head_count(sink, causal):
 def test_native_graph_refresh_lengths_and_reorder(sink, causal):
     adapter, data, oracle = make_case(sink, torch.bfloat16, (2, 1), (257, 33), causal, padded=True)
     metadata = adapter.build_metadata(data["cache_seqlens"], data["cu_seqlens_q"], data["seqused_q"])
+    output_mask = adapter.build_output_mask(data["cache_seqlens"], data["cu_seqlens_q"], data["q"].shape[0])
     for _ in range(3):
-        adapter.attention(**data, metadata=metadata)
+        adapter.attention(**data, metadata=metadata, output_mask=output_mask)
     torch.npu.synchronize()
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph):
-        output = adapter.attention(**data, metadata=metadata)
+        output = adapter.attention(**data, metadata=metadata, output_mask=output_mask)
     pointer = metadata.data_ptr()
+    mask_pointer = output_mask.data_ptr()
     for qlens, klens in [((2, 1), (257, 33)), ((1, 2), (9, 143)), ((2, 1), (129, 0)), ((2, 1), (1, 0))]:
         data["cache_seqlens"].copy_(torch.tensor(klens, dtype=torch.int32, device="npu"))
         data["cu_seqlens_q"].copy_(torch.tensor([0, qlens[0], 3], dtype=torch.int32, device="npu"))
         data["seqused_q"].copy_(torch.tensor(qlens, dtype=torch.int32, device="npu"))
         metadata.copy_(adapter.build_metadata(data["cache_seqlens"], data["cu_seqlens_q"], data["seqused_q"]))
+        output_mask.copy_(adapter.build_output_mask(data["cache_seqlens"], data["cu_seqlens_q"], data["q"].shape[0]))
         graph.replay()
         torch.npu.synchronize()
         assert metadata.data_ptr() == pointer
+        assert output_mask.data_ptr() == mask_pointer
         compare(output, reference(*oracle[:3], qlens, klens, causal, oracle[-1]))
+
+
+@pytest.mark.parametrize("tokens", [3, 129])
+@torch.inference_mode()
+def test_native_split_query_and_fused_dcp_mask_graph(sink, tokens):
+    from vllm_ascend.ops.triton.dcp.dcp_a2a import fused_dcp_lse_combine
+
+    adapter, data, oracle = make_case(sink, torch.bfloat16, (2, tokens - 2), (3, 0), True)
+    metadata = adapter.build_metadata(data["cache_seqlens"], data["cu_seqlens_q"], data["seqused_q"])
+    output_mask = adapter.build_output_mask(data["cache_seqlens"], data["cu_seqlens_q"], tokens)
+    original_mask = output_mask.clone()
+    data["q"] = (data["q"][..., :512].contiguous(), data["q"][..., 512:].contiguous())
+
+    def pipeline():
+        out, lse = adapter.attention(**data, metadata=metadata, output_mask=output_mask, normalize_output=False)
+        out, lse = out.transpose(0, 1), lse.T.unsqueeze(-1)
+        recv = torch.ops.vllm.dcp_a2a_fused(out, lse, 1, 1, "", defer_combine=True, output_mask=output_mask)
+        # Identical contributions must merge back to the FP64 reference.
+        return fused_dcp_lse_combine(recv, 512, 1, local_output=out, local_lse=lse, local_output_mask=output_mask)
+
+    expected = reference(*oracle)[0].transpose(0, 1)
+    actual = pipeline()
+    torch.testing.assert_close(actual.cpu().double(), expected, atol=0.003, rtol=0.02)
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        captured = pipeline()
+    pointer = output_mask.data_ptr()
+    for all_invalid in (False, True, False):
+        if all_invalid:
+            output_mask.fill_(True)
+        else:
+            output_mask.copy_(original_mask)
+        graph.replay()
+        torch.npu.synchronize()
+        torch.testing.assert_close(
+            captured.cpu().double(), torch.zeros_like(expected) if all_invalid else expected, atol=0.003, rtol=0.02
+        )
+        assert output_mask.data_ptr() == pointer
 
 
 def test_native_eager_does_not_read_device_scalars(sink):
@@ -231,6 +275,7 @@ def test_native_production_builder_refreshes_padded_batch(sink):
             cu_seqlens_q=batch.cu,
             seqused_q=batch.used_q,
             metadata=batch.schedule,
+            output_mask=batch.output_mask,
         )
         compare((out[:, :3], lse[:, :3]), reference(*oracle[:3], qlens, klens, False, oracle[-1]))
         assert torch.all(out[:, 3:] == 0).item()

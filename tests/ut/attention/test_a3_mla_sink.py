@@ -222,6 +222,7 @@ def test_two_operator_boundary_reuses_lengths_and_normalizes_empty_rows(monkeypa
     cu = torch.tensor([0, 2, 4], dtype=torch.int32)
     used = torch.tensor([2, 0], dtype=torch.int32)
     calls = []
+    provider_outputs = []
 
     def metadata_op(*args, **kwargs):
         assert args[6] is lengths
@@ -236,7 +237,10 @@ def test_two_operator_boundary_reuses_lengths_and_normalizes_empty_rows(monkeypa
         assert q.shape == (4, 8, 64) and q.is_contiguous()
         assert kwargs["qv"].shape == (4, 8, 512) and kwargs["qv"].is_contiguous()
         calls.append("attention")
-        return torch.ones(4, 8, 512, dtype=q.dtype), torch.full((8, 4), torch.inf), None, None
+        output = torch.ones(4, 8, 512, dtype=q.dtype)
+        lse = torch.full((8, 4), torch.inf)
+        provider_outputs.append((output, lse))
+        return output, lse, None, None
 
     adapter = sink.A3MLAAdapter(sink.A3MLAConfig(8, 0.125, mask_mode=3 if causal else 0), attention_op, metadata_op)
 
@@ -248,6 +252,9 @@ def test_two_operator_boundary_reuses_lengths_and_normalizes_empty_rows(monkeypa
             context.setattr(torch.Tensor, name, forbidden)
         context.setattr(torch, "where", forbidden)
         metadata = adapter.build_metadata(lengths, cu, used)
+        output_mask = adapter.build_output_mask(lengths, cu, 4)
+        context.setattr(torch, "searchsorted", forbidden)
+        context.setattr(torch.Tensor, "masked_fill", forbidden)
         output, lse = adapter.attention(
             torch.zeros(4, 8, 576, dtype=torch.bfloat16),
             adapter.allocate_cache(2, device="cpu"),
@@ -256,13 +263,33 @@ def test_two_operator_boundary_reuses_lengths_and_normalizes_empty_rows(monkeypa
             cu_seqlens_q=cu,
             seqused_q=used,
             metadata=metadata,
+            output_mask=output_mask,
         )
     assert calls == ["metadata", "attention"]
+    assert output.data_ptr() == provider_outputs[0][0].data_ptr()
+    assert lse.data_ptr() == provider_outputs[0][1].data_ptr()
     assert torch.all(output[:, 2:] == 0) and torch.isneginf(lse[:, 2:]).all()
     assert torch.all(output[:, 1] == 1)
     assert torch.all(output[:, 0] == (0 if causal else 1))
     if causal:
         assert torch.isneginf(lse[:, 0]).all()
+
+
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize(
+    "qlens,klens",
+    [((0, 3, 0, 2, 4), (0, 1, 9, 0, 2)), ((1, 0, 3), (0, 0, 0)), ((0, 0), (0, 3)), ((2, 1), (3, 1))],
+)
+def test_output_mask_matches_visible_kv_rows(causal, qlens, klens):
+    adapter = sink.A3MLAAdapter(sink.A3MLAConfig(8, 0.125, mask_mode=3 if causal else 0), None, None)
+    cu = torch.tensor([0, *torch.tensor(qlens).cumsum(0).tolist()], dtype=torch.int32)
+    expected = [
+        (min(klen, max(0, klen - qlen + offset + 1)) if causal else klen) == 0
+        for qlen, klen in zip(qlens, klens)
+        for offset in range(qlen)
+    ]
+    actual = adapter.build_output_mask(torch.tensor(klens, dtype=torch.int32), cu, sum(qlens))
+    assert actual.dtype == torch.bool and actual.tolist() == expected
 
 
 @pytest.mark.parametrize("causal", [False, True])
@@ -312,7 +339,9 @@ def test_a3_builder_normalizes_once_and_reuses_schedule_storage(monkeypatch, cau
     inputs.causal = causal
     first = builder.build(inputs, 2, 3, False, retain_for_graph=True)
     schedule_ptr = first.schedule.data_ptr()
+    mask_ptr = first.output_mask.data_ptr()
     current_ptr = first.current.schedule.data_ptr() if first.current else None
+    current_mask_ptr = first.current.output_mask.data_ptr() if first.current else None
     split = causal and dcp_size > 1
     assert first.cache_lens.tolist() == (
         [7, 3, 0, 0, 0] if split else [8, 4, 0, 0, 0] if dcp_size > 1 else [15, 7, 0, 0, 0]
@@ -322,13 +351,93 @@ def test_a3_builder_normalizes_once_and_reuses_schedule_storage(monkeypatch, cau
     inputs.seq_lens.copy_(torch.tensor([1, 0], dtype=torch.int32))
     second = builder.build(inputs, 2, 3, False)
     assert second is first and second.schedule.data_ptr() == schedule_ptr
+    assert second.output_mask.data_ptr() == mask_ptr
+    expected_live = [False, False] if split else [not causal, True]
+    assert second.output_mask.tolist() == [not live for live in expected_live] + [True] * 6
     assert second.used_q.tolist() == [2, 0, 0, 0, 0]
     assert second.cache_lens.tolist() == ([0, 0, 0, 0, 0] if split else [1, 0, 0, 0, 0])
     torch.testing.assert_close(second.schedule, torch.cat((second.cache_lens, second.cu)).to(torch.uint8))
     if split:
         assert second.current.schedule.data_ptr() == current_ptr
+        assert second.current.output_mask.data_ptr() == current_mask_ptr
+        assert second.current.output_mask.tolist() == [False, False] + [True] * 6
         assert isinstance(second.current.cache, tuple)
         torch.testing.assert_close(second.current.schedule, torch.cat((second.used_q, second.cu)).to(torch.uint8))
+
+    # Reorder query boundaries and reactivate a previously empty request in
+    # the same retained buffers; masks must not be stale across graph replays.
+    inputs.query_start_loc.copy_(torch.tensor([0, 1, 3], dtype=torch.int32))
+    inputs.seq_lens.copy_(torch.tensor([0, 4], dtype=torch.int32))
+    third = builder.build(inputs, 2, 3, False)
+    assert third.output_mask.data_ptr() == mask_ptr
+    assert third.output_mask.tolist() == [True, False, False] + [True] * 5
+    if split:
+        assert third.current.output_mask.data_ptr() == current_mask_ptr
+        assert third.current.output_mask.tolist() == third.output_mask.tolist()
+
+
+@pytest.mark.parametrize("path", ["ordinary", "history", "current"])
+def test_a3_callers_forward_the_matching_output_mask(monkeypatch, path):
+    monkeypatch.setattr(sink.A3MLAAdapter, "_check_lengths", lambda self, lengths, cu, used: lengths.numel())
+
+    def provider(q, *args, **kwargs):
+        if path != "ordinary":
+            assert q.data_ptr() == q_pe.data_ptr()
+            assert kwargs["qv"].data_ptr() == q_nope.data_ptr()
+        # Finite invalid-row sentinels must be masked by the eventual consumer.
+        return torch.ones(2, 8, 512, dtype=q.dtype), torch.zeros(8, 2), None, None
+
+    adapter = sink.A3MLAAdapter(sink.A3MLAConfig(8, 0.125), provider, None)
+    cache = adapter.allocate_cache(1, device="cpu")
+    flash = SimpleNamespace(
+        adapter=adapter,
+        query=torch.zeros(2, 8, 576, dtype=torch.bfloat16),
+        block_table=torch.zeros(1, 1, dtype=torch.int32),
+        cache_lens=torch.zeros(1, dtype=torch.int32),
+        cu=torch.tensor([0, 2], dtype=torch.int32),
+        used_q=torch.tensor([2], dtype=torch.int32),
+        schedule=torch.zeros(32, dtype=torch.uint8),
+        attn_mask=None,
+        output_mask=torch.ones(2, dtype=torch.bool),
+    )
+    flash.current = SimpleNamespace(
+        adapter=adapter,
+        query=flash.query.clone(),
+        cache=cache,
+        schedule=flash.schedule,
+        block_table=flash.block_table,
+        attn_mask=None,
+        output_mask=torch.zeros(2, dtype=torch.bool),
+    )
+    q_nope, q_pe = flash.query[..., :512].contiguous(), flash.query[..., 512:].contiguous()
+    if path == "ordinary":
+        forward = ast_method(
+            "vllm_ascend/attention/mla_v1.py",
+            "AscendMLAImpl",
+            "_forward_external_flashmla",
+            {"torch": torch, "record_attention_compute_start": lambda: None},
+        )
+        impl = SimpleNamespace(kv_lora_rank=512, use_a3_mla_sink=True, _v_up_proj=lambda output: output)
+        out = forward(impl, SimpleNamespace(ql_nope=q_nope, q_pe=q_pe), cache, SimpleNamespace(external_flashmla=flash))
+        assert torch.all(out == 0)
+    else:
+
+        def forbidden(*args, **kwargs):
+            pytest.fail("DCP must defer masking and avoid fused Query copies")
+
+        monkeypatch.setattr(torch.Tensor, "masked_fill_", forbidden)
+        monkeypatch.setattr(torch.Tensor, "copy_", forbidden)
+        kinds = SimpleNamespace(HISTORY=object(), CURRENT=object())
+        forward = ast_method(
+            "vllm_ascend/attention/context_parallel/mla_cp.py",
+            "AscendMlaDCPImpl",
+            "_run_dcp_flashmla_attention",
+            {"CPKVScope": kinds},
+        )
+        kind = kinds.CURRENT if path == "current" else kinds.HISTORY
+        out, lse = forward(SimpleNamespace(kv_lora_rank=512), flash, q_nope, q_pe, cache, None, attention_kind=kind)
+        assert torch.all(out == 1)
+        assert torch.all(lse == 0)
 
 
 def test_current_and_persistent_caches_preserve_packed_components():

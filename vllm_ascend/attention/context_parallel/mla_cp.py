@@ -607,8 +607,10 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             slot_mapping=current.slots,
             cache_mode="Norm",
         )
-        current.query[..., : self.kv_lora_rank].copy_(q_nope)
-        current.query[..., self.kv_lora_rank :].copy_(q_pe)
+        if getattr(current, "output_mask", None) is None:
+            # A5 consumes fused Query; A3 consumes the existing split tensors.
+            current.query[..., : self.kv_lora_rank].copy_(q_nope)
+            current.query[..., self.kv_lora_rank :].copy_(q_pe)
 
     def _run_dcp_flashmla_attention(self, flash, q_nope, q_pe, k_nope, k_pe, *, attention_kind):
         """Adapt FlashMLA to TND/TN1; current KV/Q must already be staged."""
@@ -618,12 +620,17 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             query, cache = current.query, current.cache
             adapter, schedule = current.adapter, current.schedule
             block_table, cache_lens, attn_mask = current.block_table, flash.used_q, current.attn_mask
+            output_mask = getattr(current, "output_mask", None)
         else:
             query, cache = flash.query, k_nope
             adapter, schedule = flash.adapter, flash.schedule
             block_table, cache_lens, attn_mask = flash.block_table, flash.cache_lens, None
-            query[..., : self.kv_lora_rank].copy_(q_nope)
-            query[..., self.kv_lora_rank :].copy_(q_pe)
+            output_mask = getattr(flash, "output_mask", None)
+            if output_mask is None:
+                query[..., : self.kv_lora_rank].copy_(q_nope)
+                query[..., self.kv_lora_rank :].copy_(q_pe)
+        if output_mask is not None:
+            query = (q_nope, q_pe)
         output, lse = adapter.attention(
             query,
             cache,
@@ -633,6 +640,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             seqused_q=flash.used_q,
             metadata=schedule,
             attn_mask=attn_mask,
+            **({"output_mask": output_mask, "normalize_output": False} if output_mask is not None else {}),
         )
         return output.transpose(0, 1), lse.transpose(0, 1).unsqueeze(-1)
 
@@ -881,6 +889,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                     current.block_table,
                     current.slots,
                     current.attn_mask,
+                    getattr(current, "output_mask", None),
                     flash.cu,
                     flash.used_q,
                     flash.token_live,
@@ -924,6 +933,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             history_output,
             history_lse,
             defer_combine=True,
+            **({"output_mask": flash.output_mask} if getattr(flash, "output_mask", None) is not None else {}),
         )
         if has_current:
             main_stream.wait_event(current_attn_done)
@@ -935,6 +945,11 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             scatter_dim=1,
             local_output=current_output,
             local_lse=current_lse,
+            **(
+                {"local_output_mask": flash.current.output_mask}
+                if has_current and flash is not None and getattr(flash.current, "output_mask", None) is not None
+                else {}
+            ),
         )
         return self._v_up_proj_batch_major(attn_output)
 

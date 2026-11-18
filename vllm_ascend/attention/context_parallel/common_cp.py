@@ -176,7 +176,7 @@ class DCPImplMixin:
         head_end = head_start + num_heads
         return tuple(query[:, head_start:head_end].contiguous() for query in queries)
 
-    def _merge_dcp_attention_output(self, attn_output, softmax_lse, *, defer_combine=False):
+    def _merge_dcp_attention_output(self, attn_output, softmax_lse, *, defer_combine=False, output_mask=None):
         pcp_group = getattr(self, "pcp_group", None)
         if pcp_group is not None and pcp_group.world_size > 1:
             # Match SFA: TP exchanges distinct head shards, then PCP gathers
@@ -190,6 +190,7 @@ class DCPImplMixin:
                 self.tp_group.unique_name,
                 pcp_group.unique_name,
                 defer_combine=defer_combine,
+                **({"output_mask": output_mask} if output_mask is not None else {}),
             )
         return torch.ops.vllm.dcp_a2a_fused(
             attn_output,
@@ -198,4 +199,5 @@ class DCPImplMixin:
             1,
             self.dcp_group.unique_name if self.dcp_size > 1 else "",
             defer_combine=defer_combine,
+            **({"output_mask": output_mask} if output_mask is not None else {}),
         )
