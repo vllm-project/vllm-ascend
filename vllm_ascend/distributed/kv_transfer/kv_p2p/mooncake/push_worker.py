@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 """Layerwise Push: proxy-provided destinations, P WRITE pool and D DONE listener."""
 
+import functools
+import inspect
 import queue
 import threading
 import time
@@ -44,6 +46,22 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
 
 # Rank tuples are (PP, PCP, TP), matching scheduler handshake keys.
 WorkerRank = tuple[int, int, int]
+
+
+@functools.cache
+def _dcp_groups_sorted() -> bool:
+    """Whether the installed vLLM sorts DCP group members by global rank.
+
+    Upstream vLLM forms one DCP group per segment of ``dcp_size`` consecutive
+    (TP, PCP) positions and derives ``rank_in_group`` from the order of the
+    member list it gives ``GroupCoordinator``. Since vllm@25e9f7b3f2 that list
+    is sorted by global rank (``pcp * tp_size + tp``); the v0.33.0 tag keeps
+    the TP-major order. Mirror whichever order the local build uses.
+    """
+    import vllm.distributed.parallel_state as parallel_state
+
+    source = inspect.getsource(parallel_state.initialize_model_parallel)
+    return "group_ranks = [sorted(x.tolist()) for x in group_ranks]" in source
 
 
 @dataclass
@@ -407,6 +425,29 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         if not state.destinations:
             raise ValueError("Missing D worker completion endpoints")
 
+    def _get_remote_dcp_rank(self, remote: MooncakeTransferMetadataGroups, params) -> int:
+        """DCP in-group rank the destination's attention kernel uses for stripes.
+
+        The group is the segment of ``dcp_size`` consecutive (TP, PCP) positions
+        starting at ``lin - lin % dcp_size``, ``lin = tp * pcp_size + pcp``; a
+        sorting vLLM orders it by the in-replica global rank
+        ``pcp * tp_size + tp``, otherwise by the TP-major ``lin``.
+        """
+        if remote.dcp_size <= 1:
+            # DCP is disabled on the destination side; the rank is irrelevant.
+            return 0
+        tp_rank, pcp_rank = params["consumer_rank"][2], params["consumer_rank"][1]
+        lin = tp_rank * remote.pcp_size + pcp_rank
+        start = lin - lin % remote.dcp_size
+        if not _dcp_groups_sorted():
+            return lin - start
+        key = pcp_rank * remote.tp_size + tp_rank
+        return sum(
+            1
+            for member in range(start, start + remote.dcp_size)
+            if member % remote.pcp_size * remote.tp_size + member // remote.pcp_size < key
+        )
+
     def _get_layer_dcp_sizes(
         self, layer_name: str, remote: MooncakeTransferMetadataGroups, rank: WorkerRank
     ) -> tuple[int, int]:
@@ -547,10 +588,10 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 layer_name, remote, tuple(params["consumer_rank"])
             )
             local_dcp_rank = self.dcp_rank if local_dcp_size > 1 else 0
-            # Pull uses the same TP-major/PCP-minor ordering: DCP=PCP
-            # shards within each TP rank; DCP=TP*PCP spans all workers.
-            remote_rank = params["consumer_rank"][2] * remote.pcp_size + params["consumer_rank"][1]
-            remote_dcp_rank = remote_rank % remote_dcp_size
+            # A layer the destination does not shard assigns no stripes, so its
+            # rank is never needed and a pre-fix peer stays usable for it.
+            remote_dcp_rank = self._get_remote_dcp_rank(remote, params) if remote_dcp_size > 1 else 0
+
             local_interleave = self.transfer_metadata.cp_kv_cache_interleave_size
             remote_interleave = pp.cp_kv_cache_interleave_size
             for side, size, interleave, page_size in (
