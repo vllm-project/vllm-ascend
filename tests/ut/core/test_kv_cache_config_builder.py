@@ -20,12 +20,15 @@ pytest.importorskip(
 
 import torch
 from vllm.config import KVTransferConfig
+from vllm.v1.core import kv_cache_config_builder as upstream_builder_module
+from vllm.v1.core import kv_cache_planning
 from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     MambaSpec,
+    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
@@ -197,3 +200,39 @@ def test_turboquant_groups_use_packed_pool_bytes():
     pool_bytes = builder._get_pool_bytes_per_block(make_runtime(), groups)
     assert pool_bytes == tq_cache.pool_bytes_per_block(groups)
     assert pool_bytes >= sum(spec.page_size_bytes for spec in uniform.kv_cache_specs.values())
+    runtime = make_runtime()
+    runtime.cache_config = SimpleNamespace(prefix_cache_retention_interval=4096)
+    config = builder_module._get_kv_cache_config_deepseek_v4_main(runtime, groups, num_blocks=3)
+    assert config.num_blocks == 3 and config.prefix_cache_retention_interval == 4096
+    assert config.kv_cache_tensors == tq_cache.cache_config(groups, num_blocks=3)[1]
+
+
+@pytest.mark.parametrize("override", [None, 11])
+def test_core_applies_capacity_and_converges_worker_layouts(monkeypatch, override):
+    builder = AscendKVCacheConfigBuilder()
+    config = make_runtime()
+    config.cache_config = SimpleNamespace(
+        num_gpu_blocks_override=override, prefix_cache_retention_interval=None, enable_extensible_kv_cache=False
+    )
+    config.model_config.original_max_model_len = config.model_config.max_model_len = 16
+    config.parallel_config = SimpleNamespace(tensor_parallel_size=1, decode_context_parallel_size=1)
+    spec = MLAAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=16, dtype=torch.bfloat16, model_version="deepseek_v4"
+    )
+    uniform = UniformTypeKVCacheSpecs.from_specs({"target": spec})
+    groups = [KVCacheGroupSpec(["target"], uniform)]
+    specs = {"target": uniform}
+    monkeypatch.setattr(upstream_builder_module, "get_kv_cache_config_builder", lambda _: builder)
+    if hasattr(kv_cache_planning, "get_kv_cache_config_builder"):
+        monkeypatch.setattr(kv_cache_planning, "get_kv_cache_config_builder", lambda _: builder)
+    p = builder._get_pool_bytes_per_block(config, groups)
+    results = kv_cache_planning.get_kv_cache_configs(config, [specs, specs], [100 * p, 80 * p], groups)
+    expected_n = override if override is not None else 80
+    expected = builder.get_kv_cache_config_from_groups(config, groups, expected_n)
+    assert [result.num_blocks for result in results] == [expected_n, expected_n]
+    assert all(result.kv_cache_tensors == expected.kv_cache_tensors for result in results)
+    # A later materialization follows Core's current N without reapplying override.
+    config.cache_config.num_gpu_blocks_override = 99
+    replanned = builder.get_kv_cache_config_from_groups(config, groups, num_blocks=3)
+    assert replanned.num_blocks == 3
+    assert {tensor.size for tensor in replanned.kv_cache_tensors} == {3 * p}
