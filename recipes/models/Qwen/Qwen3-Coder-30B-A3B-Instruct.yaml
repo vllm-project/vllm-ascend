@@ -53,7 +53,7 @@ variants:
     description: "W8A8 checkpoint published by Eco-Tech on ModelScope; served with the Ascend quantization method."
   bf16:
     precision: bf16
-    vram_minimum_gb: 60
+    vram_minimum_gb: 64
     supported_hardware: [ascend_910c]
     hardware_overrides:
       ascend_910c:
