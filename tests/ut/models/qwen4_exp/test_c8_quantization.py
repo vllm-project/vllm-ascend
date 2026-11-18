@@ -5,6 +5,8 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
 from tests.ut.models.test_qwen4_exp_cache_config import _groups
@@ -311,6 +313,70 @@ def test_c8_indexer_constructor_keeps_raw_ring_bf16(monkeypatch):
     assert indexer.compressed_key_cache.head_size == 132
     assert indexer.raw_key_cache.dtype == torch.bfloat16
     assert indexer.raw_key_cache.head_size == 128
+
+
+@pytest.mark.parametrize("positions_2d", [False, True])
+def test_qsa_indexer_standard_rope_with_no_mrope_sections(positions_2d):
+    indexer = object.__new__(qsa.AscendQSAIndexer)
+    torch.nn.Module.__init__(indexer)
+    cache = torch.stack([torch.tensor([0] * 32 + [1] * 32), torch.tensor([1] * 32 + [0] * 32)])
+    indexer.rotary_emb = SimpleNamespace(
+        mrope_section=None,
+        rotary_dim=64,
+        is_neox_style=True,
+        _match_cos_sin_cache_dtype=lambda rows: cache.to(rows.dtype),
+    )
+    indexer.index_head_dim = 128
+    with set_current_vllm_config(VllmConfig()):
+        norm = indexer.k_layernorm = GemmaRMSNorm(128).bfloat16()
+    rows = torch.arange(256, dtype=torch.bfloat16).view(2, 1, 128)
+    positions = torch.tensor([-1, 2])
+    if positions_2d:
+        positions = positions.unsqueeze(0)
+    normalized = norm.forward_native(rows)
+    expected = normalized.clone()
+    expected[0, :, :32] = -normalized[0, :, 32:64]
+    expected[0, :, 32:64] = normalized[0, :, :32]
+    torch.testing.assert_close(indexer._norm_rope(rows, norm, positions), expected, rtol=0, atol=0)
+    torch.testing.assert_close(
+        indexer.normalize_compressed_keys(rows, torch.tensor([[-1], [2]])),
+        expected,
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.parametrize("query_dtype", [torch.float32, torch.bfloat16])
+def test_qsa_indexer_fused_dispatch_uses_each_norm_dtype(monkeypatch, query_dtype):
+    indexer = object.__new__(qsa.AscendQSAIndexer)
+    torch.nn.Module.__init__(indexer)
+    indexer.index_head_dim = 128
+    key_dtype = torch.bfloat16 if query_dtype == torch.float32 else torch.float32
+    with set_current_vllm_config(VllmConfig()):
+        indexer.q_layernorm = GemmaRMSNorm(128).to(query_dtype)
+        indexer.k_layernorm = GemmaRMSNorm(128).to(key_dtype)
+    cache = torch.tensor([[1] * 32 + [0] * 32], dtype=torch.bfloat16)
+    indexer.rotary_emb = SimpleNamespace(
+        mrope_section=[11, 11, 10],
+        mrope_interleaved=True,
+        rotary_dim=64,
+        is_neox_style=True,
+        _match_cos_sin_cache_dtype=lambda rows: cache.to(rows.dtype),
+    )
+    rows = torch.randn(2, 1, 128, dtype=torch.bfloat16)
+    fused = Mock(side_effect=lambda tensor, norm, positions: norm.forward_native(tensor))
+    monkeypatch.setattr(indexer, "_fused_norm_rope", fused)
+    actual_query = indexer._norm_rope(rows, indexer.q_layernorm, torch.zeros(1, 2, dtype=torch.int64))
+    actual_key = indexer.normalize_compressed_keys(rows, torch.zeros(2, 3, dtype=torch.int64))
+    torch.testing.assert_close(actual_query, indexer.q_layernorm.forward_native(rows))
+    torch.testing.assert_close(actual_key, indexer.k_layernorm.forward_native(rows))
+    assert fused.call_count == 1
+    if query_dtype == torch.bfloat16:
+        assert fused.call_args.args[1] is indexer.q_layernorm
+        assert fused.call_args.args[2].shape == (2,)
+    else:
+        assert fused.call_args.args[1] is indexer.k_layernorm
+        assert fused.call_args.args[2].shape == (3, 2)
 
 
 def test_c8_device_interfaces_reject_cpu_workloads():

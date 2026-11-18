@@ -138,11 +138,10 @@ def apply_qsa_rope(
     """Apply RoPE using the QSA head width rather than the main Q/K width."""
     rotary_dim = int(rotary_emb.rotary_dim)
     cache = rotary_emb._match_cos_sin_cache_dtype(tensor)  # noqa: SLF001
-    sections = list(getattr(rotary_emb, "mrope_section", []))
+    sections = list(getattr(rotary_emb, "mrope_section", None) or ())
     # Keep the materialized normalization/RoPE boundary portable on Ascend.
     # The CUDA/ROCm variants use a Triton MRoPE gather here; advanced indexing
     # has identical semantics and is graph-capturable by the NPU backend.
-    use_merged_cache = False
     # Compression emits rows for every scheduled token, including rows whose
     # compressed slot is invalid.  Never let such dead-row metadata reach the
     # NPU Index kernel as an out-of-range address.  This materializes only the
@@ -151,7 +150,7 @@ def apply_qsa_rope(
     cos_sin = cache[safe_positions]
     cos, sin = cos_sin.chunk(2, dim=-1)
 
-    if positions.ndim == 2 and not use_merged_cache:
+    if positions.ndim == 2:
         if getattr(rotary_emb, "mrope_interleaved", False):
             merged_cos = cos[0].clone()
             merged_sin = sin[0].clone()
@@ -229,6 +228,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
     def _fused_norm_rope_eligible(
         self,
         tensor: torch.Tensor,
+        norm: torch.nn.Module,
         positions: torch.Tensor,
     ) -> bool:
         section = getattr(self.rotary_emb, "mrope_section", None)
@@ -236,7 +236,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             tensor.dtype == torch.bfloat16
             and tensor.ndim == 3
             and tensor.shape[-1] == self.index_head_dim == 128
-            and self.k_layernorm.weight.dtype == tensor.dtype
+            and norm.weight.dtype == tensor.dtype
             and getattr(self.rotary_emb, "rotary_dim", None) == 64
             and getattr(self.rotary_emb, "is_neox_style", False)
             and getattr(self.rotary_emb, "mrope_interleaved", False)
@@ -265,6 +265,22 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             rope_dim=self.rotary_emb.rotary_dim,
         )
 
+    def _norm_rope(
+        self,
+        tensor: torch.Tensor,
+        norm: torch.nn.Module,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        # A single axis is ordinary RoPE. The fused ABI accepts either a
+        # vector or three MRoPE axes and checks the active Q or K norm.
+        if positions.ndim == 2 and positions.shape[0] == 1:
+            positions = positions[0]
+        if self._fused_norm_rope_eligible(tensor, norm, positions):
+            return self._fused_norm_rope(tensor, norm, positions)
+        logger.info_once("QSA indexer is using separate RMSNorm and RoPE.")
+        normalized = norm.forward_native(tensor)
+        return apply_qsa_rope(self.rotary_emb, positions, normalized)
+
     def normalize_compressed_keys(
         self,
         pooled: torch.Tensor,
@@ -276,9 +292,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         else:
             first_positions = first_positions[:, 0]
         pooled = pooled.reshape(-1, 1, self.index_head_dim)
-        if not self._fused_norm_rope_eligible(pooled, first_positions):
-            raise ValueError("QSA compressed-key fused norm+RoPE ABI is not satisfied")
-        return self._fused_norm_rope(
+        return self._norm_rope(
             pooled,
             self.k_layernorm,
             first_positions,
@@ -394,9 +408,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             dim=-1,
         )
         q = q_raw.reshape(-1, self.index_n_heads, self.index_head_dim)
-        if not self._fused_norm_rope_eligible(q, positions):
-            raise ValueError("QSA query fused norm+RoPE ABI is not satisfied")
-        q = self._fused_norm_rope(q, self.q_layernorm, positions)
+        q = self._norm_rope(q, self.q_layernorm, positions).to(self.indexer_dtype)
         return q, token_k.reshape(-1, 1, self.index_head_dim)
 
     def _update_and_compress(
