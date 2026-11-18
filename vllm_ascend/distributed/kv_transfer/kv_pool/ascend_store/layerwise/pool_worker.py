@@ -2066,10 +2066,13 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if self.cache_coordinator is None:
                 raise ValueError("Block-key hybrid loads require a reachability coordinator")
             return self.token_database.load_mask(request.block_hashes, cached_tokens)
-        masks = None
-        if self.cache_coordinator is not None:
-            with suppress(AssertionError):
+        if self.cache_coordinator is None:
+            masks = None
+        else:
+            try:
                 masks = self.token_database.load_mask(request.block_hashes, cached_tokens)
+            except AssertionError:
+                masks = None
         if not self.layerwise_offload or request.load_spec is None or not request.load_spec.layerwise_previous_step:
             return masks
         reused_state_groups = [
