@@ -38,6 +38,7 @@ from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.worker.sentinel.eplb_redistribute import (
     densify_routing_table_physical_ids,
     reload_experts_from_disk,
+    validate_reload_checkpoint,
 )
 
 if TYPE_CHECKING:
@@ -165,6 +166,16 @@ class WorkerSentinel(GPUWorkerSentinel):
         self.activate_cpu_group_timeouts(ft_request)
         torch.npu.synchronize()
 
+    def _validate_reload_checkpoints(self) -> None:
+        """Reject a checkpoint the reload cannot read before recovery starts."""
+        vllm_config = self.worker.vllm_config
+        sources = [(self.worker.model_runner.model, vllm_config.model_config, vllm_config.load_config)]
+        drafter = self._resolve_drafter()
+        if drafter is not None:
+            sources.append((drafter[0], drafter[2], drafter[3]))
+        for model, model_config, load_config in sources:
+            validate_reload_checkpoint(model_config, load_config, model)
+
     def _validate_scale_down_preconditions(self) -> None:
         if not self.worker.use_v2_model_runner:
             raise ValueError("[FT] scale_down on Ascend NPU requires the v2 model runner.")
@@ -174,7 +185,6 @@ class WorkerSentinel(GPUWorkerSentinel):
             raise ValueError(
                 "[FT] scale_down requires EPLB with num_redundant_experts > 0 to re-host the dead rank's experts."
             )
-        self._resolve_drafter()
         ascend_config = get_ascend_config()
         if ascend_config.enable_fused_mc2:
             raise ValueError(
@@ -191,6 +201,9 @@ class WorkerSentinel(GPUWorkerSentinel):
                 "[FT] scale_down requires npu_moe_distribute_dispatch_v2 "
                 "(aclnn V3+); please upgrade the CANN/torch_npu version."
             )
+        # Resolve checkpoints last: it may glob or download, so let the cheap
+        # preconditions fail first.
+        self._validate_reload_checkpoints()
 
     def _max_reachable_num_tokens(self) -> int:
         """Largest batch in tokens: max_num_batched_tokens or the largest graph capture size."""
@@ -289,29 +302,22 @@ class WorkerSentinel(GPUWorkerSentinel):
         self._densify_routing_tables(model_state)
 
     def _resolve_drafter(self) -> tuple[torch.nn.Module, EplbModelState, ModelConfig, LoadConfig] | None:
-        """Resolve a drafter's EPLB state and checkpoint, rejecting unregistered MoE."""
+        """Resolve the drafter's EPLB state and checkpoint, rejecting unregistered MoE."""
         model_runner = self.worker.model_runner
         drafter = getattr(getattr(model_runner, "speculator", None), "model", None)
         draft_moe = get_mixture_of_experts_model(drafter)
         if draft_moe is None and not getattr(drafter, "moe_layers", None):
             return None
-
-        for model_state in model_runner.eplb_state.model_states.values():
-            if model_state.model is draft_moe:
-                speculative_config = self.worker.vllm_config.speculative_config
-                if speculative_config is None or speculative_config.draft_model_config is None:
-                    raise ValueError("[FT] scale_down requires draft_model_config for an EPLB-registered drafter.")
-                return (
-                    drafter,
-                    model_state,
-                    speculative_config.draft_model_config,
-                    get_draft_load_config(self.worker.vllm_config),
-                )
-
-        raise ValueError(
-            "[FT] scale_down requires the MoE drafter to be registered with EPLB; "
-            "otherwise its expert placement would keep pointing at dead ranks."
-        )
+        state = next((s for s in model_runner.eplb_state.model_states.values() if s.model is draft_moe), None)
+        spec = self.worker.vllm_config.speculative_config
+        if state is None:
+            raise ValueError(
+                "[FT] scale_down requires the MoE drafter to be registered with EPLB; "
+                "otherwise its expert placement would keep pointing at dead ranks."
+            )
+        if spec is None or spec.draft_model_config is None:
+            raise ValueError("[FT] scale_down requires draft_model_config for an EPLB-registered drafter.")
+        return drafter, state, spec.draft_model_config, get_draft_load_config(self.worker.vllm_config)
 
     def _densify_routing_tables(self, eplb_model_state) -> None:
         """Renumber the kernel-facing routing tables into the densified id space.

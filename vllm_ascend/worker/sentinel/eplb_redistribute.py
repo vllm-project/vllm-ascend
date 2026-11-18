@@ -8,9 +8,9 @@ densified rank space and reloads the reassigned experts' weights from the
 checkpoint into each rank's local slots.
 """
 
+import os
 from collections.abc import Callable, Set
 from concurrent.futures import ThreadPoolExecutor
-from copy import copy
 from functools import partial
 
 import torch
@@ -31,6 +31,7 @@ from vllm_ascend.worker.sentinel.eplb_quant_schemes import (
 __all__ = [
     "densify_routing_table_physical_ids",
     "reload_experts_from_disk",
+    "validate_reload_checkpoint",
 ]
 
 # (layer, expert) pairs per chunk: bigger chunks amortise device rounds but grow the stacked buffer.
@@ -38,10 +39,6 @@ _RELOAD_CHUNK_SIZE = 32
 
 # Threads assembling one chunk; bounded because worker processes share host memory bandwidth.
 _GATHER_MAX_WORKERS = 8
-
-# Only source resolution changes here: Ascend loads from auto/safetensors, other
-# formats fall back to "auto"; the reload itself still requires safetensors.
-_DISK_LOAD_FORMATS = frozenset({"auto", "safetensors"})
 
 
 def densify_routing_table_physical_ids(
@@ -201,14 +198,13 @@ def _resolve_expert_tensor(
     return (key, suffix) if key is not None else None
 
 
-def _disk_prepare_load_config(load_config: LoadConfig) -> LoadConfig:
-    """LoadConfig for resolving where the checkpoint lives; the reload stays safetensors-only."""
-    if load_config.load_format in _DISK_LOAD_FORMATS:
-        return load_config
-    fallback = copy(load_config)
-    fallback.load_format = "auto"
-    fallback.model_loader_extra_config = {}
-    return fallback
+def validate_reload_checkpoint(
+    model_config: ModelConfig,
+    load_config: LoadConfig,
+    model: torch.nn.Module,
+) -> None:
+    """Raise if the reload cannot read this model's checkpoint."""
+    _collect_safetensors_shards(model_config, load_config, model)
 
 
 def _collect_safetensors_shards(
@@ -217,7 +213,7 @@ def _collect_safetensors_shards(
     model: torch.nn.Module,
 ) -> list[str]:
     """Safetensors shards the normal loader would find (repo IDs via cache/download)."""
-    loader = DefaultModelLoader(_disk_prepare_load_config(load_config))
+    loader = DefaultModelLoader(load_config)
     _, shards, use_safetensors, _ = loader._prepare_weights(
         model_name_or_path=model_config.model,
         subfolder=None,
@@ -226,9 +222,10 @@ def _collect_safetensors_shards(
         allow_patterns_overrides=getattr(model, "allow_patterns_overrides", None),
     )
     if not use_safetensors:
+        found = ", ".join(os.path.basename(shard) for shard in shards[:3]) or "no weight files"
         raise RuntimeError(
             f"[FT] scale_down expert reload requires a safetensors checkpoint, but "
-            f"'{model_config.model}' does not resolve to one."
+            f"'{model_config.model}' resolved to non-safetensors files ({found})."
         )
     return sorted(shard for shard in shards if shard.endswith(".safetensors"))
 

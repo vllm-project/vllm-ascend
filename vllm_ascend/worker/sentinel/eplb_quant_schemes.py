@@ -16,12 +16,7 @@ import torch
 import torch_npu
 
 from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
-from vllm_ascend.quantization.methods.w4a8.w4a8 import (
-    AscendW4A8DynamicFusedMoEMethod,
-    process_scale_to_runtime,
-    reduce_scale_bias_modelslim,
-    w13_scale_to_runtime,
-)
+from vllm_ascend.quantization.methods.w4a8.w4a8 import AscendW4A8DynamicFusedMoEMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import (
     AscendW8A8DynamicFusedMoEMethod,
     flatten_expert_dims,
@@ -125,7 +120,7 @@ _WEIGHT_ATTRS = tuple(_WEIGHT_PIPELINES)
 
 
 def _to_fractal_nz(weight: torch.Tensor) -> torch.Tensor:
-    """Unconditional FRACTAL_NZ cast, as W8A8's weights are loaded with."""
+    """Unconditional FRACTAL_NZ cast, as the W8A8/W4A8 MoE loaders do."""
     return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
 
 
@@ -165,12 +160,20 @@ _W4A8_ASCEND_SCHEME = _ReloadScheme(
     AscendW4A8DynamicFusedMoEMethod,
     {
         **_WEIGHT_PIPELINES,
-        "w13_weight_scale": _WeightPipeline(_gate_up("weight_scale"), _single_expert(w13_scale_to_runtime)),
-        "w2_weight_scale": _WeightPipeline(_down_proj("weight_scale"), process_scale_to_runtime),
-        "w13_scale_bias": _WeightPipeline(_gate_up("scale_bias"), reduce_scale_bias_modelslim),
-        "w2_scale_bias": _WeightPipeline(_down_proj("scale_bias"), reduce_scale_bias_modelslim),
+        "w13_weight_scale": _WeightPipeline(
+            _gate_up("weight_scale"), _single_expert(AscendW4A8DynamicFusedMoEMethod.w13_scale_to_runtime)
+        ),
+        "w2_weight_scale": _WeightPipeline(
+            _down_proj("weight_scale"), AscendW4A8DynamicFusedMoEMethod.process_scale_to_runtime
+        ),
+        "w13_scale_bias": _WeightPipeline(
+            _gate_up("scale_bias"), AscendW4A8DynamicFusedMoEMethod.reduce_scale_bias_modelslim
+        ),
+        "w2_scale_bias": _WeightPipeline(
+            _down_proj("scale_bias"), AscendW4A8DynamicFusedMoEMethod.reduce_scale_bias_modelslim
+        ),
     },
-    maybe_trans_nz,
+    _to_fractal_nz,
 )
 
 _SCHEMES: tuple[_ReloadScheme, ...] = (_UNQUANTIZED_SCHEME, _W8A8_DYNAMIC_SCHEME, _W4A8_ASCEND_SCHEME)
