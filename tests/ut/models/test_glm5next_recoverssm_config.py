@@ -85,13 +85,15 @@ def test_initialization_rejects_unsupported_execution(section, field, value, mes
 @pytest.mark.parametrize("connector", ["MooncakeConnectorV2", "MooncakePullConnector"])
 @pytest.mark.parametrize("prefix_caching", [False, True])
 @pytest.mark.parametrize("enforce_eager", [False, True])
-def test_pcp_prefill_producer_and_dp_decode_consumer(connector, prefix_caching, enforce_eager):
+@pytest.mark.parametrize(("tp_size", "pcp_size"), [(1, 8), (2, 4), (4, 2)])
+def test_pcp_prefill_producer_and_dp_decode_consumer(connector, prefix_caching, enforce_eager, tp_size, pcp_size):
     for producer in (True, False):
         config = make_config()
         config.cache_config.enable_prefix_caching = prefix_caching
         config.cache_config.mamba_cache_mode = "align" if prefix_caching else "none"
         config.model_config.enforce_eager = enforce_eager
-        config.parallel_config.prefill_context_parallel_size = 8 if producer else 1
+        config.parallel_config.tensor_parallel_size = tp_size if producer else 1
+        config.parallel_config.prefill_context_parallel_size = pcp_size if producer else 1
         config.parallel_config.data_parallel_size = 1 if producer else 8
         config.kv_transfer_config = SimpleNamespace(
             kv_connector=connector, kv_role="kv_producer" if producer else "kv_consumer"
@@ -100,27 +102,24 @@ def test_pcp_prefill_producer_and_dp_decode_consumer(connector, prefix_caching, 
         assert config.cache_config.use_kda_recoverssm
 
 
-@pytest.mark.parametrize(
-    "section,field,value,message",
-    [
-        ("parallel_config", "tensor_parallel_size", 2, "PCP requires TP=1"),
-        ("kv_transfer_config", "kv_role", "kv_consumer", "PCP requires a KV producer"),
-        ("kv_transfer_config", "kv_role", "kv_both", "PCP requires a KV producer"),
-    ],
-)
-def test_pcp_rejects_unsupported_execution(section, field, value, message):
+@pytest.mark.parametrize(("tp_size", "pcp_size"), [(1, 8), (2, 4), (4, 2)])
+@pytest.mark.parametrize("kv_role", [None, "kv_consumer", "kv_both"])
+def test_pcp_rejects_unsupported_execution(tp_size, pcp_size, kv_role):
     config = make_config()
-    config.parallel_config.prefill_context_parallel_size = 8
+    config.parallel_config.tensor_parallel_size = tp_size
+    config.parallel_config.prefill_context_parallel_size = pcp_size
     config.model_config.enforce_eager = True
-    config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2", kv_role="kv_producer")
-    setattr(getattr(config, section), field, value)
-    with pytest.raises(ValueError, match=message):
+    if kv_role is not None:
+        config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2", kv_role=kv_role)
+    with pytest.raises(ValueError, match="PCP requires a KV producer"):
         patch_replayssm_config.validate_mamba_cached_kernel(config)
     assert not config.cache_config.use_kda_recoverssm
 
 
-def test_pcp_store_enables_recoverssm():
+@pytest.mark.parametrize("tp_size", [1, 2, 4])
+def test_pcp_store_enables_recoverssm(tp_size):
     config = make_config()
+    config.parallel_config.tensor_parallel_size = tp_size
     config.parallel_config.prefill_context_parallel_size = 2
     config.cache_config.enable_prefix_caching = True
     config.cache_config.mamba_cache_mode = "align"

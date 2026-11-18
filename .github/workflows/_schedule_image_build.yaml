@@ -229,6 +229,8 @@ jobs:
         # NPU test jobs use fail-on-cache-miss instead.
         build-args: |
           COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
+          MAX_JOBS=32
+          CARGO_BUILD_JOBS=32
         provenance: false
         # To speed up the build, we use registry cache. The cache tag is determined by the suffix and architecture, and shared across different workflow runs.
         # For example, the cache tag for arm64 image with suffix "openeuler" will be "buildcache-openeuler-arm64".

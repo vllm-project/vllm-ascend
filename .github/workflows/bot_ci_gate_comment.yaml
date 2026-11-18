@@ -31,7 +31,8 @@ name: CI Gate Comment
 on:
   workflow_run:
     workflows:
-      - "E2E" # pr_test.yaml
+      - "E2E" # pr_test.yaml, the gate verdict itself
+      - "CI Gate Refresh" # bot_ci_gate_refresh.yaml, failure contract of the review retrigger
     types:
       - completed
 
@@ -41,8 +42,16 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: ci-gate-comment-${{ github.event.workflow_run.id }}
-  cancel-in-progress: false
+  # Key by head SHA so multiple E2E runs on the same commit (opened /
+  # synchronize / labeled / review) collapse into a single comment job: the
+  # comment is delete-then-repost, so only the latest verdict matters and the
+  # rest are no-ops (older commits are additionally skipped by the staleness
+  # guard below). Do NOT key by workflow_run.id (one job per run, no dedup, so
+  # they pile up in the runner queue) or by pull_requests[0].number (that array
+  # is unreliable/empty for workflow_run, which would collapse every PR into
+  # one group and cancel unrelated PRs' comments).
+  group: ci-gate-comment-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: true
 
 jobs:
   comment:

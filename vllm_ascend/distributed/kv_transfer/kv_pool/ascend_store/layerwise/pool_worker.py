@@ -56,6 +56,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
     get_layerwise_kv_cache_specs,
+    has_shared_kv_sources,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     LayerBlockRange,
@@ -131,6 +132,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         )
         self.use_block_key_layerwise = self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = self.layerwise_data_plane == "gva"
+        self.has_shared_kv = self.use_layerwise_transfer and has_shared_kv_sources(vllm_config)
         self._step_load_keys: set[str] = set()
         super()._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
@@ -257,6 +259,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 for layer_name in group_spec.layer_names
                 if layer_name not in draft_names
             }
+            if getattr(self, "has_shared_kv", False):
+                # Execution layers include holes; group ordinals stay dense.
+                physical_layers.update(range(base_layers))
+                self.num_layers = max(physical_layers) + 1
             if physical_layers:
                 self._global_to_local_layer = {
                     global_layer: local_layer for local_layer, global_layer in enumerate(sorted(physical_layers))
@@ -486,6 +492,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if isinstance(self.kv_recv_thread, KVCacheStoreLayerRecvingThread):
             self.kv_recv_thread.external_slot_release_waiter = waiter
         return True
+
+    def _global_group_alloc_size(self, group_id: int) -> int:
+        if getattr(self, "has_shared_kv", False) and self.group_block_len.get(group_id):
+            return sum(self.group_block_len[group_id])
+        return super()._global_group_alloc_size(group_id)
 
     def _start_kv_transfer_threads(self) -> None:
         if self.use_layerwise_transfer:
@@ -749,7 +760,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 raise RuntimeError(f"Mooncake layerwise: no KV cache group for local layer {local_layer}")
             return [(group_id, layer_idx) for group_id, layer_idx in groups if group_id in self.cacheable_group_ids]
         # GVA groups use stage-local indices too; PP offsets apply to pool keys and remote addresses.
-        return self.physical_layer_to_group_layers.get(local_layer, [(0, local_layer)])
+        return self.physical_layer_to_group_layers.get(
+            local_layer, [] if getattr(self, "has_shared_kv", False) else [(0, local_layer)]
+        )
 
     def _masked_block_runs_cached(
         self,
@@ -1943,10 +1956,18 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 # Only call batch_add_lease for keys with valid size.
                 valid_keys = [keys[index] for index in valid_gva_indices]
                 if valid_keys:
-                    lease_results = self.m_store.batch_add_lease(valid_keys, LAYERWISE_READ_LEASE_TTL_MS)
-                    if lease_results is None or len(lease_results) != len(valid_keys):
+                    # Multiple requests in one step can share prefix keys. One
+                    # lease pins each key for the whole step, so acquire it only
+                    # once to match the set-based release at the step fence.
+                    new_keys = list(dict.fromkeys(key for key in valid_keys if key not in self._step_load_keys))
+                    new_results = (
+                        self.m_store.batch_add_lease(new_keys, LAYERWISE_READ_LEASE_TTL_MS) if new_keys else []
+                    )
+                    if new_results is None or len(new_results) != len(new_keys):
                         return False
-                    for key, res in zip(valid_keys, lease_results):
+                    result_by_key = dict(zip(new_keys, new_results))
+                    lease_results = [0 if key in self._step_load_keys else result_by_key[key] for key in valid_keys]
+                    for key, res in zip(new_keys, new_results):
                         if res == 0:
                             self._step_load_keys.add(key)
                     leased_keys = []
@@ -1992,17 +2013,19 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     leased_infos = self.m_store.batch_get_key_info(leased_keys)
                     if leased_infos is None or len(leased_infos) != len(leased_keys):
                         return False
-                    key_indices: dict[str, int] = {}
+                    key_indices: dict[str, list[int]] = {}
                     for index, key in enumerate(keys):
-                        # Preserve keys.index()'s first occurrence for repeated keys.
-                        key_indices.setdefault(key, index)
+                        key_indices.setdefault(key, []).append(index)
+                    pinned_gvas: dict[str, int] = {}
                     for key, info in zip(leased_keys, leased_infos, strict=True):
-                        index = key_indices[key]
-                        gvas[index] = (
+                        pinned_gvas[key] = (
                             next((address for address in info.gva_list() if address > 0), 0) if info is not None else 0
                         )
-                        if not gvas[index]:
-                            invalid_block_ids.append(int(block_ids_by_group[block_indices[index]]))
+                    for key, pinned_gva in pinned_gvas.items():
+                        for index in key_indices[key]:
+                            gvas[index] = pinned_gva
+                            if not pinned_gva:
+                                invalid_block_ids.append(int(block_ids_by_group[block_indices[index]]))
 
                 if invalid_block_ids:
                     return False
@@ -2263,7 +2286,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if not self.layer_load_tasks[layer_id] and reuse_source is None:
                 return False
             attention_start_gate = None
-            if self.layer_load_tasks[layer_id] and layer_id != self.current_layer:
+            if (
+                self.layer_load_tasks[layer_id]
+                and layer_id != self.current_layer
+                and not getattr(self, "has_shared_kv", False)
+            ):
                 attention_start_gate = get_attention_compute_start_gate()
             recv_thread.add_request(
                 LayerLoadTask(  # type: ignore[arg-type]
@@ -2275,7 +2302,19 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             )
             return True
 
-        window_end = min(self.current_layer + self.num_prefetch_layers, self.num_layers - 1)
+        if getattr(self, "has_shared_kv", False):
+            assert self.hf_config is not None
+            source_layers = self.hf_config.kv_source_layer_ids
+            window_end = self.current_layer
+            if self.current_layer >= source_layers[-1]:
+                # Keep tail SWA and draft loads one layer ahead.
+                window_end += 1
+            elif self.current_layer == 0 or self.current_layer in source_layers:
+                # Submit the intervening SWA before the next shared source.
+                window_end = next(layer for layer in source_layers if layer > self.current_layer)
+        else:
+            window_end = self.current_layer + self.num_prefetch_layers
+        window_end = min(window_end, self.num_layers - 1)
         while self.next_layer_to_submit <= window_end:
             layer_id = self.next_layer_to_submit
             self.next_layer_to_submit += 1

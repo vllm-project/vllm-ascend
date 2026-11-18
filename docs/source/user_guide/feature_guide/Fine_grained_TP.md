@@ -85,9 +85,7 @@ Set `qkv_iproj_tensor_parallel_size` above `1` when the deployment meets these c
 LM head TP works with EAGLE, DFlash, and DSpark draft models. A few combinations are not aligned with the group-row padding yet and fail fast at construction with an explicit error stating the reason — these are current scope decisions rather than defects:
 
 - DFlash2 draft models;
-- `draft_sample_method = "probabilistic"`;
-- `use_local_argmax_reduction`;
-- `enable_adaptive_verification`.
+- `use_local_argmax_reduction`.
 
 Prompt logprobs is also not supported with LM head TP: a request asking for prompt logprobs fails with an explicit error at sampling time.
 
