@@ -1204,6 +1204,18 @@ class NPUModelRunner(GPUModelRunner):
         # only feeds FastPrefillHelper, which this Ascend path does not use.
         return self._prepare_inputs_impl(scheduler_output, batch_req_state, batch_desc)
 
+    def prepare_attn(self, input_batch: AscendInputBatch) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        if self.pcp_manager is not None:
+            return self.pcp_manager.prepare_attn(input_batch)
+        return self.block_tables.gather_block_tables_and_slot_mappings(  # type: ignore[attr-defined]
+            input_batch.idx_mapping,
+            input_batch.query_start_loc,
+            input_batch.positions,
+            num_reqs_padded=input_batch.num_reqs_after_padding,
+            num_tokens_padded=input_batch.num_tokens_after_padding,
+            num_computed_tokens=self.req_states.num_computed_tokens.gpu,
+        )
+
     def prepare_dummy_attn(
         self, input_batch: AscendInputBatch, valid_state_slots: bool = False
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:

@@ -17,13 +17,108 @@
 # This file is a part of the vllm-ascend project.
 #
 import torch
-from vllm.triton_utils import triton
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.block_table import BlockTables, _load_ptr
 
 from vllm_ascend.ops.triton.block_table.compute_slot_mappings import (
     _compute_slot_mappings_kernel,
 )
+
+try:
+    import torch_npu as _torch_npu
+
+    _get_raw_stream = _torch_npu._C._npu_getCurrentRawStream
+    _is_capturing = _torch_npu.npu.is_current_stream_capturing
+except Exception:
+    _torch_npu = None
+    _get_raw_stream = None
+    _is_capturing = None
+
+
+@triton.jit(do_not_specialize=["num_reqs", "num_rows", "max_num_tokens"])
+def _fused_gather_bt_and_slot_mappings_kernel(
+    batch_idx_to_req_idx,  # [num_reqs]
+    src_block_table_ptrs,  # [num_kv_cache_groups]
+    dst_block_table_ptrs,  # [num_kv_cache_groups]
+    block_table_strides,  # [num_kv_cache_groups]
+    num_blocks_ptr,  # [num_kv_cache_groups, max_num_reqs]
+    num_blocks_stride,
+    num_reqs,
+    num_rows,
+    max_num_tokens,
+    query_start_loc,  # [num_reqs + 1]
+    pos,  # [num_tokens]
+    block_sizes,  # [num_kv_cache_groups]
+    slot_mapping_enabled,  # [num_kv_cache_groups]
+    slot_mappings_ptr,  # [num_kv_cache_groups, max_num_batched_tokens]
+    slot_mappings_stride,
+    PAD_ID: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    TRITON_BLOCK_SIZE: tl.constexpr,
+):
+    group_id = tl.program_id(0)
+    batch_idx = tl.program_id(1)
+    slot_mapping_ptr = slot_mappings_ptr + group_id * slot_mappings_stride
+
+    if batch_idx == num_rows:
+        actual_num_tokens = tl.load(query_start_loc + num_reqs)
+        for i in range(actual_num_tokens, max_num_tokens, TRITON_BLOCK_SIZE):
+            offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+            tl.store(
+                slot_mapping_ptr + offset,
+                PAD_ID,
+                mask=offset < max_num_tokens,
+            )
+        return
+
+    stride = tl.load(block_table_strides + group_id)
+    max_num_blocks = stride
+    dst_block_table_ptr = _load_ptr(dst_block_table_ptrs + group_id, tl.int32)
+    dst_row_ptr = dst_block_table_ptr + batch_idx * stride
+
+    if batch_idx >= num_reqs:
+        for i in tl.range(0, max_num_blocks, BLOCK_SIZE):
+            offset = i + tl.arange(0, BLOCK_SIZE)
+            tl.store(dst_row_ptr + offset, 0, mask=offset < max_num_blocks)
+        return
+
+    req_state_idx = tl.load(batch_idx_to_req_idx + batch_idx)
+    is_real_req = req_state_idx >= 0
+    safe_req_idx = tl.where(is_real_req, req_state_idx, 0)
+    group_num_blocks_ptr = num_blocks_ptr + group_id * num_blocks_stride
+    num_blocks = tl.load(
+        group_num_blocks_ptr + safe_req_idx,
+        mask=is_real_req,
+        other=0,
+    )
+
+    src_block_table_ptr = _load_ptr(src_block_table_ptrs + group_id, tl.int32)
+    src_row_ptr = src_block_table_ptr + safe_req_idx * stride
+
+    for i in tl.range(0, num_blocks, BLOCK_SIZE):
+        offset = i + tl.arange(0, BLOCK_SIZE)
+        block_ids = tl.load(src_row_ptr + offset, mask=offset < num_blocks)
+        tl.store(dst_row_ptr + offset, block_ids, mask=offset < num_blocks)
+
+    kv_block_size = tl.load(block_sizes + group_id)
+    mapping_enabled = tl.load(slot_mapping_enabled + group_id) != 0
+    start_idx = tl.load(query_start_loc + batch_idx)
+    end_idx = tl.load(query_start_loc + batch_idx + 1)
+    for i in range(start_idx, end_idx, TRITON_BLOCK_SIZE):
+        offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+        in_range = offset < end_idx
+        positions = tl.load(pos + offset, mask=in_range, other=0).to(tl.int32)
+        block_indices = tl.where(mapping_enabled, positions // kv_block_size, 0)
+        block_offsets = positions % kv_block_size
+        block_numbers = tl.load(
+            src_row_ptr + block_indices,
+            mask=in_range & is_real_req & mapping_enabled,
+            other=0,
+        )
+        slot_ids = block_numbers * kv_block_size + block_offsets
+        slot_ids = tl.where(mapping_enabled & is_real_req, slot_ids, PAD_ID)
+        tl.store(slot_mapping_ptr + offset, slot_ids, mask=in_range)
 
 
 class AscendBlockTables(BlockTables):
@@ -37,6 +132,7 @@ class AscendBlockTables(BlockTables):
 
     block_sizes_tensor: torch.Tensor
     kernel_block_sizes_tensor: torch.Tensor
+    _num_dirty_rows: int
 
     def __init__(
         self,
@@ -165,3 +261,133 @@ class AscendBlockTables(BlockTables):
             dcp_sharded=self.dcp_sharded,
         )
         return slot_mappings[:, :num_tokens_padded]
+
+    def gather_block_tables_and_slot_mappings(
+        self,
+        idx_mapping: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+        num_reqs_padded: int,
+        num_tokens_padded: int,
+        num_computed_tokens: torch.Tensor | None = None,
+    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        if self.num_kv_cache_groups == 0:
+            return (), self.slot_mappings[:, :num_tokens_padded]
+        if (
+            self.has_sliding_window_groups
+            or self.cp_size != 1
+            or any(b != 1 for b in self.blocks_per_kv_block)
+            or self.redirect_writes_to_null_block
+        ):
+            block_tables = self.gather_block_tables(
+                idx_mapping,
+                num_reqs_padded=num_reqs_padded,
+                num_computed_tokens=num_computed_tokens,
+            )
+            slot_mappings = self.compute_slot_mappings(
+                idx_mapping,
+                query_start_loc,
+                positions,
+                num_tokens_padded=num_tokens_padded,
+            )
+            return block_tables, slot_mappings
+
+        num_reqs = idx_mapping.shape[0]
+        num_rows = max(num_reqs_padded, self._num_dirty_rows)
+        self._num_dirty_rows = num_reqs
+        num_blocks_gpu = self.num_blocks.gpu
+        num_blocks_stride = num_blocks_gpu.stride(0)
+        slot_mappings_stride = self.slot_mappings.stride(0)
+        if _get_raw_stream is None or _is_capturing is None or _is_capturing() or idx_mapping.device.type != "npu":
+            _fused_gather_bt_and_slot_mappings_kernel[(self.num_kv_cache_groups, num_rows + 1)](
+                idx_mapping,
+                self.block_table_ptrs,
+                self.input_block_table_ptrs,
+                self.block_table_strides,
+                num_blocks_gpu,
+                num_blocks_stride,
+                num_reqs,
+                num_rows,
+                num_tokens_padded,
+                query_start_loc,
+                positions,
+                self.block_sizes_tensor,
+                self.slot_mapping_enabled,
+                self.slot_mappings,
+                slot_mappings_stride,
+                PAD_ID=PAD_SLOT_ID,
+                BLOCK_SIZE=1024,  # type: ignore[arg-type]
+                TRITON_BLOCK_SIZE=1024,  # type: ignore[arg-type]
+            )
+        else:
+            dev_idx = idx_mapping.device.index if idx_mapping.device.index is not None else 0
+            kcache = getattr(self, "_fused_bt_kcache", None)
+            if kcache is None:
+                kcache = {}
+                self._fused_bt_kcache = kcache
+            kkey = (
+                dev_idx,
+                (idx_mapping.data_ptr() & 15) == 0,
+                (query_start_loc.data_ptr() & 15) == 0,
+                (positions.data_ptr() & 15) == 0,
+                num_blocks_stride == 1,
+                slot_mappings_stride == 1,
+            )
+            k = kcache.get(kkey)
+            if k is None:
+                k = _fused_gather_bt_and_slot_mappings_kernel[(self.num_kv_cache_groups, num_rows + 1)](
+                    idx_mapping,
+                    self.block_table_ptrs,
+                    self.input_block_table_ptrs,
+                    self.block_table_strides,
+                    num_blocks_gpu,
+                    num_blocks_stride,
+                    num_reqs,
+                    num_rows,
+                    num_tokens_padded,
+                    query_start_loc,
+                    positions,
+                    self.block_sizes_tensor,
+                    self.slot_mapping_enabled,
+                    self.slot_mappings,
+                    slot_mappings_stride,
+                    PAD_ID=PAD_SLOT_ID,
+                    BLOCK_SIZE=1024,  # type: ignore[arg-type]
+                    TRITON_BLOCK_SIZE=1024,  # type: ignore[arg-type]
+                )
+                kcache[kkey] = k
+            else:
+                st = _get_raw_stream(dev_idx)
+                k.run(
+                    self.num_kv_cache_groups,
+                    num_rows + 1,
+                    1,
+                    st,
+                    k.function,
+                    k.packed_metadata,
+                    None,
+                    None,
+                    None,
+                    idx_mapping,
+                    self.block_table_ptrs,
+                    self.input_block_table_ptrs,
+                    self.block_table_strides,
+                    num_blocks_gpu,
+                    num_blocks_stride,
+                    num_reqs,
+                    num_rows,
+                    num_tokens_padded,
+                    query_start_loc,
+                    positions,
+                    self.block_sizes_tensor,
+                    self.slot_mapping_enabled,
+                    self.slot_mappings,
+                    slot_mappings_stride,
+                    PAD_SLOT_ID,
+                    1024,
+                    1024,
+                )
+        return (
+            tuple(bt[:num_reqs_padded] for bt in self.input_block_tables),
+            self.slot_mappings[:, :num_tokens_padded],
+        )
