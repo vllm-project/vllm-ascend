@@ -1,8 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
+from typing import cast
+
+from vllm.config import VllmConfig
 
 from vllm_ascend.models.qwen4_exp import mtp
+
+
+def test_qwen4_exp_mtp_does_not_inherit_target_recoverssm(monkeypatch) -> None:
+    cache = SimpleNamespace(use_replayssm=True, use_kda_recoverssm=True)
+    target = SimpleNamespace(
+        cache_config=cache,
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen4_exp_text")),
+        speculative_config=SimpleNamespace(draft_model_config=None, target_model_config=None, num_speculative_tokens=3),
+    )
+    draft = SimpleNamespace(quant_config=None)
+
+    def make_draft(config, _start, _layers):
+        assert not config.cache_config.use_replayssm
+        assert not config.cache_config.use_kda_recoverssm
+        return draft
+
+    monkeypatch.setattr(mtp, "_upstream_make_draft_vllm_config", make_draft)
+    assert mtp._make_draft_vllm_config(cast(VllmConfig, target), 4, 1) is draft
+    assert cache.use_replayssm and cache.use_kda_recoverssm
 
 
 def _make_long_context_config(
