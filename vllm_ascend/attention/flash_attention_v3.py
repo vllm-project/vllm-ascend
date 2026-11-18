@@ -44,14 +44,6 @@ class AscendFlashAttentionBackend(AttentionBackend):
     def get_name() -> str:
         return "CUSTOM"
 
-    @classmethod
-    def supports_non_causal(cls) -> bool:
-        return True
-
-    @classmethod
-    def supports_sliding_window(cls) -> bool:
-        return True
-
     @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
@@ -167,7 +159,9 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         # Its CPU offsets identify the active prefix without a device sync.
         # Keep one empty request for dummy forwards: the operator requires B > 0.
         offsets_cpu = common.query_start_loc_cpu[: num_reqs + 1]
-        query_extent = offsets_cpu[-1] if self.is_dflash else common.num_actual_tokens
+        # Draft token counts can include padding; target offsets can include
+        # dummy requests. Limit the active prefix by both host-side counts.
+        query_extent = min(common.num_actual_tokens, int(offsets_cpu[-1]))
         active_reqs = max(1, int(torch.searchsorted(offsets_cpu, query_extent)))
         # The runner owns graph-stable buffers. Device tiling limits reads to
         # active_reqs, so padding rows need neither copying nor sanitizing.

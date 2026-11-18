@@ -25,10 +25,10 @@ def ops(monkeypatch):
     return operators
 
 
-def make_builder(mode, eager=False, target=False):
+def make_builder(mode, eager=False, target=False, method="dflash"):
     impl = AscendFlashAttentionImpl(8, 192, 192**-0.5, num_kv_heads=2)
     config = NS(
-        speculative_config=NS(method="dflash", enforce_eager=eager, num_speculative_tokens=7),
+        speculative_config=NS(method=method, enforce_eager=eager, num_speculative_tokens=7),
         scheduler_config=NS(max_num_seqs=4),
         compilation_config=NS(
             cudagraph_mode=mode,
@@ -55,6 +55,31 @@ def make_common():
         causal=False,
         slot_mapping=torch.arange(16, dtype=torch.int32),
     )
+
+
+@pytest.mark.parametrize("method,target", [("dflash", False), ("dflash", True), ("dspark", False)])
+@pytest.mark.parametrize(
+    "offsets,num_actual_tokens,active_reqs",
+    [
+        ([0, 4, 8, 12, 16], 16, 4),
+        ([0, 4, 4, 4, 4], 4, 1),
+        ([0, 4, 4, 4, 4], 16, 1),  # Draft counts can include graph padding.
+        ([0, 4, 8, 12, 16], 4, 1),  # Target offsets can include dummy requests.
+        ([0, 0, 0, 0, 0], 0, 1),
+    ],
+)
+def test_active_requests_exclude_graph_padding(ops, method, target, offsets, num_actual_tokens, active_reqs):
+    builder, _ = make_builder(CUDAGraphMode.NONE, target=target, method=method)
+    common = make_common()
+    common.query_start_loc_cpu.copy_(torch.tensor(offsets))
+    common.query_start_loc.copy_(common.query_start_loc_cpu)
+    common.num_actual_tokens = num_actual_tokens
+    common.causal = target
+    metadata = builder.build(0, common)
+    assert ops.get_scheduler_metadata.call_args.kwargs["batch_size"] == active_reqs
+    assert metadata.query_start_loc.numel() == active_reqs + 1
+    assert metadata.seq_lens.numel() == active_reqs
+    assert metadata.block_tables.shape[0] == active_reqs
 
 
 @pytest.mark.parametrize("eager", [False, True])
