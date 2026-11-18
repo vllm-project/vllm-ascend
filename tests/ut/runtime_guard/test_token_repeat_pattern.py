@@ -339,8 +339,8 @@ class ProductionPatternTests(_PatternFixture):
 
                 self.replace_method(processor, "_reap_lock", new=observed_lock())
                 runner = SimpleNamespace(ascend_config=SimpleNamespace(runtime_config=MagicMock()))
-                operation = (
-                    lambda processor=processor, runner=runner, rebind=rebind: processor._rebind_runner(runner)
+                operation = lambda processor=processor, runner=runner, rebind=rebind: (
+                    processor._rebind_runner(runner)
                     if rebind
                     else processor._apply_config_cascade(prev_needs_sample_hooks=False)
                 )
@@ -496,11 +496,39 @@ class ProductionPatternTests(_PatternFixture):
         self.det.rebind_runner(None)
         self.assertEqual(self.loader.target.load_pattern.call_count, 2)
         self.loader.target.load_pattern.side_effect = RuntimeError("extension unavailable")
-        with self.assertLogs("vllm_ascend.observability.runtime_guard.detector.token_repeat", level="ERROR"):
+        with self.assertLogs("vllm_ascend.observability.runtime_guard.detector.token_repeat", level="WARNING"):
             self.det.rebind_runner(None)
+        self.assertTrue(self.det.warmup_failed)
+        self.assertIsNone(self.det._backend)
+        self.assertFalse(self.manager.token_repeat_enabled())
+        # Latched: refresh must not retry until disable/re-enable (or rebind clears latch).
         self.det.refresh_from_config()
         self.assertEqual(self.loader.target.load_pattern.call_count, 3)
         self.assertIsNone(self.det._backend)
+        # Disable then re-enable clears latch and retries.
+        self.section["enabled"] = False
+        self.det.refresh_from_config()
+        self.assertFalse(self.det.warmup_failed)
+        self.loader.target.load_pattern.side_effect = None
+        self.loader.target.load_pattern.return_value = self.backend
+        self.section["enabled"] = True
+        self.det.refresh_from_config()
+        self.assertFalse(self.det.warmup_failed)
+        self.assertIs(self.det._backend, self.backend)
+        self.assertTrue(self.manager.token_repeat_enabled())
+
+    def test_warmup_failure_skips_cpu_enqueue_until_reenable(self):
+        self.loader.target.load_pattern.side_effect = RuntimeError("no extension")
+        self.section["enabled"] = False
+        self.det.refresh_from_config()
+        with self.assertLogs("vllm_ascend.observability.runtime_guard.detector.token_repeat", level="WARNING"):
+            self.section["enabled"] = True
+            self.det.refresh_from_config()
+        self.assertTrue(self.det.warmup_failed)
+        self.assertFalse(self.manager.token_repeat_enabled())
+        _, snap = self.manager.after_sample_hot_path([[1]], ["a"])
+        self.assertIsNone(snap)
+        self.assertEqual(self.backend.calls, [])
 
 
 class ResourceValidationTests(unittest.TestCase):

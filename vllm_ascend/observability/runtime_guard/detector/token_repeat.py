@@ -79,6 +79,9 @@ class TokenRepeatDetector(ConfigBackedDetector):
         self._owners: dict[str, ReferenceType[RequestGuardState]] = {}
         self._start_offset: dict[str, int] = {}
         self._failed: set[str] = set()
+        # Process-local latch: warmup/native init failed → skip CPU enqueue until
+        # config disables token_repeat (then re-enable can retry). Matches rare_chars.
+        self._warmup_failed = False
         super().__init__(runtime_config=runtime_config, runner=runner, enabled=False)
         # How many cumulative output ids have already been pushed for each req.
         self._consumed_len: dict[str, int] = {}
@@ -90,6 +93,14 @@ class TokenRepeatDetector(ConfigBackedDetector):
     def epoch(self) -> int:
         with self._lock:
             return self._epoch
+
+    @property
+    def warmup_failed(self) -> bool:
+        return bool(self._warmup_failed)
+
+    def note_config_disabled(self) -> None:
+        """Clear the warmup-fail latch when JSON ``enabled`` is false."""
+        self._warmup_failed = False
 
     def refresh_from_config(self) -> None:
         with self._lock:
@@ -115,12 +126,14 @@ class TokenRepeatDetector(ConfigBackedDetector):
         super()._apply_detector_section(candidate)
         if was_enabled and not self.enabled and epoch == self._epoch:
             self.on_disabled()
+        if not self.enabled:
+            self._warmup_failed = False
         if self.enabled and (not was_enabled or epoch != self._epoch):
             self._enable_pattern()
 
     def warmup(self) -> None:
         """Prepare model-specific CPU tables at enable time, outside detection batches."""
-        if not self.enabled or self._backend is not None:
+        if not self.enabled or self._backend is not None or self._warmup_failed:
             return
         from vllm_ascend.observability.runtime_guard.detector.pattern_backend import load_pattern
         from vllm_ascend.observability.runtime_guard.rank_gate import should_run_anomaly_check_on_rank
@@ -129,16 +142,23 @@ class TokenRepeatDetector(ConfigBackedDetector):
             return
         try:
             self._backend = load_pattern(self._runner, self._think_end)
-        except Exception:
+            self._warmup_failed = False
+        except Exception as exc:
             # Optional detection must not break model initialization or the bus.
-            logger.exception(
-                "[runtime_guard: token_repeat] pattern warmup failed; detection unavailable until fixed and re-enabled"
+            # Latch off enqueue (see manager.token_repeat_enabled) until disable/re-enable.
+            self._backend = None
+            self._warmup_failed = True
+            logger.warning(
+                "[runtime_guard: token_repeat] pattern warmup failed; latching off CPU detect until "
+                "detector.token_repeat.enabled is turned off then on again: %s",
+                exc,
             )
 
     def rebind_runner(self, runner: Any, *, runtime_config: RuntimeConfig | None = None) -> None:
         with self._lock:
             self.on_disabled()
             self._enabled = False
+            self._warmup_failed = False  # new runner may fix a prior warmup failure
             super().rebind_runner(runner, runtime_config=runtime_config)
 
     def _apply_detector_values(self, getter: Callable[[str, Any], Any]) -> None:
@@ -232,8 +252,8 @@ class TokenRepeatDetector(ConfigBackedDetector):
 
     def _check_pattern(self, req_ids, skip_req_ids):
         backend = self._backend
-        if backend is None:
-            return []  # Warmup already logged the missing/invalid resource.
+        if backend is None or self._warmup_failed:
+            return []  # Warmup failed or not ready; enqueue is gated by token_repeat_enabled().
         keys, states, inputs, indices = [], [], [], []
         seen: set[str] = set()
         io = RequestIoSnapshotManager.get()

@@ -179,6 +179,19 @@ def test_dump_manual_trigger_unknown_key_rejected():
         validate_runtime_config(data)
 
 
+def test_token_repeat_legacy_window_keys_rejected():
+    from copy import deepcopy
+
+    from vllm_ascend.observability.runtime_config._defaults import _DEFAULTS
+    from vllm_ascend.observability.runtime_config.config import validate_runtime_config
+
+    for key in ("window", "algorithm", "repeat_sum_threshold", "min_tokens", "consecutive_hits", "ignore_token_ids"):
+        data = deepcopy(_DEFAULTS)
+        data["detector"]["token_repeat"][key] = 1 if key != "ignore_token_ids" else [1]
+        with pytest.raises(ValueError, match="unknown key"):
+            validate_runtime_config(data)
+
+
 def test_token_repeat_think_end_wrong_type_rejected():
     from copy import deepcopy
 

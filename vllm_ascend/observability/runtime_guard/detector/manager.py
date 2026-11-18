@@ -159,11 +159,21 @@ class DetectorManager:
         return bool(self._spec_det.enabled)
 
     def token_repeat_enabled(self) -> bool:
-        """``token_repeat`` only. ``logits_finite`` does not use this path."""
+        """True when after-sample should enqueue token_repeat CPU work.
+
+        False when JSON ``enabled`` is off, or after a process-local warmup/
+        native-init failure latch (cleared when config disables token_repeat).
+        Matches ``rare_chars_enabled``.
+        """
         if self._runtime_config is not None and self._runtime_config.hot_reload_enabled:
             # Live flag only; full refresh happens in check_all → _precheck.
-            return bool(self._runtime_config.detector_get("token_repeat", "enabled", False))
-        return bool(self._token_repeat_det.enabled)
+            cfg_on = bool(self._runtime_config.detector_get("token_repeat", "enabled", False))
+        else:
+            cfg_on = bool(self._token_repeat_det.enabled)
+        if not cfg_on:
+            self._token_repeat_det.note_config_disabled()
+            return False
+        return not self._token_repeat_det.warmup_failed
 
     def check_after_spec(
         self,

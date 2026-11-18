@@ -72,11 +72,16 @@ def _as_title_reason(row: dict[str, Any], field: str) -> tuple[str, str]:
     return title, reason
 
 
-@lru_cache(maxsize=1)
 def load_pattern_rules(path: str | None = None) -> dict[str, Any]:
-    """Parse and validate packaged thresholds. Cached for process lifetime."""
-    cfg_path = Path(path) if path else _CONFIG_PATH
-    with cfg_path.open(encoding="utf-8") as source:
+    """Parse and validate packaged thresholds. Cached per resolved path."""
+    cfg_path = Path(path).resolve() if path else _CONFIG_PATH
+    return _load_pattern_rules_cached(str(cfg_path))
+
+
+@lru_cache(maxsize=8)
+def _load_pattern_rules_cached(cfg_path: str) -> dict[str, Any]:
+    cfg_path_obj = Path(cfg_path)
+    with cfg_path_obj.open(encoding="utf-8") as source:
         data = json.load(source)
     if not isinstance(data, dict):
         raise ValueError("pattern.json must be an object")
@@ -167,5 +172,5 @@ def load_pattern_rules(path: str | None = None) -> dict[str, Any]:
         "atom_thr": np.ascontiguousarray(atom_thr),
         "num_feature_rules": n_feat,
         "num_rules": num_rules,
-        "path": str(cfg_path),
+        "path": cfg_path,
     }
