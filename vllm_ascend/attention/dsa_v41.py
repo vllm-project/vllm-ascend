@@ -329,6 +329,22 @@ def scatter_cache_sk(
     torch.ops._C_ascend.npu_scatter_nd_update_sk(cache, indices, updates)
 
 
+def _packed_cache_ready(backend, *caches: torch.Tensor | None) -> bool:
+    """Return whether this attention call really owns packed cache tensors.
+
+    DSpark draft layers can inherit an A5/A3 backend while keeping standard
+    BF16 SWA caches.  They must stay on the scatter/fallback path instead of
+    receiving 608-byte INT8 records.
+    """
+    if backend is None:
+        return False
+    if getattr(backend, "uses_a5_packed_cache", False):
+        return True
+    if getattr(backend, "uses_a3_int8_packed_cache", False):
+        return all(cache is not None and cache.dtype == torch.int8 and cache.shape[-1] == 608 for cache in caches)
+    return False
+
+
 def pad_sparse_indices(indices: torch.Tensor, topk: int) -> torch.Tensor:
     """Convert V4.1's compact [T, K] selection into SMLA [T, 1, topk]."""
     if indices.shape[-1] < topk:
@@ -386,7 +402,7 @@ class AscendDSAV41Impl:
             return
         cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
         backend = getattr(attn, "packed_cache_ops", None)
-        if backend is not None:
+        if _packed_cache_ready(backend, cache):
             backend.write_attention_cache(
                 cache,
                 metadata.flat_slot_mapping[: value.shape[0]],
@@ -401,8 +417,9 @@ class AscendDSAV41Impl:
         # Replicated-cache collectives and packaged A5 prefill/mixed writes
         # run on the current stream after the independent Q/KV work joins.
         # A missing prefill classification also cannot qualify as pure decode.
+        cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
         return metadata.global_metadata is not None or (
-            getattr(attn, "packed_cache_ops", None) is not None
+            _packed_cache_ready(getattr(attn, "packed_cache_ops", None), cache)
             and (metadata.num_prefills > 0 or metadata.num_decodes != metadata.num_reqs)
         )
 
@@ -631,16 +648,17 @@ class AscendDSAV41Impl:
         latent = latent.view(-1, 1, attn.head_dim)
         AscendDSAV41Impl._apply_rotary(attn, latent, source_cos, source_sin)
         backend = getattr(attn, "packed_cache_ops", None)
-        if backend is not None:
+        cache = attn.long_kv_cache.kv_cache[0]
+        if _packed_cache_ready(backend, cache):
             backend.write_attention_cache(
-                attn.long_kv_cache.kv_cache[0],
+                cache,
                 compressor_metadata.cache.flat_slot_mapping[:num_tokens],
                 latent.squeeze(1),
                 kind="cmp",
             )
         else:
             scatter_cache_sk(
-                attn.long_kv_cache.kv_cache[0],
+                cache,
                 long_slots,
                 latent.squeeze(1),
             )
@@ -694,13 +712,14 @@ class AscendDSAV41Impl:
         if source_cache is None and self.role.has_long_context:
             source_cache = get_forward_context().no_compile_layers[self.long_kv_source_prefix].kv_cache[0]
         backend = getattr(attn, "packed_cache_ops", None)
-        if backend is not None:
+        swa_cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
+        if _packed_cache_ready(backend, swa_cache, source_cache):
             compressed_lengths = None
             if self.role.has_long_context and attn.shared_state.topk_lengths is not None:
                 compressed_lengths = attn.shared_state.topk_lengths[: q.shape[0]]
             return backend.qsmla(
                 q,
-                attn.dsa_attn.swa_cache_layer.kv_cache[0],
+                swa_cache,
                 source_cache,
                 metadata,
                 compressed_indices,
@@ -708,6 +727,8 @@ class AscendDSAV41Impl:
                 window_size=attn.window_size,
                 sinks=attn.attn_sink,
                 softmax_scale=attn.softmax_scale,
+                compress_ratio=self.role.compress_ratio,
+                index_topk=self.topology.index_topk,
             )
         has_compressed = self.role.compress_ratio in (1, 2)
         ratio = self.role.compress_ratio if has_compressed else 0
@@ -733,7 +754,6 @@ class AscendDSAV41Impl:
             DeviceMetadataStage.ATTENTION,
             id(op_metadata),
         )
-        swa_cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
         if metadata.swa.replay_block_table is not None:
             # Rebase only SWA: A3 CSA cannot mask its missing prefix with
             # sparse ori indices. Compressed KV retains its causal coordinates.
@@ -843,6 +863,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                     updates["storage_block_size"] = logical_block_size // get_kv_cache_compression_ratio(kv_cache_spec)
                 kv_cache_spec = replace(kv_cache_spec, **updates)
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._v41_layer_names = tuple(layer_names)
+        self._v41_layer_compress_ratio = self._resolve_layer_compress_ratio()
         max_tokens = getattr(vllm_config.scheduler_config, "max_num_batched_tokens", 4096)
         max_reqs = getattr(vllm_config.scheduler_config, "max_num_seqs", 256)
         self.common_v41_metadata: dict[str, Any] = {}
@@ -868,8 +890,12 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 self._cache_kind = "index_k" if kv_cache_spec.scale_dim else "long_kv"
         else:
             raise TypeError(f"Unsupported V4.1 cache spec: {type(kv_cache_spec).__name__}")
-        self._device_backend = DeviceOperator.get_dsv41_packed_cache_ops()
-        self._uses_a5_packed_cache = self._device_backend is not None
+        self._device_backend = DeviceOperator.get_dsv41_packed_cache_ops(
+            vllm_config.cache_config.cache_dtype
+        )
+        self._uses_packed_cache = self._device_backend is not None
+        self._uses_a5_packed_cache = bool(getattr(self._device_backend, "uses_a5_packed_cache", False))
+        self._uses_a3_int8_packed_cache = bool(getattr(self._device_backend, "uses_a3_int8_packed_cache", False))
         text_config = vllm_config.model_config.hf_text_config
         window_size = int(_config_value(text_config, "sliding_window", 0))
         self._window_size = window_size
@@ -894,15 +920,26 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self._cmp_residual = torch.zeros(max_reqs, dtype=torch.int32, device=device)
         self._smla_metadata = torch.zeros(query_metadata_size, dtype=torch.int32, device=device)
         self._qli_metadata = torch.zeros(query_metadata_size, dtype=torch.int32, device=device)
-        if self._supports_device_ops and self._uses_a5_packed_cache and self._cache_kind == "swa":
-            self._a5_causal_swa_indices = torch.empty((max_tokens, 1, window_size), dtype=torch.int32, device=device)
-            self._a5_causal_swa_lengths = torch.empty((max_tokens, 1), dtype=torch.int32, device=device)
-            self._a5_smla_metadata = torch.empty(V41_METADATA_BUFFER_SIZE, dtype=torch.int32, device=device)
-            self._a5_smla_length_rows = torch.empty((max_tokens, 1), dtype=torch.int32, device=device)
+        if self._supports_device_ops and self._uses_packed_cache and self._cache_kind == "swa":
+            self._packed_smla_metadata = torch.empty(
+                int(getattr(self._device_backend, "metadata_size", V41_METADATA_BUFFER_SIZE)),
+                dtype=torch.int32,
+                device=device,
+            )
+            if self._uses_a5_packed_cache:
+                self._a5_causal_swa_indices = torch.empty(
+                    (max_tokens, 1, window_size), dtype=torch.int32, device=device
+                )
+                self._a5_causal_swa_lengths = torch.empty((max_tokens, 1), dtype=torch.int32, device=device)
+                self._a5_smla_length_rows = torch.empty((max_tokens, 1), dtype=torch.int32, device=device)
+            else:
+                self._a5_causal_swa_indices = None
+                self._a5_causal_swa_lengths = None
+                self._a5_smla_length_rows = None
         else:
+            self._packed_smla_metadata = None
             self._a5_causal_swa_indices = None
             self._a5_causal_swa_lengths = None
-            self._a5_smla_metadata = None
             self._a5_smla_length_rows = None
         self._c2_ring_metadata = torch.zeros(5 * compressor_reqs, dtype=torch.int32, device=device)
         self._c2_complete_mask = torch.zeros(compressor_tokens, dtype=torch.bool, device=device)
@@ -932,6 +969,22 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         # FULL warmup/capture so producers and consumer waits share one graph.
         self._device_metadata_in_graph = False
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
+
+    def _resolve_layer_compress_ratio(self) -> int:
+        """Return the layer plan's compression ratio for this cache group."""
+        marker = ".layers."
+        for name in self._v41_layer_names:
+            if marker not in name:
+                continue
+            try:
+                layer_idx = int(name.split(marker, 1)[1].split(".", 1)[0])
+            except (IndexError, ValueError):
+                continue
+            from vllm_ascend.models.deepseek_v41.model import build_layer_plan
+
+            config = self.vllm_config.model_config.hf_text_config
+            return int(build_layer_plan(config).layer(layer_idx).compress_ratio)
+        return 0
 
     @classmethod
     def get_cudagraph_support(
@@ -1494,13 +1547,13 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
         if (
             self._uses_a5_packed_cache
             and req.cache_kind == "swa"
-            and self._a5_smla_metadata is not None
+            and self._packed_smla_metadata is not None
             and self._a5_smla_length_rows is not None
         ):
 
             def build_a5_smla_metadata() -> None:
                 if metadata_tokens == 0:
-                    self._a5_smla_metadata.zero_()
+                    self._packed_smla_metadata.zero_()
                     return
                 length_rows = self._a5_smla_length_rows[:metadata_tokens]
                 assert self._device_backend is not None
@@ -1517,17 +1570,70 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                     has_ori_kv=True,
                     has_cmp_kv=True,
                 )
-                self._a5_smla_metadata.copy_(value)
+                self._packed_smla_metadata.copy_(value)
 
             req.smla_metadata = self._publish_task(
                 self.common_v41_smla_metadata,
                 "smla:a5",
-                self._a5_smla_metadata,
+                self._packed_smla_metadata,
                 DeviceMetadataStage.ATTENTION,
                 build_a5_smla_metadata,
             )
 
-        if self._supports_device_ops and not self._uses_a5_packed_cache and req.cache_kind in {"swa", "long_kv"}:
+        if (
+            self._uses_a3_int8_packed_cache
+            and req.cache_kind == "swa"
+            and self._v41_layer_compress_ratio in (1, 2)
+            and self._packed_smla_metadata is not None
+        ):
+
+            def build_a3_int8_smla_metadata() -> None:
+                if metadata_tokens == 0 or req.num_reqs == 0:
+                    self._packed_smla_metadata.zero_()
+                    return
+                assert self._device_backend is not None
+                seq_lens = req.seq_lens[: req.num_reqs]
+                cmp_seq_lens = torch.div(
+                    seq_lens, self._v41_layer_compress_ratio, rounding_mode="floor"
+                ).to(torch.int32)
+                cmp_residual = torch.remainder(seq_lens, self._v41_layer_compress_ratio).to(torch.int32)
+                value = self._device_backend.build_smla_metadata(
+                    num_heads_q=n_local_heads,
+                    head_dim=head_dim,
+                    num_reqs=req.num_reqs,
+                    cu_seqlens_q=common.query_start_loc[: req.num_reqs + 1].int().contiguous(),
+                    seq_lens=seq_lens,
+                    cmp_seq_lens=cmp_seq_lens,
+                    cmp_residual=cmp_residual,
+                    max_seqlen_q=int(getattr(common, "max_query_len", 0)),
+                    max_seqlen_ori_kv=max_ori_seq_len,
+                    max_seqlen_cmp_kv=int(req.max_cache_seq_len) // self._v41_layer_compress_ratio,
+                    index_topk=index_topk,
+                    compress_ratio=self._v41_layer_compress_ratio,
+                    ori_mask_mode=req.ori_mask_mode,
+                    ori_win_left=req.ori_win_left,
+                    ori_win_right=req.ori_win_right,
+                )
+                self._packed_smla_metadata.copy_(value)
+
+            req.smla_metadata = self._publish_task(
+                self.common_v41_smla_metadata,
+                "smla:a3-int8",
+                self._packed_smla_metadata,
+                DeviceMetadataStage.ATTENTION,
+                build_a3_int8_smla_metadata,
+            )
+
+        if (
+            self._supports_device_ops
+            and not self._uses_a5_packed_cache
+            and not (
+                self._uses_a3_int8_packed_cache
+                and req.cache_kind == "swa"
+                and self._v41_layer_compress_ratio in (1, 2)
+            )
+            and req.cache_kind in {"swa", "long_kv"}
+        ):
             has_compressed = operator_ratio in (1, 2)
             cmp_seq_lens = req.cache_seq_lens if has_compressed else None
             cmp_residual = req.cmp_residual

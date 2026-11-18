@@ -79,6 +79,7 @@ from vllm_ascend.utils import (
 from .cache_config import (
     make_mla_cache_spec,
     make_swa_cache_spec,
+    uses_a3_int8_packed_cache,
 )
 from .compressor import DeepseekV41Compressor
 from .decoder_replay_layers import make_decoder_replay
@@ -566,7 +567,7 @@ def build_layer_plan(config: Any) -> DeepseekV41Topology:
 class AscendDeepseekV41SWACache(DeepseekV41CacheLayer):
     """Ascend SWA cache registered with the V4.1 allocator."""
 
-    def __init__(self, head_dim, window_size, dtype, prefix, cache_config, bounded_replay=False):
+    def __init__(self, head_dim, window_size, dtype, prefix, cache_config, bounded_replay=False, packed_int8=False):
         block_size = cache_config.block_size
         spec = make_swa_cache_spec(
             block_size=block_size,
@@ -575,6 +576,7 @@ class AscendDeepseekV41SWACache(DeepseekV41CacheLayer):
             dtype=dtype,
             cache_dtype=cache_config.cache_dtype,
             bounded_replay=bounded_replay,
+            packed_int8=packed_int8,
         )
         super().__init__(get_current_vllm_config(), prefix, spec)
         self.head_dim = head_dim
@@ -601,6 +603,7 @@ class DeepseekV41SWAAttention(nn.Module):
         reduce_results=True,
         *,
         use_yarn=False,
+        swa_packed_int8=False,
     ):
         super().__init__()
         self.layer_idx = int(prefix.split(".")[-2])
@@ -624,6 +627,10 @@ class DeepseekV41SWAAttention(nn.Module):
             rope_groups=["default"],
         )
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+        if str(vllm_config.cache_config.cache_dtype).lower() == "int8" and not swa_packed_int8:
+            # --kv-cache-dtype int8 selects the CSA packed ABI; standard SWA
+            # caches (SWA-only layers and the DSpark draft) stay on model dtype.
+            kv_cache_dtype = vllm_config.model_config.dtype
         swa_cache_layer = self.swa_cache_cls(
             head_dim=self.head_dim,
             window_size=self.window_size,
@@ -635,6 +642,7 @@ class DeepseekV41SWAAttention(nn.Module):
             # which rebuilds the spec without the flag, so the feature is a
             # strict addition to the target's group.
             bounded_replay=resolve_bounded_replay(vllm_config, cache_config),
+            packed_int8=swa_packed_int8,
         )
 
         dsa_modules = DSAModules(
@@ -704,13 +712,24 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
             topk_indices_buffer=topk_indices_buffer,
             reduce_results=reduce_results,
             use_yarn=role.has_long_context,
+            swa_packed_int8=(
+                uses_a3_int8_packed_cache(vllm_config.cache_config.cache_dtype)
+                and role.compress_ratio in (1, 2)
+            ),
         )
         block_size = vllm_config.cache_config.block_size
         self.role = role
         self.topology = topology
         self.shared_state = None
         self.prefix = prefix
-        self.packed_cache_ops = DeviceOperator.get_dsv41_packed_cache_ops()
+        backend = DeviceOperator.get_dsv41_packed_cache_ops(vllm_config.cache_config.cache_dtype)
+        if (
+            backend is not None
+            and getattr(backend, "uses_a3_int8_packed_cache", False)
+            and role.compress_ratio not in (1, 2)
+        ):
+            backend = None
+        self.packed_cache_ops = backend
         width = config.head_dim
         self.softmax_scale = width**-0.5
         if role.is_kv_source:
@@ -721,6 +740,7 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
                     block_size=block_size,
                     head_size=width,
                     compress_ratio=role.compress_ratio,
+                    cache_dtype=vllm_config.cache_config.cache_dtype,
                 ),
             )
         self.compressor = (
@@ -1784,7 +1804,9 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         # A5's packaged cache operators are qualified for eager prefill and
         # full-graph decode. Runtime NONE must bypass the compiled model rather
         # than entering a piecewise torch.compile path.
-        self.requires_uncompiled_fallback = DeviceOperator.get_dsv41_packed_cache_ops() is not None
+        self.requires_uncompiled_fallback = (
+            DeviceOperator.get_dsv41_packed_cache_ops(vllm_config.cache_config.cache_dtype) is not None
+        )
 
         self.model = self.model_cls(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
         with ExitStack() as rollback:

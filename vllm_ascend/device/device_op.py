@@ -181,9 +181,19 @@ class BaseDeviceAdaptor:
         )
 
     @staticmethod
-    def get_dsv41_packed_cache_ops() -> type["MixedQuantPackedCacheOps"] | None:
+    def get_dsv41_packed_cache_ops(cache_dtype: str | None = None) -> type | None:
         """Return the packed-cache ABI implementation, or use standard caches."""
-        return None
+        from vllm_ascend.models.deepseek_v41.cache_config import (
+            uses_a3_int8_packed_cache,
+        )
+
+        if not uses_a3_int8_packed_cache(cache_dtype):
+            return None
+        from vllm_ascend.models.deepseek_v41.a3_int8_packed_cache import (
+            A3Int8PackedCacheOps,
+        )
+
+        return A3Int8PackedCacheOps
 
     @staticmethod
     def host_register_flags() -> int:
@@ -1186,7 +1196,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return ACL_HOST_REG_MAPPED
 
     @staticmethod
-    def get_dsv41_packed_cache_ops() -> type["MixedQuantPackedCacheOps"]:
+    def get_dsv41_packed_cache_ops(cache_dtype: str | None = None) -> type["MixedQuantPackedCacheOps"]:
         from vllm_ascend.models.deepseek_v41.mixed_quant_attention import MixedQuantPackedCacheOps
 
         return MixedQuantPackedCacheOps
