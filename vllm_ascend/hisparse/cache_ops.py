@@ -19,6 +19,7 @@ from vllm_ascend.ops.triton.hisparse import (
     gather_resident_rows_kernel,
     gather_rows_kernel,
     invalidate_kernel,
+    invalidate_written_slots_batched,
     invalidate_written_slots_sorted,
     pack_attention_rows_kernel,
     pack_written_slot_keys,
@@ -27,6 +28,9 @@ from vllm_ascend.ops.triton.hisparse import (
 
 _SORT_MIN_DIRECT_TILES = 64 * 1024
 _SORT_BUFFER_LIMIT_BYTES = 768 * 1024
+# Bound sequential writes per tile on the arch22 decode path.
+_BATCH_INVALIDATE_MAX_WRITES = 64
+_BATCH_INVALIDATE_TILE = 2048
 
 
 def _load_resolver():
@@ -389,6 +393,20 @@ class HiSparseNPUOps:
         if num_tokens == 0:
             return
         if region_stride == 0 or num_state_rows == 0 or groups == 0:
+            return
+        if not is_950() and num_tokens <= _BATCH_INVALIDATE_MAX_WRITES:
+            invalidate_written_slots_batched[(triton.cdiv(region_stride, _BATCH_INVALIDATE_TILE), groups)](
+                group_table,
+                request_state_indices,
+                req_id_per_token,
+                written_slots,
+                num_tokens,
+                REQUESTS=request_state_indices.numel(),
+                STATE_ROWS=num_state_rows,
+                REGION=region_stride,
+                BLOCK=_BATCH_INVALIDATE_TILE,
+                multibuffer=False,
+            )
             return
         tile = 256
         hot_tiles = triton.cdiv(region_stride, tile)

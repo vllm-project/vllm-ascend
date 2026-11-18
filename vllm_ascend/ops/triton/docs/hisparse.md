@@ -13,7 +13,7 @@
   plans. `HiSparseNPUOps` validates them and launches the kernels below on the
   current stream. Completion dependencies remain owned by the runtime/connector.
 - **Supported modes**: 950PR&950DT Products with the qualified CANN 9.2 stack.
-  Atlas A2/A3 are not qualified by this adapter. Refill, layout and written-slot
+  A2/A3 use batched written-slot invalidation for small writes. Refill, layout and written-slot
   invalidation have eager and ACLGraph test cases. Recycled-block invalidation
   runs outside capture and uses an initialization-time sentinel warmup.
 
@@ -44,7 +44,13 @@ distinguished below; the Python wrappers supply the launch geometry.
 | `ATTENTION_BLOCK`, `HAS_ATTENTION`, `HAS_STATE` | Attribute | Attention page stride in rows and optional-input flags | Integer / boolean | Scalar |
 | `BLOCK`, `PARALLEL_COLUMNS` | Attribute | Byte tile and compact-plan parallelism; zero selects mask mode | Integer | Scalar |
 
-### `invalidate_kernel`
+### `invalidate_kernel` and `invalidate_written_slots_batched`
+
+On A2/A3, up to 64 writes use one program per group and tag tile, processing
+writes sequentially within that owner. Contiguous stores preserve unmatched
+tags and avoid the cross-program locking of masked scatter stores. INT64
+written slots are range-checked before INT32 comparison. Larger writes and
+950PR&950DT Products retain the existing direct/sorted dispatch.
 
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
@@ -53,6 +59,7 @@ distinguished below; the Python wrappers supply the launch geometry.
 | `requests`, `written` | Input | Request ID and updated Host row ID per token | INT32; INT32 or INT64 | `[tokens]` |
 | Tables addressed by `tables` | Input/Output | Invalidate entries matching an updated row in its state | INT32 | Contiguous `[states, hot_capacity]` |
 | `REQUESTS`, `STATE_ROWS`, `REGION`, `BLOCK` | Attribute | Request count, state count, Hot capacity and scan tile | Integer | Scalar |
+| `ROWS` (batched only) | Attribute | Runtime write count; does not specialize the kernel | Integer | Scalar |
 
 ### `pack_written_slot_keys` and `invalidate_written_slots_sorted`
 
@@ -165,6 +172,7 @@ operator tests.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_hisparse.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_hisparse_arch22_ops.py -k invalidation
 pytest -sv tests/ut/model_executor/warmup/test_hisparse_recycled_invalidate.py
 ```
 

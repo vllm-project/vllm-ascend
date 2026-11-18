@@ -497,11 +497,14 @@ def test_invalidate_hot_capacity_graph(hot_capacity):
 
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize("hot_capacity", [1, 7, 2049, 10240])
-def test_batched_invalidation_dynamic_graph(dtype, hot_capacity):
+@pytest.mark.parametrize("write_repeats", [1, 8])
+def test_batched_invalidation_dynamic_graph(dtype, hot_capacity, write_repeats):
     """Duplicate writes and changing states must not race or pollute neighbors."""
     torch.manual_seed(71)
     initial = torch.randint(-1, 128, (3, 4, hot_capacity), dtype=torch.int32)
     initial[:, :, 0] = 2**31 - 1
+    if hot_capacity > 1:
+        initial[:, :, 1] = 3
     backing = [torch.full((table.numel() + 9,), -73, dtype=torch.int32, device="npu") for table in initial]
     tables = [storage[1:-8].view_as(table) for storage, table in zip(backing, initial)]
     for table, original in zip(tables, initial):
@@ -511,7 +514,10 @@ def test_batched_invalidation_dynamic_graph(dtype, hot_capacity):
     requests_cpu = torch.tensor([0, 0, 1, 0, 2, 3, -1, 9], dtype=torch.int32)
     writes_cpu = torch.tensor([3, 3, 2**31 - 1, 5, -1, 8, 9, 10], dtype=dtype)
     if dtype == torch.int64:
+        writes_cpu[4] = 2**32 + 3  # Must not wrap to the valid tag 3.
         writes_cpu[-3:] = torch.tensor([2**34 + 3, -(2**34), 2**31], dtype=dtype)
+    requests_cpu = requests_cpu.repeat(write_repeats)
+    writes_cpu = writes_cpu.repeat(write_repeats)
     requests, writes = requests_cpu.npu(), writes_cpu.npu()
 
     def forward():
