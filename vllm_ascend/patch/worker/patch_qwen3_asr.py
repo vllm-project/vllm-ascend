@@ -113,7 +113,9 @@ class _LayersWrapper(nn.Module):
         # hidden_states: (W, WS, dim); attn_mask: (W, 1, WS, WS) bool.
         W = hidden_states.shape[0]
         WS = hidden_states.shape[1]
-        H, D, dim = self._num_heads, self._head_dim, self._embed_dim
+        # H is the LOCAL head count, so H * D is this rank's share of the
+        # channels. out_proj is row-parallel and takes that, not embed_dim.
+        H, D = self._num_heads, self._head_dim
 
         def _linear_out(mod, x):
             r = mod(x)
@@ -143,7 +145,7 @@ class _LayersWrapper(nn.Module):
                 sparse_mode=0,
             )
             a = ret[0] if isinstance(ret, (tuple, list)) else ret
-            a = a.view(W, WS, dim)
+            a = a.view(W, WS, H * D)
             h = _linear_out(layer.self_attn.out_proj, a)
             h = residual + h
 
