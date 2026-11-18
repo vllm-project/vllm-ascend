@@ -530,6 +530,7 @@ class AscendConfig:
             "enable_force_eplb": false,
             "enable_pcp_o_proj_weight_sharding": true,
             "enable_pcp_embedding_lmhead_weight_sharding": true,
+            "dflash_pcp_request_sharding": false,
             "mix_placement": false,
             "pa_shape_list": [],
             "mega_moe_max_tokens": 0,
@@ -673,6 +674,8 @@ class AscendConfig:
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
+    # Experimental eager DFlash2 query sharding; valid context KV stays replicated.
+    dflash_pcp_request_sharding: bool = False
     mix_placement: bool = False
     # When non-zero, force the MC2 combine stage's comm quant_mode to this
     # value (e.g. 4 = MXFP float8_e4m3 communication quantization) regardless of the
@@ -798,6 +801,17 @@ class AscendConfig:
             if getattr(vc, "shutdown_timeout", 0) <= 0:
                 raise ValueError("shared_engram requires --shutdown-timeout > 0 to retire reader leases")
             os.environ.setdefault("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "120")
+        if self.dflash_pcp_request_sharding:
+            speculative = vc.speculative_config
+            draft_config = getattr(speculative, "draft_model_config", None)
+            if not vc.use_v2_model_runner or "DFlash2DraftModel" not in (
+                getattr(draft_config, "architectures", None) or []
+            ):
+                logger.warning(
+                    "dflash_pcp_request_sharding requires DFlash2 on Model Runner V2; "
+                    "using the existing draft execution path."
+                )
+                self.dflash_pcp_request_sharding = False
         engram_config = getattr(vc, "engram_config", None)
         if self.shared_engram is not None and self.shared_engram.backend == "a3":
             if not vc.use_v2_model_runner:

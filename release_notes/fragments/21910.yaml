@@ -1,0 +1,5 @@
+# Design discussion: https://github.com/vllm-project/vllm-ascend/issues/21632
+pr: 21910
+entries:
+  - category: feature
+    text: Added opt-in eager DFlash2 request sharding under PCP on Model Runner V2 via additional_config.dflash_pcp_request_sharding. Candidate generation is distributed across requests while valid context KV remains replicated; unsupported configurations retain the existing execution path.
