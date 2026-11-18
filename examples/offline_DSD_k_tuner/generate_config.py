@@ -394,6 +394,7 @@ def main():
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--enable-chunked-prefill", action="store_true")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    # TODO: Remove this CLI option and its handling when dropping vLLM v0.33.0 support.
     parser.add_argument(
         "--disable-padded-drafter-batch",
         action="store_true",
