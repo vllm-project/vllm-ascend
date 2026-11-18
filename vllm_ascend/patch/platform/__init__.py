@@ -19,7 +19,6 @@ import os
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kimi_k31_config  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_admission  # noqa
-import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
 import vllm_ascend.patch.platform.patch_parallel_config  # noqa
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa
@@ -73,22 +72,6 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 #    Future Plan:
 #       Remove this patch when upstream's `is_cuda_alike()` covers Ascend NPU
 #       or when the device-index qualification is applied unconditionally.
-#
-# ** File: platform/patch_kv_cache_utils.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.kv_cache_planning._annotate_eagle_groups`
-#    Why:
-#       Qwen4Exp's MTP draft group marking has no builder or platform hook
-#       upstream.
-#    How:
-#       Monkey-patch only the module-level helper the builder cannot express.
-#       Grouping, pool accounting, and materialization live in
-#       AscendKVCacheConfigBuilder, which the platform selects through
-#       NPUPlatform.get_kv_cache_config_builder_cls.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/53558
-#    Future Plan:
-#       Remove this patch once upstream exposes a hook for the EAGLE marking.
 #
 # ** File: platform/patch_mamba_config.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
