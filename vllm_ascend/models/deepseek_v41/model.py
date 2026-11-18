@@ -70,7 +70,7 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
 )
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
-from vllm_ascend.ops.triton.mul_add import muls_add_triton
+from vllm_ascend.ops.triton.scale_and_add import scale_and_add_triton
 from vllm_ascend.utils import (
     get_rotation_path,
     normalize_deepseek_v41_config,
@@ -346,13 +346,13 @@ class DeepseekV41MoE(nn.Module):
 
             if hidden_states.dtype != torch.float16:
                 if self.shared_experts is not None:
-                    final_hidden_states = muls_add_triton(
+                    final_hidden_states = scale_and_add_triton(
                         final_hidden_states, shared_output, self.routed_scaling_factor
                     )
                 else:
                     final_hidden_states *= self.routed_scaling_factor
             elif self.shared_experts is not None:
-                final_hidden_states = muls_add_triton(
+                final_hidden_states = scale_and_add_triton(
                     shared_output, final_hidden_states, 1.0 / self.routed_scaling_factor
                 )
         else:

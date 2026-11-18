@@ -31,7 +31,7 @@ class MulsAddPattern(BasePattern):
     Pattern that matches an element-wise mul + add sequence:
         tmp = x * scale
         out = tmp + y
-    and replaces it with a call to the muls_add_triton kernel.
+    and replaces it with a call to the scale_and_add_triton kernel.
     """
 
     def __init__(self, vllm_config: VllmConfig, scale: float = 1.0):
@@ -65,10 +65,10 @@ class MulsAddPattern(BasePattern):
     def get_replacement(self):
         def replacement(x: torch.Tensor, y: torch.Tensor):
             """
-            Replacement that calls the muls_add_triton kernel using the
+            Replacement that calls the scale_and_add_triton kernel using the
             class-level scalar self.scale.
             """
-            return torch.ops.vllm.muls_add(x, y, self.scale)
+            return torch.ops.vllm.scale_and_add(x, y, self.scale)
 
         return replacement
 
@@ -100,7 +100,7 @@ class MulsForeachAddSharedFirstPattern(MulsAddPattern):
 class MulsAddFusionPass(VllmInductorPass):
     """
     Fuse out-of-place scalar mul followed by add or singleton foreach_add,
-    in either add operand order, with the Triton muls_add kernel on Ascend.
+    in either add operand order, with the Triton scale_and_add kernel on Ascend.
     """
 
     def __init__(self, vllm_config: VllmConfig):
