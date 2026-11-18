@@ -31,6 +31,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.utils import replace_parameter
+from vllm.third_party.flash_linear_attention.ops.fused_recurrent import fused_recurrent_gated_delta_rule
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
@@ -52,6 +53,9 @@ from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
+# The release's AscendC recurrent kernel leaves outputs unwritten above this
+# per-sequence limit. Use the existing Triton path for wider state tables.
+_MAX_RECURRENT_GDN_TOKENS = 8
 
 
 @lru_cache(maxsize=1)
@@ -702,25 +706,43 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
             query_spec = l2norm_fwd(query_spec)
             key_spec = l2norm_fwd(key_spec)
-            core_attn_out_spec = recurrent_gated_delta_rule(
-                query_spec.squeeze(0),
-                key_spec.squeeze(0),
-                value_spec.squeeze(0),
-                ssm_state,
-                g=g_spec.squeeze(0),
-                beta=beta_spec.squeeze(0),
-                scale=key_spec.shape[-1] ** -0.5,
-                actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=_flatten_recurrent_state_indices(
-                    spec_state_indices_tensor,
-                    query_spec.shape[1],
-                    spec_causal_conv1d_meta.query_start_loc,
-                ),
-                num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
-            ).unsqueeze(0)
+            if spec_state_indices_tensor.ndim == 2 and spec_state_indices_tensor.shape[1] > _MAX_RECURRENT_GDN_TOKENS:
+                # Preserve the full per-sequence state table: the previous
+                # accepted slot may lie beyond the current query's length.
+                core_attn_out_spec, _ = fused_recurrent_gated_delta_rule(
+                    q=query_spec,
+                    k=key_spec,
+                    v=value_spec,
+                    g=g_spec,
+                    beta=beta_spec,
+                    scale=key_spec.shape[-1] ** -0.5,
+                    initial_state=ssm_state,
+                    inplace_final_state=True,
+                    cu_seqlens=spec_causal_conv1d_meta.query_start_loc,
+                    # vLLM v0.30's recurrent kernel uses unit column stride.
+                    ssm_state_indices=spec_state_indices_tensor.contiguous(),
+                    num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens,
+                )
+            else:
+                actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
+                core_attn_out_spec = recurrent_gated_delta_rule(
+                    query_spec.squeeze(0),
+                    key_spec.squeeze(0),
+                    value_spec.squeeze(0),
+                    ssm_state,
+                    g=g_spec.squeeze(0),
+                    beta=beta_spec.squeeze(0),
+                    scale=key_spec.shape[-1] ** -0.5,
+                    actual_seq_lengths=actual_seq_lengths,
+                    ssm_state_indices=_flatten_recurrent_state_indices(
+                        spec_state_indices_tensor,
+                        query_spec.shape[1],
+                        spec_causal_conv1d_meta.query_start_loc,
+                    ),
+                    num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
+                ).unsqueeze(0)
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 
