@@ -158,7 +158,7 @@ def _restore_ascend_tp_sharded_rows(self, topk_ids: torch.Tensor, ctx: Any) -> t
         # so the rows were never split across the TP group.
         return None
 
-    shard_sizes = dp_metadata.local_sizes
+    shard_sizes = getattr(dp_metadata, "local_sizes", None)
     if shard_sizes is not None and n == sum(shard_sizes):
         # Gathered DP/EP shards: already DP-major/TP-minor, so upstream only has
         # to select this rank's shard group.
