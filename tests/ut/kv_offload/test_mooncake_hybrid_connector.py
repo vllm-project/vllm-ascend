@@ -872,6 +872,104 @@ class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
             [backing_size],
         )
 
+    def test_reconstruct_shared_pages_ignores_empty_placeholder_tensors(self):
+        num_blocks = 2
+        block_stride = 80
+        layer_names = ["long_kv_cache", "indexer.k_cache"]
+        backing = torch.empty((num_blocks, block_stride), dtype=torch.uint8)
+        empty_placeholder = torch.empty(0, dtype=torch.uint8)
+        self.assertEqual(empty_placeholder.data_ptr(), 0)
+        kv_caches = {
+            layer_names[0]: (backing[:, :64], empty_placeholder),
+            layer_names[1]: (backing[:, 64:72], backing[:, 72:74]),
+        }
+
+        pages = _reconstruct_shared_pages(
+            types.SimpleNamespace(
+                kv_cache_tensors=[
+                    types.SimpleNamespace(
+                        layers=layer_names,
+                        layer_stride=0,
+                        block_stride=block_stride,
+                        offset=0,
+                    )
+                ]
+            ),
+            kv_caches,
+        )
+
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(pages[0].placements, ((layer_names[0], 0), (layer_names[1], 64)))
+
+    def test_sparse_mamba_registration_uses_shared_pages(self):
+        alignment = 2 * 1024 * 1024
+        num_blocks = 2
+        block_stride = 80
+        backing_size = num_blocks * block_stride
+        raw_tensor = torch.empty(backing_size + alignment, dtype=torch.uint8)
+        aligned_offset = (-raw_tensor.data_ptr()) % alignment
+        backing = raw_tensor[aligned_offset : aligned_offset + backing_size]
+
+        attn_layer = "model.layers.0.self_attn"
+        mamba_layer = "model.layers.1.linear_attn"
+        empty_placeholder = torch.empty(0, dtype=torch.uint8)
+        kv_caches = {
+            attn_layer: (
+                backing.as_strided((num_blocks, 64), (block_stride, 1)),
+                empty_placeholder,
+                backing[64:].as_strided((num_blocks, 8), (block_stride, 1)),
+            ),
+            mamba_layer: (
+                backing.as_strided((num_blocks, 16), (block_stride, 1)),
+                backing[16:].as_strided((num_blocks, 64), (block_stride, 1)),
+            ),
+        }
+
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = types.SimpleNamespace(
+            model_config=types.SimpleNamespace(
+                is_deepseek_mla=True,
+                hf_text_config=types.SimpleNamespace(index_topk=2048),
+            )
+        )
+        worker.kv_cache_config = types.SimpleNamespace(
+            num_blocks=num_blocks,
+            kv_cache_groups=[
+                types.SimpleNamespace(layer_names=[attn_layer]),
+                types.SimpleNamespace(layer_names=[mamba_layer]),
+            ],
+            kv_cache_tensors=[
+                types.SimpleNamespace(
+                    size=backing_size,
+                    layers=[attn_layer, mamba_layer],
+                    layer_stride=0,
+                    block_stride=block_stride,
+                    offset=0,
+                )
+            ],
+        )
+        worker.use_hybrid = True
+        worker.use_mamba = True
+        worker.use_compress = False
+
+        class RegistrationCaptured(Exception):
+            pass
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.global_te.register_buffer",
+                side_effect=RegistrationCaptured,
+            ),
+            self.assertRaises(RegistrationCaptured),
+        ):
+            worker.register_kv_caches(kv_caches)
+
+        self.assertEqual(worker.kv_caches_base_addr, [backing.data_ptr()])
+        self.assertNotIn(0, worker.kv_caches_base_addr)
+        self.assertEqual(worker.addr_group_idx, [[0, 1]])
+        self.assertEqual(worker.block_stride_per_addr, [block_stride])
+        self.assertEqual(worker.block_len_per_addr, [block_stride])
+
 
 class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
     def _make_scheduler(self):

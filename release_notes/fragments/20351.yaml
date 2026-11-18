@@ -1,0 +1,6 @@
+pr: 20351
+entries:
+  - category: bugfix
+    text: Fixed garbled output in PD disaggregation with MooncakeHybridConnector for sparse-indexer hybrid models such as GLM-5.3-Flash, caused by KV cache pages being registered with null base addresses.
+    model: GLM-5.3-Flash
+    hardware: [A2]
