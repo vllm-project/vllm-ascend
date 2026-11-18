@@ -138,8 +138,11 @@ def test_ascendc_segments_preserve_checkpoint_and_final_state(offset, length):
     torch.testing.assert_close(actual_final, final, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("offset,length", [(1408, 1464), (1280, 1336), (256, 315)])
-def test_fused_segments_preserve_checkpoint_and_restored_tail(offset, length):
+@pytest.mark.parametrize("layout", ["head_first", "token_slice"])
+@pytest.mark.parametrize(
+    "lengths,offsets", [([1464], [1408]), ([1336], [1280]), ([315], [256]), ([145, 0, 65, 209], [128, 0, 0, 192])]
+)
+def test_fused_segments_preserve_checkpoint_and_restored_tail(lengths, offsets, layout):
     from vllm_ascend.device.device_op import DeviceOperator
     from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
     from vllm_ascend.ops.gdn_ascendc_checkpoint import build_ascendc_checkpoint_plan
@@ -152,12 +155,25 @@ def test_fused_segments_preserve_checkpoint_and_restored_tail(offset, length):
         pytest.skip("The installed FLA NPU package lacks fused GDN prefill")
     torch.manual_seed(41)
     device = torch.device("npu")
-    q, k, v = [torch.randn(1, length, 4, 128, device=device, dtype=torch.bfloat16) * 0.1 for _ in range(3)]
-    g = -torch.rand(1, length, 4, device=device) * 0.01
-    beta = torch.rand(1, length, 4, device=device, dtype=torch.bfloat16)
-    initial = torch.randn(1, 4, 128, 128, device=device, dtype=torch.float32) * 0.01
-    snapshots = torch.empty_like(initial)
-    plan = build_ascendc_checkpoint_plan((0, length), [offset], device)
+    cu = [0]
+    for length in lengths:
+        cu.append(cu[-1] + length)
+    total = cu[-1]
+    if layout == "head_first":
+        q, k, v = [
+            torch.randn(1, heads, total, 128, device=device, dtype=torch.bfloat16).transpose(1, 2) * 0.1
+            for heads in (2, 2, 4)
+        ]
+    else:
+        q, k, v = [
+            (torch.randn(1, total * 2, heads, 128, device=device, dtype=torch.bfloat16) * 0.1)[:, ::2]
+            for heads in (2, 2, 4)
+        ]
+    g = -torch.rand(1, total, 4, device=device) * 0.01
+    beta = torch.rand(1, total, 4, device=device, dtype=torch.bfloat16)
+    initial = torch.randn(len(lengths), 4, 128, 128, device=device, dtype=torch.float32) * 0.01
+    snapshots = torch.full_like(initial, float("nan"))
+    plan = build_ascendc_checkpoint_plan(tuple(cu), offsets, device)
     output, final = fused_gdn_checkpoint_prefill(q, k, v, g, beta, initial, snapshots, plan, chunk_gated_delta_rule_fwd)
 
     def reference(start, end, state):
@@ -178,11 +194,20 @@ def test_fused_segments_preserve_checkpoint_and_restored_tail(offset, length):
             chunk_gated_delta_rule_fwd,
         )
 
-    prefix_output, prefix = reference(0, offset, initial)
-    tail_output, expected_final = reference(offset, length, prefix)
-    torch.testing.assert_close(snapshots, prefix, rtol=0, atol=0)
-    torch.testing.assert_close(final, expected_final, rtol=0, atol=0)
-    torch.testing.assert_close(output, torch.cat((prefix_output, tail_output), dim=1), rtol=0, atol=0)
+    for row, (begin, end, offset) in enumerate(zip(cu, cu[1:], offsets)):
+        if begin == end:
+            torch.testing.assert_close(final[row], initial[row], rtol=0, atol=0)
+            continue
+        if offset:
+            prefix_output, prefix = reference(begin, begin + offset, initial[row : row + 1])
+            tail_output, expected_final = reference(begin + offset, end, prefix)
+            torch.testing.assert_close(snapshots[row : row + 1], prefix, rtol=0, atol=0)
+            expected_output = torch.cat((prefix_output, tail_output), dim=1)
+        else:
+            expected_output, expected_final = reference(begin, end, initial[row : row + 1])
+            assert snapshots[row].isnan().all()
+        torch.testing.assert_close(final[row : row + 1], expected_final, rtol=0, atol=0)
+        torch.testing.assert_close(output[:, begin:end], expected_output, rtol=0, atol=0)
 
 
 def test_cache_hit_prefill_exports_tail_in_one_model_step(monkeypatch, model_name="Qwen/Qwen3.5-35B-A3B"):
