@@ -430,6 +430,8 @@ class AscendHiSparseImpl(AscendSFAImpl):
         return finish if defer_wait else finish()
 
     def _exec_kv_local(self, kv_no_split, cos, sin, kv_cache, slots, attn_metadata):
+        from vllm_ascend.hisparse.cache_ops import scatter_packed_kv
+
         assert self.kv_a_layernorm is not None
         if self.enable_sparse_sfa_c8:
             from vllm_ascend.hisparse.c8 import pack_c8_components
@@ -459,7 +461,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         cache = self.hisparse_cache
         destination, mapping, num_rows = cache.write_target(values.shape[0], slots.numel())
         num_valid_rows = attn_metadata.query_start_loc[-1:]
-        cache_ops.scatter_packed_kv(latent[:num_rows], rope[:num_rows], destination, mapping, num_valid_rows)
+        scatter_packed_kv(latent[:num_rows], rope[:num_rows], destination, mapping, num_valid_rows)
         # The common connector mirrors resident rows after this write. Draft
         # rows are deferred until the next step, and FULL graphs are mirrored
         # by finish_forward after replay.
