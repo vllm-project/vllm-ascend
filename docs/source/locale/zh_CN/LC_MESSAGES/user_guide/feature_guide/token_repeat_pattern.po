@@ -1,0 +1,47 @@
+# Chinese translations for token_repeat_pattern.md
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: zh_CN\n"
+
+msgid "# Token repetition detection (pattern backend)"
+msgstr "# Token 重复检测（pattern 后端）"
+
+msgid ""
+"`token_repeat` uses a fixed pattern-based rule set with 64 raw-token check\n"
+"boundaries and a final partial-block flush. There is no sliding-window\n"
+"algorithm and no `algorithm` selector."
+msgstr "`token_repeat` 使用固定的基于 pattern 的规则集，在 64 个原始 token 检查边界处判定，并在末尾做部分块 flush。不再提供滑动窗口算法，也没有 `algorithm` 选择器。"
+
+msgid "Build the optional CPU extension independently in the serving environment (Linux, C++17):"
+msgstr "在推理环境中独立构建可选 CPU 扩展（Linux，C++17）："
+
+msgid "Set these fields under `detector.token_repeat` in runtime_config:"
+msgstr "在 runtime_config 的 `detector.token_repeat` 下设置："
+
+msgid ""
+"Use `-1` for chat mode, or the model's explicit `</think>` token ID for reasoning.\n"
+"Tables are built from the served model's `tokenizer.json` during enable-time\n"
+"warmup. ByteLevel BPE is supported; remote model IDs require tokenizer.json in\n"
+"the local HF cache. The table stays in memory and is released when the detector\n"
+"is disabled. Warmup logs vocabulary size and elapsed time, with a warning above\n"
+"the 5-second target."
+msgstr "chat 模式使用 `-1`；推理场景使用模型显式的 `</think>` token ID。启用时预热阶段从所服务模型的 `tokenizer.json` 构建表。支持 ByteLevel BPE；远程模型 ID 需要本地 HF 缓存中有 tokenizer.json。表常驻内存，检测器禁用时释放。预热会记录词表大小与耗时，超过 5 秒目标会告警。"
+
+msgid ""
+"Warmup failure is logged once for that enable attempt and leaves detection\n"
+"unavailable; inference can continue. Fix the extension/resources and\n"
+"disable/re-enable to retry. Rebinding to a different model rebuilds the tables."
+msgstr "某次启用若预热失败只会记一次日志，检测不可用，但推理可继续。修好扩展/资源后，通过禁用再启用以重试。换绑到不同模型会重建表。"
+
+msgid ""
+"Detection uses the existing CPU ActionQueue and Incident actions. Terminal\n"
+"tails are checked before Store cleanup after CPU jobs drain. Forced cleanup at\n"
+"the deferred-wave limit can skip the terminal check for outstanding jobs; this\n"
+"is explicitly logged."
+msgstr "检测复用现有 CPU ActionQueue 与 Incident 动作。CPU 任务排空后、Store 清理前会检查终端尾巴。在延迟波次上限强制清理时，可能跳过未完成任务的终端检查；该情况会显式打日志。"
+
+msgid ""
+"Focused regression tests are in `tests/ut/runtime_guard/test_token_repeat_pattern.py`.\n"
+"Native cases require the optional extension and skip when it is absent."
+msgstr "专项回归测试见 `tests/ut/runtime_guard/test_token_repeat_pattern.py`。原生用例需要可选扩展，缺失时 skip。"
