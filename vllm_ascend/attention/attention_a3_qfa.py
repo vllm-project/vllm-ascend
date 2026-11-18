@@ -446,7 +446,12 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
             logger.info(
                 "A3 QFA INT8 KV cache attention enabled "
                 "(--kv-cache-dtype int8_qfa); one QFA call per step for "
-                "decode and prefill alike."
+                "decode and prefill alike. KV write path: %s "
+                "(VLLM_ASCEND_QFA_SCATTER_WRITE=%d).",
+                "fused ScatterPaKvCache (sectioned layout)"
+                if envs.VLLM_ASCEND_QFA_SCATTER_WRITE
+                else "index_put reference",
+                int(envs.VLLM_ASCEND_QFA_SCATTER_WRITE),
             )
             AscendQFA3Int8Impl._logged = True
         # Capture-safe constants: created lazily on first use (the eager
