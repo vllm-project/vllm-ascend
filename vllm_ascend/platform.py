@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 import os
 from importlib import import_module, util
-from typing import TYPE_CHECKING, Any, get_args
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import torch
@@ -395,6 +395,14 @@ class NPUPlatform(Platform):
 
         adapt_patch(is_global_patch=True)
 
+        # Eager side-effect import: registers the Ascend KV-cache dtype
+        # handlers (fp8 -> torch.float8_e4m3fn, int8, mxfp8) via vLLM's
+        # register_kv_cache_dtype mechanism. This runs in the launcher
+        # process, so CacheConfig._validate_cache_dtype sees the registered
+        # dtypes. Worker processes re-run the registration through the eager
+        # import in vllm_ascend/worker/worker.py.
+        from vllm_ascend.core import kv_cache_dtype_handlers  # noqa: F401
+
         # For online serving, "ascend" quantization method is not a choice natively,
         # so we need to add "ascend" quantization method to quantization methods list
         # and the user can enable quantization using "vllm serve --quantization ascend".
@@ -404,13 +412,13 @@ class NPUPlatform(Platform):
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
             # Same pattern for --kv-cache-dtype: the argparse choices were
-            # built from the upstream CacheDType Literal before this patch
-            # widened it, so append the Ascend-only dtypes here.
+            # built before the Ascend handlers were registered, so append
+            # every registered dtype here (including int8/mxfp8).
             dtype_action = parser._option_string_actions.get("--kv-cache-dtype")
             if dtype_action and hasattr(dtype_action, "choices") and dtype_action.choices:
-                from vllm.config.cache import CacheConfig
+                from vllm.config.cache import KV_CACHE_DTYPES
 
-                for dtype in get_args(CacheConfig.__dataclass_fields__["cache_dtype"].type):
+                for dtype in KV_CACHE_DTYPES:
                     if dtype not in dtype_action.choices:
                         dtype_action.choices.append(dtype)
 

@@ -17,7 +17,8 @@ from vllm.model_executor.models.qwen3_dflash import DFlashQwen3DecoderLayer, _ge
 from vllm.model_executor.models.qwen3_dspark import DSparkConfidenceHead, DSparkMarkovHead
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
-from vllm_ascend.models.qwen3_dspark import AscendQwen3DSparkForCausalLM, align_draft_weights
+from vllm_ascend.models.quarot_utils import align_draft_weights
+from vllm_ascend.models.qwen3_dspark import AscendQwen3DSparkForCausalLM
 
 
 class Glm5DSparkMLAAttention(DeepseekV2MLAAttention):

@@ -2232,6 +2232,7 @@ def _make_initialized_sfa_impl(pcp_size, dcp_size, physical_pcp_size=None):
             hf_text_config=SimpleNamespace(index_topk=4),
         ),
         kv_transfer_config=None,
+        cache_config=SimpleNamespace(cache_dtype="auto"),
         num_speculative_tokens=0,
         scheduler_config=SimpleNamespace(max_num_seqs=4),
         compilation_config=SimpleNamespace(
@@ -2253,7 +2254,10 @@ def _make_initialized_sfa_impl(pcp_size, dcp_size, physical_pcp_size=None):
         patch(
             "vllm_ascend.attention.sfa_v1.get_ascend_config",
             return_value=SimpleNamespace(
-                enable_sparse_sfa_c8=False, enable_sparse_sfa_turboquant=False, enable_mlapo=False
+                enable_sparse_sfa_c8=False,
+                enable_sparse_sfa_turboquant=False,
+                enable_mlapo=False,
+                sparse_kv_offload_config=SimpleNamespace(enabled=False),
             ),
         ),
         patch("vllm_ascend.attention.sfa_v1.is_rl_weight_update_enabled", return_value=False),
