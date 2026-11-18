@@ -7,6 +7,8 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
+_BLOCK = 32  # One program owns a 32-element span, including its partial 32-byte tail.
+
 
 @triton.jit(do_not_specialize=["actual_rows", "graph_rows", "token_count"])
 def _cached_decode_kernel(
@@ -122,7 +124,8 @@ def materialize_cached_gdn_decode(
         ACCEPTED_STRIDE=accepted_source.stride(0),
         WIDTH=width,
         BLOCK_SLOTS=next_power_of_2(width),
-        BLOCK=32,
+        BLOCK=_BLOCK,
+        # Single-buffered, no unit-flag scheduling: one short copy kernel.
         multibuffer=False,
         unit_flag=False,
     )
