@@ -114,6 +114,9 @@ accuracy_tests:
 runner_mapping:
   tests/e2e/pull_request/one_card/test_expert_offload_a5\.py$:
     default: a5-4
+  # Match the four-device Ascend 950 PD validation environment.
+  tests/e2e/pull_request/four_card/test_glm5_3_flash_pd\.py$:
+    default: a5-4
   # Sparse KV offload native ops require A3, even for the TP=1 runner test.
   tests/e2e/pull_request/one_card/test_sparse_kv_offload_lifecycle\.py$:
     default: a3-2
