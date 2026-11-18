@@ -1006,6 +1006,35 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         # dcp_size > 1 means no slicing
         self.assertEqual(len(store.put_calls), 1)
 
+    def test_mixed_put_waits_once_before_the_first_missing_group(self):
+        store = MagicMock(spec=MemcacheBackend)
+        store.requires_exists_before_put = True
+        db = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0, i) for i in range(2)], [16, 16], None)
+        db.set_group_buffers({0: [1000], 1: [2000]}, {0: [16], 1: [16]})
+        sender = KVCacheStoreSendingThread(store, db, 16, tp_rank=0, host_resident_groups=frozenset({1}))
+        order = []
+        event = MagicMock()
+        event.synchronize.side_effect = lambda: order.append("ready")
+
+        def put(keys, addrs, sizes, *, host):
+            order.append("host" if host else "device")
+            return [True]
+
+        store.put.side_effect = put
+        request = ReqMeta(
+            req_id="mixed",
+            token_len_chunk=16,
+            block_ids_by_group=[[1], [2]],
+            block_hashes=["h0"],
+            kv_cache_group_ids=[0, 1],
+            current_event=event,
+        )
+        for hits, expected in (([0, 0], ["ready", "device", "host"]), ([1, 0], ["ready", "host"]), ([1, 1], [])):
+            order.clear()
+            store.exists.side_effect = [[hit] for hit in hits]
+            assert sender._handle_stored_request(request)
+            assert order == expected
+
     def test_handle_request_applies_store_mask(self):
         class StoreMask(list):
             def __iter__(self):
@@ -1432,6 +1461,24 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         keys, _, _ = store.get_calls[0]
         self.assertEqual(len(keys), 1)
         self.assertEqual(t._invalid_block_ids, set())
+
+    def test_rank_rotation_keeps_partial_get_failure_with_its_block(self):
+        store = FakeStore()
+        db = FakeTokenDatabase()
+        thread = KVCacheStoreRecvingThread(store, db, 16, tp_rank=1)
+        request = ReqMeta(
+            req_id="rank1",
+            token_len_chunk=48,
+            block_ids=[4, 8, 12],
+            block_hashes=[b"h0", b"h1", b"h2"],
+            load_spec=LoadSpec(0, 48, can_load=True, token_len=48),
+        )
+        with patch.object(store, "get", return_value=[-1, 0, 0]) as get:
+            thread.add_request(request)
+            thread._handle_request(thread.request_queue.get_nowait())
+        _, addrs, _ = get.call_args.args
+        assert addrs == [[1008], [1012], [1004]]
+        assert thread._invalid_block_ids == {8}
 
 
 class TestLayerBatchBuilder(unittest.TestCase):

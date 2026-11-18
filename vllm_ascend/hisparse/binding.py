@@ -13,29 +13,28 @@ from vllm.v1.kv_cache_interface import (
     HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheSpec,
-    KVCacheTensor,
     UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend.core.kv_cache_interface import AlignedKVCacheTensor, AscendSFAIndexerCacheSpec
 
 
-def _align_hisparse_slab_views(
-    kv_cache_config: KVCacheConfig, kv_caches: dict[str, Any]
-) -> tuple[list[KVCacheTensor], int] | None:
+def _align_hisparse_slab_views(kv_cache_config: KVCacheConfig, kv_caches: dict[str, Any]) -> list[AlignedKVCacheTensor]:
     """Rebase Core's device views onto one aligned slice, without allocating or copying KV."""
     device_tensors = [t for t in kv_cache_config.kv_cache_tensors if not t.host_resident]
-    geometry = {(t.logical_size, t.alignment) for t in device_tensors if isinstance(t, AlignedKVCacheTensor)}
-    if not geometry:
+    reserved = [t for t in device_tensors if isinstance(t, AlignedKVCacheTensor)]
+    if not reserved:
         if any(
             getattr(g.kv_cache_spec, "requires_aligned_device_slab", False) for g in kv_cache_config.kv_cache_groups
         ):
             raise RuntimeError("HiSparse AscendStore device views require a slab alignment reservation.")
-        return None
-    if len(geometry) != 1 or not all(isinstance(t, AlignedKVCacheTensor) for t in device_tensors):
+        return []
+    size, alignment = reserved[0].logical_size, reserved[0].alignment
+    if len(reserved) != len(device_tensors) or any(
+        (t.logical_size, t.alignment) != (size, alignment) for t in reserved
+    ):
         raise ValueError("HiSparse device views require a consistent slab alignment reservation.")
-    ((size, alignment),) = geometry
-    first_view = kv_caches[device_tensors[0].layers[0]]
+    first_view = kv_caches[reserved[0].layers[0]]
     owner = first_view.untyped_storage()
     start = -owner.data_ptr() % alignment
     if owner.nbytes() != size + alignment - 1:
@@ -44,7 +43,7 @@ def _align_hisparse_slab_views(
     # Core binds Resident and Hot using offsets from the storage base. Use
     # one storage slice for all device views so those offsets still start at 0.
     aligned_storage = owner[start : start + size]
-    for tensor in device_tensors:
+    for tensor in reserved:
         for name in tensor.layers:
             view = kv_caches[name]
             if view.untyped_storage().data_ptr() != owner.data_ptr():
@@ -55,7 +54,7 @@ def _align_hisparse_slab_views(
                 kv_caches[name] = view.new_empty(0).set_(
                     aligned_storage, view.storage_offset(), view.size(), view.stride()
                 )
-    return device_tensors, size
+    return reserved
 
 
 def prepare_hisparse_cache_views(
@@ -63,13 +62,11 @@ def prepare_hisparse_cache_views(
 ) -> None:
     """Publish the aligned slab and indexer views only after every view is valid."""
     prepared_caches = kv_caches.copy()
-    alignment = _align_hisparse_slab_views(kv_cache_config, prepared_caches)
+    reserved = _align_hisparse_slab_views(kv_cache_config, prepared_caches)
     _bind_indexer_views(prepared_caches, get_hisparse_indexer_specs(kv_cache_config), forward_context)
     kv_caches.update(prepared_caches)
-    if alignment is not None:
-        device_tensors, size = alignment
-        for tensor in device_tensors:
-            tensor.size = size
+    for tensor in reserved:
+        tensor.size = tensor.logical_size
 
 
 def align_hisparse_indexer_specs(
@@ -220,7 +217,7 @@ def write_hisparse_indexer_c8(key, scale, values, scales, slots) -> None:
 def _bind_indexer_views(
     kv_caches: dict[str, Any], indexer_specs: dict[str, AscendSFAIndexerCacheSpec], forward_context: dict[str, Any]
 ) -> None:
-    block_strides = {}
+    block_strides = []
     for name, spec in indexer_specs.items():
         cache = kv_caches[name]
         # The indexer kernels address dense pages. Expand the view over the
@@ -229,7 +226,7 @@ def _bind_indexer_views(
             raise ValueError(f"Unexpected HiSparse indexer cache shape for {name}: {tuple(cache.shape)}")
         if spec.cache_sparse_li_c8:
             kv_caches[name] = _quantized_indexer_views(cache, spec)
-            block_strides[name] = 1
+            block_strides.append((forward_context[name], 1))
             continue
         block_size = cache.shape[2]
         page_elements = block_size * spec.num_kv_heads * spec.head_size
@@ -242,7 +239,7 @@ def _bind_indexer_views(
             size=(physical_blocks, block_size, spec.num_kv_heads, spec.head_size),
             stride=(page_elements, spec.num_kv_heads * spec.head_size, spec.head_size, 1),
         )
-        block_strides[name] = block_stride
+        block_strides.append((forward_context[name], block_stride))
         kv_caches[name] = (indexer_cache,)
-    for name, block_stride in block_strides.items():
-        forward_context[name].hisparse_block_stride = block_stride
+    for layer, block_stride in block_strides:
+        layer.hisparse_block_stride = block_stride

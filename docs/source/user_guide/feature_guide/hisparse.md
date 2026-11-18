@@ -116,6 +116,12 @@ To use MemCache instead, set `backend` to `memcache` and use the
 either backend. This combination does not support external PD transport,
 layerwise transfer, or Mooncake FabricMem or SSD modes.
 
+Pool keys use the `hisparse-v4` namespace and include the target and draft
+checkpoint identities, revisions and page layout. Upgrading from an earlier
+namespace starts with a cold pool. For local weights, use a versioned directory
+when replacing a checkpoint in a persistent pool. Files overwritten in place
+keep the same model path.
+
 ### Verifying the Feature
 
 Send a request and check the server's metrics endpoint for the HiSparse miss

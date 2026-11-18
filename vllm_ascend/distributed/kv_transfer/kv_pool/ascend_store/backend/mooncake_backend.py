@@ -611,11 +611,10 @@ class MooncakeBackend(Backend):
             raise RuntimeError("Mooncake mixed bulk buffers are already registered")
         self.ensure_initialized()
         assert self.store is not None
-        host_ranges = {buffer.address: buffer.size_bytes for buffer in buffers if buffer.host}
-        staging = MooncakeHostStaging(self.store, host_ranges)
+        staging = MooncakeHostStaging(self.store)
         self._host_staging = staging
         try:
-            staging.register(*buffer_arrays(buffers))
+            staging.register(buffers)
         except Exception:
             try:
                 self.close()
@@ -628,14 +627,14 @@ class MooncakeBackend(Backend):
         store = self.store
         try:
             if staging is not None:
-                staging.close()
+                staging.unregister()
         finally:
             # This backend owns the Store. If deregistration failed, shut its
             # engine down before releasing memory it may still have registered.
             if store is not None:
                 store.close()
             if staging is not None:
-                staging.release_staging()
+                staging.close()
             self._host_staging = None
             self.store = None
             self._store_initialized = False

@@ -348,9 +348,15 @@ class KVTransferThread(threading.Thread):
 
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
-        self._set_os_thread_name()
-        self.m_store.set_device()
-        self.ready_event.set()
+        try:
+            self._set_os_thread_name()
+            self.m_store.set_device()
+        except BaseException as error:
+            self._fatal_error = error
+            return
+        finally:
+            # Registration waits for this signal on both success and failure.
+            self.ready_event.set()
         while True:
             request_data = None
             try:
@@ -999,6 +1005,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return False
             if current_event is not None:
                 current_event.synchronize()
+                # This request's readiness event covers all subsequent group PUTs.
+                current_event = None
             put_result: bool | list[bool] | None
             if self.host_resident_groups:
                 put_result = self.m_store.put(keys, addrs, sizes, host=group_id in self.host_resident_groups)
@@ -1170,23 +1178,25 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             if not key_list:
                 self.set_finished_request(req_id)
                 return
-            key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
-            addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
-            size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
-            block_id_list_c = (
-                block_id_list[self.tp_rank % len(block_id_list) :] + block_id_list[: self.tp_rank % len(block_id_list)]
-            )
+            # Mixed GETs rotate within each memory kind and return codes in input
+            # order. Ordinary GETs rotate the whole batch, including block IDs.
+            rotation = self.tp_rank % len(key_list)
+            if host_keys is None and rotation:
+                key_list = key_list[rotation:] + key_list[:rotation]
+                addr_list = addr_list[rotation:] + addr_list[:rotation]
+                size_list = size_list[rotation:] + size_list[:rotation]
+                block_id_list = block_id_list[rotation:] + block_id_list[:rotation]
             logger.debug(
                 "KV pool async recv calls backend get request=%s token_len=%d groups=%s keys=%d sample_keys=%s",
                 req_id,
                 token_len,
-                req_meta.kv_cache_group_ids or [0],
-                len(key_list_c),
-                key_list_c[:3],
+                group_ids,
+                len(key_list),
+                key_list[:3],
             )
             load_get_start = time.perf_counter() if self._record_operation_cb is not None else 0.0
             if host_keys is None:
-                ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+                ret = self.m_store.get(key_list, addr_list, size_list)
             else:
                 ret = get_by_residency(
                     self.m_store, key_list, addr_list, size_list, tp_rank=self.tp_rank, host_keys=host_keys
@@ -1195,34 +1205,14 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 self._record_operation_cb(
                     "load_get",
                     time.perf_counter() - load_get_start,
-                    len(key_list_c),
+                    len(key_list),
                 )
-            if (host_keys is not None or getattr(self.m_store, "strict_get_results", False) is True) and (
-                ret is None or len(ret) != len(key_list_c) or any(r != 0 for r in ret)
-            ):
-                self._mark_failed_requests([req_meta], finish_receiving=True)
-                return
-            if ret is not None and any(r != 0 for r in ret):
-                missing_block_ids = record_failed_blocks(
-                    block_id_list_c,
-                    ret,
-                )
-                if len(req_meta.block_ids_by_group) == 1:
-                    with self._invalid_block_ids_lock:
-                        self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
-                    logger.error(
-                        "KV load failed for hybrid request %s. "
-                        "Skip invalid-block fallback to avoid scheduler crash. "
-                        "failed_blocks=%s",
-                        req_id,
-                        missing_block_ids,
-                    )
-            elif ret is None:
-                missing_block_ids = record_failed_blocks(
-                    block_id_list_c,
-                    [1] * len(block_id_list_c),
-                )
+            if host_keys is not None or getattr(self.m_store, "strict_get_results", False) is True:
+                if ret is None or len(ret) != len(key_list) or any(r != 0 for r in ret):
+                    self._mark_failed_requests([req_meta], finish_receiving=True)
+                    return
+            elif ret is None or any(r != 0 for r in ret):
+                missing_block_ids = record_failed_blocks(block_id_list, ret if ret is not None else [1] * len(key_list))
                 if len(req_meta.block_ids_by_group) == 1:
                     with self._invalid_block_ids_lock:
                         self._invalid_block_ids.update(missing_block_ids)
@@ -1238,8 +1228,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 "KV pool async recv backend get returned request=%s token_len=%d groups=%s keys=%d",
                 req_id,
                 token_len,
-                req_meta.kv_cache_group_ids or [0],
-                len(key_list_c),
+                group_ids,
+                len(key_list),
             )
             self.set_finished_request(req_id)
         finally:

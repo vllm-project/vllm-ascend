@@ -554,7 +554,7 @@ class MemcacheBackend(Backend):
         *,
         host: bool | None = None,
     ) -> list[bool] | bool:
-        if host and not (len(key) == len(addr) == len(size)):
+        if host is not None and not (len(key) == len(addr) == len(size)):
             logger.error("Invalid HiSparse MemCache PUT metadata: expected one address and size per key")
             return False
         self.ensure_initialized()
@@ -562,7 +562,7 @@ class MemcacheBackend(Backend):
         try:
             direction = MmcDirect.COPY_H2G if host else MmcDirect.COPY_L2G
             res = self.store.batch_put_from_layers(key, addr, size, direction.value)
-            if host:
+            if host is not None:
                 res = require_aligned_batch_results("HiSparse Memcache PUT", key, res)
             failed_codes = [int(value) for value in res if value != 0]
             failed_count = len(failed_codes)

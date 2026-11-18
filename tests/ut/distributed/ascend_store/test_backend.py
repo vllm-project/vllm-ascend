@@ -1815,6 +1815,17 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b.store.batch_put_from_layers.return_value = [1]
         self.assertEqual(b.put(["k1"], [[100]], [[10]]), [False])
 
+    def test_hisparse_put_validates_both_indexer_and_source_batches(self):
+        backend = self._make_backend()
+        for host in (False, True):
+            with self.subTest(host=host):
+                backend.store.reset_mock()
+                self.assertIs(backend.put(["k"], [], [[8]], host=host), False)
+                backend.store.batch_put_from_layers.assert_not_called()
+                for malformed in ([False], ["0"], [], [0, 0]):
+                    backend.store.batch_put_from_layers.return_value = malformed
+                    self.assertIs(backend.put(["k"], [[100]], [[8]], host=host), False)
+
     def test_put_exception(self):
         b = self._make_backend()
         b.store.batch_put_from_layers.side_effect = RuntimeError("backend fail")

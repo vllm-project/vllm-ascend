@@ -14,6 +14,7 @@ from typing import Any
 from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import require_aligned_batch_results
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor
 
 # Each direction owns a bounded buffer; network waits never serialize PUT and GET.
 _HOST_STAGING_BYTES = 64 * 1024 * 1024
@@ -32,11 +33,11 @@ class _HostStaging:
 
 
 class MooncakeHostStaging:
-    def __init__(self, store: Any, host_ranges: dict[int, int]) -> None:
+    def __init__(self, store: Any) -> None:
         self.store = store
-        self._host_ranges = host_ranges.copy()
-        self._host_bases = sorted(host_ranges)
-        self._registered: dict[int, int] = {}
+        self._host_ranges: dict[int, int] = {}
+        self._host_bases: list[int] = []
+        self._registered: list[int] = []
         self._send = _HostStaging()
         try:
             self._recv = _HostStaging()
@@ -44,49 +45,45 @@ class MooncakeHostStaging:
             self._send.buffer.close()
             raise
 
-    def register(self, ptrs: list[int], lengths: list[int]) -> None:
-        if len(ptrs) != len(lengths):
-            raise ValueError("Mooncake bulk buffer pointers and lengths must have the same size")
-        regions = dict(zip(ptrs, lengths, strict=True))
-        if not self._host_ranges or any(regions.get(ptr) != size for ptr, size in self._host_ranges.items()):
+    def register(self, buffers: list[BufferDescriptor]) -> None:
+        if len({buffer.address for buffer in buffers}) != len(buffers):
+            raise ValueError("Mooncake bulk buffer addresses must be distinct")
+        self._host_ranges = {buffer.address: buffer.size_bytes for buffer in buffers if buffer.host}
+        if not self._host_ranges:
             raise ValueError("Mooncake bulk transfer requires explicit Host Source buffer ranges")
-        if len(regions) != len(ptrs) or any(ptr <= 0 or size <= 0 for ptr, size in regions.items()):
-            raise ValueError("Mooncake bulk buffer pointers must be distinct and sizes positive")
+        self._host_bases = sorted(self._host_ranges)
         # HIXL cannot register HiSparse's already mapped/pinned pages (Resource_Busy).
         # Use ordinary DDR for Store and keep the Indexer slab on the direct device path.
         for staging in (self._send, self._recv):
             staging.prepare()
             self._register(staging.base, _HOST_STAGING_BYTES)
-        for ptr, size in regions.items():
-            if ptr not in self._host_ranges:
-                self._register(ptr, size)
+        for buffer in buffers:
+            if not buffer.host:
+                self._register(buffer.address, buffer.size_bytes)
 
     def _register(self, ptr: int, size: int) -> None:
         rc = self.store.register_buffer(ptr, size)
         if rc != 0:
             raise RuntimeError(f"Mooncake bulk buffer registration failed: {size} bytes, status={rc}")
-        self._registered[ptr] = size
+        self._registered.append(ptr)
 
-    def close(self) -> None:
-        # Worker shutdown stops the transfer threads before releasing this buffer.
+    def unregister(self) -> None:
         failures = []
-        for ptr in reversed(tuple(self._registered)):
+        for ptr in reversed(self._registered):
             try:
                 rc = self.store.unregister_buffer(ptr)
                 if rc != 0:
                     logger.error("Mooncake bulk buffer unregister failed: status=%s", rc)
                     failures.append(ptr)
-                else:
-                    del self._registered[ptr]
             except Exception:
                 logger.exception("Mooncake bulk buffer unregister raised")
                 failures.append(ptr)
+        self._registered = failures[::-1]
         if failures:
             # Keep the buffers alive until their owner has closed the Store.
             raise RuntimeError(f"Mooncake could not unregister {len(failures)} bulk buffers")
-        self.release_staging()
 
-    def release_staging(self) -> None:
+    def close(self) -> None:
         """Release memory after successful deregistration or backend Store shutdown."""
         self._registered.clear()
         self._recv.buffer.close()
