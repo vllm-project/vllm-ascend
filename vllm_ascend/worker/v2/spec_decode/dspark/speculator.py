@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from typing import Any, cast
 
 import numpy as np
@@ -294,6 +295,17 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             max_model_len=self.max_model_len,
         )
 
+    @contextmanager
+    def _draft_metadata_proposal(self, num_reqs: int):
+        previous_cache = getattr(self, "_draft_metadata_cache", None)
+        # Reuse only this proposal's post-rejection state, never a previous batch.
+        self._draft_metadata_cache = {}
+        try:
+            with draft_metadata_request_count(self, num_reqs):
+                yield
+        finally:
+            self._draft_metadata_cache = previous_cache
+
     # Graph capture builds metadata from the padded request shape.
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         assert self.input_batch is not None
@@ -359,6 +371,26 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             )
 
         num_reqs_padded = batch_desc.num_reqs or num_reqs
+        cache = getattr(self, "_draft_metadata_cache", None)
+        cache_key = None
+        if (
+            cache is not None
+            and batch_desc.cg_mode == CUDAGraphMode.FULL
+            and self.attn_architecture == "GQA"
+            and not self.use_dcp
+            and dcp_local_seq_lens is None
+        ):
+            cache_key = (
+                num_reqs,
+                batch_desc.cg_mode,
+                batch_desc.num_tokens,
+                num_reqs_padded,
+                tuple(query_start_loc_np),
+                step,
+                causal if isinstance(causal, bool) else tuple(sorted(causal.items())),
+            )
+            if cache_key in cache:
+                return cache[cache_key]
         # The draft forward may process padded inputs outside FULL graphs, but
         # attention only consumes the tokens owned by real requests there.
         num_tokens = batch_desc.num_tokens if batch_desc.cg_mode == CUDAGraphMode.FULL else int(query_start_loc_np[-1])
@@ -387,6 +419,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             # FULL replay uses the captured padded Q, so FIA needs cumulative
             # query lengths through every padded request slot.
             self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
+        if cache_key is not None and attn_metadata is not None:
+            cache[cache_key] = attn_metadata
         return attn_metadata
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
@@ -447,7 +481,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 num_draft_reqs, self.max_num_reqs, self.num_query_per_req
             )
         with (
-            draft_metadata_request_count(self, num_draft_reqs),
+            self._draft_metadata_proposal(num_draft_reqs),
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
                 self.input_buffers.positions,
