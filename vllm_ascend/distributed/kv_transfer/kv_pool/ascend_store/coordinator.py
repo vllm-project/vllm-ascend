@@ -311,7 +311,7 @@ class AscendStoreCoordinator:
     ) -> tuple[list[bool] | None, ...]:
         # Probe candidate replay boundaries as well as segment boundaries;
         # find_longest_cache_hit still requires all necessary states to exist.
-        masks = self._cached_reachable_masks(aligned_token_len, None, None)
+        masks = self._cached_reachable_masks(aligned_token_len, self.retention_interval, None)
         for num_chunks, mask in masks:
             if mask is not None:
                 assert len(mask) == num_chunks

@@ -277,7 +277,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
 
         self.assertEqual(masks, ([False, False, False, True],))
 
-    def test_lookup_mask_uses_reachability_without_retention(self):
+    def test_lookup_mask_preserves_retention_and_lcm_boundaries(self):
         coord = AscendStoreCoordinator(
             [KVCacheGroupSpec(["layer.0"], _sliding_spec(block_size=128, sliding_window=256))],
             scheduler_block_size=512,
@@ -293,7 +293,8 @@ class TestAscendStoreCoordinator(unittest.TestCase):
             masks = coord.lookup_mask(512)
 
         self.assertEqual(masks, ([False, False, False, True],))
-        self.assertIsNone(reachable.call_args.kwargs["retention_interval"])
+        self.assertEqual(reachable.call_args.kwargs["retention_interval"], 256)
+        self.assertEqual(list(reachable.call_args.kwargs["reachable_boundaries"]), [512])
 
     def test_reachable_mask_preserves_optional_kwargs_for_flexible_signature(self):
         class FlexibleManager:
