@@ -1,0 +1,4 @@
+pr: 22074
+entries:
+  - category: bugfix
+    text: Fixed DFlash2 startup and candidate selection with fine-grained LM-head tensor parallelism, including idle and uneven data-parallel ranks. Preserved fine-grained LM-head sharding when aligning DFlash2 and Qwen3/K3 DSpark draft weights for QuaRot targets. Rebuilt draft LM heads use ordinary tensor parallelism when fine-grained LM-head TP is disabled, including with PCP enabled.

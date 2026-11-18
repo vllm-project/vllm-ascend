@@ -74,6 +74,7 @@ from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     bind_dspark_context_receiver,
     configure_dspark_kv_transfer,
@@ -320,6 +321,7 @@ class NPUModelRunner(GPUModelRunner):
         return AscendPCPManager
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
+        expert_offload.validate_loading(self, load_dummy_weights)
         from vllm_ascend.model_executor.warmup.nz_warmup import (
             join_nz_warm_thread,
             start_nz_warm_thread,
@@ -351,6 +353,8 @@ class NPUModelRunner(GPUModelRunner):
             # device and must not outlive this call. Joining here is also before
             # memory profiling.
             join_nz_warm_thread()
+
+        expert_offload.initialize(self)
 
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
@@ -601,6 +605,10 @@ class NPUModelRunner(GPUModelRunner):
                 fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
 
     def shutdown(self) -> None:
+        from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
+
+        expert_offload.shutdown(self)
+
         model = getattr(self, "model", None)
         # Include private/shared UVA owners, which have no MemFabric client.
         shared_embeddings = list(getattr(self, "_shared_engram_shutdown_pending", None) or [])
@@ -626,6 +634,8 @@ class NPUModelRunner(GPUModelRunner):
             self._shared_engram_parent_stopped = True
         first_error = None
         for embedding in shared_embeddings:
+            if getattr(embedding, "local_vmm", False) is True:
+                continue
             try:
                 embedding.close_host_offload()
             except Exception as exc:
@@ -633,7 +643,21 @@ class NPUModelRunner(GPUModelRunner):
                     first_error = exc
         if first_error is not None:
             raise first_error
-        self._shared_engram_shutdown_pending = []
+        pending = [owner for owner in shared_embeddings if getattr(owner, "local_vmm", False) is True]
+        self._shared_engram_shutdown_pending = pending
+        if pending:
+            from vllm_ascend.models.deepseek_v41.engram.local_shared_vmm import EngramSharedReleaseError
+
+            errors = []
+            for index in range(len(pending) - 1, -1, -1):
+                try:
+                    pending[index].close_host_offload()
+                except EngramSharedReleaseError as exc:
+                    errors.append(str(exc))
+                else:
+                    del pending[index]
+            if errors:
+                raise EngramSharedReleaseError("; ".join(errors))
 
     def _register_sparse_kv_caches(self, kv_caches: dict[str, Any]) -> None:
         """Bind host pools before the V2 KV connector registers its destinations."""
@@ -841,6 +865,7 @@ class NPUModelRunner(GPUModelRunner):
         if self._target_uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
+        expert_offload.prepare_batch(self, batch_state)
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:

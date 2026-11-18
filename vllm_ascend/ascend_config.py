@@ -26,7 +26,7 @@ from contextvars import ContextVar
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, TypeAdapter, field_validator, model_validator
+from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -34,6 +34,7 @@ from vllm.utils.math_utils import cdiv
 from vllm_ascend.config_utils import config
 from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.distributed.expert_transfer.expert_offload_config import validate_expert_offload_config
 from vllm_ascend.kv_trace.kv_trace_config import KVTraceConfig
 
 if TYPE_CHECKING:
@@ -490,6 +491,20 @@ class SharedEngramConfig:
         return self
 
 
+@config(config=ConfigDict(frozen=True))
+class ExpertOffloadConfig:
+    """Configuration for exact single-worker expert offload."""
+
+    enabled: bool = False
+    num_device_experts: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_capacity(self):
+        if self.enabled and self.num_device_experts is None:
+            raise ValueError("expert_offload_config.num_device_experts is required when enabled")
+        return self
+
+
 @config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
@@ -734,6 +749,7 @@ class AscendConfig:
     # Still factory-injected: construction depends on vllm_config.
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
     kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
+    expert_offload_config: ExpertOffloadConfig = dataclasses.field(default_factory=ExpertOffloadConfig)
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
     # This switches the prefill recurrence; keep opt-in until cold/cache-hit
@@ -794,6 +810,7 @@ class AscendConfig:
     # pydantic after-validator). Preserves the original __init__ ordering —
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        validate_expert_offload_config(self.expert_offload_config, vc, self)
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:
                 raise ValueError("shared_engram requires --shutdown-timeout > 0 to retire reader leases")

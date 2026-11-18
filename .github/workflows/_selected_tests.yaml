@@ -249,7 +249,7 @@ jobs:
           export MAX_JOBS=$(( ${{ matrix.group.num_npus }} * 23 ))
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          uv pip install 'mooncake-transfer-engine-npu===0.3.14rc3'
+          uv pip install 'mooncake-transfer-engine-npu===0.3.14'
           # Reinstall triton-ascend last so its files win over upstream triton in the shared triton/ dir.
           uv pip install --force-reinstall --no-deps 'triton-ascend===3.6.0.post2'
           # Preserve CI availability during the transition by compiling on the
