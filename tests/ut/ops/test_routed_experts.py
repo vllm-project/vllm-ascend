@@ -2,13 +2,42 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
+from vllm.model_executor.layers.fused_moe.router.custom_routing_router import CustomRoutingRouter
 
 import vllm_ascend.ops.fused_moe.routed_experts as routed_experts_module
+from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts, EplbExpertTensorList
 from vllm_ascend.quantization.nz import NzCastSpec
+from vllm_ascend.quantization.quant_type import QuantType
+
+
+@pytest.mark.parametrize(("weight_on_input", "custom_router"), [(False, False), (True, False), (False, True)])
+def test_pcp_preserves_float_activations_for_routing(monkeypatch, weight_on_input, custom_router):
+    layer = SimpleNamespace(
+        enable_npugraph_ex_static_kernel=False,
+        moe_config=SimpleNamespace(pcp_size=8, is_sequence_parallel=False),
+        quant_type=QuantType.W8A8,
+        router=MagicMock(spec=CustomRoutingRouter) if custom_router else None,
+        apply_router_weight_on_input=weight_on_input,
+    )
+    comm = MagicMock(spec=AllGatherCommImpl)
+    # Check the prepare policy before routing or expert kernels run.
+    comm.prepare.side_effect = RuntimeError("prepare boundary")
+    monkeypatch.setattr(routed_experts_module, "get_forward_context", lambda: SimpleNamespace())
+    monkeypatch.setattr(routed_experts_module, "get_moe_comm_method", lambda *args: comm)
+    monkeypatch.setattr(
+        routed_experts_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(in_profile_run=False, moe_comm_type=None),
+    )
+    with pytest.raises(RuntimeError, match="prepare boundary"):
+        AscendRoutedExperts.forward_impl(layer, hidden_states=torch.randn(3, 4), router_logits=torch.randn(3, 8))
+    expected = QuantType.NONE if weight_on_input or custom_router else QuantType.W8A8
+    assert comm.prepare.call_args.kwargs["quant_type"] == expected
 
 
 class _FakeNpuTensor:
