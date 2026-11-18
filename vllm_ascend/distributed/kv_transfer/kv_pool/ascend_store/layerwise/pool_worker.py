@@ -1322,6 +1322,15 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
                     continue
                 effective_block_size = self.grouped_block_size[group_id]
+                if (
+                    self.layerwise_offload
+                    and request.target_token_len > 0
+                    and self.group_uses_align_state[group_id]
+                    and group_id in self._reused_layers_by_group
+                ):
+                    endpoint_block = (request.target_token_len - 1) // effective_block_size
+                    if endpoint_block >= len(block_ids_by_group) or block_ids_by_group[endpoint_block] == 0:
+                        raise ValueError("Recurrent cache endpoint has no allocated state page")
                 alloc_size = self._global_group_alloc_size(group_id)
                 group_block_hashes = get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)
 
@@ -1805,6 +1814,19 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     if (request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np))
                     else request.block_ids_np
                 )
+                if (
+                    self.layerwise_offload
+                    and cached_tokens > 0
+                    and self.group_uses_align_state[group_id]
+                    and group_id in self._reused_layers_by_group
+                ):
+                    endpoint_block = (cached_tokens - 1) // effective_block_size
+                    if (
+                        block_ids_by_group is None
+                        or endpoint_block >= len(block_ids_by_group)
+                        or block_ids_by_group[endpoint_block] == 0
+                    ):
+                        raise ValueError("Recurrent cache endpoint has no allocated state page")
                 if block_ids_by_group is None:
                     if get_saved_key is not None:
                         return False
@@ -2117,31 +2139,16 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.layer_load_tasks = [[] for _ in range(self.num_layers)]
         if not requests:
             return
-        reused_state_groups = [
-            group_id
-            for group_id, uses_align in enumerate(self.group_uses_align_state)
-            if self.layerwise_offload and uses_align and group_id in self._reused_layers_by_group
-        ]
-        if reused_state_groups:
+        if (
+            self.layerwise_offload
+            and any(self.group_uses_align_state[group_id] for group_id in self._reused_layers_by_group)
+            and self.vllm_config.speculative_config is not None
+        ):
             for request in requests:
                 # A prefill endpoint is final at the layer save hook, including
                 # with MTP enabled. Decode state may commit after sampling.
-                if (
-                    self.vllm_config.speculative_config is not None
-                    and request.num_prompt_tokens is not None
-                    and request.target_token_len > request.num_prompt_tokens
-                ):
+                if request.num_prompt_tokens is not None and request.target_token_len > request.num_prompt_tokens:
                     raise NotImplementedError("Shared recurrent state supports speculative prefill, not decode commits")
-                for group_id in reused_state_groups:
-                    endpoints = [request.target_token_len] if request.can_save else []
-                    if request.load_spec is not None and request.load_spec.can_load:
-                        endpoints.append(request.load_spec.kvpool_cached_tokens)
-                    blocks = request.block_ids_by_group[group_id]
-                    for end in endpoints:
-                        if end > 0:
-                            index = (end - 1) // self.grouped_block_size[group_id]
-                            if index >= len(blocks) or blocks[index] == 0:
-                                raise ValueError("Recurrent cache endpoint has no allocated state page")
         # Mooncake uses the projected stage-local cache layout, including any
         # draft layers. The GVA/key planes retain their existing PP key count.
         if not self.use_block_key_layerwise and getattr(self, "pp_size", 1) > 1:
