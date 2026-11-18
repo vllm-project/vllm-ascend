@@ -211,6 +211,7 @@ class WorkerSentinel(GPUWorkerSentinel):
             comm_type = select_moe_comm_method(max_tokens, self.worker.vllm_config)
             if comm_type is MoECommType.MC2:
                 return
+            # TODO: accept MegaMoE/fused MC2 once dispatch_ffn_combine takes elastic_info.
             message = (
                 f"[FT] scale_down requires MC2 for every reachable batch, but a "
                 f"{max_tokens}-token batch selects {comm_type} (MC2 capacity: {capacity}); "

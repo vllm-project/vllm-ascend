@@ -35,7 +35,12 @@ from vllm_ascend.ops.fused_moe.moe_utils import (
     cumsum_group_list,
 )
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, dispose_tensor, maybe_trans_nz, transpose_expert_dims
+from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_NZ,
+    dispose_tensor,
+    maybe_trans_nz,
+    transpose_expert_weight_last_two_dims,
+)
 
 from ..base import (
     AscendLinearScheme,
@@ -282,8 +287,8 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         return weights
 
     def process_weights_after_loading(self, layer):
-        layer.w13_weight.data = transpose_expert_dims(layer.w13_weight.data)
-        layer.w2_weight.data = transpose_expert_dims(layer.w2_weight.data)
+        layer.w13_weight.data = transpose_expert_weight_last_two_dims(layer.w13_weight.data)
+        layer.w2_weight.data = transpose_expert_weight_last_two_dims(layer.w2_weight.data)
         # TODO(zzzzwwjj): Currently, `torch_npu.npu_grouped_matmul_swiglu_quant`
         # can only support weight nz.
         if self.quant_type == QuantType.W8A8:
