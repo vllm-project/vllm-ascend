@@ -85,28 +85,61 @@ def test_c8_prolog_requires_matching_fp8_weight_scheme(mxfp8):
     assert impl._fused_preprocess_type() is expected
 
 
-@pytest.mark.parametrize("hisparse", [False, True])
-def test_indexer_backend_choice_survives_model_construction_context(hisparse):
-    from vllm.config import CacheConfig, VllmConfig, set_current_vllm_config
+@pytest.mark.parametrize("hisparse", [False, True], ids=["sfa", "hisparse"])
+def test_indexer_backend_choice_survives_model_construction_context(hisparse, monkeypatch):
+    from vllm.config import CacheConfig, VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
     from vllm.config.attention import HiSparseConfig
+    from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
     from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 
-    from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+    from vllm_ascend.attention import indexer as indexer_module
+    from vllm_ascend.attention.indexer import (
+        AscendHiSparseIndexerMetadataBuilder,
+        AscendSFAIndexerBackend,
+        AscendSFAIndexerMetadataBuilder,
+    )
+    from vllm_ascend.ops.mla import IndexerWrapper
     from vllm_ascend.patch.worker import patch_attn_utils  # noqa: F401
 
-    config = VllmConfig()
+    config = VllmConfig(cache_config=CacheConfig(block_size=128))
     config.attention_config.hisparse_config = HiSparseConfig() if hisparse else None
+    hf_config = NS(model_type="deepseek_v32", index_topk=2048)
+    config.model_config = NS(dtype=torch.bfloat16, hf_config=hf_config, hf_text_config=hf_config)
+    monkeypatch.setattr(
+        indexer_module,
+        "get_ascend_config",
+        lambda: NS(is_sparse_li_c4_layer=lambda _: False, is_sparse_li_c8_layer=lambda _: False),
+    )
     expected = AscendHiSparseIndexerBackend if hisparse else AscendSFAIndexerBackend
+    expected_builder = AscendHiSparseIndexerMetadataBuilder if hisparse else AscendSFAIndexerMetadataBuilder
+    prefix = "model.layers.0.self_attn.indexer.k_cache"
+    head_dim = 128
     with set_current_vllm_config(config):
-        cache = DeepseekV32IndexerCache(132, torch.uint8, "regression.indexer.k_cache", CacheConfig())
-        assert cache.get_attn_backend() is expected
-    # Core's post-load block-size discovery runs after the construction context
-    # exits. A later model's context must not change an existing cache either.
-    assert cache.get_attn_backend() is expected
+        cache = DeepseekV32IndexerCache(head_dim + 4, torch.uint8, prefix, config.cache_config)
+        indexer = NS(
+            n_head=64,
+            head_dim=head_dim,
+            topk_tokens=hf_config.index_topk,
+            q_lora_rank=1536,
+            wq_b=None,
+            wk_weights_proj=None,
+            k_norm=None,
+            softmax_scale=head_dim**-0.5,
+            k_cache=cache,
+        )
+        wrapper = IndexerWrapper(indexer, qk_rope_head_dim=64)
+        assert type(wrapper.impl) is expected
+
+    # Worker metadata discovery uses the registered owner after construction.
+    owner = get_layers_from_vllm_config(config, AttentionLayerBase, [prefix])[prefix]
+    assert owner is wrapper.k_cache
+    assert owner.get_attn_backend() is expected
+    assert owner.get_attn_backend().get_builder_cls() is expected_builder
+    # Another model's configuration must not change this owner's backend.
     other = VllmConfig()
     other.attention_config.hisparse_config = None if hisparse else HiSparseConfig()
     with set_current_vllm_config(other):
-        assert cache.get_attn_backend() is expected
+        assert owner.get_attn_backend() is expected
 
 
 def test_failed_unregister_retains_host_owner_for_safe_retry(monkeypatch):
