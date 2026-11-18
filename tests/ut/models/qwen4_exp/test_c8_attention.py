@@ -6,30 +6,7 @@ import torch
 
 from tests.ut.models.qwen4_exp.test_gbsa_preparation import load_cpu_preparation
 from vllm_ascend.models.qwen4_exp import c8_attention, lightning_indexer
-from vllm_ascend.models.qwen4_exp.quantization import qsa_c8_cache_views, quantize_qsa_rows
-
-
-def cpu_pack(cache, groups, counts, visible, table, output, output_scales=None):
-    """Independent logical-to-physical page reference for the device gather."""
-    codes, scales = qsa_c8_cache_views(cache)
-    output.zero_()
-    if output_scales is not None:
-        output_scales.zero_()
-    for row in range(output.shape[0]):
-        for head in range(output.shape[2]):
-            for slot in range(int(counts[head, row])):
-                logical_group = int(groups[head, row, slot])
-                for offset in range(4):
-                    logical = logical_group * 4 + offset
-                    if logical >= int(visible[row]) or logical < 0:
-                        continue
-                    page = int(table[row, logical // 128])
-                    if 0 <= page < cache.shape[0]:
-                        packed_token = slot * 4 + offset
-                        output[row, packed_token, head] = codes[page, logical % 128, head]
-                        if output_scales is not None:
-                            packed_page = row * (output.shape[1] // 128) + packed_token // 128
-                            output_scales[packed_page, head, packed_token % 128] = scales[page, logical % 128, head]
+from vllm_ascend.models.qwen4_exp.quantization import qsa_c8_indexer_cache_views, quantize_qsa_rows
 
 
 def cpu_gbsa(query, keys, values, indices, counts, block_shape, **kwargs):
@@ -65,31 +42,27 @@ def cpu_gbsa(query, keys, values, indices, counts, block_shape, **kwargs):
 
 @pytest.mark.parametrize("tail", [0, 1, 2, 3])
 @pytest.mark.parametrize("row_count", [1, 11, 129])
-@pytest.mark.parametrize("tile_rows", [8, 128])
-def test_c8_sparse_attention_matches_dense_quantized_reference(monkeypatch, tail, row_count, tile_rows):
+def test_c8_sparse_attention_matches_dense_quantized_reference(monkeypatch, tail, row_count):
     torch.manual_seed(123 + tail)
-    monkeypatch.setattr(c8_attention, "C8_QUERY_TILE", tile_rows)
     monkeypatch.setattr(c8_attention, "prepare_qsa_gbsa_inputs", load_cpu_preparation())
-    monkeypatch.setattr(c8_attention, "pack_qsa_c8_rows", cpu_pack)
     calls = []
 
     def metadata(indices, counts, *args, **kwargs):
         assert kwargs["quant_mode"] == 7
-        assert kwargs["max_seqlen_kv"] <= 2048
+        assert kwargs["max_seqlen_kv"] == 3 * 128
         calls.append(counts.shape[1])
         return torch.empty(0)
 
     monkeypatch.setattr(c8_attention, "generic_block_sparse_attention_metadata", metadata)
     monkeypatch.setattr(c8_attention, "generic_block_sparse_attention", cpu_gbsa)
-    key_cache = torch.zeros(6, 128, 2, 132, dtype=torch.int8)
-    value_cache = torch.zeros_like(key_cache)
+    cache = torch.empty(6, 2, 128, 2, 128, dtype=torch.int8)
+    key_cache, value_cache = cache[:, 0], cache[:, 1]
     v_scale = torch.rand(2, 128) * 0.01 + 0.01
     p_scale = torch.tensor([127.0])
-    for cache in (key_cache, value_cache):
-        codes, scales = qsa_c8_cache_views(cache)
-        q, s = quantize_qsa_rows(torch.randn(6 * 128, 2, 128, dtype=torch.bfloat16))
-        codes.copy_(q.view_as(codes))
-        scales.copy_(s.view_as(scales))
+    key_codes, scales = quantize_qsa_rows(torch.randn(6 * 128, 2, 128, dtype=torch.bfloat16))
+    key_scales = scales.view(6, 128, 2).transpose(1, 2).contiguous()
+    key_cache.copy_(key_codes.view_as(key_cache))
+    value_cache.random_(-127, 128)
     query = torch.randn(row_count, 4, 128, dtype=torch.bfloat16)
     # Two requests, nonconsecutive physical pages, cross-page selected groups,
     # holes in top-k, and a partial final group.
@@ -103,36 +76,44 @@ def test_c8_sparse_attention_matches_dense_quantized_reference(monkeypatch, tail
         positions[-1] = -1
     output = torch.empty_like(query)
     c8_attention.qsa_c8_attention(
-        query, key_cache, value_cache, compact, table, requests, positions, lengths, output, v_scale, p_scale
+        query,
+        key_cache,
+        value_cache,
+        compact,
+        table,
+        requests,
+        positions,
+        lengths,
+        output,
+        v_scale,
+        p_scale,
+        key_scales=key_scales,
     )
     qcodes, qscales = quantize_qsa_rows(query)
     qdq = qcodes.float() * qscales.unsqueeze(-1)
     expected = torch.zeros_like(query)
-    kc, ks = qsa_c8_cache_views(key_cache)
-    vc, vs = qsa_c8_cache_views(value_cache)
     for row in range(row_count):
         if positions[row] < 0:
             continue
         selected = list(range(128, 132)) + list(range(4)) + list(range(256, 260)) + list(range(260, 260 + tail))
         token = torch.tensor(selected)
         page = table[requests[row], token // 128].long()
-        keys = (kc[page, token % 128].float() * ks[page, token % 128].unsqueeze(-1)).repeat_interleave(2, 1)
-        values = (vc[page, token % 128].float() * v_scale).repeat_interleave(2, 1)
+        key_scale = key_scales.transpose(1, 2)[page, token % 128].unsqueeze(-1)
+        keys = (key_cache[page, token % 128].float() * key_scale).repeat_interleave(2, 1)
+        values = (value_cache[page, token % 128].float() * v_scale).repeat_interleave(2, 1)
         score = torch.einsum("hd,shd->hs", qdq[row], keys) / math.sqrt(128)
         exponent = (score - score.amax(-1, keepdim=True)).exp()
         expected[row] = torch.einsum("hs,shd->hd", (exponent * 127).round() / 127, values) / exponent.sum(
             -1, keepdim=True
         )
     torch.testing.assert_close(output, expected)
-    assert sum(calls) == row_count
-    assert max(calls) <= tile_rows
-    assert len(calls) == math.ceil(row_count / tile_rows)
+    assert calls == [row_count]
 
 
 def test_quantized_indexer_native_abi_and_visibility(monkeypatch):
     query = torch.randn(3, 4, 128, dtype=torch.bfloat16)
     cache = torch.zeros(4, 32, 1, 132, dtype=torch.int8)
-    key, scales = qsa_c8_cache_views(cache, indexer=True)
+    key, scales = qsa_c8_indexer_cache_views(cache)
     key.fill_(2)
     scales.fill_(0.125)
     calls = []
@@ -176,26 +157,22 @@ def test_quantized_indexer_native_abi_and_visibility(monkeypatch):
 
 def test_c8_full_topk_replaces_last_group_with_residual(monkeypatch):
     monkeypatch.setattr(c8_attention, "prepare_qsa_gbsa_inputs", load_cpu_preparation())
-    monkeypatch.setattr(c8_attention, "pack_qsa_c8_rows", cpu_pack)
     seen = []
 
     def metadata(indices, counts, *args, **kw):
         assert indices.shape == (1, 1, 512)
         assert counts.tolist() == [[512]]
-        assert kw["seqused_kv"].tolist() == [2047]
-        assert kw["max_seqlen_kv"] == 2048
+        assert kw["seqused_kv"].tolist() == [2051]
+        assert kw["max_seqlen_kv"] == 17 * 128
         seen.append(True)
         return torch.empty(0)
 
     monkeypatch.setattr(c8_attention, "generic_block_sparse_attention_metadata", metadata)
     monkeypatch.setattr(c8_attention, "generic_block_sparse_attention", cpu_gbsa)
-    key = torch.zeros(17, 128, 1, 132, dtype=torch.int8)
-    value = torch.zeros_like(key)
-    codes, scales = qsa_c8_cache_views(value)
-    codes.fill_(1)
-    scales.fill_(1)
+    key = torch.zeros(17, 128, 1, 128, dtype=torch.int8)
+    value = torch.ones_like(key)
     # Excluded group zero has a large value, so an off-by-one is observable.
-    codes[0, :4].fill_(100)
+    value[0, :4].fill_(100)
     query = torch.zeros(1, 1, 128, dtype=torch.bfloat16)
     compact = torch.cat((torch.arange(511, -1, -1), torch.full((3,), -1))).int().view(1, -1)
     output = torch.empty_like(query)
@@ -211,6 +188,7 @@ def test_c8_full_topk_replaces_last_group_with_residual(monkeypatch):
         output,
         torch.ones(1, 128),
         torch.tensor([127.0]),
+        key_scales=torch.ones(17, 1, 128),
     )
     torch.testing.assert_close(output, torch.ones_like(output))
     assert seen == [True]
@@ -220,7 +198,7 @@ def test_c8_empty_batch_does_not_invoke_native_attention(monkeypatch):
     monkeypatch.setattr(
         c8_attention, "generic_block_sparse_attention_metadata", lambda *a, **k: pytest.fail("native call")
     )
-    cache = torch.zeros(1, 128, 1, 132, dtype=torch.int8)
+    cache = torch.zeros(1, 128, 1, 128, dtype=torch.int8)
     output = torch.empty(0, 2, 128, dtype=torch.bfloat16)
     assert (
         c8_attention.qsa_c8_attention(
@@ -235,6 +213,7 @@ def test_c8_empty_batch_does_not_invoke_native_attention(monkeypatch):
             output,
             torch.ones(1, 128),
             torch.tensor([127.0]),
+            key_scales=torch.ones(1, 1, 128),
         )
         is output
     )
@@ -243,4 +222,4 @@ def test_c8_empty_batch_does_not_invoke_native_attention(monkeypatch):
 @pytest.mark.parametrize("bad_dtype,bad_width", [(torch.bfloat16, 132), (torch.int8, 131), (torch.int8, 4)])
 def test_c8_invalid_storage_is_rejected(bad_dtype, bad_width):
     with pytest.raises(ValueError, match="QSA C8"):
-        qsa_c8_cache_views(torch.empty(1, 128, 1, bad_width, dtype=bad_dtype))
+        qsa_c8_indexer_cache_views(torch.empty(1, 128, 1, bad_width, dtype=bad_dtype))

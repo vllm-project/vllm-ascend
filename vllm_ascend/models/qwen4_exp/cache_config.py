@@ -34,9 +34,10 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
 )
-from vllm_ascend.models.qwen4_exp.quantization import QSAC8Spec
+from vllm_ascend.models.qwen4_exp.quantization import C8_SCALE_BYTES, QSAC8Spec
 
 QSA_MAIN: Final = "qsa_main"
+QSA_K_SCALE_REGION: Final = "qsa_k_scales"
 QSA_RAW: Final = "qsa_raw"
 QSA_COMPRESSED: Final = "qsa_compressed"
 GDN: Final = "gdn"
@@ -305,6 +306,19 @@ def build_qwen4_kv_cache_layout(
         cursor = round_up(cursor, alignment)
         regions.append(SlabRegion(name, cursor, page_size, num_blocks))
         cursor += page_size * num_blocks
+    scale_page_bytes = max(
+        (
+            spec.block_size * spec.num_kv_heads * C8_SCALE_BYTES
+            for _, spec in role_members[QSA_MAIN]
+            if isinstance(spec, QSAC8Spec)
+        ),
+        default=0,
+    )
+    if scale_page_bytes:
+        cursor = round_up(cursor, alignment)
+        scale_region = SlabRegion(QSA_K_SCALE_REGION, cursor, scale_page_bytes, num_blocks)
+        regions.append(scale_region)
+        cursor = scale_region.end
     slot_backing_size = round_up(cursor, alignment)
 
     # Each QSA layer needs one slot. State groups reuse those slots with
@@ -428,27 +442,37 @@ def make_qsa_c8_kernel_page_cache(
     num_blocks: int,
     storage_offset: int,
     block_stride: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    scale_offset: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Keep MRV2's virtual page IDs, allowing gaps beside BF16/GDN owners."""
     kernel_pages = spec.block_size // 128
     if not kernel_pages or spec.block_size % 128 or block_stride % kernel_pages:
         raise ValueError("QSA C8 manager pages must split into whole 128-token pages")
     page_stride = block_stride // kernel_pages
-    key_bytes = 128 * spec.num_kv_heads * spec.storage_head_size
+    width = spec.head_size
+    key_bytes = 128 * spec.num_kv_heads * width
     if page_stride < 2 * key_bytes:
-        raise ValueError("QSA C8 page stride must fit both codes and scales for K/V")
+        raise ValueError("QSA C8 page stride must fit both K and V codes")
     key, value = (
         make_slab_view(
             backing,
             dtype=torch.int8,
             num_blocks=num_blocks * kernel_pages,
-            item_shape=(128, spec.num_kv_heads, spec.storage_head_size),
+            item_shape=(128, spec.num_kv_heads, width),
             storage_offset=storage_offset + offset,
             block_stride=page_stride,
         )
         for offset in (0, key_bytes)
     )
-    return key, value
+    # GBSA indexes K scales by physical page ID without an arbitrary stride.
+    key_scales = make_slab_view(
+        backing,
+        dtype=torch.float32,
+        num_blocks=num_blocks * kernel_pages,
+        item_shape=(spec.num_kv_heads, 128),
+        storage_offset=scale_offset,
+    )
+    return key, value, key_scales
 
 
 def _prepare_qsa_composite_groups(

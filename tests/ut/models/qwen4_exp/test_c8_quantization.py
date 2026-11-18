@@ -11,13 +11,14 @@ from tests.ut.models.test_qwen4_exp_cache_config import _groups
 from vllm_ascend.models.qwen4_exp import qsa
 from vllm_ascend.models.qwen4_exp.cache_config import (
     build_qwen4_kv_cache_layout,
+    QSA_K_SCALE_REGION,
     make_qsa_c8_kernel_page_cache,
 )
 from vllm_ascend.models.qwen4_exp.quantization import (
     C8_SCALE_MIN,
     QSAC8Spec,
     QSAStaticVParameters,
-    qsa_c8_cache_views,
+    qsa_c8_indexer_cache_views,
     quantize_qsa_rows,
     quantize_qsa_values,
     uses_qsa_c8_quantization,
@@ -66,19 +67,15 @@ def test_dynamic_rounding_zero_rows_and_per_head_scales(dtype):
     assert empty.shape == (0, 2, 128) and empty_scale.shape == (0, 2)
 
 
-@pytest.mark.parametrize("indexer", [False, True])
-def test_strided_codes_and_scales_roundtrip_and_page_copy(indexer):
+def test_indexer_strided_codes_and_scales_roundtrip_and_page_copy():
     raw = torch.full((5, 2, 8, 1, 132), 42, dtype=torch.int8)
     cache = raw[:, 1]
-    codes, scales = qsa_c8_cache_views(cache, indexer=indexer)
+    codes, scales = qsa_c8_indexer_cache_views(cache)
     codes.copy_(torch.arange(5 * 8 * 128).view_as(codes).to(torch.int8))
     scales.copy_(torch.arange(40).view_as(scales) * 0.125)
-    if indexer:
-        assert codes.stride()[1:] == (128, 128, 1)
-        assert scales.stride()[1:] == (1, 1)
-        assert scales.dtype == torch.float16
-    else:
-        assert scales.dtype == torch.float32
+    assert codes.stride()[1:] == (128, 128, 1)
+    assert scales.stride()[1:] == (1, 1)
+    assert scales.dtype == torch.float16
     expected_codes, expected_scales = codes[0].clone(), scales[0].clone()
     cache[4].copy_(cache[0])
     torch.testing.assert_close(codes[4], expected_codes)
@@ -114,18 +111,23 @@ def test_mixed_c8_bf16_layout_has_bounded_padding_and_disjoint_views():
     # Adding width 68 must not introduce an LCM with BF16 width 128.
     assert region.block_stride == 65536
     backing = torch.full((layout.slot_backing_size,), 37, dtype=torch.int8)
-    k, v = make_qsa_c8_kernel_page_cache(
-        backing, spec=c8, num_blocks=3, storage_offset=region.offset, block_stride=region.block_stride
+    k, v, scales = make_qsa_c8_kernel_page_cache(
+        backing,
+        spec=c8,
+        num_blocks=3,
+        storage_offset=region.offset,
+        block_stride=region.block_stride,
+        scale_offset=layout.region(QSA_K_SCALE_REGION).offset,
     )
-    assert k.shape == v.shape == (6, 128, 1, 68)
+    assert k.shape == v.shape == (6, 128, 1, 64)
     assert k.stride(0) == region.block_stride // 2
-    codes, scales = qsa_c8_cache_views(k)
-    codes.fill_(3)
+    assert scales.shape == (6, 1, 128) and scales.is_contiguous()
+    k.fill_(3)
     scales.fill_(0.5)
     assert (v == 37).all()
     # Both subpages of one manager block retain the exact virtual page IDs.
     assert k[2].data_ptr() - k[0].data_ptr() == region.block_stride
-    assert scales[-1, -1, 0] == 0.5
+    assert scales[-1, 0, -1] == 0.5
 
 
 def test_c8_dispatch_bypasses_bf16_fia(monkeypatch):
@@ -137,7 +139,8 @@ def test_c8_dispatch_bypasses_bf16_fia(monkeypatch):
         indexer=SimpleNamespace(token_topk=2048, compress_ratio=4),
         topk_indices_buffer=torch.zeros(2, 2051, dtype=torch.int32),
     )
-    cache = torch.zeros(1, 128, 1, 132, dtype=torch.int8)
+    cache = torch.zeros(1, 128, 1, 128, dtype=torch.int8)
+    scales = torch.ones(1, 1, 128)
     output = torch.ones(3, 2, 128, dtype=torch.bfloat16)
     callback = Mock(return_value=output[:2])
     monkeypatch.setattr(qsa, "qsa_c8_attention", callback)
@@ -148,7 +151,7 @@ def test_c8_dispatch_bypasses_bf16_fia(monkeypatch):
         output,
         None,
         None,
-        (cache, cache),
+        (cache, cache, scales),
         metadata,
         output,
         torch.zeros(3, dtype=torch.int32),
@@ -157,6 +160,7 @@ def test_c8_dispatch_bypasses_bf16_fia(monkeypatch):
     )
     assert callback.call_count == 1
     assert callback.call_args.args[3].shape == (2, 515)
+    assert callback.call_args.kwargs["key_scales"] is scales
     assert not output[2].any()
 
 
@@ -165,15 +169,20 @@ def test_c8_cache_update_keeps_scale_and_codes_in_one_transaction(monkeypatch):
     monkeypatch.setattr(qsa, "store_qsa_c8_rows", callback)
     impl = object.__new__(qsa.AscendQSAImpl)
     key, value = torch.randn(2, 1, 128), torch.randn(2, 1, 128)
-    cache = (torch.empty(1, 128, 1, 132, dtype=torch.int8), torch.empty(1, 128, 1, 132, dtype=torch.int8))
+    cache = (torch.empty(1, 128, 1, 128, dtype=torch.int8), torch.empty(1, 128, 1, 128, dtype=torch.int8),
+             torch.empty(1, 1, 128))
     slots = torch.tensor([0, -1])
     v_scale = torch.ones(1, 128)
     impl.do_kv_cache_update(
         SimpleNamespace(c8_enabled=True, fa_v=SimpleNamespace(scale=v_scale)), key, value, cache, slots
     )
     assert callback.call_args_list[0].args == (cache[0], slots, key)
+    assert callback.call_args_list[0].kwargs["key_scales"] is cache[2]
     assert callback.call_args_list[1].args == (cache[1], slots, value)
     assert callback.call_args_list[1].kwargs["v_scale"] is v_scale
+    with pytest.raises(ValueError, match="requires K, V and K scales"):
+        impl.do_kv_cache_update(SimpleNamespace(c8_enabled=True), key, value, cache[:2], slots)
+
 
 
 @pytest.mark.parametrize("all_c8", [False, True])
@@ -220,25 +229,29 @@ def test_c8_runner_allocation_binding_and_pool_budget(monkeypatch, all_c8, manag
     allocations = {t.untyped_storage().data_ptr(): t.numel() for t in raw.values()}
     assert sum(allocations.values()) == 3 * get_qwen4_exp_pool_bytes_per_block(config.kv_cache_groups)
     for name in groups[0].layer_names:
-        k, v = caches[name]
+        k, v = caches[name][:2]
         is_c8 = all_c8 or ".mtp." not in name
         assert k.dtype == (torch.int8 if is_c8 else torch.bfloat16)
-        assert k.shape == (3 * manager_size // 128, 128, 1, 68 if is_c8 else 64)
+        assert k.shape == v.shape == (3 * manager_size // 128, 128, 1, 64)
+        assert len(caches[name]) == (3 if is_c8 else 2)
         owner = SimpleNamespace(kv_cache=None)
         bind_kv_cache_to_layers({name: caches[name]}, {name: owner})
         assert owner.kv_cache is caches[name]
         if is_c8:
-            codes, scales = qsa_c8_cache_views(k)
-            codes.fill_(7)
+            scales = caches[name][2]
+            assert scales.shape == (k.shape[0], 1, 128)
+            assert scales.dtype == torch.float32 and scales.is_contiguous()
             scales.fill_(0.25)
-            assert scales[-1, -1, 0] == 0.25
+            k.fill_(7)
+            v.fill_(9)
+            assert (scales == 0.25).all()
     for name in groups[2].layer_names:
         cache = caches[name]
         is_c8 = all_c8 or ".mtp." not in name
         assert cache.shape == (3 * manager_size // 128, 32, 1, 36 if is_c8 else 32)
         assert cache.stride(0) * cache.element_size() == layout.region("r5").block_stride * 128 // manager_size
         if is_c8:
-            codes, scales = qsa_c8_cache_views(cache, indexer=True)
+            codes, scales = qsa_c8_indexer_cache_views(cache)
             codes.fill_(4)
             scales.fill_(0.125)
             assert scales[-1, -1, 0] == 0.125
@@ -301,20 +314,14 @@ def test_c8_indexer_constructor_keeps_raw_ring_bf16(monkeypatch):
 
 
 def test_c8_device_interfaces_reject_cpu_workloads():
-    from vllm_ascend.ops.triton.qwen4_exp.c8 import pack_qsa_c8_rows, store_qsa_c8_rows
+    from vllm_ascend.ops.triton.qwen4_exp.c8 import store_qsa_c8_rows
 
-    cache = torch.zeros(1, 128, 1, 132, dtype=torch.int8)
+    cache = torch.zeros(1, 128, 1, 128, dtype=torch.int8)
+    slots, rows = torch.tensor([0]), torch.zeros(1, 1, 128)
     with pytest.raises(ValueError, match="same NPU"):
-        store_qsa_c8_rows(cache, torch.tensor([0]), torch.zeros(1, 1, 128))
-    with pytest.raises(ValueError, match="same NPU"):
-        pack_qsa_c8_rows(
-            cache,
-            torch.zeros(1, 1, 1, dtype=torch.int32),
-            torch.ones(1, 1, dtype=torch.int32),
-            torch.tensor([4], dtype=torch.int32),
-            torch.zeros(1, 1, dtype=torch.int32),
-            torch.empty(1, 128, 1, 128, dtype=torch.int8),
-        )
+        store_qsa_c8_rows(cache, slots, rows, key_scales=torch.empty(1, 1, 128))
+    with pytest.raises(ValueError, match="K scales"):
+        store_qsa_c8_rows(cache, slots, rows)
 
 
 @pytest.mark.parametrize("total_heads,tp_size", [(8, 1), (8, 4), (2, 8), (1, 8)])

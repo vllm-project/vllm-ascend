@@ -103,6 +103,7 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     HIDDEN,
     PLE,
     QSA_COMPRESSED,
+    QSA_K_SCALE_REGION,
     QSA_MAIN,
     QSA_RAW,
     build_qwen4_kv_cache_layout,
@@ -1782,6 +1783,7 @@ def _reshape_kv_cache_v2(
                             num_blocks=kv_cache_config.num_blocks,
                             storage_offset=slot_offset + region.offset,
                             block_stride=region.block_stride,
+                            scale_offset=slot_offset + qwen4_cache_layout.region(QSA_K_SCALE_REGION).offset,
                         )
                         continue
                     kv_caches[layer_name] = make_qsa_kernel_page_cache(

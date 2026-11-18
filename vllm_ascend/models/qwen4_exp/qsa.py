@@ -74,7 +74,7 @@ if vllm_version_is("0.33.0"):
 else:
     UpstreamQSABackend = upstream_qsa.Qwen4ExpQSABackend  # type: ignore[attr-defined]
 
-QSAKVCache: TypeAlias = tuple[torch.Tensor, torch.Tensor]
+QSAKVCache: TypeAlias = tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 
 def _store_qsa_cache_rows(
@@ -522,9 +522,12 @@ class AscendQSAImpl:
         kv_cache: QSAKVCache,
         slot_mapping: torch.Tensor,
     ) -> None:
-        key_cache, value_cache = kv_cache
+        key_cache, value_cache = kv_cache[:2]
         if getattr(layer, "c8_enabled", False):
-            store_qsa_c8_rows(key_cache, slot_mapping, key)
+            if len(kv_cache) != 3:
+                raise ValueError("QSA C8 cache requires K, V and K scales")
+            scales = kv_cache[2]
+            store_qsa_c8_rows(key_cache, slot_mapping, key, key_scales=scales)
             store_qsa_c8_rows(value_cache, slot_mapping, value, v_scale=layer.fa_v.scale)
             return
         _store_qsa_cache_rows(key_cache, slot_mapping, key)
@@ -617,12 +620,14 @@ class AscendQSAImpl:
         if num_tokens == 0:
             return output
         selected_indices = layer.topk_indices_buffer[:num_tokens]
-        key_cache, value_cache = kv_cache
+        key_cache, value_cache = kv_cache[:2]
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)
         packed_width = layer.indexer.token_topk // layer.indexer.compress_ratio + layer.indexer.compress_ratio - 1
         compact_indices = selected_indices[:, :packed_width]
         if getattr(layer, "c8_enabled", False):
+            if len(kv_cache) != 3:
+                raise ValueError("QSA C8 cache requires K, V and K scales")
             return qsa_c8_attention(
                 query[:num_tokens],
                 key_cache,
@@ -635,6 +640,7 @@ class AscendQSAImpl:
                 output[:num_tokens],
                 layer.fa_v.scale,
                 layer.c8_p_scale,
+                key_scales=kv_cache[2],
             )
         request_plan = getattr(attn_metadata, "qsa_request_plan", None)
         if request_plan is None:
