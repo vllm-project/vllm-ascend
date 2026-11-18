@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -64,6 +65,7 @@ def test_qsa_gbsa_uses_kernel_paged_cache(dtype, tail_tokens, storage_page_size,
 
     namespace = {
         "torch": torch,
+        "envs": SimpleNamespace(VLLM_BATCH_INVARIANT=False),
         "prepare_qsa_gbsa_inputs": load_cpu_preparation(),
         "generic_block_sparse_attention_metadata": metadata,
         "generic_block_sparse_attention": attention,
@@ -152,6 +154,7 @@ def test_qsa_gbsa_uses_per_row_mtp_visible_lengths():
 
     namespace = {
         "torch": torch,
+        "envs": SimpleNamespace(VLLM_BATCH_INVARIANT=False),
         "prepare_qsa_gbsa_inputs": load_cpu_preparation(),
         "generic_block_sparse_attention_metadata": metadata,
         "generic_block_sparse_attention": attention,
@@ -211,6 +214,7 @@ def test_qsa_gbsa_reserves_tail_within_512_entry_limit():
 
     namespace = {
         "torch": torch,
+        "envs": SimpleNamespace(VLLM_BATCH_INVARIANT=False),
         "prepare_qsa_gbsa_inputs": load_cpu_preparation(),
         "generic_block_sparse_attention_metadata": metadata,
         "generic_block_sparse_attention": attention,

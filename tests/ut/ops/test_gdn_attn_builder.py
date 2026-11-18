@@ -387,6 +387,7 @@ def test_ascend_gdn_attention_uses_ascend_backend():
     kimi_backend = AscendKimiK3DeltaAttention.get_attn_backend(kimi_attention)  # type: ignore[arg-type]
     glm_backend = Glm5NextLinearAttention.get_attn_backend(object())  # type: ignore[arg-type]
     assert fused_backend is AscendGDNFusedAttentionBackend
+    assert fused_backend.supports_batch_invariance()
     assert kimi_backend is KimiKDAHostMetadataBackend
     assert issubclass(kimi_backend, AscendGDNHostMetadataBackend)
     assert glm_backend is Glm5NextGDNHostMetadataBackend
