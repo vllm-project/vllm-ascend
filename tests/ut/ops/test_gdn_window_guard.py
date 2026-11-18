@@ -35,6 +35,8 @@ OP_NAME = "recurrent_gated_delta_rule"
 # fails until you do, which is the point of the guard.
 KNOWN_OPP_WINDOWS: dict[str, int | None] = {
     "26.9.1": 8,
+    # v26.10.0-feature (ccaed063) and the published A2/A3/A5 wheels retain MAX_MTP=8.
+    "26.10.0+feature": 8,
 }
 
 UNKNOWN = object()
@@ -142,8 +144,18 @@ def _op_dirs(vendor: Path) -> list[Path]:
 def _window_of(op_dir: Path) -> int | None | object:
     # Check the architecture directories first: a V2 tree that still shipped a
     # root header would otherwise be read as the legacy fixed window.
-    if (op_dir / "arch22").is_dir() or (op_dir / "arch35").is_dir():
-        return None
+    arch_dirs = [op_dir / arch for arch in ("arch22", "arch35") if (op_dir / arch).is_dir()]
+    if arch_dirs:
+        # 26.10.0+feature also has arch35, but its kernel still declares MAX_MTP.
+        # Directory layout alone is not evidence that the cap was removed.
+        caps = []
+        for arch_dir in arch_dirs:
+            header = arch_dir / f"{OP_NAME}.h"
+            if header.is_file():
+                match = _MAX_MTP.search(header.read_text(encoding="utf-8", errors="replace"))
+                if match is not None:
+                    caps.append(int(match.group(1)))
+        return min(caps) if caps else None
     header = op_dir / f"{OP_NAME}.h"
     if header.is_file():
         match = _MAX_MTP.search(header.read_text(encoding="utf-8", errors="replace"))
@@ -239,6 +251,7 @@ def test_workflow_pin_accepts_both_specifiers() -> None:
         "uv pip install --no-deps flash-linear-attention-npu-a3===26.9.1": "26.9.1",
         "uv pip install --no-deps flash-linear-attention-npu-a3==26.9.1": "26.9.1",
         "flash-linear-attention-npu==26.10.0": "26.10.0",
+        "flash-linear-attention-npu-a3===26.10.0+feature": "26.10.0+feature",
     }
     for line, expected in cases.items():
         match = _WORKFLOW_PIN.search(line)
@@ -295,6 +308,13 @@ class TestDetector:
         op_dir.mkdir()
         (op_dir / f"{OP_NAME}.h").write_text("constexpr uint64_t MAX_MTP = 16;\n", encoding="utf-8")
         assert _window_of(op_dir) == 16
+
+    def test_arch35_fixed_window_is_not_mistaken_for_v2(self, tmp_path: Path) -> None:
+        op_dir = tmp_path / "op"
+        arch_dir = op_dir / "arch35"
+        arch_dir.mkdir(parents=True)
+        (arch_dir / f"{OP_NAME}.h").write_text("constexpr uint64_t MAX_MTP = 8;\n", encoding="utf-8")
+        assert _window_of(op_dir) == 8
 
     def test_architecture_directory_means_no_cap(self, tmp_path: Path) -> None:
         op_dir = tmp_path / "op"
