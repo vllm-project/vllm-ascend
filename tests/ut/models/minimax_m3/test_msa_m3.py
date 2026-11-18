@@ -1552,6 +1552,8 @@ def test_ascendc_index_prefill_limits_score_width_for_topk(
         seq_lens,
         start_loc,
         causal_mask,
+        init_blocks=1,
+        local_blocks=1,
     )
     mock_topk.assert_called_once()
     topk_args = mock_topk.call_args.args
@@ -1689,7 +1691,7 @@ def test_topk_fusion_is_enabled_on_a5_only(monkeypatch: pytest.MonkeyPatch) -> N
             "get_current_hardware_profile",
             lambda device=device: get_hardware_profile(device),
         )
-        assert msa_m3_npu_module._use_index_score_topk_fusion() is expected
+        assert msa_m3_npu_module._can_use_index_score_topk_fusion(16) is expected
 
 
 def test_index_score_requests_fused_topk_indices(fused_index_ops: MagicMock) -> None:
@@ -1786,7 +1788,11 @@ def test_ascendc_index_prefill_falls_back_for_unaligned_topk(
 
 
 def test_ascendc_index_prefill_falls_back_without_fused_topk(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(msa_m3_npu_module, "_use_index_score_topk_fusion", lambda: False)
+    monkeypatch.setattr(
+        msa_m3_npu_module,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(AscendDeviceType.A3),
+    )
     operands = _index_score_test_operands()
     score = torch.zeros(2, 2, 16)
     expected = torch.zeros(2, 2, 2, dtype=torch.int32)
@@ -1838,20 +1844,15 @@ def test_fusion_gate_allows_aligned_topk(fused_index_ops: MagicMock, topk: int) 
     assert msa_m3_npu_module._can_use_index_score_topk_fusion(topk) is True
 
 
-def test_fusion_gate_requires_device_support(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        msa_m3_npu_module,
-        "_use_index_score_topk_fusion",
-        lambda: False,
-    )
-    assert msa_m3_npu_module._can_use_index_score_topk_fusion(16) is False
-
-
 def test_ascendc_index_prefill_falls_back_when_device_cannot_fuse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """硬件或 CANN 不支持融合时，对齐的 topk 也必须走分离路径。"""
-    monkeypatch.setattr(msa_m3_npu_module, "_use_index_score_topk_fusion", lambda: False)
+    monkeypatch.setattr(
+        msa_m3_npu_module,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(AscendDeviceType.A3),
+    )
     operands = _index_score_test_operands()
     score = torch.zeros(2, 2, 64)
     expected = torch.zeros(2, 2, 16, dtype=torch.int32)

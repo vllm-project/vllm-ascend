@@ -421,11 +421,6 @@ def _build_cu_block_lens(
     return cu_block_lens
 
 
-def _use_index_score_topk_fusion() -> bool:
-    """Select the fused CANN TopK on hardware that supports it."""
-    return get_current_hardware_profile().supports(HardwareCapability.MINIMAX_M3_INDEX_SCORE_TOPK_FUSION)
-
-
 @torch.no_grad()
 def _minimax_m3_index_score(
     idx_q: torch.Tensor,
@@ -513,7 +508,7 @@ def _minimax_m3_index_score_topk(
 
 
 def _can_use_index_score_topk_fusion(topk: int) -> bool:
-    """Whether the fused TopK can serve this ``topk``.
+    """Whether the fused TopK can serve this ``topk`` on this device.
 
     ``topk`` must be aligned to the kernel's bulk write-back. The kernel collapses
     the row only for that alignment and otherwise stores slot by slot, which with
@@ -522,11 +517,9 @@ def _can_use_index_score_topk_fusion(topk: int) -> bool:
     {2, 4, 8} produced values like ``1050427392`` and ``-8388609``; ``topk`` in
     {8, 16, 24, 32} was exact for every shape measured.
     """
-    return (
-        _use_index_score_topk_fusion()
-        and 0 < topk <= _INDEX_SCORE_TOPK_MAX
-        and topk % _INDEX_SCORE_TOPK_WRITE_ALIGNMENT == 0
-    )
+    if not get_current_hardware_profile().supports(HardwareCapability.MINIMAX_M3_INDEX_SCORE_TOPK_FUSION):
+        return False
+    return 0 < topk <= _INDEX_SCORE_TOPK_MAX and topk % _INDEX_SCORE_TOPK_WRITE_ALIGNMENT == 0
 
 
 @torch.no_grad()
