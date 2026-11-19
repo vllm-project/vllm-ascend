@@ -6,6 +6,8 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import apply_cache_prefix
+
 
 @dataclass(frozen=True)
 class LayerwiseKeyBuilder:
@@ -15,6 +17,7 @@ class LayerwiseKeyBuilder:
     pcp_size: int = 1
     pcp_sharded_group_ids: set[int] = field(default_factory=set)
     dcp_size: int = 1
+    cache_prefix: str = ""
 
     def make_full_key(
         self,
@@ -33,7 +36,7 @@ class LayerwiseKeyBuilder:
             if dcp_rank is None:
                 raise ValueError("dcp_rank is required when dcp_size > 1")
             key = f"{key}@dcp_size:{self.dcp_size}@dcp_rank:{dcp_rank}"
-        return key
+        return apply_cache_prefix(key, self.cache_prefix)
 
     def make_hit_check_keys(self, group_id: int, block_hash: str, num_ranks: int) -> list[str]:
         """Require every distinct shard on every PP stage."""

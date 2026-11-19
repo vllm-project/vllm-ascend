@@ -36,6 +36,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_group_cache_families,
     infer_tp_mismatch_info,
     normalize_block_ids_by_group,
+    resolve_cache_prefix,
     uses_hybrid_kv_cache,
 )
 
@@ -58,6 +59,7 @@ class BaseKVPoolScheduler(ABC):
         kv_cache_config: KVCacheConfig | None = None,
     ):
         self.vllm_config = vllm_config
+        self.cache_prefix = resolve_cache_prefix(vllm_config, kv_cache_config)
         self.use_layerwise = use_layerwise
         self.kv_cache_config = kv_cache_config
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config

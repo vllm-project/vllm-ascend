@@ -1,0 +1,5 @@
+# Rename to the assigned PR number before submission.
+pr: 0
+entries:
+  - category: feature
+    text: Added manual and automatic cache_prefix namespaces to AscendStoreConnector's Mooncake backend for bulk and layerwise KV pooling. External full-reset scope is unchanged; nonempty prefixes on other backends are rejected.

@@ -124,6 +124,7 @@ def make_worker(
     cache_block_size=16,
     use_recoverssm=False,
     mamba_copy_funcs=None,
+    speculative_config=None,
 ):
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
     start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
@@ -196,6 +197,8 @@ def make_worker(
     if enable_kv_events:
         config.kv_events_config = MagicMock(enable_kv_cache_events=True)
 
+    if speculative_config is not None:
+        config.speculative_config = speculative_config
     return create_kv_pool_worker(config, use_layerwise=use_layerwise, kv_cache_config=kv_cache_config)
 
 
