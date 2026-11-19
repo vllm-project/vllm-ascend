@@ -4,9 +4,14 @@ entries:
     text: >-
       Fused matmul-collective ops (AllGather+Matmul, Matmul+ReduceScatter) for
       dense sequence parallelism on Qwen3.5 family attention projections and
-      dense MLP. Extends the fusion to the MoE shared-expert path: the
-      shared expert's gate_up_proj AllGather and down_proj ReduceScatter are
-      folded into their GEMMs, with the Qwen3-Next output gate reordered to
-      run on the SP shard before the fused AG and after the fused RS.
+      dense MLP. Extends the fusion to the MoE shared-expert path in two
+      quantization scenarios: (1) W8A8/W4A8 INT — the shared expert's
+      gate_up_proj AllGather and down_proj ReduceScatter are folded into their
+      GEMMs via npu_all_gather_base_mm / npu_mm_reduce_scatter_base with
+      per-token float32 scales; (2) W4A8MXFP — the same fusion uses the A5
+      dedicated fused quant operators npu_all_gather_quant_mm /
+      npu_quant_mm_reduce_scatter (scene 4: E8M0 per-group scale, blockSize=32).
+      In both paths the Qwen3-Next output gate is reordered to run on the SP
+      shard before the fused AG and after the fused RS.
     model: qwen3.5, qwen3.6
-    hardware: [A2, A3]
+    hardware: [A2, A3, A5]

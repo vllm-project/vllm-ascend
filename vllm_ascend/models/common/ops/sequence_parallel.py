@@ -531,3 +531,235 @@ direct_register_custom_op(
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
+
+
+# ---------------------------------------------------------------------------
+# MXFP8 helpers (A5 scene-4 fused quant operators)
+#
+# npu_all_gather_quant_mm / npu_quant_mm_reduce_scatter accept MXFP8
+# (float8_e4m3fn) activations with E8M0 per-group scales (blockSize=32).
+# Weights must be in ND format (NZ is rejected), so callers cache an ND copy
+# after process_weights_after_loading.
+# ---------------------------------------------------------------------------
+
+MX_GROUP_SIZE = 32
+MX_SCALE_PAIR_SIZE = 2 * MX_GROUP_SIZE
+ACL_FORMAT_FRACTAL_ND = 2
+
+
+def _ensure_nd(tensor: torch.Tensor) -> torch.Tensor:
+    """Convert NZ (FRACTAL_NZ) tensors back to ND for A5 fused quant ops."""
+    import torch_npu
+
+    if tensor.device.type == "npu":
+        fmt = int(torch_npu.get_npu_format(tensor))
+        if fmt not in (0, ACL_FORMAT_FRACTAL_ND):
+            return torch_npu.npu_format_cast(tensor, ACL_FORMAT_FRACTAL_ND)
+    return tensor
+
+
+def _normalize_mx_scale(scale: torch.Tensor, rows: int, k: int) -> torch.Tensor:
+    """Reshape E8M0 scale to the paired (rows, K//64, 2) layout CANN expects."""
+    if k % MX_SCALE_PAIR_SIZE:
+        raise ValueError("MXFP8 MC2 requires K aligned to two MX groups.")
+    packed_shape = (rows, k // MX_SCALE_PAIR_SIZE, 2)
+    if tuple(scale.shape) == (rows, k // MX_GROUP_SIZE):
+        return scale.reshape(packed_shape).contiguous()
+    if tuple(scale.shape) != packed_shape:
+        raise ValueError(
+            f"Invalid MXFP8 activation scale shape: {tuple(scale.shape)} != {packed_shape}"
+        )
+    return scale.contiguous()
+
+
+def _mx_quant_activations(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """MXFP8 activation quantization via npu_dynamic_mx_quant.
+
+    Returns (quantized_x, scale) where quantized_x is float8_e4m3fn and
+    scale is the E8M0 per-group scale in the paired (M, K//64, 2) layout.
+    """
+    import torch_npu
+
+    quantized_x, scale = torch_npu.npu_dynamic_mx_quant(
+        x,
+        dst_type=torch.float8_e4m3fn,
+    )
+    if scale.ndim == 2 and scale.shape[-1] % 2 == 0:
+        scale = scale.reshape(scale.shape[0], scale.shape[1] // 2, 2)
+    return quantized_x, scale
+
+
+# ---------------------------------------------------------------------------
+# Column-parallel: AllGather + Matmul (MXFP8 quantized weights)
+# ---------------------------------------------------------------------------
+
+
+def _dense_sp_all_gather_mm_quant_mxfp8_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: torch.Tensor | None,
+    world_size: int,
+) -> torch.Tensor:
+    """Fused AG+MM for MXFP8 (float8_e4m3fn) weights with bf16 SP-shard activation.
+
+    Uses the A5 dedicated fused quant operator npu_all_gather_quant_mm
+    (scene 4: E8M0 per-group scale, blockSize=32).  The op AllGathers the
+    quantized activation and its scale internally, so we quantize the local
+    SP shard (not the gathered result).  Falls back to unfused AllGather +
+    npu_quant_matmul when the structural guard rejects fusion.
+    """
+    import torch_npu
+
+    num_tokens = x.shape[0] * world_size
+    if (
+        world_size in DENSE_SP_FUSED_TP_SIZES
+        and x.ndim == 2
+        and weight.ndim == 2
+        and x.dtype in _DENSE_SP_FUSED_DTYPES
+        and num_tokens >= _DENSE_SP_FUSED_MIN_TOKENS
+    ):
+        quantized_x, x_scale = _mx_quant_activations(x)
+        if bias is not None and bias.dtype != torch.float32:
+            bias = bias.to(torch.float32)
+        nd_weight = _ensure_nd(weight)
+        output, _, _ = torch_npu.npu_all_gather_quant_mm(
+            quantized_x,
+            nd_weight,
+            _get_hcom(),
+            world_size,
+            bias=bias,
+            x1_scale=x_scale,
+            x2_scale=weight_scale,
+            group_sizes=[1, 1, MX_GROUP_SIZE],
+            y_dtype=x.dtype,
+            x1_scale_dtype=torch_npu.float8_e8m0fnu,
+            x2_scale_dtype=torch_npu.float8_e8m0fnu,
+        )
+        return output
+    # Fallback: unfused AllGather + npu_quant_matmul
+    input_parallel = sp_all_gather(x)
+    quantized_x, pertoken_scale = _mx_quant_activations(input_parallel)
+    if bias is not None and bias.dtype != torch.float32:
+        bias = bias.to(torch.float32)
+    return torch_npu.npu_quant_matmul(
+        quantized_x,
+        weight,
+        weight_scale,
+        scale_dtype=torch_npu.float8_e8m0fnu,
+        pertoken_scale=pertoken_scale,
+        pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
+        bias=bias,
+        output_dtype=x.dtype,
+        group_sizes=[1, 1, MX_GROUP_SIZE],
+    )
+
+
+def _dense_sp_all_gather_mm_quant_mxfp8_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: torch.Tensor | None,
+    world_size: int,
+) -> torch.Tensor:
+    # MXFP8 weights are stored as (K, N) after process_weights transpose.
+    return x.new_empty((x.shape[0] * world_size, weight.shape[1]))
+
+
+direct_register_custom_op(
+    op_name="dense_sp_all_gather_mm_quant_mxfp8",
+    op_func=_dense_sp_all_gather_mm_quant_mxfp8_impl,
+    fake_impl=_dense_sp_all_gather_mm_quant_mxfp8_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+
+# ---------------------------------------------------------------------------
+# Row-parallel: Matmul + ReduceScatter (MXFP8 pre-quantized input)
+#
+# Shared experts (W4A8MXFP) produce MXFP8 (float8_e4m3fn) activations from
+# situ_mx_quant / npu_swiglu_group_quant with an E8M0 per-group scale.  This
+# variant accepts already-quantized MXFP8 + scale so the shared expert's
+# down_proj can fuse MM+RS without a redundant re-quantization.
+# ---------------------------------------------------------------------------
+
+
+def _dense_sp_mm_reduce_scatter_quant_mxfp8_prequant_impl(
+    quantized_x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    pertoken_scale: torch.Tensor,
+    output_dtype: torch.dtype,
+    world_size: int,
+) -> torch.Tensor:
+    """Fused MM+RS for pre-quantized MXFP8 activations from SwiGLU/MX quant.
+
+    ``quantized_x`` is float8_e4m3fn with shape [T, K].
+    ``weight`` is float8_e4m3fn with shape [K, N] (post process_weights ND).
+    ``pertoken_scale`` is the E8M0 per-group scale from the quant kernel,
+    in the paired (T, K//64, 2) layout.
+    """
+    import torch_npu
+
+    tp_size = world_size
+    num_tokens = quantized_x.shape[0]
+    if (
+        tp_size in DENSE_SP_FUSED_TP_SIZES
+        and quantized_x.ndim == 2
+        and weight.ndim == 2
+        and num_tokens >= _DENSE_SP_FUSED_MIN_TOKENS
+    ):
+        sp_pad = (-num_tokens) % tp_size
+        if sp_pad:
+            quantized_x = F.pad(quantized_x, (0, 0, 0, sp_pad))
+            # pertoken_scale is (T, K//64, 2) — pad the token dim (dim 0).
+            pertoken_scale = F.pad(pertoken_scale, (0, 0, 0, 0, 0, sp_pad))
+        nd_weight = _ensure_nd(weight)
+        output, _ = torch_npu.npu_quant_mm_reduce_scatter(
+            quantized_x,
+            nd_weight,
+            _get_hcom(),
+            tp_size,
+            reduce_op="sum",
+            x1_scale=pertoken_scale,
+            x2_scale=weight_scale,
+            group_sizes=[1, 1, MX_GROUP_SIZE],
+            y_dtype=output_dtype,
+            x1_scale_dtype=torch_npu.float8_e8m0fnu,
+            x2_scale_dtype=torch_npu.float8_e8m0fnu,
+        )
+        return output
+    # Fallback: unfused npu_quant_matmul + sp_reduce_scatter
+    output_parallel = torch_npu.npu_quant_matmul(
+        quantized_x,
+        weight,
+        weight_scale,
+        scale_dtype=torch_npu.float8_e8m0fnu,
+        pertoken_scale=pertoken_scale,
+        pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
+        bias=None,
+        output_dtype=output_dtype,
+        group_sizes=[1, 1, MX_GROUP_SIZE],
+    )
+    return sp_reduce_scatter(output_parallel)
+
+
+def _dense_sp_mm_reduce_scatter_quant_mxfp8_prequant_fake(
+    quantized_x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    pertoken_scale: torch.Tensor,
+    output_dtype: torch.dtype,
+    world_size: int,
+) -> torch.Tensor:
+    return quantized_x.new_empty((cdiv(quantized_x.shape[0], world_size), weight.shape[1]))
+
+
+direct_register_custom_op(
+    op_name="dense_sp_mm_reduce_scatter_quant_mxfp8_prequant",
+    op_func=_dense_sp_mm_reduce_scatter_quant_mxfp8_prequant_impl,
+    fake_impl=_dense_sp_mm_reduce_scatter_quant_mxfp8_prequant_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)

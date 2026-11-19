@@ -21,7 +21,6 @@ import os
 from functools import wraps
 
 import torch
-import torch.nn.functional as F
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_gather
@@ -38,220 +37,20 @@ except ImportError:
     Qwen3_5MultiTokenPredictor = None
     IntermediateTensors = None
 
-from vllm.utils.torch_utils import direct_register_custom_op
-
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_reduce_scatter
+from vllm_ascend.models.common.ops.sequence_parallel import (
+    _DENSE_SP_FUSED_DTYPES,
+    DENSE_SP_FUSED_TP_SIZES,
+    DenseSpAllGatherMmOp,
+    DenseSpMmReduceScatterOp,
+    sp_all_gather,
+    sp_reduce_scatter,
+)
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
 from vllm_ascend.ops.gdn_checkpoint import initialize_gdn_checkpoints
-from vllm_ascend.ops.linear_op import CustomColumnParallelOp, CustomRowParallelOp
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 _GDN_ORIGINAL_INIT = _GDN_PATCH_TARGET.__init__
-
-
-# torch_npu's fused matmul-collective kernels are restricted to these TP
-# sizes (npu_mm_reduce_scatter_base rejects larger ones on the installed
-# torch_npu builds; see the tp_size >= 16 TODO in ascend_forward_context.py).
-DENSE_SP_FUSED_TP_SIZES = (2, 4, 8)
-_DENSE_SP_FUSED_DTYPES = (torch.bfloat16, torch.float16)
-# Minimum total token count for fusion: prefill and mixed batches have large
-# token counts; pure decode batches (concurrency ~8, 1 token/seq) stay below
-# this threshold and fall back to the unfused GEMM + collective path.
-_DENSE_SP_FUSED_MIN_TOKENS = 128
-
-
-def _dense_sp_can_fuse(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    world_size: int,
-    *,
-    is_shard: bool = False,
-) -> bool:
-    """Whether the inputs are eligible for the fused matmul-collective kernel.
-
-    The decision is purely structural (shapes / dtypes / TP size / token
-    count) so the same path is taken during compile tracing, warmup, ACL
-    graph capture and replay.  The threshold is applied to the **total**
-    token count: for column-parallel layers ``x`` is the sequence-parallel
-    shard (``is_shard=True``), so ``x.shape[0] * world_size`` recovers the
-    full token count; for row-parallel layers ``x`` is already the full
-    sequence.  This keeps the threshold consistent across projections at
-    every TP size.
-    """
-    num_tokens = x.shape[0] * world_size if is_shard else x.shape[0]
-    return (
-        world_size in DENSE_SP_FUSED_TP_SIZES
-        and x.ndim == 2
-        and weight.ndim == 2
-        and x.dtype in _DENSE_SP_FUSED_DTYPES
-        and weight.dtype == x.dtype
-        and num_tokens >= _DENSE_SP_FUSED_MIN_TOKENS
-        and x.shape[1] == weight.shape[1]
-    )
-
-
-# ---------------------------------------------------------------------------
-# Column-parallel: AllGather + Matmul
-# ---------------------------------------------------------------------------
-
-
-def _get_hcom():
-    """Resolve the HCCL communicator handle at runtime (not at trace time)."""
-    tp_group = get_tp_group()
-    backend = tp_group.device_group._get_backend(torch.device("npu"))
-    return backend.get_hccl_comm_name(tp_group.rank_in_group)
-
-
-def _dense_sp_all_gather_mm_impl(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor | None,
-    world_size: int,
-) -> torch.Tensor:
-    if _dense_sp_can_fuse(x, weight, world_size, is_shard=True):
-        return DeviceOperator.npu_all_gather_base_mm(
-            x.contiguous(),
-            weight.t(),
-            _get_hcom(),
-            world_size,
-            bias=bias,
-        )
-    input_parallel = sp_all_gather(x)
-    return F.linear(input_parallel, weight, bias)
-
-
-def _dense_sp_all_gather_mm_fake(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor | None,
-    world_size: int,
-) -> torch.Tensor:
-    return x.new_empty((x.shape[0] * world_size, weight.shape[0]))
-
-
-direct_register_custom_op(
-    op_name="dense_sp_all_gather_mm",
-    op_func=_dense_sp_all_gather_mm_impl,
-    fake_impl=_dense_sp_all_gather_mm_fake,
-    mutates_args=[],
-    dispatch_key="PrivateUse1",
-)
-
-
-# ---------------------------------------------------------------------------
-# Row-parallel: Matmul + ReduceScatter
-# ---------------------------------------------------------------------------
-
-
-def _dense_sp_mm_reduce_scatter_impl(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor | None,
-    skip_bias_add: bool,
-    world_size: int,
-) -> torch.Tensor:
-    if _dense_sp_can_fuse(x, weight, world_size):
-        sp_pad = (-x.shape[0]) % world_size
-        if sp_pad:
-            x = F.pad(x, (0, 0, 0, sp_pad))
-        output = DeviceOperator.npu_mm_reduce_scatter_base(
-            x,
-            weight.t(),
-            _get_hcom(),
-            world_size,
-            reduce_op="sum",
-        )
-        if bias is not None and not skip_bias_add:
-            output = output + bias
-        return output
-    tp_rank = get_tp_group().rank_in_group
-    bias_ = None if (tp_rank > 0 or skip_bias_add) else bias
-    output_parallel = F.linear(x, weight, bias_)
-    return sp_reduce_scatter(output_parallel)
-
-
-def _dense_sp_mm_reduce_scatter_fake(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor | None,
-    skip_bias_add: bool,
-    world_size: int,
-) -> torch.Tensor:
-    from vllm.utils.math_utils import cdiv
-
-    return x.new_empty((cdiv(x.shape[0], world_size), weight.shape[0]))
-
-
-direct_register_custom_op(
-    op_name="dense_sp_mm_reduce_scatter",
-    op_func=_dense_sp_mm_reduce_scatter_impl,
-    fake_impl=_dense_sp_mm_reduce_scatter_fake,
-    mutates_args=[],
-    dispatch_key="PrivateUse1",
-)
-
-
-class DenseSpAllGatherMmOp(CustomColumnParallelOp):
-    """Fused AllGather + Matmul for a dense-SP column projection.
-
-    The branch decision lives inside the registered custom op's runtime
-    implementation so torch.compile only sees the fake (shape) impl during
-    tracing.  The structural guard (token-count threshold) directs prefill
-    and mixed batches to the fused kernel and pure decode to the unfused
-    path, captured and replayed in FULL_DECODE_ONLY.
-    """
-
-    def __init__(self, layer):
-        super().__init__(layer)
-        self.update_attrs()
-        tp_group = get_tp_group()
-        backend = tp_group.device_group._get_backend(torch.device("npu"))
-        self.hcom = backend.get_hccl_comm_name(tp_group.rank_in_group)
-        self.fused_tp_size = tp_group.world_size
-
-    def apply_impl(self, input_):
-        bias = self.bias if not self.skip_bias_add else None
-        output = torch.ops.vllm.dense_sp_all_gather_mm(
-            input_,
-            self.layer.weight,
-            bias,
-            self.fused_tp_size,
-        )
-        output_bias = self.bias if self.skip_bias_add else None
-        return output, output_bias
-
-
-class DenseSpMmReduceScatterOp(CustomRowParallelOp):
-    """Fused Matmul + ReduceScatter for a dense-SP row projection.
-
-    Same custom-op dispatch pattern as the column projection: the branch
-    decision lives in the runtime implementation, not in ``apply_impl``.
-    The token-count threshold keeps prefill/mixed on the fused path and
-    pure decode on the unfused path.
-    """
-
-    def __init__(self, layer):
-        super().__init__(layer)
-        self.update_attrs()
-        tp_group = get_tp_group()
-        backend = tp_group.device_group._get_backend(torch.device("npu"))
-        self.hcom = backend.get_hccl_comm_name(tp_group.rank_in_group)
-        self.fused_tp_size = tp_group.world_size
-
-    def apply_impl(self, input_):
-        input_parallel = self.get_input_parallel(input_)
-        bias = self.bias
-        output = torch.ops.vllm.dense_sp_mm_reduce_scatter(
-            input_parallel,
-            self.layer.weight,
-            bias,
-            self.skip_bias_add,
-            self.fused_tp_size,
-        )
-        output_bias = self.bias if self.skip_bias_add else None
-        return output, output_bias
 
 
 def _owns_sequence_collective(proj, op_cls) -> bool:

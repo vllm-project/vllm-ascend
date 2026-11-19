@@ -794,27 +794,43 @@ class AscendSharedExperts:
     def _can_fuse_sp_mc2(self) -> bool:
         """Whether the SP-only shared-expert path can use fused AG+MM / MM+RS.
 
-        Requires SP-only mode (TP-sharded weights, not replicated), W8A8/W4A8
-        INT quantization, and TP size in the fused kernel's supported range.
-        The expert_gate (Qwen3-Next output gating) must be present or absent —
-        when present it is computed on the SP shard before the fused AG and
-        applied after the fused RS, which is mathematically equivalent because
-        expert_gate is a ReplicatedLinear (same weights on all ranks).
+        Supports two quantization scenarios:
+
+        - **W8A8/W4A8 INT** (``A8_INT_FUSED``): uses ``npu_all_gather_base_mm``
+          and ``npu_mm_reduce_scatter_base`` with per-token float32 scales
+          (``x1_scale``/``x2_scale``).
+
+        - **W4A8MXFP** (``A8_MXFP_FUSED``): uses the A5 dedicated fused quant
+          operators ``npu_all_gather_quant_mm`` and ``npu_quant_mm_reduce_scatter``
+          (scene 4: E8M0 per-group scale, blockSize=32).
+
+        Both paths require SP-only mode (TP-sharded weights, not replicated),
+        TP size in {2, 4, 8}, no active LoRA, and the corresponding torch_npu
+        kernel to be callable.  The expert_gate (Qwen3-Next output gating) is
+        computed on the SP shard before the fused AG and applied after the
+        fused RS — mathematically equivalent because expert_gate is a
+        ReplicatedLinear (same weights on all ranks).
         """
         if self.parallel_mode() is not SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
             return False
-        if self._select_mlp_path() is not SharedExpertMLPPath.A8_INT_FUSED:
+        path = self._select_mlp_path()
+        if path not in (SharedExpertMLPPath.A8_INT_FUSED, SharedExpertMLPPath.A8_MXFP_FUSED):
             return False
         tp_size = self.moe_config.tp_group.world_size
         if tp_size not in (2, 4, 8):
             return False
-        # The fused kernel needs npu_all_gather_base_mm / npu_mm_reduce_scatter_base
         import torch_npu
 
-        if not callable(getattr(torch_npu, "npu_all_gather_base_mm", None)):
-            return False
-        if not callable(getattr(torch_npu, "npu_mm_reduce_scatter_base", None)):
-            return False
+        if path is SharedExpertMLPPath.A8_INT_FUSED:
+            if not callable(getattr(torch_npu, "npu_all_gather_base_mm", None)):
+                return False
+            if not callable(getattr(torch_npu, "npu_mm_reduce_scatter_base", None)):
+                return False
+        else:  # A8_MXFP_FUSED
+            if not callable(getattr(torch_npu, "npu_all_gather_quant_mm", None)):
+                return False
+            if not callable(getattr(torch_npu, "npu_quant_mm_reduce_scatter", None)):
+                return False
         if has_lora(self.lora_context):
             return False
         return True
@@ -911,6 +927,13 @@ class AscendSharedExperts:
                 return (hidden_states, pertoken_scale)
             return torch_npu.npu_dynamic_quant(hidden_states)
         if path is SharedExpertMLPPath.A8_MXFP_FUSED:
+            if self._can_fuse_sp_mc2():
+                # Fused AG+MM: the A5 npu_all_gather_quant_mm kernel gathers
+                # the quantized activation and its scale internally, so we
+                # quantize the SP shard.  The gate_up GEMM output is bf16;
+                # the subsequent SwiGLU+MX quant path stays unchanged.
+                # We return the raw SP shard; the fused op quantizes inside.
+                return hidden_states
             return torch_npu.npu_dynamic_mx_quant(
                 hidden_states,
                 dst_type=torch.float8_e4m3fn,
@@ -985,9 +1008,21 @@ class AscendSharedExperts:
             elif path is SharedExpertMLPPath.A8_MXFP_FUSED:
                 # W4A8MXFP only: MXFP8 activations with MXFP4 weights.
                 # W8A8MXFP remains on the registered linear-wrapper path.
-                assert isinstance(prepared_execution.gate_up_input, tuple)
-                quantized_x, pertoken_scale = prepared_execution.gate_up_input
-                gate_up = self.layer.gate_up_proj((quantized_x, pertoken_scale))[0]
+                if self._can_fuse_sp_mc2():
+                    # Fused AG+MM: the A5 npu_all_gather_quant_mm kernel
+                    # quantizes the SP shard and gathers inside.  The
+                    # gate_up_input is the raw bf16 SP shard.
+                    gate_up = torch.ops.vllm.dense_sp_all_gather_mm_quant_mxfp8(
+                        prepared_execution.hidden_states,
+                        self.layer.gate_up_proj.weight,
+                        self.layer.gate_up_proj.weight_scale,
+                        None,  # bias
+                        self.moe_config.tp_group.world_size,
+                    )
+                else:
+                    assert isinstance(prepared_execution.gate_up_input, tuple)
+                    quantized_x, pertoken_scale = prepared_execution.gate_up_input
+                    gate_up = self.layer.gate_up_proj((quantized_x, pertoken_scale))[0]
             else:
                 gate_up = self.part1(prepared_execution.gate_up_input)
 
@@ -1124,6 +1159,25 @@ class AscendSharedExperts:
             milestones.routed_combine_start,
             "routed_combine_start",
         )
+        if self._can_fuse_sp_mc2():
+            # Fused MM+RS: the A5 npu_quant_mm_reduce_scatter kernel fuses
+            # the down_proj GEMM with ReduceScatter.  quantized_x is
+            # float8_e4m3fn and swiglu_out_scale is the E8M0 per-group scale
+            # in the paired (T, K//64, 2) layout.  The fused op returns the
+            # SP shard [T/TP, H] directly.
+            shared_out = torch.ops.vllm.dense_sp_mm_reduce_scatter_quant_mxfp8_prequant(
+                quantized_x,
+                self.layer.down_proj.weight,
+                self.layer.down_proj.weight_scale,
+                swiglu_out_scale,
+                submitted_gate_up.hidden_states.dtype,
+                self.moe_config.tp_group.world_size,
+            )
+            # Apply output gate on the SP shard (after RS).
+            shared_out = self._apply_output_gate_sp(
+                submitted_gate_up.hidden_states, shared_out
+            )
+            return shared_out
         return self.part2(submitted_gate_up.hidden_states, (quantized_x, swiglu_out_scale))
 
     def _can_fuse_w8a8_mxfp_activation(self, gate_up: torch.Tensor) -> bool:

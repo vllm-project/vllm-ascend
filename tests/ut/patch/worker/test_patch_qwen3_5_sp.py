@@ -10,6 +10,7 @@ from vllm.config import CompilationMode
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
+from vllm_ascend.models.common.ops import sequence_parallel as sp_ops
 from vllm_ascend.ops import linear_op
 from vllm_ascend.patch.worker import patch_qwen3_5
 from vllm_ascend.patch.worker.patch_qwen3_5 import enable_dense_sp
@@ -419,13 +420,13 @@ class _FakeDeviceOperator:
     @staticmethod
     def npu_all_gather_base_mm(x1, x2, hcom, world_size, *, bias=None, **kwargs):
         _FakeDeviceOperator.calls.append(("all_gather_mm", x1, x2, world_size, bias))
-        output = patch_qwen3_5.sp_all_gather(x1) @ x2
+        output = sp_ops.sp_all_gather(x1) @ x2
         return output if bias is None else output + bias
 
     @staticmethod
     def npu_mm_reduce_scatter_base(x1, x2, hcom, world_size, *, reduce_op="sum", **kwargs):
         _FakeDeviceOperator.calls.append(("mm_reduce_scatter", x1, x2, world_size))
-        return patch_qwen3_5.sp_reduce_scatter(x1 @ x2)
+        return sp_ops.sp_reduce_scatter(x1 @ x2)
 
 
 class _FakeQuantMethod:
@@ -479,21 +480,21 @@ class TestDenseSpFusedColumnOp:
     @pytest.fixture(autouse=True)
     def _fused_env(self, monkeypatch: pytest.MonkeyPatch):
         _FakeDeviceOperator.calls = []
-        monkeypatch.setattr(patch_qwen3_5, "get_tp_group", lambda: _make_fake_tp_group(2))
-        monkeypatch.setattr(patch_qwen3_5, "DeviceOperator", _FakeDeviceOperator)
-        monkeypatch.setattr(patch_qwen3_5, "_DENSE_SP_FUSED_DTYPES", (torch.float64,))
+        monkeypatch.setattr(sp_ops, "get_tp_group", lambda: _make_fake_tp_group(2))
+        monkeypatch.setattr(sp_ops, "DeviceOperator", _FakeDeviceOperator)
+        monkeypatch.setattr(sp_ops, "_DENSE_SP_FUSED_DTYPES", (torch.float64,))
         # Tests use 3-6 row tensors; the shard threshold (x.shape[0] * world_size)
         # must be lowered so the structural guard passes for these small inputs.
-        monkeypatch.setattr(patch_qwen3_5, "_DENSE_SP_FUSED_MIN_TOKENS", 2)
+        monkeypatch.setattr(sp_ops, "_DENSE_SP_FUSED_MIN_TOKENS", 2)
 
     def test_fuses_all_gather_into_gemm(self, monkeypatch):
         gen = torch.Generator().manual_seed(0)
         weight = torch.randn(5, 4, generator=gen, dtype=torch.float64)
         gathered = torch.randn(6, 4, generator=gen, dtype=torch.float64)
         shard = torch.randn(3, 4, generator=gen, dtype=torch.float64)
-        monkeypatch.setattr(patch_qwen3_5, "sp_all_gather", lambda x: gathered)
+        monkeypatch.setattr(sp_ops, "sp_all_gather", lambda x: gathered)
 
-        op = patch_qwen3_5.DenseSpAllGatherMmOp(_make_column_proj(weight))
+        op = sp_ops.DenseSpAllGatherMmOp(_make_column_proj(weight))
         output, output_bias = op.apply(shard)
 
         assert [call[0] for call in _FakeDeviceOperator.calls] == ["all_gather_mm"]
@@ -512,9 +513,9 @@ class TestDenseSpFusedColumnOp:
         weight = torch.randn(5, 4, generator=gen, dtype=torch.float64)
         bias = torch.randn(5, generator=gen, dtype=torch.float64)
         gathered = torch.randn(6, 4, generator=gen, dtype=torch.float64)
-        monkeypatch.setattr(patch_qwen3_5, "sp_all_gather", lambda x: gathered)
+        monkeypatch.setattr(sp_ops, "sp_all_gather", lambda x: gathered)
 
-        op = patch_qwen3_5.DenseSpAllGatherMmOp(_make_column_proj(weight, bias=bias))
+        op = sp_ops.DenseSpAllGatherMmOp(_make_column_proj(weight, bias=bias))
         output, output_bias = op.apply(torch.randn(3, 4, generator=gen, dtype=torch.float64))
 
         torch.testing.assert_close(output, gathered @ weight.t() + bias)
@@ -526,9 +527,9 @@ class TestDenseSpFusedColumnOp:
         # suite), so the structural guard rejects the fusion.
         weight = torch.randn(5, 4, generator=gen, dtype=torch.float32)
         gathered = torch.randn(6, 4, generator=gen, dtype=torch.float32)
-        monkeypatch.setattr(patch_qwen3_5, "sp_all_gather", lambda x: gathered)
+        monkeypatch.setattr(sp_ops, "sp_all_gather", lambda x: gathered)
 
-        op = patch_qwen3_5.DenseSpAllGatherMmOp(_make_column_proj(weight))
+        op = sp_ops.DenseSpAllGatherMmOp(_make_column_proj(weight))
         output, _ = op.apply(torch.randn(3, 4, generator=gen, dtype=torch.float32))
 
         assert _FakeDeviceOperator.calls == []
@@ -540,20 +541,20 @@ class TestDenseSpFusedRowOp:
     def _fused_env(self, monkeypatch: pytest.MonkeyPatch):
         _FakeDeviceOperator.calls = []
         fake_group = _make_fake_tp_group(2)
-        monkeypatch.setattr(patch_qwen3_5, "get_tp_group", lambda: fake_group)
+        monkeypatch.setattr(sp_ops, "get_tp_group", lambda: fake_group)
         # CustomLinearOp.tp_rank resolves the group from linear_op's module.
         monkeypatch.setattr(linear_op, "get_tp_group", lambda: fake_group)
-        monkeypatch.setattr(patch_qwen3_5, "DeviceOperator", _FakeDeviceOperator)
-        monkeypatch.setattr(patch_qwen3_5, "_DENSE_SP_FUSED_DTYPES", (torch.float64,))
-        monkeypatch.setattr(patch_qwen3_5, "_DENSE_SP_FUSED_MIN_TOKENS", 2)
-        monkeypatch.setattr(patch_qwen3_5, "sp_reduce_scatter", lambda x: x[: x.shape[0] // 2])
+        monkeypatch.setattr(sp_ops, "DeviceOperator", _FakeDeviceOperator)
+        monkeypatch.setattr(sp_ops, "_DENSE_SP_FUSED_DTYPES", (torch.float64,))
+        monkeypatch.setattr(sp_ops, "_DENSE_SP_FUSED_MIN_TOKENS", 2)
+        monkeypatch.setattr(sp_ops, "sp_reduce_scatter", lambda x: x[: x.shape[0] // 2])
 
     def test_zero_pads_then_fuses(self, monkeypatch):
         gen = torch.Generator().manual_seed(3)
         weight = torch.randn(4, 6, generator=gen, dtype=torch.float64)
         partial_input = torch.randn(5, 6, generator=gen, dtype=torch.float64)  # 5 % tp(2) != 0
 
-        op = patch_qwen3_5.DenseSpMmReduceScatterOp(_make_row_proj(weight))
+        op = sp_ops.DenseSpMmReduceScatterOp(_make_row_proj(weight))
         output, output_bias = op.apply(partial_input)
 
         assert [call[0] for call in _FakeDeviceOperator.calls] == ["mm_reduce_scatter"]
@@ -573,12 +574,12 @@ class TestDenseSpFusedRowOp:
         weight = torch.randn(4, 6, generator=gen, dtype=torch.float64)
         x = torch.randn(6, 6, generator=gen, dtype=torch.float64)
 
-        fused_op = patch_qwen3_5.DenseSpMmReduceScatterOp(_make_row_proj(weight))
+        fused_op = sp_ops.DenseSpMmReduceScatterOp(_make_row_proj(weight))
         fused, _ = fused_op.apply(x)
 
         # Force the fallback path by swapping the dtype allow-list to exclude
         # float64, so the structural guard rejects the same input.
-        monkeypatch.setattr(patch_qwen3_5, "_DENSE_SP_FUSED_DTYPES", (torch.float16,))
+        monkeypatch.setattr(sp_ops, "_DENSE_SP_FUSED_DTYPES", (torch.float16,))
         fallback, _ = fused_op.apply(x)
 
         torch.testing.assert_close(fused, fallback)
@@ -591,7 +592,7 @@ class TestDenseSpFusedRowOp:
         bias = torch.randn(4, generator=gen, dtype=torch.float64)
         x = torch.randn(6, 6, generator=gen, dtype=torch.float64)
 
-        op = patch_qwen3_5.DenseSpMmReduceScatterOp(_make_row_proj(weight, bias=bias))
+        op = sp_ops.DenseSpMmReduceScatterOp(_make_row_proj(weight, bias=bias))
         output, output_bias = op.apply(x)
 
         torch.testing.assert_close(output, (x @ weight.t())[:3] + bias)
@@ -604,7 +605,7 @@ class TestDenseSpFusedRowOp:
         weight = torch.randn(4, 6, generator=gen, dtype=torch.float32)
         x = torch.randn(6, 6, generator=gen, dtype=torch.float32)
 
-        op = patch_qwen3_5.DenseSpMmReduceScatterOp(_make_row_proj(weight))
+        op = sp_ops.DenseSpMmReduceScatterOp(_make_row_proj(weight))
         output, _ = op.apply(x)
 
         assert _FakeDeviceOperator.calls == []
@@ -614,7 +615,9 @@ class TestDenseSpFusedRowOp:
 class TestInstallDenseSpFusedOps:
     @pytest.fixture(autouse=True)
     def _install_env(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setattr(patch_qwen3_5, "get_tp_group", lambda: _make_fake_tp_group(2))
+        fake_group = _make_fake_tp_group(2)
+        monkeypatch.setattr(patch_qwen3_5, "get_tp_group", lambda: fake_group)
+        monkeypatch.setattr(sp_ops, "get_tp_group", lambda: fake_group)
         monkeypatch.setattr(patch_qwen3_5.torch_npu, "npu_all_gather_base_mm", lambda *a, **k: None, raising=False)
         monkeypatch.setattr(patch_qwen3_5.torch_npu, "npu_mm_reduce_scatter_base", lambda *a, **k: None, raising=False)
 
@@ -626,41 +629,45 @@ class TestInstallDenseSpFusedOps:
 
     def test_installs_fused_row_op_on_eligible_projection(self):
         proj = self._eligible_proj()
-        assert patch_qwen3_5._install_dense_sp_fused_op(proj, patch_qwen3_5.DenseSpMmReduceScatterOp) is True
-        assert isinstance(proj.custom_op, patch_qwen3_5.DenseSpMmReduceScatterOp)
+        assert patch_qwen3_5._install_dense_sp_fused_op(proj, sp_ops.DenseSpMmReduceScatterOp) is True
+        assert isinstance(proj.custom_op, sp_ops.DenseSpMmReduceScatterOp)
 
     def test_skips_for_unsupported_tp_size(self, monkeypatch):
-        monkeypatch.setattr(patch_qwen3_5, "get_tp_group", lambda: _make_fake_tp_group(16))
+        fake_group = _make_fake_tp_group(16)
+        monkeypatch.setattr(patch_qwen3_5, "get_tp_group", lambda: fake_group)
+        monkeypatch.setattr(sp_ops, "get_tp_group", lambda: fake_group)
         proj = self._eligible_proj()
-        assert patch_qwen3_5._install_dense_sp_fused_op(proj, patch_qwen3_5.DenseSpMmReduceScatterOp) is False
+        assert patch_qwen3_5._install_dense_sp_fused_op(proj, sp_ops.DenseSpMmReduceScatterOp) is False
         assert proj.custom_op is None
 
     def test_skips_for_quantized_projection(self):
         proj = self._eligible_proj(quant_method=_FakeQuantMethod(torch.randn(4, 6, dtype=torch.bfloat16)))
-        assert patch_qwen3_5._install_dense_sp_fused_op(proj, patch_qwen3_5.DenseSpMmReduceScatterOp) is False
+        assert patch_qwen3_5._install_dense_sp_fused_op(proj, sp_ops.DenseSpMmReduceScatterOp) is False
         assert proj.custom_op is None
 
     def test_skips_when_a_custom_op_is_already_installed(self):
         proj = self._eligible_proj()
         proj.custom_op = object()
-        assert patch_qwen3_5._install_dense_sp_fused_op(proj, patch_qwen3_5.DenseSpMmReduceScatterOp) is False
+        assert patch_qwen3_5._install_dense_sp_fused_op(proj, sp_ops.DenseSpMmReduceScatterOp) is False
 
     def test_skips_column_projection_with_gather_output(self):
         weight = torch.randn(4, 6, dtype=torch.bfloat16)
         proj = _make_column_proj(weight, quant_method=UnquantizedLinearMethod())
         proj.gather_output = True
-        assert patch_qwen3_5._install_dense_sp_fused_op(proj, patch_qwen3_5.DenseSpAllGatherMmOp) is False
+        assert patch_qwen3_5._install_dense_sp_fused_op(proj, sp_ops.DenseSpAllGatherMmOp) is False
 
     def test_skips_when_the_fused_kernel_is_unavailable(self, monkeypatch):
         monkeypatch.delattr(patch_qwen3_5.torch_npu, "npu_mm_reduce_scatter_base", raising=False)
         proj = self._eligible_proj()
-        assert patch_qwen3_5._install_dense_sp_fused_op(proj, patch_qwen3_5.DenseSpMmReduceScatterOp) is False
+        assert patch_qwen3_5._install_dense_sp_fused_op(proj, sp_ops.DenseSpMmReduceScatterOp) is False
 
 
 class TestDenseSpLayerInitFusedOps:
     @pytest.fixture(autouse=True)
     def _init_env(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setattr(patch_qwen3_5, "get_tp_group", lambda: _make_fake_tp_group(2))
+        fake_group = _make_fake_tp_group(2)
+        monkeypatch.setattr(patch_qwen3_5, "get_tp_group", lambda: fake_group)
+        monkeypatch.setattr(sp_ops, "get_tp_group", lambda: fake_group)
         monkeypatch.setattr(patch_qwen3_5, "enable_dense_sp", lambda vllm_config=None: True)
         monkeypatch.setattr(patch_qwen3_5.torch_npu, "npu_all_gather_base_mm", lambda *a, **k: None, raising=False)
         monkeypatch.setattr(patch_qwen3_5.torch_npu, "npu_mm_reduce_scatter_base", lambda *a, **k: None, raising=False)
@@ -685,16 +692,16 @@ class TestDenseSpLayerInitFusedOps:
         layer = self._make_layer_with_fusable_projections("full_attention")
         _run_layer_init(layer, _make_vllm_config(), "full_attention", dense_sp=True)
 
-        assert isinstance(layer.self_attn.qkv_proj.custom_op, patch_qwen3_5.DenseSpAllGatherMmOp)
-        assert isinstance(layer.self_attn.o_proj.custom_op, patch_qwen3_5.DenseSpMmReduceScatterOp)
-        assert isinstance(layer.mlp.gate_up_proj.custom_op, patch_qwen3_5.DenseSpAllGatherMmOp)
-        assert isinstance(layer.mlp.down_proj.custom_op, patch_qwen3_5.DenseSpMmReduceScatterOp)
+        assert isinstance(layer.self_attn.qkv_proj.custom_op, sp_ops.DenseSpAllGatherMmOp)
+        assert isinstance(layer.self_attn.o_proj.custom_op, sp_ops.DenseSpMmReduceScatterOp)
+        assert isinstance(layer.mlp.gate_up_proj.custom_op, sp_ops.DenseSpAllGatherMmOp)
+        assert isinstance(layer.mlp.down_proj.custom_op, sp_ops.DenseSpMmReduceScatterOp)
 
     def test_gdn_installs_only_the_output_projection(self):
         layer = self._make_layer_with_fusable_projections("linear_attention")
         _run_layer_init(layer, _make_vllm_config(), "linear_attention", dense_sp=True)
 
-        assert isinstance(layer.linear_attn.out_proj.custom_op, patch_qwen3_5.DenseSpMmReduceScatterOp)
+        assert isinstance(layer.linear_attn.out_proj.custom_op, sp_ops.DenseSpMmReduceScatterOp)
         # The GDN in-projections keep the decoder-level gather.
         assert not hasattr(layer.linear_attn, "in_proj_qkvz")
 
@@ -727,18 +734,19 @@ class TestFusedDecoderFlow:
         _FakeDeviceOperator.calls = []
         fake_group = _make_fake_tp_group(2)
         monkeypatch.setattr(patch_qwen3_5, "get_tp_group", lambda: fake_group)
+        monkeypatch.setattr(sp_ops, "get_tp_group", lambda: fake_group)
         monkeypatch.setattr(linear_op, "get_tp_group", lambda: fake_group)
-        monkeypatch.setattr(patch_qwen3_5, "DeviceOperator", _FakeDeviceOperator)
-        monkeypatch.setattr(patch_qwen3_5, "_DENSE_SP_FUSED_DTYPES", (torch.float64,))
-        monkeypatch.setattr(patch_qwen3_5, "_DENSE_SP_FUSED_MIN_TOKENS", 2)
+        monkeypatch.setattr(sp_ops, "DeviceOperator", _FakeDeviceOperator)
+        monkeypatch.setattr(sp_ops, "_DENSE_SP_FUSED_DTYPES", (torch.float64,))
+        monkeypatch.setattr(sp_ops, "_DENSE_SP_FUSED_MIN_TOKENS", 2)
 
     def _fused_column(self, out_features: int, in_features: int) -> "_CallableProjection":
         proj = _make_column_proj(torch.randn(out_features, in_features, dtype=torch.float64))
-        return _CallableProjection(patch_qwen3_5.DenseSpAllGatherMmOp(proj))
+        return _CallableProjection(sp_ops.DenseSpAllGatherMmOp(proj))
 
     def _fused_row(self, out_features: int, in_features: int) -> "_CallableProjection":
         proj = _make_row_proj(torch.randn(out_features, in_features, dtype=torch.float64))
-        return _CallableProjection(patch_qwen3_5.DenseSpMmReduceScatterOp(proj))
+        return _CallableProjection(sp_ops.DenseSpMmReduceScatterOp(proj))
 
     def test_all_fused_layer_skips_decoder_collectives(self):
         gather_rows = []
@@ -763,8 +771,8 @@ class TestFusedDecoderFlow:
             return x[: x.shape[0] // 2]
 
         with (
-            patch.object(patch_qwen3_5, "sp_all_gather", _gather),
-            patch.object(patch_qwen3_5, "sp_reduce_scatter", _scatter),
+            patch.object(sp_ops, "sp_all_gather", _gather),
+            patch.object(sp_ops, "sp_reduce_scatter", _scatter),
         ):
             output, residual = layer.forward(
                 hidden_states=torch.zeros(4, 2, dtype=torch.float64),
@@ -807,8 +815,8 @@ class TestFusedDecoderFlow:
         # 5 real tokens, TP=2: the fused gather produces 6 padded rows and
         # the patched attention must trim back to 5 before RoPE.
         with (
-            patch.object(patch_qwen3_5, "sp_all_gather", lambda x: x.repeat(2, 1)),
-            patch.object(patch_qwen3_5, "sp_reduce_scatter", lambda x: x[: x.shape[0] // 2]),
+            patch.object(sp_ops, "sp_all_gather", lambda x: x.repeat(2, 1)),
+            patch.object(sp_ops, "sp_reduce_scatter", lambda x: x[: x.shape[0] // 2]),
         ):
             out = patch_qwen3_5.AscendQwen3NextAttention.forward(
                 attention,
