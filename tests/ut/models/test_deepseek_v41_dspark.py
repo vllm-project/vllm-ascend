@@ -20,6 +20,7 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec, register_ascend_kv_cache_specs
 from vllm_ascend.models.deepseek_v41 import dspark as deepseek_v41_dspark_module
+from vllm_ascend.models.deepseek_v41 import model as deepseek_v41_module
 from vllm_ascend.models.deepseek_v41.dspark import (
     DeepseekV41DSparkAttention,
     DeepseekV41DSparkDecoderLayer,
@@ -27,7 +28,12 @@ from vllm_ascend.models.deepseek_v41.dspark import (
     DeepseekV41DSparkSWACache,
     DSparkDeepseekV41ForCausalLM,
 )
-from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41SWACache, DeepseekV41Model
+from vllm_ascend.models.deepseek_v41.model import (
+    AscendDeepseekV41LLMForCausalLM,
+    AscendDeepseekV41SWACache,
+    DeepseekV41Model,
+)
+from vllm_ascend.models.deepseek_v41.vl_model import AscendDeepseekV41ForCausalLM
 from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 
@@ -61,22 +67,46 @@ def test_draft_cache_uses_v41_backend_and_explicit_deepseek_v41_spec(monkeypatch
     assert registrations[type(draft)] is SlidingWindowManager
 
 
-def test_composite_config_selects_checkpoint_aux_layers():
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize(
+    "model_type,layer_field,expected",
+    [
+        ("deepseek_v41", "dspark_target_layer_ids", (37, 38, 39)),
+        ("deepseek_v41_text", "dspark_target_layer_ids", (37, 38, 39)),
+        ("deepseek_v4", "dspark_target_layer_ids", (38, 39, 40)),
+        ("qwen3", "target_layer_ids", (38, 39, 40)),
+    ],
+)
+def test_composite_config_selects_checkpoint_aux_layers(nested, model_type, layer_field, expected):
     runner = NPUModelRunner.__new__(NPUModelRunner)
-    text = SimpleNamespace(dspark_target_layer_ids=[37, 38, 39])
+    text_model_type = "deepseek_v41_text" if nested and model_type == "deepseek_v41" else model_type
+    text = SimpleNamespace(model_type=text_model_type, **{layer_field: [37, 38, 39]})
+    hf_config = SimpleNamespace(model_type=model_type, text_config=text) if nested else text
     runner.speculative_config = SimpleNamespace(
         use_dspark=lambda: True,
-        draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(text_config=text)),
+        draft_model_config=SimpleNamespace(hf_config=hf_config),
     )
     with patch.object(GPUModelRunner, "_get_eagle3_aux_layers_from_config", return_value=None):
-        assert runner._get_eagle3_aux_layers_from_config() == (38, 39, 40)
+        assert runner._get_eagle3_aux_layers_from_config() == expected
 
 
-def test_target_exports_residual_entering_selected_layers(monkeypatch):
-    monkeypatch.setattr(
-        "vllm_ascend.models.deepseek_v41.model.get_pp_group",
-        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
-    )
+@pytest.mark.parametrize(
+    "num_layers,selected",
+    [(3, ()), (3, (0,)), (3, (1,)), (3, (2,)), (3, (0, 2)), (40, (37, 38, 39))],
+)
+@pytest.mark.parametrize("sequence_parallel", [False, True])
+@pytest.mark.parametrize("resolver", ["mrv1", "mrv1_composite", "mrv2"])
+def test_target_exports_residual_entering_selected_layers(
+    monkeypatch, num_layers, selected, sequence_parallel, resolver
+):
+    from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_layers_from_config
+
+    monkeypatch.setattr("vllm.distributed.parallel_state.model_parallel_is_initialized", lambda: False)
+    monkeypatch.setattr(deepseek_v41_module.envs, "VLLM_MOE_SKIP_PADDING", False)
+    # Simulate identical input shards; only collectives are replaced, while
+    # the model's SP capture and final gather branches execute normally.
+    monkeypatch.setattr(deepseek_v41_module, "sp_shard", lambda tensor: tensor[: tensor.shape[0] // 2])
+    monkeypatch.setattr(deepseek_v41_module, "sp_all_gather", lambda tensor: torch.cat([tensor, tensor], dim=0))
 
     class Layer:
         def __init__(self, index):
@@ -90,30 +120,77 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch):
         def hc_collapse(hidden, pre_mix):
             return hidden.mean(dim=1)
 
-    model = SimpleNamespace(
-        hc_mult=4,
-        decoder_replay_layers=None,
-        needs_moe_input_ids=False,
-        _mtp_hidden_buffer=None,
-        prepare_engram=lambda input_ids, positions: ({}, torch.empty(0, dtype=torch.bool)),
-        aux_hidden_state_layers=(1, 3),
-        shared_attention_state=SimpleNamespace(reset=lambda: None),
-        layers=[Layer(i) for i in range(3)],
-        norm=lambda hidden: hidden,
-    )
-    hidden = torch.arange(12, dtype=torch.float32).reshape(3, 4)
-    output, aux = DeepseekV41Model.forward(
-        model,
-        torch.arange(3),
-        torch.arange(3),
+    model = DeepseekV41Model.__new__(DeepseekV41Model)
+    torch.nn.Module.__init__(model)
+    model.hc_mult = 4
+    model.use_sequence_parallel = sequence_parallel
+    model.decoder_replay_layers = None
+    model.needs_moe_input_ids = False
+    model._mtp_hidden_buffer = None
+    model.shared_attention_state = SimpleNamespace(reset=lambda: None)
+    model.layers = [Layer(i) for i in range(num_layers)]
+    model.norm = lambda hidden: hidden
+    target = AscendDeepseekV41LLMForCausalLM.__new__(AscendDeepseekV41LLMForCausalLM)
+    torch.nn.Module.__init__(target)
+    target.model = model
+    hf_config = SimpleNamespace(model_type="deepseek_v41", dspark_target_layer_ids=list(selected))
+    if resolver == "mrv1_composite":
+        hf_config.model_type = "deepseek_v41_text"
+        runner_hf_config = SimpleNamespace(model_type="deepseek_v41", text_config=hf_config)
+    else:
+        runner_hf_config = hf_config
+    spec = SimpleNamespace(use_dspark=lambda: True, draft_model_config=SimpleNamespace(hf_config=runner_hf_config))
+    if resolver == "mrv2":
+        resolved = get_eagle3_aux_layers_from_config(spec) or ()
+    else:
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.speculative_config = spec
+        with patch.object(GPUModelRunner, "_get_eagle3_aux_layers_from_config", return_value=None):
+            resolved = runner._get_eagle3_aux_layers_from_config() or ()
+    assert resolved == selected
+    target.set_aux_hidden_state_layers(resolved)
+    assert model.aux_hidden_state_layers == selected
+    assert hf_config.dspark_target_layer_ids == list(selected)
+    hidden = torch.arange(8, dtype=torch.float32).reshape(2, 4).repeat(2, 1)
+    result = model.forward(
+        torch.arange(4),
+        torch.arange(4),
         None,
         inputs_embeds=hidden,
         engram_lookups={},
         engram_mask=torch.empty(0, dtype=torch.bool),
     )
-    torch.testing.assert_close(aux[0], hidden)
-    torch.testing.assert_close(aux[1], hidden + 3)
-    torch.testing.assert_close(output, hidden + 6)
+    output, aux = result if selected else (result, [])
+    assert len(aux) == len(selected)
+    for actual, index in zip(aux, selected):
+        torch.testing.assert_close(actual, hidden + index * (index + 1) // 2)
+    torch.testing.assert_close(output, hidden + num_layers * (num_layers + 1) // 2)
+
+
+@pytest.mark.parametrize("multimodal", [False, True])
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_v41_public_setter_preserves_checkpoint_aux_layer_ids(multimodal, adaptive):
+    from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_layers_from_config
+
+    setter = MagicMock()
+    text_target = AscendDeepseekV41LLMForCausalLM.__new__(AscendDeepseekV41LLMForCausalLM)
+    torch.nn.Module.__init__(text_target)
+    text_target.model = SimpleNamespace(_set_aux_hidden_state_layers=setter)
+    if multimodal:
+        target = AscendDeepseekV41ForCausalLM.__new__(AscendDeepseekV41ForCausalLM)
+        torch.nn.Module.__init__(target)
+        target.language_model = text_target
+    else:
+        target = text_target
+    hf_config = SimpleNamespace(model_type="deepseek_v41", dspark_target_layer_ids=[0, 37, 38, 39])
+    spec = SimpleNamespace(
+        draft_model_config=SimpleNamespace(hf_config=hf_config), enable_adaptive_verification=adaptive
+    )
+    resolved = get_eagle3_aux_layers_from_config(spec)
+    assert resolved == (0, 37, 38, 39)
+    target.set_aux_hidden_state_layers(resolved)
+    setter.assert_called_once_with((0, 37, 38, 39))
+    assert hf_config.dspark_target_layer_ids == [0, 37, 38, 39]
 
 
 def test_v41_draft_routes_to_v41():

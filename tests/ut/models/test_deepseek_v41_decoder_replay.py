@@ -145,7 +145,13 @@ def test_untrimmed_replica_enters_decoder_context_without_gathering():
     assert torch.equal(buffer, torch.arange(6))
 
 
-def test_model_replays_only_layers_after_kv_sources(monkeypatch):
+@pytest.mark.parametrize(
+    "num_layers,replay_start,selected",
+    [(3, start, selected) for start in (0, 1, 2) for selected in ((), (0,), (1,), (2,), (0, 2), (1, 2), (0, 1, 2))]
+    + [(40, start, (37, 38, 39)) for start in (37, 38, 39)],
+)
+@pytest.mark.parametrize("compacted", [False, True])
+def test_model_replays_only_layers_after_kv_sources(monkeypatch, num_layers, replay_start, selected, compacted):
     seen = []
 
     class Layer:
@@ -168,20 +174,19 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch):
     model.use_sequence_parallel = False
     model._mtp_hidden_buffer = None
     model.shared_attention_state = SimpleNamespace(reset=lambda: None)
-    model.layers = [Layer(i) for i in range(3)]
+    model.layers = [Layer(i) for i in range(num_layers)]
     model.norm = lambda hidden: hidden
-    model.end_layer = 3
+    model.end_layer = num_layers
     model.start_layer = 0
     model.needs_moe_input_ids = False
-    model.decoder_replay_start = 1
-    model.aux_hidden_state_layers = (1, 3)
+    model.decoder_replay_start = replay_start
+    model.aux_hidden_state_layers = selected
     replay = replay_mod.AscendDecoderReplayLayers(2, model._run_replay_layers, [])
-    replay.rows = torch.tensor([2, 3])
+    replay.rows = torch.tensor([2, 3]) if compacted else None
     replay.num_actual_rows = 2
     replay.context_factory = nullcontext
     model.decoder_replay_layers = replay
-    output, aux = DeepseekV41Model.forward(
-        model,
+    result = model.forward(
         torch.arange(4),
         torch.arange(4),
         None,
@@ -189,7 +194,31 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch):
         engram_lookups={},
         engram_mask=torch.empty(0, dtype=torch.bool),
     )
-    assert seen == [(0, [0, 1, 2, 3]), (1, [2, 3]), (2, [2, 3])]
-    assert output[:, 0].tolist() == [0, 0, 4, 4]
-    assert aux[0][:, 0].tolist() == [1, 1, 1, 1]
-    assert aux[1][:, 0].tolist() == [0, 0, 3, 3]
+    output, aux = result if selected else (result, [])
+    all_rows = [0, 1, 2, 3]
+    expected = [(i, all_rows) for i in range(replay_start)]
+    expected += [(i, [2, 3] if compacted else all_rows) for i in range(replay_start, num_layers)]
+    assert seen == expected
+    assert output[:, 0].tolist() == ([0, 0, num_layers + 1, num_layers + 1] if compacted else [num_layers + 1] * 4)
+    assert len(aux) == len(selected)
+    for actual, index in zip(aux, selected):
+        values = [1 + index] * 4
+        if compacted and index >= replay_start:
+            values[:2] = [0, 0]
+        assert actual[:, 0].tolist() == values
+
+    # A selected ID equal to replay_start belongs to the replay suffix.
+    # Its retained rows must match ordinary forward on the same input.
+    model.decoder_replay_layers = None
+    regular = model.forward(
+        torch.arange(4),
+        torch.arange(4),
+        None,
+        inputs_embeds=torch.ones(4, 1),
+        engram_lookups={},
+        engram_mask=torch.empty(0, dtype=torch.bool),
+    )
+    regular_aux = regular[1] if selected else []
+    for actual, reference, index in zip(aux, regular_aux, selected):
+        rows = slice(2, None) if compacted and index >= replay_start else slice(None)
+        torch.testing.assert_close(actual[rows], reference[rows])
