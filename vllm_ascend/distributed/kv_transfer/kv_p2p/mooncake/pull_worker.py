@@ -598,6 +598,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         remote_host: str,
         remote_port: int,
         requests: dict[str, ReqMeta],
+        selection_index_offset: int = 0,
     ) -> Iterator[tuple[str, dict[Future[None], tuple[int, int, int, set[str]]], Exception | None]]:
         """Plan an engine batch once and stream prepared requests to the pool."""
         remote_metadata = self._get_remote_metadata(remote_engine_id, remote_host, remote_port)
@@ -624,6 +625,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 remote_metadata.dcp_size,
                 requests,
                 transfer_block_ids_by_spec,
+                selection_index_offset=selection_index_offset,
             )
             for (pcp_rank, tp_rank), specs in buckets.items():
                 for spec_index, layers in specs.items():

@@ -1328,7 +1328,7 @@ def test_submit_transfer_requests_preserves_tasks_after_submission_error(
     thread._prepare_tp_transfer_bucket = MagicMock(side_effect=lambda pp, pcp, tp, *args: (pp, pcp, tp))
     requests = {"request-a": make_req_meta(), "request-b": make_req_meta()}
 
-    results = list(thread._submit_transfer_requests("engine-p", "10.0.0.1", 6000, requests))
+    results = list(thread._submit_transfer_requests("engine-p", "10.0.0.1", 6000, requests, selection_index_offset=3))
     assert [result[0] for result in results] == ["request-a", "request-b"]
     assert completed_future in results[0][1]
     assert results[0][2] is None
@@ -1343,7 +1343,7 @@ def test_submit_transfer_requests_preserves_tasks_after_submission_error(
         assert isinstance(failed_future.exception(), RuntimeError)
     completed_result.assert_not_called()
     thread._build_transfer_block_buckets.assert_called_once()
-    assert thread._build_transfer_block_buckets.call_args.args[5] is requests
+    assert thread._build_transfer_block_buckets.call_args.kwargs["selection_index_offset"] == 3
 
 
 @pytest.mark.parametrize("mode,read_count", [("batch", 1), ("request", 2)])
