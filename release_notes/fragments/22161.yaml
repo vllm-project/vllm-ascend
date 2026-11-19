@@ -1,6 +1,0 @@
-pr: 22161
-entries:
-  - category: performance
-    text: Reduced repeated scalar KV address translation for DeepSeek V4.1 CSA on A2/A3 in eligible TopK-512 workloads, retaining fallback for unsupported shapes and address ranges. No new configuration is required.
-    model: deepseek-v4.1
-    hardware: [A2, A3]
