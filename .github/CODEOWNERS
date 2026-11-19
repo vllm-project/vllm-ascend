@@ -2,23 +2,23 @@
 
 # Infra, CI
 /.gemini @wangxiyuan
-/.github @zhangxinyuehfad @czydyy
+/.github @zhangxinyuehfad @czydyy @LQDLove
 /.github/CODEOWNERS @wangxiyuan
-/tools @zhangxinyuehfad @czydyy
-/.gitignore @zhangxinyuehfad @czydyy
-/.pre-commit-config.yaml @zhangxinyuehfad @czydyy
-/codecov.yml @zhangxinyuehfad @czydyy
-/format.sh @zhangxinyuehfad @czydyy
-/mypy.ini @zhangxinyuehfad @czydyy
-/requirements* @zhangxinyuehfad @czydyy @winson-00178005
-/typos.toml @zhangxinyuehfad @czydyy
-/packages.txt @zhangxinyuehfad @czydyy
-/.markdownlint.yaml @MrZ20 @czydyy
-/.gitleaks.toml @zhangxinyuehfad @czydyy
-/.clang-format @MrZ20 @czydyy
+/tools @zhangxinyuehfad @czydyy @LQDLove
+/.gitignore @zhangxinyuehfad @czydyy @LQDLove
+/.pre-commit-config.yaml @zhangxinyuehfad @czydyy @LQDLove
+/codecov.yml @zhangxinyuehfad @czydyy @LQDLove
+/format.sh @zhangxinyuehfad @czydyy @LQDLove
+/mypy.ini @zhangxinyuehfad @czydyy @LQDLove
+/requirements* @zhangxinyuehfad @czydyy @winson-00178005 @LQDLove
+/typos.toml @zhangxinyuehfad @czydyy @LQDLove
+/packages.txt @zhangxinyuehfad @czydyy @LQDLove
+/.markdownlint.yaml @MrZ20 @czydyy @LQDLove
+/.gitleaks.toml @zhangxinyuehfad @czydyy @LQDLove
+/.clang-format @MrZ20 @czydyy @LQDLove
 /setup.py @wangxiyuan
 /pyproject.toml @wangxiyuan
-/collect_env.py @zhangxinyuehfad @czydyy
+/collect_env.py @zhangxinyuehfad @czydyy @LQDLove
 /.gitmodules @zzzzwwjj
 
 # Repo metadata
@@ -28,13 +28,13 @@
 /DCO @wangxiyuan
 
 # Agent
-/.agents/ @zhangxinyuehfad @czydyy
+/.agents/ @zhangxinyuehfad @czydyy @LQDLove
 /.claude/ @MrZ20
 /AGENTS.md @MrZ20
 /CLAUDE.md @MrZ20
 
 # Dockerfiles
-/Dockerfile* @zhangxinyuehfad @czydyy @winson-00178005
+/Dockerfile* @zhangxinyuehfad @czydyy @winson-00178005 @LQDLove
 
 # docs
 /docs @liqian79
