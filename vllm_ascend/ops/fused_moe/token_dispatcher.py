@@ -550,6 +550,14 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             # each local expert GMM, after the AlltoAll exchange.
             with_quant = False
         dst_type = token_dispatch_input.quant.get_dst_type
+        fused_init_routing_min_tokens = get_current_hardware_profile().moe_all2allv_fused_init_routing_min_tokens
+        use_fused_init_routing = (
+            with_quant
+            and not use_mxfp_quant
+            and dst_type == torch.int8
+            and fused_init_routing_min_tokens is not None
+            and token_dispatch_input.topk_ids.shape[0] >= fused_init_routing_min_tokens
+        )
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids
@@ -563,13 +571,20 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             global_input_tokens_local_experts_indices,
             hidden_shape,
             hidden_shape_before_permute,
-        ) = self._dispatch_preprocess(hidden_states, topk_ids)
+            dynamic_scale,
+        ) = self._dispatch_preprocess(
+            hidden_states,
+            topk_ids,
+            use_fused_init_routing=use_fused_init_routing,
+            dst_type=dst_type,
+        )
 
         dynamic_scale_after_all2all = None
         if with_quant:
-            permutated_local_input_tokens, dynamic_scale = DeviceOperator.npu_dynamic_quant(
-                permutated_local_input_tokens, act_quant_type=dst_type, use_mxfp_quant=use_mxfp_quant
-            )
+            if not use_fused_init_routing:
+                permutated_local_input_tokens, dynamic_scale = DeviceOperator.npu_dynamic_quant(
+                    permutated_local_input_tokens, act_quant_type=dst_type, use_mxfp_quant=use_mxfp_quant
+                )
             _, dynamic_scale_after_all2all, permute2_ep_all_to_all_handle = async_all_to_all(
                 dynamic_scale, output_splits, input_splits, self.ep_group
             )
@@ -638,7 +653,14 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
 
         return output
 
-    def _dispatch_preprocess(self, hidden_states, topk_ids):
+    def _dispatch_preprocess(
+        self,
+        hidden_states,
+        topk_ids,
+        *,
+        use_fused_init_routing: bool = False,
+        dst_type: torch.dtype = torch.int8,
+    ):
         hidden_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_states.size(-1))
         (
@@ -650,14 +672,32 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             num_out_tokens,
         ) = self._preprocess(topk_ids)
         hidden_shape_before_permute = hidden_states.shape
-
-        # The first permute only depends on host-known shapes. Enqueue it
-        # before waiting for the split D2H copies so the device stays busy.
-        permutated_local_input_tokens, reversed_local_input_permutation_mapping = torch_npu.npu_moe_token_permute(
-            tokens=hidden_states,
-            indices=topk_ids,
-            num_out_tokens=num_out_tokens,
-        )
+        dynamic_scale = None
+        # Keep local routing between the asynchronous split copies and their wait.
+        if use_fused_init_routing:
+            (
+                permutated_local_input_tokens,
+                reversed_local_input_permutation_mapping,
+                _,
+                dynamic_scale,
+            ) = DeviceOperator.npu_moe_init_routing(
+                hidden_states,
+                topk_ids,
+                scale=None,
+                active_num=num_out_tokens,
+                expert_num=self.num_experts,
+                expert_tokens_num_type=1,
+                expert_tokens_num_flag=True,
+                active_expert_range=[0, self.num_experts],
+                quant_mode=1,
+                act_quant_type=dst_type,
+            )
+        else:
+            permutated_local_input_tokens, reversed_local_input_permutation_mapping = torch_npu.npu_moe_token_permute(
+                tokens=hidden_states,
+                indices=topk_ids,
+                num_out_tokens=num_out_tokens,
+            )
 
         if self.lora_context is not None:
             preprocess_lora_indices(
@@ -691,6 +731,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             global_input_tokens_local_experts_indices,
             hidden_shape,
             hidden_shape_before_permute,
+            dynamic_scale,
         )
 
     def _preprocess(self, topk_ids: torch.Tensor):

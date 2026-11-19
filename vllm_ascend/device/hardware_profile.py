@@ -319,6 +319,9 @@ class HardwareProfile:
     # query length to work around native operator numerical failures. None
     # retains native dispatch; this is a stack workaround, not a silicon limit.
     gdn_fixed_spec_recurrent_fallback_min_query_len: int | None = None
+    # A3 fuses INT8 dynamic quantization and top-k expansion when the native
+    # routing kernel is faster than separate permutation and quantization.
+    moe_all2allv_fused_init_routing_min_tokens: int | None = None
 
     def supports(self, capability: HardwareCapability) -> bool:
         """Return whether the exact documented ``capability`` contract is available."""
@@ -418,6 +421,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
             flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX}),
+            moe_all2allv_fused_init_routing_min_tokens=1024,
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,
             default_worker_cls=_DEFAULT_WORKER_CLS,
