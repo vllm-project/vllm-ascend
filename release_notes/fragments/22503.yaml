@@ -1,0 +1,7 @@
+pr: 22503
+entries:
+  - category: feature
+    text: >-
+      Added TP query sharding for long sparse MLA prefills on supported Ascend Lightning Indexer
+      and KPool paths. Set `sparse_mla_shard_q` to `false` in the attention configuration to opt out
+      on vLLM versions that provide it.
