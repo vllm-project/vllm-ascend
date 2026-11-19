@@ -39,7 +39,7 @@ The examples use ModelScope model IDs with `VLLM_USE_MODELSCOPE=True`. Both PD r
 Qwen4Exp HyperConnection execution requires the matching TextGatedResidual CANN
 custom operator package and Torch extension. Install both and source the vendor
 environment before starting the service. See the
-[HC adapter dependencies](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/triton/docs/combine_final.md#runtime-dependencies)
+HC adapter documentation in `vllm_ascend/ops/triton/docs/combine_final.md`
 for the validated package and adapter versions.
 
 ### 4.1 Docker Image Installation
