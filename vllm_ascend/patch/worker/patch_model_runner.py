@@ -206,6 +206,9 @@ def initialize_kv_cache(
     register_sparse_kv_caches = getattr(self, "_register_sparse_kv_caches", None)
     if register_sparse_kv_caches is not None:
         register_sparse_kv_caches(kv_caches_dict)
+    # Hybrid adapters resolve per-layer ownership from this mapping; the flat list below keeps
+    # the native group-by-group order.
+    self._kv_caches_dict = kv_caches_dict
     self.kv_caches = [
         tensor
         for cache in kv_caches_dict.values()
