@@ -14,9 +14,9 @@ from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
-from vllm_ascend.attention.dsa_v1 import AscendDSABackend, AscendDSAMetadata
+from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
-from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadata
+from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.models.kimi_k3 import kimi_k3_dspark
 from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiLinearModel
 from vllm_ascend.utils import vllm_version_is
@@ -48,6 +48,8 @@ def make_speculator():
         moe_backend=None, attention_backend=None, kv_cache_dtype=None
     )
     spec.num_query_per_req = 5
+    spec._graph_query_start_loc_cpu = torch.arange(5, dtype=torch.int32) * 5
+    spec._graph_query_start_loc_gpu = spec._graph_query_start_loc_cpu.clone()
     spec.input_buffers = SimpleNamespace(
         positions=torch.arange(20), seq_lens=torch.tensor([5, 0, 0, 0], dtype=torch.int32)
     )
@@ -187,20 +189,6 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
     return spec
 
 
-@pytest.mark.parametrize(
-    "backend,metadata_cls", [(AscendDSABackend, AscendDSAMetadata), (AscendSFABackend, AscendSFAMetadata)]
-)
-def test_sparse_mla_metadata_keeps_shared_update(monkeypatch, backend, metadata_cls):
-    spec = initialize_attention(monkeypatch, backend)
-    assert spec.attn_architecture is None
-    spec.num_query_per_req = 5
-    metadata = metadata_cls.__new__(metadata_cls)
-    assert not hasattr(metadata, "decode")
-    layers = {"draft": metadata}
-    assert spec._update_draft_attn_metadata(layers, 2) is layers
-    assert metadata.actual_seq_lengths_q == [5, 10]
-
-
 @pytest.mark.parametrize("wrapped", [False, True])
 def test_shared_loader_configures_mla_model(monkeypatch, wrapped):
     spec, target = make_speculator(), make_target()
@@ -256,22 +244,6 @@ def test_raw_prefix_capture_does_not_add_attnres_bank(layer_idx, has_residual):
         assert captured == []
     if residual is not None:
         torch.testing.assert_close(residual, torch.ones(2, 3, 4))
-
-
-def test_padded_mla_query_lengths_are_nested():
-    spec = make_speculator()
-    metadata = {"draft.0": SimpleNamespace(decode=SimpleNamespace(actual_seq_lengths_q=[5, 5]))}
-    assert spec._update_draft_attn_metadata(metadata, 2) is metadata
-    assert metadata["draft.0"].decode.actual_seq_lengths_q == [5, 10]
-    assert not hasattr(metadata["draft.0"], "actual_seq_lengths_q")
-
-
-@pytest.mark.parametrize("architecture", [None, "GQA", "MLA"])
-def test_empty_metadata_is_a_noop(architecture):
-    spec = make_speculator()
-    spec.attn_architecture = architecture
-    metadata: dict[str, SimpleNamespace] = {}
-    assert spec._update_draft_attn_metadata(metadata, 1) is metadata
 
 
 @pytest.mark.parametrize("architecture", [None, "GQA", "MLA"])
@@ -345,7 +317,7 @@ def test_propose_uses_draft_decode_flags_for_dcp(monkeypatch, use_dcp):
     monkeypatch.setattr(shared, "build_attn_metadata_wrapper", nullcontext)
 
     @contextmanager
-    def factory(positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None):
+    def factory(positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None, **kwargs):
         captured.update(is_prefilling=is_prefilling, seq_lens_cpu=seq_lens_cpu)
         yield
 
@@ -376,18 +348,16 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
     builder = MagicMock(return_value=metadata)
     # Keep the real uniform builder so it dispatches to Ascend's new hook.
     monkeypatch.setattr(DSparkSpeculator, "_build_attn_metadata", builder)
-    update = MagicMock(wraps=spec._update_draft_attn_metadata)
-    monkeypatch.setattr(spec, "_update_draft_attn_metadata", update)
     captured: dict[str, Any] = {}
 
     @contextmanager
-    def factory(positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None):
+    def factory(positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None, **kwargs):
         if architecture == "MLA":
             assert seq_lens_cpu.tolist() == [5, 0]
         else:
             assert seq_lens_cpu is None
         assert parallel_config is spec.vllm_config.parallel_config
-        captured.update(pad=pad, is_prefilling=is_prefilling, attn_state=attn_state)
+        captured.update(pad=pad, is_prefilling=is_prefilling, attn_state=attn_state, **kwargs)
         yield
 
     monkeypatch.setattr(shared, "build_attn_metadata_factory", factory)
@@ -398,12 +368,10 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
     assert captured["is_prefilling"].dtype == torch.bool
     assert captured["attn_state"] == AscendAttentionState.ChunkedPrefill
     builder.assert_called_once()
+    assert query_metadata.actual_seq_lengths_q == [5, 5]
     if architecture in ("GQA", "MLA"):
-        assert query_metadata.actual_seq_lengths_q == [5, 10]
-        update.assert_called_once_with(metadata, 2)
-    else:
-        assert query_metadata.actual_seq_lengths_q == [5, 5]
-        update.assert_not_called()
+        assert captured["query_start_loc_cpu"].tolist() == [0, 5, 10]
+        assert captured["query_start_loc_gpu"].tolist() == [0, 5, 10]
     kwargs = builder.call_args.kwargs
     assert kwargs["num_reqs"] == 1
     assert kwargs["batch_desc"].num_reqs == 2
@@ -462,7 +430,8 @@ def test_query_builder_overrides_and_restores_target_context(monkeypatch, archit
         captured.append(kwargs)
         if fail and kwargs["attn_state"] == AscendAttentionState.ChunkedPrefill:
             raise RuntimeError("query failed")
-        query = SimpleNamespace(actual_seq_lengths_q=[5, 5])
+        boundaries = kwargs.get("query_start_loc_cpu")
+        query = SimpleNamespace(actual_seq_lengths_q=boundaries[1:].tolist() if boundaries is not None else [5, 5])
         metadata = SimpleNamespace(decode=query) if architecture == "MLA" else query
         metadata.attn_state = kwargs["attn_state"]
         return {"draft": metadata}
