@@ -253,6 +253,15 @@ class Orchestrator:
         else:
             output = SIGNATURE_RE.sub(new_state.signature(self.head_sha), output, count=1)
 
+        # Stop semantics: removing the label mid-round must win. The queued
+        # unlabeled handler runs after us and marks state=stopped; here we
+        # only need to not post a round the reviewer already cancelled. The
+        # completed round is discarded (cost is sunk, the output is dropped).
+        labels = self._gh_json("pr", "view", str(self.pr), "--json", "labels", "-q", "[.labels[].name]")
+        if AI_REVIEW_LABEL not in labels:
+            print("ai-review label was removed mid-round; discarding output", flush=True)
+            return
+
         banner = (
             f"<!-- {BOT_MARKER} -->\n"
             f"🤖 **AI review** (round {round_no}/{MAX_ROUNDS_PER_PUSH}, "
