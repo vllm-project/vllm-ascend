@@ -2707,7 +2707,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker.m_store.batch_get_key_info.side_effect = [before, pinned]
         worker.m_store.batch_add_lease.return_value = [0, 0]
 
-        self.assertIsNone(worker._data_plane._prepare_load_gvas_for_request([request]))
+        self.assertIsNone(worker._data_plane._prepare_load_gvas([request]))
 
         # Every occurrence must use the pinned GVA, never the pre-lease address.
         self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [303, 302, 303])
@@ -2739,7 +2739,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker.m_store.batch_add_lease.return_value = [0] * count
         operations["eq"] = operations["hash"] = 0
 
-        self.assertIsNone(worker._data_plane._prepare_load_gvas_for_request([request]))
+        self.assertIsNone(worker._data_plane._prepare_load_gvas([request]))
         lookup_work = sum(operations.values())
 
         self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), list(range(2000, 2000 + count)))
@@ -2759,7 +2759,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker.m_store.batch_get_key_info.side_effect = [before, pinned]
         worker.m_store.batch_add_lease.return_value = [0, -1, 0]
 
-        self.assertFalse(worker._data_plane._prepare_load_gvas_for_request([request]))
+        self.assertFalse(worker._data_plane._prepare_load_gvas([request]))
 
         queried = worker.m_store.batch_get_key_info.call_args_list[0].args[0]
         refreshed = worker.m_store.batch_get_key_info.call_args_list[1].args[0]
@@ -2779,7 +2779,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                     )
                     worker.m_store.batch_add_lease.return_value = [0, 0]
 
-                    self.assertFalse(worker._data_plane._prepare_load_gvas_for_request([request]))
+                    self.assertFalse(worker._data_plane._prepare_load_gvas([request]))
 
                     self.assertIsNone(request.load_block_gvas_by_group_np)
                     if stage == "before_lease":
@@ -2801,7 +2801,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker.m_store.batch_add_lease.side_effect = [[0, 0, -3101], [0]]
 
         with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes.gva.time.sleep") as sleep:
-            self.assertIsNone(worker._data_plane._prepare_load_gvas_for_request([request]))
+            self.assertIsNone(worker._data_plane._prepare_load_gvas([request]))
 
         queried = worker.m_store.batch_get_key_info.call_args_list[0].args[0]
         self.assertEqual(worker.m_store.batch_add_lease.call_args_list[1].args[0], [queried[2]])

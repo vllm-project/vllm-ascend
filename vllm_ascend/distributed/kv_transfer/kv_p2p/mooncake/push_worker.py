@@ -41,6 +41,9 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     ensure_zmq_send,
     zmq_ctx,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    get_layerwise_reuse_layout,
+)
 
 # Rank tuples are (PP, PCP, TP), matching scheduler handshake keys.
 WorkerRank = tuple[int, int, int]
@@ -213,8 +216,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         self._sending_futures: dict[str, list[Future]] = {}
         self._shared_layer_indices: dict[str, int] = {}
         self._shared_layer_writes: dict[int, tuple[Future, ...]] = {}
-        if getattr(kv_cache_config, "layerwise_kv_cache_reuse", False):
-            layout = kv_cache_config.layerwise_reuse_layout
+        layout = get_layerwise_reuse_layout(kv_cache_config)
+        if layout is not None and layout.has_layer_reuse:
             stage_indices = {layer: index for index, layer in enumerate(layout.layers)}
             self._shared_layer_indices = {
                 name: stage_indices[layout.cache_layer_indices[name]] for name in layout.reused_cache_names
