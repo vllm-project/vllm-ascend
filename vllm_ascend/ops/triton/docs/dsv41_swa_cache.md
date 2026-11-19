@@ -56,11 +56,7 @@ it still specializes on the compile-time dimensions, epsilon, and strides.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dsv41_swa_cache.py
-python benchmarks/benchmark_dsv41_swa_triton.py --quick --json swa-quick.json
 ```
 
 The operator tests compare the production wrapper with a BF16-rounded PyTorch
 reference, including strided cache views, negative slots, and graph replay.
-The standalone benchmark compares eager latency and cache contents against the
-original three-operator path without importing vLLM. It needs the matching
-Ascend custom operator library and does not measure serving latency.
