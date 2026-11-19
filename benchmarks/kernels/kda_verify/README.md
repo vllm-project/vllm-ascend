@@ -13,7 +13,7 @@ done
 python benchmarks/kernels/kda_verify/benchmark.py --batches 1:80 --out full-sweep.json
 ```
 
-Each request verifies 1?16 tokens (six by default) with 64 heads, head dimension 128 and hidden size 4096.
+Each request verifies 1–16 tokens (six by default) with 64 heads, head dimension 128 and hidden size 4096.
 Weights and inputs are synthetic. Compilation and immutable weight packing happen before capture.
 Timing covers the input projection, padding when needed, the gate projections, the mixed kernel and the output projection.
 All paths share inputs and weights. Each median comes from 20 timed NPU graph replays after warmup,
@@ -95,11 +95,11 @@ for t in $(seq 1 16); do
 done
 ```
 
-The state projection packs query and key rows into 16 rows for lengths 1?8 and 32 rows for lengths 9?16. On both boards the tuned schedule precomputes decay-adjusted keys at length 9 for batches 11?80 and length 16 for batches 32?80 with a gate lower bound between -5 and 0. The graph includes all projections, convolution, recurrence and gated normalization.
+The state projection packs query and key rows into 16 rows for lengths 1–8 and 32 rows for lengths 9–16. On both boards the tuned schedule precomputes decay-adjusted keys at length 9 for batches 11–80 and length 16 for batches 32–80 with a gate lower bound between -5 and 0. The graph includes all projections, convolution, recurrence and gated normalization.
 
 ![Fused and unfused KDA latency by batch and token length](latency-b1-50.png)
 
-Across batches 1?80 and token lengths 1?16, the geometric mean unfused-to-fused latency ratio was 2.00? on 850E and 1.72? on 850. The figure displays batches 1?50. Each measured shape passed eager and graph replay comparison with synthetic weights.
+Across batches 1–80 and token lengths 1–16, the geometric mean unfused-to-fused latency ratio was 2.00× on 850E and 1.72× on 850. The figure displays batches 1–50. Each measured shape passed eager and graph replay comparison with synthetic weights.
 
 ## Interpreting utilization
 
