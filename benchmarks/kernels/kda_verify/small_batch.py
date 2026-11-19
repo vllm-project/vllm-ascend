@@ -5,10 +5,11 @@
 import tilelang.ascend.language as T
 
 
-def small_batch_program(c, *, reuse_weights=False):
+def small_batch_program(c, *, reuse_weights=False, batch_gates=False):
     single_wave = c.batch == 1
     register_prefix = c.batch != 2
     B, L, H, D = T.dynamic("B"), c.tokens, c.heads, c.dim
+    gate_shape = (B * L, H * D) if batch_gates else (H // 2, 2 * D, D)
     stages = 6 if c.batch == 1 else 4
     PITCH = 3 * H * D + H + 2 * D
 
@@ -20,8 +21,8 @@ def small_batch_program(c, *, reuse_weights=False):
     @T.prim_func
     def main(
         P: T.Tensor((B * L, PITCH), "bfloat16"),
-        WF: T.Tensor((H // 2, 2 * D, D), "bfloat16"),
-        WG: T.Tensor((H // 2, 2 * D, D), "bfloat16"),
+        WF: T.Tensor(gate_shape, "bfloat16"),
+        WG: T.Tensor(gate_shape, "bfloat16"),
         CW: T.Tensor((H, 3, 4, D), "bfloat16"),
         CS: T.Tensor((B + 1, L + 2, 3 * H * D), "bfloat16"),
         State: T.Tensor(((B + 1) * H * D, D), "float32"),
@@ -43,6 +44,8 @@ def small_batch_program(c, *, reuse_weights=False):
             gf = T.alloc_shared((16, D), "float32")
             gg = T.alloc_shared((16, D), "float32")
             g = T.alloc_shared((16, 2 * D), "bfloat16")
+            g0 = T.alloc_shared((L, D), "bfloat16")
+            g1 = T.alloc_shared((L, D), "bfloat16")
             window = T.alloc_shared((3, L + 3, D), "bfloat16")
             cache = T.alloc_shared((3, L + 2, D), "bfloat16")
             cw = T.alloc_shared((3, 4, D), "bfloat16")
@@ -80,8 +83,9 @@ def small_batch_program(c, *, reuse_weights=False):
             # Each core owns a fixed head pair across all batch items.
             if reuse_weights:
                 owner = 2 * bx + sid
-                T.copy(WF[bx, :, :], wl1)
-                T.copy(WG[bx, :, :], vl1)
+                if not batch_gates:
+                    T.copy(WF[bx, :, :], wl1)
+                    T.copy(WG[bx, :, :], vl1)
                 T.copy(CW[owner, :, :, :], cw)
                 T.copy(A[owner : owner + 1], alog)
                 T.copy(DT[owner, :], dt)
@@ -92,19 +96,23 @@ def small_batch_program(c, *, reuse_weights=False):
                 hp = bx if single_wave or reuse_weights else job % (H // 2)
                 h = hp * 2 + sid
                 T.copy(Accepted[b : b + 1], ac)
-                T.copy(P[b * L : b * L + 16, 3 * H * D + H : 3 * H * D + H + D], al1)
-                T.copy(P[b * L : b * L + 16, 3 * H * D + H + D : PITCH], bl1)
-                if not reuse_weights:
-                    T.copy(WF[hp, :, :], wl1)
-                    T.copy(WG[hp, :, :], vl1)
-                T.gemm(al1, wl1, ga, transpose_B=True, clear_accum=True)
-                T.gemm(bl1, vl1, gb, transpose_B=True, clear_accum=True)
-                T.dual_copy(ga, gf)
-                T.dual_copy(gb, gg)
-                with T.SimtVF(threads=128):
-                    for t, j in T.Parallel(16, D):
-                        g[t, j] = gf[t, j]
-                        g[t, D + j] = gg[t, j]
+                if batch_gates:
+                    T.copy(WF[b * L : (b + 1) * L, h * D : (h + 1) * D], g0)
+                    T.copy(WG[b * L : (b + 1) * L, h * D : (h + 1) * D], g1)
+                else:
+                    T.copy(P[b * L : b * L + 16, 3 * H * D + H : 3 * H * D + H + D], al1)
+                    T.copy(P[b * L : b * L + 16, 3 * H * D + H + D : PITCH], bl1)
+                    if not reuse_weights:
+                        T.copy(WF[hp, :, :], wl1)
+                        T.copy(WG[hp, :, :], vl1)
+                    T.gemm(al1, wl1, ga, transpose_B=True, clear_accum=True)
+                    T.gemm(bl1, vl1, gb, transpose_B=True, clear_accum=True)
+                    T.dual_copy(ga, gf)
+                    T.dual_copy(gb, gg)
+                    with T.SimtVF(threads=128):
+                        for t, j in T.Parallel(16, D):
+                            g[t, j] = gf[t, j]
+                            g[t, D + j] = gg[t, j]
                 if not reuse_weights:
                     T.copy(CW[h, :, :, :], cw)
                     T.copy(A[h : h + 1], alog)
@@ -130,11 +138,19 @@ def small_batch_program(c, *, reuse_weights=False):
                 with T.SimtVF(threads=128):
                     for q, t, j in T.Parallel(3, L, D):
                         cf[q, t, j] = conv[q, t, j]
-                    for t, j in T.Parallel(L, 2 * D):
-                        gatef[t, j] = g[t, j]
+                    if batch_gates:
+                        for t, j in T.Parallel(L, D):
+                            gatef[t, j] = g0[t, j]
+                            gatef[t, D + j] = g1[t, j]
+                    else:
+                        for t, j in T.Parallel(L, 2 * D):
+                            gatef[t, j] = g[t, j]
                     for t, j in T.Parallel(L, D):
                         kg[t, j] = conv[1, t, j]
-                        kg[t, D + j] = g[t, j]
+                        if batch_gates:
+                            kg[t, D + j] = g0[t, j]
+                        else:
+                            kg[t, D + j] = g[t, j]
                         val[t, j] = conv[2, t, j]
                     for t in T.Parallel(L):
                         betaf[t] = beta[t, 0]

@@ -40,6 +40,10 @@ Each row includes the underlying timing samples. For two seeds, take the geometr
 All tuned schedules read history and current tokens from a contiguous on-chip window.
 Except at batch 2, the Vector kernel accumulates the decay prefix in registers and rounds the recurrence output to BF16 before computing its gated RMS normalization in the same Vector function.
 The paired runner also enables weight reuse at batches 1, 3 and 5 through 10.
+At batches 11 through 80 of the fixed six-token fixture, it computes the two BF16 gate
+projections across all requests with dense linear operators. The TileLang mixed kernel
+reads the gate rows for each head and performs convolution, state projection, recurrence
+and normalization. Smaller batches compute both gate projections inside the mixed kernel.
 
 For batches 14, 17, 19 and 22, the tuned benchmark pads the input projection by six rows,
 producing GEMMs with 90, 108, 120 and 138 rows respectively. It slices the result back to the
@@ -81,6 +85,11 @@ For this fixed shape and six-token workload, `model_utilization` reports useful 
 Logical MBU uses a 4 TB/s reference peak and the modeled tensor bytes for the path.
 For batch size B, modeled bytes are 275,481,096 + 7,790,100 × B for unfused and
 275,481,088 + 6,020,612 × B for TileLang, with another 98,304 × B when the input projection is padded. This allowance counts reads and writes of valid input rows. Dummy rows add no useful FLOPs.
-Both metrics use the same complete QKV-to-output median latency.
+The batched gate schedule adds 393,216 bytes per request for writing and reading its two BF16 gate tensors.
+Both metrics use the same complete QKV-to-output median latency. For comparison across schedules,
+`fixed_work_mbu_pct` and `fixed_work_sum_points` use the parent schedule's logical bytes,
+excluding the extra gate transfers. At fixed batch and projection height the fixed-work score
+is inversely proportional to latency. A score of 100 corresponds to the sum of the reference
+compute time and the reference memory time.
 The sum is expressed in percentage points. These model estimates exclude FP32 and vector work from
 the FLOP numerator and do not measure physical HBM traffic or hardware occupancy.

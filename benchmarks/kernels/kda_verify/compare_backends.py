@@ -29,7 +29,7 @@ TOLERANCES = {
 }
 
 
-def model_utilization(batch, latency_us, *, fused, projection_rows=None):
+def model_utilization(batch, latency_us, *, fused, projection_rows=None, batch_gates=False):
     """Pass the measured input projection height when comparing padded schedules."""
     if fused:
         logical_bytes = 275_481_088 + 6_020_612 * batch
@@ -39,10 +39,19 @@ def model_utilization(batch, latency_us, *, fused, projection_rows=None):
             logical_bytes += 98_304 * batch
     else:
         logical_bytes = 275_481_096 + 7_790_100 * batch
+    # Two materialized BF16 gates, each written and read once.
+    gate_bytes = 2 * 2 * 2 * 6 * 8192 * batch if fused and batch_gates else 0
     seconds = latency_us * 1e-6
     mfu = 100 * (PROJECTION_FLOPS_PER_REQUEST * batch) / (BF16_FLOPS_PER_SECOND * seconds)
     mbu = 100 * logical_bytes / (HBM_BYTES_PER_SECOND * seconds)
-    return {"mfu_pct": mfu, "logical_mbu_pct": mbu, "sum_points": mfu + mbu}
+    path_mbu = 100 * (logical_bytes + gate_bytes) / (HBM_BYTES_PER_SECOND * seconds)
+    return {
+        "mfu_pct": mfu,
+        "logical_mbu_pct": path_mbu,
+        "sum_points": mfu + path_mbu,
+        "fixed_work_mbu_pct": mbu,
+        "fixed_work_sum_points": mfu + mbu,
+    }
 
 
 def observe(n, output):
@@ -114,12 +123,19 @@ def run_batch(b, args):
     return {
         "batch": b,
         "tilelang_projection_rows": paths["tilelang"].projection_rows,
+        "tilelang_batch_gates": paths["tilelang"].batch_gates,
         "tilelang_weight_reuse": b in WEIGHT_REUSE_BATCHES,
         "checks": checks,
         "graph_replay_validated": True,
         "median_us": medians,
         "model_utilization": {
-            k: model_utilization(b, us, fused=k == "tilelang", projection_rows=paths["tilelang"].projection_rows)
+            k: model_utilization(
+                b,
+                us,
+                fused=k == "tilelang",
+                projection_rows=paths["tilelang"].projection_rows,
+                batch_gates=paths["tilelang"].batch_gates,
+            )
             for k, us in medians.items()
         },
         "samples_us": samples,

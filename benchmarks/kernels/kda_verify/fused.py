@@ -276,6 +276,7 @@ class FusedMiddle:
         self.n = baseline
         c, i = baseline.c, baseline.i
         h, d = c.heads, c.dim
+        self.batch_gates = tuned and 11 <= c.batch <= 80 and (c.tokens, c.hidden, h, d) == (6, 4096, 64, 128)
         self.projection_rows = c.batch * c.tokens
         if c.batch in (6, 7, 8):
             self.projection_rows = 54
@@ -286,7 +287,9 @@ class FusedMiddle:
         if tuned and c.batch <= 80:
             # The sliding window reads all channels of each tap contiguously.
             self.cw = i["conv_w"].permute(1, 0, 3, 2).contiguous()
-            kernel = small_batch_program(c, reuse_weights=reuse_weights and c.batch in WEIGHT_REUSE_BATCHES)
+            kernel = small_batch_program(
+                c, reuse_weights=reuse_weights and c.batch in WEIGHT_REUSE_BATCHES, batch_gates=self.batch_gates
+            )
         else:
             self.cw = i["conv_w"].permute(1, 0, 2, 3).contiguous()
             kernel = program(c, unroll_taps=tuned and c.batch >= 41)
@@ -301,10 +304,14 @@ class FusedMiddle:
             p = F.linear(F.pad(n.x, (0, 0, 0, self.projection_rows - rows)), i["w_in"])[:rows]
         else:
             p = n.project()
+        gate_f, gate_g = self.wf, self.wg
+        if self.batch_gates:
+            gate_f = F.linear(p[:, -2 * c.dim : -c.dim], i["w_f"])
+            gate_g = F.linear(p[:, -c.dim :], i["w_g"])
         self.kernel(
             p,
-            self.wf,
-            self.wg,
+            gate_f,
+            gate_g,
             self.cw,
             n.cs,
             n.state.reshape(-1, c.dim),
