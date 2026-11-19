@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
 from vllm.triton_utils import HAS_TRITON
 
 import vllm_ascend.patch.worker.patch_worker_profiler  # noqa
@@ -90,3 +91,9 @@ if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKE
 
 # only patch routed experts capture in main2main.
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+
+
+if direct_reload_enabled():
+    from vllm_ascend.model_loader.weight_reload import install_direct_reload_patch
+
+    install_direct_reload_patch()

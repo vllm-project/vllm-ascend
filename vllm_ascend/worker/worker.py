@@ -52,6 +52,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandsha
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
 from vllm.model_executor.model_loader.weight_checksum import compute_tensor_digests, zero_weights
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -538,10 +539,10 @@ class NPUWorker(GPUWorker):
                 "start_weight_update called while a weight update is already active. Call finish_weight_update first."
             )
 
-        self._check_nz_disabled()
-
-        assert self.weight_transfer_engine is not None
-        self.weight_transfer_engine.start_weight_update()
+        with set_current_vllm_config(self.vllm_config):
+            self._check_nz_disabled()
+            assert self.weight_transfer_engine is not None
+            self.weight_transfer_engine.start_weight_update()
         self._weight_update_active = True
 
     def update_weights(self, update_info: dict) -> None:
@@ -553,11 +554,12 @@ class NPUWorker(GPUWorker):
         if not self._weight_update_active:
             raise RuntimeError("start_weight_update must be called before update_weights.")
 
-        try:
-            self.weight_transfer_engine.update_weights(update_info)
-        except BaseException:
-            self._weight_update_active = False
-            raise
+        with set_current_vllm_config(self.vllm_config):
+            try:
+                self.weight_transfer_engine.update_weights(update_info)
+            except BaseException:
+                self._end_weight_update()
+                raise
 
     def finish_weight_update(self) -> None:
         """Finish the current weight update; runs layerwise postprocessing."""
@@ -567,9 +569,22 @@ class NPUWorker(GPUWorker):
             raise RuntimeError("start_weight_update must be called before finish_weight_update.")
 
         assert self.weight_transfer_engine is not None
-        self.weight_transfer_engine.finish_weight_update()
+        with set_current_vllm_config(self.vllm_config):
+            try:
+                self.weight_transfer_engine.finish_weight_update()
+            except BaseException:
+                if direct_reload_enabled():
+                    # Direct finish consumes its begin even when PWAL fails.
+                    # Release the session for a new complete repair update.
+                    self._end_weight_update()
+                raise
+            self._end_weight_update()
         self.model_runner.reset_lora_state()
+
+    def _end_weight_update(self) -> None:
         self._weight_update_active = False
+        assert self.weight_transfer_engine is not None
+        self.weight_transfer_engine.reset_weight_update_target()
 
     def shutdown(self) -> None:
         model = getattr(getattr(self, "model_runner", None), "model", None)
@@ -1578,7 +1593,10 @@ class NPUWorker(GPUWorker):
         self.model_runner.update_config(overrides)
 
     def reload_weights(self, *args, **kwargs) -> None:
-        self.model_runner.reload_weights(*args, **kwargs)
+        with set_current_vllm_config(self.vllm_config):
+            if direct_reload_enabled():
+                self._check_nz_disabled()
+            self.model_runner.reload_weights(*args, **kwargs)
 
     def check_health(self) -> None:
         import subprocess
