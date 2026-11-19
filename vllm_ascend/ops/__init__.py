@@ -29,6 +29,7 @@ if HAS_TRITON:
     if hasattr(mrope_vit_setup, "VitMropeSetup"):
         import vllm_ascend.ops.mrope_vit_setup  # noqa: F401
 
+    import vllm_ascend.ops.triton.attention_sigmoid_mul  # noqa: F401
     import vllm_ascend.ops.triton.linearnorm.qsa_rmsnorm_mrope
     import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_mrope
     import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope  # noqa

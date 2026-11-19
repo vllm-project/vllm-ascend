@@ -530,3 +530,159 @@ def test_prefill_gathers_only_selected_rows_from_padded_state(padded_state) -> N
         scatter_mock.assert_not_called()
         clear_mock.assert_called_once()
         torch.testing.assert_close(ssm_state[1], torch.full((1, head_dim, head_dim), 7.0))
+
+
+@pytest.mark.parametrize("mode", ["decode", "spec", "mixed", "spec_fallback", "spec_at_limit", "spec_wide"])
+def test_fused_recurrent_raw_inputs_and_prefill_boundary(mode):
+    """Only the native fused kernel may consume raw gates and unnormalized Q/K."""
+    from contextlib import ExitStack
+
+    is_spec = mode.startswith("spec")
+    use_fallback = mode in ("spec_fallback", "spec_wide")
+    query_len = 9 if mode == "spec_wide" else 8 if mode == "spec_at_limit" else 2
+    layer = _make_layer()
+    layer.head_k_dim = layer.head_v_dim = 128
+    layer.key_dim = layer.value_dim = 128
+    layer.conv1d = nn.Conv1d(1, 384, 2, bias=False).to(torch.bfloat16)
+    layer.model_config.dtype = torch.bfloat16
+    initialize_packed_conv_weight(layer)
+    _pack_conv_weights(layer.conv1d)
+    layer.kv_cache = (torch.zeros(4, 1, 384), torch.zeros(4, 1, 128, 128))
+    meta = _make_mixed_metadata()
+    tokens = 3 if mode == "mixed" else 2 * query_len if is_spec else 4
+    if is_spec:
+        layer.kv_cache = (torch.zeros(2, 1, 384), torch.zeros(tokens, 1, 128, 128))
+    if mode != "mixed":
+        meta.num_prefills = meta.num_prefill_tokens = 0
+        meta.num_decodes = 4 if mode == "decode" else 0
+        meta.num_decode_tokens = 4 if mode == "decode" else 0
+        meta.num_actual_tokens = tokens
+        meta.num_spec_decodes = 2 if is_spec else 0
+        meta.num_spec_decode_tokens = tokens if is_spec else 0
+        meta.spec_sequence_masks = torch.tensor([True, True]) if is_spec else None
+        meta.non_spec_state_indices_tensor = torch.arange(4, dtype=torch.int32)
+        meta.spec_state_indices_tensor = torch.arange(2 * query_len, dtype=torch.int32).reshape(2, query_len)
+        meta.spec_decode_metadata = GDNSpecDecodeMetadata(
+            spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
+                query_start_loc=torch.tensor([0, query_len, 2 * query_len], dtype=torch.int32),
+                cache_indices=torch.tensor([0, 1], dtype=torch.int32),
+                num_accepted_tokens=torch.tensor([1, 2], dtype=torch.int32),
+            ),
+            actual_seq_lengths=torch.tensor([0, query_len, query_len], dtype=torch.int32),
+            use_upstream_recurrent=mode == "spec_fallback",
+        )
+    packed = (torch.arange(tokens * 384).reshape(tokens, 384) % 23).to(torch.bfloat16)
+    a = torch.arange(tokens, dtype=torch.bfloat16).reshape(tokens, 1)
+    b = a + 5
+    output = torch.empty(tokens, 1, 128, dtype=torch.bfloat16)
+    calls = []
+
+    def recurrent(q, k, v, state, **kwargs):
+        calls.append((q, k, kwargs))
+        return v.clone()
+
+    def prefill_conv(x, *args, **kwargs):
+        return x.reshape(-1, 3, 128).permute(1, 0, 2).contiguous()
+
+    context = ForwardContext(
+        no_compile_layers={layer.prefix: layer}, attn_metadata={layer.prefix: meta}, slot_mapping={}
+    )
+    with ExitStack() as stack:
+        stack.enter_context(override_forward_context(context))
+        stack.enter_context(patch("vllm_ascend.ops.gdn._supports_fused_recurrent_gdn", return_value=True))
+        stack.enter_context(patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)))
+        stack.enter_context(
+            patch(
+                "vllm_ascend.ops.gdn.get_current_hardware_profile",
+                return_value=SimpleNamespace(supports=lambda _: False),
+            )
+        )
+        stack.enter_context(patch.object(AscendGatedDeltaNetAttention, "_probe_fused_chunk", return_value=False))
+        gate = stack.enter_context(
+            patch(
+                "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
+                side_effect=lambda A, a, b, d: (a.unsqueeze(0).float() + 10, b.unsqueeze(0) + 20),
+            )
+        )
+        norm = stack.enter_context(
+            patch(
+                "vllm_ascend.ops.gdn.l2norm_fwd",
+                side_effect=(lambda x: x + 1) if use_fallback else AssertionError("external recurrent L2 norm"),
+            )
+        )
+        stack.enter_context(patch("vllm_ascend.ops.gdn.causal_conv1d_update", side_effect=lambda x, *args, **kwargs: x))
+        stack.enter_context(patch("vllm_ascend.ops.gdn.causal_conv1d_fn", side_effect=prefill_conv))
+        stack.enter_context(patch("vllm_ascend.ops.gdn.recurrent_gated_delta_rule", side_effect=recurrent))
+        fallback = stack.enter_context(
+            patch(
+                "vllm_ascend.ops.gdn.fused_recurrent_gated_delta_rule", side_effect=lambda **kw: (kw["v"].clone(), None)
+            )
+        )
+        chunk = stack.enter_context(
+            patch(
+                "vllm_ascend.ops.gdn.chunk_gated_delta_rule",
+                side_effect=lambda **kw: (kw["v"].clone(), kw["initial_state"].clone()),
+            )
+        )
+        stack.enter_context(patch("vllm_ascend.ops.gdn.clear_ssm_states"))
+        stack.enter_context(patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"))
+        AscendGatedDeltaNetAttention._forward_core(layer, packed, b, a, output)
+
+    if use_fallback:
+        assert calls == []
+        fallback.assert_called_once()
+        gate.assert_called_once()
+        assert norm.call_count == 2
+        kwargs = fallback.call_args.kwargs
+        torch.testing.assert_close(kwargs["q"], packed[:, :128].reshape(1, tokens, 1, 128) + 1)
+        torch.testing.assert_close(kwargs["k"], packed[:, 128:256].reshape(1, tokens, 1, 128) + 1)
+        torch.testing.assert_close(kwargs["g"], a.unsqueeze(0).float() + 10)
+        torch.testing.assert_close(kwargs["beta"], b.unsqueeze(0) + 20)
+        assert kwargs["initial_state"] is layer.kv_cache[1]
+        assert kwargs["ssm_state_indices"] is meta.spec_state_indices_tensor
+        assert kwargs["num_accepted_tokens"] is meta.spec_decode_metadata.spec_causal_conv1d.num_accepted_tokens
+        for flag in ("use_qk_l2norm_in_kernel", "use_gate_in_kernel", "use_beta_sigmoid_in_kernel", "A_log", "dt_bias"):
+            assert flag not in kwargs
+        torch.testing.assert_close(output, packed[:, 256:].reshape(tokens, 1, 128))
+        return
+
+    fallback.assert_not_called()
+    assert len(calls) == 1
+    q, k, kwargs = calls[0]
+    n = 1 if mode == "mixed" else tokens
+    torch.testing.assert_close(q, packed[:n, :128].reshape(n, 1, 128))
+    torch.testing.assert_close(k, packed[:n, 128:256].reshape(n, 1, 128))
+    torch.testing.assert_close(kwargs["g"], a[:n])
+    torch.testing.assert_close(kwargs["beta"], b[:n])
+    assert kwargs["A_log"] is layer.A_log and kwargs["dt_bias"] is layer.dt_bias
+    for flag in ("use_qk_l2norm_in_kernel", "use_gate_in_kernel", "use_beta_sigmoid_in_kernel"):
+        assert kwargs[flag] is True
+    if is_spec:
+        torch.testing.assert_close(kwargs["ssm_state_indices"], torch.arange(tokens, dtype=torch.int32))
+        torch.testing.assert_close(kwargs["num_accepted_tokens"], torch.tensor([1, 2], dtype=torch.int32))
+    if mode == "mixed":
+        gate.assert_called_once()
+        torch.testing.assert_close(gate.call_args.args[1], a[1:])
+        torch.testing.assert_close(chunk.call_args.kwargs["g"], a[1:].unsqueeze(0).float() + 10)
+        torch.testing.assert_close(chunk.call_args.kwargs["beta"], b[1:].unsqueeze(0) + 20)
+    else:
+        gate.assert_not_called()
+        chunk.assert_not_called()
+    torch.testing.assert_close(output, packed[:, 256:].reshape(tokens, 1, 128))
+
+
+def test_recurrent_gate_bias_refresh_preserves_loaded_values_and_storage():
+    from vllm_ascend.ops.gdn import _refresh_recurrent_gate_bias
+
+    layer = nn.Module()
+    layer.dt_bias = nn.Parameter(torch.tensor([0.3, -1.7], dtype=torch.bfloat16))
+    layer.register_buffer("_recurrent_dt_bias_fp32", torch.empty(2), persistent=False)
+    ptr = layer._recurrent_dt_bias_fp32.data_ptr()
+    _refresh_recurrent_gate_bias(layer)
+    torch.testing.assert_close(layer._recurrent_dt_bias_fp32, layer.dt_bias.float(), rtol=0, atol=0)
+    with torch.no_grad():
+        layer.dt_bias.add_(1)
+    _refresh_recurrent_gate_bias(layer)
+    assert layer._recurrent_dt_bias_fp32.data_ptr() == ptr
+    torch.testing.assert_close(layer._recurrent_dt_bias_fp32, layer.dt_bias.float(), rtol=0, atol=0)
+    assert "_recurrent_dt_bias_fp32" not in layer.state_dict()

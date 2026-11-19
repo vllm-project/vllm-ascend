@@ -1014,33 +1014,26 @@ class BaseDeviceAdaptor:
         fused_fwd,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the A2/A3 Phase6 FLA NPU GDN prefill kernel."""
-        # FLA's import-time capability queries can initialize an NPU context;
-        # defer them until execution on the selected worker device.
-        # TODO: Restore the top-level import once supported vLLM FLA or Triton
-        # Ascend versions make these queries safe before device selection.
-        from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
-
-        q = l2norm_fwd(q.contiguous()).contiguous()
-        k = l2norm_fwd(k.contiguous()).contiguous()
-        v = v.contiguous()
+        # l2norm is done inside the kernel (use_qk_l2norm_in_kernel=True),
+        # so the external l2norm_fwd calls are removed.
+        head_first_qkv = tuple(x.transpose(1, 2) for x in (q, k, v))
+        if all(x.is_contiguous() for x in head_first_qkv):
+            q, k, v = head_first_qkv
+            layout = "BNSD"
+        else:
+            q, k, v = (x.contiguous() for x in (q, k, v))
+            layout = "BSND"
         g = g.to(torch.float32).contiguous()
         beta = beta.to(v.dtype).contiguous()
         initial_state = initial_state.contiguous()
 
-        # BNSD/NTD take [B, H, T, D]; q/k/v arrive sequence-major. The output is
-        # still returned sequence-major, so only the inputs are permuted.
-        q = q.transpose(1, 2).contiguous()
-        k = k.transpose(1, 2).contiguous()
-        v = v.transpose(1, 2).contiguous()
-
         cu_seqlens = prebuilt_meta.cu_seqlens_host
         chunk_indices = prebuilt_meta.chunk_indices_chunk64_host
         keep_meta = prebuilt_meta.keep_meta
-        # stateVFirst=false takes [N, Hv, K, V], i.e. the transpose of ssm_state.
-        initial_state_kern = initial_state.transpose(-1, -2).contiguous()
+        initial_state_kern = initial_state
         if keep_meta is not None:
             cu_seqlens = prebuilt_meta.cu_seqlens_kern
-            initial_state_kern = initial_state[keep_meta].transpose(-1, -2).contiguous()
+            initial_state_kern = initial_state[keep_meta]
 
         output, final_state, *_ = fused_fwd(
             q,
@@ -1054,20 +1047,19 @@ class BaseDeviceAdaptor:
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             scale=scale,
-            layout="BNSD",
+            layout=layout,
             use_exp2=False,
-            use_qk_l2norm_in_kernel=False,
+            use_qk_l2norm_in_kernel=True,
+            use_beta_sigmoid_in_kernel=True,
             allow_neg_eigval=False,
-            disable_recompute=True,
-            state_v_first=False,
+            disable_recompute=False,
+            state_v_first=True,
         )
         if keep_meta is not None:
-            # Scatter in the kernel layout so empty segments keep their initial state,
-            # then flip back to the caller's [.., Dv, Dk].
-            full_final_state = initial_state.transpose(-1, -2).contiguous()
+            full_final_state = initial_state.clone()
             full_final_state[keep_meta] = final_state
             final_state = full_final_state
-        return output, final_state.transpose(-1, -2).contiguous()
+        return output, final_state
 
     @staticmethod
     def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):

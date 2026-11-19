@@ -1,0 +1,4 @@
+pr: 21820
+entries:
+  - category: performance
+    text: Fuse packed QKVZ and BA preparation with core-buffer initialization for the Qwen3.5 GDN path used by Qwen3.6.

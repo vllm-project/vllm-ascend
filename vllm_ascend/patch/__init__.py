@@ -1788,3 +1788,21 @@
 # How: initialize the capability-gated per-layer NPU adaptation after upstream init.
 # Related PR: vllm-project/vllm#60050.
 # Future Plan: remove this initialization hook when a shared backend extension supports it.
+
+# ** File: worker/patch_qwen3_5.py -- forward-local MRoPE lookup reuse **
+# Targets: Qwen3_5Model.forward and Qwen3_5DecoderLayer.forward.
+# Why: repeated advanced indexing of identical positions launches IndexCheck,
+# Index and position materialization kernels once per full-attention layer.
+# How: a model-forward-local dictionary keyed by RoPE module identity supplies
+# a shared cos/sin tensor explicitly through decoder and attention arguments.
+# Different RoPE modules do not share results. Each model invocation creates a
+# new dictionary; MTP keeps its existing independent lookup per invocation.
+# The copied forward paths retain upstream PP, SP and auxiliary hidden states.
+# Related PR: local optimization; no upstream PR submitted yet.
+# Future Plan: remove once upstream accepts forward-local rotary inputs.
+
+# Qwen3NextAttention.forward: fuse attention_output * sigmoid(gate) into the
+# out-of-place ascend_attention_sigmoid_mul custom op on supported NPU tensors.
+# Preserve low-precision sigmoid rounding and input aliasing semantics; retain
+# the native fallback for unsupported shapes/dtypes/devices. Local change, no
+# upstream PR yet. Remove the patch when upstream exposes a gated-output hook.

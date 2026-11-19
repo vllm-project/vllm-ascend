@@ -18,12 +18,17 @@
 
 
 from functools import wraps
+from itertools import islice
 
 import torch
-from vllm.distributed import tensor_model_parallel_all_gather
+from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_reduce_scatter,
+)
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
-from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
+from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer, Qwen3_5Model
 
 try:
     from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MultiTokenPredictor
@@ -32,6 +37,7 @@ except ImportError:
     Qwen3_5MultiTokenPredictor = None
     IntermediateTensors = None
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
+from vllm.model_executor.models.utils import sequence_parallel_chunk
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
@@ -46,14 +52,36 @@ def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
     return "qwen3_5" in attention.config.model_type and hasattr(attention.rotary_emb, "mrope_section")
 
 
+def _get_shared_mrope_cos_sin(rotary_emb, positions: torch.Tensor, cache: dict) -> torch.Tensor:
+    """Reuse only within one model forward and the identical RoPE module.
+
+    The caller owns the local dictionary. Graph capture records the lookup as
+    a device operation, so replay reads the current positions buffer.
+    """
+    key = id(rotary_emb)
+    if key not in cache:
+        if positions.ndim == 1:
+            positions = positions.unsqueeze(0).expand(3, -1)
+        cache[key] = rotary_emb.cos_sin_cache[positions]
+    return cache[key]
+
+
 class AscendQwen3NextAttention(Qwen3NextAttention):
-    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, output: torch.Tensor = None):
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor = None,
+        mrope_cos_sin: torch.Tensor | None = None,
+    ):
         qkv, _ = self.qkv_proj(hidden_states)
         if _uses_multimodal_rope(self):
             # MRV2 MTP uses 1D text positions; the fused kernel reads three planes.
             if positions.ndim == 1:
                 positions = positions.unsqueeze(0).expand(3, -1)
-            cos_sin = self.rotary_emb.cos_sin_cache[positions]
+            cos_sin = mrope_cos_sin
+            if cos_sin is None:
+                cos_sin = self.rotary_emb.cos_sin_cache[positions]
             if cos_sin.device != qkv.device:
                 cos_sin = cos_sin.to(qkv.device)
             if cos_sin.dtype != qkv.dtype:
@@ -92,8 +120,16 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
         attn_output = self.attn(q, k, v)
 
         if self.attn_output_gate:
-            gate = torch.sigmoid(gate)
-            attn_output = attn_output * gate
+            if (
+                attn_output.device.type == "npu"
+                and attn_output.ndim == 2
+                and gate.shape == attn_output.shape
+                and gate.dtype == attn_output.dtype
+                and attn_output.dtype in (torch.float16, torch.bfloat16, torch.float32)
+            ):
+                attn_output = torch.ops.vllm.ascend_attention_sigmoid_mul(attn_output, gate)
+            else:
+                attn_output = attn_output * torch.sigmoid(gate)
 
         out, _ = self.o_proj(attn_output)
         if output is not None:
@@ -106,14 +142,21 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
-        positions: torch.Tensor = None,
+        positions: torch.Tensor,
+        mrope_cos_sin: torch.Tensor | None = None,
         **kwargs: object,
     ):
+        full_num_tokens = positions.shape[-1]
+
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+        if self.use_attn_reduce_scatter_for_moe:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[:full_num_tokens]
 
         if self.layer_type == "linear_attention":
             hidden_states = self.linear_attn(hidden_states=hidden_states)
@@ -121,6 +164,7 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
             hidden_states = self.self_attn(
                 hidden_states=hidden_states,
                 positions=positions,
+                mrope_cos_sin=mrope_cos_sin,
             )
         else:
             raise ValueError("Invalid layer_type")
@@ -131,9 +175,23 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
             else:
                 hidden_states = hidden_states * (self.attn_layer_scale.to(hidden_states.dtype) + 1)
 
+        if self.use_attn_reduce_scatter_for_moe:
+            tp_world_size = get_tensor_model_parallel_world_size()
+            # small trick using minus, eg. -17 % 8 = 7
+            sp_pad = (-hidden_states.shape[0]) % tp_world_size
+            # pad if not divisible by world size
+            hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, sp_pad))
+            hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
+
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        if self.use_attn_reduce_scatter_for_moe:
+            hidden_states = self.mlp(
+                hidden_states,
+                already_sequence_parallel=True,
+            )
+        else:
+            hidden_states = self.mlp(hidden_states)
 
         if self.layer_scale:
             if len(hidden_states.shape) == 2:
@@ -146,6 +204,68 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
 
         return hidden_states, residual
 
+
+def qwen3_5_model_forward(
+    self,
+    input_ids: torch.Tensor | None,
+    positions: torch.Tensor,
+    intermediate_tensors: IntermediateTensors | None = None,
+    inputs_embeds: torch.Tensor | None = None,
+) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+    if get_pp_group().is_first_rank:
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
+        else:
+            hidden_states = self.embed_input_ids(input_ids)
+        residual = None
+    else:
+        assert intermediate_tensors is not None
+        hidden_states = intermediate_tensors["hidden_states"]
+        residual = intermediate_tensors["residual"]
+
+    full_num_tokens = positions.shape[-1]
+    if self.use_sequence_parallel:
+        hidden_states = sequence_parallel_chunk(hidden_states)
+        assert residual is None
+
+    mrope_cache = {}
+    aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+    for layer_idx, layer in enumerate(
+        islice(self.layers, self.start_layer, self.end_layer),
+        start=self.start_layer,
+    ):
+        mrope_cos_sin = None
+        if layer.layer_type == "full_attention" and _uses_multimodal_rope(layer.self_attn):
+            mrope_cos_sin = _get_shared_mrope_cos_sin(layer.self_attn.rotary_emb, positions, mrope_cache)
+        hidden_states, residual = layer(
+            positions=positions,
+            hidden_states=hidden_states,
+            residual=residual,
+            mrope_cos_sin=mrope_cos_sin,
+        )
+        self._maybe_add_hidden_state(aux_hidden_states, layer_idx + 1, hidden_states, residual)
+
+    if not get_pp_group().is_last_rank:
+        return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+    hidden_states, _ = self.norm(hidden_states, residual)
+    if self.use_sequence_parallel:
+        if aux_hidden_states:
+            hidden_size = hidden_states.shape[-1]
+            hidden_states = torch.cat([hidden_states, *aux_hidden_states], dim=-1)
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[:full_num_tokens]
+            hidden_states, *aux_hidden_states = hidden_states.split(hidden_size, dim=-1)
+        else:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[:full_num_tokens]
+    if aux_hidden_states:
+        return hidden_states, aux_hidden_states
+    return hidden_states
+
+
+# Remove these patches when upstream exposes a per-forward RoPE input.
+Qwen3_5Model.forward = qwen3_5_model_forward
+Qwen3_5DecoderLayer.forward = AscendQwen3_5DecoderLayer.forward
 
 if Qwen3_5MultiTokenPredictor is not None:
 
