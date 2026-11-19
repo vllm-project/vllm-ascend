@@ -1751,7 +1751,7 @@ def test_c2_launch_bounds_do_not_change_graph_metadata(monkeypatch, rows):
     launch = Mock(side_effect=lambda *args, **kwargs: args[4])
     monkeypatch.setattr(compressor_triton, "compressor_from_projected", launch)
     compressor = SimpleNamespace(
-        state_cache=SimpleNamespace(kv_cache=[torch.empty(1, 32, 1, 16)]),
+        state_cache=SimpleNamespace(kv_cache=torch.empty(1, 32, 1, 16)),
         _ring_pooled=torch.empty(rows, 8, dtype=torch.bfloat16),
         _ring_num_cores=1,
         norm=lambda x: x,
