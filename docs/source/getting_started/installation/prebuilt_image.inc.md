@@ -26,9 +26,12 @@
 
     {% endraw %}
 
-    The output must be `default=ascend`. If it prints `runc`, check the `Runtimes:` line of `docker info`: when `ascend` is listed, add `--runtime ascend` to `docker run` or set `"default-runtime": "ascend"` in `/etc/docker/daemon.json` and restart Docker; when it is missing, rerun the installation and restart Docker.
+    The output must be `default=ascend`. If it prints `runc`, check the `Runtimes:` line of `docker info`:
 
-    The runtime mounts `/etc/ascend-docker-runtime.d/base.list` into every container, read-only. To mount an extra host path in every container, add it to `base.list`, one path per line. To mount a path only in selected containers, create another lowercase `.list` file in that directory and name it in `ASCEND_RUNTIME_MOUNTS`, for example `-e ASCEND_RUNTIME_MOUNTS=mylist,base`: that variable replaces the default list, so include `base`, or the container loses the driver libraries and `npu-smi`.
+    1. If `ascend` is listed, either add `--runtime ascend` to `docker run`, or set `"default-runtime": "ascend"` in `/etc/docker/daemon.json` and restart Docker.
+    2. If `ascend` is missing, rerun the installation and restart Docker.
+
+    The runtime mounts `/etc/ascend-docker-runtime.d/base.list` into every container, read-only. To mount an extra host path in every container, add it to `base.list`, one path per line. To mount a path only in selected containers, create another lowercase `.list` file in that directory and name it in `ASCEND_RUNTIME_MOUNTS`, for example `-e ASCEND_RUNTIME_MOUNTS=mylist,base`: that variable replaces the default list, so include `base`; otherwise the container loses the driver libraries and `npu-smi`.
 
     === "Select an official image"
 
