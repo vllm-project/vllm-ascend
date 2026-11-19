@@ -9,6 +9,8 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear, MergedColumn
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.nvidia.kda import _KimiGDNMergedColumnParallelLinear
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def get_kda_parallel_size(parallel_config) -> int:
     return parallel_config.tensor_parallel_size * parallel_config.prefill_context_parallel_size
@@ -74,10 +76,15 @@ class KDAMergedColumnParallelLinear(MergedColumnParallelLinear, KDAColumnParalle
         self.loaded_shard_ids: dict[str, set[str | int]] = {}
         if padding_size:
             # Padding lives in the last ``padding_size`` rows of each rank.
+            # v0.34.0's upstream wrapper re-applies the load-completion
+            # attribute after super() returns, so only the mainline lane
+            # tracks the loaders here; zeroing stays idempotent on both.
+            track_loaders = not vllm_version_is("0.34.0")
             for name in ["weight"] + (["bias"] if self.bias is not None else []):
                 param = getattr(self, name)
                 param.data[-padding_size:].zero_()
-                set_weight_attrs(param, {"weight_loader_numel": param[:-padding_size].numel()})
+                if track_loaders:
+                    set_weight_attrs(param, {"weight_loader_numel": param[:-padding_size].numel()})
 
 
 class KDAInputParallelLinear(_KimiGDNMergedColumnParallelLinear, KDAMergedColumnParallelLinear):
