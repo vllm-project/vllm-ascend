@@ -91,8 +91,12 @@ def test_shared_config_fails_closed_and_ignores_auto_dp_sharing(monkeypatch):
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(ple_layer_ids=[2])),
     )
     monkeypatch.setattr(DefaultModelLoader, "Source", type("Legacy", (), {"__dataclass_fields__": {}}))
+    monkeypatch.setattr(DefaultModelLoader, "_ascend_external_weight_filter", False, raising=False)
     with pytest.raises(RuntimeError, match="per-tensor"):
         ple.shared_ple_config(config)
+    monkeypatch.setattr(DefaultModelLoader, "_ascend_external_weight_filter", True)
+    assert ple.shared_ple_config(config) is shared
+    monkeypatch.setattr(DefaultModelLoader, "_ascend_external_weight_filter", False)
     monkeypatch.setattr(
         DefaultModelLoader,
         "Source",
