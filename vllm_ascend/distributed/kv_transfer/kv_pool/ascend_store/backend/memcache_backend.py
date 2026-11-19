@@ -533,22 +533,21 @@ class MemcacheBackend(Backend):
         addr: int,
         size: int,
         direction: int = MmcDirect.COPY_L2G.value,
-        session_ids: list[str] | None = None,
+        session_id: str | None = None,
     ) -> int | None:
         """Store one object, optionally with a session-affinity placement.
 
-        ``session_ids`` must contain exactly one session id when provided;
-        a single-key write carries one session id per the MemCache API
-        contract. Content-addressed objects shared across requests (e.g. the
-        EC embedding store) keep the default and use the original placement.
+        ``session_id`` is the single session id for this single-key write
+        per the MemCache API contract; an empty string keeps the original
+        placement. Content-addressed objects shared across requests (e.g.
+        the EC embedding store) keep the default and use the original
+        placement.
         """
-        if session_ids is not None and len(session_ids) != 1:
-            raise ValueError(f"session_ids must contain exactly one session id, got {len(session_ids)}")
         self.ensure_initialized()
         assert self.store is not None
         try:
-            if session_ids is not None:
-                config = _make_session_replicate_config(session_ids)
+            if session_id is not None:
+                config = _make_session_replicate_config([session_id])
                 res = self.store.put_from(key, addr, size, direction, config)
             else:
                 res = self.store.put_from(key, addr, size, direction)

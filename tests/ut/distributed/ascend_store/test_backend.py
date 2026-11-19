@@ -1915,23 +1915,15 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
         b.store.batch_alloc.assert_not_called()
 
-    def test_put_from_with_session_ids_builds_replicate_config(self):
+    def test_put_from_with_session_id_builds_replicate_config(self):
         b = self._make_backend()
         b.store.put_from.return_value = 0
 
-        self.assertEqual(b.put_from("k1", 100, 10, session_ids=["req-1"]), 0)
+        self.assertEqual(b.put_from("k1", 100, 10, session_id="req-1"), 0)
 
         args = b.store.put_from.call_args.args
         self.assertEqual(args[:4], ("k1", 100, 10, MmcDirect.COPY_L2G.value))
         self.assertEqual(args[4].sessionIds, ["req-1"])
-
-    def test_put_from_with_mismatched_session_ids_raises(self):
-        b = self._make_backend()
-
-        with self.assertRaises(ValueError):
-            b.put_from("k1", 100, 10, session_ids=["req-1", "req-2"])
-
-        b.store.put_from.assert_not_called()
 
 
 # =========================================================================
