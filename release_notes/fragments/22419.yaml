@@ -1,0 +1,4 @@
+pr: 22419
+entries:
+  - category: bugfix
+    text: Fixed Memcache layerwise prefix reuse with sliding-window attention. Saves skip recycled slots, and requests that replay private state fall back when the required cache window is incomplete.
