@@ -15,10 +15,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import re
 from enum import IntEnum
 from pathlib import Path
 
+import regex as re
 import torch
 import torch_npu  # noqa: F401
 from vllm import envs
