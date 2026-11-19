@@ -77,9 +77,10 @@ class TestQuantizedAllReduce(unittest.TestCase):
         self.assertEqual(wrapper.min_numel, 12345)
 
     def test_min_numel_defaults_per_tp(self):
-        # Measured break-even on A2 is ~10 / ~20 / ~49 MiB; the defaults are
-        # 16 / 32 / 50 MiB, i.e. rounded up so int8 is a clear win.
-        cases = ((2, 8_388_608), (4, 16_777_216), (8, 26_214_400))
+        # Measured break-even on A2 is ~10 / ~22 / 31-38 MiB; the defaults
+        # are 16 / 32 / 60 MiB, i.e. rounded up so int8 is a clear win. TP=8's
+        # end-to-end crossing is higher (50-60 MiB), hence the 60 MiB gate.
+        cases = ((2, 8_388_608), (4, 16_777_216), (8, 31_457_280))
         for world_size, expected in cases:
             with self.subTest(world_size=world_size):
                 self.assertEqual(_make(world_size=world_size, min_numel=None).min_numel, expected)
@@ -90,7 +91,7 @@ class TestQuantizedAllReduce(unittest.TestCase):
         self.assertEqual(_make(world_size=3, min_numel=None).min_numel, 16_777_216)
         for world_size in (5, 6, 7):
             with self.subTest(world_size=world_size):
-                self.assertEqual(_make(world_size=world_size, min_numel=None).min_numel, 26_214_400)
+                self.assertEqual(_make(world_size=world_size, min_numel=None).min_numel, 31_457_280)
 
     def test_explicit_min_numel_wins_over_default(self):
         self.assertEqual(_make(world_size=8, min_numel=1024).min_numel, 1024)
