@@ -41,6 +41,49 @@ class TestParseAllowlist:
         assert ai.parse_allowlist("") == set()
 
 
+class TestParseFindings:
+    def test_wellformed_block(self):
+        text = (
+            "some prose\n\n"
+            "```finding\n"
+            "path: vllm_ascend/foo.py\n"
+            "line: 42\n"
+            "severity: MUST-FIX\n"
+            "rule: L1#no-item-sync\n"
+            "body: sync in hot path\n"
+            "```\n\n"
+            "<!-- ai-review: state=reviewing | round=1/5 | total=1 | head=abc -->"
+        )
+        findings = ai.parse_findings(text)
+        assert len(findings) == 1
+        assert findings[0] == {
+            "path": "vllm_ascend/foo.py",
+            "line": 42,
+            "severity": "MUST-FIX",
+            "rule": "L1#no-item-sync",
+            "body": "sync in hot path",
+        }
+
+    def test_multiline_body(self):
+        text = "```finding\npath: a.py\nline: 1\nseverity: NIT\nrule: general\nbody: line one\nline two\n```\n"
+        assert ai.parse_findings(text)[0]["body"] == "line one\nline two"
+
+    @pytest.mark.parametrize(
+        "block",
+        [
+            "```finding\nline: 1\nseverity: NIT\nrule: general\nbody: x\n```",  # no path
+            "```finding\npath: a.py\nline: abc\nseverity: NIT\nrule: general\nbody: x\n```",  # bad line
+            "```finding\npath: a.py\nline: 0\nseverity: NIT\nrule: general\nbody: x\n```",  # zero line
+            "```finding\npath: a.py\nline: 1\nseverity: NIT\n```",  # missing rule/body
+        ],
+    )
+    def test_malformed_blocks_dropped(self, block):
+        assert ai.parse_findings(block) == []
+
+    def test_no_findings(self):
+        assert ai.parse_findings("plain comment, no blocks") == []
+
+
 class TestResolveDomains:
     REGISTRY = """
 domains:

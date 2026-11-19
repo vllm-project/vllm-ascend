@@ -73,6 +73,69 @@ def resolve_domains(domains_yaml: str, files: list[str]) -> list[dict]:
 # orchestrator (not the agent itself) turns into the `ai-review-passed` label.
 PASS_MARKER = "AI-REVIEW-VERDICT: PASS"
 
+# The agent emits each finding as a fenced block; the orchestrator turns the
+# parsed ones into inline review comments anchored on the code line.
+FINDING_BLOCK_RE = re.compile(r"```finding\n(.*?)```", re.S)
+FIELD_LINE_RE = re.compile(r"^(\w+):\s*(.+)$", re.M)
+REQUIRED_FINDING_FIELDS = ("path", "line", "severity", "rule", "body")
+
+
+def parse_findings(text: str) -> list[dict]:
+    """Parse ```finding blocks into dicts; malformed blocks are dropped."""
+    findings = []
+    for m in FINDING_BLOCK_RE.finditer(text):
+        fields = dict(FIELD_LINE_RE.findall(m.group(1)))
+        if not all(f in fields and fields[f].strip() for f in REQUIRED_FINDING_FIELDS):
+            continue
+        try:
+            line = int(fields["line"])
+        except ValueError:
+            continue
+        if line < 1:
+            continue
+        findings.append(
+            {
+                "path": fields["path"].strip(),
+                "line": line,
+                "severity": fields["severity"].strip(),
+                "rule": fields["rule"].strip(),
+                "body": fields["body"].strip(),
+            }
+        )
+    return findings
+
+
+def post_inline_review(pr: int, head_sha: str, findings: list[dict]) -> bool:
+    """Post one COMMENT-level review with the findings as inline comments.
+
+    Returns False if GitHub rejected the anchors (e.g. a line outside the
+    diff context), in which case the caller falls back to the summary.
+    """
+    comments = []
+    for f in findings:
+        body = (
+            f"**[{f['severity']}]** rule: `{f['rule']}`\n\n{f['body']}\n\n"
+            "🤖 ai-review finding — `ai-review-passed` is not an approve."
+        )
+        comments.append({"path": f["path"], "line": f["line"], "side": "RIGHT", "body": body})
+    payload = {
+        "commit_id": head_sha,
+        "event": "COMMENT",
+        "body": f"🤖 ai-review round: {len(findings)} finding(s) anchored inline.",
+        "comments": comments,
+    }
+    with open("/tmp/ai-review-payload.json", "w") as fp:
+        json.dump(payload, fp)
+    result = subprocess.run(
+        ["gh", "api", "--input", "/tmp/ai-review-payload.json", f"repos/:owner/:repo/pulls/{pr}/reviews"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"::warning::inline review rejected, falling back to summary: {result.stderr.strip()[:300]}", flush=True)
+        return False
+    return True
+
 
 @dataclass
 class State:
@@ -268,7 +331,22 @@ class Orchestrator:
             f"engine: DeepSeek Harness headless, POC gray release — "
             f"`ai-review-passed` is **not** an approve; human review is still required.)\n\n"
         )
-        self.comment(banner + output.rstrip() + "\n")
+
+        # Inline review comments: findings anchored to code lines land in one
+        # COMMENT-level review (never APPROVE); the summary comment keeps the
+        # verdict, checklist and state signature. If the review API rejects
+        # an anchor (line outside the diff), fall back to a summary-only
+        # round so no finding is silently lost.
+        findings = parse_findings(output)
+        output = FINDING_BLOCK_RE.sub("", output).strip()
+        summary = banner + output.rstrip() + "\n"
+        if findings and post_inline_review(self.pr, self.head_sha, findings):
+            summary += (
+                f"\n---\n📋 {len(findings)} finding(s) posted as inline review "
+                "comments on the diff; this comment carries the verdict and "
+                "state only.\n"
+            )
+        self.comment(summary)
 
         if verdict_pass:
             subprocess.run(
