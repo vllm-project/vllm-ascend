@@ -38,6 +38,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import
     AscendStoreCoordinator,
     ExternalCachedBlockPool,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.evidence import (
+    AscendStoreAttemptEvidence,
+    EvidenceBuffer,
+    evidence_enabled,
+    validate_evidence_certification,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import (
     HiSparseTransferLayout,
     build_pool_key_namespace,
@@ -249,6 +255,7 @@ class BaseKVPoolWorker(ABC):
             self.grouped_block_size, self.lcm_block_size, self.cacheable_group_ids
         )
         self.h2d_stagger_us = int(extra_config.get("h2d_stagger_us", 0))
+        self._init_evidence_path(vllm_config, use_layerwise)
 
         logger.info(
             "use_hybrid: %s, use_mamba: %s, num_kv_cache_groups: %s, hash_block_size: %s, lcm_block_size: %s",
@@ -275,6 +282,79 @@ class BaseKVPoolWorker(ABC):
 
     def _compute_use_hybrid(self, vllm_config, kv_cache_groups) -> bool:
         return uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
+
+    def _init_evidence_path(self, vllm_config, use_layerwise: bool) -> None:
+        """Decide and configure the hole-repair evidence path.
+
+        The evidence channels activate ONLY under the explicitly configured
+        repair policy, on the blockwise single-group layout the v1 evidence
+        contract can judge, and against a vLLM core that ships the contract
+        (see evidence.evidence_enabled). In every other configuration the
+        connector keeps its legacy failure channels byte-identically
+        (#9701): invalid_block_ids for single-group loads, failed_recving
+        for hybrid/memcache whole-request failures.
+        """
+        # Defensive read: config objects that predate the
+        # kv_load_failure_policy field (or test fakes without it) read as
+        # not-repair -- exactly the pre-evidence behavior.
+        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        policy = getattr(kv_transfer_config, "kv_load_failure_policy", None)
+        # TP mismatch state exists only after _init_key_head_config; the
+        # blockwise gate re-checks it at load time for safety.
+        self._evidence_tp_mismatch = bool(getattr(self, "tp_mismatch", False))
+        evidence_active = evidence_enabled(
+            policy,
+            contract_importable=True,
+            num_prefix_cacheable_groups=len(self.cacheable_group_ids),
+            num_kv_cache_groups=self.num_kv_cache_groups,
+            use_hybrid=self.use_hybrid,
+            use_layerwise=use_layerwise,
+            tp_mismatch=self._evidence_tp_mismatch,
+            use_kvpp=self.use_kvpp,
+            dcp_size=self.dcp_size,
+            pcp_size=self.pcp_size,
+            pp_size=self.pp_size,
+            group_uses_align_state=any(self.group_uses_align_state or []),
+        )
+        self.evidence_buffer: EvidenceBuffer | None = EvidenceBuffer() if evidence_active else None
+        self._evidence_staged: list[AscendStoreAttemptEvidence] | None = None
+        if evidence_active:
+            # The honest certification mode for what the blockwise GET path
+            # actually verifies. Keys embed the block's chained token hash
+            # (an identity key, NOT a payload digest) and the blockwise PUT
+            # path skips already-present keys, so GET success means the
+            # bytes bound to that identity key were returned: correct
+            # content iff the store's key-to-data binding is trustworthy
+            # (the documented store-trust assumption). The yuanrong backend
+            # re-PUTs unconditionally, so its binding is not write-once and
+            # it cannot claim even that much. "sha256" is never claimed:
+            # no GET path performs an independent digest check.
+            requested = str(self._extra_config.get("evidence_certification", "content"))
+            if self.backend_name == "yuanrong":
+                if requested != "none":
+                    logger.warning(
+                        "AscendStore yuanrong backend cannot claim content "
+                        "certification (its PUT path re-writes keys "
+                        "unconditionally); forcing evidence_certification=none."
+                    )
+                requested = "none"
+            self._evidence_certification = validate_evidence_certification(requested)
+            # The TARGET model's attention-layer count -- the exact bound
+            # the scheduler's report battery enforces. NOT self.num_layers,
+            # which additionally counts EAGLE/MTP draft layers and would
+            # make every honest report read as malformed.
+            self._evidence_num_layers = int(getattr(self.hf_config, "num_hidden_layers", self.num_layers))
+        else:
+            self._evidence_certification = "none"
+            self._evidence_num_layers = 0
+        if evidence_active:
+            logger.info(
+                "AscendStore hole-repair evidence path ACTIVE "
+                "(certification=%s, layers=%d); flat load-failure channels "
+                "are suppressed for evidence-active loads.",
+                self._evidence_certification,
+                self._evidence_num_layers,
+            )
 
     def _init_key_head_config(self, model_config) -> None:
         self.current_layer = 0
@@ -908,6 +988,113 @@ class BaseKVPoolWorker(ABC):
             self._record_invalid_blocks_ids([block_id for block_id in request.block_ids if block_id > 0])
         self._save_disabled.set()
 
+    def _start_load_evidence(self, request: ReqMeta) -> AscendStoreAttemptEvidence | None:
+        """Register per-attempt evidence bookkeeping for one request load.
+
+        The transfer identity is captured ONCE here, from the load spec the
+        scheduler-role connector built when the attempt was scheduled --
+        never re-read at emission time, so a delayed old attempt can never
+        inherit a newer attempt's identity. Returns None whenever the
+        evidence path is inactive (the load path then behaves exactly as
+        before) or the attempt carries no identity (an unscheduled
+        attempt; the evidence gates would reject its output anyway).
+        """
+        if self.evidence_buffer is None:
+            return None
+        load_spec = request.load_spec
+        if load_spec is None or load_spec.transfer_generation is None:
+            return None
+        # Clamp the restoration target to the honest external extent: the
+        # un-padded kvpool claim (pool_hit_tokens skips the padded token the
+        # scheduler reserves for the request's final token when the hit
+        # covers the whole prompt; the report's span/restoration must stay
+        # within what the attempt actually vouches for).
+        restored_extent = min(load_spec.pool_hit_tokens, load_spec.kvpool_cached_tokens)
+        evidence = AscendStoreAttemptEvidence(
+            req_id=request.req_id,
+            transfer_generation=load_spec.transfer_generation,
+            num_layers=self._evidence_num_layers,
+            block_size=self.block_size,
+            restored_extent=restored_extent,
+            certification_mode=self._evidence_certification,
+        )
+        self.evidence_buffer.start_attempt(evidence)
+        return evidence
+
+    def _record_load_get_outcome(
+        self,
+        request: ReqMeta,
+        evidence: AscendStoreAttemptEvidence | None,
+        block_ids: list[int],
+        ret,
+        logical_ids: list[int] | None = None,
+    ) -> bool:
+        """Fold one batch GET's per-key outcomes into failure channels.
+
+        logical_ids carries, parallel to block_ids (the physical ids), the
+        request-absolute LOGICAL block indices of the GET'd objects -- the
+        evidence accounting's unit. The flat #9701 channel is written ONLY
+        when the evidence path is
+        inactive for this load: under the repair policy the structured
+        channel owns load failures (the scheduler's conflict rules dissolve
+        any repair plan the flat channels touch, so writing both would
+        demote every recovery to recompute). Returns True when the
+        whole-batch failure shape (ret is None / a memcache any-fail or
+        wrong-shape result) was detected, so callers follow their
+        existing whole-request failure handling.
+        """
+        if evidence is not None and logical_ids is None:
+            # Defensive: an evidence-active load must always supply the
+            # logical indices; fail every expected block rather than
+            # mis-attributing outcomes to physical ids.
+            evidence.note_blocks_failed(sorted(evidence.expected_blocks))
+            return True
+        if evidence is not None:
+            if ret is None:
+                # Whole-batch failure: the backend caught an exception or
+                # was uninitialized; every expected block failed.
+                evidence.note_blocks_failed(sorted(evidence.expected_blocks))
+                return True
+            if len(ret) != len(block_ids):
+                # Malformed backend result: an honest accounting is
+                # impossible, so treat the attempt as entirely failed
+                # rather than inventing per-block outcomes.
+                evidence.note_blocks_failed(sorted(evidence.expected_blocks))
+                return True
+            for logical, code in zip(logical_ids, ret):
+                evidence.note_block_outcome(logical, code == 0)
+            return False
+        if (self.backend_name == "memcache" or self.enable_partial_hash_hits) and (
+            ret is None or len(ret) != len(block_ids) or any(r != 0 for r in ret)
+        ):
+            self._record_failed_request(request)
+            return True
+        if ret is not None and any(r != 0 for r in ret):
+            missing_block_ids = record_failed_blocks(block_ids, ret)
+            if len(request.block_ids_by_group) == 1:
+                self._invalid_block_ids.update(missing_block_ids)
+            elif missing_block_ids:
+                logger.error(
+                    "KV load failed for hybrid request %s. "
+                    "Skip invalid-block fallback to avoid scheduler crash. "
+                    "failed_blocks=%s",
+                    request.req_id,
+                    missing_block_ids,
+                )
+        elif ret is None:
+            missing_block_ids = record_failed_blocks(block_ids, [1] * len(block_ids))
+            if len(request.block_ids_by_group) == 1:
+                self._invalid_block_ids.update(missing_block_ids)
+            elif missing_block_ids:
+                logger.error(
+                    "KV load failed for hybrid request %s. "
+                    "Skip invalid-block fallback to avoid scheduler crash. "
+                    "failed_blocks=%s",
+                    request.req_id,
+                    missing_block_ids,
+                )
+        return False
+
     def get_failed_requests(self) -> set[str]:
         with self._invalid_block_ids_lock:
             failed = self._failed_requests.copy()
@@ -923,6 +1110,77 @@ class BaseKVPoolWorker(ABC):
             invalid_blocks = self._invalid_block_ids.copy()
             self._invalid_block_ids.clear()
         return invalid_blocks
+
+    def _evidence_step_attempts(self) -> list[AscendStoreAttemptEvidence]:
+        """The terminal attempts of this step, staged exactly once.
+
+        get_load_failure_reports and get_load_attestations are both called
+        in the same post_forward (reports first); staging the drained
+        attempts here once lets both getters observe the SAME attempts
+        instead of whichever drained first -- a reports getter that raises
+        mid-drain must not consume the attempt before the attestations
+        getter observed it. get_finished (the first drain of the step)
+        resets the staging so an interrupted earlier pass is never
+        re-emitted.
+        """
+        if self.evidence_buffer is None:
+            return []
+        staged = self._evidence_staged
+        if staged is None:
+            staged = self.evidence_buffer.drain_terminal()
+            self._evidence_staged = staged
+        return staged
+
+    def get_load_failure_reports(self) -> list:
+        """Drain the terminal attempts' structured failure reports.
+
+        A report is emitted only when the actual failure geometry fits the
+        v1 single-region contract (exactly one failed block with a captured
+        physical id and a healthy block-aligned prefix). Any other shape --
+        multi-block failures, whole-request exceptions, unaligned final
+        blocks -- emits nothing for that attempt, the truthful attestation
+        still arrives, and the scheduler's evidence gates fail the delivery
+        closed to recomputation.
+        """
+        if self.evidence_buffer is None:
+            return []
+        reports = []
+        for evidence in self._evidence_step_attempts():
+            if not evidence.failed_blocks:
+                continue
+            report = evidence.to_failure_report()
+            if report is not None:
+                reports.append(report)
+            else:
+                logger.warning(
+                    "AscendStore load failure for req=%s affects %d blocks "
+                    "(generation=%r): not representable by the v1 "
+                    "single-region repair contract -> no report, the "
+                    "scheduler will fail the delivery closed to "
+                    "recomputation",
+                    evidence.req_id,
+                    len(evidence.failed_blocks),
+                    evidence.transfer_generation,
+                )
+        return reports
+
+    def get_load_attestations(self) -> list:
+        """Drain the terminal attempts' per-rank attestations.
+
+        One terminal attestation per completed load attempt (healthy or
+        failed), derived from the ACTUAL GET outcomes, in (block, layer)
+        cells -- the unit the scheduler's reconciliation enforces.
+        Non-terminal attempts stay buffered until their load completes; an
+        interrupted attempt never attests success. The attestation getter
+        runs last in post_forward: release the staging so the next step
+        drains afresh.
+        """
+        if self.evidence_buffer is None:
+            return []
+        staged = self._evidence_step_attempts()
+        attestations = [evidence.to_attestation() for evidence in staged]
+        self._evidence_staged = None
+        return attestations
 
     def wait_for_previous_save(self) -> None:
         save_batch = self._previous_save_batch
@@ -990,6 +1248,21 @@ class BaseKVPoolWorker(ABC):
         if failed:
             with self._invalid_block_ids_lock:
                 self._failed_requests.update(failed)
+
+        # get_finished is the FIRST getter of every post_forward drain: the
+        # finished/preempted-request evidence drop and the staging reset
+        # must run here for EVERY role, so a pass interrupted between the
+        # evidence getters is never re-emitted, and the buffered evidence
+        # of a request that will never deliver another pass (finished) or
+        # whose attempt is superseded (preempted requests re-admit with a
+        # NEW transfer generation) cannot leak into a later drain.
+        # A worker built without the evidence path (or a test stub) carries no
+        # buffer.
+        evidence_buffer = getattr(self, "evidence_buffer", None)
+        if evidence_buffer is not None:
+            for req_id in finished_req_ids | set(meta.preempted_req_ids):
+                evidence_buffer.drop(req_id)
+            self._evidence_staged = None
 
         logger.debug(
             "Number of completed KV cache send requests: %d, receive requests: %d, tp_rank:%d",
@@ -1524,6 +1797,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 worker=self if self.tp_mismatch else None,
                 record_operation=self._record_kv_connector_operation,
                 host_memory_group_ids=host_memory_group_ids,
+                evidence_buffer=self.evidence_buffer,
             )
         try:
             for thread in (self.kv_send_thread, self.kv_recv_thread):
@@ -1552,6 +1826,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 continue
             request.skip_null_blocks_by_group = self.group_uses_align_state
             requested_group_ids = request.kv_cache_group_ids or [0]
+            evidence = self._start_load_evidence(request)
             token_len = request.token_len_chunk
             if (load_spec.kvpool_cached_tokens % self.cache_transfer_granularity != 0) and (
                 load_spec.kvpool_cached_tokens == token_len - 1
@@ -1596,6 +1871,7 @@ class KVPoolWorker(BaseKVPoolWorker):
             size_list = []
             key_list = []
             block_id_list: list[int] = []
+            logical_id_list: list[int] = []
             load_masks = self.token_database.load_mask(request.block_hashes, token_len)
             tail_boundaries = dict(load_spec.tail_key_boundaries)
             for group_id in load_group_ids:
@@ -1625,6 +1901,13 @@ class KVPoolWorker(BaseKVPoolWorker):
                     chunk_filter=chunk_filter,
                     tail_key_boundary=tail_boundaries.get(group_id),
                 ):
+                    if evidence is not None and group_id == 0:
+                        # Evidence counts single-group (block, layer) cells:
+                        # one cell per expected block, layers folded.
+                        logical = start // group_block_size
+                        if logical < len(block_ids):
+                            evidence.note_expected_block(logical)
+                            evidence.block_ids[logical] = block_ids[logical]
                     addr, size, block_id = self.token_database.prepare_value(
                         start,
                         end,
@@ -1636,12 +1919,21 @@ class KVPoolWorker(BaseKVPoolWorker):
                     addr_list.append(addr)
                     size_list.append(size)
                     block_id_list.append(block_id)
+                    logical_id_list.append(start // group_block_size)
             if not key_list:
+                if evidence is not None:
+                    # Nothing to load for this rank: a terminal but VACUOUS
+                    # attempt (empty expected set). The scheduler's
+                    # completeness gate refuses to count a vacuous
+                    # attestation, so the delivery fails closed -- never
+                    # a non-terminal entry left parked in the buffer.
+                    evidence.finalize()
                 continue
             key_list_c = _circular_shift(key_list, self.tp_rank % len(key_list))
             addr_list_c = _circular_shift(addr_list, self.tp_rank % len(addr_list))
             size_list_c = _circular_shift(size_list, self.tp_rank % len(size_list))
             block_id_list_c = _circular_shift(block_id_list, self.tp_rank % len(block_id_list))
+            logical_id_list_c = _circular_shift(logical_id_list, self.tp_rank % len(logical_id_list))
             logger.debug(
                 "KV pool worker calls backend get request=%s token_len=%d groups=%s keys=%d sample_keys=%s",
                 request.req_id,
@@ -1657,41 +1949,23 @@ class KVPoolWorker(BaseKVPoolWorker):
                 time.perf_counter() - load_get_start,
                 len(key_list_c),
             )
-            if (self.backend_name == "memcache" or self.enable_partial_hash_hits) and (
-                ret is None or len(ret) != len(key_list_c) or any(r != 0 for r in ret)
-            ):
-                self._record_failed_request(request)
+            whole_batch_failed = self._record_load_get_outcome(
+                request,
+                evidence,
+                block_id_list_c,
+                ret,
+                logical_ids=logical_id_list_c,
+            )
+            if evidence is not None:
+                # The attempt reached its terminal state on every path
+                # above: full success, per-block failures, or a
+                # whole-batch failure. Exactly-once finalize; a later
+                # drain turns the accounting into the report and the
+                # per-rank attestation.
+                evidence.finalize()
                 continue
-            if ret is not None and any(r != 0 for r in ret):
-                missing_block_ids = record_failed_blocks(
-                    block_id_list_c,
-                    ret,
-                )
-                if len(request.block_ids_by_group) == 1:
-                    self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
-                    logger.error(
-                        "KV load failed for hybrid request %s. "
-                        "Skip invalid-block fallback to avoid scheduler crash. "
-                        "failed_blocks=%s",
-                        request.req_id,
-                        missing_block_ids,
-                    )
-            elif ret is None:
-                missing_block_ids = record_failed_blocks(
-                    block_id_list_c,
-                    [1] * len(block_id_list_c),
-                )
-                if len(request.block_ids_by_group) == 1:
-                    self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
-                    logger.error(
-                        "KV load failed for hybrid request %s. "
-                        "Skip invalid-block fallback to avoid scheduler crash. "
-                        "failed_blocks=%s",
-                        request.req_id,
-                        missing_block_ids,
-                    )
+            if whole_batch_failed:
+                continue
             logger.debug(
                 "KV pool worker backend get returned request=%s token_len=%d groups=%s keys=%d",
                 request.req_id,

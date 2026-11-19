@@ -863,6 +863,15 @@ class LoadSpec:
     layerwise_previous_step: bool = False
     # Append protocol extensions to preserve legacy positional construction.
     tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
+    # First block stored under request-scoped keys, including unhashed full blocks.
+    layerwise_snapshot_start_block: int | None = None
+    # The identity of this external load attempt, assigned by the v1 scheduler
+    # at admission (the hole-repair policy's transfer-identity contract) and
+    # captured once here when the request metadata is built. None marks an
+    # attempt scheduled without the identity contract (every policy other
+    # than "repair"): the worker's evidence path stays disabled and the flat
+    # failure channels own the outcome, exactly as before.
+    transfer_generation: int | None = None
 
     @property
     def pool_hit_tokens(self) -> int:

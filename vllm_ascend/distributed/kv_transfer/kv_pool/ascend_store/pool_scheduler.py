@@ -25,6 +25,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.evidence import evidence_enabled
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import has_hisparse_cache_layout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import InFlightSaveBlockTracker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyClient
@@ -164,6 +165,34 @@ class BaseKVPoolScheduler(ABC):
         )
         self.tp_mismatch = tp_mismatch_info.enabled
 
+        # Hole-repair evidence contract (kv_load_failure_policy="repair"):
+        # the scheduler-side half only captures the transfer identity the
+        # v1 scheduler assigns at admission and echoes it on the request's
+        # load spec. The worker decides evidence production. Under every
+        # other policy (including the default "fail") this stays fully
+        # inert: no state is kept and the flat failure channels behave
+        # exactly as before.
+        self._evidence_enabled = evidence_enabled(
+            getattr(vllm_config.kv_transfer_config, "kv_load_failure_policy", None),
+            contract_importable=True,
+            num_prefix_cacheable_groups=len(self.cacheable_group_ids),
+            num_kv_cache_groups=len(self.kv_cache_group_ids),
+            use_hybrid=self.use_hybrid,
+            use_layerwise=use_layerwise,
+            tp_mismatch=self.tp_mismatch,
+            dcp_size=self.dcp_size,
+            pcp_size=self.pcp_size,
+            pp_size=vllm_config.parallel_config.pipeline_parallel_size,
+            group_uses_align_state=bool(self.num_mamba_speculative_blocks_by_group),
+        )
+        # request_id -> the transfer identity of its latest scheduled
+        # external load attempt. Consumed once, when the attempt's request
+        # metadata is built; a request rescheduled later (preempted and
+        # resumed, a fresh admission) receives a NEW identity from the v1
+        # scheduler's note_transfer_attempt, so a late metadata build can
+        # never attach a consumed attempt's identity to a newer one.
+        self._transfer_generations: dict[str, int] = {}
+
         if backend_class is None:
             raise ValueError(f"Unsupported KV pool backend: {self.backend_name}")
         self.store_scheduler = backend_class.create_scheduler_client(vllm_config.parallel_config)
@@ -229,6 +258,30 @@ class BaseKVPoolScheduler(ABC):
 
     def _floor_to_cache_transfer_granularity(self, token_len: int) -> int:
         return token_len // self.cache_transfer_granularity * self.cache_transfer_granularity
+
+    def note_transfer_attempt(self, request: "Request", transfer_generation: int) -> None:
+        """Record the identity the v1 scheduler assigned to a newly admitted
+        external load attempt.
+
+        No-op unless the hole-repair evidence path is active: under the
+        fail/recompute policies (and every layout the gate refuses) nothing
+        is stored and the request metadata is built exactly as before.
+        """
+        if self._evidence_enabled:
+            self._transfer_generations[request.request_id] = transfer_generation
+
+    def _attach_transfer_generation(self, req_id: str, load_spec: LoadSpec | None) -> None:
+        """Echo the attempt's captured identity onto its load spec.
+
+        Consumed exactly once per attempt: the identity is popped when the
+        request metadata carrying the load is built. A later attempt for
+        the same request carries a fresh identity from its own
+        note_transfer_attempt, so a stale metadata build cannot attach an
+        old attempt's identity to a new one.
+        """
+        if load_spec is None or not self._evidence_enabled:
+            return
+        load_spec.transfer_generation = self._transfer_generations.pop(req_id, None)
 
     def _infer_mamba_groups(self) -> dict[int, int]:
         """Validate Mamba cache modes and return hybrid group scratch counts."""
@@ -446,6 +499,7 @@ class BaseKVPoolScheduler(ABC):
         skip_save: bool | None,
     ):
         last_chunk_tokens_num = self._get_last_chunk_tokens_num(prompt_token_ids)
+        self._attach_transfer_generation(request_tracker.req_id, load_spec)
         return ReqMeta.from_request_tracker(
             request_tracker,
             self.cache_transfer_granularity,
@@ -613,6 +667,7 @@ class BaseKVPoolScheduler(ABC):
         load_spec = self.load_specs.pop(request_id, None)
         if not load_spec:
             return None
+        self._attach_transfer_generation(request_id, load_spec)
         num_tokens_to_compute = load_spec.kvpool_cached_tokens
         if (num_tokens_to_compute % self._block_size != 0) and (
             num_tokens_to_compute == len(request.prompt_token_ids) - 1

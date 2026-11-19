@@ -323,6 +323,17 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(request, blocks, num_external_tokens)
 
+    def note_transfer_attempt(self, request: "Request", transfer_generation: int) -> None:
+        """Forward the v1 scheduler's transfer identity to the pool scheduler.
+
+        No-op unless the hole-repair evidence path is active: under the
+        fail/recompute policies (and every layout the gate refuses) the
+        base class default applies and the connector behaves exactly as
+        before.
+        """
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.note_transfer_attempt(request, transfer_generation)
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -560,6 +571,26 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         """Return KV block IDs that failed to load on the worker."""
         assert self.connector_worker is not None
         return self.connector_worker.get_block_ids_with_load_errors()
+
+    def get_load_failure_reports(self) -> list:
+        """Structured KV load-failure reports of the hole-repair policy.
+
+        Empty unless the evidence path is active: an inactive worker has no
+        evidence buffer and the flat channels own load failures, exactly
+        as before (#9701).
+        """
+        assert self.connector_worker is not None
+        return self.connector_worker.get_load_failure_reports()
+
+    def get_load_attestations(self) -> list:
+        """Positive per-rank terminal attestations of completed load attempts.
+
+        One terminal attestation per rank per completed load attempt
+        (healthy attempts included). Empty unless the evidence path is
+        active.
+        """
+        assert self.connector_worker is not None
+        return self.connector_worker.get_load_attestations()
 
     def get_kv_connector_kv_cache_events(self) -> AscendStoreKVEvents | None:
         """Return this poll's events, including an empty batch.
