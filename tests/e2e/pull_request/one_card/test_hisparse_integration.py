@@ -687,6 +687,8 @@ def test_direct_target_mirror_survives_legal_draft_writes(graph_producer, shared
                 resident_source_index=group,
                 request_state_indices=states,
                 hot=view,
+                hot_backing=source,
+                device=source.device,
                 host_cache=payload[span].view(host_rows, width),
                 eager_host_mirror=True,
                 is_group_leader=index != 1,
@@ -717,8 +719,8 @@ def test_direct_target_mirror_survives_legal_draft_writes(graph_producer, shared
             num_lookahead_tokens=1,
             kernel_config=SimpleNamespace(enable_jit_warmup=False),
         )
-        worker.initialize(handles, list(names), source, 1, host_blocks, source.device, [registered])
-        sources = _DirectMirrorSources.bind(worker, SimpleNamespace(draft_attn_layer_names={"draft"}))
+        worker.initialize(handles, list(names), 1, host_blocks, source.device, [registered])
+        sources = _DirectMirrorSources.bind(worker)
         assert sources is not None
         connector = HiSparseConnector.__new__(HiSparseConnector)
         connector.connector_worker = worker
