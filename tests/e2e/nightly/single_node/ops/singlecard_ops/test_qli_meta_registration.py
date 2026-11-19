@@ -38,7 +38,8 @@ def _check_native_dispatch(fake):
     for name, count in (
         ("npu_quant_lightning_indexer_v2", 26),
         ("npu_quant_lightning_indexer_v2_metadata", 23),
-        ("npu_quant_lightning_indexer_v3", 30),
+        ("npu_quant_lightning_indexer_v3", 31),
+        ("npu_quant_sparse_lightning_indexer_metadata", 18),
         ("npu_quant_lightning_indexer_local_candidates", 11),
     ):
         assert len(getattr(ops, name).default._schema.arguments) == count
@@ -53,6 +54,29 @@ def _check_native_dispatch(fake):
         lengths = torch.empty(1, device=device, dtype=torch.int32)
         block_table = torch.empty(1, 8, device=device, dtype=torch.int32)
         args = (query, key, weights, weights, key_scale, 512, 1)
+        candidate_lengths = torch.empty(3, 1, device=device, dtype=torch.int32)
+        sparse_metadata = ops.npu_quant_sparse_lightning_indexer_metadata(
+            32,
+            1,
+            128,
+            512,
+            2,
+            candidate_block_length=candidate_lengths,
+            cu_seqlens_q=starts,
+            seqused_k=lengths,
+            batch_size=1,
+        )
+        assert sparse_metadata.shape == (1024,) and sparse_metadata.dtype == torch.int32
+        assert sparse_metadata.device.type == device
+        if fake:
+            assert isinstance(sparse_metadata, FakeTensor)
+        for invalid, message in (
+            (candidate_lengths.to(torch.int64), "int32"),
+            (candidate_lengths.squeeze(1), "shape"),
+            (torch.empty(3, 2, device=device, dtype=torch.int32)[:, :1], "contiguous"),
+        ):
+            with pytest.raises(RuntimeError, match=message):
+                ops.npu_quant_sparse_lightning_indexer_metadata(32, 1, 128, 512, 2, candidate_block_length=invalid)
         for dcp in (False, True):
             dcp_args = (
                 dict(

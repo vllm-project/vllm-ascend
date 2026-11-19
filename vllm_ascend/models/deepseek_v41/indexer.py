@@ -279,10 +279,28 @@ class DeepseekV41Indexer(nn.Module):
             mask_mode=3,
             cmp_ratio=self.compress_ratio,
         )
+        # Sequence metadata may be staged on another stream. Candidate lengths
+        # are produced by the source in this forward and must be consumed on the
+        # current stream, including during ACL graph capture/replay.
         op_metadata = source_metadata.qli_metadata
         wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(op_metadata))
         mode = 1 if is_candidate_source else 2 if uses_candidate_filter else 3
-        selected, _, candidate_out = torch.ops._C_ascend.npu_quant_lightning_indexer_v3(
+        candidate_block_length = candidate_lengths if uses_candidate_filter else None
+        if uses_candidate_filter:
+            if candidate_block_length is None:
+                raise ValueError("A3 QSLI consumer requires source candidate lengths")
+            op_metadata = torch.ops._C_ascend.npu_quant_sparse_lightning_indexer_metadata(
+                quantized_query.shape[1],
+                key.shape[2],
+                quantized_query.shape[2],
+                topk,
+                2,
+                candidate_block_length=candidate_block_length,
+                batch_size=seqused_k.numel(),
+                max_seqlen_k=source_metadata.max_cache_seq_len,
+                **common,
+            )
+        selected, _, candidate_out, candidate_len = torch.ops._C_ascend.npu_quant_lightning_indexer_v3(
             quantized_query,
             key,
             weights,
@@ -293,11 +311,14 @@ class DeepseekV41Indexer(nn.Module):
             block_table=source_metadata.block_table,
             metadata=op_metadata,
             candidate_topk_index=candidates if uses_candidate_filter else None,
+            candidate_block_length=candidate_block_length,
             candidate_mode=mode,
             candidate_topk_blocks=candidate_topk_blocks,
             candidate_block_size=candidate_block_size,
             **common,
         )
+        if is_candidate_source and candidate_lengths is not None:
+            candidate_lengths.copy_(candidate_len)
         selected = prepare_indexer_indices(
             selected.squeeze(1),
             positions,
