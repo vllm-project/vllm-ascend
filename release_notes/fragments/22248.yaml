@@ -1,0 +1,4 @@
+pr: 22248
+entries:
+  - category: feature
+    text: Added MS service metrics for Model Runner V2 EPLB. Expert load balance is reported per rank and model as average tokens, max tokens and balancedness on balancedness log steps, and every HIXL weight transfer reports the number of distinct experts sent and received, the communication operations issued and the estimated bytes moved for each layer. Both are sampled at the existing basic metrics level and require no configuration.
