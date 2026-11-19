@@ -308,51 +308,51 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "3", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 4, "tp_size": 1}, "decode": {"dp_size": 4, "tp_size": 8}}}'
 
 benchmarks:
-#  perf_in3500_bs1:
-#    case_type: performance
-#    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-#    request_conf: vllm_api_stream_chat
-#    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-#    num_prompts: 4
-#    max_out_len: 1500
-#    batch_size: 1
-#    request_rate: 0
-#    baseline: 1
-#    threshold: 0.97
-#  perf_in3500_bs4:
-#    case_type: performance
-#    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-#    request_conf: vllm_api_stream_chat
-#    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-#    num_prompts: 64
-#    max_out_len: 1500
-#    batch_size: 16
-#    request_rate: 0
-#    baseline: 1
-#    threshold: 0.97
-#  perf_in3500_bs64:
-#    case_type: performance
-#    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-#    request_conf: vllm_api_stream_chat
-#    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-#    num_prompts: 256
-#    max_out_len: 1500
-#    batch_size: 64
-#    request_rate: 0
-#    baseline: 100
-#    threshold: 0.97
-#  perf_1m:
-#    case_type: performance
-#    dataset_path: vllm-ascend/GSM8K-in1007616-bs16-prefix0-qwen
-#    request_conf: vllm_api_stream_chat
-#    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-#    trust_remote_code: true
-#    num_prompts: 4
-#    max_out_len: 1024
-#    batch_size: 1
-#    request_rate: 0
-#    baseline: 0
-#    threshold: 0.97
+  perf_in3500_bs1:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 4
+    max_out_len: 1500
+    batch_size: 1
+    request_rate: 0
+    baseline: 1
+    threshold: 0.97
+  perf_in3500_bs4:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 64
+    max_out_len: 1500
+    batch_size: 16
+    request_rate: 0
+    baseline: 1
+    threshold: 0.97
+  perf_in3500_bs64:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 256
+    max_out_len: 1500
+    batch_size: 64
+    request_rate: 0
+    baseline: 100
+    threshold: 0.97
+  perf_1m:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in1007616-bs16-prefix0-qwen
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    trust_remote_code: true
+    num_prompts: 4
+    max_out_len: 1024
+    batch_size: 1
+    request_rate: 0
+    baseline: 0
+    threshold: 0.97
   acc_aime2025:
     case_type: accuracy
     dataset_path: vllm-ascend/aime2025
