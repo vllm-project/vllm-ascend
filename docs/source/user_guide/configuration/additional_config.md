@@ -129,7 +129,7 @@ Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/ru
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `enable_npugraph_ex`               | bool | `True` | Whether to enable npugraph_ex backend.                                                 |
-| `enable_static_kernel` | bool | `False` | Whether to enable static kernel. Suitable for scenarios where shape changes are minimal and some time is available for static kernel compilation. |
+| `enable_static_kernel` | bool | `False` | Whether to enable static kernel. Suitable for scenarios where shape changes are minimal and some time is available for static kernel compilation. Works under both full-graph and piecewise cudagraph modes. |
 | `enable_super_kernel` | bool | Inherits `enable_static_kernel` | Whether to enable Super Kernel optimization. When omitted, it follows `enable_static_kernel`; set it explicitly to override that behavior. Super Kernel requires static kernel. |
 | `fuse_norm_quant`  | bool | `True` | Whether to enable fuse_norm_quant pass. |
 | `fuse_qknorm_rope` | bool | `True` | Whether to enable fuse_qknorm_rope pass. If Triton is not in the environment, set it to False. |
