@@ -1956,6 +1956,59 @@ class TestNPUWorker(TestBase):
             worker.model_runner.capture_model.assert_called_once()
             mock_save_startup_plan.assert_called_once_with(worker, expected_kv_cache_memory)
 
+    def test_compile_or_warm_up_model_warms_up_sampler_after_graph_capture(self):
+        """Every PP rank runs a dummy forward after capture; the last also warms up the sampler.
+
+        Mirrors vllm-project/vllm#62560.
+        """
+        from vllm_ascend.worker.worker import NPUWorker
+
+        cases = (
+            # last_pp_rank, pooling, expect_dummy_run, expect_sampler_run
+            (True, False, True, True),
+            (False, False, True, False),
+            (True, True, False, False),
+        )
+        for is_last_rank, is_pooling, expect_dummy_run, expect_sampler_run in cases:
+            with (
+                self.subTest(is_last_rank=is_last_rank, is_pooling=is_pooling),
+                patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+                patch.object(kw_module, "kernel_warmup"),
+                patch("vllm_ascend.worker.worker.get_ascend_config") as mock_get_ascend_config,
+                patch("vllm_ascend.worker.worker.get_current_hardware_profile") as mock_get_hardware_profile,
+                patch("vllm_ascend.worker.worker.get_pp_group") as mock_get_pp_group,
+                patch("vllm_ascend.worker.worker.set_random_seed"),
+            ):
+                mock_get_ascend_config.return_value.enable_cpu_binding = False
+                mock_get_hardware_profile.return_value.supports.return_value = False
+                mock_get_pp_group.return_value.is_last_rank = is_last_rank
+
+                worker = NPUWorker()
+                worker.model_runner = MagicMock(is_pooling_model=is_pooling)
+                sample_hidden_states = torch.ones(8, 4)
+                worker.model_runner._dummy_run.return_value = (torch.ones(8, 4), sample_hidden_states)
+                worker.vllm_config = MagicMock(attention_config=AttentionConfig())
+                worker.vllm_config.compilation_config.compile_sizes = []
+                worker.vllm_config.compilation_config.cudagraph_capture_sizes = []
+                worker.vllm_config.compilation_config.get_compile_ranges.return_value = []
+                worker.model_config = MagicMock(enforce_eager=False, seed=1234)
+                worker.cache_config = MagicMock(kv_cache_memory_bytes=1024)
+                worker.scheduler_config = MagicMock(max_num_seqs=8, max_num_batched_tokens=16)
+
+                worker.compile_or_warm_up_model()
+
+                if expect_dummy_run:
+                    worker.model_runner._dummy_run.assert_called_once_with(num_tokens=8, skip_eplb=True)
+                else:
+                    worker.model_runner._dummy_run.assert_not_called()
+                if expect_sampler_run:
+                    worker.model_runner._dummy_sampler_run.assert_called_once_with(hidden_states=sample_hidden_states)
+                    # The warm-up must follow capture_model(), which empties the cache.
+                    call_names = [c[0] for c in worker.model_runner.method_calls]
+                    self.assertLess(call_names.index("capture_model"), call_names.index("_dummy_sampler_run"))
+                else:
+                    worker.model_runner._dummy_sampler_run.assert_not_called()
+
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     def test_initialize_from_config_with_sleep_mode(self, mock_allocator_class, mock_ensure_kv_transfer):

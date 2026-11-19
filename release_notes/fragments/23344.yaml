@@ -1,0 +1,7 @@
+pr: 23344
+entries:
+  - category: bugfix
+    text: >-
+      Fixed wrong outputs or illegal memory accesses in the Qwen4Exp HyperConnection, Qwen3.5
+      attention and GDN prefill Triton kernels when one step holds more than about 200K tokens,
+      which a large `--max-num-batched-tokens` reaches already in the startup profile run.

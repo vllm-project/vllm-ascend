@@ -89,7 +89,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 
     # load initial state
     if USE_INITIAL_STATE:
-        h0_ptr = h0 + i_nh * K * V
+        h0_ptr = h0 + i_nh.to(tl.int64) * K * V
         ptr_h0_bv1 = h0_ptr + offs_k * V + offs_v1 * 1
         b_h1_bv1 += tl.load(ptr_h0_bv1, mask=mask_kv1, other=0.0).to(tl.float32)
 
@@ -101,7 +101,8 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 
     # main recurrence
     for i_t in range(NT):
-        h_base = h + (boh + i_t) * H * K * V + i_h * K * V
+        # Cast before multiplying: the products overflow int32 for long batches.
+        h_base = h + (boh + i_t).to(tl.int64) * H * K * V + i_h * K * V
 
         if HAS_CHECKPOINTS:
             if checkpoint_offset > 0 and i_t * BT == checkpoint_offset:
@@ -111,7 +112,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                 b_h1_bv1 = b_h1_bv1.to(CHECKPOINT_STATE_DTYPE).to(tl.float32)
                 b_h1_bv2 = b_h1_bv2.to(CHECKPOINT_STATE_DTYPE).to(tl.float32)
                 # The cache uses [N,H,V,K], while accumulators are [K,V].
-                base = checkpoint_output + i_nh * K * V
+                base = checkpoint_output + i_nh.to(tl.int64) * K * V
                 first = tl.make_block_ptr(base, (K, V), (1, K), (0, 0), (128, 64), (0, 1))
                 second = tl.make_block_ptr(base, (K, V), (1, K), (0, 64), (128, 64), (0, 1))
                 tl.store(first, b_h1_bv1, boundary_check=(0, 1))
@@ -123,19 +124,20 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         p_h1_bv2 = tl.make_block_ptr(h_base, (K, V), (V, 1), (0, v_start2), (128, 64), (1, 0))
         tl.store(p_h1_bv2, b_h1_bv2.to(p_h1_bv2.dtype.element_ty), boundary_check=(0, 1))
 
-        offs_t_wv = (i_t * BT + tl.arange(0, BT))[:, None]
+        # int64: offs_t * stride overflows int32 for one long sequence.
+        offs_t_wv = (i_t * BT + tl.arange(0, BT)).to(tl.int64)[:, None]
         offs_k_wv = tl.arange(0, 128)[None, :]
         mask_w = (offs_t_wv < T) & (offs_k_wv < K)
 
-        w_base = w + bos * H * K + i_h * K
+        w_base = w + bos.to(tl.int64) * H * K + i_h * K
         ptr_w = w_base + offs_t_wv * stride_w + offs_k_wv * 1
         b_w = tl.load(ptr_w, mask=mask_w, other=0.0)
 
-        k_base = k + bos * Hg * K + (i_h // (H // Hg)) * K
+        k_base = k + bos.to(tl.int64) * Hg * K + (i_h // (H // Hg)) * K
         p_k = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (0, i_t * BT), (128, BT), (0, 1))
         b_k = tl.load(p_k, boundary_check=(0, 1))
 
-        v_new_base = v_new + bos * H * V + i_h * V
+        v_new_base = v_new + bos.to(tl.int64) * H * V + i_h * V
 
         last_idx = min((i_t + 1) * BT, T) - 1
         b_g_last = tl.load(g + bos + i_h * T_max + last_idx)
@@ -148,10 +150,10 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         b_g = safe_exp(b_g_last - b_g)
         b_g_last = tl.exp(b_g_last)
 
-        offs_t_v = (i_t * BT + tl.arange(0, BT))[:, None]
+        offs_t_v = (i_t * BT + tl.arange(0, BT)).to(tl.int64)[:, None]
         mask_v1 = (offs_t_v < T) & (offs_v1 < V)
 
-        v_base = v + bos * H * V + i_h * V
+        v_base = v + bos.to(tl.int64) * H * V + i_h * V
         ptr_v1 = v_base + offs_t_v * stride_v + offs_v1 * 1
         b_v1 = tl.load(ptr_v1, mask=mask_v1, other=0.0)
         b_v_new1 = b_v1.to(tl.float32)
@@ -187,7 +189,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 
     # epilogue
     if STORE_FINAL_STATE:
-        ht_ptr = ht + i_nh * K * V
+        ht_ptr = ht + i_nh.to(tl.int64) * K * V
 
         p_ht1_bv1 = tl.make_block_ptr(ht_ptr, (K, V), (V, 1), (0, v_start1), (128, 64), (1, 0))
         tl.store(p_ht1_bv1, b_h1_bv1.to(p_ht1_bv1.dtype.element_ty), boundary_check=(0, 1))

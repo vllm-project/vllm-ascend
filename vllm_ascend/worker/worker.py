@@ -1116,6 +1116,23 @@ class NPUWorker(GPUWorker):
         if not self.model_config.enforce_eager:
             npugraph_memory_bytes = self.model_runner.capture_model()
 
+        if not self.model_runner.is_pooling_model:
+            # Every PP rank runs a dummy forward here, as upstream does.
+            max_num_reqs = min(
+                self.scheduler_config.max_num_seqs,
+                self.scheduler_config.max_num_batched_tokens,
+            )
+            # Take the hidden states from a dummy forward pass so they have the
+            # LM head's input size.
+            _, sample_hidden_states = self.model_runner._dummy_run(num_tokens=max_num_reqs, skip_eplb=True)
+            if get_pp_group().is_last_rank:
+                # Keep the sampler's max-batch buffers (e.g. the fp32 logits
+                # copy) cached after the empty_cache() in capture_model(), so
+                # later steps reuse them instead of reserving a new, larger
+                # block at each new batch size (vllm-project/vllm#62560).
+                self.model_runner._dummy_sampler_run(hidden_states=sample_hidden_states)
+            del sample_hidden_states
+
         # Suggest an optimal --kv-cache-memory value for future runs.
         # Only emitted when we ran full profiling (kv_cache_memory_bytes was not
         # pre-specified) so that peak_activation_memory etc. are available.
