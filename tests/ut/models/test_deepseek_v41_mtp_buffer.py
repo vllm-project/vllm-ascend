@@ -21,7 +21,7 @@ def test_target_hc_buffer_allocation(method, last_pp_rank):
     model = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "DeepseekV41Model")
     initializer = next(node for node in model.body if isinstance(node, ast.FunctionDef) and node.name == "__init__")
     names = {"spec_config", "needs_mtp_hidden_states", "self._mtp_hidden_buffer"}
-    allocation = [
+    allocation: list[ast.stmt] = [
         node
         for node in initializer.body
         if isinstance(node, ast.Assign) and any(ast.unparse(target) in names for target in node.targets)
