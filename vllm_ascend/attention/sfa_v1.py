@@ -83,7 +83,8 @@ from vllm_ascend.utils import (
 from vllm_ascend.weight_switch import ParallelOProjection, WeightSwitchConfig
 
 # NoPE sparse MLA operator helpers.
-SMLA_METADATA_SIZE = 1024
+SMLA_METADATA_SIZE = 2048
+SMLA_LEGACY_METADATA_SIZE = 1024
 # GLM5Next's SFA path carries no learnable attention sink, but SparseFlashMla
 # still requires a per-head float32 sinks tensor. This is the placeholder value
 # the path has always used; whether -inf is the correct "no sink" value is a
@@ -144,14 +145,13 @@ def generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_l
 
 def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk, cu_seqlens_q, topk_length):
     generated = generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_length)
-    if generated.numel() != buffer.numel():
-        # The persistent buffer is sized by the operator's fixed [1024] contract.
-        # A generated plan of any other size means this build does not match the
-        # operator this buffer was allocated for; say so here rather than letting
-        # copy_ decide.
-        raise ValueError(f"Sparse MLA plan must contain {buffer.numel()} int32 values, got {generated.numel()}.")
-    buffer.copy_(generated)
-    metadata.smla_metadata = buffer
+    size = generated.numel()
+    if size not in (SMLA_LEGACY_METADATA_SIZE, SMLA_METADATA_SIZE):
+        raise ValueError(f"Sparse MLA plan has an unsupported size of {size} int32 values.")
+    # Match the native plan shape and keep its address stable across ACL Graph replays.
+    plan = buffer if size == buffer.numel() else buffer[:size]
+    plan.copy_(generated)
+    return plan
 
 
 def _view_cache_as_operator_pages(cache: torch.Tensor, block_size: int) -> torch.Tensor:
@@ -193,7 +193,7 @@ def sparse_mla(query, cache, indices, metadata, scale):
         if query.shape[0] != metadata.smla_topk_length.shape[0]:
             # Eager and piecewise execution trim graph-padding query rows.
             cu_seqlens_q = cu_seqlens_q.clamp(max=query.shape[0])
-        build_smla_metadata(
+        plan = build_smla_metadata(
             metadata,
             metadata.smla_metadata,
             query.shape[1],
@@ -211,7 +211,7 @@ def sparse_mla(query, cache, indices, metadata, scale):
             seqused_ori_kv=metadata.seq_lens,
             ori_topk_length=topk_length,
             sinks=metadata.smla_sinks,
-            metadata=metadata.smla_metadata,
+            metadata=plan,
             softmax_scale=scale,
             cmp_ratio=1,
             # Must match the mode the plan above was generated with.
