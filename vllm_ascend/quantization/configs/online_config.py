@@ -61,10 +61,9 @@ from vllm_ascend.quantization.methods.online.adapters import (
     AscendOnlineInt8LinearMethod,
     AscendOnlineInt8MoEMethod,
 )
-from vllm_ascend.quantization.online_methods import ASCEND_ONLINE_QUANT_METHODS
+from vllm_ascend.utils import ASCEND_ONLINE_QUANT_METHODS
 
 __all__ = [
-    "ASCEND_ONLINE_QUANT_METHODS",
     "AscendOnlineQuantizationConfig",
     "build_ascend_online_quant_config",
 ]
@@ -136,8 +135,19 @@ def _unquantized_method(layer: torch.nn.Module):
     return None
 
 
-@register_quantization_config("online")
-@register_quantization_config("int8_per_channel_weight_only")
+def _register_online_quant_names(cls: type) -> type:
+    """Register ``cls`` under every Ascend online ``--quantization`` name.
+
+    vLLM's ``register_quantization_config`` takes a single name, so the names
+    live in ``vllm_ascend.utils.ASCEND_ONLINE_QUANT_METHODS`` (shared with the
+    platform routing) and this decorator registers ``cls`` once per name.
+    """
+    for name in ASCEND_ONLINE_QUANT_METHODS:
+        cls = register_quantization_config(name)(cls)
+    return cls
+
+
+@_register_online_quant_names
 class AscendOnlineQuantizationConfig(OnlineQuantizationConfig):
     """Online quantization for Ascend, driven by the shared vLLM frontend."""
 

@@ -39,7 +39,8 @@ included -- still takes the upstream path untouched.
 
 Patching the config funnel rather than ``get_quant_config`` keeps this module
 clear of the model-loader import graph, which the platform hook must not pull in
-this early.
+this early. The method names come from ``vllm_ascend.utils``, which the platform
+module already imports, so no new import edge is added here.
 
 Future Plan
 -----------
@@ -54,7 +55,7 @@ import functools
 
 from vllm.config.vllm import VllmConfig
 
-from vllm_ascend.quantization.online_methods import ASCEND_ONLINE_QUANT_METHODS
+from vllm_ascend.utils import ASCEND_ONLINE_QUANT_METHODS
 
 __all__ = ["patch_online_quantization_config"]
 

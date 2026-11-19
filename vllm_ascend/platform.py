@@ -48,10 +48,10 @@ from vllm_ascend.device.hardware_profile import (
     get_current_hardware_profile,
 )
 from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
-from vllm_ascend.quantization.online_methods import ASCEND_ONLINE_QUANT_METHODS
 
 # isort: off
 from vllm_ascend.utils import (
+    ASCEND_ONLINE_QUANT_METHODS,
     ASCEND_QUANTIZATION_METHOD,
     COMPILATION_PASS_KEY,
     COMPRESSED_TENSORS_METHOD,
