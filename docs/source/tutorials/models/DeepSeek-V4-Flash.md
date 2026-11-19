@@ -66,7 +66,6 @@ Select an image based on your machine type and start the docker image on your no
         --net=host \
         --shm-size=512g \
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -v /usr/local/sbin:/usr/local/sbin \
         -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
@@ -87,8 +86,6 @@ Select an image based on your machine type and start the docker image on your no
         --net=host \
         --privileged=true \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /etc/hccn.conf:/etc/hccn.conf \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
@@ -109,8 +106,6 @@ Select an image based on your machine type and start the docker image on your no
         --net=host \
         --privileged=true \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /etc/hccn.conf:/etc/hccn.conf \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash

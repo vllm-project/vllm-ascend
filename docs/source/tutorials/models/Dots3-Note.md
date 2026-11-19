@@ -139,8 +139,6 @@ docker run -it --rm \
     --shm-size=1g \
     --net=host \
     -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
     -v "$HOST_MODEL_PATH":/models/dots3_note:ro \
     "$IMAGE" bash

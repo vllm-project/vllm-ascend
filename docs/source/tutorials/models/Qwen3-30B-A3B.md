@@ -72,7 +72,6 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
         --ipc host \
         --net host \
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /usr/local/sbin:/usr/local/sbin \
         -it -d $IMAGE bash
     ```
@@ -96,7 +95,6 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
         --ipc host \
         --net host \
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /usr/local/sbin:/usr/local/sbin \
         -it -d $IMAGE bash
     ```
@@ -113,8 +111,6 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
         --name vllm-ascend \
         --shm-size=1g \
         --net=host \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```

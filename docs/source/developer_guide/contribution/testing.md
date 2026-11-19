@@ -75,8 +75,6 @@ The container needs [Ascend Docker Runtime](../../getting_started/installation.m
         --name vllm-ascend \
         --shm-size=1g \
         -e ASCEND_VISIBLE_DEVICES \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -p 8000:8000 \
         -it $IMAGE bash
@@ -104,8 +102,6 @@ The container needs [Ascend Docker Runtime](../../getting_started/installation.m
         --name vllm-ascend \
         --shm-size=1g \
         -e ASCEND_VISIBLE_DEVICES=0-3 \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -p 8000:8000 \
         -it $IMAGE bash

@@ -105,8 +105,6 @@ docker run -itd \
     --shm-size=1000g \
     -e ASCEND_VISIBLE_DEVICES=0-15 \
     -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /mnt/weight:/mnt/weight \
     ${IMAGE} bash
 ```

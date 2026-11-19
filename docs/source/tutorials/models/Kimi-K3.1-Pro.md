@@ -78,8 +78,6 @@ Select an image for the deployment platform and host operating system, and start
             --net=host \
             --privileged=true \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-            -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v /root/.cache:/root/.cache \
             -it "$IMAGE" bash
         ```
@@ -95,8 +93,6 @@ Select an image for the deployment platform and host operating system, and start
             --net=host \
             --privileged=true \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-            -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v /root/.cache:/root/.cache \
             -it "$IMAGE" bash
         ```
@@ -116,7 +112,6 @@ Select an image for the deployment platform and host operating system, and start
             --net=host \
             --privileged=true \
             -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-            -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v /root/.cache:/root/.cache \
             -it "$IMAGE" bash
         ```
@@ -132,7 +127,6 @@ Select an image for the deployment platform and host operating system, and start
             --net=host \
             --privileged=true \
             -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-            -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v /root/.cache:/root/.cache \
             -it "$IMAGE" bash
         ```

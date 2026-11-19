@@ -64,7 +64,6 @@ You can use our official Docker image to run GLM-5.1 directly.
     --net=host \
     --shm-size=1g \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
     -v /etc/hixlep/:/etc/hixlep/ \
     -v /root/.cache:/root/.cache \
@@ -92,8 +91,6 @@ You can use our official Docker image to run GLM-5.1 directly.
     --net=host \
     --shm-size=1g \
     -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
     -it $IMAGE bash
     ```
@@ -111,8 +108,6 @@ You can use our official Docker image to run GLM-5.1 directly.
         --shm-size=1g \
         --net=host \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```

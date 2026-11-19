@@ -86,8 +86,6 @@ node. Refer to [using a prebuilt image](../../getting_started/installation.md#in
       --net=host \
       --shm-size=1g \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
     ```
@@ -106,8 +104,6 @@ node. Refer to [using a prebuilt image](../../getting_started/installation.md#in
       --net=host \
       --shm-size=1g \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
     ```

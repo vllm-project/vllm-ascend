@@ -119,8 +119,6 @@ separate images.
       --ipc=host \
       --privileged=true \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hccn.conf:/etc/hccn.conf \
       -v "$MODEL_ROOT:$MODEL_ROOT" \
       "$IMAGE" bash
@@ -144,8 +142,6 @@ separate images.
       --shm-size=512g \
       --privileged=true \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hccn.conf:/etc/hccn.conf \
       -v "$MODEL_ROOT:$MODEL_ROOT" \
       "$IMAGE" bash
@@ -169,7 +165,6 @@ separate images.
       --shm-size=512g \
       --privileged=true \
       -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-      -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
       -v "$MODEL_ROOT:$MODEL_ROOT" \
       "$IMAGE" bash
     ```

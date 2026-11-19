@@ -77,8 +77,6 @@ docker run --rm \
 --shm-size=1g \
 -e ASCEND_VISIBLE_DEVICES=0-7 \
 -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /etc/hccn.conf:/etc/hccn.conf \
 -v /mnt/sfs_turbo/.cache:/root/.cache \
 -it $IMAGE bash

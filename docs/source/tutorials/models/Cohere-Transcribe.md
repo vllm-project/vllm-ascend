@@ -55,8 +55,6 @@ Use the vLLM-Ascend Docker image that corresponds to your hardware. Replace the 
         --name vllm-ascend \
         --shm-size=1g \
         --net host \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it -d $IMAGE bash
     ```

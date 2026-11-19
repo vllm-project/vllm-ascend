@@ -63,8 +63,6 @@ Select the image for your target hardware.
       --net=host \
       --shm-size=128g \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hccn.conf:/etc/hccn.conf:ro \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
@@ -83,8 +81,6 @@ Select the image for your target hardware.
       --net=host \
       --shm-size=128g \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hccn.conf:/etc/hccn.conf:ro \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
@@ -107,7 +103,6 @@ Select the image for your target hardware.
       -v /root/host:/root/host \
       -v /usr/local/sbin:/usr/local/sbin \
       -v /var/log/npu:/usr/slog \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hixlep:/etc/hixlep \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
@@ -209,8 +204,6 @@ Verify that all host device and file paths exist before running Docker.
       -e ASCEND_VISIBLE_DEVICES=0-7 \
       --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hccn.conf:/etc/hccn.conf:ro \
       -v /root/.cache:/root/.cache \
       -v "${MEMCACHE_CONFIG_DIR}:${MEMCACHE_CONFIG_DIR}" \
@@ -241,8 +234,6 @@ Verify that all host device and file paths exist before running Docker.
       --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \
       --device "${SSD_DEVICE_PATH_2}:${SSD_DEVICE_PATH_2}" \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hccn.conf:/etc/hccn.conf:ro \
       -v /root/.cache:/root/.cache \
       -v "${MEMCACHE_CONFIG_DIR}:${MEMCACHE_CONFIG_DIR}" \
@@ -269,7 +260,6 @@ Verify that all host device and file paths exist before running Docker.
       -v /root/host:/root/host \
       -v /usr/local/sbin:/usr/local/sbin \
       -v /var/log/npu:/usr/slog \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hixlep:/etc/hixlep \
       -v /etc/hccn.conf:/etc/hccn.conf:ro \
       -v /usr/bin/urma_admin:/usr/bin/urma_admin:ro \

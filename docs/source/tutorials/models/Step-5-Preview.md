@@ -82,7 +82,6 @@ docker run --rm \
 --shm-size=60g \
 -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
 -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
--v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /etc/hixlep:/etc/hixlep \
 -v /etc/hccn.conf:/etc/hccn.conf \
 -v /var/log/npu/:/usr/slog \

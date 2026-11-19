@@ -61,7 +61,6 @@ Refer to [using docker](../../getting_started/installation.md#installation-prebu
       -v /root/host:/root/host  \
       -v /usr/local/sbin:/usr/local/sbin \
       -v /var/log/npu:/usr/slog \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hixlep:/etc/hixlep \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
@@ -81,8 +80,6 @@ Refer to [using docker](../../getting_started/installation.md#installation-prebu
       --net=host \
       --shm-size=1g \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
     ```
@@ -101,8 +98,6 @@ Refer to [using docker](../../getting_started/installation.md#installation-prebu
       --net=host \
       --shm-size=1g \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
     ```
@@ -120,8 +115,6 @@ Refer to [using docker](../../getting_started/installation.md#installation-prebu
     -e ASCEND_VISIBLE_DEVICES=0-7 \
     --name vllm-ascend \
     --shm-size=10g \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
     -p 8080:8080 \
     -it $IMAGE bash

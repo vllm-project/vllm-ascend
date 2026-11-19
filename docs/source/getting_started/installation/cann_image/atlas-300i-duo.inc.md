@@ -29,8 +29,6 @@
             --name vllm-ascend-cann \
             --shm-size=1g \
             -e ASCEND_VISIBLE_DEVICES=0 \
-            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-            -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v "$MODEL_CACHE:/root/.cache" \
             -p 8000:8000 \
             -it "$IMAGE" bash
@@ -47,8 +45,6 @@
             --name vllm-ascend-cann \
             --shm-size=1g \
             -e ASCEND_VISIBLE_DEVICES=0 \
-            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-            -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v "$MODEL_CACHE:/root/.cache" \
             -p 8000:8000 \
             -it "$IMAGE" bash

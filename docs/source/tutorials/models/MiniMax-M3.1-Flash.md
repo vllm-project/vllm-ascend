@@ -72,7 +72,6 @@ The image tags below are fixed to the release that matches this guide. If your v
         -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
         -v /usr/local/sbin:/usr/local/sbin:ro \
         -v /etc/hccn.conf:/etc/hccn.conf:ro \
-        -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
         -v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-W8A8:ro \
         -v "$WORK_DIR":/workspace \
         -w /workspace "$IMAGE" bash
@@ -96,7 +95,6 @@ The image tags below are fixed to the release that matches this guide. If your v
         -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
         -v /usr/local/sbin:/usr/local/sbin:ro \
         -v /etc/hccn.conf:/etc/hccn.conf:ro \
-        -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
         -v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-W8A8:ro \
         -v "$WORK_DIR":/workspace \
         -w /workspace "$IMAGE" bash
@@ -119,7 +117,6 @@ The image tags below are fixed to the release that matches this guide. If your v
         -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
         -v /usr/local/sbin:/usr/local/sbin:ro \
         -v /etc/hccn.conf:/etc/hccn.conf:ro \
-        -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
         -v /etc/hixlep:/etc/hixlep:ro \
         -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json:ro \
         -v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-W8A8-MXFP8:ro \

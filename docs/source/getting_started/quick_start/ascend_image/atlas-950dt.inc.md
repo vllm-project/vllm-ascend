@@ -37,8 +37,6 @@
             --shm-size=1g \
             -e ASCEND_VISIBLE_DEVICES=0 \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-            -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v "$MODEL_CACHE:/root/.cache" \
             -it "$IMAGE" bash
         ```
@@ -56,8 +54,6 @@
             --shm-size=1g \
             -e ASCEND_VISIBLE_DEVICES=0 \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-            -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v "$MODEL_CACHE:/root/.cache" \
             -it "$IMAGE" bash
         ```

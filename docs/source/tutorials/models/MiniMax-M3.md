@@ -73,8 +73,6 @@ Select the `docker run` command for your hardware platform:
     --net=host \
     --shm-size=100g \
     -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
     -it $IMAGE bash
     ```
@@ -95,7 +93,6 @@ Select the `docker run` command for your hardware platform:
     --shm-size=60g \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
     -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /etc/hixlep:/etc/hixlep \
     -v /etc/hccn.conf:/etc/hccn.conf \
     -v /var/log/npu/:/usr/slog \

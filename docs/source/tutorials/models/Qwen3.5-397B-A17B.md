@@ -89,7 +89,6 @@ sysctl kernel.sched_migration_cost_ns=50000
       --shm-size=64g \
       --ulimit memlock=-1 \
       -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
       -v /etc/hixlep/:/etc/hixlep/ \
       -v /root/.cache:/root/.cache \
@@ -115,8 +114,6 @@ sysctl kernel.sched_migration_cost_ns=50000
       --shm-size=64g \
       --ulimit memlock=-1 \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
     ```
@@ -136,8 +133,6 @@ sysctl kernel.sched_migration_cost_ns=50000
       --shm-size=64g \
       --ulimit memlock=-1 \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
     ```

@@ -56,7 +56,6 @@ Select an image based on your machine type and start the docker image on your no
     --shm-size=1g \
     --privileged=true \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
     -v /etc/hixlep/:/etc/hixlep/ \
     -v /root/.cache:/root/.cache \
@@ -79,8 +78,6 @@ Select an image based on your machine type and start the docker image on your no
     -e ASCEND_VISIBLE_DEVICES=0 \
     --name vllm-ascend \
     --shm-size=1g \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
     -p 8000:8000 \
     -it $IMAGE bash
@@ -96,8 +93,6 @@ Select an image based on your machine type and start the docker image on your no
     -e ASCEND_VISIBLE_DEVICES=0-7 \
     --name vllm-ascend \
     --shm-size=10g \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
     -p 8000:8000 \
     -it $IMAGE bash

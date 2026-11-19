@@ -66,8 +66,6 @@ It is **recommended to use the latest release candidate (rc) version or the late
         --shm-size=1g \
         --net=host \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
@@ -84,8 +82,6 @@ It is **recommended to use the latest release candidate (rc) version or the late
         --shm-size=1g \
         --net=host \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
@@ -100,8 +96,6 @@ It is **recommended to use the latest release candidate (rc) version or the late
         -e ASCEND_VISIBLE_DEVICES=0-7 \
         --name vllm-ascend \
         --shm-size=1g \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -p 8000:8000 \
         -it $IMAGE bash
@@ -121,7 +115,6 @@ It is **recommended to use the latest release candidate (rc) version or the late
         --net=host \
         --shm-size=1g \
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
         -v /etc/hixlep/:/etc/hixlep/ \
         -v /root/.cache:/root/.cache \
