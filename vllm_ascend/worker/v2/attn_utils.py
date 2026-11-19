@@ -555,7 +555,7 @@ def build_attn_metadata(
             builder = group.get_metadata_builder(0)
             reuse_gdn_single = _gdn_reuse_enabled(
                 builder,
-                group.kv_cache_spec,
+                getattr(group, "kv_cache_spec", None),
                 model_specific_attn_metadata,
                 common_attn_metadata_extra_kwargs,
                 pcp_context,
@@ -641,7 +641,7 @@ def build_attn_metadata(
             # upstream, only the first build needs to fetch the extra tensors.
             reuse_gdn_metadata = _gdn_reuse_enabled(
                 attn_metadata_builder,
-                attn_group.kv_cache_spec,
+                getattr(attn_group, "kv_cache_spec", None),
                 model_specific_attn_metadata,
                 common_attn_metadata_extra_kwargs,
                 pcp_context,
