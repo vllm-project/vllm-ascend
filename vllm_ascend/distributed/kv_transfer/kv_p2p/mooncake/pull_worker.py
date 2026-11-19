@@ -57,6 +57,8 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
     submission belong in _handle_requests.
     """
 
+    _vllm_sorts_dcp_groups: bool | None = None
+
     def __init__(
         self,
         engine: Any,
@@ -506,7 +508,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                     members.sort(key=peer_dcp_ranks.__getitem__)
                 else:
                     cls = self.__class__
-                    if not hasattr(cls, "_vllm_sorts_dcp_groups"):
+                    if getattr(cls, "_vllm_sorts_dcp_groups", None) is None:
                         sorts = False
                         try:
                             import inspect

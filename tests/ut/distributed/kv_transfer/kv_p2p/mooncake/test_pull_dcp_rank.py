@@ -60,8 +60,7 @@ def _make_remote_pp_metadata(
 
 
 def _fresh_thread(tp_size: int, pcp_size: int) -> pull_worker.MooncakePullRecvingThread:
-    if hasattr(pull_worker.MooncakePullRecvingThread, "_vllm_sorts_dcp_groups"):
-        delattr(pull_worker.MooncakePullRecvingThread, "_vllm_sorts_dcp_groups")
+    pull_worker.MooncakePullRecvingThread._vllm_sorts_dcp_groups = None
     thread = object.__new__(pull_worker.MooncakePullRecvingThread)
     thread.tp_rank = 0
     thread.tp_size = tp_size
