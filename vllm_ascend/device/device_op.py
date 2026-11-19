@@ -42,6 +42,13 @@ ACL_HOST_REG_PINNED = 0x10000000
 INT64_MAX = torch.iinfo(torch.int64).max
 _SFA_MAX_GENERIC_QUERY_GROUP_SIZE = 64
 _SFA_PADDED_QUERY_GROUP_SIZE = 128
+_CANN_QSFA_QUERY_HEADS = (1, 2, 4, 8, 16, 32, 48, 64, 128)
+_CANN_QSFA_ROPE_HEAD_DIM = 64
+_CANN_QSFA_QUERY_HEAD_DIM = 576
+_CANN_QSFA_PACKED_KV_HEAD_DIM = 656
+_CANN_QSFA_TILE_SIZE = 128
+_CANN_QSFA_PAGE_ALIGNMENT = 16
+_CANN_QSFA_MAX_PAGE_SIZE = 1024
 
 
 if HAS_TRITON:
@@ -746,8 +753,39 @@ class BaseDeviceAdaptor:
             if packed_query is not None
             else getattr(sfa_impl, "qk_rope_head_dim", 0 if q_pe is None else q_pe.shape[-1])
         )
+        query = query.contiguous()
+        tile_size = getattr(sfa_impl, "sfa_qsfa_tile_size", _CANN_QSFA_TILE_SIZE)
+        use_kimi_path = sfa_impl.is_kimi_k31 or packed_query is not None
+        if (
+            not (use_kimi_path or return_lse)
+            and get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+            and rope_head_dim == _CANN_QSFA_ROPE_HEAD_DIM
+            and tile_size == _CANN_QSFA_TILE_SIZE
+            and query.dtype in (torch.float16, torch.bfloat16)
+            and query.ndim == 3
+            and query.shape[1] in _CANN_QSFA_QUERY_HEADS
+            and query.shape[-1] == _CANN_QSFA_QUERY_HEAD_DIM
+            and kv.dtype in (torch.int8, torch.float8_e4m3fn)
+            and kv.shape[2:] == (1, _CANN_QSFA_PACKED_KV_HEAD_DIM)
+            and 0 < kv.shape[1] <= _CANN_QSFA_MAX_PAGE_SIZE
+            and kv.shape[1] % _CANN_QSFA_PAGE_ALIGNMENT == 0
+            and sparse_mode in (0, 3)
+        ):
+            available = getattr(torch.ops._C_ascend, "is_kv_quant_sparse_flash_attention_cann_v2_available", None)
+            if available is not None and available():
+                return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_cann_v2(
+                    query,
+                    kv,
+                    topk_indices,
+                    block_table,
+                    actual_seq_lengths_query,
+                    actual_seq_lengths_key,
+                    sfa_impl.scale,
+                    sparse_mode,
+                )
+
         kwargs = dict(
-            query=query.contiguous(),
+            query=query,
             key=kv,
             value=kv,
             sparse_indices=topk_indices,
@@ -761,12 +799,11 @@ class BaseDeviceAdaptor:
             sparse_mode=sparse_mode,
             attention_mode=2,
             quant_scale_repo_mode=1,
-            tile_size=getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
+            tile_size=tile_size,
             key_quant_mode=2,
             value_quant_mode=2,
             rope_head_dim=rope_head_dim,
         )
-        use_kimi_path = sfa_impl.is_kimi_k31 or packed_query is not None
         if use_kimi_path or return_lse or rope_head_dim == 0:
             # Kimi requires the LSE path to trim trailing invalid candidates.
             return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(

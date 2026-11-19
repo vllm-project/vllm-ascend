@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from importlib import import_module
 from itertools import accumulate
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -320,8 +321,55 @@ def test_a5_c8_lse(length, count, heads):
         (max_value + exp_sum.log()).reshape(-1), torch.logsumexp(scores, -1), atol=1e-5, rtol=1e-5
     )
     if count == 2048:
-        builtin = torch_npu.npu_kv_quant_sparse_flash_attention(**kwargs).cpu().float()
-        torch.testing.assert_close(output, builtin, atol=0, rtol=0)
+        q_nope, q_rope = kwargs["query"].split((nope_dim, rope_dim), dim=-1)
+        impl = SimpleNamespace(
+            enable_sparse_sfa_c8=True,
+            enable_sparse_sfa_turboquant=False,
+            is_kimi_k31=False,
+            qk_rope_head_dim=rope_dim,
+            scale=scale,
+            sfa_qsfa_tile_size=tile_size,
+        )
+        ascend_ops = torch.ops._C_ascend
+        assert ascend_ops.is_kv_quant_sparse_flash_attention_cann_v2_available()
+        with patch.object(
+            ascend_ops,
+            "npu_kv_quant_sparse_flash_attention_cann_v2",
+            wraps=ascend_ops.npu_kv_quant_sparse_flash_attention_cann_v2,
+        ) as ported_qsfa:
+            ported_output = AscendSFAImpl._execute_sparse_flash_attention_process(
+                impl,
+                q_nope,
+                q_rope,
+                (kwargs["key"],),
+                kwargs["sparse_indices"],
+                SimpleNamespace(block_table=kwargs["block_table"]),
+                kwargs["actual_seq_lengths_query"],
+                kwargs["actual_seq_lengths_kv"],
+            )
+            ported_qsfa.assert_called_once()
+        torch.testing.assert_close(ported_output[0].cpu().float(), reference, atol=1e-3, rtol=1e-2)
+        sinks = torch.linspace(-0.5, 0.5, heads, dtype=torch.float32)
+        sink_output, sink_max, sink_sum = ascend_ops.npu_kv_quant_sparse_flash_attention_cann_v2(
+            kwargs["query"],
+            kwargs["key"],
+            kwargs["sparse_indices"],
+            kwargs["block_table"],
+            kwargs["actual_seq_lengths_query"],
+            kwargs["actual_seq_lengths_kv"],
+            scale,
+            kwargs["sparse_mode"],
+            sinks=sinks.npu(),
+            return_softmax_lse=True,
+        )
+        reference_lse = torch.logsumexp(scores, -1)
+        reference_sink_lse = torch.logaddexp(reference_lse, sinks)
+        reference_sink_output = reference * (reference_lse - reference_sink_lse).exp()[:, None]
+        assert sink_max.shape == sink_sum.shape == (1, 1, heads)
+        torch.testing.assert_close(sink_output[0].cpu().float(), reference_sink_output, atol=1e-3, rtol=1e-2)
+        torch.testing.assert_close(
+            (sink_max.cpu() + sink_sum.cpu().log()).reshape(-1), reference_sink_lse, atol=1e-5, rtol=1e-5
+        )
 
 
 NOPE_DIM = 512

@@ -2247,6 +2247,44 @@ bool is_minimax_sparse_attention_split_kv_available()
     return is_available;
 }
 
+bool is_kv_quant_sparse_flash_attention_cann_v2_available()
+{
+    static const bool available =
+        GetOpApiFuncAddr("aclnnKvQuantSparseFlashAttentionCannV2") != nullptr &&
+        GetOpApiFuncAddr("aclnnKvQuantSparseFlashAttentionCannV2GetWorkspaceSize") != nullptr;
+    return available;
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attention_cann_v2(
+    const at::Tensor &query, const at::Tensor &kv, const at::Tensor &sparse_indices,
+    const at::Tensor &block_table, const at::Tensor &actual_seq_lengths_query,
+    const at::Tensor &actual_seq_lengths_kv, double scale_value, int64_t sparse_mode,
+    const c10::optional<at::Tensor> &sinks, bool return_softmax_lse)
+{
+    constexpr int64_t rope_head_dim = 64;
+    constexpr int64_t per_tile_quant_mode = 2;
+    constexpr int64_t token_sparse_block_size = 1;
+    constexpr int64_t mla_absorb_mode = 2;
+    constexpr int64_t combine_scales_mode = 1;
+    constexpr int64_t quant_tile_size = 128;
+    constexpr int64_t unlimited_tokens = std::numeric_limits<int64_t>::max();
+    TORCH_CHECK(query.dim() == 3 && query.size(-1) > rope_head_dim,
+                "Expected a TND query with a 64-element RoPE component");
+    auto result = construct_kv_quant_sparse_flash_attention_vllm_output_tensor(
+        query, kv, "TND", "PA_BSND", rope_head_dim, return_softmax_lse);
+    auto &[output, softmax_max, softmax_sum] = result;
+    char query_layout[] = "TND";
+    char kv_layout[] = "PA_BSND";
+    const c10::optional<at::Tensor> external_scale = c10::nullopt;
+    EXEC_NPU_CMD(
+        aclnnKvQuantSparseFlashAttentionCannV2, query, kv, kv, sparse_indices, external_scale, external_scale,
+        block_table, actual_seq_lengths_query, actual_seq_lengths_kv, sinks, scale_value, per_tile_quant_mode,
+        per_tile_quant_mode, token_sparse_block_size, query_layout, kv_layout, sparse_mode, unlimited_tokens,
+        unlimited_tokens, mla_absorb_mode, combine_scales_mode, quant_tile_size, rope_head_dim, return_softmax_lse,
+        output, softmax_max, softmax_sum);
+    return result;
+}
+
 std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)
 {
     TORCH_CHECK(
@@ -3240,6 +3278,16 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_kv_quant_sparse_flash_attention_vllm", torch::kPrivateUse1,
              &vllm_ascend::npu_kv_quant_sparse_flash_attention_vllm);
+
+    ops.def("is_kv_quant_sparse_flash_attention_cann_v2_available() -> bool");
+    ops.impl("is_kv_quant_sparse_flash_attention_cann_v2_available", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::is_kv_quant_sparse_flash_attention_cann_v2_available);
+    ops.def("npu_kv_quant_sparse_flash_attention_cann_v2(Tensor query, Tensor kv, Tensor sparse_indices, "
+            "Tensor block_table, Tensor actual_seq_lengths_query, Tensor actual_seq_lengths_kv, "
+            "float scale_value, int sparse_mode, *, Tensor? sinks=None, bool return_softmax_lse=False) "
+            "-> (Tensor attention_out, Tensor softmax_max, Tensor softmax_sum)");
+    ops.impl("npu_kv_quant_sparse_flash_attention_cann_v2", torch::kPrivateUse1,
+             &vllm_ascend::npu_kv_quant_sparse_flash_attention_cann_v2);
 
     ops.def(
         "dispatch_ffn_combine(Tensor x, Tensor[] weight1, Tensor[] weight2, Tensor expert_idx,"

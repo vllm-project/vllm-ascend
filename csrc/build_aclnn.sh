@@ -209,6 +209,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "quant_lightning_indexer_v2_metadata"
         "kv_quant_sparse_attn_sharedkv"
         "kv_quant_sparse_flash_attention_vllm"
+        "kv_quant_sparse_flash_attention_cann_v2"
         "kv_quant_sparse_attn_sharedkv_metadata"
         "hc_post"
         "hc_pre"
@@ -290,6 +291,9 @@ log_selected_ops
   chmod +x -- "${installer_candidates[0]}" || true
   log "running installer: ${installer_candidates[0]}"
   "${installer_candidates[0]}" --install-path="${custom_ops_install_dir}" --install-for-all
+  if [[ "$SOC_ARG" == "ascend950" ]]; then
+    cp attention/kv_quant_sparse_flash_attention_cann_v2/LICENSE "$custom_ops_install_dir/LICENSE.CANN-QSFA"
+  fi
   # CANN leaves generated vendor script dirs owner-read-only; keep repo-local
   # editable-build artifacts removable by the non-root user who built them.
   if [[ -d "${custom_ops_install_dir}/vendors/custom_transformer/scripts" ]]; then
