@@ -30,6 +30,7 @@ import importlib.util
 import subprocess
 import sys
 import types
+from importlib.machinery import PathFinder
 from unittest.mock import MagicMock
 
 try:
@@ -300,6 +301,28 @@ _stale_modules = [
 ]
 for _m in _stale_modules:
     del sys.modules[_m]
+
+
+@pytest.fixture
+def fa3_backend(monkeypatch):
+    """Load FA3 with CPU operators while preserving any previously imported backend."""
+    import torch
+
+    from vllm_ascend import attention
+
+    operators = types.ModuleType("flash_attn_npu_3")
+    operators.__spec__ = importlib.util.spec_from_loader(operators.__name__, loader=None)
+    operators.get_scheduler_metadata = MagicMock(side_effect=lambda **_: torch.zeros(8, dtype=torch.uint8))
+    operators.flash_attn_with_kvcache = MagicMock(side_effect=lambda query, *_args, **_kwargs: query + 1)
+    monkeypatch.setitem(sys.modules, operators.__name__, operators)
+
+    spec = PathFinder.find_spec("vllm_ascend.attention.flash_attention_v3", attention.__path__)
+    assert spec is not None and spec.loader is not None
+    backend = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, backend)
+    monkeypatch.setattr(attention, "flash_attention_v3", backend, raising=False)
+    spec.loader.exec_module(backend)
+    return backend
 
 
 @pytest.fixture(autouse=True)

@@ -10,7 +10,6 @@ from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 
-from vllm_ascend.attention.fa3_selection import MINIMAX_M3_ARCHITECTURES
 from vllm_ascend.utils import is_deepseek_v41, is_gqa_pcp_dcp_config
 
 _orig_post_init = SpeculativeConfig.__post_init__
@@ -20,6 +19,10 @@ _orig_hf_config_override = SpeculativeConfig.hf_config_override
 # contract and ``draft_hf_override`` live in
 # ``vllm_ascend.models.minimax_m3.minimax_m3_dspark``.
 _MINIMAX_DRAFT_ARCHITECTURE = "DSparkMiniMaxDraftModel"
+
+# MiniMax-M3 target architectures that ship the DSpark draft as a standalone
+# checkpoint in the ``dspark/`` subfolder of the target checkpoint.
+_MINIMAX_M3_ARCHITECTURES = frozenset({"MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration"})
 _MINIMAX_M3_DSPARK_SUBFOLDER = "dspark"
 
 
@@ -282,7 +285,7 @@ def _default_minimax_m3_dspark_draft(self):
     if target is None:
         return None
     architectures = getattr(getattr(target, "hf_config", None), "architectures", None) or ()
-    if getattr(self, "method", None) != "dspark" or not MINIMAX_M3_ARCHITECTURES.intersection(architectures):
+    if getattr(self, "method", None) != "dspark" or not _MINIMAX_M3_ARCHITECTURES.intersection(architectures):
         return None
     root = Path(target.model).resolve()
     requested = getattr(self, "model", None)

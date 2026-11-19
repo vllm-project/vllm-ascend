@@ -19,6 +19,7 @@
 
 import inspect
 import logging
+import sys
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
@@ -72,7 +73,6 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
-from vllm_ascend.attention.flash_attention_v3 import AscendFlashAttentionBackend as AscendFA3Backend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
@@ -1376,6 +1376,12 @@ class NPUModelRunner(GPUModelRunner):
         ):
             # Qwen GDN and the initialized FA3 draft use exact device counts.
             # Skip the snapshot and Event together only for audited consumers.
+            # If the selector used FA3, its optional backend is already loaded.
+            fa3_backend = getattr(
+                sys.modules.get("vllm_ascend.attention.flash_attention_v3"), "AscendFlashAttentionBackend", None
+            )
+            if fa3_backend is None:
+                return False
             draft_backends = getattr(self.speculator, "attn_backends", {})
             backends = [group.backend for groups in getattr(self, "attn_groups", []) for group in groups]
             parallel = self.parallel_config
@@ -1383,7 +1389,7 @@ class NPUModelRunner(GPUModelRunner):
                 spec.parallel_drafting
                 and isinstance(getattr(self, "model_state", None), MambaHybridModelState)
                 and bool(draft_backends)
-                and all(backend is AscendFA3Backend for backend in draft_backends.values())
+                and all(backend is fa3_backend for backend in draft_backends.values())
                 and AscendAttentionBackend in backends
                 and AscendGDNFusedAttentionBackend in backends
                 and all(
@@ -1391,7 +1397,7 @@ class NPUModelRunner(GPUModelRunner):
                     in (
                         AscendAttentionBackend,
                         AscendGDNFusedAttentionBackend,
-                        AscendFA3Backend,
+                        fa3_backend,
                     )
                     for backend in backends
                 )

@@ -256,19 +256,12 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
 
 
 @pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY])
-def test_qwen_fa3_metadata_keeps_rejected_lengths_on_device(monkeypatch, mode):
-    import sys
-
+def test_qwen_fa3_metadata_keeps_rejected_lengths_on_device(monkeypatch, fa3_backend, mode):
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
     from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
-    from vllm_ascend.attention.flash_attention_v3 import (
-        AscendFlashAttentionImpl,
-        AscendFlashAttentionMetadataBuilder,
-    )
-
     names = [f"draft.layers.{i}" for i in range(6)]
-    impl = AscendFlashAttentionImpl(8, 128, 128**-0.5, num_kv_heads=1)
+    impl = fa3_backend.AscendFlashAttentionImpl(8, 128, 128**-0.5, num_kv_heads=1)
     config = SimpleNamespace(
         compilation_config=SimpleNamespace(
             cudagraph_mode=mode,
@@ -280,9 +273,9 @@ def test_qwen_fa3_metadata_keeps_rejected_lengths_on_device(monkeypatch, mode):
         model_config=SimpleNamespace(max_model_len=1024),
     )
     kv_spec = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
-    builder = AscendFlashAttentionMetadataBuilder(kv_spec, names, config, torch.device("cpu"))
+    builder = fa3_backend.AscendFlashAttentionMetadataBuilder(kv_spec, names, config, torch.device("cpu"))
     tiling = MagicMock(side_effect=lambda **_: torch.empty(16, dtype=torch.int32))
-    monkeypatch.setitem(sys.modules, "flash_attn_npu_3", SimpleNamespace(get_scheduler_metadata=tiling))
+    monkeypatch.setattr(fa3_backend, "get_scheduler_metadata", tiling)
     speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
     speculator.vllm_config, speculator.draft_max_seq_len, speculator.dcp_size = config, 1024, 1
     speculator.arange_np = torch.arange(5, dtype=torch.int32).numpy()

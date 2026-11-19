@@ -1,4 +1,5 @@
 import ast
+import sys
 from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 from pathlib import Path
@@ -31,7 +32,6 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
-from vllm_ascend.attention.flash_attention_v3 import AscendFlashAttentionBackend as AscendFA3Backend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
 from vllm_ascend.utils import vllm_version_is
@@ -794,7 +794,7 @@ def test_load_model_joins_warmups_when_weight_loading_fails():
 
 @pytest.mark.parametrize("draft_tag", ["eagle_head", "dflash_head", "dspark_head"])
 @pytest.mark.parametrize("fail_load", [False, True])
-def test_load_model_isolates_attention_backend_cache_by_model_tag(monkeypatch, draft_tag, fail_load):
+def test_load_model_isolates_attention_backend_cache_by_model_tag(monkeypatch, fa3_backend, draft_tag, fail_load):
     runner = _make_runner()
     config = runner.vllm_config
     config.cache_config = SimpleNamespace(user_specified_block_size=True, block_size=128, cache_dtype="auto")
@@ -804,10 +804,11 @@ def test_load_model_isolates_attention_backend_cache_by_model_tag(monkeypatch, d
     original_selector = selector._cached_get_attn_backend
     original_selector.cache_clear()
     selected_tags = []
+    target_backend = fa3_backend.AscendFlashAttentionBackend
 
     def select_backend(*_args, **_kwargs):
         selected_tags.append(backends.model_tag)
-        backend = AscendFA3Backend if backends.model_tag == "backbone" else AscendAttentionBackend
+        backend = target_backend if backends.model_tag == "backbone" else AscendAttentionBackend
         return f"{backend.__module__}.{backend.__name__}"
 
     monkeypatch.setattr("vllm.platforms.current_platform", SimpleNamespace(get_attn_backend_cls=select_backend))
@@ -819,14 +820,14 @@ def test_load_model_isolates_attention_backend_cache_by_model_tag(monkeypatch, d
         return selector.get_attn_backend(head_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto", num_heads=8)
 
     def load_target_and_draft(*_args, **_kwargs):
-        assert select_attention() is AscendFA3Backend
-        assert select_attention() is AscendFA3Backend
+        assert select_attention() is target_backend
+        assert select_attention() is target_backend
         with backends.set_model_tag(draft_tag):
             assert select_attention() is AscendAttentionBackend
             assert select_attention() is AscendAttentionBackend
             if fail_load:
                 raise RuntimeError("draft loading failed")
-        assert select_attention() is AscendFA3Backend
+        assert select_attention() is target_backend
 
     try:
         with (
@@ -837,7 +838,7 @@ def test_load_model_isolates_attention_backend_cache_by_model_tag(monkeypatch, d
             patch("vllm_ascend.model_executor.warmup.nz_warmup.join_nz_warm_thread"),
         ):
             # A previously cached target selection must not leak into loading.
-            assert select_attention() is AscendFA3Backend
+            assert select_attention() is target_backend
             if fail_load:
                 with pytest.raises(RuntimeError, match="draft loading failed"):
                     runner.load_model()
@@ -845,7 +846,7 @@ def test_load_model_isolates_attention_backend_cache_by_model_tag(monkeypatch, d
                 runner.load_model()
             assert selector._cached_get_attn_backend is original_selector
             assert backends.model_tag == "backbone"
-            assert select_attention() is AscendFA3Backend
+            assert select_attention() is target_backend
         # One pre-existing entry, then one selection per tag in the load scope.
         assert selected_tags == ["backbone", "backbone", draft_tag]
     finally:
@@ -2222,7 +2223,7 @@ def test_glm_dflash2_device_lengths_do_not_require_attention_groups(model_type):
     assert runner._can_skip_spec_cpu_length_sync() is True
 
 
-def _qwen_dflash2_device_length_runner():
+def _qwen_dflash2_device_length_runner(draft_backend):
     from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
     runner, output, batch = _device_length_runner()
@@ -2234,18 +2235,25 @@ def _qwen_dflash2_device_length_runner():
     )
     runner.speculative_config.parallel_drafting = True
     runner.speculative_config.enable_adaptive_verification = False
-    runner.speculator = SimpleNamespace(attn_backends={"draft.0": AscendFA3Backend})
+    runner.speculator = SimpleNamespace(attn_backends={"draft.0": draft_backend})
     runner.attn_groups = [
         [SimpleNamespace(backend=backend)] for backend in (AscendAttentionBackend, AscendGDNFusedAttentionBackend)
     ]
     return runner, output, batch
 
 
+def test_qwen_dflash2_keeps_length_sync_without_fa3(monkeypatch):
+    monkeypatch.setitem(sys.modules, "vllm_ascend.attention.flash_attention_v3", None)
+    monkeypatch.setitem(sys.modules, "flash_attn_npu_3", None)
+    runner, _, _ = _qwen_dflash2_device_length_runner(AscendFlashAttentionBackend)
+    assert runner._can_skip_spec_cpu_length_sync() is False
+
+
 @pytest.mark.parametrize("blocked", [None, "draft_backend", "target_backend", "model_state", "pp", "kv_transfer"])
-def test_qwen_dflash2_length_snapshot_and_wait_share_backend_guard(blocked):
-    runner, output, batch = _qwen_dflash2_device_length_runner()
+def test_qwen_dflash2_length_snapshot_and_wait_share_backend_guard(fa3_backend, blocked):
+    runner, output, batch = _qwen_dflash2_device_length_runner(fa3_backend.AscendFlashAttentionBackend)
     if blocked == "draft_backend":
-        runner.speculator.attn_backends["draft.0"] = AscendAttentionBackend
+        runner.speculator.attn_backends["draft.0"] = AscendFlashAttentionBackend
     elif blocked == "target_backend":
         runner.attn_groups[0][0].backend = AscendMLABackend
     elif blocked == "model_state":

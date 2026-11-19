@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import torch
+from flash_attn_npu_3 import flash_attn_with_kvcache, get_scheduler_metadata  # type: ignore[import-not-found]
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.logger import logger
 from vllm.v1.attention.backend import (
@@ -87,6 +88,7 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
     # Per-request query offsets let one paged call handle mixed prefill/decode
     # and multi-token verification in the existing request order.
     reorder_batch_threshold = None
+    is_speculative = False
 
     def __init__(
         self,
@@ -149,9 +151,6 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
     ) -> AscendFlashAttentionMetadata:
-        # Load the optional extension only in workers selecting this backend.
-        from flash_attn_npu_3 import get_scheduler_metadata
-
         common = common_attn_metadata
         num_reqs = common.num_reqs
         # The runner can append zero-length or dummy requests for graph padding.
@@ -337,8 +336,6 @@ class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):
         # Both runners can profile the model before attention metadata exists.
         if attn_metadata is None:
             return output.fill_(0)
-
-        from flash_attn_npu_3 import flash_attn_with_kvcache
 
         if key is not None and value is not None:
             num_tokens = attn_metadata.num_actual_tokens
