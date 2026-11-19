@@ -33,6 +33,9 @@ from types import MappingProxyType
 from vllm_ascend.device.device_config import get_device_config
 from vllm_ascend.device.hardware import AscendDeviceType
 
+DCP_HEAD_SCATTER_SINGLE_ROW = 0
+DCP_HEAD_SCATTER_MULTI_ROW = 1
+
 
 class HardwareCapability(Enum):
     """Binary contracts consumed by shared business logic.
@@ -292,6 +295,8 @@ class HardwareProfile:
     # Independent, additive contracts queried with ``supports``.
     capabilities: frozenset[HardwareCapability]
 
+    # A5 streams rank contributions across eight output rows per tile.
+    dcp_head_scatter_mode: int = DCP_HEAD_SCATTER_SINGLE_ROW
     # NZ mm/addmm is supported, but batched matmul rejects NZ weights.
     requires_2d_nz_linear_input: bool = False
     # A5 uses mixed softmax for compatibility with CANN GBSA packages that
@@ -440,6 +445,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A5: HardwareProfile(
             _device_type=AscendDeviceType.A5,
+            dcp_head_scatter_mode=DCP_HEAD_SCATTER_MULTI_ROW,
             requires_2d_nz_linear_input=True,
             minimax_m3_gbsa_bf16_softmax_precision=1,
             attention_backend_family=AttentionBackendFamily.STANDARD,

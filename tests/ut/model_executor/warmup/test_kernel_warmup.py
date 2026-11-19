@@ -15,6 +15,8 @@ from tests.ut.model_executor.warmup.helpers import (
     make_mock_vllm_config,
     make_registry,
 )
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.triton import rms_norm
 from vllm_ascend.ops.triton.dcp import dcp_a2a, dcp_warmup
 from vllm_ascend.ops.triton.dcp.dcp_jit import DcpJitKernel
@@ -211,9 +213,17 @@ def _dcp_warmup_keys(registry):
     }
 
 
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize(
+    "device_type,dtype,expected_mode",
+    [
+        (AscendDeviceType.A3, torch.bfloat16, 0),
+        (AscendDeviceType.A5, torch.bfloat16, 1),
+        (AscendDeviceType.A5, torch.float16, None),
+    ],
+)
 @pytest.mark.parametrize("tokens", [1, 33])
-def test_runtime_combine_matches_registered_warmup(dtype, tokens):
+def test_runtime_combine_matches_registered_warmup(device_type, dtype, expected_mode, tokens, monkeypatch):
+    monkeypatch.setattr(dcp_a2a, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
     heads, dim, ranks = 12, 512, 8
     registry = _register_dcp_warmup(
         dtype=dtype,
@@ -230,14 +240,16 @@ def test_runtime_combine_matches_registered_warmup(dtype, tokens):
     launch = MagicMock()
     dcp_a2a._launch_fused_dcp_lse_combine(recv, output, dim, 1, False, None, None, 24, launch)
     launch.assert_called_once()
-    expected = (
-        dcp_a2a._fused_dcp_lse_combine_head_scatter_kernel
-        if dtype == torch.bfloat16
-        else dcp_a2a._fused_dcp_lse_combine_kernel
-    )
+    head_scatter = dcp_a2a._fused_dcp_lse_combine_head_scatter_kernel
+    scalar = dcp_a2a._fused_dcp_lse_combine_kernel
+    expected = scalar if expected_mode is None else head_scatter
     assert launch.call_args.args[0] is expected
-    combine_kernels = {dcp_a2a._fused_dcp_lse_combine_kernel, dcp_a2a._fused_dcp_lse_combine_head_scatter_kernel}
-    assert {owner.kernel for owner in registry._registrations} & combine_kernels == {expected}
+    assert launch.call_args.kwargs.get("MODE") == expected_mode
+    registered = _dcp_warmup_keys(registry)
+    assert {owner.kernel for owner in registered} & {scalar, head_scatter} == {expected}
+    owner = next(owner for owner in registered if owner.kernel is expected)
+    modes = {dict(key.inputs).get("MODE") for key in registered[owner]}
+    assert modes == {expected_mode}
 
 
 @pytest.mark.parametrize(

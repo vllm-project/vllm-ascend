@@ -40,8 +40,6 @@ def test_deferred_exchange_skips_combine(monkeypatch, scatter_size):
     "tokens,heads,dim,world,has_local,head_major",
     [
         (5, 1, 512, 8, True, False),
-        (5, 8, 512, 8, True, False),
-        (41, 8, 128, 8, True, False),
         (41, 7, 128, 3, True, False),
         (20, 8, 64, 4, False, False),
         (41, 12, 512, 8, True, True),

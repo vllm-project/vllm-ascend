@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from tests.e2e.nightly.single_node.ops.singlecard_ops.triton.dcp_test_utils import assert_dcp_close
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.ops.triton.dcp import dcp_a2a
 from vllm_ascend.ops.triton.dcp.dcp_a2a import (
     fused_dcp_lse_combine,
@@ -421,7 +422,7 @@ def test_head_scatter_combine(shape, edge, monkeypatch):
     launch = dcp_a2a._launch_kernel
 
     def record_launch(fn, *args, **kwargs):
-        launches.append(fn.__name__)
+        launches.append((fn.__name__, kwargs.get("MODE")))
         return launch(fn, *args, **kwargs)
 
     monkeypatch.setattr(dcp_a2a, "_launch_kernel", record_launch)
@@ -430,4 +431,4 @@ def test_head_scatter_combine(shape, edge, monkeypatch):
     assert torch.isfinite(actual).all()
     assert (error <= 2e-5 + 0.004 * expected.abs()).double().mean() >= 0.99
     assert error.max() <= 0.02
-    assert launches == ["_fused_dcp_lse_combine_head_scatter_kernel"]
+    assert launches == [("_fused_dcp_lse_combine_head_scatter_kernel", int(is_950()))]

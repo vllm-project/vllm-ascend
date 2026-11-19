@@ -140,7 +140,7 @@ whose logical PCP config is disabled. Repeated layer layouts register once.
 
 The compile-only owners in `dcp/dcp_jit.py` and `dcp/dcp_warmup.py` use the same
 JITFunction objects and launch-construction functions as runtime. They cover
-scalar/batched pack, scalar/row-weighted combine, T1/full-vector/tiled exchange packing, and
+scalar/batched pack, scalar and mode-specialized head-scatter combine, T1/full-vector/tiled exchange packing, and
 fast merge. SFA uses its contiguous native/QSFA output and FP32 max/sum views;
 TurboQuant supplies already-computed LSE. MLA additionally covers FIA output,
 single-batch BSND LSE views, transposed FlashMLA output/LSE, and deferred history
