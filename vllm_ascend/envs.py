@@ -92,6 +92,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Runtime-guard rare_chars: "1" runs collect-wait + D2H + detector feed on the
+    # caller thread (no RareLogprobFeedQueue). "0"/unset keeps the async hide path.
+    # Debug / A-B only — do not enable in production throughput runs.
+    "VLLM_ASCEND_RG_RARE_SYNC_FEED": lambda: _bool_env("VLLM_ASCEND_RG_RARE_SYNC_FEED", False),
 }
 
 # end-env-vars-definition

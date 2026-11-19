@@ -630,24 +630,60 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             pass
         import torch
 
-        from vllm_ascend.observability.runtime_guard.detector.rare_chars import last_sampled_token_ids
+        from vllm_ascend.observability.runtime_guard.detector.rare_chars import (
+            align_sampled_token_ids_to_logits,
+        )
 
         if not isinstance(logits, torch.Tensor) or not isinstance(sampled_token_ids, torch.Tensor):
             return
         if logits.numel() == 0 or logits.dim() != 2:
             return
         try:
-            token_ids = last_sampled_token_ids(sampled_token_ids)
-            if token_ids.numel() != logits.shape[0]:
+            cu_num_logits = self._rare_cu_num_logits()
+            aligned = align_sampled_token_ids_to_logits(
+                sampled_token_ids,
+                int(logits.shape[0]),
+                cu_num_logits=cu_num_logits,
+            )
+            if aligned is None:
                 return
+            token_ids, slots_per_req, cu_aligned = aligned
             from vllm_ascend.worker.v2.sample.logprob import compute_top1_and_chosen_logprobs
 
             packed = compute_top1_and_chosen_logprobs(logits, token_ids, packed=True)
-            self._stash_rare_batch(packed)
+            if slots_per_req > 1:
+                logger.info_once("[runtime_guard: rare_chars] MTP-aligned collect enabled (slots_per_req>1)")
+            elif cu_aligned is not None:
+                logger.info_once("[runtime_guard: rare_chars] adaptive/cu_num_logits collect enabled")
+            self._stash_rare_batch(
+                packed,
+                token_ids=token_ids,
+                slots_per_req=slots_per_req,
+                cu_num_logits=cu_aligned,
+            )
         except Exception:
             logger.exception("[runtime_guard: rare_chars] collect failed")
 
-    def _stash_rare_batch(self, packed: Any) -> None:
+    def _rare_cu_num_logits(self) -> Any | None:
+        """Best-effort ``cu_num_logits`` from the current sample-phase batch."""
+        batch = getattr(self, "_last_input_batch", None)
+        if batch is None:
+            batch = getattr(self.runner, "input_batch", None)
+        if batch is None:
+            return None
+        cu = getattr(batch, "cu_num_logits_np", None)
+        if cu is not None:
+            return cu
+        return getattr(batch, "cu_num_logits", None)
+
+    def _stash_rare_batch(
+        self,
+        packed: Any,
+        *,
+        token_ids: Any | None = None,
+        slots_per_req: int = 1,
+        cu_num_logits: list[int] | None = None,
+    ) -> None:
         """Stash this step's :class:`RareLogprobBatch` for AsyncOutput."""
         import torch
 
@@ -665,7 +701,16 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             ready_event.record(main_stream)
         else:
             ready_event.record()
-        self._step_rare_batch = RareLogprobBatch(device_logprobs=packed, ready_event=ready_event)
+        tok = None
+        if isinstance(token_ids, torch.Tensor):
+            tok = token_ids.detach()
+        self._step_rare_batch = RareLogprobBatch(
+            device_logprobs=packed,
+            ready_event=ready_event,
+            device_token_ids=tok,
+            slots_per_req=int(slots_per_req),
+            cu_num_logits=list(cu_num_logits) if cu_num_logits is not None else None,
+        )
 
     def take_step_rare_batch(self) -> Any | None:
         """Detach this step's :class:`RareLogprobBatch` for AsyncOutput."""
@@ -673,12 +718,13 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         self._step_rare_batch = None
         return pending
 
-    def _copy_rare_batch_to_host(self, batch: Any) -> Any:
-        """Wait for collect, then D2H ``[rows, 2]`` to pinned host memory."""
+    def _copy_rare_batch_to_host(self, batch: Any) -> tuple[Any, Any] | None:
+        """Wait for collect, then D2H pairs (+ optional aligned token ids)."""
         import torch
         from vllm.v1.worker.gpu.async_utils import stream as copy_stream_ctx
 
         packed = batch.device_logprobs
+        token_ids = getattr(batch, "device_token_ids", None)
         ready_event = batch.ready_event
         if ready_event is not None:
             ready_event.synchronize()
@@ -688,15 +734,22 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         copy_stream = getattr(runner, "output_copy_stream", None)
         main_stream = getattr(runner, "main_stream", None)
         cpu = torch.empty(packed.shape, dtype=torch.float32, device="cpu", pin_memory=True)
+        cpu_tok = None
+        if isinstance(token_ids, torch.Tensor):
+            cpu_tok = torch.empty(token_ids.shape, dtype=torch.int64, device="cpu", pin_memory=True)
         if copy_stream is None or main_stream is None:
             cpu.copy_(packed)
-            return cpu
+            if cpu_tok is not None:
+                cpu_tok.copy_(token_ids)
+            return cpu, cpu_tok
         copy_ev = torch.cuda.Event(blocking=True)
         with copy_stream_ctx(copy_stream, main_stream):
             cpu.copy_(packed, non_blocking=True)
+            if cpu_tok is not None:
+                cpu_tok.copy_(token_ids, non_blocking=True)
             copy_ev.record(copy_stream)
         copy_ev.synchronize()
-        return cpu
+        return cpu, cpu_tok
 
     def feed_rare_logprobs(self, output: Any, *, batch: Any | None = None) -> None:
         """Submit rare logprob D2H + detector feed onto RareLogprobFeedQueue."""
@@ -705,6 +758,8 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         req_ids = [str(rid) for rid in (getattr(output, "req_ids", None) or []) if rid]
         n_req = len(req_ids)
         sampled = getattr(output, "sampled_token_ids", None)
+        slots_per_req = int(getattr(batch, "slots_per_req", 1) or 0)
+        cu_num_logits = getattr(batch, "cu_num_logits", None)
 
         if n_req <= 0:
             if batch.ready_event is not None:
@@ -723,12 +778,23 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             n_req=n_req,
             sampled=sampled,
             pinned_ids=pinned,
+            slots_per_req=slots_per_req,
+            cu_num_logits=cu_num_logits,
         ) -> None:
             try:
-                cpu = self._copy_rare_batch_to_host(rare_batch)
+                copied = self._copy_rare_batch_to_host(rare_batch)
                 del rare_batch
-                if cpu is not None and n_req > 0:
-                    self._pack_and_feed_rare(cpu, sampled, req_ids, n_req)
+                if copied is not None and n_req > 0:
+                    cpu, cpu_tok = copied
+                    self._pack_and_feed_rare(
+                        cpu,
+                        sampled,
+                        req_ids,
+                        n_req,
+                        host_token_ids=cpu_tok,
+                        slots_per_req=slots_per_req,
+                        cu_num_logits=cu_num_logits,
+                    )
             except Exception:
                 logger.exception("[runtime_guard: rare_chars] async feed finish failed")
             finally:
@@ -737,7 +803,14 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
 
         from vllm_ascend.observability.runtime_guard.rare_logprob_feed import (
             get_rare_logprob_feed_queue,
+            rare_sync_feed_enabled,
         )
+
+        # Debug short path: D2H+feed on this thread (no async hide). Default stays queue.
+        if rare_sync_feed_enabled():
+            logger.info_once("[runtime_guard: rare_chars] sync feed (VLLM_ASCEND_RG_RARE_SYNC_FEED=1; debug only)")
+            _finish_feed()
+            return
 
         ok = bool(get_rare_logprob_feed_queue().submit(_finish_feed))
         if not ok:
@@ -757,23 +830,36 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         sampled: Any,
         req_ids: list[str],
         n_req: int,
+        *,
+        host_token_ids: Any | None = None,
+        slots_per_req: int = 1,
+        cu_num_logits: list[int] | None = None,
     ) -> None:
         try:
             from vllm_ascend.observability.runtime_guard.detector.rare_chars import build_rare_feed_arrays
 
-            token_ids, top1, chosen = build_rare_feed_arrays(cpu, sampled, n_req)
+            token_ids, top1, chosen, expanded_req_ids = build_rare_feed_arrays(
+                cpu,
+                sampled,
+                n_req,
+                host_token_ids=host_token_ids,
+                slots_per_req=slots_per_req,
+                req_ids=req_ids,
+                cu_num_logits=cu_num_logits,
+            )
         except Exception:
             logger.exception("[runtime_guard: rare_chars] feed array materialize failed")
             return
         n = int(token_ids.shape[0])
         if n <= 0:
             return
+        feed_req_ids = expanded_req_ids if expanded_req_ids is not None else req_ids[:n]
         detector = self.detectors.get("rare_chars")
         if detector is None:
             return
         try:
             for alert in detector.feed_precomputed(
-                req_ids=req_ids[:n],
+                req_ids=feed_req_ids[:n],
                 token_ids=token_ids,
                 top1_logprobs=top1,
                 chosen_logprobs=chosen,

@@ -20,7 +20,8 @@
  * The worker thread can launch NPU kernels while this runs on ActionQueue.
  * Pointers passed in are borrowed numpy buffers; no Python calls in feed_impl.
  *
- * Rule feature ids and GB input kinds must match rare_native.py.
+ * Rule feature ids (FT_*) and GB input kinds (IN_*) are the single source of
+ * truth; rare_enums.py / rare_native.py load them (CI asserts no drift).
  */
 
 #define PY_SSIZE_T_CLEAN

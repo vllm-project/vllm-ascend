@@ -87,10 +87,35 @@ Report JSON top-level includes `dump_attempted` (whether `dump_kv` was in `on_tr
 |------|-------|-------------|
 | `token_repeat` | after sample | Stutter / repetition |
 | `logits_finite` | before sample | NaN/Inf logits (``isfinite`` + gate; default **async** ``.item()`` wait at after-sample — logits may be mutated by grammar before wait; set ``item_sync: true`` for sync pre-sample gate/kind). Hit resolves indices/kind then enqueues; after-sample drains. Unattributable rows: warning only (no guessed / null-req report). |
-| `rare_chars` | after sample (Guard logits stash) | Visible garbled / foreign-script / illegal UTF-8. Per-tokenizer table built at warmup from the served tokenizer; `think_end` / `alert_monitor` come from packaged `rare.json`. Sampler-side narrow collect: Ascend Triton `_narrow_collect_partials`/`_narrow_collect_finish` on a **cloned** pre-grammar logits snapshot (survives structured-output bitmask; also hooks batch-sharded `all_to_all_logits`) → `(top1, sampled)` only — **does not require** API ``logprobs``. Per-step `RareLogprobBatch` rides on `AscendAsyncOutput`; collect-wait + D2H + feed run on `RareLogprobFeedQueue`; finish flushes look-ahead at reap after `rare_feed_jobs` drain. Shadow/report oriented. |
+| `rare_chars` | after sample (Guard logits stash) | Visible garbled / foreign-script / illegal UTF-8. Per-tokenizer table built at warmup from the served tokenizer; `think_end` / `alert_monitor` come from packaged `rare.json`. Sampler-side narrow collect: Ascend Triton `_narrow_collect_partials`/`_narrow_collect_finish` on a **cloned** pre-grammar logits snapshot (survives structured-output bitmask; also hooks batch-sharded `all_to_all_logits`) → `(top1, sampled)` only — **does not require** API ``logprobs``. Per-step `RareLogprobBatch` rides on `AscendAsyncOutput`; collect-wait + D2H + feed run on `RareLogprobFeedQueue`; finish flushes look-ahead at reap after `rare_feed_jobs` drain. Shadow/report oriented. See [rare_chars pipeline](#rare_chars-pipeline) below. |
 | `spec_acceptance` | after spec | Spec-decode acceptance drift (via `run_sample_phase` → `check_after_spec`; v2 stashes accept stats in `postprocess_sampled`) |
 
 All detectors default to **disabled**. Enable individually under `detector.<name>.enabled`.
+
+### rare_chars pipeline
+
+Multi-stage on purpose so D2H + CPU feed can overlap with the next forward / AsyncOutput path — do not collapse onto the inference thread by default.
+
+```
+pre-sample: stash logits clone
+    → after sample: Triton collect (top1, chosen) → RareLogprobBatch + ready_event
+    → AscendAsyncOutput.get_output submits RareLogprobFeedQueue job
+    → FeedQueue: sync collect → D2H → native pack/feed (GIL released)
+    → finish/reap waits rare_feed_jobs then flushes look-ahead
+```
+
+**Guard state (process-local):**
+
+| Latch / map | Meaning |
+|-------------|---------|
+| `_warmup_failed` | Warmup/native bind failed → skip stash/collect until `detector.rare_chars.enabled` is toggled off then on |
+| `_warmed` / `NativeFeed` | Served-tokenizer table + C extension bound |
+| `RareRowBatch` + `row_by_req` | Native row arena and `req_id → row` map |
+| `_lock` | Serializes feed / finish / clear across FeedQueue and ActionQueue |
+
+**Enum single source:** numeric `FT_*` / `IN_*` live in `detector/rare/rare_feed_native.c`; Python loads them via `rare_enums.py`. Unit test `tests/ut/runtime_guard/test_rare_enums.py` fails CI on drift.
+
+**Debug sync feed:** `VLLM_ASCEND_RG_RARE_SYNC_FEED=1` runs collect-wait + D2H + feed on the caller thread (skips `RareLogprobFeedQueue`). Default remains async hide — do not enable for production throughput.
 
 Online KV / position meta detectors are **not** in this release; use `dump_kv` for KV capture (offline compare tooling ships later).
 

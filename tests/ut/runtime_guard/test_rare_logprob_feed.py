@@ -69,35 +69,39 @@ def test_mark_finished_defers_rare_finish_when_rare_enabled():
         RequestGuardStore.reset_for_tests()
 
 
+def _make_feed_processor():
+    p = object.__new__(RuntimeGuardProcessor)
+    p.runner = SimpleNamespace()
+    p.detectors = MagicMock()
+    p.detectors.get.return_value = None
+    p.runtime_config = MagicMock()
+    p.runtime_config.detector_get.return_value = True
+    p.wave_tracker = SimpleNamespace(current_wave=lambda: 1, discard_many=lambda *_: None)
+    fed: list[tuple] = []
+
+    def _pack_and_feed(cpu, sampled, req_ids, n_req, *, host_token_ids=None, slots_per_req=1, cu_num_logits=None):
+        fed.append((list(req_ids), n_req, slots_per_req, cu_num_logits))
+
+    p._pack_and_feed_rare = _pack_and_feed  # type: ignore[method-assign]
+    p._reap_finished_requests = lambda: None  # type: ignore[method-assign]
+    materialized: list[object] = []
+
+    def _copy(batch):
+        if batch.ready_event is not None:
+            batch.ready_event.synchronize()
+        cpu = object()
+        materialized.append(cpu)
+        return cpu, None
+
+    p._copy_rare_batch_to_host = _copy  # type: ignore[method-assign]
+    return p, fed, materialized
+
+
 def test_feed_rare_logprobs_async_submits_and_releases_pin():
     RequestGuardStore.reset_for_tests()
     reset_rare_logprob_feed_queue_for_tests()
     try:
-        p = object.__new__(RuntimeGuardProcessor)
-        p.runner = SimpleNamespace()
-        p.detectors = MagicMock()
-        p.detectors.get.return_value = None
-        p.runtime_config = MagicMock()
-        p.runtime_config.detector_get.return_value = True
-        p.wave_tracker = SimpleNamespace(current_wave=lambda: 1, discard_many=lambda *_: None)
-        fed: list[tuple] = []
-
-        def _pack_and_feed(cpu, sampled, req_ids, n_req):
-            fed.append((list(req_ids), n_req))
-
-        p._pack_and_feed_rare = _pack_and_feed  # type: ignore[method-assign]
-        p._reap_finished_requests = lambda: None  # type: ignore[method-assign]
-        materialized: list[object] = []
-
-        def _copy(batch):
-            if batch.ready_event is not None:
-                batch.ready_event.synchronize()
-            cpu = object()
-            materialized.append(cpu)
-            return cpu
-
-        p._copy_rare_batch_to_host = _copy  # type: ignore[method-assign]
-
+        p, fed, materialized = _make_feed_processor()
         store = RequestGuardStore.get()
         store.get_or_create("a")
         store.mark_finished(["a"], wave=0)
@@ -111,10 +115,39 @@ def test_feed_rare_logprobs_async_submits_and_releases_pin():
         q._q.join()
         ready_event.synchronize.assert_called_once()
         assert len(materialized) == 1
-        assert fed == [(["a"], 1)]
+        assert fed == [(["a"], 1, 1, None)]
         assert store.get_state("a") is not None
         assert store.get_state("a").rare_feed_jobs == 0
     finally:
+        reset_rare_logprob_feed_queue_for_tests()
+        RequestGuardStore.reset_for_tests()
+
+
+def test_feed_rare_logprobs_sync_runs_inline(monkeypatch):
+    """VLLM_ASCEND_RG_RARE_SYNC_FEED=1 skips the queue (debug short path)."""
+    RequestGuardStore.reset_for_tests()
+    reset_rare_logprob_feed_queue_for_tests()
+    monkeypatch.setenv("VLLM_ASCEND_RG_RARE_SYNC_FEED", "1")
+    try:
+        p, fed, materialized = _make_feed_processor()
+        store = RequestGuardStore.get()
+        store.get_or_create("a")
+
+        ready_event = MagicMock()
+        batch = RareLogprobBatch(device_logprobs=object(), ready_event=ready_event)
+        output = SimpleNamespace(req_ids=["a"], sampled_token_ids=None)
+        p.feed_rare_logprobs(output, batch=batch)
+
+        # Inline: no worker drain needed; queue must stay empty / unstarted.
+        q = get_rare_logprob_feed_queue()
+        assert q.submitted == 0
+        assert q.qsize() == 0
+        ready_event.synchronize.assert_called_once()
+        assert len(materialized) == 1
+        assert fed == [(["a"], 1, 1, None)]
+        assert store.get_state("a").rare_feed_jobs == 0
+    finally:
+        monkeypatch.delenv("VLLM_ASCEND_RG_RARE_SYNC_FEED", raising=False)
         reset_rare_logprob_feed_queue_for_tests()
         RequestGuardStore.reset_for_tests()
 

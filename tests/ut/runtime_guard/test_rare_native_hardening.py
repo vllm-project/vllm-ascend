@@ -36,9 +36,11 @@ from vllm_ascend.observability.runtime_guard.detector.rare.rare_gb import GB
 
 
 def _require_native() -> None:
+    rare_native._NATIVE_EXT = None
+    rare_native._NATIVE_EXT_TRIED = False
     rare_native._MOD = None
     rare_native._MOD_TRIED = False
-    if rare_native._module() is None:
+    if rare_native._load_native_ext() is None:
         pytest.skip("rare_feed_native not built")
 
 
