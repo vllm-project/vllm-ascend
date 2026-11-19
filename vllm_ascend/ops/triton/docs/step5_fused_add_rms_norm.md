@@ -27,12 +27,13 @@
 
 ## Constraints
 
-- Inputs share the same NPU device and have a positive hidden size.
+- The caller supplies inputs on the same NPU device. The hidden size is positive.
 - When the residual is absent, `x` must be FP32 and the wrapper returns it
   as the residual output. The norm output and any updated residual use fresh
   storage. Empty row batches return without a kernel launch.
-- The decoder checks eligibility before any sequence parallel all-gather and
-  after any reduce-scatter. Unsupported inputs use the existing path.
+- With FP32 residual connections enabled, the decoder checks input dtypes,
+  shapes, and layouts before any sequence parallel all-gather and after any
+  reduce-scatter. Other cases use the existing path.
 - The custom op supplies fake output shape and dtype metadata for graph tracing.
   The A5 TP8 Step5 benchmark exercised `FULL_DECODE_ONLY` graph replay with MTP.
 - Row count is a non-specialized runtime argument. The tile, weight-centering and residual

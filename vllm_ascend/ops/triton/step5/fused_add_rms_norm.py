@@ -2,10 +2,9 @@
 """Fused Step5 residual add and RMSNorm with BF16 output on Ascend A5."""
 
 import torch
-from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.device.device_config import is_950
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 # Use several rows per tile for narrow inputs. As the width of a row grows,
@@ -72,10 +71,6 @@ def can_use_fused_add_rms_norm_cast(
     # scale in the weight dtype. The kernel keeps both in FP32.
     if not (
         fp32_residual
-        and HAS_TRITON
-        and x.device.type == "npu"
-        and is_950()
-        and x.device == weight.device
         and x.dtype in (torch.bfloat16, torch.float16, torch.float32)
         and weight.dtype == torch.float32
         and x.ndim > 0
@@ -87,12 +82,7 @@ def can_use_fused_add_rms_norm_cast(
         return False
     if residual is None:
         return x.dtype == torch.float32
-    return (
-        residual.device == x.device
-        and residual.dtype == torch.float32
-        and residual.shape == x.shape
-        and residual.is_contiguous()
-    )
+    return residual.dtype == torch.float32 and residual.shape == x.shape and residual.is_contiguous()
 
 
 def _fused_add_rms_norm_cast_impl(
