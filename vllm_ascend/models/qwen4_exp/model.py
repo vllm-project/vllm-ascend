@@ -34,8 +34,8 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
     hc_silu,
 )
 
-from . import ple_embedding  # noqa: F401 - register the OOT host embedding before model construction
 from .ple import patch_upstream_ple_short_conv
+from .ple_embedding import ExternalPLEWeightsMixin, shared_ple_config
 
 # Keep the upstream model and weight loader authoritative. HyperConnection's
 # CUDA glue functions are module globals, so replace them before importing the
@@ -77,8 +77,12 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
 upstream_model.Qwen4ExpModel = AscendQwen4ExpModel
 
 
-class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
+class AscendQwen4ExpForCausalLM(ExternalPLEWeightsMixin, upstream_model.Qwen4ExpForCausalLM):
     """Qwen3.8-Flash-Next text model using Ascend platform operators."""
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        shared_ple_config(vllm_config)
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
 
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
@@ -104,8 +108,14 @@ class AscendQwen4ExpProcessingInfo(_AscendProcessorMixin, upstream_model.Qwen4Ex
     info=AscendQwen4ExpProcessingInfo,
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
-class AscendQwen4ExpForConditionalGeneration(_AscendVLPreprocessMixin, upstream_model.Qwen4ExpForConditionalGeneration):
+class AscendQwen4ExpForConditionalGeneration(
+    ExternalPLEWeightsMixin, _AscendVLPreprocessMixin, upstream_model.Qwen4ExpForConditionalGeneration
+):
     """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model") -> None:
+        shared_ple_config(vllm_config)
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
 
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):

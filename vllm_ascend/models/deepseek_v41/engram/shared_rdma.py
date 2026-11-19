@@ -230,7 +230,9 @@ def _physical_device_id(device):
 class RemoteReader:
     """One rank's reusable connection and finite HBM receive buffer."""
 
-    def __init__(self, model, endpoint, *, capacity, library_path=None, listen_port=None, local_comm_res=None):
+    def __init__(
+        self, model, endpoint, *, capacity, library_path=None, listen_port=None, local_comm_res=None, metadata=None
+    ):
         if not 0 < capacity <= MAX_ROWS:
             raise ValueError("invalid remote Engram row capacity")
         self.closed = False
@@ -239,7 +241,7 @@ class RemoteReader:
         self._last_use = None
         self.engine = None
         self.buffer = None
-        metadata = checkpoint_metadata(model)
+        metadata = checkpoint_metadata(model) if metadata is None else metadata
         host, port = endpoint.rsplit(":", 1)
         self.wire = socket.create_connection((host, int(port)), 120)
         _configure_socket(self.wire)
@@ -483,8 +485,10 @@ class SharedOwner(socketserver.ThreadingTCPServer):
         listen_port=None,
         local_comm_res=None,
         fabric="roce",
+        metadata=None,
+        table_loader=None,
     ):
-        self.metadata = checkpoint_metadata(model)
+        self.metadata = checkpoint_metadata(model) if metadata is None else metadata
         self.generation = uuid.uuid4().hex
         self.device = device
         self.physical_device = _physical_device_id(device)
@@ -504,19 +508,22 @@ class SharedOwner(socketserver.ThreadingTCPServer):
         self.lock = threading.Lock()
         self.pending_handlers = 0
         try:
-            root = Path(model)
-            index = json.loads((root / self.metadata["index_file"]).read_text())["weight_map"]
-            for layer, spec in self.metadata["tables"].items():
-                packed = torch.empty((spec["rows"], spec["row_bytes"]), dtype=torch.uint8)
-                for suffix, start, end in (("weight", 0, 256), ("scale", 256, spec["row_bytes"])):
-                    key = f"layers.{layer}.engram.embed.{suffix}"
-                    with safe_open(root / index[key], framework="pt", device="cpu") as file:
-                        tensor = file.get_slice(key)
-                        for row in range(0, spec["rows"], 1 << 20):
-                            stop = min(row + (1 << 20), spec["rows"])
-                            packed[row:stop, start:end].copy_(tensor[row:stop].contiguous().view(torch.uint8))
-                self.tables[layer] = packed
-                print(json.dumps(dict(stage="TABLE_LOADED", layer=layer, bytes=packed.numel())), flush=True)
+            if table_loader is not None:
+                self.tables = table_loader()
+            else:
+                root = Path(model)
+                index = json.loads((root / self.metadata["index_file"]).read_text())["weight_map"]
+                for layer, spec in self.metadata["tables"].items():
+                    packed = torch.empty((spec["rows"], spec["row_bytes"]), dtype=torch.uint8)
+                    for suffix, start, end in (("weight", 0, 256), ("scale", 256, spec["row_bytes"])):
+                        key = f"layers.{layer}.engram.embed.{suffix}"
+                        with safe_open(root / index[key], framework="pt", device="cpu") as file:
+                            tensor = file.get_slice(key)
+                            for row in range(0, spec["rows"], 1 << 20):
+                                stop = min(row + (1 << 20), spec["rows"])
+                                packed[row:stop, start:end].copy_(tensor[row:stop].contiguous().view(torch.uint8))
+                    self.tables[layer] = packed
+                    print(json.dumps(dict(stage="TABLE_LOADED", layer=layer, bytes=packed.numel())), flush=True)
             host, port = endpoint.rsplit(":", 1)
             super().__init__((host, int(port)), _OwnerConnection, bind_and_activate=False)
             self.server_bind()

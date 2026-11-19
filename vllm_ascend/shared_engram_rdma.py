@@ -29,6 +29,7 @@ def main():
     import torch_npu  # noqa: F401
 
     import vllm_ascend.ops  # noqa: F401
+    from vllm_ascend.models.deepseek_v41.engram.shared_pool import has_ple_checkpoint
     from vllm_ascend.models.deepseek_v41.engram.shared_rdma import SharedOwner
 
     torch.set_num_threads(1)
@@ -36,6 +37,12 @@ def main():
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
+    owner_options = {}
+    if has_ple_checkpoint(args.model):
+        from vllm_ascend.models.qwen4_exp.ple_embedding import PLECheckpoint
+
+        checkpoint = PLECheckpoint(args.model)
+        owner_options = {"metadata": checkpoint.metadata(), "table_loader": checkpoint.load_rdma}
     owner = SharedOwner(
         args.model,
         args.endpoint,
@@ -45,6 +52,7 @@ def main():
         listen_port=args.listen_port,
         local_comm_res=args.local_comm_res,
         fabric=args.fabric,
+        **owner_options,
     )
     service = threading.Thread(target=owner.serve_forever, name="engram-owner")
     started = False

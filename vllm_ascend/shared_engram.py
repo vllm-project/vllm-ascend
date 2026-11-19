@@ -14,7 +14,12 @@ from safetensors import safe_open
 
 # Initialize the normal operator registry before Engram's DeviceOperator import.
 import vllm_ascend.ops  # noqa: F401
-from vllm_ascend.models.deepseek_v41.engram.shared_pool import SharedPoolOwner, checkpoint_identity, parse_endpoint
+from vllm_ascend.models.deepseek_v41.engram.shared_pool import (
+    SharedPoolOwner,
+    checkpoint_identity,
+    has_ple_checkpoint,
+    parse_endpoint,
+)
 
 
 def load_tables(owner, model, stop):
@@ -67,15 +72,24 @@ def main():
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
+    checkpoint = None
+    if has_ple_checkpoint(args.model):
+        from vllm_ascend.models.qwen4_exp.ple_embedding import PLECheckpoint
+
+        checkpoint = PLECheckpoint(args.model)
+    identity = checkpoint.identity if checkpoint is not None else checkpoint_identity(args.model)
     owner = SharedPoolOwner(
         args.endpoint,
-        checkpoint_identity(args.model),
+        identity,
         device=f"npu:{args.device}",
         store_url=args.store_url,
         world_size=args.max_consumers + 1,
     )
     try:
-        load_tables(owner, args.model, stop)
+        if checkpoint is None:
+            load_tables(owner, args.model, stop)
+        else:
+            checkpoint.load_bm(owner, stop)
         owner.ready()
         print(json.dumps(dict(stage="POOL_READY", endpoint=args.endpoint, generation=owner.generation)), flush=True)
         stop.wait()

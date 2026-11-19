@@ -16,7 +16,7 @@ import torch
 from .shared_host import MappedHostBuffer, MappingCleanupError, MemfabricRuntime
 
 SCHEMA = 2
-DTYPES = {"int8": torch.int8, "float32": torch.float32}
+DTYPES = {"int8": torch.int8, "float32": torch.float32, "bfloat16": torch.bfloat16}
 MAX_CONTROL_BYTES = 1 << 20
 # Keep failed startup rollbacks alive until process exit; EOF is not a safe release.
 _failed_startup_cleanups: list[Callable[[], None]] = []
@@ -42,6 +42,14 @@ def _close_all(items):
                 first_error = exc
     if first_error is not None:
         raise first_error
+
+
+def has_ple_checkpoint(root):
+    index = Path(root) / "model.safetensors.index.json"
+    if not index.is_file():
+        return False
+    mapping = json.loads(index.read_text()).get("weight_map", {})
+    return any(".ple.ple_embedding.ngram_embedding.shard_" in name for name in mapping)
 
 
 def checkpoint_identity(root):
@@ -171,7 +179,7 @@ class SharedPoolOwner:
             raise ValueError("Cannot add to a published pool or duplicate a tensor")
         name = str(dtype).removeprefix("torch.")
         if name not in DTYPES:
-            raise ValueError("Only INT8 codes and FP32 scales are supported")
+            raise ValueError("Only INT8, FP32 and BF16 tensors are supported")
         if self.runtime is None:
             settings = self.manifest["memfabric"]
             self.runtime = MemfabricRuntime.acquire(
