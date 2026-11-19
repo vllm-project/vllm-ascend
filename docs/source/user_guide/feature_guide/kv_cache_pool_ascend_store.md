@@ -1608,7 +1608,7 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 | `lookup_rpc_port` | str | No default | Yes | Distinct service identifier (e.g., "0", "1") | Local IPC identifier between pooling scheduler and worker processes. DP replicas within a service are isolated automatically; independently launched services sharing the RPC base directory need unique values. The legacy name `mooncake_rpc_port` is deprecated; use `lookup_rpc_port`. |
 | `load_async` | bool | false | No | true / false | Whether to enable asynchronous loading. |
 | `backend` | str | mooncake | No | mooncake / memcache / yuanrong | KV Pool storage backend. |
-| `cache_prefix` | str | `""` | No | `""` / `"auto"` / custom string | Namespace prepended to every Mooncake Store key. Empty preserves existing keys; `"auto"` derives a deployment fingerprint; other strings are literal prefixes. See below. |
+| `cache_prefix` | str | `""` | No | `""` / `"auto"` / custom string | Mooncake only. Namespace prepended to every Store key. Empty preserves existing keys; `"auto"` derives a deployment fingerprint; other strings are literal prefixes. Memcache and Yuanrong reject nonempty values at startup. See below. |
 | `consumer_is_to_put` | bool | false | No | true / false | Whether Decode node puts KV Cache into KV Pool. |
 | `save_decode_cache` | bool | false | No | true / false | Save complete Decode KV blocks. A consumer can enable this without `consumer_is_to_put`, keeping Prefill writes disabled; this consumer mode requires `use_layerwise=false`. |
 | `consumer_is_to_load` | bool | false | No | true / false | Whether Decode node loads KV Cache from KV Pool. |
