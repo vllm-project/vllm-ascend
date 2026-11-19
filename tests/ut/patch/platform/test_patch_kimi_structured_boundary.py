@@ -15,6 +15,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 # Load this CPU-only patch without importing unrelated NPU platform patches.
 PATCH_PATH = Path(__file__).resolve().parents[4] / "vllm_ascend/patch/platform/patch_kimi_structured_boundary.py"
 spec = importlib.util.spec_from_file_location("kimi_boundary_patch", PATCH_PATH)
+assert spec is not None and spec.loader is not None
 patch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(patch)
 
