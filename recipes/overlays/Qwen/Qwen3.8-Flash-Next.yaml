@@ -963,13 +963,6 @@ guide_sections:
     | [Long context](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#54-long-context-pd-separation-deployment) | TP2 PP4 DP1 (EP2) | TP2 DP4 (EP8) | TP4 DP1 (EP4) | TP4 DP1 (EP4) |
     | [MemCache three-tier pooling](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#55-pd-separation-with-memcache-three-tier-kv-cache-pool) | TP2 PP2 DP2 (EP4) | TP2 DP4 (EP8) | TP2 DP2 (EP4) | TP2 DP2 (EP4) |
 
-    **MemCache three-tier pooling:** This recipe currently does not support end-to-end
-    pool deployment. The A3 and 950DT pooling presets generate the Prefill and Decode
-    worker commands. For A2, A3, and 950DT, follow [Section 4.3](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#43-docker-for-three-tier-pd-pooling)
-    to prepare the container and mount the storage devices. Then follow the hardware
-    tab in [Section 5.5](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#55-pd-separation-with-memcache-three-tier-kv-cache-pool)
-    to configure MemCache, start or reuse MetaService, and verify cache reuse.
-
     For basic, image or long-context serving, prepare the hardware-specific container
     from Section 4.1. Set `LOCAL_SERVICE_IP` and `SERVICE_NIC` to the service address
     and interface. In each role shell, initialize CANN/ATB, unset proxy variables
@@ -1164,3 +1157,7 @@ guide_sections:
     `--reasoning-parser qwen3` matters: thinking mode is the default and the chat
     template seeds the assistant turn with `<think>`, so without the parser the
     reasoning block lands in `message.content`.
+
+    #### Not covered by this page
+
+    **MemCache three-tier pool setup.** On A3 and 950DT, the pooling presets generate the Prefill and Decode worker commands. To set up the full pool on A2, A3, or 950DT, follow [Section 4.3](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#43-docker-for-three-tier-pd-pooling) to prepare the container and mount the storage devices. Then follow the steps for your hardware in [Section 5.5](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#55-pd-separation-with-memcache-three-tier-kv-cache-pool) to configure MemCache, start or reuse MetaService, and verify cache reuse.
