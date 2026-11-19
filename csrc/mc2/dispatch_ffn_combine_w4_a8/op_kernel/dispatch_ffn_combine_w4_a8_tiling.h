@@ -31,6 +31,7 @@ struct DispatchFFNCombineW4A8Info {
     uint32_t worldSize;
     uint32_t listLen;
     float swigluLimit;
+    uint64_t cclBufferSize;
 };
 
 struct CoCTiling {

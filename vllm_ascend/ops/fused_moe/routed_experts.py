@@ -30,7 +30,12 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import Un
 from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import (
+    _EXTRA_CTX,
+    MoECommType,
+    resolve_moe_comm_type_for_layer,
+    use_cann_megamoe,
+)
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
@@ -705,7 +710,23 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         enable_force_load_balance = _EXTRA_CTX.in_profile_run
 
         lora_context = getattr(self, "_ascend_moe_lora_context", None)
-        moe_comm_method = get_moe_comm_method(_EXTRA_CTX.moe_comm_type, self.moe_config)
+        # The forward-level selection cannot see per-layer quant types: on A2
+        # only the W4A8 dispatch_ffn_combine variant exists, so an unquantized
+        # MoE layer (e.g. the BF16 dspark draft) must downgrade here.
+        moe_comm_type = _EXTRA_CTX.moe_comm_type
+        if moe_comm_type is MoECommType.FUSED_MC2:
+            moe_comm_type = resolve_moe_comm_type_for_layer(
+                moe_comm_type,
+                self.quant_type,
+                self.moe_config.num_experts,
+                self.moe_config.ep_size,
+                _EXTRA_CTX.num_tokens,
+            )
+        if moe_comm_type is not _EXTRA_CTX.moe_comm_type:
+            # Keep the per-layer view consistent for code that reads the type
+            # later in this layer's forward (router, EPLB, LoRA).
+            _EXTRA_CTX.moe_comm_type = moe_comm_type
+        moe_comm_method = get_moe_comm_method(moe_comm_type, self.moe_config)
         _EXTRA_CTX.moe_comm_method = moe_comm_method
         assert moe_comm_method is not None
         if lora_context is not None:

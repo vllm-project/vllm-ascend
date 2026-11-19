@@ -17,7 +17,11 @@ from vllm_ascend.device.hardware_profile import (
     get_current_hardware_profile,
 )
 from vllm_ascend.mrv2_utils import use_v2_model_runner
-from vllm_ascend.quantization.quant_type import A5_SUPPORT_MEGA_MOE_QUANT_TYPES, QuantType
+from vllm_ascend.quantization.quant_type import (
+    A2_SUPPORT_DISPATCH_FFN_COMBINE_QUANT_TYPES,
+    A5_SUPPORT_MEGA_MOE_QUANT_TYPES,
+    QuantType,
+)
 from vllm_ascend.utils import (
     has_layer_idx,
     is_moe_model,
@@ -336,18 +340,14 @@ def get_mc2_mask():
     return _reserved_mc2_mask
 
 
-def _select_capacity_and_expert_density_moe_comm_method(
-    num_tokens: int,
-    vllm_config: VllmConfig,
+def _a2_default_moe_comm_type(
+    num_tokens: int | None,
+    num_experts: int,
+    ep_world_size: int,
     mc2_tokens_capacity: int,
-    is_draft_model: bool = False,
-    draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
-    num_experts = vllm_config.model_config.get_num_experts()
-    ep_world_size = (
-        vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
-    )
-    num_experts_per_device = num_experts // ep_world_size
+    """A2's pre-enable_fused_mc2 policy (MC2 for small/dense-EP, else ALLGATHER)."""
+    num_experts_per_device = num_experts // max(1, ep_world_size)
     if (
         num_experts_per_device <= 24
         and ep_world_size >= 16
@@ -355,6 +355,79 @@ def _select_capacity_and_expert_density_moe_comm_method(
     ):
         return MoECommType.MC2
     return MoECommType.ALLGATHER
+
+
+def _select_capacity_and_expert_density_moe_comm_method(
+    num_tokens: int,
+    vllm_config: VllmConfig,
+    mc2_tokens_capacity: int,
+    is_draft_model: bool = False,
+    draft_moe_quant_type: QuantType = QuantType.NONE,
+) -> MoECommType:
+    # A2 opt-in for the fused dispatch-FFN-combine path. The A2 default policy
+    # predates enable_fused_mc2; without this, enable_fused_mc2=1 is silently
+    # ignored on A2 and the run falls back to ALLGATHER/MC2.
+    # Draft (MTP) MoE layers keep the default path: on A2 only the W4A8 variant
+    # of dispatch_ffn_combine is built, and the MTP layer's weight layout /
+    # quant type is not guaranteed to match it. This mirrors the A5 gate in
+    # _select_capacity_and_world_size_moe_comm_method.
+    if get_ascend_config().enable_fused_mc2 == 1 and not is_draft_model:
+        return MoECommType.FUSED_MC2
+    num_experts = vllm_config.model_config.get_num_experts()
+    ep_world_size = (
+        vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
+    )
+    return _a2_default_moe_comm_type(num_tokens, num_experts, ep_world_size, mc2_tokens_capacity)
+
+
+def resolve_moe_comm_type_for_layer(
+    moe_comm_type: MoECommType,
+    quant_type: QuantType,
+    num_experts: int,
+    ep_world_size: int,
+    num_tokens: int | None,
+) -> MoECommType:
+    """Downgrade FUSED_MC2 for MoE layers the fused operator cannot run.
+
+    The forward-level selection cannot see individual layers, so a model that
+    mixes quantized target layers with unquantized ones (e.g. the BF16 dspark
+    MTP draft layer) would hand every MoE layer to FUSED_MC2. On A2 only the
+    W4A8 variant of dispatch_ffn_combine is built, so such a layer must fall
+    back to the device's default (non-fused) policy instead of failing at the
+    aclnn lookup.
+
+    Everything is derived from layer/model-local state: real request forwards
+    do not run under ``set_current_vllm_config()``, so this must not call
+    ``get_current_vllm_config()``.
+    """
+    if moe_comm_type is not MoECommType.FUSED_MC2:
+        return moe_comm_type
+
+    from vllm_ascend.device.device_config import get_ascend_device_type
+    from vllm_ascend.device.hardware import AscendDeviceType
+
+    if get_ascend_device_type() != AscendDeviceType.A2:
+        return moe_comm_type
+    if quant_type in A2_SUPPORT_DISPATCH_FFN_COMBINE_QUANT_TYPES:
+        return moe_comm_type
+
+    # Prefer MC2 over the default ALLGATHER: MC2 runs on the same HCCL
+    # communicator family as the fused op, whereas ALLGATHER uses a different
+    # communicator. Interleaving the two communicators inside one engine
+    # deadlocked in practice (234s device event wait + HCCL watchdog, see
+    # AAR-0009/AAR-0012), so keep an unrelated-quant layer on the MC2 path.
+    mc2_capacity = get_mc2_tokens_capacity()
+    if ep_world_size > 1 and (num_tokens is None or num_tokens <= mc2_capacity):
+        fallback = MoECommType.MC2
+    else:
+        fallback = _a2_default_moe_comm_type(num_tokens, num_experts, ep_world_size, mc2_capacity)
+    logger.info_once(
+        "MoE layer quant type %s has no A2 dispatch_ffn_combine kernel; "
+        "using %s instead of FUSED_MC2 for this layer.",
+        quant_type,
+        fallback.name,
+    )
+    return fallback
 
 
 def _select_fused_or_capacity_moe_comm_method(

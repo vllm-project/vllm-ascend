@@ -286,6 +286,13 @@ class FusedMC2CommImpl(MoECommMethod):
         super().__init__(moe_config)
         self._mega_moe_hccl_state_stale = False
         self.enable_fused_mc2 = get_ascend_config().enable_fused_mc2
+        # A2 (Ascend910B) has no HCCL symmetric window through
+        # GetHcclContext. Use CANN's KFC CommContext instead: its per-rank
+        # epHcclBuffer_ entries are symmetric across ranks and feed
+        # dispatch_ffn_combine's window path. Created lazily on first forward.
+        self._dffc_kfc_context = None
+        self._dffc_ccl_buffer_size = 0
+        self._dffc_sym_buffer = None
         if self.enable_fused_mc2 == 1 and is_mega_moe_supported():
             self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
@@ -380,6 +387,66 @@ class FusedMC2CommImpl(MoECommMethod):
             symm_buffer.ep_world_size,
         )
         return True
+
+    def _init_dffc_kfc_context(self):
+        """Create the A2 KFC context used by dispatch_ffn_combine.
+
+        No-op on A3/A5, where the kernel uses the HCCL window from
+        GetHcclContext. The buffer size must be rank-invariant; it is derived
+        from the dispatcher's compile-time capacity, never from the current
+        forward's token count.
+        """
+        if self._dffc_kfc_context is not None:
+            return
+        from vllm_ascend.device.device_config import get_ascend_device_type
+        from vllm_ascend.device.hardware import AscendDeviceType
+        from vllm_ascend.distributed.parallel_state import get_mc2_group
+
+        if get_ascend_device_type() != AscendDeviceType.A2:
+            return
+
+        assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
+        group = get_mc2_group().device_group
+        if self.token_dispatcher.global_bs > 0:
+            num_max_tokens_per_rank = max(
+                1, int(self.token_dispatcher.global_bs // self.token_dispatcher.ep_world_size)
+            )
+        else:
+            num_max_tokens_per_rank = max(
+                1, int(getattr(self.token_dispatcher, "max_num_tokens_per_rank", 0))
+            )
+        from cann_ops_transformer.ops import get_symm_buffer_for_mega_moe
+
+        # The KFC context reserves a rank-invariant CCL buffer (2 GiB on A2)
+        # outside torch's allocator. Log the headroom once: an HCCL_E_OOM
+        # (ret 24) here means vLLM left too little device memory at profile
+        # time (gpu_memory_utilization / kv-cache-memory-bytes / HCCL_BUFFSIZE).
+        try:
+            free_bytes, total_bytes = torch.npu.mem_get_info()
+            logger.info(
+                "A2 DFFC KFC: free=%.2f GiB / total=%.2f GiB before symm buffer",
+                free_bytes / 2**30,
+                total_bytes / 2**30,
+            )
+        except Exception:  # noqa: BLE001 - diagnostics must never break startup
+            pass
+
+        self._dffc_sym_buffer = get_symm_buffer_for_mega_moe(
+            group,
+            self.moe_config.num_experts,
+            num_max_tokens_per_rank,
+            self.moe_config.experts_per_token,
+            hidden=self.moe_config.hidden_dim,
+            intermediate_hidden=self.moe_config.intermediate_size_per_partition,
+        )
+        self._dffc_kfc_context = self._dffc_sym_buffer.context
+        self._dffc_ccl_buffer_size = self._dffc_sym_buffer.ccl_buffer_size
+        logger.info(
+            "A2 DFFC KFC context: ccl_buffer_size=%d num_max_tokens_per_rank=%d ep_world=%d",
+            self._dffc_ccl_buffer_size,
+            num_max_tokens_per_rank,
+            self.token_dispatcher.ep_world_size,
+        )
 
     def _init_mega_moe_symm_buffer(
         self,
@@ -663,6 +730,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 )
 
                 out = torch.empty_like(fused_experts_input.hidden_states)
+                self._init_dffc_kfc_context()
                 # The plain-MC2 dispatch_ffn_combine kernel has no auto mode:
                 # keep its historical fixed output capacity. It must NOT read
                 # mega_moe_max_tokens, whose 0 now means "operator
@@ -682,6 +750,8 @@ class FusedMC2CommImpl(MoECommMethod):
                     max_output_size=max_output_size,
                     swiglu_limit=self.swiglu_limit,
                     world_size=self.token_dispatcher.ep_world_size,
+                    context=self._dffc_kfc_context,
+                    ccl_buffer_size=self._dffc_ccl_buffer_size,
                     x_active_mask=fused_experts_input.routing.mc2_mask,
                     out=out,
                     expert_token_nums=self.expert_token_nums,
