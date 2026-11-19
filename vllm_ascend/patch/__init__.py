@@ -64,6 +64,15 @@
 #   Related PR: No upstream platform-specific ReplaySSM selector exists yet.
 #   Future plan: Remove when upstream supports the Ascend KDA configuration contract.
 # --------------------------------
+# * platform/patch_request_state_manager.py and platform/patch_kv_cache_utils.py:
+#   Target: KVCacheManager.allocate_slots and Core's cross-rank KV planning.
+#   Why: Core currently budgets and admits one device pool in these APIs.
+#   How: Deduct fixed request-slot and workspace bytes before history planning.
+#        Check both slot pools before history allocation and roll back a
+#        partial append for the opted-in DSV4.1 layout.
+#   Future plan: Remove these bridges when Core exposes per-pool planning and
+#                atomic admission hooks.
+# --------------------------------
 # * Platform Patch:
 # ==========#
 # Entries are listed in alphabetical order by file name.

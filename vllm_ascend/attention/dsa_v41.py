@@ -43,7 +43,22 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
+from vllm_ascend.models.deepseek_v41.cache_config import (
+    STATE_RING_ROWS,
+    WINDOW,
+    RequestWindowSpec,
+    get_window_staging_rows,
+)
+from vllm_ascend.models.deepseek_v41.request_state import (
+    defer_window_write,
+    forward_request_window,
+    state_swa_lengths,
+)
+from vllm_ascend.models.deepseek_v41.window_state import (
+    RequestWindowMetadata,
+    RequestWindowMetadataBuilder,
+    prepare_request_window_metadata,
+)
 from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
     get_full_cos_and_sin_dsa_for_layer,
@@ -239,6 +254,7 @@ class AscendDSAV41Metadata(AttentionMetadata):
     c2_source_cos: torch.Tensor | None = None
     c2_source_sin: torch.Tensor | None = None
     c2_metadata_group_id: int | None = None
+    request_state: RequestWindowMetadata | None = None
     global_metadata: "AscendDSAV41Metadata | None" = None
 
 
@@ -389,6 +405,9 @@ class AscendDSAV41Impl:
     @staticmethod
     def _write_swa_cache(attn, metadata, value):
         if not value.shape[0]:
+            return
+        if metadata.request_state is not None:
+            defer_window_write(attn, metadata, value)
             return
         cache = attn.dsa_attn.swa_cache_layer.kv_cache
         backend = getattr(attn, "packed_cache_ops", None)
@@ -696,11 +715,17 @@ class AscendDSAV41Impl:
         return shared.topk_indices[:num_tokens]
 
     def _forward_attention(self, attn, q, metadata, compressed_indices, *, source_cache=None):
+        if metadata.swa.request_state is not None:
+            return forward_request_window(self, attn, q, metadata, compressed_indices, source_cache=source_cache)
+        return self._forward_attention_impl(attn, q, metadata, compressed_indices, source_cache=source_cache)
+
+    def _forward_attention_impl(self, attn, q, metadata, compressed_indices, *, source_cache=None, staged_window=None):
         """Run SparseFlashMla with the same PA metadata for both operator stages."""
         if source_cache is None and self.role.has_long_context:
             source_cache = get_forward_context().no_compile_layers[self.long_kv_source_prefix].kv_cache
         backend = getattr(attn, "packed_cache_ops", None)
         if backend is not None:
+            assert staged_window is None
             compressed_lengths = None
             if self.role.has_long_context and attn.shared_state.topk_lengths is not None:
                 compressed_lengths = attn.shared_state.topk_lengths[: q.shape[0]]
@@ -740,7 +765,13 @@ class AscendDSAV41Impl:
             id(op_metadata),
         )
         swa_cache = attn.dsa_attn.swa_cache_layer.kv_cache
-        if metadata.swa.replay_block_table is not None:
+        if staged_window is not None:
+            state = metadata.swa.request_state
+            assert state is not None
+            swa_cache = staged_window
+            ori_block_table = state.block_table[:num_reqs]
+            seq_lens = state.lengths[:num_reqs]
+        elif metadata.swa.replay_block_table is not None:
             # Rebase only SWA: A3 CSA cannot mask its missing prefix with
             # sparse ori indices. Compressed KV retains its causal coordinates.
             swa_cache = swa_cache[metadata.swa.replay_cache_blocks, metadata.swa.replay_cache_offsets]
@@ -900,6 +931,11 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self._slot_mapping_2d = torch.full((max_tokens, 2), -1, dtype=torch.int32, device=device)
         self._flat_slot_mapping = torch.full((max_tokens,), -1, dtype=torch.int64, device=device)
         self._seq_lens = torch.zeros(max_reqs, dtype=torch.int32, device=device)
+        self.request_window_builder = (
+            RequestWindowMetadataBuilder(self._seq_lens, get_window_staging_rows(max_tokens, max_reqs))
+            if isinstance(kv_cache_spec, RequestWindowSpec)
+            else None
+        )
         self._max_tokens = max_tokens
         self._dspark_swa_indices = None
         self._dspark_swa_lengths = None
@@ -1125,7 +1161,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             self.common_v41_batch_metadata["batch"] = self._build_batch_metadata(
                 common, num_reqs, num_actual_reqs, num_input_tokens
             )
-        return self.build_req_metadata(common, num_actual_reqs, **kwargs)
+        result = self.build_req_metadata(common, num_actual_reqs, **kwargs)
+        return prepare_request_window_metadata(self, common, result)
 
     def build_req_metadata(
         self, common, num_actual_reqs: int, *, build_query: bool = True, update_cache: bool = True, **kwargs
@@ -1148,7 +1185,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         # SWA uses original-token coordinates; circular state has no token slots.
         # Long KV and index K are addressed in completed compression groups.
         compressed = req.cache_kind in {"long_kv", "index_k"}
-        if req.is_compressor_state:
+        if req.is_compressor_state or self.request_window_builder is not None:
             # State writes use ring ownership metadata; this buffer stays PAD.
             req.slot_mapping = self._slot_mapping[: req.num_input_tokens]
             req.flat_slot_mapping = None
@@ -1551,17 +1588,22 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                 if req.num_actual_tokens == 0:
                     self._smla_metadata.zero_()
                     return
+                swa_lengths = req.replay_seq_lens if req.replay_seq_lens is not None else req.seq_lens
+                swa_max_len = max_ori_seq_len
+                if kwargs.get("request_state_pools", False):
+                    swa_lengths = state_swa_lengths(req.seq_lens, common.query_start_loc)
+                    swa_max_len = min(swa_max_len, req.max_query_len + WINDOW - 1)
                 value = torch.ops._C_ascend.npu_sparse_flash_mla_metadata(
                     n_local_heads,
                     1,
                     head_dim,
                     cu_seqlens_q=common.query_start_loc[: req.num_reqs + 1].int(),
-                    seqused_ori_kv=req.replay_seq_lens if req.replay_seq_lens is not None else req.seq_lens,
+                    seqused_ori_kv=swa_lengths,
                     seqused_cmp_kv=cmp_seq_lens,
                     cmp_residual_kv=cmp_residual,
                     batch_size=req.num_reqs,
                     max_seqlen_q=int(getattr(common, "max_query_len", 0)),
-                    max_seqlen_ori_kv=max_ori_seq_len,
+                    max_seqlen_ori_kv=swa_max_len,
                     max_seqlen_cmp_kv=(req.max_cache_seq_len if has_compressed else 0),
                     ori_topk=req.ori_sparse_indices.shape[-1] if req.ori_sparse_indices is not None else 0,
                     ori_topk_length=req.ori_topk_length,

@@ -30,9 +30,13 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_pool_bytes_per_block,
+    get_request_state_groups,
+    get_request_state_pool_plan,
     group_cache_specs,
     is_deepseek_v41_cache,
+    is_request_state_cache,
     make_cache_groups,
+    materialize_request_state_pools,
 )
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
@@ -66,6 +70,10 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         Precedence: Kimi-K3.1, GLM-Next, then DSV4.1 / mixed-page-size shared slots, then
         the Kimi-K3 DSpark mixed grouping, then vLLM's generic grouping.
         """
+        request_state_groups = get_request_state_groups(vllm_config, kv_cache_spec)
+        if request_state_groups is not None:
+            return request_state_groups
+
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
@@ -107,6 +115,8 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             return paired_sfa_pool_bytes(kv_cache_groups)
         if is_step5_groups(kv_cache_groups):
             return get_step5_pool_bytes_per_block(kv_cache_groups)
+        if is_request_state_cache(kv_cache_groups):
+            return get_request_state_pool_plan(vllm_config, kv_cache_groups, 1).budget.history_page_bytes
         if is_deepseek_v41_cache(kv_cache_groups):
             return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
         if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
@@ -119,6 +129,18 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         if _is_deepseek_v4_groups(kv_cache_groups):
             return _deepseek_v4_pool_bytes_per_block(kv_cache_groups)
         return super()._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
+
+    def get_kv_cache_config_from_groups(
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_groups: list[KVCacheGroupSpec],
+        num_blocks: int,
+    ):
+        if not is_request_state_cache(kv_cache_groups):
+            return super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks)
+        config = materialize_request_state_pools(vllm_config, kv_cache_groups, num_blocks)
+        config.kv_transfer_config = vllm_config.kv_transfer_config
+        return config
 
 
 def _page_sizes(spec: UniformTypeKVCacheSpecs) -> set[int]:

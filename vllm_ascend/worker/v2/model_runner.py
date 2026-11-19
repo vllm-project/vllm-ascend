@@ -73,7 +73,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
-from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.core.kv_cache_interface import get_request_state_plan, is_circular_kv_cache_spec
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     bind_dspark_context_receiver,
@@ -420,9 +420,18 @@ class NPUModelRunner(GPUModelRunner):
         excluded_cache_components = (
             offload_manager.get_topk_cache_components() if offload_manager is not None else set()
         )
+        plan = get_request_state_plan(self.kv_cache_config)
+        # Upstream's zeroing output carries bare IDs. In this layout only the
+        # history manager emits them, so never interpret them as ring slot IDs.
+        groups = (
+            group
+            for per_cache_group in self.attn_groups
+            for group in per_cache_group
+            if plan is None or group.kv_cache_group_id in plan.history.spec.group_ids
+        )
         self.kv_block_zeroer = AscendV2KVBlockZeroer(
             self.device,
-            attn_groups_iter=(g for groups in self.attn_groups for g in groups),
+            attn_groups_iter=groups,
             kernel_block_sizes=self.kernel_block_sizes,
             static_forward_context=self.compilation_config.static_forward_context,
             num_blocks=self.kv_cache_config.num_blocks,
@@ -509,6 +518,13 @@ class NPUModelRunner(GPUModelRunner):
                 if isinstance(self.speculator, DraftModelSpeculator):
                     self.pcp_manager.set_speculator(self.speculator)
                 self.model_state.pcp_manager = self.pcp_manager
+        from vllm_ascend.models.deepseek_v41.window_state import bind_window_staging_workspace
+
+        self.request_state_workspace = bind_window_staging_workspace(
+            self.kv_cache_config,
+            self.compilation_config.static_forward_context,
+            getattr(self, "request_state_workspace", None),
+        )
         bind_dspark_context_receiver(
             self.vllm_config,
             sparse_offload_enabled=sparse_cfg.enabled,
@@ -631,6 +647,12 @@ class NPUModelRunner(GPUModelRunner):
         self._shared_engram_shutdown_pending = shared_embeddings
         if not getattr(self, "_shared_engram_parent_stopped", False):
             super().shutdown()
+            workspace = getattr(self, "request_state_workspace", None)
+            if workspace is not None:
+                for layer in self.compilation_config.static_forward_context.values():
+                    if getattr(layer, "request_state_workspace", None) is workspace:
+                        del layer.request_state_workspace
+                self.request_state_workspace = None
             self._shared_engram_parent_stopped = True
         first_error = None
         for embedding in shared_embeddings:
@@ -1177,11 +1199,15 @@ class NPUModelRunner(GPUModelRunner):
     def prepare_dummy_attn(
         self, input_batch: AscendInputBatch, valid_state_slots: bool = False
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        separated = get_request_state_plan(getattr(self, "kv_cache_config", None)) is not None
         block_tables, slot_mappings = super().prepare_dummy_attn(
             input_batch,
-            valid_state_slots=valid_state_slots,
+            valid_state_slots=valid_state_slots and not separated,
         )
-        prepare_v41_dummy_ring_state(self, input_batch.num_reqs)
+        if not separated:
+            prepare_v41_dummy_ring_state(self, input_batch.num_reqs)
+        # Separated pools keep the parent's reserved null IDs. IDs 1..N can
+        # belong to live requests even on a DP rank with no work in this step.
         slot_mappings = self._maybe_extend_slot_mappings(input_batch, slot_mappings)
         return block_tables, slot_mappings
 

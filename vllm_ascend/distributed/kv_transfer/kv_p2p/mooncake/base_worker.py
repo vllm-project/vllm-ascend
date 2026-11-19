@@ -4,6 +4,7 @@
 
 import math
 import os
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -36,6 +37,8 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, is_circular_kv_cache_spec
 from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
+from vllm_ascend.distributed.kv_transfer.kv_p2p.dsv41_state import is_state_config
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.dsv41 import make_layout
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
     MooncakePPTransferMetadata,
@@ -517,6 +520,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
     ) -> None:
         """Register configured KV cache allocations and publish metadata."""
+        state_mode = is_state_config(self.kv_cache_config)
         self.num_blocks = self.kv_cache_config.num_blocks
         logger.info("num_blocks: %s", self.num_blocks)
         self.kv_caches = kv_caches
@@ -567,7 +571,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                 caches = as_kv_cache_tensors(cache_or_caches)
                 shared_page_metadata = (
                     self._get_shared_page_metadata(caches)
-                    if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+                    if not state_mode and isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
                     else None
                 )
                 if shared_page_metadata is not None and _is_component_major_mla_binding(spec, caches):
@@ -599,7 +603,9 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                         block_strides.append(cache.stride(0) * element_size)
                         block_lens.append(math.prod(block_shape) * element_size)
                         block_shapes.append(block_shape)
-                        block_size_scales.append(tensor_num_blocks // self.num_blocks)
+                        # State layouts expose one row-strided view per pool
+                        # page. make_layout validates capacity before registration.
+                        block_size_scales.append(1 if state_mode else tensor_num_blocks // self.num_blocks)
 
                 layer_names.append(layer_name)
                 layer_block_size = spec.block_size
@@ -624,10 +630,6 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         if unexpected_layers:
             raise ValueError(f"KV caches contain layers absent from kv_cache_tensors: {sorted(unexpected_layers)}.")
 
-        register_regions = collect_configured_register_regions(self.kv_cache_config, kv_caches)
-        validate_register_region_count(register_regions)
-        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
-
         transfer_metadata = MooncakeTransferMetadata(
             engine_id=self.engine_id,
             te_rpc_port=self.te_rpc_port,
@@ -647,6 +649,11 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             local_ip=self.side_channel_host,
             handshake_port=self.handshake_port,
         )
+        if state_mode:
+            transfer_metadata = replace(transfer_metadata, state_layout=make_layout(self, transfer_metadata))
+        register_regions = collect_configured_register_regions(self.kv_cache_config, kv_caches)
+        validate_register_region_count(register_regions)
+        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
         self.transfer_metadata = transfer_metadata
         self.xfer_handshake_metadata = transfer_metadata
 

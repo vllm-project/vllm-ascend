@@ -72,6 +72,7 @@ def make_sending_thread(
 def make_pull_scheduler() -> MooncakePullConnectorScheduler:
     scheduler = MooncakePullConnectorScheduler.__new__(MooncakePullConnectorScheduler)
     scheduler.need_truncate = False
+    scheduler.state_mode = False
     scheduler._logged_mamba_allocation = False
     scheduler.num_speculative_tokens = 0
     scheduler.pcp_size = 1
@@ -860,6 +861,7 @@ def prefix_connector():
     result = MooncakePullConnector.__new__(MooncakePullConnector)
     result.connector_scheduler = MooncakePullConnectorScheduler.__new__(MooncakePullConnectorScheduler)
     result.connector_scheduler.need_truncate = True
+    result.connector_scheduler.state_mode = False
     result.connector_scheduler._heartbeat_thread = None
     return result
 
@@ -1031,6 +1033,7 @@ def test_scheduler_shutdown_stops_threads_and_clears_request_state() -> None:
     scheduler._reqs_recv_info["recv"] = ("10.0.0.1", 6000, "remote")
     connector = MooncakePullConnector.__new__(MooncakePullConnector)
     connector.connector_scheduler = scheduler
+    connector.connector_worker = None
 
     connector.shutdown()
 
@@ -1837,9 +1840,12 @@ def test_consumer_always_starts_heartbeat_with_configured_interval(monkeypatch, 
         is_kv_consumer=True,
         get_from_extra_config=extra.get,
     )
-    monkeypatch.setattr(
-        MooncakeBaseConnectorScheduler, "__init__", lambda self, *args: setattr(self, "kv_transfer_config", config)
-    )
+
+    def init_native(self, *args):
+        self.kv_transfer_config = config
+        self.state_mode = False
+
+    monkeypatch.setattr(MooncakeBaseConnectorScheduler, "__init__", init_native)
     receiver = MagicMock()
 
     def create_receiver(ready):

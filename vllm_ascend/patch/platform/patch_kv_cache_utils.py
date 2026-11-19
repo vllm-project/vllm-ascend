@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
+import sys
 from collections import defaultdict
 from dataclasses import replace
 from typing import Any
 
 # Both supported versions use the KV-cache planner and builder API from #61183/#42309.
 import vllm.v1.core.kv_cache_planning as _kv_cache_planning
+import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_planning import _approximate_gcd, may_override_num_blocks
@@ -23,12 +25,17 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.core.kv_cache_interface import get_request_state_plan
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
+    get_request_state_pd_alignment_bytes,
+    get_request_state_pool_plan,
     group_cache_specs,
     is_deepseek_v41_cache,
+    is_request_state_cache,
     make_cache_groups,
+    unwrap,
 )
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
@@ -69,6 +76,8 @@ _orig_annotate_eagle_groups = getattr(_kv_cache_planning, "_annotate_eagle_group
 _orig_get_kv_cache_config_from_groups = _kv_cache_planning.get_kv_cache_config_from_groups
 _orig_max_memory_usage_bytes_from_groups = _kv_cache_planning._max_memory_usage_bytes_from_groups
 _orig_pool_bytes_per_block = _kv_cache_planning._pool_bytes_per_block
+_orig_get_kv_cache_configs = _kv_cache_planning.get_kv_cache_configs
+_orig_get_max_concurrency = vllm.v1.core.kv_cache_utils.get_max_concurrency_for_kv_cache_config
 
 
 def _page_sizes(spec: UniformTypeKVCacheSpecs) -> set[int]:
@@ -485,6 +494,8 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
     """
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         return paired_sfa_pool_bytes(kv_cache_groups)
+    if is_request_state_cache(kv_cache_groups):
+        return get_request_state_pool_plan(vllm_config, kv_cache_groups, 1).budget.history_page_bytes
     pools = _get_replicated_draft_pools(kv_cache_groups)
     if pools is not None:
         return sum(_orig_pool_bytes_per_block(vllm_config, pool) for pool in pools)
@@ -506,6 +517,43 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
     return sum(page_sizes) * num_layer_tuples
 
 
+def _ascend_get_kv_cache_configs(
+    vllm_config: VllmConfig,
+    kv_cache_specs: list[dict[str, KVCacheSpec]],
+    available_memory: list[int],
+    global_kv_cache_groups: list[KVCacheGroupSpec],
+) -> list[KVCacheConfig]:
+    if is_request_state_cache(global_kv_cache_groups):
+        # Core estimates, checks and reconciles the history pages. Deduct the
+        # rank-local fixed allocation once; the builder restores it at any
+        # capacity requested by Core, including cross-rank re-planning.
+        if (
+            len(kv_cache_specs) != len(available_memory)
+            or not kv_cache_specs
+            or any(specs != kv_cache_specs[0] for specs in kv_cache_specs)
+        ):
+            raise ValueError("Request-state pools require identical worker cache specs and one budget per rank")
+        budget = get_request_state_pool_plan(vllm_config, global_kv_cache_groups, 1).budget
+        alignment = get_request_state_pd_alignment_bytes(vllm_config, global_kv_cache_groups)
+        override = vllm_config.cache_config.num_gpu_blocks_override
+        for memory in available_memory:
+            budget.resolve_history_capacity(
+                max(0, memory - alignment), min_history_blocks=2, num_history_blocks=override
+            )
+        available_memory = [memory - budget.fixed_bytes - alignment for memory in available_memory]
+    return _orig_get_kv_cache_configs(vllm_config, kv_cache_specs, available_memory, global_kv_cache_groups)
+
+
+def _ascend_get_max_concurrency(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> float:
+    plan = get_request_state_plan(kv_cache_config)
+    if plan is None:
+        return _orig_get_max_concurrency(vllm_config, kv_cache_config)
+    history_group = kv_cache_config.kv_cache_groups[plan.history.spec.group_ids[0]]
+    max_length = vllm_config.model_config.max_model_len
+    pages = history_group.kv_cache_spec.max_num_blocks_per_req(vllm_config, max_length)
+    return min((plan.history.capacity - 1) / pages, *(pool.capacity - 1 for pool in plan.request_states))
+
+
 def _ascend_max_memory_usage_bytes_from_groups(
     builder: Any,
     vllm_config: VllmConfig,
@@ -514,6 +562,11 @@ def _ascend_max_memory_usage_bytes_from_groups(
     """Keep Ascend admission accounting with the upstream builder API."""
     if is_step5_groups(kv_cache_groups):
         return get_step5_max_memory_usage(vllm_config, kv_cache_groups)
+    if is_request_state_cache(kv_cache_groups):
+        # Core already reserved the fixed pools and excluded the history null page.
+        return sum(
+            spec.max_memory_usage_bytes(vllm_config) for spec in unwrap(kv_cache_groups[0].kv_cache_spec).values()
+        )
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         return paired_sfa_max_memory(vllm_config, kv_cache_groups)
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
@@ -654,3 +707,13 @@ _kv_cache_planning.get_kv_cache_groups = _get_ascend_kv_cache_groups
 _kv_cache_planning.get_kv_cache_config_from_groups = _ascend_get_kv_cache_config_from_groups
 _kv_cache_planning._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
 _kv_cache_planning._pool_bytes_per_block = _ascend_pool_bytes_per_block
+
+
+_kv_cache_planning.get_kv_cache_configs = _ascend_get_kv_cache_configs
+vllm.v1.core.kv_cache_utils.get_kv_cache_configs = _ascend_get_kv_cache_configs
+vllm.v1.core.kv_cache_utils.get_max_concurrency_for_kv_cache_config = _ascend_get_max_concurrency
+
+# EngineCore may already hold a cached from-import from kv_cache_utils.
+_engine_core = sys.modules.get("vllm.v1.engine.core")
+if _engine_core is not None:
+    _engine_core.get_kv_cache_configs = _ascend_get_kv_cache_configs

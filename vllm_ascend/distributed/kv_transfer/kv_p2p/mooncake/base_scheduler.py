@@ -30,6 +30,10 @@ from vllm_ascend.ascend_config import (
     init_ascend_config,
 )
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.distributed.kv_transfer.kv_p2p.dsv41_state import (
+    is_state_config,
+    validate_pd_config,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakePCPTransferMetadata,
     MooncakePPTransferMetadata,
@@ -64,6 +68,8 @@ class MooncakeMetadataThread(threading.Thread):
         dcp_size: int,
         use_kv_pp: bool,
         ready_event: threading.Event,
+        *,
+        published_engine_id: str | None = None,
     ) -> None:
         super().__init__(daemon=True, name=type(self).__name__)
         encoder = msgspec.msgpack.Encoder()
@@ -74,13 +80,14 @@ class MooncakeMetadataThread(threading.Thread):
         self.pcp_size = pcp_size
         self.dcp_size = dcp_size
         self.engine_id = engine_id
+        self.published_engine_id = published_engine_id or engine_id
         self.use_kv_pp = use_kv_pp
         if self.use_kv_pp and self.dcp_size != 1:
             raise ValueError(f"Mooncake KVPP cannot be combined with DCP, got dcp_size={self.dcp_size}")
         metadata_by_pp_rank = self._merge_metadata_by_pp_rank(metadata)
         self.encoded_metadata = encoder.encode(
             MooncakeTransferMetadataGroups(
-                engine_id=engine_id,
+                engine_id=self.published_engine_id,
                 scheduler_host=host,
                 scheduler_port=port,
                 pp_size=pp_size,
@@ -95,7 +102,7 @@ class MooncakeMetadataThread(threading.Thread):
             "Initialized Mooncake scheduler handshake metadata: engine_id=%s, "
             "worker_count=%d, pp_ranks=%s, tp_size=%d, pp_size=%d, "
             "pcp_size=%d, dcp_size=%d, use_kv_pp=%s",
-            engine_id,
+            self.published_engine_id,
             len(metadata),
             sorted(metadata_by_pp_rank),
             tp_size,
@@ -187,7 +194,7 @@ class MooncakeMetadataThread(threading.Thread):
                 for tp_rank, worker_metadata in workers_by_tp_rank.items():
                     mismatched_fields = [
                         field_name
-                        for field_name in ("block_size", "num_blocks", "cp_kv_cache_interleave_size")
+                        for field_name in ("block_size", "num_blocks", "cp_kv_cache_interleave_size", "state_layout")
                         if getattr(worker_metadata, field_name) != getattr(reference, field_name)
                     ]
                     if mismatched_fields:
@@ -313,6 +320,7 @@ class MooncakeMetadataThread(threading.Thread):
                 block_shapes=block_shapes,
                 block_size_scales=block_size_scales,
                 metadata_by_pcp_rank=metadata_by_pcp_rank,
+                state_layout=reference.state_layout,
                 indexer_replication_sizes=indexer_replication_sizes,
             )
         return merged
@@ -414,7 +422,9 @@ class MooncakeBaseConnectorScheduler:
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
         self.group_block_size = [group.kv_cache_spec.block_size for group in self.kv_cache_groups]
         self.group_unique_specs = [self._get_group_unique_specs(group) for group in self.kv_cache_groups]
-        self.need_truncate = self._needs_prefill_token_truncation()
+        self.state_mode = is_state_config(kv_cache_config)
+        self.state_model_id = validate_pd_config(vllm_config) if self.state_mode else ""
+        self.need_truncate = self.state_mode or self._needs_prefill_token_truncation()
         self._logged_mamba_allocation = False
 
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
@@ -537,6 +547,15 @@ class MooncakeBaseConnectorScheduler:
         # Truncate before local prefix-cache lookup so its hit count stays
         # consistent with the prompt length used by the scheduler.
         params = request.kv_transfer_params
+        if (
+            self.state_mode
+            and params is not None
+            and params.get("do_remote_decode")
+            and not params.get("_p_side_truncated")
+        ):
+            params.setdefault("_dsv41_original_prompt_tokens", request.num_prompt_tokens)
+            if request.num_prompt_tokens == 1:
+                request.max_tokens = 1
         if params is not None and params.get("do_remote_decode") and self.need_truncate:
             self._truncate_request_for_prefill(request)
 
@@ -557,9 +576,12 @@ class MooncakeBaseConnectorScheduler:
         )
 
         if params is not None and params.get("do_remote_prefill"):
-            token_ids = request.prompt_token_ids or []
-            actual = self._state_prefill_token_count(len(token_ids))
             params["num_computed_tokens"] = num_computed_tokens
+            if self.state_mode:
+                # A non-empty remote hint must take the async receive path so
+                # malformed handoffs can fail this request through KV output.
+                return max(request.num_prompt_tokens - 1, 1), True
+            actual = self._state_prefill_token_count(len(request.prompt_token_ids or []))
             count = max(actual - num_computed_tokens, 0)
             if count > 0:
                 return count, True
