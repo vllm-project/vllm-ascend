@@ -102,7 +102,11 @@ def _ascend_moe_forward_prepared(
 ) -> list[torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     result = layer._forward_impl(hidden_states, router_logits, shared_experts_input, input_ids, image_mask=image_mask)
-    return list(result) if isinstance(result, tuple) else [result]
+    if isinstance(result, tuple):
+        shared_output, routed_output = result
+        # CANN MegaMoE already includes the shared expert in routed_output.
+        return [routed_output] if shared_output is None else [shared_output, routed_output]
+    return [result]
 
 
 def _ascend_moe_forward_prepared_fake(
@@ -282,7 +286,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 image_mask,
                 self._encode_layer_name(),
                 output_dim,
-                self.ascend_shared_experts is not None,
+                self.ascend_shared_experts is not None and not self._megamoe_shared_expert_fused,
                 self._can_overlap_sp_shared_with(self.routed_input_transform),
             )
             result = tuple(prepared_outputs) if len(prepared_outputs) == 2 else prepared_outputs[0]
