@@ -10,6 +10,20 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise import p
 
 
 class TestReusePublicationFence(unittest.TestCase):
+    def test_failed_forward_end_drain_still_fences_next_step(self):
+        worker = module.LayerwiseKVPoolWorker.__new__(module.LayerwiseKVPoolWorker)
+        worker._save_at_forward_end = True
+        worker._pending_last_save_drain = True
+        worker.use_block_key_layerwise = False
+        worker.num_layers = 2
+        worker.kv_send_thread = object()
+        with patch.object(worker, "_wait_for_final_layer_save", side_effect=RuntimeError("save failed")) as drain:
+            with self.assertRaisesRegex(RuntimeError, "save failed"):
+                worker.finish_forward()
+            with self.assertRaisesRegex(RuntimeError, "save failed"):
+                worker.wait_for_previous_save()
+        self.assertEqual(drain.call_count, 2)
+
     def test_fence_order_and_scope(self):
         for transfer, reuse, tp_size, sync in [
             (True, True, 16, True),

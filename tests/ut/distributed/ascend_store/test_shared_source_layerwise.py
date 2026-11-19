@@ -221,10 +221,64 @@ def save_prefix(worker):
     worker.start_load_kv(meta)
     for layer in range(worker.num_layers):
         forward_layer(worker, meta)
+    worker.finish_forward()
     worker.get_finished(set(), meta)
 
 
 class TestSharedSourceLayerwise(unittest.TestCase):
+    def test_final_save_waits_at_forward_end(self):
+        self._check_final_save_fence(finish_called=True)
+
+    def test_skipped_forward_end_still_fences_buffer_reuse(self):
+        self._check_final_save_fence(finish_called=False)
+
+    def _check_final_save_fence(self, *, finish_called):
+        worker, store, caches = make_shared_worker(self, bounded=True)
+        meta = metadata(worker)
+        conn = AscendStoreConnector.__new__(AscendStoreConnector)
+        conn.use_layerwise = conn.can_put = True
+        conn.connector_worker = worker
+        conn._mamba_state = None
+        conn.bind_connector_metadata(meta)
+        saved = caches["model.layers.8.attn.long_kv_cache"][1]
+        store.block_address = saved.data_ptr()
+        store.block_direction = 0
+        tail_submitted = threading.Event()
+        finished = threading.Event()
+        errors: list[Exception] = []
+
+        def forward():
+            try:
+                for layer in range(worker.num_layers):
+                    name = f"model.layers.{layer}.v41_attn"
+                    conn.wait_for_layer_load(name)
+                    conn.save_kv_layer(name, [], None)
+                tail_submitted.set()
+                if finish_called:
+                    conn.finish_forward()
+                else:
+                    conn.handle_preemptions(meta)
+                saved.zero_()
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        thread = threading.Thread(target=forward)
+        thread.start()
+        try:
+            self.assertTrue(store.blocked.wait(3))
+            self.assertTrue(tail_submitted.wait(3))
+            self.assertFalse(finished.wait(0.1))
+            self.assertFalse(store.published)
+        finally:
+            store.resume.set()
+            thread.join(5)
+        self.assertTrue(finished.is_set())
+        self.assertFalse(errors)
+        self.assertTrue(store.published)
+        self.assertFalse(any(event.is_set() for event in worker.layer_save_finished_events))
+
     def test_sparse_groups_keep_model_layer_slots(self):
         worker, store, caches = make_shared_worker(self, bounded=True)
         self.assertIs(type(worker), LayerwiseKVPoolWorker)
@@ -374,6 +428,7 @@ class TestSharedSourceLayerwise(unittest.TestCase):
             name = f"model.layers.{layer}.v41_attn"
             conn.wait_for_layer_load(name)
             conn.save_kv_layer(name, [], None)
+        conn.finish_forward()
         self.assertTrue(store.published)
 
     def test_failed_load_reports_request_and_disables_saves(self):

@@ -1,0 +1,7 @@
+pr: 22433
+entries:
+  - category: performance
+    text: >-
+      Memcache-backed layerwise KV offloading on Model Runner V2 can overlap the
+      final KV write with the remaining prefill computation when speculative
+      decoding is disabled and no draft save layers are registered.
