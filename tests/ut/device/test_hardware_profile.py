@@ -14,6 +14,7 @@ from vllm_ascend.device.hardware_profile import (
     CPUBindingMode,
     DeviceAdaptorFamily,
     DeviceAddressingMode,
+    FlashAttentionNpu3Model,
     HardwareCapability,
     MoECommPolicy,
     QuantizationBackendFamily,
@@ -96,6 +97,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,
             HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
             HardwareCapability.DEVICE_LENGTH_FLASH_ATTN,
+            HardwareCapability.FLASH_ATTN_NPU_3,
             HardwareCapability.CLUSTER_CPU_TOPOLOGY,
             HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
             HardwareCapability.DSV4_COMPRESSED_CACHE,
@@ -317,3 +319,18 @@ def test_unknown_device_type_is_rejected() -> None:
 def test_every_device_type_has_a_profile() -> None:
     for device_type in AscendDeviceType:
         assert get_hardware_profile(device_type)._device_type is device_type
+
+
+@pytest.mark.parametrize(
+    ("device_type", "models"),
+    [
+        (AscendDeviceType.A2, frozenset({FlashAttentionNpu3Model.MINIMAX})),
+        (AscendDeviceType.A3, frozenset({FlashAttentionNpu3Model.MINIMAX})),
+        (AscendDeviceType.A5, frozenset({FlashAttentionNpu3Model.STEP5})),
+        (AscendDeviceType._310P, frozenset()),
+    ],
+)
+def test_flash_attn_npu_3_supported_models(device_type, models) -> None:
+    profile = get_hardware_profile(device_type)
+    assert profile.flash_attn_npu_3_models == models
+    assert profile.supports(HardwareCapability.FLASH_ATTN_NPU_3) == bool(models)

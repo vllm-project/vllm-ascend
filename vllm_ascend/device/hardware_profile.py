@@ -76,8 +76,8 @@ class HardwareCapability(Enum):
     CHUNKED_PREFILL_PHASE_SPLIT = auto()
     # CANN device-side FlashAttn metadata with strided paged GQA K/V.
     DEVICE_LENGTH_FLASH_ATTN = auto()
-    # Optional flash_attn_npu_3 device-tiling ABI for ordinary MiniMax target/draft
-    # attention. Restricted to A2/A3; A5 uses the CANN backend instead.
+    # Optional flash_attn_npu_3 device-tiling ABI on A2/A3/A5.
+    # Model eligibility is checked separately by the attention selector.
     FLASH_ATTN_NPU_3 = auto()
     # Build CPU-affinity pools from the cluster-aware CPU topology.
     CLUSTER_CPU_TOPOLOGY = auto()
@@ -230,6 +230,16 @@ class AttentionBackendFamily(Enum):
     COMPATIBILITY = auto()
 
 
+class FlashAttentionNpu3Model(Enum):
+    """Model families eligible for the optional flash-attention-npu backend.
+
+    Model architectures and runtime configuration are checked by the selector.
+    """
+
+    MINIMAX = auto()
+    STEP5 = auto()
+
+
 class CPUBindingMode(Enum):
     """CPU binding policies selected for worker processes."""
 
@@ -298,6 +308,9 @@ class HardwareProfile:
     native_weight_formats: frozenset[WeightFormat]
     # Independent, additive contracts queried with ``supports``.
     capabilities: frozenset[HardwareCapability]
+
+    # Operator availability alone does not determine which model route to use.
+    flash_attn_npu_3_models: frozenset[FlashAttentionNpu3Model] = frozenset()
 
     # NZ mm/addmm is supported, but batched matmul rejects NZ weights.
     requires_2d_nz_linear_input: bool = False
@@ -382,6 +395,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
     {
         AscendDeviceType.A2: HardwareProfile(
             _device_type=AscendDeviceType.A2,
+            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX}),
             # A2 BF16 native verification produced NaNs with 8 drafts (9 queries).
             # Nine is the first observed failing configuration, not a proven
             # universal kernel bound. Remove after native recurrent parity is
@@ -405,6 +419,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
+            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX}),
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,
             default_worker_cls=_DEFAULT_WORKER_CLS,
@@ -448,6 +463,11 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A5: HardwareProfile(
             _device_type=AscendDeviceType.A5,
+            # A5 uses CANN flash_attn by default. Step5 temporarily uses the
+            # ecosystem FA3 operator because CANN flash_attn does not support it.
+            # TODO: Route Step5 back to CANN flash_attn and remove this exception
+            # once CANN supports Step5 and the integration is validated.
+            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.STEP5}),
             requires_2d_nz_linear_input=True,
             minimax_m3_gbsa_bf16_softmax_precision=1,
             attention_backend_family=AttentionBackendFamily.STANDARD,
@@ -468,6 +488,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.CANN_MEGAMOE_MXFP,
                     HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,
                     HardwareCapability.DEVICE_LENGTH_FLASH_ATTN,
+                    HardwareCapability.FLASH_ATTN_NPU_3,
                     HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
                     HardwareCapability.CLUSTER_CPU_TOPOLOGY,
                     HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
