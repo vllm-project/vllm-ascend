@@ -57,6 +57,7 @@ _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A2: _STANDARD_CAPABILITIES
     | {
         HardwareCapability.RMS_NORM_CAST,
+        HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.MINIMAX_ECOSYSTEM_FA3,
         HardwareCapability.POOL_KEY_INDEXER_INT8,
     },

@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import torch
 import torch_npu
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -30,8 +30,17 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import Un
 from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, select_moe_comm_method, use_cann_megamoe
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ascend_forward_context import (
+    _EXTRA_CTX,
+    is_draft_model,
+    select_moe_comm_method,
+    use_cann_megamoe,
+)
+from vllm_ascend.device.hardware_profile import (
+    HardwareCapability,
+    MoECommPolicy,
+    get_current_hardware_profile,
+)
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
@@ -698,7 +707,26 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         lora_context = getattr(self, "_ascend_moe_lora_context", None)
         comm_type = _EXTRA_CTX.moe_comm_type
+        # A2 (910B): one worker runs both the PCP8 MegaMoe target and the nested
+        # PCP1 DSpark draft. The platform hook selects the target FUSED_MC2 route
+        # globally, so a draft forward entering here must fall back to its
+        # ordinary MC2/GMM route. Re-derive only when a config is present.
+        a2_current_config = get_current_vllm_config_or_none()
         if (
+            a2_current_config is not None
+            and get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY
+            and is_draft_model(a2_current_config)
+        ):
+            num_tokens = _EXTRA_CTX.max_tokens_across_dp
+            if num_tokens is None:
+                num_tokens = _EXTRA_CTX.num_tokens
+            comm_type = select_moe_comm_method(
+                num_tokens,
+                a2_current_config,
+                is_draft_model=True,
+                draft_moe_quant_type=self.quant_type,
+            )
+        elif (
             getattr(_EXTRA_CTX, "use_mega_moe", False)
             and self._vllm_config.model_config.runner_type == "draft"
             and self.quant_type == QuantType.NONE

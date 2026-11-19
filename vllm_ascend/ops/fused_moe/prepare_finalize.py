@@ -26,6 +26,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 
@@ -271,6 +272,15 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         """
         self.replace_allreduce = replace_allreduce
         mc2_mask = _EXTRA_CTX.mc2_mask
+        if _EXTRA_CTX.use_mega_moe and _EXTRA_CTX.max_tokens_across_pcp:
+            # PCP and bounded replay can contain padding inside the local row
+            # range, not just a suffix beyond num_tokens.
+            is_padding = getattr(get_forward_context(), "is_padding", None)
+            if isinstance(is_padding, torch.Tensor):
+                mc2_mask = torch.logical_not(is_padding)
+                pad = _EXTRA_CTX.padded_num_tokens - mc2_mask.shape[0]
+                if pad > 0:
+                    mc2_mask = nn.functional.pad(mc2_mask, (0, pad), value=False)
         if self.replace_allreduce:
             # SP shards use the local token count, not the largest DP batch.
             # Select valid bits before adding padding for uniform MC2 batches.

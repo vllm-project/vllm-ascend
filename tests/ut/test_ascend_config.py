@@ -1564,7 +1564,11 @@ class TestUpstreamConfigCompatibility(TestBase):
                 with self.subTest(field="hidden_size", value=3584), patch.object(text_config, "hidden_size", 3584):
                     self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
 
-    def test_megamoe_model_config_constraints(self):
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_megamoe_model_config_constraints(self, _mock_profile):
         supported = SimpleNamespace(
             model_config=SimpleNamespace(
                 hf_text_config=SimpleNamespace(
@@ -1603,7 +1607,11 @@ class TestUpstreamConfigCompatibility(TestBase):
         )
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(minimax_m3))
 
-    def test_kimi_k3_megamoe_uses_routed_expert_dimensions(self):
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_kimi_k3_megamoe_uses_routed_expert_dimensions(self, _mock_profile):
         kimi_k3 = SimpleNamespace(
             model_config=SimpleNamespace(
                 hf_text_config=SimpleNamespace(
@@ -1818,8 +1826,12 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             init_ascend_config(vc)
 
     @_clean_up
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_minimax_m3_allows_fused_mc2_mode_2_megamoe(self, mock_fix):
+    def test_minimax_m3_allows_fused_mc2_mode_2_megamoe(self, mock_fix, _mock_profile):
         def _fake_find_spec(name, *args, **kwargs):
             if name == "cann_ops_transformer":
                 return object()
@@ -1868,6 +1880,70 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             self.assertRaisesRegex(AssertionError, "MiniMax M3 does not support enable_fused_mc2=1"),
         ):
             config.derive_and_validate(vc)
+
+    @_clean_up
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A2),
+    )
+    @patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", True)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_dspark_draft_rebuild_keeps_target_megamoe_mode(self, _mock_fix, _mock_profile):
+        def _fake_find_spec(name, *args, **kwargs):
+            # MegaMoe availability is normally probed through find_spec; pin it
+            # so the result does not depend on whether the runner image ships
+            # cann_ops_transformer.
+            if name == "cann_ops_transformer":
+                return object()
+            return real_find_spec(name, *args, **kwargs)
+
+        # The PCP8 target publishes a MegaMoe-enabled singleton first.
+        target = VllmConfig()
+        target.additional_config = {"enable_fused_mc2": 2}
+        with (
+            patch("vllm_ascend.ascend_config.importlib.util.find_spec", side_effect=_fake_find_spec),
+            patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=True),
+        ):
+            target_config = init_ascend_config(target)
+        self.assertEqual(target_config.enable_fused_mc2, 1)
+
+        # The DSpark speculator shallow-copies the target VllmConfig with PCP=1;
+        # its rebuild fails the PCP8 envelope but must not downgrade the shared
+        # process singleton, because use_cann_megamoe() excludes draft forwards.
+        draft = VllmConfig()
+        draft.model_config.architectures = ["DeepseekV41ForCausalLM"]
+        draft.parallel_config.prefill_context_parallel_size = 1
+        draft.additional_config = {"enable_fused_mc2": 2}
+        with patch("vllm_ascend.ascend_config.importlib.util.find_spec", side_effect=_fake_find_spec):
+            draft_config = init_ascend_config(draft)
+        self.assertEqual(draft_config.enable_fused_mc2, 1)
+        self.assertEqual(get_ascend_config().enable_fused_mc2, 1)
+
+    @_clean_up
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A2),
+    )
+    @patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", True)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_standalone_pcp1_dsv41_downgrades_megamoe(self, _mock_fix, _mock_profile):
+        def _fake_find_spec(name, *args, **kwargs):
+            # MegaMoe availability is normally probed through find_spec; pin it
+            # so the result does not depend on whether the runner image ships
+            # cann_ops_transformer.
+            if name == "cann_ops_transformer":
+                return object()
+            return real_find_spec(name, *args, **kwargs)
+
+        # Without a previously published target singleton, a PCP1 DSV4.1
+        # deployment is an ordinary unsupported topology, not a nested draft.
+        vc = VllmConfig()
+        vc.model_config.architectures = ["DeepseekV41ForCausalLM"]
+        vc.parallel_config.prefill_context_parallel_size = 1
+        vc.additional_config = {"enable_fused_mc2": 2}
+        with patch("vllm_ascend.ascend_config.importlib.util.find_spec", side_effect=_fake_find_spec):
+            config = init_ascend_config(vc)
+        self.assertEqual(config.enable_fused_mc2, 0)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
