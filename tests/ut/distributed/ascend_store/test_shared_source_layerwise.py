@@ -114,8 +114,10 @@ class MemoryGVAStore:
         return 0
 
 
-def make_shared_worker(test, *, bounded=False, draft=False, num_layers=12, sources=(2, 8)):
-    """Register real CPU cache views with the production GVA worker and queue threads."""
+def make_shared_worker(
+    test, *, bounded=False, draft=False, num_layers=12, sources=(2, 8), backend="memcache", store=None
+):
+    """Register CPU cache views with the production worker and queue threads."""
     names = [
         name
         for source in sources
@@ -165,10 +167,11 @@ def make_shared_worker(test, *, bounded=False, draft=False, num_layers=12, sourc
             use_layerwise=True,
             num_layers=num_layers,
             num_hidden_layers=num_layers,
-            extra_config={"backend": "memcache"},
+            extra_config={"backend": backend},
             kv_cache_config=cache_config,
         )
-    store = MemoryGVAStore()
+    if store is None:
+        store = MemoryGVAStore()
     worker.m_store = store
     worker.cache_coordinator = worker.token_database.cache_coordinator = None
     all_names = sum(groups, [])

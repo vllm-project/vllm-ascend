@@ -151,9 +151,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.backend_class = get_backend_class(self.backend_name) if self.use_layerwise else None
         self.layerwise_data_plane = self.backend_class.layerwise_data_plane if self.backend_class is not None else None
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
-        self.supports_composite_kv_loads = (
-            self.use_layerwise and self.layerwise_data_plane == "gva" and has_shared_kv_sources(vllm_config)
-        )
+        self.supports_composite_kv_loads = self.use_layerwise and has_shared_kv_sources(vllm_config)
         self.supports_composite_kv_saves = self.supports_composite_kv_loads
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False
