@@ -271,8 +271,6 @@ class _HixlSession:
             self._check_status(status, "get ACL context")
             self._engine = self._hixl.Hixl()
             local_engine = join_host_port(get_ip(), get_open_port())
-            if self._rank == 0 and self._initialize_options:
-                logger.info("Initializing HIXL EPLB with explicit options: %s", sorted(self._initialize_options))
             self._check_status(self._engine.initialize(local_engine, self._initialize_options), "initialize")
 
         self._initializing = True
