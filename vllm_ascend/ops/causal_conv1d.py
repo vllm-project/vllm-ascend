@@ -3,6 +3,29 @@ import torch.nn.functional as F
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 
+def _causal_conv1d_npu(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None, seqlen: int):
+    """Depthwise causal convolution using elementwise NPU operations.
+
+    ``torch.nn.functional.conv1d`` lowers to a grouped Conv2D on NPU. Some
+    supported Ascend/CANN combinations do not provide a kernel for the shapes
+    used by Mamba short convolutions, so use the equivalent channel-wise sum.
+    ``x`` already contains the left padding or initial state, if any.
+    """
+    batch, dim = x.shape[:2]
+    width = weight.shape[1]
+    acc_dtype = torch.float32 if x.dtype in (torch.float16, torch.bfloat16) else x.dtype
+    out = torch.zeros((batch, dim, seqlen), dtype=acc_dtype, device=x.device)
+
+    for i in range(width):
+        x_slice = x[..., i : i + seqlen].to(acc_dtype)
+        weight_slice = weight[:, i].to(acc_dtype).view(1, dim, 1)
+        out.add_(x_slice * weight_slice)
+
+    if bias is not None:
+        out.add_(bias.to(acc_dtype).view(1, dim, 1))
+    return out.to(x.dtype)
+
+
 def causal_conv1d_ref(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -35,10 +58,19 @@ def causal_conv1d_ref(
     seqlen = x.shape[-1]
     dim, width = weight.shape
 
+    x_conv = x
     if initial_states is None:
-        out = F.conv1d(x, weight.unsqueeze(1), bias, padding=width - 1, groups=dim)
+        if x.device.type == "npu":
+            x_conv = F.pad(x, (width - 1, 0))
     else:
         x = torch.cat([initial_states, x], dim=-1)
+        x_conv = x
+
+    if x.device.type == "npu":
+        out = _causal_conv1d_npu(x_conv, weight, bias, seqlen)
+    elif initial_states is None:
+        out = F.conv1d(x, weight.unsqueeze(1), bias, padding=width - 1, groups=dim)
+    else:
         out = F.conv1d(x, weight.unsqueeze(1), bias, padding=0, groups=dim)
     out = out[..., :seqlen]
 
@@ -295,3 +327,4 @@ def causal_conv1d_update(
             out[start : start + out_i.shape[0]] = out_i
 
     return out.to(original_x_dtype)
+
