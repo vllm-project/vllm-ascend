@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 """Unit tests for the ACLNN operator-descriptor cache advisory.
 
-The advisory exists because CANN caches at most ``ACLNN_CACHE_LIMIT`` operator
-descriptors per worker. Model Runner V2 with speculative decoding and ACL Graph
-can exhaust that cache, which adds host-side tiling/workspace work; the variable
-is exposed so that this can be diagnosed and, if it helps, tuned (see
-https://github.com/vllm-project/vllm-ascend/issues/21741).
+The advisory exists because CANN keeps ``ACLNN_CACHE_LIMIT`` single-operator
+descriptors per thread (large fused operators use a separate process-wide pool).
+Model Runner V2 with speculative decoding and ACL Graph browses more shapes and
+may fill a cache, which adds host-side tiling/workspace work; the variable is
+exposed so that this can be diagnosed and, if it helps, tuned (see
+https://github.com/vllm-project/vllm-ascend/issues/21741). The message must keep
+the per-thread / process-wide scopes explicit and must not claim saturation from
+a worker-wide entry count.
 """
 
 from types import SimpleNamespace
@@ -33,6 +36,9 @@ def test_advises_for_spec_decode_with_full_cudagraph(monkeypatch: pytest.MonkeyP
     assert message is not None
     assert f"ACLNN_CACHE_LIMIT={ACLNN_CACHE_LIMIT_RECOMMENDED}" in message
     assert "diagnostic knob" in message
+    assert "per-thread" in message
+    assert "process-wide" in message
+    assert "does not prove per-thread saturation" in message
     assert "re-measure" in message.lower() or "keep the value only if it actually helps" in message
 
 

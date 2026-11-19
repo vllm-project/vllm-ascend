@@ -1675,18 +1675,22 @@ ACLNN_CACHE_LIMIT_RECOMMENDED = 100_000
 
 
 def aclnn_cache_limit_advisory(vllm_config: VllmConfig) -> str | None:
-    """Return an advisory string when this config is likely to exhaust the ACLNN cache.
+    """Return an advisory string when this config may exhaust the ACLNN caches.
 
-    CANN's ACLNN executor caches at most ``ACLNN_CACHE_LIMIT`` compiled operator
-    descriptors per worker process (default 10000). Model Runner V2 captures the
-    target and the speculative prefill/decode graphs separately, so it browses a
-    larger operator/shape working set than Model Runner V1 did. On
-    Qwen3.6-35B-A3B (TP=2, MTP=3, ``FULL_AND_PIECEWISE``) one worker was observed
-    holding about 9945 entries right after startup - one warmup away from the
-    default ceiling. Once the cache is full the executor stops reusing
-    descriptors and recomputes tiling and workspace on the host for every call,
-    which a profile shows as ``aclnn*GetWorkspaceSize`` / ``*_Tiling`` host time
-    (https://github.com/vllm-project/vllm-ascend/issues/21741).
+    CANN keeps compiled ACLNN descriptors in a per-thread single-operator cache
+    whose ceiling is controlled by ``ACLNN_CACHE_LIMIT`` (default 10000), and it
+    keeps a separate process-wide pool for large fused operators. The scopes
+    matter: a worker-wide entry count does not tell you how full any single
+    thread's cache is. Model Runner V2 captures the target and the speculative
+    prefill/decode graphs separately, so it browses a larger operator/shape
+    working set than Model Runner V1 did. On Qwen3.6-35B-A3B (TP=2, MTP=3,
+    ``FULL_AND_PIECEWISE``) workers were observed holding about 9945 descriptor
+    entries in aggregate right after startup, but that measurement is
+    worker-wide, so it does not by itself show that a thread reached the default
+    ceiling. Saturation is therefore a hypothesis, not an established cause: it
+    is worth checking when a profile attributes a large share of time to
+    ``aclnn*GetWorkspaceSize`` / ``*_Tiling`` host work and identifies which
+    cache filled (https://github.com/vllm-project/vllm-ascend/issues/21741).
 
     The advisory is diagnostic: raising the limit did not change the measured
     prefill wave time in our own A/B runs, so users should re-measure before and
@@ -1709,13 +1713,15 @@ def aclnn_cache_limit_advisory(vllm_config: VllmConfig) -> str | None:
     if not graph_mode.has_full_cudagraphs():
         return None
     return (
-        f"{ACLNN_CACHE_LIMIT_ENV} is unset, so CANN caches at most "
-        f"{ACLNN_CACHE_LIMIT_DEFAULT} ACLNN operator descriptors per worker. Speculative "
-        "decoding with ACL Graph captures additional prefill and decode graphs and can exhaust "
-        "that cache; the executor then recomputes tiling/workspace on the host, which shows up "
-        "as host time (aclnn*GetWorkspaceSize / *_Tiling) rather than NPU time. This is a "
-        "diagnostic knob, not a known fix: if a profile of your workload shows that pattern, "
-        "compare with "
+        f"{ACLNN_CACHE_LIMIT_ENV} is unset, so CANN's per-thread single-operator cache "
+        f"uses its default ceiling of {ACLNN_CACHE_LIMIT_DEFAULT} descriptors (large fused "
+        "operators use a separate process-wide pool). Speculative decoding with ACL Graph "
+        "captures additional prefill and decode graphs and may fill those caches; a full "
+        "cache makes the executor recompute tiling/workspace on the host, which shows up as "
+        "host time (aclnn*GetWorkspaceSize / *_Tiling) rather than NPU time. A worker-wide "
+        "entry count alone does not prove per-thread saturation. This is a diagnostic knob, "
+        "not a known fix: if a profile of your workload shows that pattern and identifies "
+        "which cache filled, compare with "
         f"{ACLNN_CACHE_LIMIT_ENV}={ACLNN_CACHE_LIMIT_RECOMMENDED} (export it in the "
         "environment before startup; raising it increases host memory use) and keep the value "
         "only if it actually helps."

@@ -332,12 +332,14 @@ profile first. A profile of one affected configuration reported in
 - `MatMulV2_Tiling` / `Transpose_Tiling`: 0 calls on the previous runner, ~1900 / ~3300 calls here
 - `aclnnChunkGatedDeltaRuleFwdGetWorkspaceSize`: same number of calls, ~13x the cost per call
 
-One candidate explanation is the CANN ACLNN operator-descriptor cache. Its capacity is
-`ACLNN_CACHE_LIMIT` per worker process and defaults to `10000`. Model Runner V2 captures the target
+One candidate explanation is the CANN ACLNN operator-descriptor cache. CANN keeps single-operator
+descriptors in a per-thread cache whose ceiling is `ACLNN_CACHE_LIMIT` and defaults to `10000`, and
+keeps a separate process-wide pool for large fused operators. Model Runner V2 captures the target
 and the speculative prefill/decode graphs separately, so it browses a larger operator/shape working
-set than the previous runner; a worker has been observed holding about 9900 entries right after
-startup. Once the cache is full, the executor stops reusing descriptors and recomputes tiling and
-workspace on the host for every call.
+set than the previous runner; a worker has been observed holding about 9900 descriptor entries in
+aggregate right after startup. That count is worker-wide, so it does not by itself show that any
+thread reached the per-thread ceiling. If a cache fills, the executor stops reusing descriptors and
+recomputes tiling and workspace on the host for every call.
 
 `ACLNN_CACHE_LIMIT` is therefore exposed as a **diagnostic knob**, not as a guaranteed fix. To test
 it on your own workload:
