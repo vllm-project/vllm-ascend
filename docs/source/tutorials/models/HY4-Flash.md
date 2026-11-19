@@ -44,10 +44,10 @@ Choose the Hy4-Flash image for your container environment:
 
 | Image Variant | Image |
 | --- | --- |
-| Default | [quay.io/ascend/vllm-ascend:hy4-flash-a5](https://quay.io/repository/ascend/vllm-ascend?tab=tags&tag=hy4-flash-a5) |
+| Ubuntu | [quay.io/ascend/vllm-ascend:hy4-flash-a5](https://quay.io/repository/ascend/vllm-ascend?tab=tags&tag=hy4-flash-a5) |
 | openEuler | [quay.io/ascend/vllm-ascend:hy4-flash-a5-openeuler](https://quay.io/repository/ascend/vllm-ascend?tab=tags&tag=hy4-flash-a5-openeuler) |
 
-Run the following on each 950DT products host. Set the model path to the FP8 checkpoint. The example uses the openEuler image; set `IMAGE` to `quay.io/ascend/vllm-ascend:hy4-flash-a5` for the default image.
+Run the following on each 950DT products host. Set the model path to the FP8 checkpoint. The example uses the openEuler image; set `IMAGE` to `quay.io/ascend/vllm-ascend:hy4-flash-a5` for the Ubuntu image.
 
 ```bash
 export IMAGE="quay.io/ascend/vllm-ascend:hy4-flash-a5-openeuler"
