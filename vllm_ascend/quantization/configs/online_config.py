@@ -57,9 +57,9 @@ from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMetho
 from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 
-from vllm_ascend.quantization.methods.online.adapters import (
-    AscendOnlineInt8LinearMethod,
-    AscendOnlineInt8MoEMethod,
+from vllm_ascend.quantization.methods.online.int8 import (
+    AscendInt8PerChannelOnlineLinearMethod,
+    AscendInt8PerChannelOnlineMoEMethod,
 )
 from vllm_ascend.utils import ASCEND_ONLINE_QUANT_METHODS
 
@@ -89,8 +89,8 @@ def _method_tables() -> tuple[dict[Any, type], dict[Any, type]]:
         kInt8StaticChannelSym,
     )
 
-    _ASCEND_ONLINE_LINEAR_METHODS[kInt8StaticChannelSym] = AscendOnlineInt8LinearMethod
-    _ASCEND_ONLINE_MOE_METHODS[kInt8StaticChannelSym] = AscendOnlineInt8MoEMethod
+    _ASCEND_ONLINE_LINEAR_METHODS[kInt8StaticChannelSym] = AscendInt8PerChannelOnlineLinearMethod
+    _ASCEND_ONLINE_MOE_METHODS[kInt8StaticChannelSym] = AscendInt8PerChannelOnlineMoEMethod
     return _ASCEND_ONLINE_LINEAR_METHODS, _ASCEND_ONLINE_MOE_METHODS
 
 

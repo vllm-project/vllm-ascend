@@ -33,14 +33,17 @@ from vllm_ascend.quantization.configs.online_config import (
     AscendOnlineQuantizationConfig,
     build_ascend_online_quant_config,
 )
-from vllm_ascend.quantization.methods.online.adapters import AscendOnlineInt8LinearMethod
 from vllm_ascend.quantization.methods.online.int8 import (
-    AscendOnlineInt8W8A8FusedMoEMethod,
-    AscendOnlineInt8W8A8LinearMethod,
+    AscendInt8PerChannelOnlineLinearMethod,
+    AscendInt8PerChannelOnlineMoEMethod,
     _linear_reduce_group,
     _moe_reduce_group,
     _zero_expert_padding,
     quantize_last_dim_to_int8,
+)
+from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import (
+    AscendW8A8DynamicFusedMoEMethod,
+    AscendW8A8DynamicLinearMethod,
 )
 
 MODULE = "vllm_ascend.quantization.methods.online.int8"
@@ -140,7 +143,7 @@ class TestQuantizeLastDimToInt8(TestBase):
         self.assertAlmostEqual(scale[0].item(), 1.0 / 127, places=7)
 
 
-class TestOnlineInt8LinearMethod(TestBase):
+class TestInt8PerChannelOnlineLinearMethod(TestBase):
     def _layer(self, weight=None):
         layer = SimpleNamespace(prefix="model.layers.0.mlp.down_proj", params_dtype=torch.bfloat16)
         layer.weight = torch.nn.Parameter(
@@ -149,14 +152,20 @@ class TestOnlineInt8LinearMethod(TestBase):
         )
         return layer
 
-    def test_weight_staging_is_owned_by_vllm(self):
-        """vLLM's OnlineLinearBase.create_weights stages the checkpoint-dtype
-        weight, so the offline create_weights path must not stage one here."""
-        with self.assertRaises(NotImplementedError):
-            AscendOnlineInt8W8A8LinearMethod().get_weight(64, 32, torch.bfloat16)
+    def _method(self):
+        # OnlineLinearBase.__init__ records the model dtype.
+        vllm_config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16))
+        with patch(
+            "vllm.model_executor.layers.quantization.online.fp8.get_current_vllm_config",
+            return_value=vllm_config,
+        ):
+            return AscendInt8PerChannelOnlineLinearMethod()
+
+    def test_reuses_the_offline_w8a8_dynamic_scheme(self):
+        self.assertIs(AscendInt8PerChannelOnlineLinearMethod.scheme_cls, AscendW8A8DynamicLinearMethod)
 
     def test_process_weights_installs_scale_and_delegates_the_layout(self):
-        scheme = AscendOnlineInt8W8A8LinearMethod()
+        method = self._method()
         layer = self._layer()
 
         scale_buffer = torch.empty(32, 1, dtype=torch.bfloat16)
@@ -169,50 +178,44 @@ class TestOnlineInt8LinearMethod(TestBase):
             patch(f"{MODULE}.AscendW8A8DynamicLinearMethod.process_weights_after_loading") as layout,
             patch(f"{MODULE}._linear_reduce_group", return_value=None),
         ):
-            scheme.process_weights_after_loading(layer)
+            method.process_weights_after_loading(layer)
 
         self.assertEqual(layer.weight.dtype, torch.int8)
         self.assertEqual(tuple(layer.weight.shape), (32, 64))
         self.assertEqual(tuple(layer.weight_scale.shape), (32, 1))
         self.assertTrue(torch.all(layer.weight_offset == 0))
-        layout.assert_called_once_with(scheme, layer)
+        layout.assert_called_once_with(layer)
         self.assertTrue(getattr(layer, PROCESSED_FLAG))
 
     def test_process_weights_is_idempotent(self):
-        scheme = AscendOnlineInt8W8A8LinearMethod()
         layer = self._layer()
         setattr(layer, PROCESSED_FLAG, True)
 
         with patch(f"{MODULE}.quantize_last_dim_to_int8") as quantize:
-            scheme.process_weights_after_loading(layer)
+            self._method().process_weights_after_loading(layer)
 
         quantize.assert_not_called()
 
     def test_process_weights_rejects_non_2d_weight(self):
-        scheme = AscendOnlineInt8W8A8LinearMethod()
         layer = self._layer(weight=torch.randn(2, 8, 16, dtype=torch.bfloat16))
 
         with self.assertRaises(ValueError):
-            scheme.process_weights_after_loading(layer)
+            self._method().process_weights_after_loading(layer)
 
 
-class TestOnlineInt8MoeMethod(TestBase):
-    def _scheme(self):
-        # Bypass __init__: it probes the MC2 communication group, which does not
-        # exist in a unit-test process.
-        return AscendOnlineInt8W8A8FusedMoEMethod.__new__(AscendOnlineInt8W8A8FusedMoEMethod)
+class TestInt8PerChannelOnlineMoEMethod(TestBase):
+    def _method(self):
+        # Bypass __init__: it builds the offline scheme, which probes the MC2
+        # communication group that does not exist in a unit-test process.
+        method = AscendInt8PerChannelOnlineMoEMethod.__new__(AscendInt8PerChannelOnlineMoEMethod)
+        method.quant_method = MagicMock()
+        return method
 
-    def test_weight_staging_is_owned_by_vllm(self):
-        """vLLM's OnlineMoEMethodBase.create_weights stages the expert weights."""
-        with self.assertRaises(NotImplementedError):
-            self._scheme().get_weight(4, 16, 32, torch.bfloat16)
-
-    def test_scale_parameters_are_derived_after_loading(self):
-        with self.assertRaises(NotImplementedError):
-            self._scheme().get_dynamic_quant_param(2, 16, 32, torch.bfloat16)
+    def test_reuses_the_offline_w8a8_dynamic_scheme(self):
+        self.assertIs(AscendInt8PerChannelOnlineMoEMethod.scheme_cls, AscendW8A8DynamicFusedMoEMethod)
 
     def test_process_weights_quantizes_both_projections_and_delegates_the_layout(self):
-        scheme = self._scheme()
+        method = self._method()
         layer = SimpleNamespace(
             prefix="model.layers.0.mlp.experts",
             moe_config=SimpleNamespace(tp_size=1, dp_size=1, pcp_size=1),
@@ -226,22 +229,17 @@ class TestOnlineInt8MoeMethod(TestBase):
             "w2_weight_scale": torch.empty(2, 16, 1, dtype=torch.bfloat16),
             "w2_weight_offset": torch.empty(2, 16, 1, dtype=torch.bfloat16),
         }
-        with (
-            patch(
-                f"{MODULE}.AscendW8A8DynamicFusedMoEMethod.get_dynamic_quant_param",
-                return_value=dict(buffers),
-            ) as make_buffers,
-            patch(f"{MODULE}.AscendW8A8DynamicFusedMoEMethod.process_weights_after_loading") as layout,
-        ):
-            scheme.process_weights_after_loading(layer)
+        method.quant_method.get_dynamic_quant_param.return_value = dict(buffers)
 
-        make_buffers.assert_called_once_with(scheme, 2, 16, 16, torch.bfloat16)
+        method.process_weights_after_loading(layer)
+
+        method.quant_method.get_dynamic_quant_param.assert_called_once_with(2, 16, 16, torch.bfloat16)
         self.assertEqual(layer.w13_weight.dtype, torch.int8)
         self.assertEqual(layer.w2_weight.dtype, torch.int8)
         self.assertEqual(tuple(layer.w13_weight.shape), (2, 32, 16))
         self.assertTrue(torch.all(layer.w13_weight_offset == 0))
         self.assertTrue(torch.all(layer.w2_weight_offset == 0))
-        layout.assert_called_once_with(scheme, layer)
+        method.quant_method.process_weights_after_loading.assert_called_once_with(layer)
 
     def test_tensor_sharded_experts_spanning_dp_are_rejected(self):
         with self.assertRaises(NotImplementedError):
@@ -360,7 +358,7 @@ class TestAscendOnlineQuantizationConfig(TestBase):
     def test_supports_the_int8_weight_key(self):
         method_cls = _int8_moe_config()._get_method_cls(QuantSpec(weight=kInt8StaticChannelSym), {}, LinearBase)
 
-        self.assertIs(method_cls, AscendOnlineInt8LinearMethod)
+        self.assertIs(method_cls, AscendInt8PerChannelOnlineLinearMethod)
 
     def test_rejects_unsupported_weight_keys_with_a_hardware_hint(self):
         with self.assertRaises(NotImplementedError) as raised:
@@ -382,7 +380,7 @@ class TestAscendOnlineQuantizationConfig(TestBase):
         for layer_arg in (LinearBase, _LinearLayer()):
             self.assertIs(
                 config._get_method_cls(QuantSpec(weight=kInt8StaticChannelSym), {}, layer_arg),
-                AscendOnlineInt8LinearMethod,
+                AscendInt8PerChannelOnlineLinearMethod,
             )
 
     def test_override_still_matches_the_upstream_signature(self):
@@ -433,7 +431,7 @@ class TestAscendOnlineQuantizationConfig(TestBase):
             AscendUnquantizedLinearMethod,
         )
 
-    def test_matched_linear_layer_is_wrapped_in_the_online_adapter(self):
+    def test_matched_linear_layer_is_wrapped_in_the_ascend_online_method(self):
         from vllm.config.quantization import QuantizationConfigArgs
 
         from vllm_ascend.quantization.method_adapters import AscendOnlineLinearMethod

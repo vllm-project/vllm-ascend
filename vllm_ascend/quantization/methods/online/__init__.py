@@ -14,16 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Ascend online (load-time) quantization schemes."""
+"""Ascend online (load-time) quantization methods."""
 
 from .int8 import (
-    AscendOnlineInt8W8A8FusedMoEMethod,
-    AscendOnlineInt8W8A8LinearMethod,
+    AscendInt8PerChannelOnlineLinearMethod,
+    AscendInt8PerChannelOnlineMoEMethod,
     quantize_last_dim_to_int8,
 )
 
 __all__ = [
-    "AscendOnlineInt8W8A8FusedMoEMethod",
-    "AscendOnlineInt8W8A8LinearMethod",
+    "AscendInt8PerChannelOnlineLinearMethod",
+    "AscendInt8PerChannelOnlineMoEMethod",
     "quantize_last_dim_to_int8",
 ]
