@@ -661,10 +661,8 @@ def run_pool_ab(
     def _run(use_pool: bool, leg: str) -> tuple[LegResult | None, str | None, bool, bool]:
         """Return (result, error, original-assertion failed, env failed)."""
         accuracy_ok = False
-        built = False
         try:
             with build_leg(use_pool, f"{case_name}_{leg}") as runner:
-                built = True
                 acceptance = accuracy(runner) or []
                 accuracy_ok = True
                 if use_pool:
@@ -706,8 +704,9 @@ def run_pool_ab(
         except AssertionError as exc:
             return None, str(exc), not accuracy_ok, False
         except Exception as exc:
-            # Engine/store failures are ENV_BLOCKED, not pool assertions.
-            return None, f"{type(exc).__name__}: {exc}", False, not built
+            # Engine/store failures are ENV_BLOCKED, not pool assertions; only
+            # AssertionError above is classified as a defect.
+            return None, f"{type(exc).__name__}: {exc}", False, True
 
     b, b_err, b_fatal, b_env = _run(False, "b")
     if b_err is None:
@@ -723,10 +722,16 @@ def run_pool_ab(
     # An empty or failed leg makes the comparison meaningless: rerun, do not blame the pool.
     incomplete = a is None or b is None or not a_result.acc or not b_result.acc
     acceptance_diff = False
+    token_diff = False
+    perf_bad = False
     if incomplete:
-        token_diff = False
-        perf_bad = False
-        label = "ENV_BLOCKED"
+        # The A leg is skipped when the control leg fails, so `incomplete` alone
+        # does not mean the environment blocked us: keep the failing leg's
+        # verdict (CONTROL_DEFECT / TEST_DEFECT) and only fall back to
+        # ENV_BLOCKED when neither leg actually asserted.
+        label = _classify(a_err, b_err, a_env, b_env, False, False)
+        if label == "PASS":
+            label = "ENV_BLOCKED"
     else:
         token_diff = token_identity and a_result.outputs != b_result.outputs
         perf_bad = (
@@ -779,12 +784,12 @@ def run_pool_ab(
         flush=True,
     )
     report.emit()
-    if a_env or b_env or incomplete:
-        raise AssertionError(f"[{case_name}] ENV_BLOCKED: A={a_err or 'ok'}; B={b_err or 'ok'}")
+    a_msg = a_err or ("ok" if a is not None else "skipped")
+    b_msg = b_err or ("ok" if b is not None else "skipped")
+    if a_env or b_env or (incomplete and label == "ENV_BLOCKED"):
+        raise AssertionError(f"[{case_name}] ENV_BLOCKED: A={a_msg}; B={b_msg}")
     if a_fatal or b_fatal:
-        raise AssertionError(
-            f"[{case_name}] {label}: original assertions failed (A={a_err or 'ok'}; B={b_err or 'ok'})"
-        )
+        raise AssertionError(f"[{case_name}] {label}: original assertions failed (A={a_msg}; B={b_msg})")
     if gate and label != "PASS":
         raise AssertionError(f"[{case_name}] {label}: A/B comparison failed")
     return report

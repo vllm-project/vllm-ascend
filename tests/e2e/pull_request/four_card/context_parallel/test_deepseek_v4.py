@@ -78,9 +78,12 @@ MTP_EXPECTED_OUTPUT_PREFIXES = {
 }
 DSPARK_EXPECTED_OUTPUT_PREFIXES = {
     "Hello, my name is": "Hello, my name is {name} and I am {age} years old.",
-    "The president of the United States is": "The president of the United States is the head of state and head of government",
+    # The president/future prompts land on near-tie continuations ("state" vs
+    # "the executive", "algorithms" vs "technology") that flip between the pool
+    # and non-pool legs and between checkpoints, so only their shared span is pinned.
+    "The president of the United States is": "The president of the United States is the head of",
     "The capital of France is": "The capital of France is Paris",
-    "The future of AI is": "The future of AI is not just about algorithms;",
+    "The future of AI is": "The future of AI is not just about",
 }
 
 MTP_MIN_ACCEPTANCE_RATES = [0.85, 0.65, 0.35]
