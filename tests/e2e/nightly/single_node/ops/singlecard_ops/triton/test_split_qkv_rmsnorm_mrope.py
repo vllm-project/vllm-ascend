@@ -330,6 +330,25 @@ def test_split_qkv_rmsnorm_mrope(
     torch.testing.assert_close(real_v.cpu(), golden_v.cpu(), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
     if has_gate:
         torch.testing.assert_close(real_gate.cpu(), golden_gate.cpu(), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+        gate_out = torch.empty_like(real_gate)
+        out_q, out_k, out_v = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope_with_gate_out(
+            qkv=qkv,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            cos_sin=cos_sin,
+            gate_output=gate_out,
+            num_q_heads=num_q_heads,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            eps=eps,
+            mrope_section=mrope_section,
+            is_interleaved=is_interleaved,
+            rope_dim=rope_dim,
+        )
+        torch.testing.assert_close(out_q, real_q, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+        torch.testing.assert_close(out_k, real_k, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+        torch.testing.assert_close(out_v, real_v, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+        torch.testing.assert_close(gate_out, real_gate, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
 
     gc.collect()
     torch.npu.empty_cache()
