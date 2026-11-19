@@ -73,7 +73,8 @@ def prepare_qsa_lightning_v2_inputs(
         round(math.ldexp(1.0 / math.sqrt(_HEAD_DIM), _WEIGHT_FRACTION_BITS)), -_WEIGHT_FRACTION_BITS
     )
     # One vector tile covers small request batches; larger query weights scale
-    # through the grid without specializing on the token or request count.
+    # through the grid. Counts are runtime arguments, but the backend may still
+    # specialize on their types and default scalar specialization classes.
     block_size = 256
     grid = (triton.cdiv(max(requests + 1, weights.numel()), block_size),)
     _prepare_qsa_lightning_v2_inputs_kernel[grid](

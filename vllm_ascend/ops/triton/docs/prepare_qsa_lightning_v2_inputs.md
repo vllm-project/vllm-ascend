@@ -11,21 +11,22 @@
 - **Algorithm flow:** Each vector tile independently writes request lengths,
   query boundaries and query-head weights with separate bounds masks.
 - **Supported modes:** Intended for Atlas A2, Atlas A3 and 950PR/950DT through
-  Triton Ascend. Hardware compilation, accuracy and performance are pending;
-  CPU contract checks do not establish device support or speedup.
+  Triton Ascend. Manual operator correctness, graph replay and preparation
+  performance have been validated on A3. Other devices remain unverified;
+  CPU contract checks do not establish device support.
 
 ## Parameters
 
-| Parameter | Direction | Shape / type | Meaning |
-| --- | --- | --- | --- |
-| `query` | Input | `[T, H, 128]`, model BF16 | Only shape and device are used |
-| `sequence_lengths` | Input | `[B]`, INT32 or INT64 | Nonnegative original-token lengths |
-| `query_start_loc` | Input | At least `[B + 1]`, INT32 or INT64 | Packed query boundaries |
-| `compress_ratio` | Attribute | Positive integer; QSA uses 4 | Tokens per compressed group |
-| `weights` | Output | `[T, H]`, FP32 | Uniform score weights |
-| `cu_query` | Output | `[B + 1]`, boundary input dtype | Boundaries clamped to T |
-| `compressed` | Output | `[B]`, length input dtype | Complete compressed-group counts |
-| `residual` | Output | `[B]`, length input dtype | Remaining original-token counts |
+| Parameter | Input/Output/Attribute | Description | Data type | Data format |
+| --- | --- | --- | --- | --- |
+| `query` | Input | Only shape and device are used | Model BF16; contents are not read | `[T, H, 128]` |
+| `sequence_lengths` | Input | Nonnegative original-token lengths | INT32 or INT64 | `[B]`, strided allowed |
+| `query_start_loc` | Input | Packed query boundaries | INT32 or INT64 | At least `[B + 1]`, strided allowed |
+| `compress_ratio` | Attribute | Positive tokens per group; QSA uses 4 | Integer | Scalar |
+| `weights` | Output | Uniform score weights | FP32 | `[T, H]`, contiguous |
+| `cu_query` | Output | Boundaries clamped to T | Boundary input dtype | `[B + 1]`, contiguous |
+| `compressed` | Output | Complete compressed-group counts | Length input dtype | `[B]`, contiguous |
+| `residual` | Output | Remaining original-token counts | Length input dtype | `[B]`, contiguous |
 
 Outputs are returned in table order: weights, cu_query, compressed, residual.
 
@@ -63,9 +64,8 @@ Outputs are returned in table order: weights, cu_query, compressed, residual.
 
 CPU tests cover decode/prefill row counts, padded requests, empty inputs,
 both integer dtypes, strided metadata and schedule reuse/regeneration.
-NPU e2e cases are deferred; device validation must compare all four outputs
-exactly against the original PyTorch expressions, including FP32 weights,
-and exercise graph replay after metadata changes.
+Repository NPU e2e cases are deferred. The manual A3 validation below is
+separate from these CPU tests and is not an automated CI test entry point.
 
 ```bash
 pytest -sv tests/ut/ops/test_qsa_lightning_v2_prepare_contract.py
@@ -74,5 +74,35 @@ pytest -sv tests/ut/models/qwen4_exp/test_lightning_indexer_v2.py
 
 CPU tests cover allocation, launch wiring, dtype/stride contracts, schedule
 reuse, trimming and output-buffer behavior. Device arithmetic is not emulated.
-NPU exact comparison, native Indexer integration, A3/A5 timing, model accuracy
-and end-to-end performance remain required before claiming performance gains.
+
+### Manual A3 operator validation
+
+Validated implementation: `a5e9acf3a9580afd8e5c9375f0ee1fb6cc750761`.
+All four outputs matched the original PyTorch expressions exactly
+(`rtol=0`, `atol=0`), including the BF16-rounded weight promoted to FP32.
+The 96 cases covered heads 2/4/8, INT32/INT64 metadata, contiguous/strided
+metadata, empty inputs and padded request boundaries. Three captured-graph
+replays after updating lengths and boundaries also matched exactly.
+
+Performance setup: one Ascend A3 device (`Ascend910_9382`), 1109-r89 base image,
+CANN 9.2.1, PyTorch 2.10.0, torch_npu 2.10.0.post7 and
+triton-ascend 3.6.0.post2. Inputs were BF16 queries `[T, 4, 128]`, INT32
+metadata and compression ratio 4. Compare the four original PyTorch operations
+against the fused wrapper using 128 calls per captured NPUGraph, 10 replays
+per timed sample, seven samples per arm and five A/B/A trials. Values below
+are median per-call NPU-event latency, excluding compilation and warmup.
+
+| Query rows | Requests | Baseline (us) | Fused (us) | Latency reduction |
+| --- | --- | --- | --- | --- |
+| 32 | 1 | 8.377 | 2.238 | 73.29% |
+| 32 | 8 | 7.974 | 2.233 | 72.00% |
+| 32 | 32 | 8.463 | 2.241 | 73.51% |
+| 128 | 1 | 8.394 | 2.239 | 73.33% |
+| 128 | 8 | 8.000 | 2.244 | 71.96% |
+| 128 | 32 | 8.418 | 2.242 | 73.37% |
+
+These results measure input preparation only, excluding CANN schedule metadata,
+scoring/TopK, index packing and model execution. They do not establish
+end-to-end model speedup or model accuracy non-regression. Other-device
+coverage, repository NPU e2e cases, model accuracy/performance comparisons and
+actual startup/serving compilation counts remain pending.
