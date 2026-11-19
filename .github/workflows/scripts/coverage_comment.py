@@ -48,8 +48,9 @@ threshold (Total < 70%, Diff < 80%), bold when at/above.
 
 import argparse
 import json
-import re
 import sys
+
+import regex as re
 from pathlib import Path
 
 
