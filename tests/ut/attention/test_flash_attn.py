@@ -277,7 +277,9 @@ def qwen_dflash2_fa3(monkeypatch, dflash2_config):
     spec.draft_model_config.hf_config = SimpleNamespace(architectures=["DFlash2DraftModel"])
     config.model_config = spec.target_model_config
     config.cache_config = SimpleNamespace(cache_dtype="auto")
+    config.load_config = SimpleNamespace()
     config.quant_config = None
+    spec.draft_model_config.quantization = None
     config.use_v2_model_runner = True
     config.parallel_config = SimpleNamespace(
         pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
@@ -421,6 +423,30 @@ def test_fa3_minimax_keeps_only_dspark_drafts(qwen_dflash2_fa3, target, draft):
     assert r.select("dspark_head") == "AscendAttentionBackend"
 
 
+@pytest.mark.parametrize("target_c8,draft_c8", [(False, True), (True, False), (True, True)])
+def test_qwen_fa3_checks_target_and_draft_c8_separately(qwen_dflash2_fa3, monkeypatch, target_c8, draft_c8):
+    r = qwen_dflash2_fa3
+    r.config.quant_config = SimpleNamespace(enable_c8_quant=target_c8)
+    monkeypatch.setattr(
+        "vllm.model_executor.models.utils.get_draft_quant_config", lambda _: SimpleNamespace(enable_c8_quant=draft_c8)
+    )
+    assert (r.select("backbone") == "AscendFlashAttentionBackend") == (not target_c8)
+    assert (r.select("dflash_head") == "AscendFlashAttentionBackend") == (not draft_c8)
+
+
+@pytest.mark.parametrize(
+    "head_size,dtype,kv_cache_dtype",
+    [(512, torch.bfloat16, "bfloat16"), (128, torch.bfloat16, "float16"), (128, torch.float16, "bfloat16")],
+)
+def test_qwen_fa3_routing_does_not_filter_head_size_or_match_float_dtypes(
+    qwen_dflash2_fa3, head_size, dtype, kv_cache_dtype
+):
+    r = qwen_dflash2_fa3
+    r.selector = r.selector._replace(head_size=head_size, dtype=dtype, kv_cache_dtype=kv_cache_dtype)
+    assert r.select("backbone") == "AscendFlashAttentionBackend"
+    assert r.select("dflash_head") == "AscendFlashAttentionBackend"
+
+
 @pytest.mark.parametrize(
     "section,field,value",
     [
@@ -430,9 +456,8 @@ def test_fa3_minimax_keeps_only_dspark_drafts(qwen_dflash2_fa3, target, draft):
         ("parallel", "prefill_context_parallel_size", 2),
         ("parallel", "decode_context_parallel_size", 2),
         ("selector", "kv_cache_dtype", "fp8"),
-        ("selector", "kv_cache_dtype", "float16"),
+        ("selector", "kv_cache_dtype", "int8"),
         ("selector", "dtype", torch.float32),
-        ("selector", "head_size", 512),
         ("selector", "attn_type", AttentionType.ENCODER_ONLY),
         ("selector", "use_rswa", True),
         ("selector", "has_sink", True),

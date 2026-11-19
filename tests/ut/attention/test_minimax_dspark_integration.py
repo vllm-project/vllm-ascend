@@ -14,6 +14,8 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from vllm_ascend.attention.fa3_selection import MINIMAX_M3_ARCHITECTURES
+
 
 @pytest.fixture
 def selector_runtime(monkeypatch):
@@ -21,12 +23,6 @@ def selector_runtime(monkeypatch):
     tree = ast.parse(source.read_text())
     names = {"_is_supported_flash_attn_draft", "_validate_flash_attn_backend", "_validate_minimax_dspark_flash_attn"}
     nodes: list[ast.stmt] = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
-    nodes.extend(
-        node
-        for node in tree.body
-        if isinstance(node, ast.Assign)
-        and any(getattr(t, "id", "") == "_MINIMAX_M3_ARCHITECTURES" for t in node.targets)
-    )
     runtime = SimpleNamespace(config=None, tag="dspark_head", supported=True)
     backend = SimpleNamespace(AttentionType=SimpleNamespace(DECODER="decoder"))
     config_module = SimpleNamespace(get_current_vllm_config_or_none=lambda: runtime.config)
@@ -37,6 +33,7 @@ def selector_runtime(monkeypatch):
     namespace = {
         "torch": torch,
         "HardwareCapability": SimpleNamespace(DEVICE_LENGTH_FLASH_ATTN=object()),
+        "MINIMAX_M3_ARCHITECTURES": MINIMAX_M3_ARCHITECTURES,
         "get_current_hardware_profile": lambda: SimpleNamespace(supports=lambda _: runtime.supported),
     }
     module = ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[]))
