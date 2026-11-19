@@ -197,7 +197,14 @@ Use the startup logs (`GPU KV cache size` and `Maximum concurrency for ... token
 
 ## Graph Mode
 
-Batch invariance does not require eager execution: ACLGraph capture works with `VLLM_BATCH_INVARIANT=1` enabled, so `FULL_DECODE_ONLY` can be used together with batch invariance. Verified with batch invariance enabled: `Qwen/Qwen3-30B-A3B` with `FULL_DECODE_ONLY` on Atlas A3 and 950DT Products, and `Qwen/Qwen3.5-35B-A3B` with the default `FULL_AND_PIECEWISE` graph on Atlas A3. Other models have not been validated with graph mode and batch invariance enabled together.
+Batch invariance does not require eager execution: graph mode can be enabled together with batch invariance, and some models are already verified with both features turned on.
+
+| Model | Verified on Atlas A2/A3 | Verified on Atlas 950DT |
+| --- | :---: | :---: |
+| `Qwen/Qwen3-30B-A3B` | ✅ | ✅ |
+| `Qwen/Qwen3.5-35B-A3B` | ✅ | ✅ |
+
+The verification used `cudagraph_mode=FULL_DECODE_ONLY`. Models that are not listed have not been verified with graph mode and batch invariance enabled together.
 
 ## Tested Models
 
