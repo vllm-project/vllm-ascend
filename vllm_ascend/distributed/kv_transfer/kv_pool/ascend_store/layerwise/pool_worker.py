@@ -385,7 +385,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         # register_kv_caches to include them; the key layer count must follow
         # or those extra layers are skipped during the save/load lifecycle. A
         # block-key store owns a stage-local object, so its count stays local
-        # under PP. A GVA store retains the global PP layout and offset below.
+        # under PP. A GVA store retains the global PP key layout below.
         if (
             self.use_block_key_layerwise
             or (self.num_kv_cache_groups == 1 and getattr(self, "pp_size", 1) == 1)
@@ -399,9 +399,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 if self.use_block_key_layerwise
                 else self._global_group_alloc_size(group_id)
             )
-            # Global byte offsets for the shared GVA region:
-            #   PP: each stage writes its local layers at
-            #       (pp_layer_offset + local_layer) * per_layer_bytes.
+            # Dense byte origins for the GVA regions:
+            #   PP: every stage owns a distinct @pp{rank} region per key and
+            #       writes its local layers from offset 0 (see
+            #       _group_pp_byte_offset), so one region never spans stages.
             #   DCP (shard-major): ranks sharing head_or_tp_rank (put_step>1)
             #       hold different context shards of the same logical block
             #       and share ONE region; shard d occupies the byte range
@@ -414,9 +415,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             gbl = self.group_block_len.get(group_id) or []
             if not self.use_block_key_layerwise and gbl and group_num_layers > 0:
                 if self.dcp_size > 1 and self.put_step > 1:
-                    # Use the GLOBAL region size (PP-aware) as the basis for
-                    # the per-shard stride; under PP>1 the local sum(gbl) only
-                    # covers this stage's layers and would under-allocate.
+                    # The shared DCP region covers every shard; derive the
+                    # per-shard stride from the region size so shard origins
+                    # stay GVA-hugepage aligned.
                     shard_stride = self._global_group_alloc_size(group_id) // self.dcp_size
                     shard_idx = self.dcp_rank
                     layer_byte_offset += shard_idx * shard_stride
@@ -493,10 +494,45 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self.kv_recv_thread.external_slot_release_waiter = waiter
         return True
 
+    def _group_pp_byte_offset(self, group_id: int) -> int:
+        """Dense per-stage GVA byte origin for the layerwise data planes.
+
+        Every PP stage owns a distinct ``@pp{rank}`` region per pool key and
+        writes its local group layers from offset 0, mirroring the block-key
+        data plane. The former global-layer origin addressed hybrid groups
+        sparsely (layer L at ``L * per_layer`` even when the group owns only
+        a fraction of the model layers), which is what forced the
+        ``per_layer x total_layers`` region sizing. Layerwise object sharing
+        requires matching PP topologies on both sides, so the writer and the
+        reader independently derive the same dense local layout.
+        """
+        return 0
+
     def _global_group_alloc_size(self, group_id: int) -> int:
-        if getattr(self, "has_shared_kv", False) and self.group_block_len.get(group_id):
-            return sum(self.group_block_len[group_id])
-        return super()._global_group_alloc_size(group_id)
+        """Dense per-group GVA region size for the layerwise data planes.
+
+        One region per (group, block, storing rank) holds exactly this
+        group's own layer payload: ``LayerBatchBuilder`` addresses every
+        layer from offset 0 by the group-local cumulative byte sum, so the
+        region never needs bytes beyond ``sum(group_block_len)``. Sizing by
+        the whole model's layer count — the legacy formula kept for the
+        non-layerwise fallback — over-allocates hybrid groups that own only
+        a subset of the model's layers (for example 10 full-attention
+        layers out of 41 physical layers, a 4.1x DRAM amplification).
+
+        DCP shard-major regions keep the hugepage-aligned per-shard stride:
+        ranks sharing head_or_tp_rank (put_step>1) hold different context
+        shards of one logical block, so the region must cover all shards.
+        """
+        gbl = self.group_block_len.get(group_id) or []
+        if not gbl:
+            return super()._global_group_alloc_size(group_id)
+        shard_bytes = sum(gbl)
+        if getattr(self, "put_step", 1) > 1 and getattr(self, "dcp_size", 1) > 1:
+            gva_align = 2 * 1024 * 1024
+            shard_stride = (shard_bytes + gva_align - 1) // gva_align * gva_align
+            return shard_stride * self.dcp_size
+        return shard_bytes
 
     def _start_kv_transfer_threads(self) -> None:
         if self.use_layerwise_transfer:
