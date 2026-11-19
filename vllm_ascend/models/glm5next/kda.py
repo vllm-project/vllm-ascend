@@ -320,6 +320,14 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         projection_size = self.head_dim * self.num_heads
         self.local_projection_size = divide(projection_size, self.tp_size)
+        self._pad_verify_projection = (
+            self.use_recoverssm
+            and num_spec == 5
+            and self.tp_size == 1
+            and self.hidden_size == 4096
+            and self.num_heads == 64
+            and torch.npu.get_device_name(torch.npu.current_device()) == "Ascend950DT_9581"
+        )
         projection_tp_size = self.tp_size
         merged_linear_kwargs = {}
         self.projection_tp: KDAInputProjectionTP | None = None
@@ -507,7 +515,21 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         else:
             num_tokens = hidden_states.size(0)
             # One merged GEMM for q, k, v, b, f_a, g_a (replaces 6 separate GEMMs).
-            projected = self.in_proj_qkvbfg_a(hidden_states)[0]
+            projection_input = hidden_states
+            if (
+                self._pad_verify_projection
+                and num_tokens in (36, 42, 48)
+                and isinstance(attn_metadata, GDNAttentionMetadata)
+                and attn_metadata.num_actual_tokens == num_tokens
+                and attn_metadata.num_spec_decodes * 6 == num_tokens
+                and attn_metadata.num_prefills == 0
+                and attn_metadata.num_decodes == 0
+            ):
+                # The 54-row GEMM tile is faster for these full six-token verify batches.
+                projection_input = torch.nn.functional.pad(hidden_states, (0, 0, 0, 54 - num_tokens))
+            projected = self.in_proj_qkvbfg_a(projection_input)[0]
+            if projection_input is not hidden_states:
+                projected = projected[:num_tokens]
             qkv, beta_raw, f_a, g_a = projected.split(
                 [
                     3 * self.local_projection_size,
