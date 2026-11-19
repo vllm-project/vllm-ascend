@@ -60,8 +60,6 @@ Outputs are returned in table order: weights, cu_query, compressed, residual.
 
 ## Test Cases
 
-CPU tests cover decode/prefill row counts, padded requests, empty inputs,
-both integer dtypes, strided metadata and schedule reuse/regeneration.
 The NPU e2e entry point covers exact output comparison, input preservation,
 both integer dtypes, strided metadata and graph replay after metadata updates.
 All four outputs are compared against the original PyTorch expressions with
@@ -69,10 +67,5 @@ All four outputs are compared against the original PyTorch expressions with
 Execution of the repository NPU test file remains pending.
 
 ```bash
-pytest -sv tests/ut/ops/test_qsa_lightning_v2_prepare_contract.py
-pytest -sv tests/ut/models/qwen4_exp/test_lightning_indexer_v2.py
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_lightning_v2_prepare.py
 ```
-
-CPU tests cover allocation, launch wiring, dtype/stride contracts, schedule
-reuse, trimming and output-buffer behavior. Device arithmetic is not emulated.

@@ -76,30 +76,13 @@ reads current position contents, not captured Python values.
 
 ## Test Cases
 
-The device test compares the Triton output with an independent CPU fp32 PyTorch reference and uses `rtol=2e-2`, `atol=2e-2`.
-
-| Device | Case | Shape | Maximum absolute difference |
-| --- | --- | --- | ---: |
-| Ascend A3 | Prefill | `(4096, 4, 128)` | 0.03125 |
-| Ascend A3 | Decode | `(4096, 1, 128)` | 0.0078125 |
-| Ascend950DT (A5) | Prefill | `(4096, 4, 128)` | 0.015625 |
-| Ascend950DT (A5) | Decode | `(4096, 1, 128)` | 0.0078125 |
-
-Both cases passed on A3 and A5 using the Qwen3.8-Next 2026-11-02 validation images.
-
-Those historical results cover the original operator, not the direct-position
-extension in PR #22086. New direct-position tests compare with legacy gathered
-inputs using `rtol=0, atol=0`, including empty rows, strided positions, clamping,
-and NPUGraph replay. The new tests currently select A3 only; execution on the
+[test_qsa_rmsnorm_mrope_positions.py](../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope_positions.py)
+compares direct-position lookup with legacy gathered-cache inputs using
+`rtol=0, atol=0`. Cases cover 0/1/32/129 tokens, 1/3 position axes,
+non-contiguous query rows, strided positions, position clamping and NPUGraph
+replay after updating positions. These tests select A3 only; execution on the
 final PR revision and compatibility on other applicable devices remain pending.
 
-Direct-gather coverage is in [test_qsa_rmsnorm_mrope_direct.py](../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope_direct.py):
-`test_direct_rope_matches_gathered_cache` covers the Indexer wrapper, while
-`test_direct_rope_replay_uses_updated_positions` checks changed positions during
-graph replay. Legacy coverage is in
-[test_qsa_rmsnorm_mrope.py](../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope.py).
-
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope.py
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope_direct.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope_positions.py
 ```
