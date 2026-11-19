@@ -114,6 +114,42 @@ def test_pcp_decoder_replay_keeps_only_original_tail_owners(state, local_end, ex
     assert replay_start.tolist() == [6]
 
 
+def test_pcp_decoder_replay_compacts_when_rank_local_width_is_smaller(state):
+    # A prefix hit schedules the hit's last window plus the uncached tail. The
+    # window is spread across the PCP ranks, so this rank only sees one row.
+    # Compaction is a global decision: comparing the global kept count (2)
+    # with the rank-local padded width (1) would incorrectly skip the replay.
+    local_batch = SimpleNamespace(
+        num_reqs=1,
+        is_dummy=False,
+        num_tokens_after_padding=1,
+        query_start_loc_np=np.array([0, 1], dtype=np.int32),
+        seq_lens_np=np.array([16], dtype=np.int32),
+        idx_mapping_np=np.array([0], dtype=np.int32),
+    )
+    global_batch = SimpleNamespace(
+        num_reqs=1,
+        query_start_loc_np=np.array([0, 8], dtype=np.int32),
+        seq_lens_np=np.array([16], dtype=np.int32),
+        is_prefilling_np=np.array([True]),
+        idx_mapping_np=np.array([0], dtype=np.int32),
+    )
+    replay_inputs = replay_mod.DecoderReplayInputs(
+        local_batch,
+        (),
+        torch.empty(1, 8),
+        [],
+        torch.zeros(1, dtype=torch.int32),
+        SimpleNamespace(global_batch=global_batch),
+    )
+
+    kept_lens, padded, replay_start = state._pcp_kept_lengths(replay_inputs)
+
+    assert kept_lens.tolist() == [1]
+    assert padded == 2
+    assert replay_start.tolist() == [14]
+
+
 def test_pcp_decoder_replay_keeps_prompt_logprob_rows(state):
     state.keeps_rows[0] = True
     local_batch = SimpleNamespace(num_reqs=1, num_tokens_after_padding=4, is_dummy=False)
