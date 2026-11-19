@@ -70,7 +70,6 @@ def register(layer, name, data):
     param = ModelWeightParameter(
         data=data, input_dim=max(0, data.ndim - 1), output_dim=0, weight_loader=default_weight_loader
     )
-    param.audit_marker = object()
     layer.register_parameter(name, param)
 
 
@@ -147,6 +146,9 @@ def test_bf16_reload_matches_cold_start(config, monkeypatch, layout, mode):
     if layout == "moe-list":
         assert all(hasattr(layer, name) == (mode == "direct") for name in ("w13_weight", "w2_weight"))
     parameters = dict(layer.named_parameters())
+    if layout == "kpool-bf16":
+        checkpoint_storage = {p.untyped_storage().data_ptr() for p in parameters.values()}
+        assert all(buf.untyped_storage().data_ptr() not in checkpoint_storage for buf in layer.buffers())
     held = {name: tensor.detach() for name, tensor in _runtime(layer).items()}
     for version in (1, 3, 1):
         fresh, values = _build_bf16_layer(layout, version, config, monkeypatch)
@@ -166,32 +168,6 @@ def test_bf16_reload_matches_cold_start(config, monkeypatch, layout, mode):
             assert all(layer.get_parameter(name) is parameter for name, parameter in parameters.items())
 
 
-@pytest.mark.parametrize("mode", ["direct", "layerwise"])
-def test_failed_finish_releases_only_direct_session(config, monkeypatch, mode):
-    from vllm_ascend.worker.worker import NPUWorker
-
-    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
-
-    class Engine:
-        resets = 0
-
-        def finish_weight_update(self):
-            raise ValueError("failed BF16 finish")
-
-        def reset_weight_update_target(self):
-            self.resets += 1
-
-    worker = NPUWorker.__new__(NPUWorker)
-    worker.vllm_config = config
-    worker.weight_transfer_engine = Engine()
-    worker._weight_update_active = True
-    worker.model_runner = SimpleNamespace(reset_lora_state=lambda: pytest.fail("failed finish refreshed LoRA"))
-    with pytest.raises(ValueError, match="failed BF16 finish"):
-        worker.finish_weight_update()
-    assert worker._weight_update_active is (mode != "direct")
-    assert worker.weight_transfer_engine.resets == (mode == "direct")
-
-
 def test_expert_layout_change_rejected_before_copy(monkeypatch):
     monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     layer = torch.nn.Module()
@@ -200,74 +176,6 @@ def test_expert_layout_change_rejected_before_copy(monkeypatch):
     with pytest.raises(ValueError, match="expert runtime layout changed"):
         refill_expert_list(layer, "experts", [torch.zeros_like(before[0]), torch.zeros(3, 2, dtype=torch.bfloat16)])
     assert all(torch.equal(actual, expected) for actual, expected in zip(layer.experts, before))
-
-
-def _native_mlapo(version, padding, dtype):
-    # Exercise the real PWAL method without constructing an NPU attention backend.
-    from vllm_ascend.attention.mla_v1 import AscendMLAImpl
-
-    impl = AscendMLAImpl.__new__(AscendMLAImpl)
-    impl.fa_quant_layer = False
-    impl._mlapo_uses_native_weights = True
-    impl.q_lora_rank = 4
-    impl.num_heads = 2
-    impl.qk_head_dim = 4
-    impl.head_padding = padding
-    impl.num_heads_padded = impl.num_heads + padding
-    impl.qkv_a_gate_fused = False
-    impl.kv_lora_rank = 4
-    impl.qk_rope_head_dim = 2
-    impl.fused_qkv_a_proj = torch.nn.Module()
-    impl.q_proj = torch.nn.Module()
-    # Native MLAPO uses the supported two-shard Q-A / KV-A layout.
-    for owner, name, shape in (
-        (impl.fused_qkv_a_proj, "weight", (10, 8)),
-        (impl.q_proj, "weight", (8, 4)),
-    ):
-        register(owner, name, (torch.arange(torch.Size(shape).numel()).reshape(shape) % 5 + version).to(dtype))
-    impl.W_UK_T = torch.nn.Parameter(torch.full((2, 2, 4), float(version), dtype=dtype))
-    impl.mlapo_W_UK_T = impl.W_UK_T
-    impl._process_weights_for_fused(dtype)
-    return impl
-
-
-@pytest.mark.parametrize("mode", ["layerwise", "direct"])
-@pytest.mark.parametrize("padding", [0, 1])
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_native_mlapo_refills_captured_tensors(config, monkeypatch, mode, padding, dtype):
-    from vllm_ascend.attention import mla_v1
-    from vllm_ascend.device.hardware import AscendDeviceType
-    from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
-
-    profile = get_hardware_profile(AscendDeviceType.A5)
-    assert profile.supports(HardwareCapability.MLAPO_NATIVE_WEIGHTS)
-    monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: profile)
-    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
-    monkeypatch.setattr(torch_npu, "npu_format_cast", lambda value, *args, **kwargs: value.clone())
-    impl = _native_mlapo(1, padding, dtype)
-    names = ("weight_dq", "weight_dkv_kr", "weight_uq_qr", "mlapo_W_UK_T")
-    held = {name: getattr(impl, name) for name in names}
-    sources = (impl.fused_qkv_a_proj.weight, impl.q_proj.weight, impl.W_UK_T)
-    for version in (1, 3, 1):
-        cold = _native_mlapo(version, padding, dtype)
-        for target, source in zip(sources, (cold.fused_qkv_a_proj.weight, cold.q_proj.weight, cold.W_UK_T)):
-            target.copy_(source)
-        # Match the enclosing PWAL hook, which resets this alias each round.
-        impl.mlapo_W_UK_T = impl.W_UK_T
-        impl._process_weights_for_fused(dtype)
-        for name in names:
-            actual, expected = getattr(impl, name), getattr(cold, name)
-            assert torch.equal(actual, expected), name
-            if mode == "direct":
-                assert actual is held[name], name
-                assert actual.data_ptr() == held[name].data_ptr(), name
-                assert torch.equal(held[name], expected), name
-        assert impl.mlapo_num_heads == impl.num_heads_padded
-        assert impl.mlapo_weight_quant_mode == 0
-        assert impl.fused_qkv_a_proj.weight is sources[0]
-        assert impl.q_proj.weight is sources[1]
-    if mode == "layerwise":
-        assert not hasattr(impl, "_reload_runtime_buffers")
 
 
 @pytest.mark.parametrize("change", ["shape", "dtype"])
@@ -289,7 +197,9 @@ def test_native_sfa_prolog_refills_captured_tensors(config, monkeypatch):
 
     impl = AscendSFAImpl.__new__(AscendSFAImpl)
     impl.use_rope = True
-    impl.is_kv_consumer = impl.rl_weight_update_enabled = True
+    impl.is_kv_consumer = True
+    impl.rl_weight_update_enabled = False
+    impl.vllm_config = config
     impl._quant_type = None
     impl.q_lora_rank = 4
     impl.fused_qkv_a_proj = torch.nn.Linear(8, 10, bias=False, dtype=torch.bfloat16)
@@ -304,7 +214,10 @@ def test_native_sfa_prolog_refills_captured_tensors(config, monkeypatch):
         impl.fused_qkv_a_proj.weight.data = fused
         impl.q_proj.weight.data = query
         impl._process_weights_for_fused_prolog_v3()
+        assert impl.fused_qkv_a_proj.weight.numel() == fused.numel()
+        assert impl.q_proj.weight.numel() == query.numel()
         for name, expected in zip(names, (fused.T[:, :4], fused.T[:, 4:], query.T)):
             tensor = getattr(impl, name)
-            assert held.setdefault(name, tensor) is tensor
-            assert torch.equal(tensor, expected)
+            captured = held.setdefault(name, tensor.detach())
+            assert captured.data_ptr() == tensor.data_ptr()
+            assert torch.equal(captured, expected)

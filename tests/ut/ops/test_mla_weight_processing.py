@@ -12,8 +12,8 @@ from vllm.model_executor.layers.attention.attention import set_default_quant_sca
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
-from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
-from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
+from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, PreprocessType
+from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention, IndexerWrapper
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -127,3 +127,85 @@ def test_mlapo_post_load_does_not_reprocess_released_weights(is_kv_consumer):
     torch.testing.assert_close(impl.weight_dq, torch.ones(8, 4))
     torch.testing.assert_close(impl.weight_dkv_kr, torch.ones(8, 6))
     torch.testing.assert_close(impl.weight_uq_qr, torch.ones(4, 8))
+
+
+@pytest.fixture
+def native_sfa(monkeypatch):
+    impl = AscendSFAImpl.__new__(AscendSFAImpl)
+    impl.has_indexer = False
+    impl.local_num_heads = 2
+    impl.kv_lora_rank = 4
+    impl.qk_nope_head_dim = 2
+    impl.v_head_dim = 4
+    impl.kv_b_proj = nn.Linear(4, 12, bias=False, dtype=torch.bfloat16)
+    impl.vllm_config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16, quantization=None))
+    impl.rl_weight_update_enabled = False
+    impl.enable_sparse_sfa_c8 = False
+    impl._parallel_o_proj = None
+    impl._resolve_preprocess_type = MagicMock(return_value=PreprocessType.NATIVE)
+    monkeypatch.setattr("torch_npu.npu_format_cast", lambda weight, fmt: weight)
+    monkeypatch.setattr("vllm_ascend.attention.sfa_v1.maybe_trans_nz", lambda weight: weight)
+    return impl
+
+
+@pytest.mark.parametrize("indexer_layout", ["module", "plain_backend", "plain_indexer"])
+def test_indexer_finalized_once_per_complete_load(indexer_layout, native_sfa, monkeypatch):
+    from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
+
+    events = []
+
+    class Backend(nn.Module):
+        def process_weights_after_loading(self):
+            events.append("backend")
+
+    backend = (
+        Backend()
+        if indexer_layout == "module"
+        else SimpleNamespace(process_weights_after_loading=lambda: events.append("backend"))
+    )
+    indexer = IndexerWrapper.__new__(IndexerWrapper)
+    nn.Module.__init__(indexer)
+    indexer.impl = backend
+    if indexer_layout == "plain_indexer":
+        indexer = backend
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    native_sfa.has_indexer = True
+    native_sfa.indexer = indexer
+
+    class Attention(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.indexer = indexer
+
+        def process_weights_after_loading(self):
+            events.append("attention")
+            native_sfa.process_weights_after_loading(torch.bfloat16)
+
+    attention = Attention()
+    root = nn.Module()
+    root.attention = attention
+    root.shared_indexer_alias = indexer
+    for _ in range(2):
+        events.clear()
+        finalize_model_weights(root)
+        expected = ["attention", "backend"] if indexer_layout == "plain_indexer" else ["backend", "attention"]
+        assert events == expected
+    assert native_sfa._resolve_preprocess_type.call_count == 2
+
+
+@pytest.mark.parametrize("mode", ["layerwise", "direct"])
+def test_sfa_disk_only_keeps_loadable_source_for_direct(native_sfa, monkeypatch, mode):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    source = native_sfa.kv_b_proj.weight
+    with torch.no_grad():
+        source.fill_(1)
+        native_sfa.process_weights_after_loading(torch.bfloat16)
+        if mode == "layerwise":
+            assert source.numel() == 0
+            return
+        captured = native_sfa.W_UV.detach()
+        source.fill_(3)
+        native_sfa.process_weights_after_loading(torch.bfloat16)
+        assert native_sfa.kv_b_proj.weight is source
+        assert native_sfa.W_UV.data_ptr() == captured.data_ptr()
+        torch.testing.assert_close(captured, torch.full_like(captured, 3))

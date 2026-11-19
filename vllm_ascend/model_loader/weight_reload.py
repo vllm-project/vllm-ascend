@@ -67,7 +67,7 @@ def refill_runtime_tensor(layer, name, tensor):
     """Retain an owned runtime allocation, including non-Module attention impls.
 
     Store the physical-format tensor independently of public attributes: PWAL
-    may temporarily rebind an attribute (for example the padded MLAPO UK view).
+    may temporarily rebind an attribute.
     Checkpoint parameters must use refill_runtime_parameter for ND staging.
     """
     if not direct_reload_enabled():
@@ -159,23 +159,19 @@ def install_direct_reload_patch():
     vllm_direct._checkpoint_views = checkpoint_views
 
 
-def refill_derived_buffer(module, name, tensor):
-    """Refill an owned non-persistent buffer while retaining captured storage.
-
-    Checkpoint parameters and persistent buffers must use their weight loaders.
-    Callers provide independent storage on first initialization, including when
-    dtype conversion or contiguous() alone would return a checkpoint alias.
-    """
+def refill_derived_buffer(module, name, source, *, dtype=None):
+    """Give a derived buffer independent storage and refresh it from the checkpoint."""
     if name not in module._buffers or name not in module._non_persistent_buffers_set:
         raise ValueError(f"{name}: expected a registered non-persistent derived buffer")
     old = getattr(module, name)
-    if (
-        isinstance(old, torch.Tensor)
-        and tensor is not None
-        and (old.shape, old.dtype, old.device) == (tensor.shape, tensor.dtype, tensor.device)
-    ):
-        return old.copy_(tensor)
+    if source is not None:
+        source = source.detach()
+        dtype = source.dtype if dtype is None else dtype
+        if old is not None and (old.shape, old.dtype, old.device) == (source.shape, dtype, source.device):
+            return old.copy_(source)
     if direct_reload_enabled() and old is not None:
         raise ValueError(f"{name}: derived buffer layout changed; rebuild and recapture graphs")
-    setattr(module, name, tensor)
-    return tensor
+    if source is not None:
+        source = source.to(dtype=dtype, memory_format=torch.contiguous_format, copy=True)
+    setattr(module, name, source)
+    return source

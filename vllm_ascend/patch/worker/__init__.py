@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-from vllm import envs as vllm_envs
+from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
 from vllm.triton_utils import HAS_TRITON
 
 import vllm_ascend.patch.worker.patch_worker_profiler  # noqa
@@ -93,7 +93,5 @@ if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKE
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
 
 
-# The verified vLLM main supplies the direct-reload API.
-# Release builds without it keep their original worker setup unchanged.
-if getattr(vllm_envs, "VLLM_RELOAD_MODE", None) == "direct":
+if direct_reload_enabled():
     import vllm_ascend.patch.worker.patch_direct_reload  # noqa: F401

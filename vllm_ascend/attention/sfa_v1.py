@@ -11,6 +11,7 @@ from vllm.distributed import get_pcp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
+from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
 from vllm.model_executor.utils import replace_parameter
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -977,6 +978,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         # sfa does not need to update graph params
         pass
 
+    def _keep_projection_sources(self) -> bool:
+        if self.rl_weight_update_enabled:
+            return True
+        if not direct_reload_enabled():
+            return False
+        config = self.vllm_config.model_config
+        return config.dtype == torch.bfloat16 and config.quantization is None
+
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # kv_b_proj is absorbed into W_UK/W_UV below and then disposed, so it never runs a
         # matmul. What matters is that whichever quant method owns it left a dense weight
@@ -1012,10 +1021,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         replace_parameter(self, "W_UK_T", w_uk_t)
 
         # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory.
-        # RL keeps it: it is the only source of W_UV/W_UK_T, so every weight
-        # update re-derives them from this parameter and the parameter must stay
-        # loadable (#15463).
-        if not self.rl_weight_update_enabled:
+        # Keep the checkpoint source for both trainer updates and BF16 direct disk reload.
+        if not self._keep_projection_sources():
             dispose_layer(self.kv_b_proj)
         self.preprocess_type = self._resolve_preprocess_type(act_dtype)
 
@@ -1030,7 +1037,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     device=self.weight_dq.device,
                 )
 
-        if self.has_indexer:
+        if self.has_indexer and not isinstance(self.indexer, torch.nn.Module):
             self.indexer.process_weights_after_loading()
 
         if self._parallel_o_proj is not None:
@@ -1175,8 +1182,8 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # Same reasoning as kv_b_proj: once the fused projections are consumed by
         # PROLOG_V3 they are pure load sources, but discarding their storage
-        # breaks the next layerwise reload, so RL keeps them.
-        if self.is_kv_consumer and not self.rl_weight_update_enabled:
+        # breaks the next checkpoint reload.
+        if self.is_kv_consumer and not self._keep_projection_sources():
             dispose_layer(self.fused_qkv_a_proj)
             dispose_layer(self.q_proj)
             torch.npu.empty_cache()

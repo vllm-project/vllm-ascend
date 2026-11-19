@@ -857,27 +857,12 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         return 2 if self.enable_sparse_li_c8 else 1
 
     def process_weights_after_loading(self) -> None:
-        # These non-persistent derived buffers must own their storage: slices
-        # and float()/contiguous() can otherwise alias checkpoint parameters.
-        refill_derived_buffer(
-            self, "_key_weight", self.wk_weights_proj.weight[: self.head_dim].detach().clone().contiguous()
-        )
-        refill_derived_buffer(
-            self,
-            "_gate_weight",
-            self.index_kpool_compress_gate.detach().to(self._key_weight.dtype).clone().contiguous(),
-        )
-        refill_derived_buffer(
-            self, "_head_weight_f32", self.wk_weights_proj.weight[self.head_dim :].detach().float().clone().contiguous()
-        )
-        refill_derived_buffer(
-            self,
-            "_norm_weight_f32",
-            self.k_norm.weight.detach().float().clone() if self.k_norm.weight is not None else None,
-        )
-        refill_derived_buffer(
-            self, "_norm_bias_f32", self.k_norm.bias.detach().float().clone() if self.k_norm.bias is not None else None
-        )
+        weight = self.wk_weights_proj.weight
+        refill_derived_buffer(self, "_key_weight", weight[: self.head_dim])
+        refill_derived_buffer(self, "_gate_weight", self.index_kpool_compress_gate, dtype=weight.dtype)
+        refill_derived_buffer(self, "_head_weight_f32", weight[self.head_dim :], dtype=torch.float32)
+        refill_derived_buffer(self, "_norm_weight_f32", self.k_norm.weight, dtype=torch.float32)
+        refill_derived_buffer(self, "_norm_bias_f32", self.k_norm.bias, dtype=torch.float32)
 
     @staticmethod
     def _bound_caches(layer: Any) -> tuple[torch.Tensor, ...]:

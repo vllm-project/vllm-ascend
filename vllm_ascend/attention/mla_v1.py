@@ -74,7 +74,6 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.paged_mla_cache_read import load_mla_cache_rows_by_slots
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.model_loader.weight_reload import refill_runtime_tensor
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate, register_flash_attention_gate_warmup
 from vllm_ascend.quantization.methods import (
@@ -1487,16 +1486,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             weight_scale = self.fused_qkv_a_proj.weight_scale  # type: ignore[union-attr]
             self.dequant_scale_w_dq = weight_scale[: self.q_lora_rank].to(torch.float).unsqueeze(0)
             self.dequant_scale_w_dkv_kr = weight_scale[self.q_lora_rank : kv_end].to(torch.float).unsqueeze(0)
-
-        if is_native:
-            # Native A5 MLAPO consumes these NZ tensors directly. Refill the
-            # captured allocations rather than replacing them on a reload.
-            for name in ("weight_dq", "weight_dkv_kr", "weight_uq_qr"):
-                setattr(self, name, refill_runtime_tensor(self, name, getattr(self, name)))
-            if self.head_padding > 0:
-                # process_weights_after_loading resets this public attribute
-                # to W_UK_T before rebuilding the padded projection.
-                self.mlapo_W_UK_T = refill_runtime_tensor(self, "mlapo_W_UK_T", self.mlapo_W_UK_T)
 
         # On KV consumers (decode-only) MLAPO uses the transformed weights built above;
         # the original fused_qkv_a_proj/q_proj weights and quant params are no longer

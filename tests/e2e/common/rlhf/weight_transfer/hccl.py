@@ -3,9 +3,7 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """HCCL transactions with a TP1 rollout server and a separate trainer NPU.
 
-The trainer broadcasts the checkpoint in two pause/update/resume rounds. The
-shared server lifecycle supplies an independent startup-load reference and the
-dummy pre-update signature. IPC's same-device sleep/wake protocol is not used.
+Direct reload alternates two checkpoints and checks each round against cold loading.
 """
 
 import os
@@ -21,8 +19,8 @@ from tests.e2e.common.rlhf.common import post_control, register_engines_once, se
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     UPDATE_ROUNDS,
-    assert_weight_update_matches_reference,
     generation_signature,
+    reference_signature,
     weight_transfer_servers,
 )
 from tests.e2e.common.rlhf.weight_transfer.weight_source import (
@@ -53,15 +51,31 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
         "ASCEND_RT_VISIBLE_DEVICES": server_visible_devices(INFERENCE_DEVICE_INDEX, INFERENCE_WORLD_SIZE),
     }
 
-    with weight_transfer_servers(
-        source,
-        case,
-        backend="hccl",
+    server_options = dict(
         tensor_parallel_size=INFERENCE_WORLD_SIZE,
         device_index=INFERENCE_DEVICE_INDEX,
         gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
         env_dict=env_dict,
-    ) as (server, reference, dummy_signature):
+    )
+    seed_a = source.seed
+    seeds = (seed_a,) * UPDATE_ROUNDS
+    references = {}
+    if reload_mode == "direct":
+        seed_b = seed_a + 1
+        seeds = (seed_a, seed_b, seed_a)
+        source.seed = seed_b
+        references[seed_b] = reference_signature(source, case, port=get_open_port(), **server_options)
+        source.seed = seed_a
+
+    with weight_transfer_servers(source, case, backend="hccl", **server_options) as (
+        server,
+        reference,
+        dummy_signature,
+    ):
+        references[seed_a] = reference
+        assert dummy_signature != reference, f"{case.id}: dummy and cold A produced identical signatures"
+        if reload_mode == "direct":
+            assert reference != references[seed_b], f"{case.id}: cold A and B produced identical signatures"
         client = server.get_client()
 
         from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
@@ -79,26 +93,15 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
             client=HTTPVLLMWeightSyncClient(base_url=server.url_root, timeout=UPDATE_TIMEOUT),
             source=source,
         )
-        signatures = []
         try:
-            for update_round in range(UPDATE_ROUNDS):
-                print(
-                    f"[trainer] {case.id}: sending {('packed' if packed else 'unpacked')} "
-                    f"fixed-random update round={update_round + 1}",
-                    flush=True,
-                )
+            for update_round, seed in enumerate(seeds, start=1):
+                source.seed = seed
+                print(f"[trainer] {case.id}: {reload_mode} update round={update_round} seed={seed}", flush=True)
                 post_control(server, "pause")
-                try:
-                    engine.send_weights()
-                finally:
-                    post_control(server, "resume")
-                signatures.append(generation_signature(client, case.model))
+                engine.send_weights()
+                post_control(server, "resume")
+                assert generation_signature(client, case.model) == references[seed], (
+                    f"{case.id}: {reload_mode} round {update_round} differs from cold loading seed {seed}"
+                )
         finally:
             engine.shutdown()
-
-    assert_weight_update_matches_reference(
-        dummy_signature,
-        reference,
-        signatures,
-        case,
-    )
