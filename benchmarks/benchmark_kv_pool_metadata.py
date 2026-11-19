@@ -89,6 +89,7 @@ class SchedulerCase:
             "_request_trackers": {},
             "_unfinished_requests": {req_id: (None, []) for req_id in unfinished_ids},
             "_preempted_req_ids": set(),
+            "_async_loading_req_ids": set(),
             "_loading_req_ids": set(),
         }.items():
             setattr(self.scheduler, name, value)
@@ -141,8 +142,10 @@ class LeaseCase:
             "num_kv_cache_groups": 1,
             "cacheable_group_ids": [0],
             "grouped_block_size": [128],
+            "group_uses_align_state": [False],
             "hash_block_size": 128,
             "layerwise_offload": True,
+            "layerwise_max_transfer_blocks": 0,
             "_step_load_keys": set(),
             "m_store": self.store,
             "_compute_reachable_load_masks": lambda *_: None,
@@ -151,6 +154,8 @@ class LeaseCase:
             "_make_layerwise_full_key": self.make_key,
         }.items():
             setattr(self.worker, name, value)
+        plane_module = load_source(Path(module.__file__).parent, "planes/gva.py", module.__name__)
+        self.plane = plane_module.GvaDataPlane(self.worker)
         ids = np.arange(count, dtype=np.int64)
         self.request = ReqMeta(
             req_id="benchmark-load",
@@ -173,7 +178,7 @@ class LeaseCase:
         self.worker._step_load_keys.clear()
 
     def run(self) -> Any:
-        return self.worker._prepare_load_gvas_for_request([self.request])
+        return self.plane._prepare_load_gvas([self.request])
 
     def verify(self, result: Any) -> dict[str, Any]:
         import numpy as np
