@@ -401,19 +401,24 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 if self.use_block_key_layerwise
                 else self._global_group_alloc_size(group_id)
             )
-            # PP stages have distinct keys, so each stage's payload starts at zero.
-            # Shared DCP shards retain hugepage-aligned strides.
+            # Byte offsets within each GVA object:
+            #   PP: stages have distinct keys, so no PP byte offset is added.
+            #   DCP (shard-major): ranks sharing head_or_tp_rank (put_step>1)
+            #       hold different context shards of the same logical block
+            #       and share ONE region; shard d's payload starts at d * shard_stride
+            #       within [d * shard_stride, (d+1) * shard_stride), where the stride
+            #       is the group byte total aligned up to the GVA hugepage
+            #       size (unaligned strides yield misaligned GVA addresses).
+            #       With put_step == 1 every rank owns a distinct region key
+            #       and no shard separation is needed.
             layer_byte_offset = 0
             gbl = self.group_block_len.get(group_id) or []
-            if (
-                not self.use_block_key_layerwise
-                and gbl
-                and group_num_layers > 0
-                and self.dcp_size > 1
-                and self.put_step > 1
-            ):
-                shard_stride = group_page_size // self.dcp_size
-                layer_byte_offset = self.dcp_rank * shard_stride
+            if not self.use_block_key_layerwise and gbl and group_num_layers > 0:
+                if self.dcp_size > 1 and self.put_step > 1:
+                    # Derive shard origins from the same aligned allocation size.
+                    shard_stride = group_page_size // self.dcp_size
+                    shard_idx = self.dcp_rank
+                    layer_byte_offset += shard_idx * shard_stride
             builders.append(
                 LayerBatchBuilder(
                     self.token_database,

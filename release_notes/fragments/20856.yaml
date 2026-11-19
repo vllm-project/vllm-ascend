@@ -1,6 +1,0 @@
-pr: 20856
-entries:
-  - category: bugfix
-    text: >-
-      Reduced excess DRAM reservation in Memcache layerwise KV pooling by sizing
-      each cache group from its registered stage-local payload without PP padding.
