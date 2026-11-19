@@ -26,27 +26,16 @@ Reducing scheduling concurrency alone does not reduce that row width.
 
 ## Validation
 
-CPU checks cover physical-pool overflow boundaries, flag propagation and the
-architecture-specific template matrix:
+The existing architecture-specific template-matrix check covers the optimized
+and fallback kernel selections:
 
 ```bash
-python -m pytest --noconftest -q \
-  tests/ut/ops/test_sparse_flash_mla_address_cache.py \
-  tests/ut/ops/test_aurora_tiling_keys.py
+python -m pytest --noconftest -q tests/ut/ops/test_aurora_tiling_keys.py
 ```
 
-Run the numerical cases on an A2/A3 NPU with matching Python bindings and OPP:
-
-```bash
-pytest --noconftest -q \
-  tests/e2e/nightly/single_node/ops/singlecard_ops/test_sparse_flash_mla.py \
-  -k csa_v0_paged_address_cache_against_fp32
-```
-
-The reference computes attention independently in FP32. Cases include page
-sizes 64/128, padded page strides, shuffled block mappings, duplicate and padded
-indices, 64/128 heads, row widths 1024/1025, and NPU graph replay. A 256-valid
-index case still supplies a supported TopK-512 tensor padded with `-1`.
+No new test scripts are included in this optimization. Numerical checks and
+before/after A3 performance measurements were run separately; the PR records
+the environment, results and limitations.
 
 Benchmark baseline and candidate with identical model, workload, cache budget
 and software versions. Single-round end-to-end TTFT/TPOT differences do not
