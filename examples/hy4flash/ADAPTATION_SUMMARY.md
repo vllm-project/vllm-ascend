@@ -39,7 +39,7 @@ BS9 有一路在首 token 已分叉，两轮 prefill 调度也有差异。表中
 | DFly 5 | 此前讨论的 DFlash 5。Checkpoint 自带 5 层 draft，vLLM 方法名为 `dfly`。每轮提出最多 5 个草稿 token，目标模型最多每路联合验证 6 个 query。Draft 使用目标层的候选快照和分页 KV，draft attention 和后续计算均已入 FULL 图。 |
 | Engram | 4 张 embedding 表按 TP 分片，默认用 pinned CPU 内存保存。图回放前按本轮 token 算 hash 并拷入查到的行。当前 checkpoint 的表为 BF16，约 126.7 GB 合计。 |
 | 共享专家双流 | 共享专家和路由专家可用不同 NPU stream。此前同步调度的开关对照覆盖 10 个请求、120 个生成 token，token、logprob 与 top-5 均一致。最新 FULL 整网回归启用了双流。 |
-| Prefix cache | 已在 eager 和此前的分段图中验证纯文本、SWA/IndexPool 长度边界和图片前缀命中。TP8 + FULL 下与 DFly 5、异步调度同时开启，完整一轮 AIME2026 为 30/30，均自然结束。默认开启，允许与 DFly 叠加；冷热请求仍可能存在概率和贪心输出差异。 |
+| Prefix cache | 已在 eager 和此前的分段图中验证纯文本、SWA/IndexPool 长度边界和图片前缀命中。默认开启，可与 DFly 5、FULL decode 图和异步调度同时使用；冷热请求仍可能存在概率和贪心输出差异。 |
 
 ### 目标模型和 draft 的数据流
 
@@ -233,8 +233,6 @@ export HY4FLASH_GPU_MEMORY_UTILIZATION=0.70
 | GPQA-Diamond | 184 / 198 | 181 / 198 | 181 / 198 | 91.92% |
 
 684 次作答均自然结束。AIME 第一轮的生成上限为 32,768，最长输出 30,452。其后五轮请求使用 131,072 的总上下文预算。AIME 第二轮最长输出 97,818 token。文本检查中，29 条 AIME 思考段出现了局部公式控制字符，最终答案段未检出这些字符。
-
-2026-11-19，TP8 + EP、FULL decode 图、prefix cache、DFly 5 和异步调度同时开启，使用相同的 EvalScope 版本、并发和采样参数，完成 AIME2026 单轮 30/30。上下文和请求输出上限均为 131,072；全部自然结束，0 截断、0 失败，最长输出 101,115 token。独立前缀探针在 129 和 513 token 输入上仍观察到冷热请求贪心序列不同，单轮 AIME 得分不能证明冷热数值严格等价。
 
 16,384 输入、1,024 输出、8 路并发的单次无 profiler 测量，逐请求 TPOT 均值为 123.40 ms/token。8 路全部进入 decode 的 20.0 秒区间中，TPOT 均值为 27.39 ms/token，P50 为 24.62 ms/token。较早开始生成的请求会在其余请求分块 prefill 时累计等待，逐请求 TPOT 包含这段等待。
 
