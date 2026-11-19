@@ -105,6 +105,7 @@ class AscendW4A16MXFP4LinearMethod(AscendLinearScheme):
             weight=layer.weight,
             antiquant_scale=layer.weight_scale,
             bias=bias,
+            antiquant_group_size=self.group_size,
         )
         return output
 
