@@ -292,17 +292,9 @@ def _setup_file_logging(log_dir: str | None = None) -> None:
     _file_logging_configured = True
 
 
-def configure_ascend_file_logging() -> None:
+def setup_ascend_file_logging(log_dir: str | None) -> None:
     global _file_logging_configured, _file_handler
-    log_dir = _LOG_DIR
-    try:
-        from vllm_ascend.ascend_config import get_ascend_config
-
-        ascend_config = get_ascend_config()
-        log_dir = ascend_config.ascend_log_path
-    except Exception:
-        pass
-    if log_dir != _LOG_DIR:
+    if log_dir and log_dir != _LOG_DIR:
         vllm_logger = logging.getLogger("vllm")
         ascend_logger = logging.getLogger("vllm_ascend")
         if _file_handler is not None:
@@ -312,6 +304,13 @@ def configure_ascend_file_logging() -> None:
             _file_handler = None
         _file_logging_configured = False
     _setup_file_logging(log_dir)
+
+
+def configure_ascend_file_logging() -> None:
+    """Set up file logging after the worker has initialized its Ascend config."""
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    setup_ascend_file_logging(get_ascend_config().ascend_log_path)
 
 
 def configure_ascend_logging() -> None:

@@ -630,12 +630,13 @@ class NPUPlatform(Platform):
         # Lazy import vllm/vllm-ascend to avoid circular import
         from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
-        from vllm_ascend.logger import configure_ascend_file_logging, configure_ascend_logging
+        from vllm_ascend.logger import configure_ascend_logging, setup_ascend_file_logging
 
         sync_v2_extra_kwargs(vllm_config)
 
-        # 1.Configure logging
-        configure_ascend_file_logging()
+        # Open the API server log before config validation emits its first warning.
+        additional_config = vllm_config.additional_config or {}
+        setup_ascend_file_logging(additional_config.get("ascend_log_path"))
         configure_ascend_logging()
 
         # 2.Early exit checks and validate parallel config
