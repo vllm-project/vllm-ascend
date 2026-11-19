@@ -148,7 +148,7 @@ def test_c8_dispatch_bypasses_bf16_fia(monkeypatch):
     callback = Mock(return_value=output[:2])
     monkeypatch.setattr(qsa, "qsa_c8_attention", callback)
     monkeypatch.setattr(qsa, "dispatch_qsa_attention", Mock(side_effect=AssertionError("BF16 FIA used")))
-    metadata = SimpleNamespace(num_actual_tokens=2, block_table=torch.tensor([[0]]), qsa_request_plan=object())
+    metadata = SimpleNamespace(num_actual_tokens=2, block_table=torch.tensor([[0]]), qsa_request_plan=None)
     impl._dispatch_qsa(
         layer,
         output,

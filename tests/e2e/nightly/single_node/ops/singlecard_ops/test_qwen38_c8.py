@@ -140,6 +140,47 @@ def test_c8_attention_eager_and_changed_input_graph_replay(dim, row_count, kv_he
 
 
 @torch.inference_mode()
+@pytest.mark.parametrize("rows,length", [(512, 512), (4096, 8195)])
+def test_c8_prefill_grouped_attention_matches_independent_rows(rows, length):
+    torch.manual_seed(34)
+    pages = (length + 127) // 128
+    kv = torch.randint(-127, 128, (pages + 4, 2, 128, 1, 256), dtype=torch.int8, device="npu")
+    key, value = kv.unbind(1)
+    table = torch.randperm(pages + 4, dtype=torch.int32, device="npu").unsqueeze(0)
+    key_scales = torch.rand(pages + 4, 1, 128, device="npu") * 0.01 + 0.001
+    v_scale = torch.rand(1, 256, device="npu") * 0.01 + 0.001
+    p_scale = torch.tensor([127.0], device="npu")
+    query = torch.randn(rows, 3, 256, dtype=torch.bfloat16, device="npu")
+    positions = torch.arange(length - rows, length, dtype=torch.int32, device="npu")
+    lengths = torch.tensor([length], dtype=torch.int32, device="npu")
+    requests = torch.zeros(rows, dtype=torch.int32, device="npu")
+    compact = torch.full((rows, 515), -1, dtype=torch.int32, device="npu")
+    groups = (positions + 1).floor_divide(4).unsqueeze(1)
+    columns = torch.arange(512, dtype=torch.int32, device="npu").unsqueeze(0)
+    selected = (columns + positions.unsqueeze(1) * 23) % groups.clamp_min(1)
+    compact[:, :512] = torch.where(columns < groups, selected, -1)
+
+    def run(prefill_kv_length):
+        return qsa_c8_attention(
+            query,
+            key,
+            value,
+            compact,
+            table,
+            requests,
+            positions,
+            lengths,
+            torch.empty_like(query),
+            v_scale,
+            p_scale,
+            key_scales=key_scales,
+            prefill_kv_length=prefill_kv_length,
+        )
+
+    torch.testing.assert_close(run(length), run(None), rtol=0, atol=0)
+
+
+@torch.inference_mode()
 def test_c8_indexer_matches_all_visible_group_set():
     # With <512 visible groups, all complete groups must be selected exactly
     # once regardless of floating-point score rounding or tie order.

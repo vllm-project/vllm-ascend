@@ -9,6 +9,7 @@ from vllm.forward_context import override_forward_context
 
 from tests.ut.models.qwen4_exp.test_gbsa_preparation import load_cpu_preparation
 from vllm_ascend.models.qwen4_exp import c8_attention, lightning_indexer
+from vllm_ascend.models.qwen4_exp.attention_dispatch import build_qsa_request_plan
 from vllm_ascend.models.qwen4_exp.quantization import qsa_c8_indexer_cache_views, quantize_qsa_rows
 
 
@@ -41,6 +42,71 @@ def cpu_gbsa(query, keys, values, indices, counts, block_shape, **kwargs):
                 exponent = (scores - scores.max()).exp()
                 output[row, head] = ((exponent * 127).round() / 127) @ v / exponent.sum()
     return output, torch.empty(0)
+
+
+@pytest.mark.parametrize(
+    "starts,lengths,prefilling,tokens,expected",
+    [
+        ([0, 512], [10240], [True], 512, 10240),
+        ([0, 4096], [4096], [True], 4096, 4096),
+        ([0, 511], [4096], [True], 511, None),
+        ([0, 512], [10241], [True], 512, None),
+        ([0, 512], [4096], [False], 512, None),
+        ([0, 512, 516], [4096, 2048], [True, False], 516, None),
+        ([0, 512], [4096], [True], 516, None),
+    ],
+)
+def test_c8_prefill_grouped_schedule_bounds(starts, lengths, prefilling, tokens, expected):
+    plan = build_qsa_request_plan(torch.tensor(starts), torch.tensor(lengths), tokens, torch.tensor(prefilling))
+    assert c8_attention.c8_prefill_kv_length(plan, tokens) == expected
+    assert c8_attention.c8_prefill_kv_length(None, tokens) is None
+
+
+def test_c8_grouped_prefill_uses_request_bounds_and_preserves_sparse_rows(monkeypatch):
+    monkeypatch.setattr(c8_attention, "prepare_qsa_gbsa_inputs", load_cpu_preparation())
+    rows = 512
+    query = torch.zeros(rows, 3, 128, dtype=torch.bfloat16)
+    cache = torch.zeros(9, 128, 1, 128, dtype=torch.int8)
+    seq_lens = torch.tensor([1023], dtype=torch.int32)
+    positions = torch.arange(511, 1023, dtype=torch.int32)
+    table = torch.tensor([[6, 2, 0, 3, 4, 1, 5, 7, 8]], dtype=torch.int32)
+    compact = torch.tensor([[0, 32, 128, -1, -1, -1]], dtype=torch.int32).expand(rows, -1).clone()
+    captured = []
+
+    def metadata(indices, counts, *args, **kwargs):
+        assert kwargs["quant_mode"] == 7 and kwargs["mask_mode"] == 1
+        assert kwargs["max_seqlen_q"] == rows and kwargs["max_seqlen_kv"] == 1024
+        assert kwargs["cu_seqlens_q"].tolist() == [0, rows]
+        assert kwargs["seqused_kv"] is seq_lens
+        captured.append((indices, counts))
+        return torch.empty(0)
+
+    def attention(q, k, v, indices, counts, *args, **kwargs):
+        assert kwargs["block_table"].tolist() == [[6, 2, 0, 3, 4, 1, 5, 7]]
+        assert kwargs["cu_seqlens_q"].tolist() == [0, rows] and kwargs["seqused_kv"] is seq_lens
+        assert captured == [(indices, counts)]
+        assert indices[0, 0, :2].tolist() == [0, 32] and counts[0, 0] == 2
+        assert indices[0, -1].tolist() == [0, 32, 128, 255] and counts[0, -1] == 4
+        return torch.ones_like(q, dtype=torch.bfloat16), torch.empty(0)
+
+    monkeypatch.setattr(c8_attention, "generic_block_sparse_attention_metadata", metadata)
+    monkeypatch.setattr(c8_attention, "generic_block_sparse_attention", attention)
+    result = c8_attention.qsa_c8_attention(
+        query,
+        cache,
+        cache,
+        compact,
+        table,
+        torch.zeros(rows, dtype=torch.int32),
+        positions,
+        seq_lens,
+        torch.empty_like(query),
+        torch.ones(1, 128),
+        torch.tensor([127.0]),
+        key_scales=torch.ones(9, 1, 128),
+        prefill_kv_length=1024,
+    )
+    torch.testing.assert_close(result, torch.ones_like(result))
 
 
 @pytest.mark.parametrize("tail", [0, 1, 2, 3])

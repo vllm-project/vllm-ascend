@@ -2,14 +2,35 @@
 """Native INT8 GBSA with dynamic Q/K and calibrated per-channel V."""
 
 import torch
+from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ops.gbsa import GBSAQuantMode, generic_block_sparse_attention, generic_block_sparse_attention_metadata
 from vllm_ascend.ops.triton.qwen4_exp.c8 import quantize_qsa_query
 from vllm_ascend.ops.triton.qwen4_exp.gbsa import prepare_qsa_gbsa_inputs
 
+from .attention_dispatch import QSARequestPlan
 from .gbsa import GBSA_COMPRESS_RATIO, GBSA_PAGE_SIZE
 
 C8_PROBABILITY_QUANT_SCALE = 127.0
+# 910B replay showed a gain for large prefill chunks with a short KV prefix.
+# Keep long, decode and mixed batches on the independent-row GBSA schedule.
+_MIN_GROUPED_QUERY_TOKENS = 512
+_MAX_GROUPED_KV_TOKENS = 10 * 1024
+
+
+def c8_prefill_kv_length(request_plan: QSARequestPlan | None, tokens: int) -> int | None:
+    """Return the scheduler's KV upper bound for an eligible prefill chunk."""
+    if request_plan is None or len(request_plan.requests) != 1:
+        return None
+    request = request_plan.requests[0]
+    if (
+        request.is_prefill
+        and request.query_start == 0
+        and request.query_end == tokens
+        and _MIN_GROUPED_QUERY_TOKENS <= tokens <= request.kv_length <= _MAX_GROUPED_KV_TOKENS
+    ):
+        return request.kv_length
+    return None
 
 
 def qsa_c8_attention(
@@ -26,6 +47,7 @@ def qsa_c8_attention(
     p_scale: torch.Tensor,
     *,
     key_scales: torch.Tensor,
+    prefill_kv_length: int | None = None,
 ) -> torch.Tensor:
     """Run native INT8 GBSA on paged KV and calibrated scales."""
     if query.ndim != 3 or query.dtype != torch.bfloat16 or output.shape != query.shape or output.dtype != query.dtype:
@@ -59,9 +81,22 @@ def qsa_c8_attention(
     output.zero_()
     if not query.shape[0]:
         return output
+    if prefill_kv_length is not None:
+        if block_table.shape[0] != 1:
+            raise ValueError("Grouped QSA C8 prefill requires one request")
+        block_table = block_table[:, : cdiv(prefill_kv_length, GBSA_PAGE_SIZE)].contiguous()
     groups, counts, visible, cu_q, row_table = prepare_qsa_gbsa_inputs(
         compact_indices, logical_positions, seq_lens, token_to_req, block_table, heads
     )
+    max_seqlen_q = 1
+    if prefill_kv_length is not None:
+        # The scheduler positions are contiguous and right-aligned to the live
+        # KV length. GBSA's causal mask derives the same visibility per row
+        # from those request bounds, enabling KV reuse across the chunk.
+        max_seqlen_q = query.shape[0]
+        cu_q = cu_q[::max_seqlen_q].contiguous()
+        visible = seq_lens
+        row_table = block_table
     common = dict(
         layout_q="TND",
         layout_kv="PA_BBND",
@@ -81,7 +116,7 @@ def qsa_c8_attention(
         heads,
         query.shape[-1],
         [1, GBSA_COMPRESS_RATIO],
-        max_seqlen_q=1,
+        max_seqlen_q=max_seqlen_q,
         max_seqlen_kv=row_table.shape[1] * GBSA_PAGE_SIZE,
         cu_seqlens_q=cu_q,
         seqused_kv=visible,
