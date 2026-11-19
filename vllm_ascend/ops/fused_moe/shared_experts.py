@@ -508,8 +508,8 @@ class AscendSharedExperts:
         """Rebuild one shared linear into the A3 INT MegaMoe layout.
 
         Mirrors the routed experts' per-scenario conventions on A3: A16W16
-        keeps plain (out, in) bf16 ND weights with no scale; A8W8-INT keeps
-        (out, in) int8 weights cast to FRACTAL_NZ with the fused int64
+        keeps plain (in, out) bf16 ND weights with no scale; A8W8-INT keeps
+        (in, out) int8 weights cast to FRACTAL_NZ with the fused int64
         per-channel scale. The A3 operator runs a single scenario per call,
         so the shared expert must be quantized like the routed experts; any
         other combination keeps the separate shared-expert forward. The
@@ -556,7 +556,11 @@ class AscendSharedExperts:
         finally:
             torch.npu.config.allow_internal_format = True
         if tuple(weight.shape) == expected_weight_shape:
-            weight = weight.contiguous()
+            # MegaMoe GMM consumes weights in the routed experts' (in, out)
+            # layout (routed process_weights_after_loading transposes (out,
+            # in) to (in, out), and the MXFP shared rebuild below does the
+            # same), so transpose the (out, in) linear weight here too.
+            weight = weight.transpose(0, 1).contiguous()
         elif tuple(weight.shape) == (expected_weight_shape[1], expected_weight_shape[0]):
             weight = weight.transpose(0, 1).contiguous()
         else:
@@ -602,13 +606,17 @@ class AscendSharedExperts:
             needed += ("w1_scale", "w2_scale")
         if not all(name in self._megamoe_shared_parts for name in needed):
             return
+        w1_scale = self._megamoe_shared_parts.get("w1_scale")
+        w2_scale = self._megamoe_shared_parts.get("w2_scale")
         weights = MegamoeSharedWeights(
             w1=[self._megamoe_shared_parts["w1"]],
             w2=[self._megamoe_shared_parts["w2"]],
             # The A16W16 scenario has no shared scales; the operator infers
-            # the shared GMM dtype from the bf16 weights.
-            w1_scale=self._megamoe_shared_parts.get("w1_scale"),
-            w2_scale=self._megamoe_shared_parts.get("w2_scale"),
+            # the shared GMM dtype from the bf16 weights. Quantized scenarios
+            # wrap the scale in a list: the MegaMoe ABI declares the shared
+            # scale knobs as Tensor[] (one entry per shared linear).
+            w1_scale=[w1_scale] if w1_scale is not None else None,
+            w2_scale=[w2_scale] if w2_scale is not None else None,
         )
         # Record the shared expert's own quant settings so the operator call
         # can declare them explicitly. The routed and shared experts may
