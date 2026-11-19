@@ -10,12 +10,14 @@ import numpy as np
 import pytest
 import torch
 from vllm import envs
-from vllm.config import CompilationMode, CUDAGraphMode
+from vllm.compilation import backends
+from vllm.config import CompilationMode, CUDAGraphMode, set_current_vllm_config
 from vllm.config.attention import AttentionConfig
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.offloader.base import NoopOffloader
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention import selector
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
@@ -788,6 +790,66 @@ def test_load_model_joins_warmups_when_weight_loading_fails():
 
     start_nz.assert_called_once_with("thread")
     join_nz.assert_called_once_with()
+
+
+@pytest.mark.parametrize("draft_tag", ["eagle_head", "dflash_head", "dspark_head"])
+@pytest.mark.parametrize("fail_load", [False, True])
+def test_load_model_isolates_attention_backend_cache_by_model_tag(monkeypatch, draft_tag, fail_load):
+    runner = _make_runner()
+    config = runner.vllm_config
+    config.cache_config = SimpleNamespace(user_specified_block_size=True, block_size=128, cache_dtype="auto")
+    config.attention_config = AttentionConfig()
+    config.speculative_config = SimpleNamespace(enable_adaptive_verification=False)
+    config.model_config = SimpleNamespace(rswa_window=None)
+    original_selector = selector._cached_get_attn_backend
+    original_selector.cache_clear()
+    selected_tags = []
+
+    def select_backend(*_args, **_kwargs):
+        selected_tags.append(backends.model_tag)
+        backend = AscendFA3Backend if backends.model_tag == "backbone" else AscendAttentionBackend
+        return f"{backend.__module__}.{backend.__name__}"
+
+    monkeypatch.setattr("vllm.platforms.current_platform", SimpleNamespace(get_attn_backend_cls=select_backend))
+    monkeypatch.setattr(backends, "model_tag", "backbone")
+
+    def select_attention():
+        # Target and draft can have exactly the same head/dtype/causal settings.
+        # Exercise the real upstream cache entry point, not the platform helper.
+        return selector.get_attn_backend(head_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto", num_heads=8)
+
+    def load_target_and_draft(*_args, **_kwargs):
+        assert select_attention() is AscendFA3Backend
+        assert select_attention() is AscendFA3Backend
+        with backends.set_model_tag(draft_tag):
+            assert select_attention() is AscendAttentionBackend
+            assert select_attention() is AscendAttentionBackend
+            if fail_load:
+                raise RuntimeError("draft loading failed")
+        assert select_attention() is AscendFA3Backend
+
+    try:
+        with (
+            set_current_vllm_config(config),
+            patch.object(GPUModelRunner, "load_model", side_effect=load_target_and_draft),
+            patch("vllm_ascend.worker.v2.model_runner.get_pd_dspark_aux_layer_ids", return_value=()),
+            patch("vllm_ascend.model_executor.warmup.nz_warmup.start_nz_warm_thread"),
+            patch("vllm_ascend.model_executor.warmup.nz_warmup.join_nz_warm_thread"),
+        ):
+            # A previously cached target selection must not leak into loading.
+            assert select_attention() is AscendFA3Backend
+            if fail_load:
+                with pytest.raises(RuntimeError, match="draft loading failed"):
+                    runner.load_model()
+            else:
+                runner.load_model()
+            assert selector._cached_get_attn_backend is original_selector
+            assert backends.model_tag == "backbone"
+            assert select_attention() is AscendFA3Backend
+        # One pre-existing entry, then one selection per tag in the load scope.
+        assert selected_tags == ["backbone", "backbone", draft_tag]
+    finally:
+        original_selector.cache_clear()
 
 
 @pytest.mark.parametrize("with_draft", [False, True])

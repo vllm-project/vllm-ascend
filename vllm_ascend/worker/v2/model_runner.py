@@ -22,6 +22,7 @@ import logging
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
+from functools import cache, wraps
 from typing import Any
 
 import numpy as np
@@ -332,7 +333,7 @@ class NPUModelRunner(GPUModelRunner):
         start_nz_warm_thread("thread")
         try:
             aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
-            with track_host_offload_owners() as owners:
+            with attention_backend_cache_scope(), track_host_offload_owners() as owners:
                 try:
                     super().load_model(load_dummy_weights, *args, **kwargs)
                 except BaseException:
@@ -1692,6 +1693,33 @@ class NPUModelRunner(GPUModelRunner):
         cumulative_padding = np.arange(1, num_padding_reqs + 1, dtype=np.int32) * num_padding_tokens // num_padding_reqs
         query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = last_loc + cumulative_padding
         return query_start_loc_np, num_reqs_padded
+
+
+@contextmanager
+def attention_backend_cache_scope():
+    """Keep target and draft backend selections separate while loading a model."""
+    from vllm.compilation import backends
+    from vllm.v1.attention import selector
+
+    original_selector = selector._cached_get_attn_backend
+    select_backend = inspect.unwrap(original_selector)
+
+    # Ascend selects by construction tag, but upstream's cache omits it. Use
+    # one local cache for this synchronous load, including nested draft loaders.
+    # Remove this scope when upstream includes the model tag in its cache key.
+    @cache
+    def cached_for_tag(model_tag: str, *args, **kwargs):
+        return select_backend(*args, **kwargs)
+
+    @wraps(original_selector)
+    def select_for_tag(*args, **kwargs):
+        return cached_for_tag(backends.model_tag, *args, **kwargs)
+
+    try:
+        selector._cached_get_attn_backend = select_for_tag
+        yield
+    finally:
+        selector._cached_get_attn_backend = original_selector
 
 
 @contextmanager
