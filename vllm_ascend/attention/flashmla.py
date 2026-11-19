@@ -19,7 +19,7 @@ from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
 from vllm_ascend.attention.utils import (
     MLA_FLASH_SUPPORTED_Q_HEADS,
-    get_effective_prefill_flags,
+    apply_prefill_as_decode_mask,
     get_flashmla_ops,
 )
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
@@ -44,7 +44,9 @@ def prepare_flashmla_batch_req_state(
     use the PCP decode classification, while fresh one-token prompts remain
     FIA prefills.
     """
-    effective_is_prefilling = get_effective_prefill_flags(batch_state)
+    effective_is_prefilling = apply_prefill_as_decode_mask(
+        batch_state.is_prefilling_np, getattr(batch_state, "prefill_runs_as_decode_np", None)
+    )
     order = np.argsort(effective_is_prefilling, kind="stable")
     reordered_fields: dict[str, Any] = dict(
         req_ids=[batch_state.req_ids[index] for index in order],

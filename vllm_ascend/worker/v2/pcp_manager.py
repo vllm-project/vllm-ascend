@@ -36,7 +36,7 @@ from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
-from vllm_ascend.attention.utils import get_effective_prefill_flags, has_effective_prefill
+from vllm_ascend.attention.utils import apply_prefill_as_decode_mask, has_effective_prefill
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
@@ -255,15 +255,8 @@ class AscendPCPManager(PCPManager):
         is_prefilling: np.ndarray,
     ) -> int:
         """Size dispatch from the same phase classification as partitioning."""
-        prefill_runs_as_decode = self._dispatch_prefill_runs_as_decode_np
-        if prefill_runs_as_decode is not None:
-            if prefill_runs_as_decode.shape != is_prefilling.shape:
-                raise RuntimeError(
-                    "PCP dispatch prefill-as-decode mask must match the request phase mask: "
-                    f"{prefill_runs_as_decode.shape} != {is_prefilling.shape}."
-                )
-            is_prefilling = np.asarray(is_prefilling, dtype=np.bool_) & ~prefill_runs_as_decode
-        return super().get_num_tokens_for_dispatch(num_scheduled_tokens, is_prefilling)
+        effective_is_prefilling = apply_prefill_as_decode_mask(is_prefilling, self._dispatch_prefill_runs_as_decode_np)
+        return super().get_num_tokens_for_dispatch(num_scheduled_tokens, effective_is_prefilling)
 
     @property
     def global_batch(self) -> AscendInputBatch:
@@ -344,7 +337,8 @@ class AscendPCPManager(PCPManager):
         batch_desc: BatchExecutionDescriptor,
     ) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
-        effective_is_prefilling = get_effective_prefill_flags(input_batch)
+        prefill_runs_as_decode = getattr(input_batch, "prefill_runs_as_decode_np", None)
+        effective_is_prefilling = apply_prefill_as_decode_mask(input_batch.is_prefilling_np, prefill_runs_as_decode)
         partition_input = input_batch
         if not np.array_equal(effective_is_prefilling, input_batch.is_prefilling_np):
             # Upstream PCP accepts only one phase mask. Give it the compute-path
@@ -360,7 +354,6 @@ class AscendPCPManager(PCPManager):
         assert isinstance(local_batch, AscendInputBatch)
         self._global_batch = input_batch
 
-        prefill_runs_as_decode = getattr(input_batch, "prefill_runs_as_decode_np", None)
         if prefill_runs_as_decode is not None:
             global_flags = {
                 int(req_state): bool(flag)

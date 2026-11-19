@@ -27,7 +27,7 @@ from vllm_ascend.attention.dsa_v41 import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
-    get_effective_prefill_flags,
+    apply_prefill_as_decode_mask,
     has_effective_prefill,
     is_pcp_enabled,
     uses_pcp_sharded_layout,
@@ -149,7 +149,9 @@ def build_v41_pcp_c2_metadata(
     """Use upstream segment ownership; send chunk ends and each request's ring tail."""
     query_lens = batch.num_scheduled_tokens[: batch.num_reqs]
     query_start_rows = batch.query_start_loc_np[: batch.num_reqs + 1]
-    is_prefilling = get_effective_prefill_flags(batch)[: batch.num_reqs]
+    is_prefilling = apply_prefill_as_decode_mask(
+        batch.is_prefilling_np, getattr(batch, "prefill_runs_as_decode_np", None)
+    )[: batch.num_reqs]
     manager = PCPManager.__new__(PCPManager)
     manager.pcp_world_size, manager.dcp_world_size = world, 1
     manager.shard_decode_requests = decode_sharded
