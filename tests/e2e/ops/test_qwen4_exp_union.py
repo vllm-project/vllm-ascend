@@ -126,3 +126,45 @@ def test_batched_prefill_dispatch_matches_single_request_launches(query_lengths)
     assert len(plan.union_batches) == 1
     dispatch_qsa_attention(query, None, None, key, value, compact, table, requests, positions, lengths, actual, plan)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("query_lengths", [(17,), (9, 16)])
+def test_multi_kv_heads_match_independent_head_launches(query_lengths):
+    torch.manual_seed(811)
+    starts = [0]
+    for size in query_lengths:
+        starts.append(starts[-1] + size)
+    batch = len(query_lengths)
+    lengths_cpu = torch.arange(batch, dtype=torch.int32) * 5 + 32768
+    pages = (int(lengths_cpu.max()) + 127) // 128
+    q = torch.randn(starts[-1], 24, 256, dtype=torch.bfloat16, device="npu")
+    k = torch.randn(batch * pages, 128, 2, 256, device="npu", dtype=q.dtype)
+    v = torch.randn_like(k)
+    table = torch.randperm(batch * pages, dtype=torch.int32, device="npu").reshape(batch, pages)
+    lens = lengths_cpu.npu()
+    pos = torch.cat([torch.arange(int(kv) - size, int(kv)) for kv, size in zip(lengths_cpu, query_lengths)]).int().npu()
+    req = torch.repeat_interleave(torch.arange(batch, dtype=torch.int32), torch.tensor(query_lengths)).npu()
+    compact = torch.full((starts[-1], 515), -1, device="npu", dtype=torch.int32)
+    compact[:, :512] = torch.randint(0, 8000, (starts[-1], 512), device="npu", dtype=torch.int32)
+    plan = build_qsa_request_plan(torch.tensor(starts), lengths_cpu, starts[-1], torch.ones(batch, dtype=torch.bool))
+    plan = prepare_qsa_union_batches(plan, pos + 1, lens, table)
+    assert len(plan.union_batches) == 1
+
+    def run(query, key, value):
+        output = torch.full_like(query, float("nan"))
+        dispatch_qsa_attention(query, None, None, key, value, compact, table, req, pos, lens, output, plan)
+        return output
+
+    expected = torch.cat(
+        [
+            run(
+                q[:, h * 12 : (h + 1) * 12].contiguous(),
+                k[:, :, h : h + 1].contiguous(),
+                v[:, :, h : h + 1].contiguous(),
+            )
+            for h in range(2)
+        ],
+        dim=1,
+    )
+    actual = run(q, k, v)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)

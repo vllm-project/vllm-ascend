@@ -127,6 +127,13 @@ def _run_union_gbsa(
     max_query_length: int,
 ) -> torch.Tensor:
     """Use the same native attention contract for single and packed requests."""
+    kv_heads = key_cache.shape[2]
+    q_heads = query.shape[1]
+    if kv_heads < 1 or q_heads < 1 or q_heads % kv_heads or q_heads // kv_heads > 16:
+        raise ValueError("Union GBSA requires 1 to 16 Q heads per KV head and evenly sized head groups")
+    if kv_heads > 1:
+        # The QSA indexer selects the same blocks for all KV heads.
+        union_inputs = tuple(t.expand(kv_heads, *t.shape[1:]).contiguous() for t in union_inputs)
     union_idx, union_count, exact = union_inputs
     common = dict(
         cu_seqlens_q=cu_q,
@@ -146,8 +153,8 @@ def _run_union_gbsa(
     metadata = union_ops.generic_block_sparse_attention_metadata(
         union_idx,
         union_count,
-        query.shape[1],
-        1,
+        q_heads,
+        kv_heads,
         query.shape[-1],
         shape,
         max_seqlen_q=max_query_length,
@@ -190,8 +197,6 @@ def qsa_union_gbsa_attention(
     # from stock decode/graph capture. Missing support must fail visibly.
     from vllm_ascend.ops import gbsa as union_ops
 
-    if key_cache.shape[2] != 1 or query.shape[1] > 16:
-        raise ValueError("Union GBSA requires one KV head and at most 16 Q heads per launch")
     if block_table.shape[1] * GBSA_PAGE_SIZE > (1 << 23):
         raise ValueError("Union index encoding exceeds exact FP32 sort range")
     union_inputs = build_qsa_union_inputs_from_compact(
@@ -235,8 +240,6 @@ def qsa_union_gbsa_attention_batch(
 
     if not request_indices or len(request_indices) + 1 != len(query_starts):
         raise ValueError("Each packed query segment must have one request")
-    if key_cache.shape[2] != 1 or query.shape[1] > 16:
-        raise ValueError("Union GBSA requires one KV head and at most 16 Q heads")
     if block_table.shape[1] * GBSA_PAGE_SIZE > (1 << 23):
         raise ValueError("Union index encoding exceeds exact FP32 sort range")
     union_inputs = build_qsa_union_inputs_from_compact(
