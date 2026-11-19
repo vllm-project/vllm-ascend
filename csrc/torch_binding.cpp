@@ -1728,6 +1728,12 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_mega_mhc_npu(
     constexpr double MEGA_MHC_RMS_NORM_SCALE = 1.0;
 
     const c10::optional<at::Tensor> no_tensor = c10::nullopt;
+    const std::array<const at::Tensor*, 8> mega_mhc_inputs = {
+        &x, &residual, &post, &comb, &hc_fn, &hc_scale, &hc_base, &norm_weight};
+    for (const auto* input : mega_mhc_inputs) {
+        TORCH_CHECK(input->is_privateuseone(), "MegaMhc inputs must be NPU tensors.");
+        TORCH_CHECK(input->device() == x.device(), "MegaMhc inputs must be on the same NPU device.");
+    }
     check_hc_pre_shape_and_dtype(residual, hc_fn, hc_scale, hc_base, no_tensor, hc_mult);
     TORCH_CHECK(hc_mult == MEGA_MHC_HC_MULT, "MegaMhc only supports hc_mult=4.");
     TORCH_CHECK(x.dim() == 2 || x.dim() == 3, "MegaMhc x must be [T,D] or [B,S,D].");
@@ -1738,9 +1744,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_mega_mhc_npu(
                 "MegaMhc hidden size must be in [16,16384] and aligned to 16.");
     TORCH_CHECK(post.dim() == x.dim() + 1 && comb.dim() == x.dim() + 1,
                 "MegaMhc post and comb must add one head dimension to x.");
+    uint64_t token_count = 1;
     for (int64_t i = 0; i < x.dim() - 1; ++i) {
         TORCH_CHECK(residual.size(i) == x.size(i) && post.size(i) == x.size(i) && comb.size(i) == x.size(i),
                     "MegaMhc inputs must have the same leading dimensions.");
+        TORCH_CHECK(token_count <= std::numeric_limits<uint32_t>::max() / static_cast<uint64_t>(x.size(i)),
+                    "MegaMhc token count must not exceed UINT32_MAX.");
+        token_count *= static_cast<uint64_t>(x.size(i));
     }
     TORCH_CHECK(residual.size(-2) == hc_mult && residual.size(-1) == x.size(-1),
                 "MegaMhc residual must be [...,hc_mult,hidden_size].");
@@ -1757,6 +1767,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_mega_mhc_npu(
                     std::isfinite(hc_pre_eps) && hc_pre_eps > 0 && std::isfinite(hc_post_scale),
                 "MegaMhc epsilon values must be positive and hc_post_scale must be finite.");
 
+    const c10_npu::OptionalNPUGuard npu_guard(x.device());
     at::Tensor new_residual = at::empty(residual.sizes(), residual.options());
     at::Tensor new_post = at::empty(post.sizes(), post.options());
     at::Tensor comb_logits = at::empty(comb.sizes(), comb.options());
@@ -1775,10 +1786,28 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_mega_mhc_npu(
 bool is_mega_mhc_available()
 {
     static const bool is_available = []() {
-        return GetOpApiFuncAddr("aclnnMegaMhc") != nullptr &&
-               GetOpApiFuncAddr("aclnnMegaMhcGetWorkspaceSize") != nullptr &&
-               GetOpApiFuncAddr("aclnnMhcSinkhorn") != nullptr &&
-               GetOpApiFuncAddr("aclnnMhcSinkhornGetWorkspaceSize") != nullptr;
+        const std::array<void*, 4> functions = {
+            GetOpApiFuncAddr("aclnnMegaMhc"),
+            GetOpApiFuncAddr("aclnnMegaMhcGetWorkspaceSize"),
+            GetOpApiFuncAddr("aclnnMhcSinkhorn"),
+            GetOpApiFuncAddr("aclnnMhcSinkhornGetWorkspaceSize"),
+        };
+        const void* library_base = nullptr;
+        for (auto* function : functions) {
+            if (function == nullptr) {
+                return false;
+            }
+            Dl_info info{};
+            if (dladdr(function, &info) == 0) {
+                return false;
+            }
+            if (library_base == nullptr) {
+                library_base = info.dli_fbase;
+            } else if (info.dli_fbase != library_base) {
+                return false;
+            }
+        }
+        return true;
     }();
     return is_available;
 }

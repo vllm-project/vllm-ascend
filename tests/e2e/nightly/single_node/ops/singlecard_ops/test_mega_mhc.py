@@ -20,11 +20,11 @@ NORM_EPS = 1e-6
 HC_EPS = 1e-6
 HC_POST_SCALE = 2.0
 
-pytestmark = pytest.mark.skipif(
-    not get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMHC)
-    or not torch.ops._C_ascend.is_mega_mhc_available(),
-    reason="MegaMhc and MhcSinkhorn require an A5 CANN ops-transformer package",
-)
+
+def test_npu_mega_mhc_available_on_a5():
+    if not get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMHC):
+        pytest.skip("MegaMhc requires A5")
+    assert torch.ops._C_ascend.is_mega_mhc_available()
 
 
 def _assert_close_with_pass_rate(actual, expected, *, diff_threshold, required_pass_rate):
@@ -42,6 +42,11 @@ def _assert_close_with_pass_rate(actual, expected, *, diff_threshold, required_p
     )
 
 
+@pytest.mark.skipif(
+    not get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMHC)
+    or not torch.ops._C_ascend.is_mega_mhc_available(),
+    reason="MegaMhc and MhcSinkhorn require an A5 CANN ops-transformer package",
+)
 @pytest.mark.parametrize("shape", [(2, HIDDEN_SIZE), (1, 2, HIDDEN_SIZE)])
 @pytest.mark.parametrize("sinkhorn_iters", [1, 20, 100])
 @torch.inference_mode()

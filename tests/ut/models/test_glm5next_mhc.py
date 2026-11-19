@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch_npu
 from torch import nn
 from vllm.model_executor.kernels.mhc.torch import mhc_post_torch, mhc_pre_torch
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
-from vllm_ascend.models.glm5next.model import Glm5NextDecoderLayer
+from vllm_ascend.models.glm5next.model import Glm5NextDecoderLayer, Glm5NextForCausalLM, Glm5NextModel
 
 
 def _rms_norm(x, weight, epsilon):
@@ -112,6 +115,21 @@ def test_mega_mhc_post_pre_maps_glm_inputs_and_outputs(monkeypatch):
     torch.testing.assert_close(args[7], norm_weight.float())
     assert args[8:] == (4, 20, norm_eps, layer.rms_norm_eps, layer.hc_eps, layer.mhc_post_mult_value)
 
+    cached_weight = norm_weight.float()
+    layer.hc_post_pre(
+        x,
+        residual,
+        post,
+        comb,
+        fn,
+        scale,
+        base,
+        norm_weight,
+        norm_eps,
+        norm_weight_fp32=cached_weight,
+    )
+    assert captured["args"][7] is cached_weight
+
 
 @pytest.mark.parametrize(
     ("mega_enabled", "with_norm", "x_dtype"),
@@ -160,3 +178,62 @@ def test_mega_mhc_post_pre_preserves_legacy_fallback(monkeypatch, mega_enabled, 
 
     assert all(actual_value is expected_value for actual_value, expected_value in zip(actual, expected))
     assert calls == ["post", "pre"]
+
+
+def test_mega_mhc_fp32_norm_buffers_refresh_in_place():
+    layer = Glm5NextDecoderLayer.__new__(Glm5NextDecoderLayer)
+    nn.Module.__init__(layer)
+    layer._use_mega_mhc = True
+    layer.input_layernorm = nn.Module()
+    layer.input_layernorm.weight = nn.Parameter(torch.linspace(0.5, 1.5, 8).bfloat16())
+    layer.post_attention_layernorm = nn.Module()
+    layer.post_attention_layernorm.weight = nn.Parameter(torch.linspace(1.5, 2.5, 8).bfloat16())
+    refresh_calls = []
+    refresh_norm_buffers = layer.process_weights_after_loading
+
+    def counted_refresh(act_dtype=None):
+        refresh_calls.append(None)
+        refresh_norm_buffers(act_dtype)
+
+    layer.process_weights_after_loading = counted_refresh
+    model = Glm5NextModel.__new__(Glm5NextModel)
+    nn.Module.__init__(model)
+    model._active_layers = [layer]
+    causal = Glm5NextForCausalLM.__new__(Glm5NextForCausalLM)
+    nn.Module.__init__(causal)
+    causal.model = model
+    config = SimpleNamespace(dtype=torch.bfloat16, quantization=None, word_embeddings_untied_by_checkpoint=False)
+
+    process_weights_after_loading(causal, config, torch.device("cpu"))
+    assert len(refresh_calls) == 1
+
+    input_cached = layer._input_layernorm_weight_fp32
+    post_cached = layer._post_attention_layernorm_weight_fp32
+    assert input_cached.dtype == torch.float32
+    assert post_cached.dtype == torch.float32
+    torch.testing.assert_close(input_cached, layer.input_layernorm.weight.float())
+    torch.testing.assert_close(post_cached, layer.post_attention_layernorm.weight.float())
+    assert "_input_layernorm_weight_fp32" not in layer.state_dict()
+    assert "_post_attention_layernorm_weight_fp32" not in layer.state_dict()
+    input_ptr = input_cached.data_ptr()
+    post_ptr = post_cached.data_ptr()
+
+    with torch.no_grad():
+        layer.input_layernorm.weight.copy_(torch.linspace(2.5, 3.5, 8).bfloat16())
+        layer.post_attention_layernorm.weight.copy_(torch.linspace(3.5, 4.5, 8).bfloat16())
+    process_weights_after_loading(causal, config, torch.device("cpu"))
+    assert len(refresh_calls) == 2
+
+    assert layer._input_layernorm_weight_fp32 is input_cached
+    assert layer._post_attention_layernorm_weight_fp32 is post_cached
+    assert input_cached.data_ptr() == input_ptr
+    assert post_cached.data_ptr() == post_ptr
+    torch.testing.assert_close(input_cached, layer.input_layernorm.weight.float())
+    torch.testing.assert_close(post_cached, layer.post_attention_layernorm.weight.float())
+
+    layer._use_mega_mhc = False
+    layer._input_layernorm_weight_fp32 = None
+    layer._post_attention_layernorm_weight_fp32 = None
+    process_weights_after_loading(causal, config, torch.device("cpu"))
+    assert layer._input_layernorm_weight_fp32 is None
+    assert layer._post_attention_layernorm_weight_fp32 is None
