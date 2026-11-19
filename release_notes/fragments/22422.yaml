@@ -1,0 +1,4 @@
+pr: 22422
+entries:
+  - category: bugfix
+    text: Fixed `MooncakeConnectorV2` producers retaining expired KV-lease entries indefinitely when a decode instance crashed, was aborted, or lost its completion notification; the KV lease bound stopped applying and stale entries accumulated until the engine was restarted. Expired entries are now reclaimed even when the decode instance is gone, and a rate-limited `Mooncake delayed-free sweeper` warning reports entries that are still waiting to be released.
