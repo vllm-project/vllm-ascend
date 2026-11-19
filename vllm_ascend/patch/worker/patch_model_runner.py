@@ -274,7 +274,7 @@ def initialize_kv_cache(
 upstream.copy_kv_cache_blocks_inplace = copy_kv_cache_blocks_inplace
 
 upstream_dp_utils.dispatch_cg_and_sync_dp = dispatch_cg_and_sync_dp
-upstream.dispatch_cg_and_sync_dp = dispatch_cg_and_sync_dp
+setattr(upstream, "dispatch_cg_and_sync_dp", dispatch_cg_and_sync_dp)
 for module_name in (
     "vllm.v1.worker.gpu.spec_decode.dflash.speculator",
     "vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator",
