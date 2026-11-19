@@ -18,6 +18,8 @@ pytestmark = pytest.mark.skipif(not (HAS_TRITON and is_950()), reason="Requires 
 
 STEP5_RMS_NORM_EPS = 1e-5
 STEP5_HIDDEN_SIZE = 4096
+# Observed in the Step-5-Preview TP8 "Who are you" prefill trace.
+STEP5_PROFILED_PREFILL_TOKENS = 14
 BF16_TOLERANCE = 2**-6
 MIN_WITHIN_TOLERANCE = 0.99
 MAX_ABSOLUTE_ERROR = 1.0
@@ -41,22 +43,22 @@ def assert_bf16_output_matches(output, expected):
 
 
 @pytest.mark.parametrize(
-    "tokens, hidden_size, input_dtype, zero_centered, has_residual",
+    "tokens, input_dtype, zero_centered, has_residual",
     [
-        (0, STEP5_HIDDEN_SIZE, torch.bfloat16, True, True),
-        (1, STEP5_HIDDEN_SIZE, torch.bfloat16, True, True),
-        (333, 6144, torch.float16, False, True),
-        (4096, STEP5_HIDDEN_SIZE, torch.float32, True, True),
-        (0, STEP5_HIDDEN_SIZE, torch.float32, True, False),
-        (1, STEP5_HIDDEN_SIZE, torch.float32, True, False),
-        (333, STEP5_HIDDEN_SIZE, torch.float32, False, False),
+        pytest.param(STEP5_PROFILED_PREFILL_TOKENS, torch.float32, True, False, id="prefill-no-residual"),
+        pytest.param(STEP5_PROFILED_PREFILL_TOKENS, torch.float32, True, True, id="prefill-fp32-with-residual"),
+        pytest.param(STEP5_PROFILED_PREFILL_TOKENS, torch.bfloat16, True, True, id="prefill-bf16-with-residual"),
+        pytest.param(1, torch.bfloat16, True, True, id="single-token"),
+        pytest.param(0, torch.bfloat16, True, True, id="empty-with-residual"),
+        pytest.param(0, torch.float32, True, False, id="empty-no-residual"),
+        pytest.param(STEP5_PROFILED_PREFILL_TOKENS, torch.float16, False, True, id="fp16-plain-weight"),
     ],
 )
-def test_fused_add_rms_norm_matches_decoder_path(tokens, hidden_size, input_dtype, zero_centered, has_residual):
+def test_fused_add_rms_norm_matches_decoder_path(tokens, input_dtype, zero_centered, has_residual):
     torch.manual_seed(0)
-    hidden_states = torch.randn(tokens, hidden_size, device="npu", dtype=input_dtype)
+    hidden_states = torch.randn(tokens, STEP5_HIDDEN_SIZE, device="npu", dtype=input_dtype)
     residual = torch.randn_like(hidden_states, dtype=torch.float32) if has_residual else None
-    weight = torch.randn(hidden_size, device="npu", dtype=torch.float32) * 0.1
+    weight = torch.randn(STEP5_HIDDEN_SIZE, device="npu", dtype=torch.float32) * 0.1
     expected_residual = hidden_states if residual is None else hidden_states.float() + residual
     assert can_use_fused_add_rms_norm_cast(hidden_states, residual, weight, fp32_residual=True)
     output, residual_out = fused_add_rms_norm_cast(hidden_states, residual, weight, STEP5_RMS_NORM_EPS, zero_centered)
@@ -82,9 +84,10 @@ def test_fused_add_rms_norm_matches_decoder_path(tokens, hidden_size, input_dtyp
 
 
 def test_fused_add_rms_norm_rejects_inputs_outside_fp32_path():
-    hidden_states = torch.ones((2, 8), device="npu", dtype=torch.bfloat16)
-    residual = torch.ones((2, 8), device="npu", dtype=torch.float32)
-    weight = torch.ones(8, device="npu", dtype=torch.float32)
+    shape = (STEP5_PROFILED_PREFILL_TOKENS, STEP5_HIDDEN_SIZE)
+    hidden_states = torch.ones(shape, device="npu", dtype=torch.bfloat16)
+    residual = torch.ones(shape, device="npu", dtype=torch.float32)
+    weight = torch.ones(STEP5_HIDDEN_SIZE, device="npu", dtype=torch.float32)
 
     assert not can_use_fused_add_rms_norm_cast(hidden_states, None, weight, fp32_residual=True)
     assert not can_use_fused_add_rms_norm_cast(hidden_states, residual, weight, fp32_residual=False)
