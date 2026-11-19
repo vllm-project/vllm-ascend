@@ -1641,6 +1641,23 @@
 #      Remove when upstream adds dirty tracking to UvaBackedTensor flushes.
 #
 
+# ** 37. File: worker/patch_external_weight_filter.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.model_loader.default_loader.DefaultModelLoader.get_all_weights`
+#    Why:
+#      External PLE tables must be skipped before safetensors materializes them,
+#      including when a file contains both PLE and ordinary model weights.
+#    How:
+#      When upstream per-tensor filtering is absent, intercept only models that
+#      request it. Support lazy single-threaded safetensors and reject unsupported
+#      loading modes; ordinary models and native upstream filtering are unchanged.
+#    Related PR:
+#      https://github.com/vllm-project/vllm/pull/64395
+#    Future Plan:
+#      Remove this patch when every supported vLLM version has native filtering.
+
+#
+
 # ** File: platform/patch_kimi_k31_config.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.transformers_utils.config._CONFIG_REGISTRY["kimi_k31"]`

@@ -48,11 +48,7 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
     ple_query_start_loc: torch.Tensor
 
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        model: nn.Module,
-        encoder_cache: EncoderCache | None,
-        device: torch.device,
+        self, vllm_config: VllmConfig, model: nn.Module, encoder_cache: EncoderCache | None, device: torch.device
     ) -> None:
         super().__init__(vllm_config, model, encoder_cache, device)
         self.qsa_prepared_input_adapter = Qwen4ExpPreparedInputAdapter(model)
@@ -63,15 +59,41 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
                 (capacity, self.ngram_context_len), self.ngram_eos_token_id
             )
             self.ple_query_start_loc = self.ple_query_start_loc.new_zeros(capacity + 1)
+        self._remote_ple_layers = []
+        from .ple_embedding import AscendPLEHostEmbedding, shared_ple_config
+
+        shared = shared_ple_config(vllm_config)
+        if shared is not None and shared.backend != "a3":
+            for layer in model.modules():
+                embedding = getattr(layer, "ngram_embedding", None)
+                if isinstance(embedding, AscendPLEHostEmbedding):
+                    embedding.bind_preparation()
+                    self._remote_ple_layers.append(layer)
 
     def prepare_inputs(self, input_batch: Any, req_states: Any) -> dict[str, Any]:
         model_inputs = super().prepare_inputs(input_batch, req_states)
-        # Qwen4Exp's RoPE state expands text positions to the three MRoPE axes.
-        # Prepare the same tensor passed to model.forward; using the raw 1-D
-        # scheduler positions makes the prepared shape miss and silently falls
-        # back to a replay-unsafe gather inside the captured QSA forward.
+        # Qwen4Exp expands text positions to three MRoPE axes. Prepare the
+        # same positions passed to forward to avoid a replay-unsafe QSA gather.
         positions = model_inputs.get("positions", input_batch.positions)
         self.qsa_prepared_input_adapter.prepare_positions(positions, input_batch.num_tokens_after_padding)
+        if getattr(self, "_remote_ple_layers", ()):
+            from vllm.models.qwen4_exp.common.ops.ple import ple_ngram_ids
+
+            for layer in self._remote_ple_layers:
+                if input_batch.num_reqs == 0:
+                    layer.ngram_embedding.clear_prepared_rows()
+                    continue
+                ids = ple_ngram_ids(
+                    input_ids=input_batch.input_ids,
+                    query_start_loc=model_inputs["query_start_loc"],
+                    ngram_context=model_inputs["ngram_context"],
+                    layer_multipliers=layer.layer_multipliers,
+                    ngram_heads_vocab_sizes=layer.ngram_heads_vocab_sizes,
+                    ngram_heads_offsets=layer.ngram_heads_offsets,
+                    eos_token_id=layer.eos_token_id,
+                    heads_per_ngram=layer.heads_per_ngram,
+                )
+                layer.ngram_embedding.prepare_rows(ids)
         return model_inputs
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
@@ -79,6 +101,8 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
         positions = model_inputs.get("positions")
         if positions is not None:
             self.qsa_prepared_input_adapter.prepare_positions(positions, num_tokens)
+        for layer in self._remote_ple_layers:
+            layer.ngram_embedding.clear_prepared_rows()
         return model_inputs
 
     def prepare_attn(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
