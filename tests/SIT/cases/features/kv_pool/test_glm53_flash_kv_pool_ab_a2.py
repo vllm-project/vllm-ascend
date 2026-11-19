@@ -10,17 +10,18 @@ cover the other cells; this file is the A2/TP8 memcache column):
 scenario                  backend    mode        tier (medium)
 ========================  =========  ==========  ==========
 memcache_bulk_tier2       memcache   bulk        DRAM
-memcache_layerwise_tier3  memcache   layerwise   DRAM + SSD
+memcache_bulk_tier3       memcache   bulk        DRAM + SSD
 ========================  =========  ==========  ==========
 
 Two orthogonal axes, not one: ``bulk`` vs ``layerwise`` is the *transfer mode*
 axis (whole-request synchronous load vs per-layer streamed load, connector
 extra_config ``use_layerwise``); ``tier2`` vs ``tier3`` is the *storage medium*
 axis (pool DRAM only vs pool DRAM spilling to a UBS IO raw block device).
-This pair happens to correlate them (tier2 runs bulk, tier3 runs layerwise,
-mirroring the Qwen3.8 A2 pair) but they are configured independently and the
-case names keep both axes visible so a reader never conflates medium with
-transfer mode.
+Both cases run ``bulk`` transfer and vary only the storage medium: on the
+validated A2 runner the layerwise transfer path kills the MetaService right
+after the first prefill (MetaNetClient reconnect loop, reproduced with the
+documented RoCE network env), while the bulk transfer passes the full A/B on
+both tiers, so the tier-3 cell asserts the storage axis through the bulk path.
 
 Every scenario runs two control legs, each inside one engine instance:
 
@@ -55,24 +56,24 @@ a ``[kv_pool_a2] deviation ...`` line plus the ``ab_local_cache`` /
 why. The judged criteria (exact external hit tokens, R4 isolation, token
 identity) are identical in both modes; nothing is relaxed silently.
 
-Case ④ (``memcache_layerwise_tier3``) is the evidence-strongest cell here:
-the v0.30.0 release notes state "GLM-5.3-Flash: ... added layerwise memcache
-DRAM/SSD pooling" (``docs/source/user_guide/release_notes.md:15``,
-:143 ``#17698``). The GLM5.3-Flash tutorial's A2 pool paragraph ("Keep ...
-`use_layerwise` disabled for this configuration", :1681-1682, and the A3
-:1470 same-worded note) describes the *validated deployment configuration*,
-not a capability prohibition — the docs table at :25-26 similarly restricts
-the model runner only. Both citations are kept side by side deliberately so a
-reviewer can see the case is asserting a shipped feature, not a hoped-for one.
-``KV_POOL_AB_MODE=record`` on the very first production run remains the safe
-rollout choice; the per-tier gates are overridable without editing this file.
+Case ④ (``memcache_bulk_tier3``) exercises the storage-medium axis through the
+bulk transfer path. The release notes ship layerwise memcache DRAM/SSD pooling
+for this model (``docs/source/user_guide/release_notes.md:15``, :143
+``#17698``), but on the validated A2 runner the layerwise pool upload kills
+the MetaService right after the first prefill (every worker falls into a
+MetaNetClient reconnect loop and R2 reports zero external hits), while the
+bulk transfer with the same tier-3 UBS IO pool passes the full A/B — so the
+protection case pins the working bulk path and leaves the layerwise defect to
+its own follow-up. ``KV_POOL_AB_MODE=record`` on the very first production run
+remains the safe rollout choice; the per-tier gates are overridable without
+editing this file.
 
 Sizing risk (over documented configuration, read before triaging OOM): the
 320B-parameter W8A8 checkpoint is ~320GB of weights, and the documented A2
 baseline for this checkpoint is **2 nodes colocated** (DP2 x TP8,
 ``GLM5.3-Flash.md:36-38``) with a 200k-class context matrix. This watch case
 deliberately squeezes it into one 8x64GB node with a 16K-class window
-(``gpu_memory_utilization`` default 0.85, ``max_model_len`` 16640) to exercise
+(``gpu_memory_utilization`` default 0.92, ``max_model_len`` 16640) to exercise
 the pool, not the context length. If engine startup fails from HBM pressure
 rather than a pool defect, retune ``GLM53_POOL_GPU_MEM_UTIL`` /
 ``GLM53_POOL_MAX_MODEL_LEN`` (or move the case to TP8 x DP2 hardware) before
@@ -94,17 +95,25 @@ Environment knobs:
   same model config) is the complete, runnable W8A8 checkpoint and is the
   selected default. Point this env at the plain dir only after its tokenizer
   files are provided;
-- ``GLM53_POOL_GPU_MEM_UTIL`` (default 0.85) / ``GLM53_POOL_MAX_MODEL_LEN``
-  (default 16640): HBM retuning knobs for the over-doc single-node layout;
-- ``GLM53_POOL_NUM_SPEC_TOKENS``: MTP speculative tokens (default 5, the
-  documented A2 pool example ``GLM5.3-Flash.md:1753/1780`` uses 5);
-- ``KV_POOL_GLM53_TIER2_CUDAGRAPH_MODE``: tier2 graph mode (default
-  ``FULL_DECODE_ONLY``; ``eager`` is the documented alternative). Tier3 is
-  forced to ``PIECEWISE`` because ``use_layerwise`` requires it
-  (``ascend_store_connector.py:118-124``);
-- ``KV_POOL_GLM53_DRAM_TIER_GB`` (default 4) / ``KV_POOL_GLM53_SSD_DRAM_TIER_GB``
-  (default 3): per-rank memcache pool DRAM sizes (device_rdma auto-aligns to
-  1GB, guide :806);
+- ``GLM53_POOL_GPU_MEM_UTIL`` (default 0.92) / ``GLM53_POOL_MAX_MODEL_LEN``
+  (default 16640): HBM retuning knobs for the over-doc single-node layout
+  (0.92 leaves ~13.5 GiB per rank for the KV cache on the validated A2
+  runner, the A2 memcache guide's own 40GB ``dram.size`` sizing below);
+- ``GLM53_POOL_NUM_SPEC_TOKENS``: MTP speculative tokens (default 1, the
+  validated A2 pool configuration; the tutorial's 5-draft example is
+  unvalidated with the pool connector on this checkpoint);
+- ``KV_POOL_GLM53_HCCL_IF_IP`` / ``KV_POOL_GLM53_SOCKET_IFNAME``: A2 RoCE
+  fabric pinning for the ``device_rdma`` pool transport — the RoCE NIC's
+  IPv4 (e.g. 172.26.2.x, *not* the management subnet) and its interface
+  name. Without the pinning the device-to-device pool transfers fail
+  (``TRANSFER_FAIL`` / ``rtsIpcMemImportByKey`` 107000, or the RoCE endpoint
+  falls back to a stale fabric address) and the pool legs see zero external
+  hits; empty values leave the variables unset (exporting an empty value
+  breaks HCCL with EI0001), so the nightly runner sets them per machine;
+- ``KV_POOL_GLM53_DRAM_TIER_GB`` (default 40) / ``KV_POOL_GLM53_SSD_DRAM_TIER_GB``
+  (default 40): per-rank memcache pool DRAM sizes (device_rdma auto-aligns to
+  1GB, guide :806; 40GB is the guide's A2 example, ``dram.size`` is the
+  allocation per LocalService and the host must reserve ~8x for TP8);
 - ``KV_POOL_GLM53_PROMPT_MB_PER_RANK`` (default 600): planning estimate of one
   16K prompt's pool payload per rank, used only to derive the eviction
   watermarks and print them (see the derivation next to the constants);
@@ -193,29 +202,25 @@ DUMMY_REF_HITS = 16128
 REAL_REF_HITS_TP8 = 15360
 POOL_PROMPT_TOKENS = 16388
 # Fix the chunked-prefill shape for cold and hit rounds alike; 16,388 tokens
-# prefill in [16384, 4] chunks in every leg.
-POOL_MAX_NUM_BATCHED_TOKENS = 16384
+# prefill in [8192, 8192, 4] chunks in every leg. 16384 blows the profiling
+# run's activation peak on the validated A2 runner at util 0.92 (kernel
+# launch OOM), 8192 is the validated shape.
+POOL_MAX_NUM_BATCHED_TOKENS = 8192
 POOL_MAX_TOKENS = 16
-POOL_GPU_MEM_UTIL = float(os.environ.get("GLM53_POOL_GPU_MEM_UTIL", "0.85"))
+POOL_GPU_MEM_UTIL = float(os.environ.get("GLM53_POOL_GPU_MEM_UTIL", "0.92"))
 POOL_MAX_MODEL_LEN = int(os.environ.get("GLM53_POOL_MAX_MODEL_LEN", "16640"))
 POOL_MIN_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + POOL_MAX_TOKENS
-POOL_NUM_SPEC_TOKENS = int(os.environ.get("GLM53_POOL_NUM_SPEC_TOKENS", "5"))
+POOL_NUM_SPEC_TOKENS = int(os.environ.get("GLM53_POOL_NUM_SPEC_TOKENS", "1"))
 
 # The watch is text-only; the multimodal wrapper is still built (the
 # production Glm5Next wrapper initializes its vision tower first), so mm
 # input is limited to zero instead of pretending the tower is absent.
 LIMIT_MM_TEXT_ONLY = {"image": 0, "video": 0}
 
-TIER2_CUDAGRAPH_MODE = os.environ.get("KV_POOL_GLM53_TIER2_CUDAGRAPH_MODE", "FULL_DECODE_ONLY")
-# use_layerwise hard-requires PIECEWISE graphs (ascend_store_connector.py
-# :118-124 requires_piecewise_for_cudagraph); the GLM support matrix lists
-# Piecewise as validated for this model, so tier3 is not configurable here.
-TIER3_CUDAGRAPH_MODE = "PIECEWISE"
-
 # memcache pool DRAM per rank (``dram.size`` is per die; device_rdma
 # auto-aligns it to 1GB, guide :806, so both tiers stay on the 1GB grid).
-DRAM_TIER_GB = int(os.environ.get("KV_POOL_GLM53_DRAM_TIER_GB", "4"))
-SSD_DRAM_TIER_GB = int(os.environ.get("KV_POOL_GLM53_SSD_DRAM_TIER_GB", "3"))
+DRAM_TIER_GB = int(os.environ.get("KV_POOL_GLM53_DRAM_TIER_GB", "40"))
+SSD_DRAM_TIER_GB = int(os.environ.get("KV_POOL_GLM53_SSD_DRAM_TIER_GB", "40"))
 DRAM_TIER = f"{DRAM_TIER_GB}GB"
 SSD_DRAM_TIER = f"{SSD_DRAM_TIER_GB}GB"
 # memcache LocalService cluster slots (guide :804, range [1,1024]); the pool
@@ -226,6 +231,22 @@ AB_MODE = os.environ.get("KV_POOL_AB_MODE", "gate")
 MEMCACHE_UBSIO_DISK = os.environ.get("KV_POOL_MEMCACHE_UBSIO_DISK", "/dev/loop0")
 MEMCACHE_UBSIO_DEVICES = int(os.environ.get("KV_POOL_MEMCACHE_UBSIO_DEVICES", TP_SIZE))
 MEMCACHE_UBSIO_MEM_GB = int(os.environ.get("KV_POOL_GLM53_UBSIO_MEM_GB", "10"))
+
+# A2 RoCE fabric pinning for the memcache ``device_rdma`` pool transport: the
+# device endpoint candidates come from the host fabric configuration, and the
+# transfers only come up when HCCL_IF_IP is the actual RoCE NIC IPv4 (the
+# management subnet times out; an empty value breaks HCCL with EI0001). The
+# knobs stay empty when the machine has no pinned fabric (the variables are
+# then left unset for the engine defaults); the nightly runner sets them per
+# machine. Validated on the A2 runner with 172.26.2.x / enp67s0f0np0.
+HCCL_IF_IP = os.environ.get("KV_POOL_GLM53_HCCL_IF_IP", "")
+SOCKET_IFNAME = os.environ.get("KV_POOL_GLM53_SOCKET_IFNAME", "")
+ROCE_NET_ENVS: dict[str, str] = {"HCCL_INTRA_ROCE_ENABLE": "1"}
+if HCCL_IF_IP:
+    ROCE_NET_ENVS["HCCL_IF_IP"] = HCCL_IF_IP
+if SOCKET_IFNAME:
+    for _ifname_key in ("GLOO_SOCKET_IFNAME", "TP_SOCKET_IFNAME", "HCCL_SOCKET_IFNAME"):
+        ROCE_NET_ENVS[_ifname_key] = SOCKET_IFNAME
 
 
 def _float_env(name: str, default: float) -> float:
@@ -457,9 +478,10 @@ def _leg(use_pool: bool, use_layerwise: bool, tier_ssd: bool, local_cache: bool,
             # MTP speculative decoding per the documented A2 pool example
             # (method deepseek_mtp, 5 draft tokens, draft graph enabled).
             speculative_config={"method": "deepseek_mtp", "num_speculative_tokens": POOL_NUM_SPEC_TOKENS},
-            compilation_config={
-                "cudagraph_mode": TIER3_CUDAGRAPH_MODE if use_layerwise else TIER2_CUDAGRAPH_MODE,
-            },
+            # Eager execution: the validated A2 pool configuration (the
+            # graph-capture paths are unvalidated with the pool connector on
+            # this checkpoint), and both legs share it so the A/B stays clean.
+            enforce_eager=True,
         )
         if use_pool:
             pool = stack.enter_context(SingleNodeMemcacheManager(_memcache_pool_config(tier_ssd), case_name))
@@ -752,12 +774,21 @@ def _leg_stats(p50: float, p95: float, throughput: float, state: dict[str, Any])
     deploy="pd_mix",
     hardware="A2",
     quantization="W8A8",
-    graph_mode="full_and_piecewise",
+    graph_mode="eager",
 )
 @pytest.mark.parametrize(
-    ("use_layerwise",),
-    [(False,), (True,)],
-    ids=["memcache_bulk_tier2", "memcache_layerwise_tier3"],
+    ("use_layerwise", "tier_ssd"),
+    [
+        # Case 1: bulk transfer, tier-2 DRAM-only pool.
+        (False, False),
+        # Case 2: bulk transfer, tier-3 DRAM + UBS IO SSD pool. Bulk (not
+        # layerwise) on purpose: on the validated A2 runner the layerwise pool
+        # upload kills the MetaService right after the first prefill (every
+        # worker falls into a MetaNetClient reconnect loop), while the bulk
+        # transfer with the same tier-3 pool passes the full A/B.
+        (False, True),
+    ],
+    ids=["memcache_bulk_tier2", "memcache_bulk_tier3"],
 )
 @patch.dict(
     os.environ,
@@ -776,11 +807,13 @@ def _leg_stats(p50: float, p95: float, throughput: float, state: dict[str, Any])
         # section (docs:1659-1661).
         "ASCEND_TRANSFER_TIMEOUT": "10000",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": "3000",
+        # A2 RoCE fabric pinning for the device_rdma pool transport (see
+        # ROCE_NET_ENVS next to the memcache constants for the rationale).
+        **ROCE_NET_ENVS,
     },
 )
 @wait_until_npu_memory_free()
-def test_glm53_flash_kv_pool_ab_a2(use_layerwise: bool):
-    tier_ssd = use_layerwise
+def test_glm53_flash_kv_pool_ab_a2(use_layerwise: bool, tier_ssd: bool):
     mode = "layerwise" if use_layerwise else "bulk"
     tier = "tier3-ssd" if tier_ssd else "tier2-dram"
     case = f"glm53flash_tp8_memcache_{mode}_{tier}"

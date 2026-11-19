@@ -402,7 +402,10 @@ AB_THROUGHPUT_LIMIT = 0.92
 AB_SAMPLES = 20
 AB_WARMUP = 2
 # Leave time for worker processes and NPU memory to be reclaimed between legs.
-AB_LEG_GAP_SECONDS = 10
+# 180s (not 10s): the tier-3 memcache teardown (LocalService unregister, UBS
+# IO storage release, NPU HBM reclaim) measured ~60-90s on the validated A2
+# runner, and a shorter gap races the next leg's startup HBM check.
+AB_LEG_GAP_SECONDS = 180
 AB_ARTIFACT = os.environ.get("KV_POOL_AB_ARTIFACT", "pool_ab_report.json")
 # Default 16K-class load for the performance segment; every PR case passes its
 # own prompt_tokens explicitly.
