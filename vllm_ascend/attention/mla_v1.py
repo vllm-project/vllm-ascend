@@ -2878,9 +2878,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 num_tokens=num_tokens,
                 is_draft_model=is_draft_model,
                 eagle_spec_multiple=eagle_spec_multiple,
-                disable_padded_batch=(
-                    is_draft_model and _uses_unpadded_drafter_batch(self.speculative_config)
-                ),
+                disable_padded_batch=(is_draft_model and _uses_unpadded_drafter_batch(self.speculative_config)),
             )
             register_task(torch_npu.npu_fused_infer_attention_score_v2.out, operation_kwargs, provider)
         else:
