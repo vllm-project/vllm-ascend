@@ -1,0 +1,9 @@
+pr: 22406
+entries:
+  - category: feature
+    text: >-
+      Added single-host data-parallel serving on Ascend 310P with Model Runner V2.
+      Use `--data-parallel-size 2 --tensor-parallel-size 2` to run two replicas
+      across four devices. For Qwen3.6-35B-A3B W8A8 with expert parallelism disabled,
+      use one decode graph capture size, such as `[16]`, if additional capture
+      sizes exhaust runtime event resources.
