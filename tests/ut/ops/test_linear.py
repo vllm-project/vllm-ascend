@@ -23,6 +23,7 @@ from vllm_ascend.ops.linear import (
 from vllm_ascend.ops.linear_op import DCPGroupColumnParallelOp
 from vllm_ascend.quantization.method_adapters import AscendLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+from vllm_ascend.utils import vllm_version_is
 
 
 class BaseLinearTest(unittest.TestCase):
@@ -273,6 +274,12 @@ class TestAscendMergedColumnParallelLinear(BaseLinearTest):
             kwargs: dict[str, Any] = dict(
                 input_size=8, output_sizes=[4, 6], bias=True, disable_tp=True, padding_size=padding_size
             )
+            if vllm_version_is("0.34.0") and padding_size:
+                # v0.34.0 lacks the upstream pad-fill helpers, so the layer
+                # refuses padded allocations instead of mismatching weights.
+                with self.assertRaisesRegex(ValueError, "requires the verified"):
+                    AscendMergedColumnParallelLinear(**kwargs)
+                continue
             layer = AscendMergedColumnParallelLinear(**kwargs)
             self.assertEqual(tuple(layer.weight.shape), (10 + padding_size, 8))
             for value in (1.0, 2.0):

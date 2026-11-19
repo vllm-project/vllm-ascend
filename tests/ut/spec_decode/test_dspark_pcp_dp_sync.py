@@ -43,7 +43,9 @@ def test_dspark_global_requests_do_not_reuse_local_pcp_dp_capacity(monkeypatch, 
     )
     monkeypatch.setattr(module, "build_attn_metadata_wrapper", lambda: nullcontext())
     monkeypatch.setattr(module, "build_attn_metadata_factory", lambda *a, **k: nullcontext())
-    monkeypatch.setattr(pcp_module, "get_pcp_group", lambda: SimpleNamespace(broadcast=lambda tensor, src: tensor))
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.pcp_manager.get_pcp_group", lambda: SimpleNamespace(broadcast=lambda tensor, src: tensor)
+    )
     seen = []
 
     def parent(self, *args, **kwargs):

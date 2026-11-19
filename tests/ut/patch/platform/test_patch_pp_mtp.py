@@ -155,6 +155,9 @@ def test_pp_ipc_cached_request_data_carries_confirmed_token_for_sync_and_async(
         num_computed_tokens=2,
         num_output_tokens=1,
         num_output_placeholders=0,
+        # vLLM main's Scheduler._make_cached_request_data fences the final
+        # prefill chunk with this flag; v0.34.0 does not read it.
+        is_prefill_chunk=False,
     )
     blocks = SimpleNamespace(get_block_ids=lambda allow_none: ([0],))
 
@@ -196,6 +199,7 @@ def test_pp_ipc_cached_request_data_fills_empty_confirmed_token_only_for_async(
         num_computed_tokens=3,
         num_output_tokens=1,
         num_output_placeholders=0,
+        is_prefill_chunk=False,
     )
     blocks = SimpleNamespace(get_block_ids=lambda allow_none: ([0],))
 
@@ -367,6 +371,7 @@ def test_pp_ipc_cached_request_data_skips_empty_output_tokens():
         num_computed_tokens=3,
         num_output_tokens=0,
         num_output_placeholders=0,
+        is_prefill_chunk=False,
     )
     blocks = SimpleNamespace(get_block_ids=lambda allow_none: ([0],))
     cached = Scheduler._make_cached_request_data(

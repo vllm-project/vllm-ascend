@@ -23,8 +23,6 @@ def runtime_fixture(monkeypatch):
         monkeypatch.setitem(sys.modules, name, package)
 
     utils = ModuleType("vllm_ascend.utils")
-    # kv_trace_state imports the helper; no supported lane takes a legacy path.
-    monkeypatch.setattr(utils, "vllm_version_is", lambda version: False, raising=False)
     monkeypatch.setitem(sys.modules, "vllm_ascend.utils", utils)
 
     def load(name, path):

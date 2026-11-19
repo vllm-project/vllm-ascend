@@ -78,10 +78,28 @@ def config(tp=2, pp=2, dp=1, ep=True, architecture="KimiLinearForCausalLM", runn
 
 
 class BaseModel(nn.Module):
+    _aux_slot_base_cached = 0
+    _aux_upstream_total_cached = 0
+
     def _cache_aux_pp_layout(self):
         # Upstream EagleModelMixin caches post-layer aux slots with <= start.
         self._aux_slot_base_cached = bisect_right(self.aux_hidden_state_layers, self.start_layer)
         self._aux_upstream_total_cached = self._aux_slot_base_cached
+
+    def pack_local_aux_hidden_states(self, aux_hidden_states):
+        # v0.34.0 carries the cumulative aux payload through the PP tensors.
+        if not aux_hidden_states:
+            return {}
+        base = self._aux_slot_base_cached
+        return {f"{self.AUX_HIDDEN_STATE_KEY}{base + i}": t for i, t in enumerate(aux_hidden_states)}
+
+    def collect_remote_aux_hidden_states(self, intermediate_tensors):
+        if self._aux_upstream_total_cached == 0:
+            return []
+        return [
+            intermediate_tensors[f"{self.AUX_HIDDEN_STATE_KEY}{i}"]
+            for i in range(self._aux_upstream_total_cached)
+        ]
 
     def _maybe_add_hidden_state(self, states, layer_idx, hidden, residual):
         if layer_idx in self.aux_hidden_state_layers:
@@ -226,6 +244,9 @@ def runtime(monkeypatch):
         "get_pp_group": lambda: context.pp,
         "get_tensor_model_parallel_world_size": lambda: context.tp,
         "get_tensor_model_parallel_rank": lambda: context.rank,
+        # BaseModel models the cumulative release protocol, so the module
+        # takes its v0.34.0 path. The native fixture installs the real check.
+        "vllm_version_is": lambda _target: True,
     }
     # Transport and sharding use the repository implementations, including
     # multi-dimensional residuals and zero-length token tensors.
@@ -342,7 +363,11 @@ def native_aux_runtime(runtime, monkeypatch):
     from vllm.model_executor.models.interfaces import EagleModelMixin
     from vllm.v1.worker.gpu.pp_utils import PPHandler
 
+    from vllm_ascend.utils import vllm_version_is
+
     namespace, context = runtime
+    # Exercise the installed ABI, so the module must see the real version.
+    namespace["vllm_version_is"] = vllm_version_is
 
     class NativeBase(BaseModel, EagleModelMixin):
         _cache_aux_pp_layout = EagleModelMixin._cache_aux_pp_layout
@@ -350,14 +375,18 @@ def native_aux_runtime(runtime, monkeypatch):
         pack_local_aux_hidden_states = EagleModelMixin.pack_local_aux_hidden_states
         AUX_HIDDEN_STATE_KEY = "pp_transport_aux_hidden_states_"
 
-    NativeBase.aux_hidden_state_slot_keys = EagleModelMixin.aux_hidden_state_slot_keys
-    # Alias the original test's legacy diagnostic to native receive slots.
-    # Production main no longer has or needs this attribute.
-    setattr(  # noqa: B010 - install the main-only diagnostic descriptor on the test class
-        NativeBase,
-        "_aux_upstream_total_cached",
-        property(lambda self: self._aux_slot_base_cached if context.pp.is_last_rank else 0),
-    )
+    # vLLM main exposes the slot-key contract; v0.34.0 relays the cumulative
+    # payload through the mixin's collect_remote_aux_hidden_states instead.
+    if hasattr(EagleModelMixin, "aux_hidden_state_slot_keys"):
+        NativeBase.aux_hidden_state_slot_keys = EagleModelMixin.aux_hidden_state_slot_keys
+    if not hasattr(EagleModelMixin, "_aux_upstream_total_cached"):
+        # Alias the original test's legacy diagnostic to native receive slots.
+        # vLLM main no longer has or needs this attribute.
+        setattr(  # noqa: B010 - install the main-only diagnostic descriptor on the test class
+            NativeBase,
+            "_aux_upstream_total_cached",
+            property(lambda self: self._aux_slot_base_cached if context.pp.is_last_rank else 0),
+        )
     namespace.update(BaseModel=NativeBase)
     load_definitions(
         "vllm_ascend/models/kimi_k3/kimi_k3.py",
@@ -393,7 +422,11 @@ def native_aux_runtime(runtime, monkeypatch):
         output = forward(self, input_ids, positions, intermediate_tensors, inputs_embeds)
         if not context.pp.is_last_rank:
             return PPHandler.relay_aux_hidden_states(handler, intermediate_tensors, output)
-        return PPHandler.add_upstream_aux_hidden_states(handler, intermediate_tensors, output)
+        if hasattr(PPHandler, "add_upstream_aux_hidden_states"):
+            # vLLM main merges the earlier stages' slots in the runner.
+            return PPHandler.add_upstream_aux_hidden_states(handler, intermediate_tensors, output)
+        # v0.34.0 already collects them through the model's forward.
+        return output
 
     model_cls.forward = forward_with_runner
     return namespace, context

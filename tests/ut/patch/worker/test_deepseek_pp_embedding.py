@@ -23,7 +23,11 @@ from vllm_ascend.patch.worker import patch_deepseek_v2
 def _make_target(monkeypatch, pp_size, pp_rank, method, *, existing=False, quant_config=None):
     group = SimpleNamespace(world_size=pp_size, is_first_rank=pp_rank == 0, is_last_rank=pp_rank == pp_size - 1)
     monkeypatch.setattr(parallel_state, "get_pp_group", lambda: group)
-    monkeypatch.setattr(eagle_utils, "in_single_pp_stage", lambda: pp_size > 1)
+    # vLLM main gates on in_single_pp_stage(); v0.34.0 reads the PP group size.
+    if hasattr(eagle_utils, "in_single_pp_stage"):
+        monkeypatch.setattr(eagle_utils, "in_single_pp_stage", lambda: pp_size > 1)
+    else:
+        monkeypatch.setattr(eagle_utils, "get_pp_group", lambda: group)
     hf_config = SimpleNamespace(
         model_type="glm_moe_dsa",
         vocab_size=65,

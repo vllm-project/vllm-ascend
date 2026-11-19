@@ -3111,11 +3111,13 @@ def _stub_moe_runner_init(
 def test_runner_preserves_native_shared_scaling(monkeypatch, divide_shared, dtype, with_shared):
     runner = _stub_moe_runner_init(monkeypatch, divide_shared_output_in_fp16=divide_shared)
     runner.routed_scaling_factor = 2.0
-    assert runner.divide_shared_output_in_fp16 is divide_shared
+    if not vllm_version_is("0.34.0"):
+        assert runner.divide_shared_output_in_fp16 is divide_shared
     shared = torch.full((2, 4), 2.0, dtype=dtype) if with_shared else None
     fused = torch.full((2, 4), 3.0, dtype=dtype)
     shared, fused = runner._maybe_apply_routed_scale_to_output(shared, fused)
-    divides = divide_shared and with_shared and dtype == torch.float16
+    # v0.34.0's runner has no per-layer guard and always divides fp16 shared output.
+    divides = with_shared and dtype == torch.float16 and (divide_shared or vllm_version_is("0.34.0"))
     torch.testing.assert_close(fused, torch.full_like(fused, 3.0 if divides else 6.0), rtol=0, atol=0)
     if shared is not None:
         torch.testing.assert_close(shared, torch.full_like(shared, 1.0 if divides else 2.0), rtol=0, atol=0)
