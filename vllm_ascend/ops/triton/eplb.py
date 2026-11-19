@@ -17,6 +17,7 @@ _MEDIUM_ASSIGNMENT_LIMIT = 8192
 _SMALL_TILE = 64
 _MEDIUM_TILE = 128
 _LARGE_TILE = 1024
+_MAX_RECORD_BLOCK_SIZE = 256
 
 
 def _mapping_block_size(numel: int) -> int:
@@ -186,7 +187,7 @@ def record_expert_tokens_triton(
     num_local_experts = expert_tokens.numel()
     if num_local_experts == 0:
         return
-    block_size = min(256, triton.next_power_of_2(num_local_experts))
+    block_size = min(_MAX_RECORD_BLOCK_SIZE, triton.next_power_of_2(num_local_experts))
     _record_expert_tokens_kernel[(triton.cdiv(num_local_experts, block_size),)](
         expert_tokens,
         expert_load_view,
