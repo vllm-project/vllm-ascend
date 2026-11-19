@@ -62,7 +62,7 @@ It is **recommended to use the latest release candidate (rc) version or the late
 
     Start the docker image on each node. Adjust `ASCEND_VISIBLE_DEVICES` according to the NPU ID you want to use.
 
-    The runtime mounts the driver libraries and `npu-smi`, but not the `ascend_manager` and `user_config` devices or the 310P host libraries, so this tab still passes those explicitly.
+    The runtime mounts the driver libraries and `npu-smi`, but not the `ascend_manager` and `user_config` devices nor the Atlas 300I DUO host libraries, so this tab still passes those explicitly.
 
     === "Ubuntu 24.04"
 

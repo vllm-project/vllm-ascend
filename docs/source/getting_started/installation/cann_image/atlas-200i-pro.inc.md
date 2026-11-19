@@ -20,7 +20,7 @@
 
     ???+ warning "Atlas 200I Pro container startup requirements"
 
-        Atlas 200I Pro selects its NPU with `ASCEND_VISIBLE_DEVICES`, so the container needs Ascend Docker Runtime on the host. The runtime mounts the driver libraries and `npu-smi`, but not the `ascend_manager` and `user_config` devices or the 310P host libraries, so the command below still passes them. Make sure every host path it mounts exists.
+        Atlas 200I Pro selects its NPU with `ASCEND_VISIBLE_DEVICES`, so the container needs Ascend Docker Runtime on the host. The runtime mounts the driver libraries and `npu-smi`, but not the `ascend_manager` and `user_config` devices nor the Atlas 300I DUO host libraries, so the command below still passes them. Make sure every host path it mounts exists.
 
     === "Ubuntu"
 
@@ -42,6 +42,7 @@
             -v /var/dmp_daemon:/var/dmp_daemon \
             -v /usr/lib64/libmmpa.so:/usr/lib64/libmmpa.so \
             -v /usr/lib64/libcrypto.so.1.1:/usr/lib64/libcrypto.so.1.1 \
+            -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
             -v /usr/lib64/libstackcore.so:/usr/lib64/libstackcore.so \
             -v /usr/lib/aarch64-linux-gnu/libyaml-0.so.2:/usr/lib64/libyaml-0.so.2 \
             -v /etc/slog.conf:/etc/slog.conf \
@@ -74,6 +75,7 @@
             -v /usr/lib64/libmmpa.so:/usr/lib64/libmmpa.so \
             -v /usr/lib64/libcrypto.so.1.1:/usr/lib64/libcrypto.so.1.1 \
             -v /usr/lib64/libyaml-0.so.2.0.9:/usr/lib64/libyaml-0.so.2 \
+            -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
             -v /usr/lib64/libstackcore.so:/usr/lib64/libstackcore.so \
             -v /etc/slog.conf:/etc/slog.conf \
             -v /var/slogd:/var/slogd \

@@ -26,7 +26,7 @@
 
     ???+ warning "Atlas 200I Pro container startup requirements"
 
-        Atlas 200I Pro selects its NPU with `ASCEND_VISIBLE_DEVICES`, so the container needs Ascend Docker Runtime on the host. The runtime mounts the driver libraries and `npu-smi`, but not the `ascend_manager` and `user_config` devices or the 310P host libraries, so the command below still passes them. Make sure every host path it mounts exists.
+        Atlas 200I Pro selects its NPU with `ASCEND_VISIBLE_DEVICES`, so the container needs Ascend Docker Runtime on the host. The runtime mounts the driver libraries and `npu-smi`, but not the `ascend_manager` and `user_config` devices nor the Atlas 300I DUO host libraries, so the command below still passes them. Make sure every host path it mounts exists.
 
     === "Ubuntu"
 
