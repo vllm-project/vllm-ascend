@@ -6,12 +6,15 @@ import tilelang.ascend.language as T
 
 
 def small_batch_program(c, *, reuse_weights=False, batch_gates=False):
+    # Use the hardware FP32 SFU for the measured six-token verify shape.
+    sfu_precision = "ftz_true" if (c.tokens, c.hidden, c.heads, c.dim) == (6, 4096, 64, 128) else None
     single_wave = c.batch == 1
-    packed_output_gate = batch_gates and c.batch >= 24
+    packed_output_gate = batch_gates
     register_prefix = c.batch != 2
     B, L, H, D = T.dynamic("B"), c.tokens, c.heads, c.dim
     gate_shape = (B * L, H * D) if batch_gates else (H // 2, 2 * D, D)
-    stages = 6 if c.batch == 1 else 4
+    stages = 3 if batch_gates else (6 if single_wave else 4)
+    taps = T.Unroll if batch_gates else T.Serial
     PITCH = 3 * H * D + H + 2 * D
 
     def jobs(core):
@@ -102,8 +105,9 @@ def small_batch_program(c, *, reuse_weights=False, batch_gates=False):
                     T.copy(WF[b * L : (b + 1) * L, h * D : (h + 1) * D], g0)
                     T.copy(WG[b * L : (b + 1) * L, h * D : (h + 1) * D], g1)
                 else:
-                    T.copy(P[b * L : b * L + 16, 3 * H * D + H : 3 * H * D + H + D], al1)
-                    T.copy(P[b * L : b * L + 16, 3 * H * D + H + D : PITCH], bl1)
+                    # Only the first L rows feed the gate outputs for this request.
+                    T.copy(P[b * L : (b + 1) * L, 3 * H * D + H : 3 * H * D + H + D], al1[:L, :])
+                    T.copy(P[b * L : (b + 1) * L, 3 * H * D + H + D : PITCH], bl1[:L, :])
                     if not reuse_weights:
                         T.copy(WF[hp, :, :], wl1)
                         T.copy(WG[hp, :, :], vl1)
@@ -130,7 +134,7 @@ def small_batch_program(c, *, reuse_weights=False, batch_gates=False):
                     cv = T.alloc_fragment((3, L, D), "float32")
                     for q, t, j in T.Parallel(3, L, D):
                         cv[q, t, j] = 0
-                    for tap in T.Serial(4):
+                    for tap in taps(4):
                         for q, t, j in T.Parallel(3, L, D):
                             cv[q, t, j] += T.cast(window[q, t + tap, j], "float32") * T.cast(cw[q, tap, j], "float32")
                     for q, t, j in T.Parallel(3, L, D):
@@ -165,7 +169,7 @@ def small_batch_program(c, *, reuse_weights=False, batch_gates=False):
                     one = T.simd.vdup(T.float32(1), "float32")
                     zero = T.simd.vdup(T.float32(0), "float32")
                     scalar_mask = T.simd.pset(32, "PAT_VL1")
-                    av = T.simd.vexp(T.simd.vld(alog[0], dist="BRC_B32"))
+                    av = T.simd.vexp(T.simd.vld(alog[0], dist="BRC_B32"), precision=sfu_precision)
                     if register_prefix:
                         running = T.simd.alloc_local((2,), "float32")
                         running[0] = one
@@ -178,17 +182,23 @@ def small_batch_program(c, *, reuse_weights=False, batch_gates=False):
                             for j in T.Unroll(2):
                                 if packed_output_gate:
                                     gate_input = T.simd.vcvt(T.simd.vld(g1[t, j * 64], dist="UNPK_B16"), "float32")
-                                    denominator = T.simd.vadd(one, T.simd.vexp(T.simd.vneg(gate_input)))
+                                    denominator = T.simd.vadd(
+                                        one, T.simd.vexp(T.simd.vneg(gate_input), precision=sfu_precision)
+                                    )
                                     norm_weight = T.simd.vcvt(T.simd.vld(nw[j * 64], dist="UNPK_B16"), "float32")
-                                    weight = T.simd.vdiv(norm_weight, denominator)
+                                    weight = T.simd.vdiv(norm_weight, denominator, precision=sfu_precision)
                                     T.simd.vsts(gate_weights[t, j * 64], weight)
                                     gate_f = T.simd.vcvt(T.simd.vld(g0[t, j * 64], dist="UNPK_B16"), "float32")
                                 else:
                                     gate_f = T.simd.vld(gatef[t, j * 64])
                                 gg = T.simd.vadd(gate_f, T.simd.vld(dt[j * 64]))
-                                den = T.simd.vadd(one, T.simd.vexp(T.simd.vneg(T.simd.vmul(av, gg))))
-                                gate = T.simd.vdiv(T.simd.vdup(T.float32(c.lower_bound), "float32"), den)
-                                decay_value = T.simd.vexp(gate)
+                                den = T.simd.vadd(
+                                    one, T.simd.vexp(T.simd.vneg(T.simd.vmul(av, gg)), precision=sfu_precision)
+                                )
+                                gate = T.simd.vdiv(
+                                    T.simd.vdup(T.float32(c.lower_bound), "float32"), den, precision=sfu_precision
+                                )
+                                decay_value = T.simd.vexp(gate, precision=sfu_precision)
                                 T.simd.vsts(decay[t, j * 64], decay_value)
                                 running[j] = T.simd.vmul(running[j], decay_value)
                         for q in T.Serial(2):
@@ -202,7 +212,7 @@ def small_batch_program(c, *, reuse_weights=False, batch_gates=False):
                                 T.simd.vadd(T.simd.vcadd(T.simd.vmul(c0, c0)), T.simd.vcadd(T.simd.vmul(c1, c1)))
                             )
                             safe = T.simd.vsel(ss, one, T.simd.vcmp(ss, zero, op="gt"))
-                            inv = T.simd.vdiv(one, T.simd.vsqrt(safe))
+                            inv = T.simd.vdiv(one, T.simd.vsqrt(safe, precision=sfu_precision), precision=sfu_precision)
                             scale = T.simd.vmuls(inv, T.if_then_else(q == 0, T.float32(D**-0.5), T.float32(1)))
                             T.simd.vsts(knq[q, t, 0], T.simd.vmul(c0, scale))
                             T.simd.vsts(knq[q, t, 64], T.simd.vmul(c1, scale))
@@ -212,11 +222,19 @@ def small_batch_program(c, *, reuse_weights=False, batch_gates=False):
                         if not register_prefix:
                             for j in T.Unroll(2):
                                 gg = T.simd.vadd(T.simd.vld(gatef[t, j * 64]), T.simd.vld(dt[j * 64]))
-                                den = T.simd.vadd(one, T.simd.vexp(T.simd.vneg(T.simd.vmul(av, gg))))
-                                gate = T.simd.vdiv(T.simd.vdup(T.float32(c.lower_bound), "float32"), den)
-                                T.simd.vsts(decay[t, j * 64], T.simd.vexp(gate))
+                                den = T.simd.vadd(
+                                    one, T.simd.vexp(T.simd.vneg(T.simd.vmul(av, gg)), precision=sfu_precision)
+                                )
+                                gate = T.simd.vdiv(
+                                    T.simd.vdup(T.float32(c.lower_bound), "float32"), den, precision=sfu_precision
+                                )
+                                T.simd.vsts(decay[t, j * 64], T.simd.vexp(gate, precision=sfu_precision))
                         bv = T.simd.vld(betaf[t], dist="BRC_B32")
-                        bb = T.simd.vdiv(one, T.simd.vadd(one, T.simd.vexp(T.simd.vneg(bv))))
+                        bb = T.simd.vdiv(
+                            one,
+                            T.simd.vadd(one, T.simd.vexp(T.simd.vneg(bv), precision=sfu_precision)),
+                            precision=sfu_precision,
+                        )
                         T.simd.vsts(bs[t], bb, scalar_mask, dist="ONEPT_B32", extent=1)
                 if not register_prefix:
                     with T.SimtVF(threads=128):
@@ -304,7 +322,12 @@ def small_batch_program(c, *, reuse_weights=False, batch_gates=False):
                             )
                             onef = T.simd.vdup(T.float32(1), "float32")
                             inv = T.simd.vdiv(
-                                onef, T.simd.vsqrt(T.simd.vadds(T.simd.vmuls(ss, T.float32(1 / D)), T.float32(c.eps)))
+                                onef,
+                                T.simd.vsqrt(
+                                    T.simd.vadds(T.simd.vmuls(ss, T.float32(1 / D)), T.float32(c.eps)),
+                                    precision=sfu_precision,
+                                ),
+                                precision=sfu_precision,
                             )
                             if packed_output_gate:
                                 yy0 = T.simd.vmul(T.simd.vmul(rr0, inv), T.simd.vld(gate_weights[t, 0]))
@@ -316,11 +339,13 @@ def small_batch_program(c, *, reuse_weights=False, batch_gates=False):
                                 gw1 = T.simd.vld(gatef[t, D + 64])
                                 yy0 = T.simd.vdiv(
                                     T.simd.vmul(T.simd.vmul(rr0, inv), T.simd.vld(nwf[0])),
-                                    T.simd.vadd(onef, T.simd.vexp(T.simd.vneg(gw0))),
+                                    T.simd.vadd(onef, T.simd.vexp(T.simd.vneg(gw0), precision=sfu_precision)),
+                                    precision=sfu_precision,
                                 )
                                 yy1 = T.simd.vdiv(
                                     T.simd.vmul(T.simd.vmul(rr1, inv), T.simd.vld(nwf[64])),
-                                    T.simd.vadd(onef, T.simd.vexp(T.simd.vneg(gw1))),
+                                    T.simd.vadd(onef, T.simd.vexp(T.simd.vneg(gw1), precision=sfu_precision)),
+                                    precision=sfu_precision,
                                 )
                                 T.simd.vsts(yf[t, 0], yy0)
                                 T.simd.vsts(yf[t, 64], yy1)
@@ -343,13 +368,22 @@ def small_batch_program(c, *, reuse_weights=False, batch_gates=False):
                                 T.simd.vadd(T.simd.vcadd(T.simd.vmul(c0, c0)), T.simd.vcadd(T.simd.vmul(c1, c1)))
                             )
                             inv = T.simd.vdiv(
-                                one, T.simd.vsqrt(T.simd.vadds(T.simd.vmuls(ss, T.float32(1 / D)), T.float32(c.eps)))
+                                one,
+                                T.simd.vsqrt(
+                                    T.simd.vadds(T.simd.vmuls(ss, T.float32(1 / D)), T.float32(c.eps)),
+                                    precision=sfu_precision,
+                                ),
+                                precision=sfu_precision,
                             )
                             for j in T.Unroll(2):
                                 cc = T.simd.vld(coref[t, j * 64])
                                 gw = T.simd.vld(gatef[t, D + j * 64])
-                                den = T.simd.vadd(one, T.simd.vexp(T.simd.vneg(gw)))
-                                yy = T.simd.vdiv(T.simd.vmul(T.simd.vmul(cc, inv), T.simd.vld(nwf[j * 64])), den)
+                                den = T.simd.vadd(one, T.simd.vexp(T.simd.vneg(gw), precision=sfu_precision))
+                                yy = T.simd.vdiv(
+                                    T.simd.vmul(T.simd.vmul(cc, inv), T.simd.vld(nwf[j * 64])),
+                                    den,
+                                    precision=sfu_precision,
+                                )
                                 T.simd.vsts(yf[t, j * 64], yy)
                 if not packed_output_gate:
                     with T.SimtVF(threads=128):

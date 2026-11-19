@@ -40,14 +40,16 @@ Each row includes the underlying timing samples. For two seeds, take the geometr
 All tuned schedules read history and current tokens from a contiguous on-chip window.
 Except at batch 2, the Vector kernel accumulates the decay prefix in registers and rounds the recurrence output to BF16 before computing its gated RMS normalization in the same Vector function.
 The paired runner also enables weight reuse at batches 1, 3 and 5 through 10.
-At batches 11 through 80 of the fixed six-token fixture, it computes the two BF16 gate
+At batches 5 through 80 of the fixed six-token fixture, it computes the two BF16 gate
 projections across all requests with dense linear operators. The TileLang mixed kernel
 reads the gate rows for each head and performs convolution, state projection, recurrence
 and normalization. Smaller batches compute both gate projections inside the mixed kernel.
 
-For batches 24 through 80, Vector instructions widen BF16 convolution outputs and gate
+For batches 5 through 80, Vector instructions widen BF16 convolution outputs and gate
 inputs directly in registers. The kernel precomputes the output gate times the normalization
-weight and stores the normalized BF16 output with packed Vector stores.
+weight and stores the normalized BF16 output with packed Vector stores. These batches use
+a three-stage pipeline and unroll the four convolution taps. The fixed six-token benchmark
+uses hardware FP32 division, exponential and square root with flush-to-zero semantics.
 
 For batches 14, 17, 19 and 22, the tuned benchmark pads the input projection by six rows,
 producing GEMMs with 90, 108, 120 and 138 rows respectively. It slices the result back to the
@@ -87,8 +89,8 @@ normalized output and the FP32 checkpoint.
 For this fixed shape and six-token workload, `model_utilization` reports useful BF16 projection FLOPs
 (1,651,507,200 per request) divided by elapsed time and a 432 TFLOP/s reference peak.
 Logical MBU uses a 4 TB/s reference peak and the modeled tensor bytes for the path.
-For batch size B, modeled bytes are 275,481,096 + 7,790,100 × B for unfused and
-275,481,088 + 6,020,612 × B for TileLang, with another 98,304 × B when the input projection is padded. This allowance counts reads and writes of valid input rows. Dummy rows add no useful FLOPs.
+For batch size B, modeled bytes are 275,481,096 + 7,790,100 脳 B for unfused and
+275,481,088 + 6,020,612 脳 B for TileLang, with another 98,304 脳 B when the input projection is padded. This allowance counts reads and writes of valid input rows. Dummy rows add no useful FLOPs.
 The batched gate schedule adds 393,216 bytes per request for writing and reading its two BF16 gate tensors.
 Both metrics use the same complete QKV-to-output median latency. For comparison across schedules,
 `fixed_work_mbu_pct` and `fixed_work_sum_points` use the parent schedule's logical bytes,

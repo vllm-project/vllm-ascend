@@ -276,7 +276,7 @@ class FusedMiddle:
         self.n = baseline
         c, i = baseline.c, baseline.i
         h, d = c.heads, c.dim
-        self.batch_gates = tuned and 11 <= c.batch <= 80 and (c.tokens, c.hidden, h, d) == (6, 4096, 64, 128)
+        self.batch_gates = tuned and 5 <= c.batch <= 80 and (c.tokens, c.hidden, h, d) == (6, 4096, 64, 128)
         self.projection_rows = c.batch * c.tokens
         if c.batch in (6, 7, 8):
             self.projection_rows = 54
