@@ -28,6 +28,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
 from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator, _HixlSession
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
@@ -388,7 +389,10 @@ class AscendEplbState(_eplb_state.EplbState):
                 if isinstance(model_state.communicator, AscendHixlEplbCommunicator)
             }
             if communicators and self._hixl_session is None:
-                self._hixl_session = _HixlSession(next(iter(communicators.values()))._cpu_group)
+                self._hixl_session = _HixlSession(
+                    next(iter(communicators.values()))._cpu_group,
+                    get_ascend_config().eplb_config.hixl_options,
+                )
                 self._hixl_session.initialize(communicators)
             if self._hixl_session is not None:
                 self._hixl_session.check_usable()

@@ -146,7 +146,7 @@ Both warmups run on a background thread during weight loading. The worker waits 
 
 **eplb_config**
 
-Accepts `load_collection_phase` and `stair_config`. Configure upstream EPLB
+Accepts `load_collection_phase`, `stair_config`, and `hixl_options`. Configure upstream EPLB
 through `--enable-eplb` and `--eplb-config`. Ascend uses the STAIR policy by
 default and moves expert weights asynchronously over HIXL when it is available
 on every EPLB rank, falling back to Gloo CPU staging otherwise. Select
@@ -165,6 +165,26 @@ removed. They no longer take effect.
 | ---- | ---- | ------- | ----------- |
 | `load_collection_phase` | str | `"all"` | Select `"all"`, `"prefill"`, or `"decode"` load submission. Only effective with the STAIR policy; a value other than `"all"` requires `--enable-eplb`. Any batch containing a prefill request is classified entirely as prefill. |
 | `stair_config` | dict | `{}` | Advanced STAIR policy tuning. See the [tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions) for all fields, defaults, and ranges. |
+| `hixl_options` | dict[str, str] | `{}` | Native HIXL initialization options for async expert transfers. Requires the official HIXL Python binding when nonempty. JSON-valued options such as `LocalCommRes` and `GlobalResourceConfig` must be serialized as strings. Empty options preserve HIXL defaults. |
+
+Use `hixl_options` when HIXL's default communication topology does not match the
+available links. For example, add the following to `--additional-config`:
+
+```json
+{
+  "eplb_config": {
+    "hixl_options": {
+      "LocalCommRes": "{\"version\":\"1.3\"}",
+      "GlobalResourceConfig": "{\"topo_file_path\":\"/path/to/topology.json\"}"
+    }
+  }
+}
+```
+
+The topology file must describe the available links and be readable on every
+worker. These options affect HIXL expert transfers; upstream EPLB policy settings
+do not configure HIXL initialization. Options are passed directly to the HIXL
+Python API rather than being read from environment variables by EPLB.
 
 **scheduler_config**
 

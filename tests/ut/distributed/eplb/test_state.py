@@ -535,6 +535,10 @@ def test_failed_close_is_fatal_without_retrying_cleanup():
 
 
 def test_hixl_initializes_all_models_before_starting_the_async_worker(monkeypatch):
+    options = {"LocalCommRes": '{"version":"1.3"}'}
+    monkeypatch.setattr(
+        eplb_state, "get_ascend_config", lambda: SimpleNamespace(eplb_config=SimpleNamespace(hixl_options=options))
+    )
     state = _shutdown_state()
     group = object()
     draft = AscendHixlEplbCommunicator.__new__(AscendHixlEplbCommunicator)
@@ -551,7 +555,7 @@ def test_hixl_initializes_all_models_before_starting_the_async_worker(monkeypatc
     state.start_async_loop()
     state.start_async_loop()
     assert calls == [("initialize", ["draft", "main"]), ("start", None), ("start", None)]
-    factory.assert_called_once_with(group)
+    factory.assert_called_once_with(group, options)
     assert state._hixl_session is session
     with (
         patch.object(upstream_eplb_state.EplbState, "add_model") as add,
@@ -566,6 +570,9 @@ def test_hixl_initializes_all_models_before_starting_the_async_worker(monkeypatc
 
 
 def test_hixl_initialization_failure_never_starts_the_async_worker(monkeypatch):
+    monkeypatch.setattr(
+        eplb_state, "get_ascend_config", lambda: SimpleNamespace(eplb_config=SimpleNamespace(hixl_options={}))
+    )
     state = _shutdown_state()
     main = AscendHixlEplbCommunicator.__new__(AscendHixlEplbCommunicator)
     main._cpu_group = object()
