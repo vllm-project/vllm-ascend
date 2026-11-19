@@ -56,6 +56,8 @@ class RuntimeGuardBusMixin:
     _pending_merged_bus_dump_jobs: list[dict[str, Any]]
     _pending_merged_bus_can_dump: bool
     _pending_merged_bus_is_first: bool
+    # Captured at wave-head submit, before TP0 bus-worker reload flips gates.
+    _pending_prev_needs_sample_hooks: bool | None
     _bus_wave_seq: int
     _merged_bus_warn_ts: float
 
@@ -76,9 +78,11 @@ class RuntimeGuardBusMixin:
         """Re-bind dependents after a successful wave-head config apply.
 
         When hot-reload turns all detectors off (``needs_sample_phase_hooks``
-        True→False), purge RequestGuardStore / wave stamps so finished reqs
-        are not left unreaped after sync stops calling mark_finished/reap.
-        Deferred KV dump jobs already claimed for D2H are kept.
+        True→False), soft-purge detect IO: clear outputs, detector private maps,
+        and wave stamps, but keep Store rows and ``prompt_token_ids`` so a
+        mid-request re-enable can still report the prompt. Finished rows stay
+        for the next sync reap. Deferred KV dump jobs already claimed for D2H
+        are kept.
         """
         self.action_executor.apply_runtime_config()
         self.runtime_config.apply_ascend_log_level()
@@ -93,19 +97,27 @@ class RuntimeGuardBusMixin:
             self._purge_guard_state_after_detectors_off()
 
     def _purge_guard_state_after_detectors_off(self) -> None:
-        """Drop detect-side per-req state after all detectors are disabled."""
+        """Soft-purge detect-side state after all detectors are disabled.
+
+        Keeps ``prompt_token_ids`` and Store entries. Shared cumulative
+        ``output_token_ids`` are cleared so a later re-enable appends only the
+        suffix (same mid-enable contract as never-on-during-prefill).
+        """
         store = RequestGuardStore.get()
-        ids = store.list_req_ids()
         # Unclaimed auto arms will never fire from detectors; refund + drop.
         # Jobs already moved to ``_deferred_kv_dump_jobs`` still D2H this wave.
         if self._kv_dump_jobs:
             self._drop_pending_dump_jobs()
+        ids = store.reset_detect_io_keep_prompts()
+        # Belt-and-suspenders: refresh already called on_disabled for sections
+        # that flipped True→False; clear every detector map in case some were
+        # already off with leftover windows.
+        self.detectors.disable_all()
         if ids:
-            store.clear_many(ids, detectors=self.detectors)
             self.wave_tracker.discard_many(ids)
         RequestIoSnapshotManager.get().clear_wave_cache()
         logger.info(
-            "[runtime_guard] purged %d req state(s) after all detectors disabled",
+            "[runtime_guard] cleared detect IO for %d req(s) after all detectors disabled (prompts kept)",
             len(ids),
         )
 
@@ -197,6 +209,9 @@ class RuntimeGuardBusMixin:
         self._pending_merged_bus_dump_jobs = list(dump_jobs)
         self._pending_merged_bus_can_dump = can_dump
         self._pending_merged_bus_is_first = is_first
+        # Snapshot before submit: TP0 ``build_config_sync_payload`` reloads on the
+        # bus worker and can flip ``needs_sample_phase_hooks`` before drain.
+        self._pending_prev_needs_sample_hooks = bool(self.needs_sample_phase_hooks())
         self._bus_wave_seq = int(self._bus_wave_seq) + 1
         wave_seq = self._bus_wave_seq
         try:
@@ -217,6 +232,7 @@ class RuntimeGuardBusMixin:
             self._pending_merged_bus_dump_jobs = []
             self._pending_merged_bus_can_dump = False
             self._pending_merged_bus_is_first = False
+            self._pending_prev_needs_sample_hooks = None
             raise
         self._merged_bus_inflight = True
         logger.debug(
@@ -254,6 +270,7 @@ class RuntimeGuardBusMixin:
             self._pending_merged_bus_dump_jobs = []
             self._pending_merged_bus_can_dump = False
             self._pending_merged_bus_is_first = False
+            self._pending_prev_needs_sample_hooks = None
             self._merged_bus_inflight = False
             self._refund_dropped_dump_arms(jobs)
             raise
@@ -262,9 +279,11 @@ class RuntimeGuardBusMixin:
         pending_jobs = list(self._pending_merged_bus_dump_jobs)
         can_dump = bool(self._pending_merged_bus_can_dump)
         is_first = bool(self._pending_merged_bus_is_first)
+        prev_hooks = self._pending_prev_needs_sample_hooks
         self._pending_merged_bus_dump_jobs = []
         self._pending_merged_bus_can_dump = False
         self._pending_merged_bus_is_first = False
+        self._pending_prev_needs_sample_hooks = None
 
         if result is None:
             return False
@@ -274,6 +293,7 @@ class RuntimeGuardBusMixin:
             pending_dump_jobs=pending_jobs,
             can_dump=can_dump,
             is_first_rank=is_first,
+            prev_needs_sample_hooks=prev_hooks,
         )
 
     def _apply_merged_bus_result(
@@ -283,6 +303,7 @@ class RuntimeGuardBusMixin:
         pending_dump_jobs: list[dict[str, Any]],
         can_dump: bool,
         is_first_rank: bool,
+        prev_needs_sample_hooks: bool | None = None,
     ) -> bool:
         if result.error is not None:
             self._refund_dropped_dump_arms(pending_dump_jobs)
@@ -291,7 +312,11 @@ class RuntimeGuardBusMixin:
         cfg = self.runtime_config
         changed = False
         if result.config_due and isinstance(result.config_payload, dict):
-            prev_hooks = bool(self.needs_sample_phase_hooks())
+            # Prefer the wave-head snapshot; fall back only for direct UT calls.
+            if prev_needs_sample_hooks is None:
+                prev_hooks = bool(self.needs_sample_phase_hooks())
+            else:
+                prev_hooks = bool(prev_needs_sample_hooks)
             try:
                 changed = cfg.apply_config_sync_payload(
                     result.config_payload,
