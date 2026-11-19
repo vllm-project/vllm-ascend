@@ -1259,3 +1259,49 @@ class TestProjectionLayout:
         expected = torch.zeros_like(output)
         expected[:live] = values.flatten(1)
         torch.testing.assert_close(output, expected)
+
+
+@pytest.mark.parametrize("different_floor", [False, True])
+@pytest.mark.parametrize("new_submission", [False, True])
+def test_replay_visibility_sharing_is_scoped_to_floor_and_submission(
+    builders, monkeypatch, different_floor, new_submission
+):
+    template = builders(world=1, max_seqs=4)["swa"]
+    owners = [
+        dsa_v41.AscendDSAV41MetadataBuilder(
+            template.kv_cache_spec, template.layer_names, template.vllm_config, torch.device("cpu")
+        )
+        for _ in range(2)
+    ]
+    for owner in owners:
+        owner._supports_device_ops = False
+        owner._uses_a5_packed_cache = False
+    visible = Mock(wraps=dsa_v41.build_replay_swa_visible_lens)
+    monkeypatch.setattr(dsa_v41, "build_replay_swa_visible_lens", visible)
+    common = _batch(2, 0, "prefill").local
+    floor = torch.zeros_like(common.seq_lens)
+    batch_cache: dict[str, Any] = {}
+    results = []
+    for index, owner in enumerate(owners):
+        if index and new_submission:
+            batch_cache = {}
+        current_floor = floor[:]
+        if index and different_floor:
+            current_floor = common.seq_lens - (common.query_start_loc[1:] - common.query_start_loc[:-1])
+        results.append(
+            owner.build(
+                0,
+                common.replace(replay_start=current_floor, pcp_context=None),
+                common_v41_metadata={},
+                common_v41_batch_metadata=batch_cache,
+            )
+        )
+    assert visible.call_count == (2 if different_floor or new_submission else 1)
+    first, second = (result.ori_topk_length for result in results)
+    assert (first is second) == (not different_floor and not new_submission)
+    if different_floor:
+        query_lens = common.query_start_loc[1:] - common.query_start_loc[:-1]
+        expected = [n for length in query_lens.tolist() for n in range(1, length + 1)]
+        assert second.flatten().tolist() == [min(n, 4) for n in expected]
+    else:
+        torch.testing.assert_close(first, second)

@@ -2,6 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+
+# [Role] Own V4.1 Engram inputs and coordinate target/decoder replay preparation.
+# [Invariants] Retire replay metadata before its input buffers may be reused.
+# [Timeouts & Locks] Reuse worker stream/event dependencies; no global device wait.
+# [Side-Effect Policy] Update per-request inputs and worker-owned device buffers.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -125,6 +130,8 @@ class EngramModelState(AscendModelState):
         # Engram owns its lookup buffers and events. Keep their retirement
         # beside the input preparation instead of exposing them to the runner.
         try:
+            if self.decoder_replay_state is not None:
+                self.decoder_replay_state.wait_for_metadata()
             self._engram_inputs = None
             self.model.retire_engram_lookups(reset_events=failed)
         finally:
@@ -235,7 +242,15 @@ class EngramModelState(AscendModelState):
         if self.decoder_replay_state is not None:
             self.decoder_replay_state.prepare(
                 DecoderReplayInputs(
-                    input_batch, block_tables, slot_mappings, attn_groups, replay_start, self.pcp_context
+                    input_batch,
+                    block_tables,
+                    slot_mappings,
+                    attn_groups,
+                    replay_start,
+                    self.pcp_context,
+                    metadata_producer_stream=(
+                        self.device_metadata.executor.stream if self.device_metadata is not None else None
+                    ),
                 ),
                 cudagraph_mode,
                 for_capture=for_capture,
