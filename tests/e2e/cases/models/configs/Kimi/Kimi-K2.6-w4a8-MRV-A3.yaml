@@ -1,0 +1,176 @@
+# ==========================================
+# Kimi-K2.6 (W4A8 + DFlash) Model Runner V1 / V2 parity, single 16-die A3 node.
+#
+# Reproducible record for the MRV2 comparison on vllm-ascend v0.30.0.
+# Both cases share every argument; the only difference is
+# VLLM_USE_V2_MODEL_RUNNER (0 = MRV1, 1 = MRV2).
+#
+# Pytest entry point:
+#   tests/e2e/nightly/single_node/model_runner_v2/test_kimi_k26_mrv1_mrv2_parity.py
+# Full environment record: REPRODUCE-kimi-k26-mrv.md (same directory).
+# ==========================================
+test_cases:
+  - name: "Kimi-K2.6-W4A8-MRV1-parity-A3"
+    model: "Eco-Tech/Kimi-K2.6-w4a8"
+    # Non-standard fields are carried through SingleNodeConfig.extra_config so the
+    # case file itself stays the single source of truth for reproduction.
+    model_revision: "index-sha256:eaea6655258a65e5fdb90f191d7bba07180247654da4c085040533f958f9da55"
+    model_files: 126
+    model_bytes: 535908987345
+    draft_model: "z-lab/Kimi-K2.5-DFlash"
+    draft_index_sha256: "f8f42e43954db93c471bc7b63c2dc82a87c5fe0d0e0d1ce2b6b3c50b4c7f69b9"
+    hardware: "Atlas 800T A3, 16 x Ascend910 (d803), 64 GiB HBM per die"
+    image: "quay.io/ascend/vllm-ascend:v0.30.0-a3"
+    image_digest: "sha256:e6c22b94f4ab3634ad20ae4ad28b73b79ef59a1e9eb0372454affd8c186e36a6"
+    expected_versions:
+      vllm: "0.30.0"
+      vllm-ascend: "0.30.0"
+      cann: "9.2.1"
+    parallel: "TP8/DP2/EP16"
+    graph_mode: "FULL_DECODE_ONLY"
+    speculative: "dflash num_speculative_tokens=7"
+    envs:
+      VLLM_USE_V2_MODEL_RUNNER: "0"
+      VLLM_USE_V1: "1"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "800"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "10"
+      TASK_QUEUE_ENABLE: "1"
+      TOKENIZERS_PARALLELISM: "false"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--quantization"
+      - "ascend"
+      - "--tensor-parallel-size"
+      - "8"
+      - "--data-parallel-size"
+      - "2"
+      - "--enable-expert-parallel"
+      - "--trust-remote-code"
+      - "--safetensors-load-strategy"
+      - "prefetch"
+      - "--no-enable-prefix-caching"
+      - "--max-num-seqs"
+      - "8"
+      - "--max-model-len"
+      - "65536"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--gpu-memory-utilization"
+      - "0.85"
+      - "--mm-processor-cache-gb"
+      - "0"
+      - "--mm-encoder-tp-mode"
+      - "data"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"method":"dflash","model":"z-lab/Kimi-K2.5-DFlash","num_speculative_tokens":7}'
+      - "--tool-call-parser"
+      - "kimi_k2"
+      - "--reasoning-parser"
+      - "kimi_k2"
+      - "--enable-auto-tool-choice"
+      - "--seed"
+      - "1234"
+    # No official baseline exists for the MRV pair yet, so the AISBench
+    # threshold is inert (baseline 0, same convention as
+    # kimi-k2.6_max_model_len.yaml). The pytest entry point owns the verdict.
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs4096-prefix0-kimi
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 32
+        max_out_len: 32
+        batch_size: 8
+        request_rate: 0
+        baseline: 0
+        threshold: 0.97
+
+  - name: "Kimi-K2.6-W4A8-MRV2-parity-A3"
+    model: "Eco-Tech/Kimi-K2.6-w4a8"
+    model_revision: "index-sha256:eaea6655258a65e5fdb90f191d7bba07180247654da4c085040533f958f9da55"
+    model_files: 126
+    model_bytes: 535908987345
+    draft_model: "z-lab/Kimi-K2.5-DFlash"
+    draft_index_sha256: "f8f42e43954db93c471bc7b63c2dc82a87c5fe0d0e0d1ce2b6b3c50b4c7f69b9"
+    hardware: "Atlas 800T A3, 16 x Ascend910 (d803), 64 GiB HBM per die"
+    image: "quay.io/ascend/vllm-ascend:v0.30.0-a3"
+    image_digest: "sha256:e6c22b94f4ab3634ad20ae4ad28b73b79ef59a1e9eb0372454affd8c186e36a6"
+    expected_versions:
+      vllm: "0.30.0"
+      vllm-ascend: "0.30.0"
+      cann: "9.2.1"
+    parallel: "TP8/DP2/EP16"
+    graph_mode: "FULL_DECODE_ONLY"
+    speculative: "dflash num_speculative_tokens=7"
+    envs:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      VLLM_USE_V1: "1"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "800"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "10"
+      TASK_QUEUE_ENABLE: "1"
+      TOKENIZERS_PARALLELISM: "false"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--quantization"
+      - "ascend"
+      - "--tensor-parallel-size"
+      - "8"
+      - "--data-parallel-size"
+      - "2"
+      - "--enable-expert-parallel"
+      - "--trust-remote-code"
+      - "--safetensors-load-strategy"
+      - "prefetch"
+      - "--no-enable-prefix-caching"
+      - "--max-num-seqs"
+      - "8"
+      - "--max-model-len"
+      - "65536"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--gpu-memory-utilization"
+      - "0.85"
+      - "--mm-processor-cache-gb"
+      - "0"
+      - "--mm-encoder-tp-mode"
+      - "data"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"method":"dflash","model":"z-lab/Kimi-K2.5-DFlash","num_speculative_tokens":7}'
+      - "--tool-call-parser"
+      - "kimi_k2"
+      - "--reasoning-parser"
+      - "kimi_k2"
+      - "--enable-auto-tool-choice"
+      - "--seed"
+      - "1234"
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs4096-prefix0-kimi
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 32
+        max_out_len: 32
+        batch_size: 8
+        request_rate: 0
+        baseline: 0
+        threshold: 0.97
