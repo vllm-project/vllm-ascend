@@ -30,8 +30,8 @@ NUM_REQUESTS = 8
 # `kv lcm block sizes 896`; 16,388 = 18 x 896 + 260 -> 16,128 hit tokens.
 POOL_LCM_BLOCK_SIZE = 896
 POOL_PROMPT_TOKENS = 16388
-# Perf prompt: 8 lcm blocks plus a tail -> 7,168 / 7,964 = 90% hit.
-POOL_PERF_PROMPT_TOKENS = 8 * POOL_LCM_BLOCK_SIZE + 8 * POOL_LCM_BLOCK_SIZE // 9
+# Design doc sec.2.2/2.5: the performance leg uses the same 16K workload as the
+# hit leg, so A and B sample the same prompt at concurrency 1.
 POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
 
 MAX_MODEL_LEN = POOL_MAX_MODEL_LEN
@@ -229,6 +229,9 @@ def test_qwen38_pp_mtp_prefix_cache():
         accuracy=_accuracy,
         hit=_hit,
         prompt_ids=prompt_ids,
-        perf_prompt_tokens=POOL_PERF_PROMPT_TOKENS,
         perf_reset_local=True,  # A leg only: reset local before each sample.
+        # Design doc sec.2.5: 10 hit-state samples per leg, gates on TTFT
+        # P50/P95 (x1.08) and input throughput (x0.92).
+        perf_sample_count=10,
+        perf_trim_count=2,
     )

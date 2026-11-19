@@ -353,19 +353,21 @@ def run_pool_hit_sequence(
 
 # --- A/B runner -------------------------------------------------------------
 
-AB_TTFT_LIMIT = 1.10
-AB_THROUGHPUT_LIMIT = 0.90
-# Trial run: concurrency 2 (matches max_num_seqs), 6 warmups + 1s settle, then
+# Design doc sec.2.5: gate on TTFT P50/P95 <= B x 1.08 and input throughput
+# >= B x 0.92, with 10 hit-state samples per leg at concurrency 1.
+AB_TTFT_LIMIT = 1.08
+AB_THROUGHPUT_LIMIT = 0.92
+# Trial run: concurrency 1 (design doc sec.2.5), 6 warmups + 1s settle, then
 # drift + timed samples: warm-up drift decays monotonically (dsv4_cp observed
 # 568 -> 550 -> 540 ms), so the head of the timed block is recorded but
 # discarded from the stability gate and A/B stats. Callers may additionally
 # pass trim_count to drop the highest/lowest tails and gate on the middle
 # samples (four_card dsv4 perf was flaky: 10 timed samples, trim 2 + 2,
 # the middle 6 gate).
-AB_SAMPLES = 3
+AB_SAMPLES = 10
 AB_DRIFT_SAMPLES = 2
 AB_WARMUP = 6
-AB_CONCURRENCY = 2
+AB_CONCURRENCY = 1
 AB_PERF_SETTLE_SECONDS = 1.0
 AB_STABILITY_LIMIT = 0.05
 # Let the B leg release device memory and child processes before starting A.
@@ -397,6 +399,7 @@ class LegResult:
     ttft_mean: float = 0.0
     ttft_min: float = 0.0
     ttft_max: float = 0.0
+    acceptance: list[float] = field(default_factory=list)
 
 
 @dataclass
@@ -525,7 +528,10 @@ def _collect_perf(
     mean = sum(ttft) / len(ttft) if ttft else 0.0
     minimum = min(ttft) if ttft else 0.0
     maximum = max(ttft) if ttft else 0.0
-    stability_ratio = (maximum - minimum) / mean if mean else 0.0
+    # Design doc sec.2.5: (max-min)/mean > 5% over the sampled window means
+    # the leg is not usable for the gate, even when trimming is requested.
+    window_mean = sum(kept_all) / len(kept_all) if kept_all else 0.0
+    stability_ratio = (max(kept_all) - min(kept_all)) / window_mean if window_mean else 0.0
     drift = ", ".join(f"{value:.1f}" for value in timed[:drift_count])
     kept_samples = ", ".join(f"{value:.1f}" for value in kept_all)
     samples = ", ".join(f"{value:.1f}" for value in ttft)
@@ -583,17 +589,22 @@ def _control_hit_outputs(
     prompt_tokens: int,
     max_tokens: int,
     prompt_ids: list[int] | None = None,
-) -> list[list[int]]:
-    """B leg: cold write + one local-hit round; no local hit is CONTROL_DEFECT."""
+) -> tuple[list[list[int]], list[list[int]]]:
+    """B leg: cold write + one local-hit round; no local hit is CONTROL_DEFECT.
+
+    Returns (hit_outputs, cold_outputs): the cold start is kept so run_pool_ab
+    can dump B hit-vs-cold local-cache fidelity and the cross-leg cold prefill
+    diff, which involves no pool recovery on either side.
+    """
     prompt = prompt_ids if prompt_ids is not None else build_pool_prompts(prompt_tokens)[0]
-    runner.generate_greedy([prompt], max_tokens)
+    cold_outputs = [list(ids) for ids, _ in runner.generate_greedy([prompt], max_tokens)]
     before = _prefix_cache_hits(runner)
     outputs = [list(ids) for ids, _ in runner.generate_greedy([prompt], max_tokens)]
     after = _prefix_cache_hits(runner)
     assert after > before, (
         f"CONTROL_DEFECT: B leg got no local prefix-cache hit (prefix_cache_hits Δ{after - before:.0f})"
     )
-    return outputs
+    return outputs, cold_outputs
 
 
 def _classify(
@@ -618,7 +629,7 @@ def _classify(
 def run_pool_ab(
     case_name: str,
     build_leg: Callable[[bool, str], Any],
-    accuracy: Callable[[Any], None],
+    accuracy: Callable[[Any], Any],
     hit: Callable[[Any], dict[str, Any]] | None = None,
     *,
     prompt_tokens: int = POOL_PROMPT_TOKENS,
@@ -626,6 +637,7 @@ def run_pool_ab(
     perf_prompt_tokens: int | None = None,
     max_tokens: int = POOL_MAX_TOKENS,
     token_identity: bool = True,
+    acceptance_tolerance: float | None = None,
     perf_reset_local: bool = False,
     gate: bool = True,
     perf_gate: bool = True,
@@ -644,6 +656,8 @@ def run_pool_ab(
         report.emit()
         raise AssertionError(f"ENV_BLOCKED: {blocked}")
 
+    cold_out = {"a": [], "b": []}
+
     def _run(use_pool: bool, leg: str) -> tuple[LegResult | None, str | None, bool, bool]:
         """Return (result, error, original-assertion failed, env failed)."""
         accuracy_ok = False
@@ -651,14 +665,15 @@ def run_pool_ab(
         try:
             with build_leg(use_pool, f"{case_name}_{leg}") as runner:
                 built = True
-                accuracy(runner)
+                acceptance = accuracy(runner) or []
                 accuracy_ok = True
                 if use_pool:
                     summary = hit(runner) if hit is not None else {}
                     outputs = summary.get("hit_outputs", [])
+                    cold_out["a"] = [list(ids) for ids in summary.get("cold_outputs") or []]
                     hits = float(summary.get("r3", 0.0))
                 else:
-                    outputs = _control_hit_outputs(runner, prompt_tokens, max_tokens, prompt_ids)
+                    outputs, cold_out["b"] = _control_hit_outputs(runner, prompt_tokens, max_tokens, prompt_ids)
                     # B leg records local-hit output, not pool hits.
                     hits = 0.0
                 p50, p95, throughput, ttft_mean, ttft_min, ttft_max = _collect_perf(
@@ -683,6 +698,7 @@ def run_pool_ab(
                     ttft_mean=ttft_mean,
                     ttft_min=ttft_min,
                     ttft_max=ttft_max,
+                    acceptance=[float(rate) for rate in acceptance],
                 )
                 return result, None, False, False
         except PerfUnstable as exc:
@@ -706,6 +722,7 @@ def run_pool_ab(
     b_result = b or empty
     # An empty or failed leg makes the comparison meaningless: rerun, do not blame the pool.
     incomplete = a is None or b is None or not a_result.acc or not b_result.acc
+    acceptance_diff = False
     if incomplete:
         token_diff = False
         perf_bad = False
@@ -717,6 +734,13 @@ def run_pool_ab(
             or a_result.ttft_p95 > b_result.ttft_p95 * AB_TTFT_LIMIT
             or a_result.throughput < b_result.throughput * AB_THROUGHPUT_LIMIT
         )
+        if acceptance_tolerance is not None and a_result.acceptance and b_result.acceptance:
+            # Design doc sec.2.4 (acceptance class): each position must be within
+            # tolerance between the pool (A) and local-cache (B) legs.
+            acceptance_diff = len(a_result.acceptance) != len(b_result.acceptance) or any(
+                abs(a_rate - b_rate) > acceptance_tolerance
+                for a_rate, b_rate in zip(a_result.acceptance, b_result.acceptance, strict=False)
+            )
         label = _classify(
             a_err,
             b_err,
@@ -725,8 +749,26 @@ def run_pool_ab(
             token_diff,
             perf_bad and perf_gate,
         )
+        if acceptance_diff and label == "PASS":
+            label = "POOL_DEFECT"
+        if acceptance_tolerance is not None:
+            print(
+                f"[kv_pool_ab] case={case_name} acceptance_tolerance={acceptance_tolerance} "
+                f"A={[round(rate, 4) for rate in a_result.acceptance]} "
+                f"B={[round(rate, 4) for rate in b_result.acceptance]} "
+                f"mismatch={int(acceptance_diff)}",
+                flush=True,
+            )
     if a_result.outputs and b_result.outputs:
         _dump_ab_token_diff(a_result.outputs, b_result.outputs, case_name)
+    if cold_out["a"] and cold_out["b"]:
+        # Cross-leg cold prefill diff: neither side involves pool recovery, so
+        # this separates configuration-level prefill numerics from pool fidelity.
+        _dump_ab_token_diff(cold_out["a"], cold_out["b"], case_name + "_cold_prefill")
+    if cold_out["b"] and b_result.outputs:
+        # B-leg local-cache fidelity: hit round vs its own cold start, the same
+        # content check the pool leg enforces via assert_output_identical.
+        _dump_ab_token_diff(cold_out["b"], b_result.outputs, case_name + "_b_hit_vs_cold")
     report = PoolABReport(case_name, a_result, b_result, "PASS" if label == "PASS" else "FAIL", label)
     print(
         f"[kv_pool_ab] perf_timed={perf_sample_count + perf_drift_count} "

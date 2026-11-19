@@ -16,10 +16,10 @@
 #
 """DeepSeek-V4 DSA-PCP tests for Model Runner V2.
 
-The MTP case additionally runs the KV-pool A/B watch (P6) ported from
-PR #20757: pool (A) vs non-pool (B) legs answer the same 16K secret
-question on every round, with rich prints so a CI failure shows exactly
-which gate failed and where the two legs diverge.
+The MTP and DSpark cases additionally run the KV-pool A/B watch (P6)
+ported from PR #20757: pool (A) vs non-pool (B) legs answer the same 16K
+secret question on every round, with rich prints so a CI failure shows
+exactly which gate failed and where the two legs diverge.
 
 Run `pytest tests/e2e/pull_request/four_card/context_parallel/test_deepseek_v4.py`.
 """
@@ -66,11 +66,21 @@ COMMON_ENV = {
     "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
 }
 
-EXPECTED_OUTPUT_PREFIXES = {
+# Output prefixes are checkpoint-specific: the mtp and dspark checkpoints
+# complete the same prompts differently, so each variant pins the prefixes
+# measured on its own weights. On a mismatch the accuracy step prints the
+# actual outputs before failing, which is how these are re-measured.
+MTP_EXPECTED_OUTPUT_PREFIXES = {
     "Hello, my name is": "Hello, my name is {name} and I am {age} years old.",
     "The president of the United States is": "The president of the United States is the head of the executive branch",
     "The capital of France is": "The capital of France is Paris",
     "The future of AI is": "The future of AI is not just about technology;",
+}
+DSPARK_EXPECTED_OUTPUT_PREFIXES = {
+    "Hello, my name is": "Hello, my name is {name} and I am {age} years old.",
+    "The president of the United States is": "The president of the United States is the head of state and head of government",
+    "The capital of France is": "The capital of France is Paris",
+    "The future of AI is": "The future of AI is not just about algorithms;",
 }
 
 MTP_MIN_ACCEPTANCE_RATES = [0.85, 0.65, 0.35]
@@ -123,12 +133,12 @@ def _run_pool_test(
     compilation_config: dict,
     expected_output_prefixes: dict[str, str],
 ) -> None:
-    """P6 pool watch: pool (A) vs non-pool (B) legs, per-round accuracy gates.
+    """P6 pool watch: pool (A) vs non-pool (B) legs, full gate coverage.
 
-    Same two-leg logic as PR #20757. The CI verdict is accuracy-only: the
-    per-round answers, the exact 16384 pool hits and the within-leg H3
-    output identity fail the test; cross-leg token identity and perf
-    numbers are recorded and dumped by run_pool_ab, but do not gate.
+    Same two-leg logic as PR #20757. The per-round answers, the exact 16384
+    pool hits and the within-leg H3 output identity fail the test; the
+    cross-leg token identity and the A/B perf comparison (TTFT p50/p95 and
+    throughput, 10 timed samples trimmed to the middle 6) gate as well.
     """
     sampling_params = SamplingParams(max_tokens=MAX_TOKENS, temperature=0.0, seed=0)
     case_name = f"dsv4_cp_{model.split('/')[-1]}"
@@ -196,7 +206,7 @@ def _run_pool_test(
         )
         print(f"Model: {model}, Acceptance rates per draft position: {acceptance_rates}", flush=True)
         if minimum_rates is None:
-            return
+            return acceptance_rates
         assert len(acceptance_rates) == len(minimum_rates), (
             f"Expected {len(minimum_rates)} acceptance rates, got {len(acceptance_rates)}"
         )
@@ -204,6 +214,7 @@ def _run_pool_test(
             assert actual >= minimum or minimum - actual < ACCEPTANCE_RATE_TOLERANCE, (
                 f"Acceptance rate at draft position {position} is {actual}, below minimum {minimum}"
             )
+        return acceptance_rates
 
     def _hit(runner) -> dict:
         print(
@@ -228,81 +239,20 @@ def _run_pool_test(
         hit=_hit,
         prompt_ids=prompt_ids,
         perf_prompt_tokens=POOL_PERF_PROMPT_TOKENS,
+        # Design doc sec.2.4 (acceptance class): both legs pass their own
+        # per-position acceptance assertions and the A/B per-position delta
+        # stays inside the same tolerance.
+        acceptance_tolerance=ACCEPTANCE_RATE_TOLERANCE,
         # Perf was flaky: collect 10 timed samples, drop the highest 2 and the
         # lowest 2, and gate on the middle 6 (same policy for both A and B).
         perf_sample_count=10,
         perf_trim_count=2,
-        # Accuracy-only CI verdict: cross-leg token identity and perf stay
-        # record-only; run_pool_ab still dumps the A/B token comparison.
-        token_identity=False,
-        perf_gate=False,
+        # Full gates: cross-leg token identity and the A/B perf comparison
+        # (helper limits: TTFT x1.08, throughput x0.92) fail the test;
+        # run_pool_ab still dumps the A/B token diff for diagnosis.
+        token_identity=True,
+        perf_gate=True,
     )
-
-
-def _run_test(
-    model: str,
-    minimum_rates: list[float] | None,
-    speculative_config: dict,
-    compilation_config: dict,
-    expected_output_prefixes: dict[str, str],
-) -> None:
-    sampling_params = SamplingParams(max_tokens=MAX_TOKENS, temperature=0.0, seed=0)
-    with VllmRunner(
-        model,
-        max_model_len=8192,
-        max_num_seqs=MAX_NUM_SEQS,
-        max_num_batched_tokens=1024,
-        dtype="auto",
-        tensor_parallel_size=2,
-        prefill_context_parallel_size=2,
-        enable_expert_parallel=True,
-        gpu_memory_utilization=0.9,
-        quantization="ascend",
-        tokenizer_mode="deepseek_v4",
-        block_size=128,
-        enforce_eager=False,
-        compilation_config=compilation_config,
-        disable_log_stats=False,
-        speculative_config=speculative_config,
-        attention_config={"indexer_kv_dtype": "int8"},
-        additional_config={
-            "enable_prefill_mc2": True,
-            # TODO: Re-enable after PCP decode sharding lands; DSV4 results are unstable.
-            "enable_pcp_o_proj_weight_sharding": False,
-        },
-    ) as runner:
-        outputs = runner.generate(PROMPTS_SHORT, sampling_params)
-        for prompt, (_, texts) in zip(PROMPTS_SHORT, outputs, strict=True):
-            print(f"Model: {model}, Prompt: {prompt!r}, Outputs: {texts!r}", flush=True)
-        metrics = runner.model.get_metrics()
-
-    assert len(outputs) == len(PROMPTS_SHORT), f"Expected {len(PROMPTS_SHORT)} outputs, got {len(outputs)}"
-    for prompt, (_, texts) in zip(PROMPTS_SHORT, outputs, strict=True):
-        assert len(texts) == 1, f"Expected one completion for prompt {prompt!r}, got {len(texts)}"
-        expected_prefix = expected_output_prefixes.get(prompt)
-        if expected_prefix is not None:
-            assert texts[0].startswith(expected_prefix), (
-                f"Unexpected output prefix for prompt {prompt!r}: "
-                f"got {texts[0][: len(expected_prefix)]!r}, expected {expected_prefix!r}"
-            )
-
-    acceptance_rates = calculate_acceptance_per_pos(
-        metrics,
-        speculative_config["num_speculative_tokens"],
-        Counter,
-        Vector,
-    )
-    print(f"Model: {model}, Acceptance rates per draft position: {acceptance_rates}", flush=True)
-    if minimum_rates is None:
-        return
-
-    assert len(acceptance_rates) == len(minimum_rates), (
-        f"Expected {len(minimum_rates)} acceptance rates, got {len(acceptance_rates)}"
-    )
-    for position, (actual, minimum) in enumerate(zip(acceptance_rates, minimum_rates, strict=True)):
-        assert actual >= minimum or minimum - actual < ACCEPTANCE_RATE_TOLERANCE, (
-            f"Acceptance rate at draft position {position} is {actual}, below minimum {minimum}"
-        )
 
 
 @pytest.mark.e2e_model(MTP_MODEL)
@@ -322,7 +272,7 @@ def test_deepseek_v4_dsa_pcp_mtp_full_decode_only() -> None:
     _run_pool_test(
         MTP_MODEL,
         minimum_rates=MTP_MIN_ACCEPTANCE_RATES,
-        expected_output_prefixes=EXPECTED_OUTPUT_PREFIXES,
+        expected_output_prefixes=MTP_EXPECTED_OUTPUT_PREFIXES,
         speculative_config={
             "num_speculative_tokens": MTP_NUM_SPECULATIVE_TOKENS,
             "method": "mtp",
@@ -347,11 +297,11 @@ def test_deepseek_v4_dsa_pcp_mtp_full_decode_only() -> None:
 @patch.dict(os.environ, COMMON_ENV)
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_deepseek_v4_dsa_pcp_dspark() -> None:
-    """Verify output accuracy and DSpark acceptance for DSA-PCP graph execution."""
-    _run_test(
+    """P6: verify accuracy, pool hits and DSpark acceptance via the pool A/B watch."""
+    _run_pool_test(
         DSPARK_MODEL,
         minimum_rates=DSPARK_MIN_ACCEPTANCE_RATES,
-        expected_output_prefixes=EXPECTED_OUTPUT_PREFIXES,
+        expected_output_prefixes=DSPARK_EXPECTED_OUTPUT_PREFIXES,
         speculative_config={
             "num_speculative_tokens": DSPARK_NUM_SPECULATIVE_TOKENS,
             "method": "dspark",

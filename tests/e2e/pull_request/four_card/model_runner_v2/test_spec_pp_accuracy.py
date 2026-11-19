@@ -25,23 +25,83 @@ tensor_parallel_size=2 and pipeline_parallel_size=2. The W4A8 checkpoint is
 ~168 GiB, so two cards cannot hold it even without a KV cache. Greedy GSM8K
 output and speculative counters are verified the same way as the eight-card
 case.
+
+The case additionally runs the KV-pool A/B watch ported from PR #20757:
+leg A serves the mooncake pool (non-layerwise) while leg B keeps local
+prefix caching, both walking R1 cold / R2-R3 hit / R4 disjoint-miss on the
+16K secret question. H3 stays asserted for this case (only the DP and
+dummy-weight cases are exempt).
 """
 
 from __future__ import annotations
 
 import os
+from contextlib import ExitStack, contextmanager
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 import regex as re
+from transformers import AutoTokenizer
+from vllm.utils.network_utils import get_open_port
 from vllm.v1.metrics.reader import Counter, Vector
 
+from tests.e2e.common.kv_pool.config import MooncakeKVPoolConfig
+from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMooncakeManager
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.pull_request.kv_pool_watch import (
+    POOL_SECRET,
+    build_pool_accuracy_prompt,
+    run_pool_ab,
+    run_pool_hit_sequence,
+)
+
+# P5 runner uses the RoCE path; fabric-mem is unavailable on this runner.
+os.environ["ASCEND_ENABLE_USE_FABRIC_MEM"] = "0"
+os.environ["HCCL_INTRA_ROCE_ENABLE"] = "1"
 
 DEEPSEEK_V4_MODEL = os.environ.get(
     "DEEPSEEK_V4_DSPARK_MODEL_PATH",
     "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test",
 )
+
+# DSpark trims the final lcm block. A prompt aligned to 16,384 therefore has
+# zero reusable tokens; the 4-token tail keeps exactly 16,384 hit tokens.
+POOL_LCM_BLOCK_SIZE = 16384
+POOL_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + 4
+# Perf prompt: one lcm block plus a tail -> 90% hit at concurrency 4.
+POOL_PERF_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + POOL_LCM_BLOCK_SIZE // 9
+# A 16K budget does not fit PP2xTP2 at gpu_memory_utilization=0.9
+# (4.76 GiB required for 16,516 sequences vs 2.85 GiB available);
+# 4,096 is chunked prefill and still yields exactly 16,384 hits.
+POOL_BATCHED_TOKENS = 4096
+POOL_MAX_MODEL_LEN = max(POOL_PROMPT_TOKENS, POOL_PERF_PROMPT_TOKENS) + 128
+
+POOL_KV_TRANSFER_CONFIG = {
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+        "backend": "mooncake",
+        "lookup_rpc_port": "1",
+        "use_layerwise": False,
+    },
+}
+
+
+def _build_mooncake_pool_config() -> MooncakeKVPoolConfig:
+    return MooncakeKVPoolConfig(
+        config={
+            "metadata_server": "P2PHANDSHAKE",
+            "protocol": "ascend",
+            "global_segment_size": "2GB",  # Not final; tune after measurement.
+            "local_buffer_size": "5GB",
+            "preferred_segment": False,
+            "prefer_alloc_in_same_node": True,
+        },
+        master_port=get_open_port(),
+        metrics_port=get_open_port(),
+    )
+
 
 GSM8K_PROMPT = (
     'Answer the following question. The last line of the response should follow this format: "answer:$ANSWER" '
@@ -82,6 +142,43 @@ def _assert_speculative_accuracy(outputs, metrics) -> None:
     assert num_accepted > 0, "Speculative decoding did not accept any draft tokens"
 
 
+CASE_NAME = "dsv4_pp2_pool_watch"
+
+
+@contextmanager
+def _leg(use_pool: bool, case_name: str):
+    """Leg A enables the mooncake pool; leg B keeps everything else identical."""
+    with ExitStack() as stack:
+        kwargs: dict[str, Any] = dict(
+            max_model_len=POOL_MAX_MODEL_LEN,
+            max_num_seqs=2,
+            max_num_batched_tokens=POOL_BATCHED_TOKENS,
+            tensor_parallel_size=2,
+            pipeline_parallel_size=2,
+            enable_expert_parallel=True,
+            distributed_executor_backend="mp",
+            gpu_memory_utilization=0.9,
+            quantization="ascend",
+            tokenizer_mode="deepseek_v4",
+            block_size=128,
+            enforce_eager=True,
+            enable_prefix_caching=not use_pool,
+            disable_log_stats=False,
+            attention_config={"indexer_kv_dtype": "int8"},
+            speculative_config={
+                "method": "dspark",
+                "num_speculative_tokens": 5,
+                "enforce_eager": True,
+            },
+            additional_config={"enable_fused_mc2": 0},
+        )
+        if use_pool:
+            pool = stack.enter_context(SingleNodeMooncakeManager(_build_mooncake_pool_config(), case_name))
+            stack.enter_context(patch.dict(os.environ, pool.server_envs))
+            kwargs["kv_transfer_config"] = POOL_KV_TRANSFER_CONFIG
+        yield stack.enter_context(VllmRunner(DEEPSEEK_V4_MODEL, **kwargs))
+
+
 @pytest.mark.e2e_model(DEEPSEEK_V4_MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
@@ -103,35 +200,45 @@ def _assert_speculative_accuracy(outputs, metrics) -> None:
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_deepseek_v4_dspark_pp_accuracy() -> None:
-    with VllmRunner(
-        DEEPSEEK_V4_MODEL,
-        max_model_len=4096,
-        max_num_seqs=2,
-        max_num_batched_tokens=512,
-        tensor_parallel_size=2,
-        pipeline_parallel_size=2,
-        enable_expert_parallel=True,
-        distributed_executor_backend="mp",
-        gpu_memory_utilization=0.8,
-        quantization="ascend",
-        tokenizer_mode="deepseek_v4",
-        block_size=128,
-        enforce_eager=True,
-        enable_prefix_caching=False,
-        disable_log_stats=False,
-        attention_config={
-            "indexer_kv_dtype": "int8",
-        },
-        speculative_config={
-            "method": "dspark",
-            "num_speculative_tokens": 5,
-            "enforce_eager": True,
-        },
-        additional_config={
-            "enable_fused_mc2": 0,
-        },
-    ) as runner:
+    """DSpark PP2xTP2 GSM8K accuracy plus the mooncake pool A/B watch (pool leg A).
+
+    Keeps the original GSM8K answer and draft/acceptance assertions in the
+    accuracy stage of both legs. The exact 16,384 hit tokens and the A/B
+    perf comparison gate as well.
+    """
+    tokenizer = AutoTokenizer.from_pretrained(DEEPSEEK_V4_MODEL, trust_remote_code=True)
+    prompt_ids = build_pool_accuracy_prompt(tokenizer, POOL_PROMPT_TOKENS, POOL_MAX_MODEL_LEN)
+
+    def _accuracy(runner) -> None:
         outputs = runner.generate_greedy([GSM8K_PROMPT], max_tokens=512)
         metrics = runner.model.get_metrics()
+        _assert_speculative_accuracy(outputs, metrics)
 
-    _assert_speculative_accuracy(outputs, metrics)
+    def _hit(runner) -> dict:
+        # H3 stays asserted for this case: the fixed 4,096 chunked-prefill
+        # shape and the serial rounds keep DSpark cold/hit outputs comparable
+        # (only the DP and dummy-weight cases are exempt).
+        return run_pool_hit_sequence(
+            runner,
+            block_size=128,
+            prompt_tokens=POOL_PROMPT_TOKENS,
+            prompt_ids=prompt_ids,
+            lcm_block_size=POOL_LCM_BLOCK_SIZE,
+            answer_secret=POOL_SECRET,
+            tag="dsv4-pp2-mooncake",
+        )
+
+    run_pool_ab(
+        case_name=CASE_NAME,
+        build_leg=_leg,
+        accuracy=_accuracy,
+        hit=_hit,
+        prompt_ids=prompt_ids,
+        perf_prompt_tokens=POOL_PERF_PROMPT_TOKENS,
+        token_identity=False,
+        # Perf gate applies (helper defaults gate=True, perf_gate=True):
+        # 10 timed samples, drop the highest 2 and the lowest 2, gate on the
+        # middle 6 -- same policy as the four-card watch.
+        perf_sample_count=10,
+        perf_trim_count=2,
+    )

@@ -988,12 +988,20 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
                 result = [req_output.outputs.score for req_output in req_outputs]
             elif command == "get_metrics":
                 # PromMetric objects are not picklable (they hold prometheus
-                # handles), so flatten to name -> value here.
-                result = {
-                    metric.name: float(metric.value)
-                    for metric in llm.get_metrics()
-                    if getattr(metric, "value", None) is not None
-                }
+                # handles), so flatten to name -> value here. Vector metrics
+                # (e.g. spec_decode_num_accepted_tokens_per_pos) have no
+                # ``value``; expose each position as ``name[pos=N]`` so the
+                # aggregation below keeps per-position acceptance rates.
+                result = {}
+                for metric in llm.get_metrics():
+                    values = getattr(metric, "values", None)
+                    if values is not None:
+                        for position, value in enumerate(values):
+                            result[f"{metric.name}[pos={position}]"] = float(value)
+                    else:
+                        value = getattr(metric, "value", None)
+                        if value is not None:
+                            result[metric.name] = float(value)
             else:
                 raise ValueError(f"Unsupported data parallel command: {command}")
 
