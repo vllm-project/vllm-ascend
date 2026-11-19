@@ -143,6 +143,12 @@ Multiple physical buffers let transfer and computation overlap. Prefill has
 enough per-layer computation to hide much of the load and save latency, which
 is why full-layer transfer is suitable for this stage.
 
+On Model Runner V2 without speculative decoding or registered draft save
+layers, AscendStore submits the final Memcache save at the layer boundary and
+waits in `finish_forward()`. The transfer can overlap the remaining output
+projection and feed-forward compute. The runner also checks for a pending save
+before it can reuse KV buffers in the next step.
+
 ### Reuse invariant
 
 A physical buffer cannot be reused until every consumer of its previous

@@ -70,12 +70,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
 
-# PERF-TUNE switch: defer the last layer's save drain out of the forward
-# critical path; the drain runs at the start of the next step's start_load_kv.
-# Opt-in (default off): the synchronous inline drain is the long-standing
-# contract that layerwise tests (e.g. test_mooncake_pipeline) and downstream
-# readers rely on, and deferring widens the window in which a subsequent
-# request can observe a partially published prefix.
+# Legacy opt-in to drain at the next metadata bind on paths without
+# forward-end draining.
 _LW_DEFER_LAST_SAVE = os.environ.get("VLLM_ASCEND_LW_DEFER_LAST_SAVE", "0") == "1"
 
 
@@ -117,6 +113,14 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self._dspark_draft_layer_names = (
             set(getattr(kv_cache_config, "dspark_draft_layer_names", ())) if self.use_layerwise_transfer else set()
+        )
+        # The V2 hook runs after the target model returns. Draft execution
+        # may still submit layer saves after that hook.
+        self._save_at_forward_end = (
+            backend_name == "memcache"
+            and vllm_config.use_v2_model_runner is True
+            and vllm_config.speculative_config is None
+            and not self._dspark_draft_layer_names
         )
         if (
             self.backend_name != "memcache"
@@ -1432,19 +1436,30 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         except AssertionError:
             return None
 
+    def finish_forward(self) -> None:
+        """Finish saves after submitting the rest of the forward's compute."""
+        if self._save_at_forward_end:
+            self._drain_deferred_last_save()
+
+    def wait_for_previous_save(self) -> None:
+        # A failed forward may leave a save outstanding before the runner
+        # attempts to reuse the previous step's buffers.
+        self.finish_forward()
+        super().wait_for_previous_save()
+
     def _drain_deferred_last_save(self) -> None:
-        """PERF-TUNE(2): deferred tail of the previous step's last-layer save."""
+        """Drain pending final-layer saves before resetting completion events."""
         if not getattr(self, "_pending_last_save_drain", False):
             return
-        self._pending_last_save_drain = False
         assert self.kv_send_thread is not None
         # PP-aware: only the per-stage LOCAL layers are forwarded; mirror
         # save_kv_layer's num_local computation for the drain lifecycle.
-        if getattr(self, "pp_size", 1) > 1:
+        if not self.use_block_key_layerwise and getattr(self, "pp_size", 1) > 1:
             num_local = getattr(self, "layerwise_key_layers", 0) or self.num_layers
         else:
             num_local = self.num_layers
         self._wait_for_final_layer_save(num_local, self.kv_send_thread)
+        self._pending_last_save_drain = False
 
     def process_layer_data(self, requests: list[ReqMeta]) -> None:
         self._masked_runs_cache.clear()
@@ -1526,9 +1541,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         transfer stops overlapping compute. Letting the send thread run a bounded
         number of layers behind the compute stream keeps the ranged puts off the
         critical path, and ordering is preserved because that thread still
-        consumes the queue in submission order. ``save_kv_layer`` waits for the
-        final layer's save at the end of every step, which implies every earlier
-        layer committed, so publication is still complete before the step ends.
+        consumes the queue in submission order. The step fence drains all saves,
+        including earlier PUTs when the final layer has no save task.
 
         ``full`` drains the selected queues to zero, defaulting to both queues
         for teardown. Step completion passes ``drain_recv=False`` to wait only
@@ -1708,11 +1722,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             # Recurrent and record-only paths do not exit an attention window.
             self._finish_attention_window()
         if self.current_layer == num_local - 1:
-            if _LW_DEFER_LAST_SAVE:
-                # PERF-TUNE(2): move the last layer's save drain off the forward
-                # critical path. The drain (host wait + event reset) runs at the
-                # start of the NEXT step's start_load_kv, absorbing the send
-                # thread's tail latency into the inter-step scheduling gap.
+            if getattr(self, "_save_at_forward_end", False) or _LW_DEFER_LAST_SAVE:
                 self._pending_last_save_drain = True
             else:
                 self._wait_for_final_layer_save(num_local, send_thread)
