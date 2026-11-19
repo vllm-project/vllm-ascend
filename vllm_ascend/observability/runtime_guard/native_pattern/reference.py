@@ -15,7 +15,12 @@
 # This file is a part of the vllm-ascend project.
 #
 
-"""Pure-Python gold for ``_pattern_native`` (UT parity only; not on the hot path)."""
+"""Pure-Python gold for ``_pattern_native`` parity tests.
+
+Not a production backend: never imported by ``PatternDetector``,
+``token_repeat``, or package ``__init__``. Used only by
+``tests/ut/runtime_guard/test_token_repeat_pattern.py``.
+"""
 
 from __future__ import annotations
 

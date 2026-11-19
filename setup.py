@@ -24,7 +24,6 @@ import subprocess
 import sys
 from sysconfig import get_paths
 
-import pybind11
 from setuptools import Command, Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py
@@ -333,6 +332,14 @@ class cmake_build_ext(build_ext):
         # Pure-CPU pybind extensions (e.g. token_repeat pattern) use the stock
         # setuptools builder and must not go through Ascend CMake.
         if other_exts:
+            # Defer pybind11 import until we actually compile pure-CPU extensions
+            # (metadata / help / non-ext installs do not need it at import time).
+            import pybind11
+
+            pybind_inc = pybind11.get_include()
+            for ext in other_exts:
+                if pybind_inc not in ext.include_dirs:
+                    ext.include_dirs.insert(0, pybind_inc)
             saved = self.extensions
             self.extensions = other_exts
             build_ext.build_extensions(self)
@@ -448,7 +455,7 @@ ext_modules.append(
         "vllm_ascend.observability.runtime_guard.native_pattern._pattern_native",
         sources=[os.path.join(_PATTERN_DIR, "pattern_native.cpp")],
         depends=[os.path.join(_PATTERN_DIR, "position_queue.h")],
-        include_dirs=[pybind11.get_include(), _PATTERN_DIR],
+        include_dirs=[_PATTERN_DIR],  # pybind11 include added in cmake_build_ext
         language="c++",
         extra_compile_args=["-O3", "-std=c++17", "-fno-fast-math"],
     )

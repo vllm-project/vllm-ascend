@@ -133,10 +133,10 @@ tokenizer.json in the local HF cache. The table stays in memory and is
 released when the detector is disabled. Warmup logs vocabulary size and
 elapsed time, with a warning above the 5-second target.
 
-Warmup failure is logged once for that enable attempt and leaves detection
-unavailable; inference can continue. Fix the tokenizer/resources and
-disable/re-enable to retry. Rebinding to a different model rebuilds the
-tables.
+Warmup failure is logged once for that enable attempt and latches detection
+off (no CPU enqueue) until disable/re-enable; inference continues. Fix the
+tokenizer/resources and disable/re-enable to retry. Rebinding to a different
+model rebuilds the tables.
 
 Detection uses the existing CPU ActionQueue and Incident actions. If the
 queue is full or stopping, that step's detect job may be dropped (warning
