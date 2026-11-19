@@ -1755,7 +1755,24 @@ class AscendSFAImpl(MLAAttentionImpl):
             "rope_head_dim": self.qk_rope_head_dim,
         }
         if return_softmax_lse:
-            kwargs["return_softmax_lse"] = True
+            # The torch_npu binding has no LSE outputs and the repo's csrc
+            # binding rejects TQ4 (its tiling hard-checks key_quant_mode == 2).
+            # DCP decode needs both TQ4 and LSE, so call the aclnn V2 op
+            # (libopapi.so) through the ctypes bridge: same TQ4 semantics as
+            # the torch_npu binding plus softmax_max/softmax_sum outputs.
+            from vllm_ascend.attention.tq4_lse_bridge import tq4_sfa_with_lse
+
+            return tq4_sfa_with_lse(
+                query,
+                kv,
+                topk_indices,
+                block_table,
+                actual_seq_lengths_query,
+                actual_seq_lengths_kv,
+                scale=self.scale,
+                sparse_mode=sparse_mode,
+                rope_head_dim=self.qk_rope_head_dim,
+            )
         result = torch_npu.npu_kv_quant_sparse_flash_attention(query, kv, kv, topk_indices, **kwargs)
         return result if isinstance(result, tuple) else (result, None, None)
 
