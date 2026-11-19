@@ -212,6 +212,9 @@ def test_aux_relay_matches_unpartitioned_forward(monkeypatch, with_topk, boundar
                 assert set(output.tensors) == expected_keys
             elif not vllm_version_is("0.34.0"):
                 output = PPHandler.add_upstream_aux_hidden_states(handler, incoming, output)
+            elif not isinstance(output, tuple):
+                # v0.34.0 returns a bare tensor when no aux slots were captured.
+                output = (output, [])
             incoming = output
         return output
 

@@ -43,6 +43,16 @@ from vllm_ascend.worker.v2.spec_decode.target_dependent_ar import (
 
 
 @pytest.fixture(autouse=True)
+def _stub_pp_group(monkeypatch):
+    # v0.34.0's draft loader resolves the PP-safe load config via get_pp_group().
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.utils.get_pp_group",
+        lambda: SimpleNamespace(world_size=1),
+        raising=False,
+    )
+
+
+@pytest.fixture(autouse=True)
 def _stub_ascend_config(monkeypatch):
     # Speculators built through the real __init__ read the global ascend
     # config during the lmhead TP construction-time validation; the stub
