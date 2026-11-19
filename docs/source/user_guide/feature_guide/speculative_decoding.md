@@ -646,6 +646,62 @@ non-speculative outputs on NPU before relying on performance results.
 For more details, see the
 [vLLM community documentation](https://docs.vllm.ai/en/latest/features/speculative_decoding/adaptive_verification/).
 
+### DSpark expert-pool routing with expert offload
+
+Expert-pool routing is an opt-in mode for compatible DeepSeek MoE layers on the
+single-device Ascend A5 expert-offload path with ModelRunner V2. Use a checkpoint
+with native DSpark support, eager drafting, and a fixed draft length.
+
+Each target layer builds one candidate expert pool for the current verification
+batch. For each request, the first `protected_positions` verification rows,
+including the anchor, contribute their Top-6 experts. Each remaining row
+contributes `suffix_experts` candidates and selects six experts from the combined
+pool. For example, with `protected_positions=2` and `suffix_experts=0`, only the
+first two rows of each request contribute candidates.
+
+Expert-pool routing can change the experts selected by suffix rows. Compare
+output quality and draft acceptance with native expert offload on your workload
+before enabling it in production.
+
+The following online serving example uses 84 resident slots, five draft tokens,
+and up to two concurrent requests:
+
+```shell
+ASCEND_RT_VISIBLE_DEVICES=0 VLLM_USE_V2_MODEL_RUNNER=1 \
+  vllm serve /path/to/DeepSeek-V4-Flash-0731 \
+    --tokenizer-mode deepseek_v4 \
+    --tensor-parallel-size 1 \
+    --max-num-seqs 2 \
+    --max-model-len 8192 \
+    --max-num-batched-tokens 2048 \
+    --enable-chunked-prefill \
+    --no-async-scheduling \
+    --block-size 32 \
+    --kv-cache-dtype fp8 \
+    --kv-cache-memory-bytes 3221225472 \
+    --speculative-config '{"method": "dspark", "num_speculative_tokens": 5, "enforce_eager": true}' \
+    --compilation-config '{
+      "mode": 0,
+      "cudagraph_mode": "FULL_DECODE_ONLY",
+      "cudagraph_capture_sizes": [1, 2, 6, 12]
+    }' \
+    --additional-config '{
+      "expert_offload_config": {"enabled": true, "num_device_experts": 84},
+      "dspark_expert_pool": {"enabled": true, "protected_positions": 2, "suffix_experts": 0}
+    }'
+```
+
+With five draft tokens, a complete verification uses six rows per request.
+The 6-row and 12-row graph sizes cover one and two complete requests. Expert
+offload checks the padded row count times Top-6 against the slot budget. Mixed
+or shorter verification batches use eager execution, where eligible verification
+rows can still use the expert pool.
+
+Set `dspark_expert_pool.enabled` to `false` or omit `dspark_expert_pool` to
+return to native routing with expert offload. See the
+[configuration reference](../configuration/additional_config.md#dspark-expert-pool-routing-with-expert-offload)
+for the parameter settings.
+
 ## Extracting Hidden States
 
 The `extract_hidden_states` method is a special speculative decoding mode that does not perform actual speculation. Instead, it extracts hidden states from specified layers of the target model and saves them to disk. This is primarily used for collecting training data for EAGLE-style draft models. The dumps are then used to train EAGLE/EAGLE-3 drafts.
