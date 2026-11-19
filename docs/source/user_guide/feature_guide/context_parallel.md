@@ -47,6 +47,12 @@ DCP supports eager and graph execution, prefix caching, chunked prefill, specula
 - ✅ **Full compatibility**: Combining the feature with DCP is supported.
 - 🟠 **Partial compatibility**: Combining the feature with DCP is supported with the stated limitations.
 
+For hybrid models such as [Kimi K3](../../tutorials/models/Kimi-K3.md) and
+[Kimi K3.1 Pro](../../tutorials/models/Kimi-K3.1-Pro.md), these tables describe
+the MLA/SFA layers. DCP shards their attention cache and K3.1 Pro's indexer cache;
+it does not further shard KDA convolution or recurrent state. Model and hardware
+status is listed in the [model support matrix](../support_matrix/supported_models.md#multimodal-language-models).
+
 ## Usage { #usage }
 
 ### Prefill Context Parallel
@@ -118,6 +124,8 @@ For either method, remove `--enforce-eager` and add the following option to use 
   and replicated DFlash/DFlash2 drafts.
 - PCP does not support `FULL` CUDA graphs; use eager mode, `PIECEWISE`, `FULL_AND_PIECEWISE`, or `FULL_DECODE_ONLY`.
 - Encoder-decoder models and LoRA are not supported with PCP.
+- The KDA head count must be divisible by `tensor_parallel_size * prefill_context_parallel_size`;
+  KDA projection weights, convolution state, and recurrent state share this head partition.
 - PCP and DCP can be stacked for MLA, SFA, and GQA. See
   [Combining PCP and DCP](#combining-pcp-and-dcp) for the supported sizes.
 - Adaptive verification is not supported with PCP speculative decoding.
@@ -157,6 +165,11 @@ When both PCP and DCP are enabled (`prefill_context_parallel_size>1` and `decode
 - **GQA**: Supports only `DCP_SIZE = PCP_SIZE`. When `TP_SIZE > 1`, `DCP_SIZE = PCP_SIZE * TP_SIZE` is not supported.
 
 DCP reuses the ranks introduced by PCP and TP, so stacking DCP does not add ranks beyond the PCP world size. For example, `TP2 + PCP2 + DCP4` is a supported MLA/SFA topology.
+
+The Kimi K3.1 Pro P/D templates enable PCP on Prefill and standalone DCP on
+Decode. They do not validate PCP+DCP on the same engine. Optional
+[KDA RecoverSSM](speculative_decoding.md#experimental-kimi-k3-and-k31-kda-recoverssm)
+has separate experimental constraints.
 
 #### KV-cache Transfer
 

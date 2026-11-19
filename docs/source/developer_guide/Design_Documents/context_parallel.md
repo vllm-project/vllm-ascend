@@ -114,6 +114,12 @@ The normal v1 builders remain the source of truth for request classification, pa
 
 For PCP, `AscendPCPAttentionContext` supplies the global request view and restore maps to the backend metadata builders. The same local-query/global-cache distinction applies when PCP is stacked with DCP.
 
+Recurrent KDA layers gather the PCP-local hidden states and restore global causal
+token order before execution, then select the local output rows afterward.
+Projection weights, convolution state, and recurrent state use the same TP×PCP
+head partition; DCP does not further shard this state. KDA output projections
+reduce across PCP even when sequence parallelism defers the TP reduction.
+
 ### Prefill and chunked prefill
 
 During chunked or cached prefill, the local query must attend to KV-cache shards distributed across the DCP group.
@@ -154,7 +160,11 @@ GLM-5.2 uses Sparse Flash Attention (SFA) with a LightningIndexer. For DCP, the 
 - During prefill or a mixed batch, KV blocks referenced by the request block table are compacted and all-gathered after the current layer writes its KV cache.
 - Decode-only batches retain the DCP SFA Q-gather and result-merge path.
 
-This mode is selected automatically for sparse SFA models when DCP is enabled (`decode_context_parallel_size>1`).
+For GLM-5.2, this mode is selected automatically when DCP is enabled (`decode_context_parallel_size>1`).
+
+Kimi K3.1 Pro uses the SFA backend with a token-sharded indexer cache instead.
+Its indexer follows the attention cache's DCP token owners, and distributed
+TopK combines candidates from the local indexer shards.
 
 For a GLM-5.2 DCP deployment, keep `cp_kv_cache_interleave_size` equal to the KV-cache block size:
 
@@ -200,3 +210,7 @@ Extensions need consistent topology checks, query/cache mappings, and output lay
 - PCP/DCP slot mapping: `vllm_ascend/worker/v2/block_table.py`
 - Backend selection and configuration: `vllm_ascend/platform.py`
 - DSA V4.1 PCP backend: `vllm_ascend/attention/context_parallel/dsa_v41_cp.py`
+- Kimi KDA head partitions and state shapes: `vllm_ascend/ops/kda_parallel.py`
+- Kimi KDA PCP metadata and token permutations: `vllm_ascend/ops/kda_pcp.py`
+- Kimi KDA execution and projections: `vllm_ascend/ops/kimi_kda.py`
+- Kimi DCP indexer selection: `vllm_ascend/attention/context_parallel/sharded_indexer.py`
