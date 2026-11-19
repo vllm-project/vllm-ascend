@@ -1,83 +1,65 @@
-# Source: https://github.com/vllm-project/vllm/blob/5535506742d57a82fcaa200d81ed3bec81baa776/recipes/models/deepseek-ai/DeepSeek-V4.1-Flash.yaml
+# Source: https://github.com/vllm-project/vllm-ascend/blob/eb22e2cdcc1fecb7fc67ebfc94f3db8e03f26299/docs/source/tutorials/models/DeepSeek-V4.1-Flash.md#52-1p1d-pd-disaggregated-deployment
 # Migrated from vllm-project/vllm#62794 with vllm-project/recipes@63a12c0cf8e9e94af9e14fb8dcc4f4c516bd5ea6.
 variants:
-  ascend_w8a8:
-    model_id: Eco-Tech/DeepSeek-V4.1-Flash-w8a8
-    label: W8A8 (Ascend A3)
-    precision: int8
-    # Capacity estimate (552B x 1.2), not a measured HBM requirement.
-    vram_minimum_gb: 663
-    description: 'ModelSlim W8A8 with Engram host offload on one Atlas 800 A3: DP4/TP4/EP16 across 16 logical devices.'
+  ascend_w4a8:
+    model_id: Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8
+    label: W4A8 (Ascend A3)
+    precision: int4
+    # Capacity estimate (552B x 0.5 x 1.2), not a measured HBM requirement.
+    vram_minimum_gb: 332
+    description: 'W4A8 with Engram host offload on two Atlas 800 A3 servers: P DP4/PCP4/TP1 and D DP16/TP1.'
     supported_hardware:
       - ascend_910c
-    min_vllm_version: 0.30.0
+    min_vllm_version: 0.32.0rc
     tp:
-      ascend_910c: 4
+      ascend_910c: 1
     extra_args:
-      - '--quantization'
-      - ascend
       - '--host'
       - 0.0.0.0
-      - '--port'
-      - '8900'
+      - '--enable-expert-parallel'
+      - '--seed'
+      - '1024'
+      - '--served-model-name'
+      - dsv41
       - '--max-model-len'
-      - '150000'
-      - '--max-num-batched-tokens'
-      - '8192'
-      - '--max-num-seqs'
-      - '32'
-      - '--gpu-memory-utilization'
-      - '0.9'
-      - '--safetensors-load-strategy'
-      - lazy
-      - '--model-loader-extra-config'
-      - '{"enable_multithread_load":true,"num_threads":128}'
+      - '1048576'
+      - '--speculative-config'
+      - '{"num_speculative_tokens":5,"method":"dspark"}'
+      - '--trust-remote-code'
       - '--block-size'
       - '128'
-      - '--compilation-config'
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - '--async-scheduling'
+      - '--tokenizer-mode'
+      - deepseek_v41
+      - '--reasoning-parser'
+      - deepseek_v41
+      - '--tool-call-parser'
+      - deepseek_v41
+      - '--enable-auto-tool-choice'
+      - '--safetensors-load-strategy'
+      - lazy
+      - '--quantization'
+      - ascend
       - '--engram-config'
       - '{"cpu_offload":true,"dp_shared_memory":true}'
-      - '--additional-config'
-      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"enable_fused_mc2":1,"enable_dsa_cp":true,"enable_flashcomm1":true,"enable_shared_expert_dp":true}'
     extra_env:
       VLLM_USE_MODELSCOPE: 'True'
+      VLLM_USE_V2_MODEL_RUNNER: '1'
+      VLLM_ENGINE_READY_TIMEOUT_S: '36000'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
     hardware_overrides:
       ascend_910c:
-        docker_image: quay.io/ascend/vllm-ascend:deepseek-v4.1-flash-a3
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc-a3
         docker_serve_command: vllm serve
         install:
           pip: false
 meta:
   hardware:
-    ascend_910c: verified
-hardware_overrides:
-  npu:
-    extra_env:
-      VLLM_USE_V2_MODEL_RUNNER: '0'
-      VLLM_ENGINE_READY_TIMEOUT_S: '36000'
-      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
-      HCCL_BUFFSIZE: '1024'
-      HCCL_OP_EXPANSION_MODE: AIV
-      ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-hardware_notes:
-  ascend_910c:
-    title: DeepSeek-V4.1-Flash on Atlas 800 A3
-    body: >-
-      Use the tutorial's ModelSlim W8A8 checkpoint with INT8 Engram storage and
-      quay.io/ascend/vllm-ascend:deepseek-v4.1-flash-a3. One A3 server uses 8
-      physical NPUs (16 logical devices) with DP4/TP4/EP16. Keep the Python
-      frontend and VLLM_USE_V2_MODEL_RUNNER=0. Engram tables are offloaded to host
-      memory and shared by local DP ranks; retain --ipc=host and provide
-      sufficient host RAM. This recipe keeps the tutorial's 150000-token serving
-      limit. Optional DSpark uses five speculative tokens with eager draft
-      execution. See the tutorial for checkpoint preparation, verification,
-      A2 multi-node deployment and the A3 PD reference example.
-    link:
-      label: DeepSeek-V4.1-Flash on vLLM-Ascend
-      href: https://github.com/vllm-project/vllm-ascend/blob/ff62595360a069343ecdc3b2cd3a0daf45b4f1f0/docs/source/tutorials/models/DeepSeek-V4.1-Flash.md
+    ascend_910c: supported
 strategy_hardware:
+  single_node_tp:
+    npu: unsupported
+  single_node_tep:
+    npu: unsupported
   single_node_dep:
     npu: unsupported
   multi_node_tp:
@@ -87,31 +69,121 @@ strategy_hardware:
   multi_node_dep:
     npu: unsupported
   pd_cluster:
-    npu: unsupported
-strategy_overrides:
-  single_node_tp:
-    hardware_overrides:
-      ascend_910c:
-        # Preserve DP4/TP4/EP16 after generic strategy sizing.
-        extra_args:
-          - '--data-parallel-size'
-          - '4'
-          - '--tensor-parallel-size'
-          - '4'
-          - '--enable-expert-parallel'
-  single_node_tep:
-    hardware_overrides:
-      ascend_910c:
-        extra_args:
-          - '--data-parallel-size'
-          - '4'
-          - '--tensor-parallel-size'
-          - '4'
-          - '--enable-expert-parallel'
+    ascend_910c: supported
+presets:
+  ascend_pd:
+    label: A3 W4A8 PD (v0.32.0rc)
+    hardware: ascend_910c
+    strategy: pd_cluster
+    variants:
+      - ascend_w4a8
+    image: quay.io/ascend/vllm-ascend:v0.32.0rc-a3
+    description: 'Non-pooling PD: P DP4/PCP4/TP1 with MegaMoE and SWA bounded replay; D DP16/TP1 with DSpark graph execution.'
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      frontend: python
+      features:
+        spec_decoding: true
+    env:
+      GLOO_SOCKET_IFNAME: $IFACE_NAME
+      TP_SOCKET_IFNAME: $IFACE_NAME
+      HCCL_SOCKET_IFNAME: $IFACE_NAME
+      LD_LIBRARY_PATH: $LD_LIBRARY_PATH:/usr/local/lib/
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: dep
+        tp: 1
+        pp: 1
+        # Requires PCP-aware role sizing in the recipes renderer.
+        pcp: 4
+        args:
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--max-num-seqs'
+          - '16'
+          - '--gpu-memory-utilization'
+          - '0.9'
+          - '--enforce-eager'
+          - '--swa-bounded-replay'
+          - '--enable-prefix-caching'
+        env:
+          HCCL_IF_IP: $PREFILL_NODE_1
+          HCCL_BUFFSIZE: '1024'
+          HCCL_OP_EXPANSION_MODE: AIV
+          VLLM_SERVER_DEV_MODE: '1'
+        json_args:
+          '--additional-config':
+            enable_cpu_binding: true
+            enable_fused_mc2: 2
+            enable_flashcomm1: false
+            multistream_overlap_shared_expert: false
+          '--kv-transfer-config':
+            kv_connector: MooncakeHybridConnector
+            kv_role: kv_producer
+            kv_port: '30000'
+      decode:
+        nodes: 1
+        parallelism: dep
+        tp: 1
+        pp: 1
+        args:
+          - '--max-num-batched-tokens'
+          - '512'
+          - '--max-num-seqs'
+          - '72'
+          - '--gpu-memory-utilization'
+          - '0.95'
+          - '--async-scheduling'
+          - '--no-enable-prefix-caching'
+          - '--no-swa-bounded-replay'
+        env:
+          HCCL_IF_IP: $DECODE_NODE_1
+          HCCL_BUFFSIZE: '4096'
+        json_args:
+          '--compilation-config':
+            cudagraph_mode: FULL_DECODE_ONLY
+          '--additional-config':
+            ascend_compilation_config:
+              enable_npugraph_ex: true
+              enable_static_kernel: false
+            enable_cpu_binding: true
+            multistream_overlap_shared_expert: true
+            recompute_scheduler_enable: true
+          '--kv-transfer-config':
+            kv_connector: MooncakeHybridConnector
+            kv_role: kv_consumer
+            kv_port: '30100'
+    source:
+      label: v0.32.0rc A3 PD tutorial
+      href: https://github.com/vllm-project/vllm-ascend/blob/eb22e2cdcc1fecb7fc67ebfc94f3db8e03f26299/docs/source/tutorials/models/DeepSeek-V4.1-Flash.md#52-1p1d-pd-disaggregated-deployment
+      revision: eb22e2cdcc1fecb7fc67ebfc94f3db8e03f26299
+    runbook: >-
+      This preset requires PCP-aware DEP sizing in the recipes renderer and
+      PCP-aware device assignment in the vLLM multi-port DP supervisor.
+      P uses four local DP ranks with four devices per rank; D uses sixteen
+      local DP ranks with one device per rank. Start P and D on their dedicated
+      nodes in parallel, then start the proxy after all engines are ready.
 features:
   spec_decoding:
     hardware_overrides:
       npu:
         args:
           - '--speculative-config'
-          - '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}'
+          - '{"num_speculative_tokens":5,"method":"dspark"}'
+guide_sections:
+  ascend: |
+    ## Ascend A3 PD deployment
+
+    Select **A3 W4A8 PD (v0.32.0rc)** with two dedicated Atlas 800 A3 servers
+    (16 logical devices per node) and the
+    [W4A8 checkpoint](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8).
+    Keep `--net=host` and `--ipc=host` for communication and Engram host offload.
+    Provide sufficient host RAM and use the Engram shared-memory/huge-page setup
+    described in the [release tutorial](https://github.com/vllm-project/vllm-ascend/blob/eb22e2cdcc1fecb7fc67ebfc94f3db8e03f26299/docs/source/tutorials/models/DeepSeek-V4.1-Flash.md).
+
+    This preset uses native multi-port external DP load balancing instead of
+    `launch_online_dp.py`. PCP-aware renderer sizing and vLLM supervisor device
+    assignment are prerequisites; the migrated launcher has not been NPU-validated.
+    The preset covers direct PD transfer without KV pooling.
