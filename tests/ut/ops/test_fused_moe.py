@@ -904,7 +904,7 @@ def test_hash_router_chunks_unaligned_input_ids_for_sequence_parallel(monkeypatc
     assert ids is topk_ids
     torch.testing.assert_close(
         hash_op.call_args.kwargs["input_ids"],
-        input_ids[:2].to(torch.int64),
+        input_ids[:2],
     )
     pad_and_split_input_ids.assert_called_once()
     sequence_parallel_chunk.assert_called_once()
