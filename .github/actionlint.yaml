@@ -23,6 +23,7 @@ self-hosted-runner:
     - linux-amd64-cpu-2-hk
     - linux-amd64-cpu-4
     - linux-amd64-cpu-4-hk
+    - linux-aarch64-cpu-2
     - linux-aarch64-cpu-4
     - linux-amd64-cpu-8-hk
     - linux-amd64-cpu-16-hk
