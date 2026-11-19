@@ -8,7 +8,9 @@ These tests pin the reviewer-driven correctness upgrades of PR #16734:
   captured with JSON-serializable access chains and recreated on restore --
   v2 silently skipped them;
 * aliased tensors (tied weights, re-referenced derived tensors) are stored
-  once and re-shared on restore -- v2 duplicated them and broke tying;
+  once and re-shared on restore -- v2 duplicated them and broke tying; stride
+  is part of the dedup identity so a transposed view of a square weight is
+  stored separately instead of aliasing its base;
 * manifests older than schema v3 are rejected (regenerated via fallback);
 * per-tensor spot hashes catch in-bounds tampering of small tensors;
 * restore failures make load_model delete the snapshot and fall back to a
@@ -288,6 +290,38 @@ class TestSnapshotV3(unittest.TestCase):
         self.assertTrue(torch.equal(restored.right["key"], model.left[0]))
         # aliasing (shared storage) survives the roundtrip
         self.assertEqual(restored.right["key"].data_ptr(), restored.left[0].data_ptr())
+
+    def test_transposed_square_view_stored_separately(self):
+        """A square transposed view must not dedup onto its base tensor.
+
+        data_ptr/dtype/shape/format are identical between a square weight and
+        its transpose; only the stride differs. Without stride in the dedup
+        key the transpose is recorded as an alias and silently restored as a
+        copy of the base, changing the weight.
+        """
+
+        class M(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.register_parameter("w", torch.nn.Parameter(torch.randn(4, 4), requires_grad=False))
+
+        model = M().to("npu")
+        with torch.no_grad():
+            model.w_t = model.w.data.t()  # same ptr/dtype/shape/format, different stride
+        self.assertFalse(torch.equal(model.w_t, model.w.data))  # non-symmetric base
+
+        self._save(model)
+        manifest = self._manifest()
+        # the transpose is its own entry, not an alias of the base
+        self.assertNotIn("alias_of", manifest["tensors"]["w_t"])
+        self.assertGreater(manifest["tensors"]["w_t"]["nbytes"], 0)
+
+        restored = M().to("npu")  # fresh model: no w_t attribute
+        self._restore(restored)
+        self.assertTrue(torch.equal(restored.w_t, model.w_t))
+        self.assertFalse(torch.equal(restored.w_t, restored.w.data))
+        # standalone storage: not the base's tensor installed a second time
+        self.assertNotEqual(restored.w_t.data_ptr(), restored.w.data_ptr())
 
     # -- schema gate ----------------------------------------------------------
 

@@ -236,7 +236,11 @@ class BigTensorLoader(BigTensorDefaultLoader):
 
         def dedup_key(t: torch.Tensor) -> tuple:
             fmt = int(torch_npu.get_npu_format(t)) if t.device.type == "npu" else 0
-            return (t.data_ptr(), t.dtype, tuple(t.shape), fmt)
+            # Stride is part of the identity: a transposed view of a square
+            # weight shares ptr/dtype/shape/format with its base but holds
+            # different values, so it must be stored as its own entry, not
+            # installed as an alias of the base.
+            return (t.data_ptr(), t.dtype, tuple(t.shape), fmt, tuple(t.stride()))
 
         # (1) params/buffers in state_dict
         for name, t in model.state_dict().items():
