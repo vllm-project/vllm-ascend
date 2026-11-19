@@ -157,7 +157,8 @@ def test_dummy_input_ids_use_upstream_lookup_once(monkeypatch, supports_mm_input
 
     with patch.object(layer, "forward", wraps=layer.forward) as lookup:
         result = state.dummy_inputs_embeds(4, input_ids)
-    lookup.assert_called_once_with(input_ids)
+    lookup.assert_called_once()
+    torch.testing.assert_close(lookup.call_args.args[0], input_ids)
 
     assert result.shape == (4, 4)
     assert result.data_ptr() == state.inputs_embeds.data_ptr()
