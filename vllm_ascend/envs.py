@@ -92,6 +92,67 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # PCP prefill KV placement. "replicated" (default) keeps one physical copy
+    # on every PCP rank. "owner" backs the DSV4.1 KV cache with a VMM slab whose
+    # physical 2 MiB chunks are split 1/pcp_size per rank while every rank maps
+    # the complete logical address range. Reads and stores therefore address
+    # the normal cache tensor; only the physical footprint changes. Only the
+    # prefill PCP path is affected; decode keeps the replicated cache contract.
+    "VLLM_ASCEND_PCP_KV_SHARING": lambda: os.getenv("VLLM_ASCEND_PCP_KV_SHARING", "replicated"),
+    # Turn the HBM freed by owner sharing into extra KV blocks. Off by default.
+    # When "1"/"true"/"yes"/"on" and a supported owner configuration is active,
+    # the planner divides each owner-sharded tuple's per-block bytes by
+    # pcp_size (replicated tensors, such as the LOCAL_INDEX copy, keep the full
+    # page). The enabled staging scratch must fit in the
+    # gpu-memory-utilization headroom; it is deliberately not subtracted from
+    # the capacity because vLLM's rank re-plan assumes a linear divisor. Owner
+    # sharding must actually be used: if the slab cannot be mapped, the rank
+    # raises instead of falling back to a replicated cache that no longer fits.
+    # Total KV HBM returns to the replicated budget; the win is block count.
+    "VLLM_ASCEND_PCP_OWNER_CAPACITY": lambda: os.getenv("VLLM_ASCEND_PCP_OWNER_CAPACITY", "0"),
+    # Per-chunk SWA staging for PCP owner-sharded KV. Off by default. When
+    # "1"/"true"/"yes"/"on", a pure-prefill step copies only the rows each
+    # virtual segment can see -- ``[chunk_start - sliding_window, chunk_end)``
+    # of every local chunk -- from the owner slab into local scratch, and runs
+    # the sparse-attention kernel against that bounded view. Inactive when no
+    # owner slab backs the SWA cache, for mixed/decode batches, or when
+    # bounded replay is in use.
+    "VLLM_ASCEND_PCP_OWNER_STAGE_SWA_CHUNK": lambda: os.getenv("VLLM_ASCEND_PCP_OWNER_STAGE_SWA_CHUNK", "0"),
+    # Local scratch budget in bytes for the per-chunk SWA staging. One request
+    # stages at most ``2 * (chunk_len + sliding_window)`` SWA rows per layer,
+    # so the default 256 MiB covers many more requests than max_num_seqs.
+    "VLLM_ASCEND_PCP_OWNER_STAGE_SWA_CHUNK_BYTES": lambda: os.getenv(
+        "VLLM_ASCEND_PCP_OWNER_STAGE_SWA_CHUNK_BYTES", "268435456"
+    ),
+    # Print the rank-local chunk layout once per process (num_rows,
+    # query_start_loc, seq_lens, and each row's chunk_start/len/end). First
+    # "1"/"true"/"yes"/"on" only; for validating the one-row-per-chunk
+    # assumption on a live prompt.
+    "VLLM_ASCEND_PCP_OWNER_STAGE_SWA_CHUNK_DEBUG": lambda: os.getenv(
+        "VLLM_ASCEND_PCP_OWNER_STAGE_SWA_CHUNK_DEBUG", "0"
+    ),
+    # Keep the DSV4.1 indexer K cache out of the owner-sharded long-KV tuple.
+    # Off by default. When "1"/"true"/"yes"/"on", the index plane gets its own
+    # replicated tensor (page = its unpadded size) while long KV, compressor
+    # state and the SWA aliases stay in the owner-sharded tuple. The indexer
+    # then reads local HBM instead of peer pages in ``select``. Costs one full
+    # index copy per rank (about 1.2 GiB) and lowers the global block capacity
+    # by roughly 4-5%.
+    "VLLM_ASCEND_PCP_LOCAL_INDEX": lambda: os.getenv("VLLM_ASCEND_PCP_LOCAL_INDEX", "0"),
+    # Owner-sharded indexer staging. Off by default. When "1"/"true"/"yes"/"on"
+    # and the index K plane stays inside the owner-sharded tuple, a pure-prefill
+    # step copies the live index pages of the rank-local chunk rows into a
+    # bounded local scratch and remaps the block table onto it, exactly like
+    # the long-KV staging. Inactive for mixed/decode batches, for the
+    # replicated index-only tuple (VLLM_ASCEND_PCP_LOCAL_INDEX), and when no
+    # owner slab backs the cache.
+    "VLLM_ASCEND_PCP_OWNER_STAGE_INDEX": lambda: os.getenv("VLLM_ASCEND_PCP_OWNER_STAGE_INDEX", "0"),
+    # Local scratch budget in bytes per staged page layout. One page copy moves
+    # the whole 128 KiB (or 144 KiB for the ratio-1 tuple) block, so the default
+    # 128 MiB holds about 1000 live pages, several times one 40K prefill step.
+    "VLLM_ASCEND_PCP_OWNER_STAGE_INDEX_BYTES": lambda: os.getenv(
+        "VLLM_ASCEND_PCP_OWNER_STAGE_INDEX_BYTES", "134217728"
+    ),
 }
 
 # end-env-vars-definition
