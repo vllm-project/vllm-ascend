@@ -419,10 +419,18 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         reapable = store.list_reapable(current_wave=wave)
         if not reapable:
             return
-        # rare_feed_jobs==0 (or force-cleared). Flush look-ahead, then clear.
+        # Drain pins normally → finish look-ahead. Force-cleared pins → skip
+        # finish (incomplete feed); still clear to avoid Store/detector leaks.
         if self.detectors.rare_chars_enabled():
-            for alert in self.detectors.finish_rare_chars(reapable):
-                self._handle_alert(alert, detector=self.detectors.get(alert.incident_type))
+            finishable, incomplete = store.partition_rare_finish_reapable(reapable)
+            if incomplete:
+                logger.warning(
+                    "[runtime_guard: rare_chars] skip finish after force-clear (incomplete feed) req_ids=%s",
+                    incomplete,
+                )
+            if finishable:
+                for alert in self.detectors.finish_rare_chars(finishable):
+                    self._handle_alert(alert, detector=self.detectors.get(alert.incident_type))
         store.clear_many(reapable, detectors=self.detectors)
         self.wave_tracker.discard_many(reapable)
 
@@ -640,12 +648,31 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             return
         try:
             cu_num_logits = self._rare_cu_num_logits()
+            num_logit_rows = int(logits.shape[0])
             aligned = align_sampled_token_ids_to_logits(
                 sampled_token_ids,
-                int(logits.shape[0]),
+                num_logit_rows,
                 cu_num_logits=cu_num_logits,
             )
             if aligned is None:
+                # Layout miss: skip this step's collect (fail closed). Rate-limited
+                # so MTP/adaptive shape bugs are visible without per-step spam.
+                samp_shape = tuple(sampled_token_ids.shape)
+                cu_tail = None
+                if cu_num_logits is not None:
+                    try:
+                        cu_list = list(cu_num_logits)
+                        cu_tail = (len(cu_list), cu_list[-1] if cu_list else None)
+                    except TypeError:
+                        cu_tail = type(cu_num_logits).__name__
+                logger.warning_once(
+                    "[runtime_guard: rare_chars] align miss; skip collect this step "
+                    "(enabled but no detection for mismatched layouts). "
+                    "logit_rows=%s sampled_shape=%s cu_num_logits=%s",
+                    num_logit_rows,
+                    samp_shape,
+                    cu_tail,
+                )
                 return
             token_ids, slots_per_req, cu_aligned = aligned
             from vllm_ascend.worker.v2.sample.logprob import compute_top1_and_chosen_logprobs
