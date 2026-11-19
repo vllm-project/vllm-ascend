@@ -234,6 +234,25 @@ class AscendStoreCoordinator:
         masks = tuple([block is not cached_block_pool.null_block for block in blocks] for blocks in blocks_per_group)
         return masks, hit_length
 
+    def find_partial_hit_tokens(
+        self,
+        block_hashes: Sequence[BlockHash],
+        token_len: int,
+        cached_block_pool: ExternalCachedBlockPool,
+        *,
+        hbm_hit_tokens: int,
+    ) -> int:
+        core_hashes = _HBMPrefixBlockHashes(block_hashes, hbm_hit_tokens // self.hash_block_size)
+        _, hit = self.find_longest_cache_hit(core_hashes, self.align_lookup_length(token_len), cached_block_pool)
+        if hit >= token_len:
+            # Leave the last token for recomputation at a recoverable boundary.
+            _, hit = self.find_longest_cache_hit(
+                core_hashes,
+                self.align_lookup_length(token_len - 1),
+                cached_block_pool,
+            )
+        return hit
+
     def load_mask(
         self,
         block_hashes: list[BlockHash],

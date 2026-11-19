@@ -57,6 +57,24 @@ def test_same_group_hits_as_upstream(seed, eagle):
     assert results[0] == results[1]
 
 
+def test_partial_full_hit_falls_back_to_recoverable_hbm_boundary():
+    coord = coordinator.AscendStoreCoordinator(
+        groups(),
+        16,
+        4,
+        group_block_sizes=[16, 16],
+        group_cache_families=["default", "default"],
+        enable_partial_hash_hits=True,
+    )
+    hashes = [BlockHash(bytes([i + 1]) * 8) for i in range(7)]
+    pool = coordinator.ExternalCachedBlockPool(4, {(g, bytes(hashes[-1])) for g in range(2)})
+
+    # The first page is local. The store can only supply the checkpoint at 28.
+    assert coord.find_partial_hit_tokens(hashes, 29, pool, hbm_hit_tokens=0) == 0
+    assert coord.find_partial_hit_tokens(hashes, 29, pool, hbm_hit_tokens=16) == 28
+    assert coord.find_partial_hit_tokens(hashes, 28, pool, hbm_hit_tokens=16) == 16
+
+
 class ByteStore:
     requires_exists_before_put = True
 

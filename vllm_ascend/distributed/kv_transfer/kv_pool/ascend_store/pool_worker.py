@@ -35,7 +35,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
     ExternalCachedBlockPool,
-    _HBMPrefixBlockHashes,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreBatch,
@@ -1136,14 +1135,7 @@ class BaseKVPoolWorker(ABC):
                 return StoreLookupResult(0)
             present = {candidates[index] for index in self._iter_present_lookup_candidates(keys, variant_counts)}
             pool = ExternalCachedBlockPool(self.hash_block_size, present)
-            core_hashes = _HBMPrefixBlockHashes(hashes, hbm_hit_tokens // self.hash_block_size)
-            _, hit = coordinator.find_longest_cache_hit(core_hashes, coordinator.align_lookup_length(token_len), pool)
-            if hit >= token_len:
-                _, hit = coordinator.find_longest_cache_hit(
-                    core_hashes,
-                    coordinator.align_lookup_length(token_len - 1),
-                    pool,
-                )
+            hit = coordinator.find_partial_hit_tokens(hashes, token_len, pool, hbm_hit_tokens=hbm_hit_tokens)
             if hit <= hbm_hit_tokens:
                 return StoreLookupResult(hit)
             return StoreLookupResult(hit, self._tail_key_boundaries(coordinator, hashes, hit, pool))
