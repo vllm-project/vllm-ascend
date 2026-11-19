@@ -1,4 +1,6 @@
 pr: 22491
 entries:
   - category: bugfix
-    text: Fixed incorrect responses and premature stopping on synchronous Mooncake prefix cache hits during prefill.
+    text: >-
+      Fixed incorrect responses and premature stopping when a prefill worker configured with
+      `kv_producer` or `kv_both` synchronously restores a cached prefix from Mooncake.
