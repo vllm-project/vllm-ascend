@@ -547,8 +547,8 @@ msgstr ""
 msgid "The following checks apply to A2/A3 deployments."
 msgstr "以下检查适用于 A2/A3 部署。"
 
-msgid "### Atlas 850/850E/950 SuperPod Communication Configuration"
-msgstr "### Atlas 850/850E/950 SuperPod 通信配置"
+msgid "### 950PR&950DT Products Communication Configuration {: #950pr950dt-products-communication-configuration}"
+msgstr "### Ascend 950PR&950DT 系列产品通信配置 {: #950pr950dt-products-communication-configuration}"
 
 msgid ""
 "The parameter plane supports UBG, UBoE, and RoCE network protocols. Each "
@@ -597,8 +597,8 @@ msgid ""
 "endpoint files are available at the configured path inside each container."
 msgstr "将 `<host_roce_ip>` 替换为实际的主机 RoCE IP 地址。确保端点文件在每个容器内的配置路径下可用。"
 
-msgid "### Atlas 850/850E/950 SuperPod (950PR/950DT) Container Requirements"
-msgstr "### Atlas 850/850E/950 SuperPod（950PR/950DT）容器要求"
+msgid "### 950PR&950DT Products Container Requirements {: #950pr950dt-products-container-requirements}"
+msgstr "### Ascend 950PR&950DT 容器要求 {: #950pr950dt-products-container-requirements}"
 
 msgid "!!! note \"Timeout for long sequences or high concurrency\""
 msgstr "!!! note \"长序列或高并发时的超时\""
@@ -642,8 +642,8 @@ msgstr ""
 "我们可以分别在预填充（prefiller）节点和解码（decoder）节点上运行以下脚本以启动服务。请注意，每个 P/D 节点将占用从 kv_port "
 "到 kv_port + num_chips 范围内的端口来初始化 socket 监听器。为避免出现问题，应防止端口冲突。"
 
-msgid "## D2RH Deployment on Atlas 850E (UBoE)"
-msgstr "## 在 Atlas 850E (UBoE) 上部署 D2RH"
+msgid "## D2RH Deployment on Atlas 850E SuperPoD (Air-Cooled) (UBoE) {: #d2rh-deployment-on-atlas-850e-superpod-air-cooled-uboe}"
+msgstr "## 在 Atlas 850E 风冷超节点 (UBoE) 上部署 D2RH {: #d2rh-deployment-on-atlas-850e-superpod-air-cooled-uboe}"
 
 msgid ""
 "**Validation scope:** D2RH has only been validated with the Atlas 850E\n"

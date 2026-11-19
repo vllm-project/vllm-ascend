@@ -3,7 +3,7 @@
 """HiSparse residency resolver single-op accuracy tests.
 
 The operator under test is the native ACLNN kernel registered by
-csrc/attention/hi_sparse_resolve_residency
+csrc/attention/hisparse_resolve_residency
 (torch.ops._C_ascend.hisparse_resolve_residency). Accuracy is checked
 against a pure-torch CPU reference of the resolution semantics; no
 vllm_ascend Python plumbing is involved beyond loading the native

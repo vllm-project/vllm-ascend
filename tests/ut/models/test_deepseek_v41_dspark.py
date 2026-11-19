@@ -243,7 +243,7 @@ def test_v41_draft_context_store_uses_physical_pairs_and_preserves_padding():
     cache = torch.empty(3, 128, 1, 8)
     attn = SimpleNamespace(
         packed_cache_ops=None,
-        dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(block_size=128, kv_cache=[cache])),
+        dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(block_size=128, kv_cache=cache)),
     )
     values = torch.randn(3, 1, 8)
     with patch("vllm_ascend.models.deepseek_v41.dspark.scatter_cache_sk") as store:
@@ -261,7 +261,7 @@ def test_v41_draft_context_store_routes_packed_a5_cache_to_device_writer():
     writer = MagicMock()
     attn = SimpleNamespace(
         packed_cache_ops=SimpleNamespace(write_attention_cache=writer),
-        dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(block_size=128, kv_cache=[cache])),
+        dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(block_size=128, kv_cache=cache)),
     )
     slots = torch.tensor([129, -1, 258])
     values = torch.randn(3, 1, 8)

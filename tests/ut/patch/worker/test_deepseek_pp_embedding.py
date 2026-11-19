@@ -105,6 +105,7 @@ def test_pp_target_embedding_uses_normal_weight_loader_before_dflash_sharing(mon
     monkeypatch.setattr(ascend_vocab, "enable_pcp_embedding_lmhead_weight_sharding", lambda: False)
     monkeypatch.setattr(ascend_vocab, "embedding_tp_enable", lambda: False)
     monkeypatch.setattr(ascend_vocab, "lmhead_tp_enable", lambda: False)
+    monkeypatch.setattr(quarot_utils, "lmhead_tp_enable", lambda: False)
     monkeypatch.setattr(ascend_vocab, "get_tp_group", lambda: SimpleNamespace(rank_in_group=tp_rank, world_size=2))
     target, _ = _make_target(monkeypatch, 2, 1, "dflash")
     assert isinstance(target.embed_tokens, vocab_parallel_embedding.VocabParallelEmbedding)

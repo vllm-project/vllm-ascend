@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-#include "hi_sparse_resolve_residency_tiling.h"
+#include "hisparse_resolve_residency_tiling.h"
 #include "register/op_impl_registry.h"
 #include "log/log.h"
 #include "tiling/platform/platform_ascendc.h"
@@ -8,6 +8,7 @@
 
 namespace optiling {
 namespace {
+// Input positions follow the registered def order.
 constexpr size_t kLogicalInput = 0;
 constexpr size_t kHotTableInput = 1;
 constexpr size_t kRequestsInput = 2;
@@ -38,11 +39,9 @@ constexpr size_t kAttentionStrideAttr = 12;
 constexpr size_t kCountsStrideAttr = 13;
 constexpr size_t kByteMissMaskAttr = 14;
 
-ge::graphStatus TileHiSparseResolveResidency(gert::TilingContext* context) {
+ge::graphStatus TileResolve(gert::TilingContext* context,
+                            HisparseResolveResidencyTilingData& tiling) {
     using namespace vllm_ascend::hisparse;
-    OP_CHECK_IF(context == nullptr,
-                OP_LOGE("HiSparseResolveResidency", "TilingContext is null."),
-                return ge::GRAPH_FAILED);
     const auto* logical = context->GetInputShape(kLogicalInput);
     const auto* tags = context->GetOutputShape(kTagsOutput);
     const auto* lru = context->GetOutputShape(kLruOutput);
@@ -102,13 +101,19 @@ ge::graphStatus TileHiSparseResolveResidency(gert::TilingContext* context) {
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     uint64_t platformUbBytes = 0;
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, platformUbBytes);
-    // SIMT dynamic UB = platform UB minus the DCache reservation; declared to
-    // the runtime through SetLocalMemorySize below.
-    const uint64_t ubBudget = resolver_simt_ub_budget(platformUbBytes);
+    // The arch22 def registers the same tiling for ascend910b/ascend910_93;
+    // those builds dispatch the scalar-UB resolver instead of the A5 SIMT
+    // kernel, so the UB budget and hash capacity follow the arch22 formulas.
+    const auto socVersion = ascendcPlatform.GetSocVersion();
+    const bool arch22 = socVersion == platform_ascendc::SocVersion::ASCEND910B ||
+                        socVersion == platform_ascendc::SocVersion::ASCEND910_93;
+    const uint64_t ubBudget = arch22 ? resolver_arch22_ub_budget(platformUbBytes)
+                                     : resolver_simt_ub_budget(platformUbBytes);
     OP_CHECK_IF(ubBudget == 0,
-                OP_LOGE(context->GetNodeName(), "platform UB does not cover the SIMT DCache reserve."),
+                OP_LOGE(context->GetNodeName(), "platform UB does not cover the resolver reserve."),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(resolver_scratch_bytes(hot, *unionRows + 1) > ubBudget,
+    OP_CHECK_IF(arch22 ? resolver_arch22_scratch_bytes(hot, *unionRows + 1) > ubBudget
+                       : resolver_scratch_bytes(hot, *unionRows + 1) > ubBudget,
                 OP_LOGE(context->GetNodeName(),
                         "HiSparse scratch requirement exceeds the platform UB budget; "
                         "lower device_buffer_size or speculative tokens."),
@@ -179,18 +184,24 @@ ge::graphStatus TileHiSparseResolveResidency(gert::TilingContext* context) {
                 OP_LOGE(context->GetNodeName(), "all compact swap outputs are required together."),
                 return ge::GRAPH_FAILED);
 
-    HiSparseResolveResidencyTilingData tiling;
     auto* rawTiling = context->GetRawTilingData();
     auto* workspace = context->GetWorkspaceSizes(1);
     OP_CHECK_IF(rawTiling == nullptr || workspace == nullptr || rawTiling->GetCapacity() < tiling.GetDataSize(),
                 OP_LOGE(context->GetNodeName(), "failed to query tiling or workspace."),
                 return ge::GRAPH_FAILED);
 
-    const uint64_t hashSize = resolver_hash_capacity(hot, *unionRows, ubBudget);
-    const uint32_t ubBytes = static_cast<uint32_t>(resolver_scratch_bytes(hot, hashSize));
-    OP_CHECK_IF(context->SetLocalMemorySize(ubBytes) != ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "failed to declare SIMT local memory of %u bytes.", ubBytes),
-                return ge::GRAPH_FAILED);
+    const uint64_t hashSize = arch22 ? resolver_arch22_hash_capacity(hot, *unionRows, ubBudget)
+                                     : resolver_hash_capacity(hot, *unionRows, ubBudget);
+    const uint32_t ubBytes = static_cast<uint32_t>(arch22 ? resolver_arch22_scratch_bytes(hot, hashSize)
+                                                          : resolver_scratch_bytes(hot, hashSize));
+    if (!arch22) {
+        // Only the SIMT kernel declares dynamic local memory; the arch22
+        // kernel allocates its scratch through TPipe instead.
+        OP_CHECK_IF(context->SetLocalMemorySize(ubBytes) != ge::GRAPH_SUCCESS,
+                    OP_LOGE(context->GetNodeName(),
+                            "failed to declare SIMT local memory of %u bytes.", ubBytes),
+                    return ge::GRAPH_FAILED);
+    }
     tiling.set_rows(rows);
     tiling.set_topk(topk);
     tiling.set_hotSlots(hot);
@@ -227,12 +238,20 @@ ge::graphStatus TileHiSparseResolveResidency(gert::TilingContext* context) {
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus PrepareHiSparseResolveResidency(gert::TilingParseContext*) {
+ge::graphStatus TileHisparseResolveResidency(gert::TilingContext* context) {
+    OP_CHECK_IF(context == nullptr,
+                OP_LOGE("HisparseResolveResidency", "TilingContext is null."),
+                return ge::GRAPH_FAILED);
+    HisparseResolveResidencyTilingData tiling;
+    return TileResolve(context, tiling);
+}
+
+ge::graphStatus PrepareHisparseResolveResidency(gert::TilingParseContext*) {
     return ge::GRAPH_SUCCESS;
 }
 }  // namespace
 
-IMPL_OP_OPTILING(HiSparseResolveResidency)
-    .Tiling(TileHiSparseResolveResidency)
-    .TilingParse<HiSparseResolveResidencyCompileInfo>(PrepareHiSparseResolveResidency);
+IMPL_OP_OPTILING(HisparseResolveResidency)
+    .Tiling(TileHisparseResolveResidency)
+    .TilingParse<HisparseResolveResidencyCompileInfo>(PrepareHisparseResolveResidency);
 }  // namespace optiling
