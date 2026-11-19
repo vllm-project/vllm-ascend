@@ -175,6 +175,34 @@ With PCP+DCP, the compact block-table plan is derived from the global request vi
 
 DSA PCP gathers hidden states and restores global order for cache updates, compression, and indexing. Attention then evaluates local query rows. DSA V4.1 follows the same local-query/global-cache structure with its sliding-window and compressor state, using backend-specific metadata.
 
+### Kimi K3 and K3.1 hybrid state
+
+Kimi K3 alternates KDA and gated MLA layers. K3.1 Pro also routes its DSA
+layers through the shared SFA backend. Cache ownership differs between the
+recurrent and full-attention layers:
+
+- `kda_parallel.py` assigns each KDA head to a combined TP×PCP rank,
+  `tp_rank * pcp_size + pcp_rank`. Projection loaders, convolution parameters,
+  and recurrent-state shapes use this same partition. State-shape calculation
+  delegates to the installed vLLM using a copied configuration with effective
+  TP size `TP * PCP`; it does not change the model's actual TP configuration.
+- `KimiKDAHostMetadataBuilder` uses the global PCP batch and token restore maps.
+  `kda_pcp_gather` restores causal token order before KDA execution;
+  `kda_pcp_scatter` selects the local token rows afterward. Padding masks keep
+  invalid rows out of the returned activations. The permutation buffers retain
+  stable addresses for graph replay.
+- KDA's output projection reduces contributions across PCP, even when sequence
+  parallelism defers the TP reduction to the decoder layer.
+- DCP sequence sharding applies to MLA/SFA caches, not KDA's recurrent state.
+  K3.1's uncompressed indexer follows the attention cache's DCP token owners;
+  distributed TopK combines candidates from the local indexer shards. This
+  differs from the GLM-5.2 replicated-indexer path described above.
+
+KDA cache groups and attention cache groups must retain their own state and
+block-layout semantics during P/D transfer. Use the model guide's connector
+topology and block/interleave settings. Model-level deployment coverage and
+RecoverSSM limitations are listed in [Kimi hybrid attention](../../user_guide/feature_guide/context_parallel.md#kimi-hybrid-attention).
+
 ## Integration with other features
 
 - **Weight sharding:** Embedding and LM-head weights can be partitioned across TP×PCP. Supported SFA/DSA O-projections also use PCP weight shards: prefill can gather weights temporarily, while sharded decode exchanges activations and returns projected results to their owners. See the [PCP weight-sharding configuration](../../user_guide/feature_guide/context_parallel.md#usage) for the embedding, LM-head, and O-projection options.
@@ -200,3 +228,7 @@ Extensions need consistent topology checks, query/cache mappings, and output lay
 - PCP/DCP slot mapping: `vllm_ascend/worker/v2/block_table.py`
 - Backend selection and configuration: `vllm_ascend/platform.py`
 - DSA V4.1 PCP backend: `vllm_ascend/attention/context_parallel/dsa_v41_cp.py`
+- Kimi KDA head partitions and state shapes: `vllm_ascend/ops/kda_parallel.py`
+- Kimi KDA PCP metadata and token permutations: `vllm_ascend/ops/kda_pcp.py`
+- Kimi KDA execution and projections: `vllm_ascend/ops/kimi_kda.py`
+- Kimi DCP indexer selection: `vllm_ascend/attention/context_parallel/sharded_indexer.py`

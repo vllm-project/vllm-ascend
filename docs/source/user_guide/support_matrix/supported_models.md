@@ -104,6 +104,13 @@
 
 ## Multimodal Language Models
 
+For Kimi K3 and K3.1 Pro, read [Kimi hybrid attention](../feature_guide/context_parallel.md#kimi-hybrid-attention)
+alongside the PCP/DCP columns. K3 PCP is implemented but remains **unverified**
+at the model-system level in this matrix. K3.1 Pro PCP and DCP remain
+**experimental**, following the separate Prefill and Decode configurations in
+its model guide. These entries do not establish support for every combination
+with graph execution, speculative decoding, or KV transfer.
+
 === "950PR&950DT Products"
 
     | Model | Support | Hardware | [Graph Mode](../../user_guide/feature_guide/graph_mode.md) |||| [Npugraph_ex](../../user_guide/feature_guide/graph_mode.md#using-npugraph_ex) || [CP](../../user_guide/feature_guide/context_parallel.md) || [KVPP(only D node)](../../user_guide/feature_guide/kvpp.md) | TP | EP | DP | MLAPO | [EPLB](../../user_guide/feature_guide/expert_parallelism_load_balancer.md) | Multistream MoE(only D node) | Shared Expert DP | Fused MC2 | [Speculative Decoding](../../user_guide/feature_guide/speculative_decoding.md) |||| [Mooncake Backend Pool](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) ||| [Memcache Backend Pool](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) ||| [KV Cache Offloading](../../user_guide/feature_guide/layerwise_and_sparse_kv_cache_offloading.md) || Prefix Cache | Weight nz | Async Scheduling | [CPU Binding](../../user_guide/feature_guide/cpu_binding.md) | flashcomm1(only P node) | [Fine-grained TP](../../user_guide/feature_guide/Fine_grained_TP.md) ||||
@@ -111,8 +118,8 @@
     | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
     | [DeepSeek-V4.1-Flash](../../tutorials/models/DeepSeek-V4.1-Flash.md) | ✅ | 950DT Products | 🟡 | ✅ | ❌ | 🟡 | ❌ | ❌ | 🟡 | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | 🟡 | ✅ | 🟡 | ❌ | 🟡 | 🟡 | 5 | ❌ | ❌ | 🟡 | 🟡 | ❌ | ✅ | 🟡 | ❌ | ❌ | ✅ | 🟡 | ✅ | ✅ | 🟡 | ❌ | ❌ | ❌ | 🟡 |
     | [GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md) | ✅ | 950DT Products | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | 5 | ❌ | ❌ | ❌ | 🟡 | 🟡 | 🟡 | 🟡 | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 |
-    | [Kimi-K3](../../tutorials/models/Kimi-K3.md) | ✅ | 950DT Products | 🟡 | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 | ❌ | ❌ | 3 | ❌ | ❌ | 🟡 | 🟡 | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 |
-    | [Kimi-K3.1-Pro](../../tutorials/models/Kimi-K3.1-Pro.md) | 🔵 | 950DT Products | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
+    | [Kimi-K3](../../tutorials/models/Kimi-K3.md) | ✅ | 950DT Products | 🟡 | ✅ | ❌ | ❌ | ❌ | ❌ | 🟡 | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 | ❌ | ❌ | 3 | ❌ | ❌ | 🟡 | 🟡 | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 |
+    | [Kimi-K3.1-Pro](../../tutorials/models/Kimi-K3.1-Pro.md) | 🔵 | 950DT Products | | | | | | | 🔵 | 🔵 | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
     | [MiniMax-M3](../../tutorials/models/MiniMax-M3.md) | ✅ | 950DT Products | 🟡 | ✅ | 🟡 | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | 🟡 | ❌ | 3 | ❌ | ❌ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 |
     | [MiniMax-M3.1-Flash](../../tutorials/models/MiniMax-M3.1-Flash.md) | ✅ | 950DT Products | 🟡 | ✅ | 🟡 | 🟡 | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | 🟡 | ❌ | ❌ | 7 | ❌ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 |
     | [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) | ✅ | 950DT Products | 🟡 | ✅ | 🟡 | 🟡 | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | 🟡 | 🟡 | ✅ | ✅ | 3 | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 |
@@ -135,8 +142,8 @@
     | [GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md) | ✅ | A2/A3 | 🟡 | ✅ | ❌ | 🟡 | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | 3 | ❌ | ❌ | ❌ | 🟡 | 🟡 | 🟡 | 🟡 | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
     | [Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md) | 🔴 | A2/A3 | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
     | [Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md) | ✅ | A2/A3 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
-    | [Kimi-K3](../../tutorials/models/Kimi-K3.md) | ✅ | A3 | 🟡 | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | 🟡 | ❌ | ❌ | 7 | ❌ | ❌ | 🟡 | 🟡 | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 |
-    | [Kimi-K3.1-Pro](../../tutorials/models/Kimi-K3.1-Pro.md) | 🔵 | A3 | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
+    | [Kimi-K3](../../tutorials/models/Kimi-K3.md) | ✅ | A3 | 🟡 | ✅ | ❌ | ❌ | ❌ | ❌ | 🟡 | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | 🟡 | ❌ | ❌ | 7 | ❌ | ❌ | 🟡 | 🟡 | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 |
+    | [Kimi-K3.1-Pro](../../tutorials/models/Kimi-K3.1-Pro.md) | 🔵 | A3 | | | | | | | 🔵 | 🔵 | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
     | [MiniMax-M3](../../tutorials/models/MiniMax-M3.md) | ✅ | A2/A3 | 🟡 | ✅ | 🟡 | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | 🟡 | ❌ | 3 | ❌ | ❌ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 |
     | [MiniMax-M3.1-Flash](../../tutorials/models/MiniMax-M3.1-Flash.md) | ✅ | A2/A3 | 🟡 | ✅ | 🟡 | 🟡 | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | 🟡 | ❌ | ❌ | 7 | ❌ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 |
     | [Qwen3.8-Flash-Next](../../tutorials/models/Qwen3.8-Flash-Next.md) | ✅ | A2/A3 | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | / | ❌ | ✅ | ✅ | ❌ | 3 | ❌ | ❌ | ❌ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | 🟡 | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
