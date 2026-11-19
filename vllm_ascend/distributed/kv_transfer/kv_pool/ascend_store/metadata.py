@@ -12,7 +12,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadat
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    MambaSpec,
+    RSWASpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
@@ -301,6 +308,18 @@ def infer_cacheable_group_ids(kv_cache_groups: Sequence[Any] | None) -> list[int
     group_ids = [i for i, group in enumerate(kv_cache_groups) if is_prefix_cacheable(group.kv_cache_spec)]
     assert group_ids, "AscendStore requires at least one prefix-cacheable KV cache group"
     return group_ids
+
+
+def get_swa_group_ids(kv_cache_config: KVCacheConfig | None, cacheable_group_ids: Sequence[int]) -> set[int]:
+    if kv_cache_config is None:
+        return set()
+    result = set()
+    for group_id in cacheable_group_ids:
+        spec = kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
+        specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
+        if any(isinstance(item, (SlidingWindowSpec, RSWASpec)) for item in specs):
+            result.add(group_id)
+    return result
 
 
 def get_group_block_size(group_block_sizes: Sequence[int], group_id: int) -> int:
