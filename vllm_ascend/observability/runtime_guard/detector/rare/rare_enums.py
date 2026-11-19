@@ -15,9 +15,10 @@
 
 """Single source for rare_chars feature / GB-input numeric ids.
 
-Numeric values live in ``rare_feed_native.c`` (``FT_*`` / ``IN_*``). Python
-string names map onto those C enumerators; CI parses the ``.c`` file so the
-two sides cannot drift silently.
+Numeric values live in ``rare_feed_native.c`` (``FT_*`` / ``IN_*``). When the
+``.c`` sidecar is present (source tree / packaged wheel), Python loads ids from
+it. CI asserts no drift. A frozen fallback keeps import working if the sidecar
+is absent from an older install layout.
 """
 
 from __future__ import annotations
@@ -55,6 +56,36 @@ IN_PY_TO_C: dict[str, str] = {
     "fsw": "IN_FSW",
     "answer": "IN_ANSWER",
     "bad_utf8": "IN_BAD",
+}
+
+# Frozen copy of rare_feed_native.c FT_*/IN_* for installs without the .c sidecar.
+_FALLBACK_FEAT: dict[str, int] = {
+    "lp1": 0,
+    "lpc": 1,
+    "gap": 2,
+    "fs": 3,
+    "fsw": 4,
+    "caseless_after_latin": 5,
+    "bad_utf8": 6,
+    "gb": 7,
+    "answer": 8,
+}
+_FALLBACK_INPUT: dict[str, int] = {
+    "lp1": 0,
+    "lpc": 1,
+    "gap": 2,
+    "cls": 3,
+    "pcls": 4,
+    "ncls": 5,
+    "first": 6,
+    "last": 7,
+    "lead": 8,
+    "pcat": 9,
+    "ncat": 10,
+    "fs": 11,
+    "fsw": 12,
+    "answer": 13,
+    "bad_utf8": 14,
 }
 
 _C_ENUM_RE = re.compile(
@@ -120,5 +151,12 @@ def assert_enums_match_c(
         raise AssertionError(f"IN input id drift: got={inp} expected={expected_inp}")
 
 
-# Import-time tables used by ``rare_native`` (C file next to this module).
-FEAT, INPUT = build_feat_input()
+def _load_feat_input() -> tuple[dict[str, int], dict[str, int]]:
+    """Prefer ``.c`` sidecar; fall back to frozen ids if the file is absent."""
+    if _C_PATH.is_file():
+        return build_feat_input()
+    return dict(_FALLBACK_FEAT), dict(_FALLBACK_INPUT)
+
+
+# Import-time tables used by ``rare_native``.
+FEAT, INPUT = _load_feat_input()
