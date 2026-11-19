@@ -352,11 +352,6 @@ class NPUModelRunner(GPUModelRunner):
             # memory profiling.
             join_nz_warm_thread()
 
-        initialize_mhc = getattr(self.model, "initialize_mhc", None)
-        if initialize_mhc is not None:
-            with self.jit_warmup_registry.activate():
-                initialize_mhc(self.vllm_config)
-
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
         # the dumper at the end of load_model).

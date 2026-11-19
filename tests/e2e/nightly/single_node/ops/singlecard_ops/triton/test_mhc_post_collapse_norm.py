@@ -71,9 +71,9 @@ def test_dsv41_mhc_boundary_full_graph_replay(record_property):
     def run_boundaries():
         # Enter with prepared Attention gates. The first producer joins the
         # auxiliary stream to this graph before any coefficient wait.
-        moe = ops.dsv41_mhc_moe_input(attn_out, residual, post, comb, pre, *fused_params, True, False)
+        moe = ops.dsv41_mhc_moe_input(attn_out, residual, post, comb, pre, *fused_params, False)
         updated, _, _, next_post, next_comb, next_pre = moe
-        attention = ops.dsv41_mhc_attention_input(moe_out, updated, next_post, next_comb, next_pre, *fused_params, True)
+        attention = ops.dsv41_mhc_attention_input(moe_out, updated, next_post, next_comb, next_pre, *fused_params)
         # Exercise the terminal join used when no following boundary is fused.
         updated, normalized, next_post, next_comb, _ = attention
         tail = ops.dsv41_mhc_finish_overlap(normalized, updated, next_post, next_comb)
@@ -83,10 +83,7 @@ def test_dsv41_mhc_boundary_full_graph_replay(record_property):
     mhc._coefficient_stream(residual.device)
     torch.npu.synchronize()
     graph = torch.npu.NPUGraph()
-    with (
-        torch.npu.graph(graph, capture_error_mode="thread_local", auto_dispatch_capture=True),
-        mhc.record_mhc_overlap(),
-    ):
+    with torch.npu.graph(graph, capture_error_mode="thread_local", auto_dispatch_capture=True):
         moe, attention, _tail = run_boundaries()
 
     for replay in range(3):

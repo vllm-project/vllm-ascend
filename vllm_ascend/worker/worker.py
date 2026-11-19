@@ -1030,9 +1030,6 @@ class NPUWorker(WorkerBase):
         from vllm_ascend.model_executor.warmup.kernel_warmup import kernel_warmup
 
         kernel_warmup(self)
-        warmup_mhc = getattr(self.get_model(), "warmup_mhc", None)
-        if warmup_mhc is not None:
-            warmup_mhc()
 
         npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:

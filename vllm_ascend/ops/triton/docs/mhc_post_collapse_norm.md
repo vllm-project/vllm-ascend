@@ -30,8 +30,9 @@
 
 The Triton kernel takes contiguous tensors with four residual streams, a hidden width of 5120, and bias-free RMSNorm.
 The model dispatches to this path at up to 72 rows. For Attention, `write_fp32` is false and the caller passes
-`normalized` as the unused `normalized_fp32` argument. The model registers the Attention and MoE variants for JIT
-warmup using their RMSNorm weight dtypes.
+`normalized` as the unused `normalized_fp32` argument. The model's weight post-processing hook registers the
+Attention and MoE variants for JIT warmup using their RMSNorm weight dtypes. Standard graph-capture warmup executes
+the selected boundaries before recording each graph. Disabling JIT precompilation keeps this execution path enabled.
 
 ## Origin and Differences
 

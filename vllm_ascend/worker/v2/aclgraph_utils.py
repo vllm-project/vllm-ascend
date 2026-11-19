@@ -17,14 +17,13 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Callable, Mapping
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import contextmanager
 from typing import Any
 
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.parallel_state import is_global_first_rank
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
@@ -215,16 +214,10 @@ class ModelAclGraphManager(ModelCudaGraphManager):
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
         metadata = getattr(model_state, "device_metadata", None)
-        mhc_mode = getattr(model, "dsv41_mhc_mode", "baseline")
-        mhc_recording: Callable[[], AbstractContextManager[None]] = nullcontext
-        if mhc_mode == "overlap":
-            from vllm_ascend.models.deepseek_v41.mhc import record_mhc_overlap
-
-            mhc_recording = record_mhc_overlap
-        model = ModelWithContext(model, device_metadata=metadata, mhc_recording=mhc_recording)
+        model = ModelWithContext(model, device_metadata=metadata)
         try:
             with communicator_switch():
-                result = super().capture(
+                return super().capture(
                     model,
                     model_state,
                     input_buffers,
@@ -238,17 +231,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                     lora_capture_hook=lora_capture_hook,
                     progress_bar_desc=progress_bar_desc,
                 )
-            if mhc_mode != "baseline" and is_global_first_rank() and self._max_full_descs_to_capture is None:
-                from vllm_ascend.models.deepseek_v41.mhc import MHC_MAX_ROWS
-
-                rows = sorted({desc.num_tokens for desc in self.graphs if desc.cg_mode == CUDAGraphMode.FULL})
-                logger.info(
-                    "DeepSeek V4.1 mHC FULL graph capture mode=%s fusion_rows=%s baseline_rows=%s",
-                    mhc_mode,
-                    [size for size in rows if 0 < size <= MHC_MAX_ROWS],
-                    [size for size in rows if size > MHC_MAX_ROWS],
-                )
-            return result
         finally:
             # Input preparation can fail before ModelWithContext.forward runs.
             if metadata is not None:
@@ -260,20 +242,12 @@ class ModelWithContext(nn.Module):
     so we can inherit vllm's CudaGraphManager._capture_full_graph.
     """
 
-    def __init__(
-        self,
-        original_model,
-        is_draft_model=False,
-        is_draft_model_prefill=False,
-        device_metadata=None,
-        mhc_recording=nullcontext,
-    ):
+    def __init__(self, original_model, is_draft_model=False, is_draft_model_prefill=False, device_metadata=None):
         super().__init__()
         self.original_model = original_model
         self.is_draft_model = is_draft_model
         self.is_draft_model_prefill = is_draft_model_prefill
         self.device_metadata = device_metadata
-        self.mhc_recording = mhc_recording
 
     def forward(self, *args, **kwargs):
         forward_context = get_forward_context()
@@ -291,9 +265,6 @@ class ModelWithContext(nn.Module):
         try:
             if self.device_metadata is not None:
                 self.device_metadata.begin_forward()
-            if _EXTRA_CTX.capturing:
-                with self.mhc_recording():
-                    return self.original_model(*args, **kwargs)
             return self.original_model(*args, **kwargs)
         finally:
             # Warmup and actual capture receive separate prepare_attn calls.

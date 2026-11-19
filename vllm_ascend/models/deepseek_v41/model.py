@@ -25,10 +25,8 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    is_global_first_rank,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
-from vllm.logger import logger
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -960,7 +958,7 @@ class DeepseekV41DecoderLayer(nn.Module):
     def _mhc_finish(self, x, residual, post, comb, pre, *, hc_post):
         return hc_post(x, residual, post, comb), pre, None
 
-    def _mhc_next_attention(self, x, residual, post, comb, pre, *, overlap):
+    def _mhc_next_attention(self, x, residual, post, comb, pre):
         updated, normalized, next_post, next_comb, next_pre = torch.ops.vllm.dsv41_mhc_attention_input(
             x,
             residual,
@@ -974,7 +972,6 @@ class DeepseekV41DecoderLayer(nn.Module):
             self.hc_sinkhorn_iters,
             self.norm_eps,
             self.hc_eps,
-            overlap,
         )
         return updated, pre, (normalized, next_post, next_comb, next_pre)
 
@@ -1006,7 +1003,6 @@ class DeepseekV41DecoderLayer(nn.Module):
             self.hc_sinkhorn_iters,
             self.norm_eps,
             self.hc_eps,
-            True,
             wait_for_attention,
         )
         x = self.mlp(x, input_ids=input_ids, hidden_states_fp32=x_fp32, already_sequence_parallel=False)
@@ -1254,6 +1250,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         self._mhc_replay = None
 
     def initialize_mhc(self, vllm_config):
+        self._mhc_prefix = None
+        self._mhc_replay = None
         parallel = vllm_config.parallel_config
         if (
             vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY
@@ -1265,7 +1263,6 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             or self.use_sequence_parallel
             or parallel.pipeline_parallel_size != 1
             or parallel.use_ubatching
-            or not getattr(getattr(vllm_config, "kernel_config", None), "enable_jit_warmup", True)
         ):
             return
 
@@ -1291,39 +1288,6 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             MHC_POST_COLLAPSE_NORM.register_warmup(weight_dtype, write_fp32)
         self._mhc_prefix = self._plan_mhc(self.start_layer, self.decoder_replay_start)
         self._mhc_replay = self._plan_mhc(self.decoder_replay_start, self.end_layer)
-        if is_global_first_rank():
-            logger.info("DeepSeek V4.1 mHC mode=overlap max_rows=%d source=%s", MHC_MAX_ROWS, __file__)
-
-    @torch.inference_mode()
-    def warmup_mhc(self):
-        if self._mhc_prefix is None:
-            return
-        layer = self.layers[self.start_layer]
-        rows = 12
-        x = layer.input_layernorm.weight.new_zeros((rows, MHC_FUSION_HIDDEN_SIZE), dtype=torch.bfloat16)
-        residual = x.new_zeros((rows, 4, MHC_FUSION_HIDDEN_SIZE))
-        post = x.new_ones((rows, 4), dtype=torch.float32)
-        comb = x.new_zeros((rows, 4, 4), dtype=torch.float32)
-        layer._mhc_next_attention(x, residual, post, comb, post, overlap=False)
-        torch.ops.vllm.dsv41_mhc_moe_input(
-            x,
-            residual,
-            post,
-            comb,
-            post,
-            layer.post_attention_layernorm.weight,
-            layer.hc_ffn_fn,
-            layer.hc_ffn_scale,
-            layer.hc_ffn_base,
-            layer.hc_sinkhorn_iters,
-            layer.norm_eps,
-            layer.hc_eps,
-            False,
-            False,
-        )
-        torch.npu.synchronize()
-        if is_global_first_rank():
-            logger.info("DeepSeek V4.1 mHC warmup completed on the main stream for both boundaries (rows=%d)", rows)
 
     def _plan_mhc(self, start_layer, end_layer):
         steps = list(self._native_mhc_steps)
@@ -1335,7 +1299,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             next_layer = self.layers[next_idx] if next_idx < end_layer else None
             has_prepared_attention = attention_input is not None
             if next_layer is not None and next_layer.engram is None:
-                finish = partial(next_layer._mhc_next_attention, overlap=True)
+                finish = next_layer._mhc_next_attention
                 next_attention_input = _prepared_mhc_attention
             else:
                 finish = partial(layer._mhc_finish, hc_post=hc_post)
@@ -1973,6 +1937,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
     @close_engram_on_init_failure(("model", "_engram_remote_reader"))
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        self.vllm_config = vllm_config
         config = normalize_deepseek_v41_config(vllm_config.model_config.hf_config)
         quant_config = vllm_config.quant_config
         self.config = config
@@ -2104,20 +2069,15 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             engram_mask_ready_event=engram_mask_ready_event,
         )
 
-    @property
-    def dsv41_mhc_mode(self):
-        return "overlap" if self._mhc_forward is not None else "baseline"
-
-    def initialize_mhc(self, vllm_config):
-        self.model.initialize_mhc(vllm_config)
+    def process_weights_after_loading(self) -> None:
+        # Recheck the loaded layout after each weight load or reload.
+        self._mhc_forward = None
+        self.model.initialize_mhc(self.vllm_config)
         if self.model._mhc_prefix is not None:
             # The base and fused forwards share a CompilationConfig, but their
             # npugraph_ex artifacts for the same compile range must stay separate.
             with set_model_tag("dsv41_mhc_overlap"):
-                self._mhc_forward = DeepseekV41MhcForward(vllm_config=vllm_config, model=self.model)
-
-    def warmup_mhc(self):
-        self.model.warmup_mhc()
+                self._mhc_forward = DeepseekV41MhcForward(vllm_config=self.vllm_config, model=self.model)
 
     @property
     def decoder_replay_layers(self):

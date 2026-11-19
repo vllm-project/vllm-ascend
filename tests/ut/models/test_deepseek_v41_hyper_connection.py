@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: E402
 
-from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -14,8 +13,10 @@ pytest.importorskip(
 
 import torch
 from vllm.config import CUDAGraphMode
+from vllm.model_executor.model_loader import weight_utils
 
 from tests.deepseek_v41_utils import hc_mixes_reference, hc_post_reference
+from tests.ut.model_executor.warmup.helpers import make_registry
 from vllm_ascend.models.deepseek_v41 import mhc
 from vllm_ascend.models.deepseek_v41 import model as deepseek_v41_module
 from vllm_ascend.models.deepseek_v41.model import (
@@ -37,7 +38,8 @@ def _layer() -> DeepseekV41DecoderLayer:
 
 
 @pytest.mark.parametrize("graph_mode", [CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.NONE])
-def test_v41_mhc_defaults_to_overlap_for_eligible_batches(monkeypatch, graph_mode):
+@pytest.mark.parametrize("enable_jit_warmup", [False, True])
+def test_v41_mhc_post_load_initializes_eligible_batches(monkeypatch, graph_mode, enable_jit_warmup):
     width = deepseek_v41_module.MHC_FUSION_HIDDEN_SIZE
     layer = _layer()
     norm = SimpleNamespace(weight=torch.ones(width, dtype=torch.bfloat16), variance_epsilon=layer.norm_eps)
@@ -61,8 +63,6 @@ def test_v41_mhc_defaults_to_overlap_for_eligible_batches(monkeypatch, graph_mod
     monkeypatch.setattr(
         deepseek_v41_module, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True)
     )
-    monkeypatch.setattr(deepseek_v41_module, "is_global_first_rank", lambda: False)
-    monkeypatch.setattr(deepseek_v41_module, "MHC_POST_COLLAPSE_NORM", MagicMock())
     monkeypatch.setattr(deepseek_v41_module, "DeepseekV41MhcForward", MagicMock(return_value=fused))
     language_model = AscendDeepseekV41LLMForCausalLM.__new__(AscendDeepseekV41LLMForCausalLM)
     torch.nn.Module.__init__(language_model)
@@ -75,13 +75,28 @@ def test_v41_mhc_defaults_to_overlap_for_eligible_batches(monkeypatch, graph_mod
         model_config=SimpleNamespace(dtype=torch.bfloat16),
         parallel_config=SimpleNamespace(pipeline_parallel_size=1, use_ubatching=False),
         compilation_config=SimpleNamespace(cudagraph_mode=graph_mode),
+        kernel_config=SimpleNamespace(enable_jit_warmup=enable_jit_warmup),
     )
+    language_model.vllm_config = cfg
+    registry = make_registry(cfg)
+    if hasattr(weight_utils, "finalize_model_weights"):
+        finalize = lambda: weight_utils.finalize_model_weights(model)
+    else:
+        finalize = model.process_weights_after_loading
 
-    model.initialize_mhc(cfg)
+    with registry.activate():
+        finalize()
     enabled = graph_mode == CUDAGraphMode.FULL_DECODE_ONLY
-    assert model.dsv41_mhc_mode == ("overlap" if enabled else "baseline")
+    assert len(registry) == (2 if enabled else 0)
     assert model(None, torch.arange(mhc.MHC_MAX_ROWS)) is (fused if enabled else backbone).return_value
     assert model(None, torch.arange(mhc.MHC_MAX_ROWS + 1)) is backbone.return_value
+
+    layer.hc_attn_base = torch.empty(23, dtype=torch.float32)
+    with registry.activate():
+        finalize()
+    assert language_model._mhc_forward is None
+    assert backbone._mhc_prefix is None
+    assert backbone._mhc_replay is None
 
 
 @pytest.mark.parametrize("capturing", [False, True])
@@ -100,18 +115,16 @@ def test_v41_mhc_waits_only_at_coefficient_consumers_during_capture(monkeypatch,
     monkeypatch.setattr(mhc, "_wait_for_coefficients", lambda _: events.append("wait"))
     monkeypatch.setattr(mhc, "_coefficients_on_aux", lambda *args: coefficients("aux"))
     monkeypatch.setattr(mhc, "_native_post", lambda *args: events.append("post"))
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: capturing)
     monkeypatch.setattr(
         torch.ops._C_ascend, "dsv41_hc_pre_coefficients", lambda *args: coefficients("main"), raising=False
     )
 
-    with mhc.record_mhc_overlap() if capturing else nullcontext():
-        updated, normed, _, post, comb, pre = mhc._prepare_moe(
-            x, residual, post, comb, pre, *weights, overlap=True, wait_for_attention=False
-        )
-        updated, normed, post, comb, _ = mhc._prepare_attention(
-            normed, updated, post, comb, pre, *weights, overlap=True
-        )
-        mhc._finish_overlap(normed, updated, post, comb)
+    updated, normed, _, post, comb, pre = mhc._prepare_moe(
+        x, residual, post, comb, pre, *weights, wait_for_attention=False
+    )
+    updated, normed, post, comb, _ = mhc._prepare_attention(normed, updated, post, comb, pre, *weights)
+    mhc._finish_overlap(normed, updated, post, comb)
 
     if capturing:
         assert events == ["fuse", "aux", "wait", "fuse", "aux", "wait", "post"]

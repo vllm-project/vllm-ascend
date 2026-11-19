@@ -731,7 +731,6 @@ def test_load_model_starts_dump_before_capture_in_graph_mode(load_dummy_weights)
     debugger = Mock(spec=["start", "step"])
     runner = _make_dump_runner(debugger)
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL)
-    runner.jit_warmup_registry = SimpleNamespace(activate=nullcontext)
 
     aux_layers = (2, 4)
     with (
@@ -744,11 +743,9 @@ def test_load_model_starts_dump_before_capture_in_graph_mode(load_dummy_weights)
         order.attach_mock(start_nz, "start_nz")
         order.attach_mock(parent_load_model, "parent_load")
         order.attach_mock(join_nz, "join_nz")
-        order.attach_mock(runner.model.initialize_mhc, "initialize_mhc")
         runner.load_model(load_dummy_weights, "load_arg", load_option=True)
 
     parent_load_model.assert_called_once_with(load_dummy_weights, "load_arg", load_option=True)
-    runner.model.initialize_mhc.assert_called_once_with(runner.vllm_config)
     assert runner.pd_dspark_aux_layer_ids == aux_layers
     debugger.start.assert_called_once_with(runner.model)
     # The warmups must be started before weight I/O and joined before the
@@ -759,14 +756,12 @@ def test_load_model_starts_dump_before_capture_in_graph_mode(load_dummy_weights)
         "start_nz",
         "parent_load",
         "join_nz",
-        "initialize_mhc",
     ]
 
 
 def test_load_model_skips_dump_in_eager_mode():
     debugger = Mock(spec=["start", "step"])
     runner = _make_dump_runner(debugger)
-    runner.model = Mock(spec=torch.nn.Module)
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
 
     with patch.object(GPUModelRunner, "load_model"):
