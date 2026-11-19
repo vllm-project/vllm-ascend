@@ -49,6 +49,7 @@ a2:
         os: linux-aarch64-a2b3-2
         model_list:
           - Qwen3-VL-30B-A3B-Instruct
+          - InternLM2-20B-Chat
       - name: accuracy-group-4
         os: linux-aarch64-a2b3-4
         model_list:

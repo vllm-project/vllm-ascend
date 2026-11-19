@@ -107,6 +107,8 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_batch_job_aware_scheduler_e2e.py: 860
   tests/e2e/pull_request/one_card/test_all2allv_dispatch_host_sync.py: 60
   tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20
+  # Two loads of a 20B BF16 checkpoint at TP2, one offline and one served.
+  tests/e2e/pull_request/two_card/test_internlm2_20b_chat.py: 900
   # Mooncake pair: ~700s per scenario pair (TP1, gate mode), plus the semantic
   # round and the concurrent throughput waves; measured 35-40 min once the
   # concurrent floor stopped triggering re-measures.
