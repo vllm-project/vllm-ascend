@@ -219,11 +219,13 @@ def test_qsa_combined_kv_store_and_sigmoid_mul() -> None:
     torch.testing.assert_close(value_cache.view(8, 1, width)[1].cpu(), value[0].cpu(), rtol=0, atol=0)
     torch.testing.assert_close(value_cache.view(8, 1, width)[6].cpu(), value[1].cpu(), rtol=0, atol=0)
 
-    output = torch.randn(400, 4096, dtype=torch.bfloat16, device="npu")
+    rows, live_rows = 400, 257
+    output = torch.randn(rows, 4096, dtype=torch.bfloat16, device="npu")
     gate_storage = torch.randn(400, 8192, dtype=torch.bfloat16, device="npu")
     gate = gate_storage[:, :4096]
-    expected = (output.float() * torch.sigmoid(gate.float())).to(torch.bfloat16)
-    qsa_sigmoid_mul_(output, gate)
+    expected = torch.zeros_like(output)
+    expected[:live_rows] = (output[:live_rows].float() * torch.sigmoid(gate[:live_rows].float())).to(torch.bfloat16)
+    qsa_sigmoid_mul_(output, gate, live_rows)
     torch.testing.assert_close(output.cpu(), expected.cpu(), rtol=1e-2, atol=1e-2)
 
 

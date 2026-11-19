@@ -15,30 +15,32 @@ def _qsa_sigmoid_mul_kernel(
     output_row_stride,
     gate_row_stride,
     width,
+    num_actual_tokens,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0)
     offsets = tl.arange(0, BLOCK)
     mask = offsets < width
+    live = row < num_actual_tokens
     values = tl.load(
         output + row * output_row_stride + offsets,
-        mask=mask,
+        mask=mask & live,
         other=0.0,
     ).to(tl.float32)
     gates = tl.load(
         gate + row * gate_row_stride + offsets,
-        mask=mask,
+        mask=mask & live,
         other=0.0,
     ).to(tl.float32)
     tl.store(
         output + row * output_row_stride + offsets,
-        values * tl.sigmoid(gates),
+        tl.where(live, values * tl.sigmoid(gates), 0.0),
         mask=mask,
     )
 
 
-def qsa_sigmoid_mul_(output: torch.Tensor, gate: torch.Tensor) -> None:
-    """Apply the QSA sigmoid gate in-place with one Triton launch."""
+def qsa_sigmoid_mul_(output: torch.Tensor, gate: torch.Tensor, num_actual_tokens: int) -> None:
+    """Gate live QSA rows and zero graph-padding rows in one launch."""
     if output.shape != gate.shape:
         raise ValueError("QSA output and gate must have the same shape")
     if output.ndim != 2:
@@ -47,6 +49,8 @@ def qsa_sigmoid_mul_(output: torch.Tensor, gate: torch.Tensor) -> None:
         raise ValueError("QSA output and gate must be contiguous in the last dimension")
 
     rows, width = output.shape
+    if not 0 <= num_actual_tokens <= rows:
+        raise ValueError("QSA actual token count must be within the output row count")
     if rows == 0:
         return
     block = triton.next_power_of_2(width)
@@ -56,12 +60,13 @@ def qsa_sigmoid_mul_(output: torch.Tensor, gate: torch.Tensor) -> None:
         output.stride(0),
         gate.stride(0),
         width,
+        num_actual_tokens,
         BLOCK=block,
         num_warps=8,
     )
 
 
-def _qsa_sigmoid_mul_fake(output: torch.Tensor, gate: torch.Tensor) -> None:
+def _qsa_sigmoid_mul_fake(output: torch.Tensor, gate: torch.Tensor, num_actual_tokens: int) -> None:
     return None
 
 
