@@ -14,6 +14,7 @@ test_cases:
       ASCEND_LAUNCH_BLOCKING: "0"
       ACL_OP_INIT_MODE: "1"
       ASCEND_ENABLE_USE_FABRIC_MEM: "1"
+      ASCEND_GLOBAL_RESOURCE_CONFIG: '{"fabric_memory.max_capacity":1}'
       SERVER_PORT: "DEFAULT_PORT"
       VLLM_ENGINE_READY_TIMEOUT_S: "3000"
       PYTHONHASHSEED: "0"
