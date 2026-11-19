@@ -24,6 +24,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+from vllm_ascend.device.device_config import AscendDeviceType, get_ascend_device_type
+
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     """Return the MLA compression ratio across vLLM cache-spec APIs."""
@@ -182,6 +184,8 @@ def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
         return False
 
     connector = getattr(kv_transfer_config, "kv_connector", None)
+    if get_ascend_device_type() != AscendDeviceType.A3:
+        return connector in {"MooncakeConnectorV2", "MooncakePullConnector"}
     extra = getattr(kv_transfer_config, "kv_connector_extra_config", {})
     if connector == "MultiConnector":
         # A single child receives the original cache tensors unchanged. Keep

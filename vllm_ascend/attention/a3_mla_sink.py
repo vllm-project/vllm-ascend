@@ -19,7 +19,7 @@ ROPE_DIM = 64
 LATENT_DIM = 512
 QK_DIM = ROPE_DIM + LATENT_DIM
 PAGE_SIZE = 128
-OPERATOR_MODULE = "flash_attn_npu_3.flash_attn_npu_interface"
+OPERATOR_MODULE = "flash_attn_npu_3"
 
 
 def get_a3_mla_ops():
@@ -27,7 +27,7 @@ def get_a3_mla_ops():
     try:
         module = import_module(OPERATOR_MODULE)
     except ModuleNotFoundError as exc:
-        if exc.name in ("flash_attn_npu_3", OPERATOR_MODULE):
+        if exc.name == OPERATOR_MODULE:
             return None
         raise
     attention = getattr(module, "flash_attn_with_kvcache", None)
@@ -40,7 +40,6 @@ class A3MLAConfig:
     num_heads: int
     softmax_scale: float
     mask_mode: int = 3
-    page_size: int = PAGE_SIZE
     max_seqlen_k: int = PAGE_SIZE
     max_seqlen_q: int = 1
     dtype: torch.dtype = torch.bfloat16
@@ -52,9 +51,7 @@ class A3MLAConfig:
             raise ValueError("softmax_scale must be finite")
         if self.dtype not in (torch.float16, torch.bfloat16):
             raise ValueError("A3 MLA supports FP16/BF16")
-        if not 16 <= self.page_size <= 1024 or self.page_size % 16:
-            raise ValueError("A3 MLA page size must be a multiple of 16 in [16, 1024]")
-        if self.max_seqlen_k <= 0 or self.max_seqlen_k % self.page_size:
+        if self.max_seqlen_k <= 0 or self.max_seqlen_k % PAGE_SIZE:
             raise ValueError("A3 MLA logical KV capacity must be positive and page-aligned")
         if self.max_seqlen_q < 0:
             raise ValueError("query capacity must be nonnegative")
@@ -94,7 +91,7 @@ class A3MLAAdapter:
 
     def allocate_cache(self, pages: int, *, device):
         """Keep both A3 components packed inside each page, including DCP KV."""
-        shape = (pages, self.config.page_size, 1)
+        shape = (pages, PAGE_SIZE, 1)
         return (
             torch.empty((*shape, LATENT_DIM), dtype=self.config.dtype, device=device),
             torch.empty((*shape, ROPE_DIM), dtype=self.config.dtype, device=device),
@@ -110,9 +107,7 @@ class A3MLAAdapter:
         return cls(config, *ops)
 
     def for_capacity(self, columns: int, tokens: int):
-        return replace(
-            self, config=replace(self.config, max_seqlen_k=columns * self.config.page_size, max_seqlen_q=tokens)
-        )
+        return replace(self, config=replace(self.config, max_seqlen_k=columns * PAGE_SIZE, max_seqlen_q=tokens))
 
     def _check_lengths(self, cache_seqlens, cu_seqlens_q, seqused_q):
         batch = cache_seqlens.numel()
@@ -157,7 +152,7 @@ class A3MLAAdapter:
             qkv_dtype=cfg.dtype,
             headdim_v=LATENT_DIM,
             cu_seqlens_q=cu_seqlens_q,
-            page_size=cfg.page_size,
+            page_size=PAGE_SIZE,
             causal=cfg.mask_mode == 3,
             num_splits=1,
         )
@@ -220,11 +215,11 @@ class A3MLAAdapter:
         if not isinstance(k_cache, tuple) or len(k_cache) != 2:
             raise ValueError("A3 MLA requires (content_cache, rope_cache)")
         v_cache, rope_cache = k_cache
-        if v_cache.ndim != 4 or v_cache.shape[1:] != (cfg.page_size, 1, LATENT_DIM):
+        if v_cache.ndim != 4 or v_cache.shape[1:] != (PAGE_SIZE, 1, LATENT_DIM):
             raise ValueError("A3 content cache must be ND [pages,128,1,512]")
         if rope_cache.shape != (*v_cache.shape[:3], ROPE_DIM):
             raise ValueError("A3 RoPE cache shape does not match the content cache")
-        if block_table.shape != (batch, cfg.max_seqlen_k // cfg.page_size) or block_table.dtype != torch.int32:
+        if block_table.shape != (batch, cfg.max_seqlen_k // PAGE_SIZE) or block_table.dtype != torch.int32:
             raise ValueError("A3 page table does not match the prepared metadata capacity")
         for tensor in (v_cache, rope_cache, block_table, cache_seqlens, metadata):
             if tensor.device != device:
@@ -262,26 +257,3 @@ class A3MLAAdapter:
             lse.masked_fill_(output_mask[None, :], -torch.inf)
         # Existing MLA V-up and DCP adaptation consume NTD output and NT LSE.
         return output.transpose(0, 1), lse
-
-
-def a3_target_device_lengths_ready(model_state, attn_groups, draft_layer_names) -> bool:
-    """Conservative consumer contract: unknown target builders keep the barrier.
-
-    Native A5 TargetDeviceMetadata remains handled by the original policy.
-    A3 builders can opt in through supports_spec_device_lengths(), after their
-    exact-host-length consumers have been removed and tested. No user flag may
-    substitute for these initialized consumer declarations.
-    """
-    state_support = getattr(model_state, "supports_spec_device_lengths", None)
-    if not callable(state_support) or state_support() is not True:
-        return False
-    seen = False
-    for groups in attn_groups:
-        for group in groups:
-            if not any(name not in draft_layer_names for name in group.layer_names):
-                continue
-            seen = True
-            supported = getattr(group.get_metadata_builder(0), "supports_spec_device_lengths", None)
-            if not callable(supported) or supported() is not True:
-                return False
-    return seen

@@ -361,7 +361,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         """Build Ascend draft metadata through the upstream attention hook."""
         if (
             batch_desc.cg_mode == CUDAGraphMode.FULL
-            and (getattr(self, "use_flashmla", False) or getattr(self, "use_a3_mla_sink", False))
+            and getattr(self, "use_a3_mla_sink", False)
             and not refresh_for_graph
         ):
             # FULL replay refreshes the captured buffers once in

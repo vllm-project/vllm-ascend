@@ -65,8 +65,19 @@ def ast_method(path, owner, name, scope):
 supports_component_major_mla_pd = ast_symbols(
     "vllm_ascend/core/kv_cache_interface.py",
     {"supports_component_major_mla_pd"},
-    {"VllmConfig": object},
+    {"VllmConfig": object, "AscendDeviceType": SimpleNamespace(A3="a3"), "get_ascend_device_type": lambda: "a3"},
 )["supports_component_major_mla_pd"]
+
+
+@pytest.mark.parametrize("connector,expected", [("MooncakeConnectorV2", True), ("MultiConnector", False)])
+def test_a5_preserves_baseline_pd_layout(monkeypatch, connector, expected):
+    monkeypatch.setitem(supports_component_major_mla_pd.__globals__, "get_ascend_device_type", lambda: "a5")
+    config = selection_impl().vllm_config
+    config.kv_transfer_config = SimpleNamespace(
+        kv_connector=connector,
+        kv_connector_extra_config={"use_layerwise": True, "connectors": [{"kv_connector": "MooncakeConnectorV2"}]},
+    )
+    assert supports_component_major_mla_pd(config) is expected
 
 
 def common(lengths=(15, 7), prefixes=(0, 2, 3), capacity=8):
@@ -172,11 +183,10 @@ def test_uses_existing_execution_config_and_page_capacity(eager):
     assert adapter.config.max_seqlen_q == 16
 
 
-@pytest.mark.parametrize("missing", ["flash_attn_npu_3", sink.OPERATOR_MODULE])
-def test_missing_package_retains_fia(monkeypatch, missing):
+def test_missing_package_retains_fia(monkeypatch):
     def unavailable(name):
         assert name == sink.OPERATOR_MODULE
-        raise ModuleNotFoundError(name=missing)
+        raise ModuleNotFoundError(name=name)
 
     monkeypatch.setattr(sink, "import_module", unavailable)
     assert sink.get_a3_mla_ops() is None
@@ -470,9 +480,7 @@ def test_current_and_persistent_caches_preserve_packed_components():
 
 def runner(ready=True):
     backend = type("UnknownBackend", (), {})
-    provider = SimpleNamespace(supports_spec_device_lengths=lambda: ready)
-    group = SimpleNamespace(layer_names=("target.0",), get_metadata_builder=lambda index: provider)
-    state = SimpleNamespace(supports_spec_device_lengths=lambda: True)
+    state = SimpleNamespace()
     speculator = SimpleNamespace(
         use_flashmla=False, use_a3_mla_sink=True, draft_attn_layer_names={"draft.0"}, attn_backends={"draft.0": backend}
     )
@@ -484,7 +492,7 @@ def runner(ready=True):
     instance = SimpleNamespace(
         sync_spec_pp_cpu_counts=False,
         model_state=state,
-        attn_groups=[[group]],
+        _a3_target_device_lengths=ready,
         speculator=speculator,
         speculative_config=spec,
         model_config=SimpleNamespace(hf_config=SimpleNamespace(), architecture="KimiK31ForConditionalGeneration"),
@@ -498,7 +506,6 @@ def runner(ready=True):
         torch=torch,
         is_deepseek_v41=lambda cfg: False,
         AscendFlashAttentionBackend=backend,
-        a3_target_device_lengths_ready=sink.a3_target_device_lengths_ready,
     )
     path = "vllm_ascend/worker/v2/model_runner.py"
     fn = ast_method(path, "NPUModelRunner", "_can_skip_spec_cpu_length_sync", scope)
@@ -644,16 +651,10 @@ def test_mooncake_layerwise_retains_legacy_layout_and_sync(wrapped, layerwise):
     assert instance._can_skip_spec_cpu_length_sync() is (not layerwise)
 
 
-@pytest.mark.parametrize("reason", ["unknown", "no_groups", "only_draft", "pp", "pcp", "offload", "adaptive", "fia"])
+@pytest.mark.parametrize("reason", ["pp", "pcp", "offload", "adaptive", "fia"])
 def test_sync_fallback_for_every_unsupported_consumer(reason):
     instance, _ = runner()
-    if reason == "unknown":
-        instance.attn_groups[0][0].get_metadata_builder = lambda index: object()
-    elif reason == "no_groups":
-        instance.attn_groups = []
-    elif reason == "only_draft":
-        instance.attn_groups[0][0].layer_names = ("draft.0",)
-    elif reason == "pp":
+    if reason == "pp":
         instance.parallel_config.pipeline_parallel_size = 2
     elif reason == "pcp":
         instance.parallel_config.prefill_context_parallel_size = 2
@@ -666,33 +667,39 @@ def test_sync_fallback_for_every_unsupported_consumer(reason):
     assert instance._can_skip_spec_cpu_length_sync() is False
 
 
-@pytest.mark.parametrize(
-    "path,owner,field,ready,blocked",
-    [
-        ("attention/sfa_v1.py", "AscendSFAMetadataBuilder", "use_pcp", False, True),
-        ("attention/context_parallel/sfa_cp.py", "AscendSFADCPMetadataBuilder", "use_pcp", False, True),
-        ("attention/indexer.py", "AscendSFAIndexerMetadataBuilder", "use_pcp", False, True),
-        ("ops/kda_pcp.py", "KimiKDAHostMetadataBuilder", "pcp_size", 1, 2),
-        ("worker/v2/model_states/mamba_hybrid.py", "AscendMambaHybridModelState", "recoverssm", None, object()),
-    ],
-)
-def test_reviewed_consumers_require_exact_type_and_supported_mode(path, owner, field, ready, blocked):
-    cls = type(owner, (), {})
-    method = ast_method("vllm_ascend/" + path, owner, "supports_spec_device_lengths", {owner: cls})
-    instance = cls()
-    setattr(instance, field, ready)
-    assert method(instance) is True
-    setattr(instance, field, blocked)
-    assert method(instance) is False
-    unknown = type("UnreviewedSubclass", (cls,), {})()
-    setattr(unknown, field, ready)
-    assert method(unknown) is False
+@pytest.mark.parametrize("case", ["supported", "unknown", "empty", "draft_only", "state", "recover", "pcp"])
+def test_bind_target_lengths_once(case, monkeypatch):
+    from types import ModuleType
 
-
-def test_unknown_model_state_keeps_cpu_sync():
-    instance, _ = runner()
-    instance.model_state = SimpleNamespace()
-    assert instance._can_skip_spec_cpu_length_sync() is False
+    modules = {}
+    for path, name in (
+        ("attention.context_parallel.sfa_cp", "AscendSFADCPMetadataBuilder"),
+        ("attention.sfa_v1", "AscendSFAMetadataBuilder"),
+        ("attention.indexer", "AscendSFAIndexerMetadataBuilder"),
+        ("ops.kda_pcp", "KimiKDAHostMetadataBuilder"),
+        ("worker.v2.model_states.mamba_hybrid", "AscendMambaHybridModelState"),
+    ):
+        module = ModuleType("vllm_ascend." + path)
+        modules[name] = type(name, (), {})
+        setattr(module, name, modules[name])
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    state = modules["AscendMambaHybridModelState"]()
+    state.recoverssm = object() if case == "recover" else None
+    builders = [modules[name]() for name in modules if name.endswith("Builder")]
+    if case == "unknown":
+        builders.append(object())
+    group = SimpleNamespace(layer_names=["draft" if case == "draft_only" else "target"], metadata_builders=builders)
+    runner = SimpleNamespace(
+        model_state=object() if case == "state" else state,
+        attn_groups=[] if case == "empty" else [[group]],
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=2 if case == "pcp" else 1),
+    )
+    configure = ast_method(
+        "vllm_ascend/worker/v2/model_runner.py", "NPUModelRunner", "_configure_a3_target_lengths", {}
+    )
+    assert configure(runner, {"draft"}) is (case == "supported")
+    for sfa in builders[:2]:
+        assert getattr(sfa, "allow_a3_device_lengths", False) is (case == "supported")
 
 
 @pytest.mark.parametrize("has_device_metadata", [False, True])
@@ -702,7 +709,6 @@ def test_a5_sync_policy_retains_original_target_producer_requirement(has_device_
     instance.speculator.use_flashmla = True
     instance.model_state = SimpleNamespace(device_metadata=object() if has_device_metadata else None)
     # A5 must not inspect the A3 consumer declarations or require A3 groups.
-    del instance.attn_groups
     assert instance._can_skip_spec_cpu_length_sync() is has_device_metadata
 
 
@@ -714,12 +720,6 @@ def test_sfa_build_consumes_device_lengths_without_exact_cpu_mirror(monkeypatch,
         "get_cos_and_sin_mla": lambda *args, **kwargs: (torch.zeros(3, 64), torch.zeros(3, 64)),
         "split_decodes_and_prefills": lambda *args, **kwargs: (2, 0, 3, 0),
     }
-    cls.supports_spec_device_lengths = ast_method(
-        "vllm_ascend/attention/sfa_v1.py",
-        cls.__name__,
-        "supports_spec_device_lengths",
-        scope,
-    )
     build = ast_method("vllm_ascend/attention/sfa_v1.py", cls.__name__, "_build", scope)
     instance = cls()
     instance.use_pcp = instance.nope = instance.use_rope = False

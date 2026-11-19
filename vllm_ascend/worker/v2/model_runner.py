@@ -64,7 +64,6 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_mask,
     set_mc2_tokens_capacity,
 )
-from vllm_ascend.attention.a3_mla_sink import a3_target_device_lengths_ready
 from vllm_ascend.attention.attention_c8_mxfp import (
     AscendC8MXFPAttentionBackendImpl,
     fill_mxfp_v_scale_cache,
@@ -448,6 +447,7 @@ class NPUModelRunner(GPUModelRunner):
     ) -> None:
         # Match V1's physical buffer plan without mutating the scheduler's
         # logical cache configuration. Allocation must honor zero-stride aliases.
+        self._a3_target_device_lengths = False
         kv_cache_config = deepcopy(kv_cache_config)
         sparse_cfg = self.ascend_config.sparse_kv_offload_config
         configure_dspark_kv_transfer(
@@ -545,7 +545,12 @@ class NPUModelRunner(GPUModelRunner):
         draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
         # The speculator owns separate builders and graph buffers for these
         # layers. Building them with target lengths submits unused schedules.
-        self.attn_groups = target_attn_groups_without_draft_flashmla(self.attn_groups, draft_layer_names)
+        if any(
+            getattr(getattr(layer, "impl", None), "use_a3_mla_sink", False)
+            for layer in self.compilation_config.static_forward_context.values()
+        ):
+            self.attn_groups = target_attn_groups_without_draft_flashmla(self.attn_groups, draft_layer_names)
+            self._a3_target_device_lengths = self._configure_a3_target_lengths(draft_layer_names)
         self.use_fia = any(
             (group.backend is AscendAttentionBackend or group.backend is AscendMLABackend)
             and any(layer_name not in draft_layer_names for layer_name in group.layer_names)
@@ -1346,6 +1351,36 @@ class NPUModelRunner(GPUModelRunner):
         self._finalize_dump_data(dump=False)
         return output
 
+    def _configure_a3_target_lengths(self, draft_layer_names: set[str]) -> bool:
+        """Bind the K3.1 target length policy once per KV cache initialization."""
+        from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
+        from vllm_ascend.attention.indexer import AscendSFAIndexerMetadataBuilder
+        from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
+        from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBuilder
+        from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
+
+        if (
+            type(self.model_state) is not AscendMambaHybridModelState
+            or self.model_state.recoverssm is not None
+            or self.parallel_config.prefill_context_parallel_size != 1
+        ):
+            return False
+        sfa_types = (AscendSFAMetadataBuilder, AscendSFADCPMetadataBuilder)
+        supported = (*sfa_types, AscendSFAIndexerMetadataBuilder, KimiKDAHostMetadataBuilder)
+        builders = [
+            builder
+            for groups in self.attn_groups
+            for group in groups
+            if any(name not in draft_layer_names for name in group.layer_names)
+            for builder in group.metadata_builders
+        ]
+        if not builders or any(type(builder) not in supported for builder in builders):
+            return False
+        for builder in builders:
+            if type(builder) in sfa_types:
+                builder.allow_a3_device_lengths = True
+        return True
+
     def _can_skip_spec_cpu_length_sync(self) -> bool:
         """Allow device lengths for supported speculative-decoding paths."""
         if self.sync_spec_pp_cpu_counts:
@@ -1376,9 +1411,8 @@ class NPUModelRunner(GPUModelRunner):
         use_flashmla = getattr(self.speculator, "use_flashmla", False)
         # Backend selection already checked the PD cache layout. Only the
         # initialized target consumers remain to be checked here, as on A5.
-        use_a3_mla_sink = getattr(self.speculator, "use_a3_mla_sink", False)
-        a3_device_lengths = use_a3_mla_sink and a3_target_device_lengths_ready(
-            self.model_state, self.attn_groups, self.speculator.draft_attn_layer_names
+        a3_device_lengths = getattr(self.speculator, "use_a3_mla_sink", False) and getattr(
+            self, "_a3_target_device_lengths", False
         )
         # K3.1 SFA/KDA and the FlashMLA draft consume corrected device lengths.
         # The initialized target producer also covers sharded SFA DCP metadata.

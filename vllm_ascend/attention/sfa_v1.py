@@ -71,12 +71,10 @@ from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import TurboQua
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
-    AscendDeviceType,
     dispose_layer,
     enable_pcp_o_proj_weight_sharding,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
-    get_ascend_device_type,
     is_mtp_layer,
     is_rl_weight_update_enabled,
     maybe_trans_nz,
@@ -424,6 +422,8 @@ class AscendSFAMetadata:
     understand this class
     """
 
+    allow_a3_device_lengths = False
+
     # NOTE(sang): Definition of context_len, query_len, and seq_len.
     # |---------- N-1 iteration --------|
     # |---------------- N iteration ---------------------|
@@ -518,11 +518,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     understand this class
     """
 
-    def supports_spec_device_lengths(self) -> bool:
-        # Execution uses seq_lens/query_start_loc tensors. The optional CPU
-        # mirror is diagnostic; unreviewed subclasses must opt in separately.
-        return type(self) is AscendSFAMetadataBuilder and not self.use_pcp
-
     def __init__(
         self,
         kv_cache_spec,
@@ -548,14 +543,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.nope = layer.qk_rope_head_dim == 0
         self.use_rope = not getattr(vllm_config.model_config.hf_text_config, "mla_use_nope", False)
         self.nope_states: dict[int | None, SparseMLAMetadataState] = {}
-        self.allow_a3_device_lengths = (
-            get_ascend_device_type() == AscendDeviceType.A3
-            and vllm_config.model_config.hf_config.model_type == "kimi_k31"
-            and getattr(vllm_config, "use_v2_model_runner", False)
-            and vllm_config.speculative_config is not None
-            and vllm_config.speculative_config.method == "dspark"
-        )
-
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
         self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
         self.speculative_config = vllm_config.speculative_config
@@ -677,7 +664,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
         elif common_attn_metadata.seq_lens_cpu is not None:
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
-        elif self.nope or (getattr(self, "allow_a3_device_lengths", False) and self.supports_spec_device_lengths()):
+        elif self.nope or self.allow_a3_device_lengths:
             # These consumers use device lengths and scheduler upper bounds;
             # do not recreate an exact CPU mirror when it is absent.
             seq_lens_cpu = None

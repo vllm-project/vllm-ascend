@@ -34,7 +34,7 @@ FLASHMLA_MAX_BATCH_SIZE = 65535
 def target_attn_groups_without_draft_flashmla(attn_groups, draft_layer_names):
     """Keep cache-group indices while leaving draft metadata to its own runner.
 
-    Only dedicated external-MLA draft groups are removed. Other backends and
+    Only dedicated A3 MLA draft groups are removed. Other backends and
     mixed target/draft groups retain their existing metadata preparation.
     """
     return [
@@ -44,7 +44,7 @@ def target_attn_groups_without_draft_flashmla(attn_groups, draft_layer_names):
             if not (
                 group.layer_names
                 and all(name in draft_layer_names for name in group.layer_names)
-                and getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
+                and getattr(group.get_metadata_builder(0), "use_a3_mla_sink", False)
             )
         ]
         for groups in attn_groups
@@ -362,8 +362,7 @@ class FlashMLAMetadataBuilder:
     def _allocate_schedule(self, adapter, tokens, columns, lengths, cu, used):
         if isinstance(adapter, A3MLAAdapter):
             adapter = adapter.for_capacity(columns, tokens)
-            # A3 has no Meta implementation. Bootstrap once from empty device
-            # sequences; the operator owns the opaque schedule's byte layout.
+            # Let the installed provider allocate its opaque schedule once for this capacity.
             schedule = adapter.build_metadata(lengths, cu, used)
         else:
             schedule_meta = adapter.build_metadata(

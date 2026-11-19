@@ -306,27 +306,24 @@ def configure_dspark_metadata(spec, provider):
     spec._prepare_draft_dcp_metadata_inputs = lambda *args: (None, torch.zeros(2, dtype=torch.bool))
 
 
-@pytest.mark.parametrize("provider", ["a3", "a5"])
-def test_dspark_full_graph_refreshes_only_two_schedules_per_round(runtime, monkeypatch, provider):
+def test_dspark_full_graph_refreshes_only_two_schedules_per_round(runtime, monkeypatch):
     """Regression: target + propose + replay previously submitted six schedules."""
     a3 = sys.modules["vllm_ascend.attention.a3_mla_sink"]
     calls = []
-    adapter = None
-    if provider == "a3":
-        monkeypatch.setattr(a3.A3MLAAdapter, "_check_lengths", lambda self, lengths, cu, used: lengths.numel())
+    monkeypatch.setattr(a3.A3MLAAdapter, "_check_lengths", lambda self, lengths, cu, used: lengths.numel())
 
-        def metadata_op(*args, **kwargs):
-            calls.append(args[6])
-            return torch.cat((args[6], kwargs["cu_seqlens_q"])).to(torch.uint8)
+    def metadata_op(*args, **kwargs):
+        calls.append(args[6])
+        return torch.cat((args[6], kwargs["cu_seqlens_q"])).to(torch.uint8)
 
-        adapter = a3.A3MLAAdapter(a3.A3MLAConfig(8, 0.125, dtype=torch.float16), None, metadata_op)
+    adapter = a3.A3MLAAdapter(a3.A3MLAConfig(8, 0.125, dtype=torch.float16), None, metadata_op)
     builder = runtime.builder(size=8, a3_adapter=adapter)
     inputs = common([17, 9], [3, 3], tokens=6)
     flash = builder.build(inputs, 2, 6, False, retain_for_graph=True)
     assert flash.current is not None
     pointers = addresses(flash)
     draft = SimpleNamespace(
-        layer_names=["draft.0"], get_metadata_builder=lambda _: SimpleNamespace(flashmla_state=builder)
+        layer_names=["draft.0"], get_metadata_builder=lambda _: SimpleNamespace(use_a3_mla_sink=True)
     )
     target = SimpleNamespace(layer_names=["target.0"], get_metadata_builder=lambda _: object())
     groups = [[target], [draft]]
@@ -339,7 +336,7 @@ def test_dspark_full_graph_refreshes_only_two_schedules_per_round(runtime, monke
             return {"draft.0": SimpleNamespace(external_flashmla=current)}
 
     spec = dspark_metadata_class(Parent)()
-    configure_dspark_metadata(spec, provider)
+    configure_dspark_metadata(spec, "a3")
     for lengths in ([23, 11], [7, 0], [31, 13]):
         inputs.seq_lens.copy_(torch.tensor(lengths, dtype=torch.int32))
         runtime.metadata_op.reset_mock()
@@ -363,7 +360,7 @@ def test_dspark_full_graph_refreshes_only_two_schedules_per_round(runtime, monke
         # The real graph-manager entry refreshes the captured buffers once.
         result = spec.build_draft_attn_metadatas(2, torch.tensor(lengths))[0]["draft.0"].external_flashmla
         assert result is flash and addresses(result) == pointers
-        assert (len(calls) if provider == "a3" else runtime.metadata_op.call_count) == 2
+        assert len(calls) == 2
         expected = [sum(t % 8 == 0 for t in range(max(0, length - 3))) for length in lengths]
         assert result.cache_lens[:2].tolist() == expected
         assert result.used_q[:2].tolist() == [3, 3 if lengths[1] else 0]
@@ -388,7 +385,7 @@ def test_dspark_metadata_dispatch_preserves_non_full_and_fia(provider, mode):
         torch.tensor([17, 9]),
         3,
     )
-    skipped = mode == "full" and provider != "fia"
+    skipped = mode == "full" and provider == "a3"
     assert (result is None) == skipped
     assert len(calls) == int(not skipped)
     if calls:
