@@ -104,33 +104,35 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
             from vllm_ascend.lora.fused_moe import (
                 _recover_moe_lora_routing_all2all,
                 _recover_moe_lora_routing_allgather,
+                has_lora,
                 moe_lora_apply_w13,
             )
 
-            if mlp_compute_input.expanded_row_idx is not None and mlp_compute_input.topk_ids is not None:
-                self._lora_routing = _recover_moe_lora_routing_allgather(
-                    lora_context,
-                    mlp_compute_input.expanded_row_idx,
-                    mlp_compute_input.topk_ids,
-                )
-            elif getattr(lora_context, "exchanged_lora_indices", None) is not None:
-                self._lora_routing = _recover_moe_lora_routing_all2all(
-                    lora_context,
-                    group_list=mlp_compute_input.group_list,
-                )
-            else:
-                raise AssertionError(
-                    "MoE LoRA requires either expanded_row_idx+topk_ids "
-                    "(AllGather) or lora_context.exchanged_lora_indices "
-                    "(AlltoAll). Neither was provided."
-                )
+            if has_lora(lora_context):
+                if mlp_compute_input.expanded_row_idx is not None and mlp_compute_input.topk_ids is not None:
+                    self._lora_routing = _recover_moe_lora_routing_allgather(
+                        lora_context,
+                        mlp_compute_input.expanded_row_idx,
+                        mlp_compute_input.topk_ids,
+                    )
+                elif getattr(lora_context, "exchanged_lora_indices", None) is not None:
+                    self._lora_routing = _recover_moe_lora_routing_all2all(
+                        lora_context,
+                        group_list=mlp_compute_input.group_list,
+                    )
+                else:
+                    raise AssertionError(
+                        "MoE LoRA requires either expanded_row_idx+topk_ids "
+                        "(AllGather) or lora_context.exchanged_lora_indices "
+                        "(AlltoAll). Neither was provided."
+                    )
 
-            moe_lora_apply_w13(
-                lora_context,
-                gate_up_out=gate_up_out,
-                hidden_states=hidden_states,
-                lora_routing=self._lora_routing,
-            )
+                moe_lora_apply_w13(
+                    lora_context,
+                    gate_up_out=gate_up_out,
+                    hidden_states=hidden_states,
+                    lora_routing=self._lora_routing,
+                )
 
         return torch_npu.npu_swiglu(gate_up_out), None
 

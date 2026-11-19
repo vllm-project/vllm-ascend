@@ -53,6 +53,11 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
         self.ep_group = get_ep_group()
         vllm_config = get_current_vllm_config()
         self.in_dtype = vllm_config.model_config.dtype
+        self.lora_context = None
+        self._lora_routing = None
+
+    def set_lora_context(self, lora_context) -> None:
+        self.lora_context = lora_context
 
     def get_weight(
         self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
@@ -152,14 +157,51 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
         layer = mlp_compute_input.layer
         assert layer is not None
         w1, w1_scale, _, _ = self._get_mlp_weights(layer)
-        hidden_states = torch_npu.npu_quant_grouped_matmul_dequant(
+        gate_up_out = torch_npu.npu_quant_grouped_matmul_dequant(
             x=mlp_compute_input.hidden_states,
             quantized_weight=w1,
             weight_scale=w1_scale,
             group_list=self._get_group_list(mlp_compute_input),
             quant_mode="pertoken",
         )
-        hidden_states = torch_npu.npu_swiglu(hidden_states)
+
+        self._lora_routing = None
+        lora_context = mlp_compute_input.lora_context
+        if lora_context is not None:
+            from vllm_ascend.lora.fused_moe import (
+                _recover_moe_lora_routing_all2all,
+                _recover_moe_lora_routing_allgather,
+                has_lora,
+                moe_lora_apply_w13,
+            )
+
+            if has_lora(lora_context):
+                if mlp_compute_input.expanded_row_idx is not None and mlp_compute_input.topk_ids is not None:
+                    self._lora_routing = _recover_moe_lora_routing_allgather(
+                        lora_context,
+                        mlp_compute_input.expanded_row_idx,
+                        mlp_compute_input.topk_ids,
+                    )
+                elif getattr(lora_context, "exchanged_lora_indices", None) is not None:
+                    self._lora_routing = _recover_moe_lora_routing_all2all(
+                        lora_context,
+                        group_list=mlp_compute_input.group_list,
+                    )
+                else:
+                    raise AssertionError(
+                        "MoE LoRA requires either expanded_row_idx+topk_ids "
+                        "(AllGather) or lora_context.exchanged_lora_indices "
+                        "(AlltoAll). Neither was provided."
+                    )
+
+                moe_lora_apply_w13(
+                    lora_context,
+                    gate_up_out=gate_up_out,
+                    hidden_states=mlp_compute_input.hidden_states,
+                    lora_routing=self._lora_routing,
+                )
+
+        hidden_states = torch_npu.npu_swiglu(gate_up_out)
         return hidden_states, None
 
     def apply_gmm2(self, mlp_compute_input: MoEMlpComputeInput, hidden_states, act_out_scale):
@@ -167,13 +209,28 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
         layer = mlp_compute_input.layer
         assert layer is not None
         _, _, w2, w2_scale = self._get_mlp_weights(layer)
-        return torch_npu.npu_quant_grouped_matmul_dequant(
+        silu_out = hidden_states
+        hidden_states = torch_npu.npu_quant_grouped_matmul_dequant(
             x=hidden_states,
             quantized_weight=w2,
             weight_scale=w2_scale,
             group_list=self._get_group_list(mlp_compute_input),
             quant_mode="pertoken",
         )
+
+        lora_routing = getattr(self, "_lora_routing", None)
+        if lora_routing is not None:
+            from vllm_ascend.lora.fused_moe import moe_lora_apply_w2
+
+            lora_context = mlp_compute_input.lora_context or getattr(self, "lora_context", None)
+            moe_lora_apply_w2(
+                lora_context,
+                down_out=hidden_states,
+                silu_out=silu_out,
+                lora_routing=lora_routing,
+            )
+            self._lora_routing = None
+        return hidden_states
 
     def process_weights_after_loading(self, layer):
         layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)

@@ -125,6 +125,86 @@ class TestMoELoraContext310P(TestBase):
                 return_value=silu_out,
             ),
             patch(
+                "vllm_ascend.lora.fused_moe.has_lora",
+                return_value=True,
+            ),
+            patch(
+                "vllm_ascend.lora.fused_moe._recover_moe_lora_routing_allgather",
+                return_value=fake_routing,
+            ) as mock_recover,
+            patch("vllm_ascend.lora.fused_moe.moe_lora_apply_w13") as mock_w13,
+            patch("vllm_ascend.lora.fused_moe.moe_lora_apply_w2") as mock_w2,
+        ):
+            act_out, scale = method.apply_gmm1_act_quant(mlp_input)
+            self.assertIs(act_out, silu_out)
+            self.assertIsNone(scale)
+            mock_recover.assert_called_once_with(lora_ctx, expanded_row_idx, topk_ids)
+            mock_w13.assert_called_once_with(
+                lora_ctx,
+                gate_up_out=gate_up,
+                hidden_states=hidden,
+                lora_routing=fake_routing,
+            )
+
+            final_out = method.apply_gmm2(mlp_input, act_out, scale)
+            self.assertIs(final_out, down_out)
+            mock_w2.assert_called_once_with(
+                lora_ctx,
+                down_out=down_out,
+                silu_out=silu_out,
+                lora_routing=fake_routing,
+            )
+            self.assertIsNone(method._lora_routing)
+
+    def test_w8a8_dynamic_310p_gmm_hooks_apply_lora_w13_and_w2(self):
+        lora_ctx = SimpleNamespace(exchanged_lora_indices=torch.tensor([0, 0]))
+        layer = _make_fake_layer(lora_ctx)
+        layer.w13_weight_scale = torch.ones(2, 32, dtype=torch.float32)
+        layer.w2_weight_scale = torch.ones(2, 16, dtype=torch.float32)
+
+        method = AscendW8A8DynamicFusedMoEMethod310.__new__(AscendW8A8DynamicFusedMoEMethod310)
+        method.lora_context = None
+        method._lora_routing = None
+        method.set_lora_context(lora_ctx)
+        self.assertIs(method.lora_context, lora_ctx)
+
+        hidden = torch.randn(2, 16, dtype=torch.float16)
+        gate_up = torch.randn(2, 32, dtype=torch.float16)
+        silu_out = torch.randn(2, 16, dtype=torch.float16)
+        down_out = torch.randn(2, 16, dtype=torch.float16)
+        group_list = torch.tensor([1, 1], dtype=torch.int64)
+        expanded_row_idx = torch.tensor([0, 1], dtype=torch.int32)
+        topk_ids = torch.tensor([[0], [1]], dtype=torch.int32)
+
+        mlp_input = MoEMlpComputeInput(
+            hidden_states=hidden,
+            group_list=group_list,
+            group_list_type=1,
+            dynamic_scale=None,
+            topk_scales=None,
+            weights=MagicMock(),
+            quant=MagicMock(),
+            fusion=True,
+            layer=layer,
+            activation=MoEActivation.SILU,
+            lora_context=lora_ctx,
+            expanded_row_idx=expanded_row_idx,
+            topk_ids=topk_ids,
+        )
+
+        fake_routing = MagicMock(name="lora_routing")
+        with (
+            patch(
+                "vllm_ascend._310p.quantization.methods.w8a8_dynamic.torch_npu.npu_quant_grouped_matmul_dequant",
+                side_effect=[gate_up, down_out],
+                create=True,
+            ),
+            patch(
+                "vllm_ascend._310p.quantization.methods.w8a8_dynamic.torch_npu.npu_swiglu",
+                return_value=silu_out,
+            ),
+            patch("vllm_ascend.lora.fused_moe.has_lora", return_value=True),
+            patch(
                 "vllm_ascend.lora.fused_moe._recover_moe_lora_routing_allgather",
                 return_value=fake_routing,
             ) as mock_recover,
