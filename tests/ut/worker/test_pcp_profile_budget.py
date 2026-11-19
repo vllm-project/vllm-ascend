@@ -5,21 +5,23 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import numpy as np
 import pytest
 from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import get_pcp_profile_num_tokens
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 
-def make_runner(tokens=16384, pcp=16, requests=64, query=4, replicated=False):
+def make_runner(tokens=16384, pcp=16, requests=64, query=4, replicated=False, dcp=1):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.max_num_tokens = tokens
     runner.max_num_reqs = requests
     runner.vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp, decode_context_parallel_size=dcp),
         model_config=SimpleNamespace(enforce_eager=True),
         compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE, cudagraph_capture_sizes=[]),
     )
@@ -184,3 +186,44 @@ def test_empty_prefill_grid_does_not_use_draft_graph_sizes():
     config.compilation_config.prefill_cudagraph_capture_token_sizes = []
     config.compilation_config.cudagraph_capture_sizes = [8192]
     assert get_pcp_profile_num_tokens(config, runner.max_num_tokens, runner.max_num_reqs) == 3048
+
+
+@pytest.mark.parametrize(
+    "pcp,requests,query,lens,prefills",
+    [
+        (8, 500, 4, [4] * 499 + [14388], [False] * 499 + [True]),
+        (8, 500, 1, [15] * 500, [True] * 500),
+        (16, 500, 1, [31] * 500, [True] * 500),
+        (8, 2, 1, [225, 16159], [True, True]),
+        (16, 2, 1, [961, 15423], [True, True]),
+        (8, 2, 256, [256, 16128], [False, True]),
+    ],
+)
+def test_dcp_budget_covers_actual_pcp_partitions(pcp, requests, query, lens, prefills):
+    runner = make_runner(pcp=pcp, requests=requests, query=query, dcp=pcp)
+    manager = PCPManager.__new__(PCPManager)
+    manager.pcp_world_size = pcp
+    manager.dcp_world_size = pcp
+    manager.shard_decode_requests = False
+    per_rank_tokens = [
+        sum(
+            count
+            for _, _, count in manager._iter_rank_chunks(
+                rank, np.array(lens, dtype=np.int64), np.array(prefills, dtype=np.bool_)
+            )
+        )
+        for rank in range(pcp)
+    ]
+    budget = get_pcp_profile_num_tokens(runner.vllm_config, runner.max_num_tokens, runner.max_num_reqs)
+    assert max(per_rank_tokens) <= budget <= runner.max_num_tokens
+    if requests == 2:
+        assert budget < runner.max_num_tokens
+
+
+def test_dcp_budget_still_covers_prefill_graph():
+    runner = make_runner(pcp=8, requests=2, query=1, dcp=8)
+    config = runner.vllm_config
+    config.model_config.enforce_eager = False
+    config.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+    config.compilation_config.prefill_cudagraph_capture_token_sizes = [4096]
+    assert get_pcp_profile_num_tokens(config, runner.max_num_tokens, runner.max_num_reqs) == 4096

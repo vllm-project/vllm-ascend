@@ -108,7 +108,19 @@ def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max
     local_tokens = (max_num_tokens + pcp_size - 1) // pcp_size
     # DualChunkSwap rounds two chunks per request on each PCP rank.
     padding_tokens = 2 * max_num_reqs
-    profile_tokens = min(max_num_tokens, max(local_tokens, max_num_reqs * query_per_req) + padding_tokens)
+    if vllm_config.parallel_config.decode_context_parallel_size > 1:
+        # DCP replicates decodes and prefills that leave an empty PCP chunk.
+        # For n=2*PCP chunks, (n-1)*ceil(tokens/n) >= tokens holds only up
+        # to (n-1)**2 tokens. Bound replicated rows before sharding the rest.
+        max_replicated_query = max(query_per_req, (2 * pcp_size - 1) ** 2)
+        replicated_tokens = min(max_num_tokens, max_num_reqs * max_replicated_query)
+        remaining_tokens = max_num_tokens - replicated_tokens
+        profile_tokens = min(
+            max_num_tokens,
+            replicated_tokens + (remaining_tokens + pcp_size - 1) // pcp_size + padding_tokens,
+        )
+    else:
+        profile_tokens = min(max_num_tokens, max(local_tokens, max_num_reqs * query_per_req) + padding_tokens)
 
     from vllm.config import CUDAGraphMode
 

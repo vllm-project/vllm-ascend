@@ -62,6 +62,7 @@ def _make_vllm_config(
         pipeline_parallel_size=pipeline_parallel_size,
         tensor_parallel_size=tensor_parallel_size,
         prefill_context_parallel_size=1,
+        decode_context_parallel_size=1,
     )
     compilation_config = SimpleNamespace(
         cudagraph_mode=CUDAGraphMode.NONE,
