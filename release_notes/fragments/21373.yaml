@@ -1,0 +1,4 @@
+pr: 21373
+entries:
+  - category: feature
+    text: Model Runner V2 users can now use static kernels and SuperKernel with Breakable ACLGraph. Set `enable_static_kernel` to `true` to enable static kernel compilation during graph warmup and turn on SuperKernel by default.

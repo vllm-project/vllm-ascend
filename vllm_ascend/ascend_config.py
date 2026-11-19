@@ -123,7 +123,7 @@ class AscendCompilationConfig:
 
     Migrated to ``@config`` (pydantic dataclass). Hardware-profile runtime
     downgrades (disable npugraph_ex / static_kernel / super_kernel) and the
-    super_kernel→static_kernel→npugraph_ex dependency checks are applied in
+    super_kernel→static_kernel dependency checks are applied in
     an ``after`` model_validator.
     """
 
@@ -154,24 +154,17 @@ class AscendCompilationConfig:
     def _apply_unsupported_hardware_downgrade_and_static_kernel_check(self):
         from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
+        # TODO: Validate static kernel compilation during graph warmup on profiles without npugraph_ex support.
         if not get_current_hardware_profile().supports(HardwareCapability.NPUGRAPH_EX):
             if self.enable_npugraph_ex:
-                logger.warning("npugraph_ex is not supported by the current hardware profile. Disabling it.")
+                logger.warning("Disabling npugraph_ex for the current hardware profile.")
             if self.enable_static_kernel:
-                logger.warning(
-                    "static kernel requires npugraph_ex, which is not supported by the current hardware profile. "
-                    "Disabling it."
-                )
+                logger.warning("Disabling static kernel compilation for the current hardware profile.")
             if self.enable_super_kernel:
-                logger.warning(
-                    "super kernel requires static kernel, which is not supported by the current hardware profile. "
-                    "Disabling it."
-                )
+                logger.warning("Disabling SuperKernel for the current hardware profile.")
             self.enable_npugraph_ex = False
             self.enable_static_kernel = False
             self.enable_super_kernel = False
-        if self.enable_static_kernel:
-            assert self.enable_npugraph_ex, "Static kernel generation requires npugraph_ex to be enabled."
         if self.enable_super_kernel:
             assert self.enable_static_kernel, "Super kernel generation requires static kernel to be enabled."
         return self
