@@ -358,7 +358,7 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
             # 2.2: Process the remaining part
             if attn_metadata.num_prefills > 0:
                 initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
-                initial_state[~has_initial_state, ...] = 0
+                initial_state.masked_fill_(~has_initial_state.view(-1, 1, 1, 1), 0)
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
