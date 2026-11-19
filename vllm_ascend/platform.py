@@ -1879,7 +1879,7 @@ def _validate_minimax_dspark_flash_attn(config, selector) -> bool:
 
 
 def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
-    """Select the optional A2/A3 FA3 ABI only for compatible MiniMax attention."""
+    """Select the optional A2/A3 FA3 ABI for compatible draft attention."""
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
         HardwareCapability.FLASH_ATTN_NPU_3
     ):
@@ -1893,8 +1893,18 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
     spec = config.speculative_config if config is not None else None
     if spec is None or spec.draft_model_config is None:
         return False
-    if config is None or config.model_config is None or not _uses_minimax_fa3(config):
+    if config is None or config.model_config is None:
         return False
+    if not _uses_minimax_fa3(config):
+        # DSpark's loader retains the target model_config in the active config.
+        draft_hf = getattr(spec.draft_model_config, "hf_config", None)
+        architectures = getattr(draft_hf, "architectures", None) or ()
+        if spec.method != "dspark" or not {"Qwen3DSparkModel", "Qwen3OmniDSparkModel"}.intersection(architectures):
+            return False
+        from vllm.compilation import backends
+
+        if backends.model_tag != "dspark_head":
+            return False
     parallel = config.parallel_config
     return (
         selector.attn_type == AttentionType.DECODER

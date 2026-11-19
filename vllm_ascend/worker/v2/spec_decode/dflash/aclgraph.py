@@ -83,6 +83,14 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         one the installed vLLM expects.
         """
         prepare_kwargs: dict[str, Any] = {"prepare_forward": prepare_forward}
+        for groups in attn_groups:
+            for group in groups:
+                if getattr(group.backend, "uses_device_tiling", False) and group.metadata_builders:
+                    builder = group.get_metadata_builder(0)
+                    # Draft buckets are rounded to their own query width, not
+                    # the target's N+1 verification width or raw config sizes.
+                    builder.capture_sizes = set(self.capture_sizes)
+                    builder.capture_query_len = self.speculator.num_query_per_req
         with communicator_switch(), model_capture_wrapper(self.speculator, False):
             super().capture(
                 forward_fn,
@@ -100,6 +108,13 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         attn_backend = list(self.speculator.attn_backends.values())[0]
+        if all(getattr(backend, "uses_device_tiling", False) for backend in self.speculator.attn_backends.values()):
+            # Upstream propose has already built metadata after prepare-inputs.
+            # That build updates the captured tiling buffers on the current
+            # stream; replay consumes them in order. Do not rebuild or dispatch
+            # FIA's host graph updates. Keep supports_decode_metadata_update
+            # false: AICPU tiling is deliberately outside the captured graph.
+            return super().run_fullgraph(desc)
         if all(backend is AscendFlashAttentionBackend for backend in self.speculator.attn_backends.values()):
             # Length preparation and FlashAttn tiling run inside the graph,
             # reading the draft's persistent device buffers on every replay.
