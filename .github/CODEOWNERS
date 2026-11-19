@@ -2,23 +2,23 @@
 
 # Infra, CI
 /.gemini @wangxiyuan
-/.github @zhangxinyuehfad
+/.github @zhangxinyuehfad @czydyy
 /.github/CODEOWNERS @wangxiyuan
-/tools @zhangxinyuehfad
-/.gitignore @zhangxinyuehfad
-/.pre-commit-config.yaml @zhangxinyuehfad
-/codecov.yml @zhangxinyuehfad
-/format.sh @zhangxinyuehfad
-/mypy.ini @zhangxinyuehfad
-/requirements* @zhangxinyuehfad
-/typos.toml @zhangxinyuehfad
-/packages.txt @zhangxinyuehfad
-/.markdownlint.yaml @MrZ20
-/.gitleaks.toml @zhangxinyuehfad
-/.clang-format @MrZ20
+/tools @zhangxinyuehfad @czydyy
+/.gitignore @zhangxinyuehfad @czydyy
+/.pre-commit-config.yaml @zhangxinyuehfad @czydyy
+/codecov.yml @zhangxinyuehfad @czydyy
+/format.sh @zhangxinyuehfad @czydyy
+/mypy.ini @zhangxinyuehfad @czydyy
+/requirements* @zhangxinyuehfad @czydyy
+/typos.toml @zhangxinyuehfad @czydyy
+/packages.txt @zhangxinyuehfad @czydyy
+/.markdownlint.yaml @MrZ20 @czydyy
+/.gitleaks.toml @zhangxinyuehfad @czydyy
+/.clang-format @MrZ20 @czydyy
 /setup.py @wangxiyuan
 /pyproject.toml @wangxiyuan
-/collect_env.py @zhangxinyuehfad
+/collect_env.py @zhangxinyuehfad @czydyy
 /.gitmodules @zzzzwwjj
 
 # Repo metadata
@@ -28,13 +28,13 @@
 /DCO @wangxiyuan
 
 # Agent
-/.agents/ @zhangxinyuehfad
+/.agents/ @zhangxinyuehfad @czydyy
 /.claude/ @MrZ20
 /AGENTS.md @MrZ20
 /CLAUDE.md @MrZ20
 
 # Dockerfiles
-/Dockerfile* @zhangxinyuehfad
+/Dockerfile* @zhangxinyuehfad @czydyy
 
 # docs
 /docs @liqian79
