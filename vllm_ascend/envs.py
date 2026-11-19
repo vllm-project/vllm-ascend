@@ -139,11 +139,13 @@ env_variables: dict[str, Callable[[], Any]] = {
     # index copy per rank (about 1.2 GiB) and lowers the global block capacity
     # by roughly 4-5%.
     "VLLM_ASCEND_PCP_LOCAL_INDEX": lambda: os.getenv("VLLM_ASCEND_PCP_LOCAL_INDEX", "0"),
-    # Write prefill KV for each rank's own DualChunkSwap chunks from the
-    # rank-local hidden states instead of the gathered view. Off by default and
-    # ignored unless an owner slab mapped successfully: on a replicated
-    # allocation the local write would lose the other ranks' rows. Only the
-    # prefill PCP path is affected; decode keeps the gathered write.
+    # Write KV for each rank's own DualChunkSwap chunks from the rank-local
+    # hidden states instead of the gathered view. Off by default. Applied only
+    # when the target cache tensor is actually backed by a mapped owner slab;
+    # on a replicated allocation the local write would lose the other ranks'
+    # rows, so it falls back to the gathered write. Under owner placement
+    # replicated decode rows are already global, so skipping the gather there
+    # is exact as well.
     "VLLM_ASCEND_PCP_LOCAL_KV_WRITE": lambda: os.getenv("VLLM_ASCEND_PCP_LOCAL_KV_WRITE", "0"),
     # Also write the compressed source planes from local tokens. Off by
     # default. Requires VLLM_ASCEND_PCP_LOCAL_KV_WRITE and assumes chunk-aligned
@@ -169,9 +171,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Diagnostic control mode: allocate the full slab locally on every rank
     # (same virtual mapping, no peer export/import, no HBM saving).
     "VLLM_ASCEND_PCP_OWNER_LOCAL_VMM": lambda: os.getenv("VLLM_ASCEND_PCP_OWNER_LOCAL_VMM", "0"),
-    # Allow an external KV-transfer connector alongside owner sharding. Off by
-    # default; the owner slab is not validated with KV pooling or Mooncake.
-    "VLLM_ASCEND_PCP_OWNER_ALLOW_KV_TRANSFER": lambda: os.getenv("VLLM_ASCEND_PCP_OWNER_ALLOW_KV_TRANSFER", "0"),
     # Log per-region device time for the DSV4.1 attention forward. Off by
     # default; synchronizes only in batches.
     "VLLM_ASCEND_PCP_TIMING": lambda: os.getenv("VLLM_ASCEND_PCP_TIMING", "0"),
