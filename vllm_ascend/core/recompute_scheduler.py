@@ -195,11 +195,12 @@ class RecomputeScheduler(Scheduler):
         )
         assert [(req.request_id, req.client_index) for req in finished_reqs] == [
             (request.request_id, request.client_index)
-        ] 
+        ]
         logger.info(
-            "[PD-RECOMPUTE] Finish_recomputed_request: back to p  request_id=%s client=%d",
-                    request.request_id,
-                    request.client_index)
+            "[PD-RECOMPUTE] Finish_recomputed_request: back to P, request_id=%s, client_index=%s",
+            request.request_id,
+            request.client_index,
+        )
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
@@ -424,10 +425,12 @@ class RecomputeScheduler(Scheduler):
                     else:
                         preempted_req = self.running.pop()
                     logger.debug(
-                        "[PD-RECOMPUTE]Try to preempt or recompute： preempted_req.request_id=%s step=%d ",
-                                request_id,
-                                self.current_step
-                                ) 
+                        "[PD-RECOMPUTE] try to preempt or recompute: "
+                        "request_id=%s, preempted_req_id=%s, step=%d",
+                        request_id,
+                        preempted_req.request_id,
+                        self.current_step,
+                    )
                     locally_preempted = self._preempt_or_recompute(
                         preempted_req,
                         scheduled_timestamp,

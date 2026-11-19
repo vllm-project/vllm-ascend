@@ -1240,13 +1240,14 @@ async def handle_completions_impl(api: str, request: Request):
                             )
                             released_kv = False
                             logger.info(
-                                "[PD-RECOMPUTE] Proxy server: proxy retry req=%s, retry_count=%d, generated_token=%d, max_tokens=%d->%d ",
-                                           instance_info.request_id,
-                                           retry_count,
-                                           generated_token,
-                                           origin_max_tokens,
-                                           req_data["max_tokens"]
-                                           )
+                                "[PD-RECOMPUTE] proxy retry: request_id=%s, retry_count=%d, "
+                                "generated_tokens=%d, max_tokens=%d->%d",
+                                instance_info.request_id,
+                                retry_count,
+                                generated_token,
+                                origin_max_tokens,
+                                req_data["max_tokens"],
+                            )
                             break
                         if retry_count > 0 and not stream_flag:
                             if chat_flag:

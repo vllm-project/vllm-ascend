@@ -2050,10 +2050,10 @@ class MooncakeConnectorScheduler:
 
         params = request.kv_transfer_params
         logger.debug(
-            "MooncakeConnector request_finished,request_id=%s, request_status=%s, kv_transfer_params=%s", 
+            "MooncakeConnector request_finished, request_id=%s, request_status=%s, kv_transfer_params=%s",
             request.request_id,
-            request.status, 
-            params
+            request.status,
+            params,
         )
 
         if params is None:
