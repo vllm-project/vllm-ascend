@@ -28,6 +28,7 @@ import torch
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.forward_context import is_forward_context_available, override_forward_context
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+from vllm.v1.worker.utils import AttentionGroup
 
 import vllm_ascend.worker.v2.pcp_manager as pcp_module
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
@@ -161,15 +162,25 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
     from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
-    from vllm_ascend.attention.fa_v1 import AscendFlashAttentionImpl, AscendFlashAttentionMetadataBuilder
+    from vllm_ascend.attention.fa_v1 import (
+        AscendFlashAttentionBackend,
+        AscendFlashAttentionImpl,
+        AscendFlashAttentionMetadataBuilder,
+    )
 
     num_query = 6
     layer_names = [f"draft.layers.{i}" for i in range(6)]
     builder = AscendFlashAttentionMetadataBuilder.__new__(AscendFlashAttentionMetadataBuilder)
     builder.model_config = SimpleNamespace(runner_type="generate")
     builder.attn_mask_builder = SimpleNamespace(get_splitfuse_attn_mask=lambda: None)
-    group = SimpleNamespace(layer_names=layer_names, get_metadata_builder=lambda _: builder)
     kv_spec = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    group = AttentionGroup(
+        backend=AscendFlashAttentionBackend,
+        layer_names=layer_names,
+        kv_cache_spec=kv_spec,
+        kv_cache_group_id=0,
+        metadata_builders=[builder],
+    )
     speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
     speculator.arange_np = torch.arange(5, dtype=torch.int32).numpy()
     # vLLM main exposes max_model_len as a read-only view of vllm_config.

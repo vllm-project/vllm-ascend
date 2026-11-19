@@ -66,6 +66,7 @@ from vllm_ascend.worker.v2 import utils as v2_utils
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states import default as model_state_module
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 from vllm_ascend.worker.v2.utils import AscendV2KVBlockZeroer
 
 
@@ -1914,7 +1915,16 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         [2, 2, 0, 0],
         dtype=torch.int32,
     )
-    pcp_context = object() if pcp_size > 1 else None
+    pcp_context = (
+        AscendPCPAttentionContext(
+            global_batch=MagicMock(),
+            global_block_tables=block_tables,
+            global_slot_mappings=slot_mappings,
+            hidden_restore_idx=torch.arange(5),
+        )
+        if pcp_size > 1
+        else None
+    )
     pcp_manager = (
         SimpleNamespace(
             build_attention_context=MagicMock(return_value=pcp_context),
