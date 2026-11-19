@@ -105,7 +105,7 @@ class BaseKVPoolWorker(ABC):
         self._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
         self._ple_group_id = self._find_ple_group_id()
         self._ple_group_owners = self._collect_ple_group_owners()
-        self._init_key_head_config(model_config, parallel_config)
+        self._init_key_head_config(model_config)
         self._init_metadata(model_config, vllm_config, extra_config)
         self._init_backend(parallel_config, extra_config)
         self._init_kv_events(vllm_config)
