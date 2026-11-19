@@ -40,6 +40,7 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.device.device_config import get_device_config
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router
 
@@ -199,6 +200,10 @@ def _ascend_FusedMoE(
         **kwargs,
     )
     _adapt_eplb_router(runner.router, enable_router_eplb)
+    if enable_router_eplb and get_device_config().use_flat_eplb_map:
+        from vllm_ascend.ops.triton.eplb_map_flat import _EPLB_MAP_KERNEL
+
+        _EPLB_MAP_KERNEL.register_warmup(num_experts, top_k)
     return runner
 
 

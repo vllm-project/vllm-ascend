@@ -1,0 +1,4 @@
+pr: 17579
+entries:
+  - category: performance
+    text: Improved EPLB expert mapping on Atlas A5 and precompiled its mapping tiles during V2 EPLB startup warmup.

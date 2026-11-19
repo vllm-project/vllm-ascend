@@ -4,6 +4,7 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.device.device_config import get_device_config
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 MAPPING_ASSIGNMENTS_PER_TILE = 512
@@ -80,6 +81,11 @@ def map_to_physical_triton(
     expert_replica_routing_table: torch.Tensor,
 ) -> torch.Tensor:
     """Map logical IDs to physical IDs without collecting expert load."""
+    if get_device_config().use_flat_eplb_map:
+        from vllm_ascend.ops.triton.eplb_map_flat import map_to_physical_triton as flat_map
+
+        return flat_map(topk_ids, expert_replica_routing_table)
+
     if topk_ids.numel() == 0:
         return topk_ids
 
