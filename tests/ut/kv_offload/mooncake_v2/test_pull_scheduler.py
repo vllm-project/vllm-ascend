@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 import threading
 import time
 from dataclasses import replace
@@ -30,6 +31,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import (
     ACK_MSG,
     DONE_RECVING_MSG,
+    DRAIN_REPORT_INTERVAL_SECONDS,
     MooncakePullConnectorScheduler,
     MooncakeSchedulerRecvingThread,
     MooncakeSchedulerSendingThread,
@@ -351,6 +353,145 @@ def test_sending_thread_force_frees_expired_request(monkeypatch: pytest.MonkeyPa
 
     thread._handle_finished_request("expired")
     assert thread.get_and_clear_finished_requests() == set()
+
+
+def test_sweeper_archives_expired_entry_without_heartbeat_or_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An entry D dropped from its heartbeat roster must still be reaped when the engine is idle.
+
+    The hook path (`get_and_clear_finished_requests`) and `_handle_heartbeat`
+    are both inactive in this state; the sending-thread recv timeout is the
+    only remaining driver, so `_sweep_expired_requests` must reclaim the entry.
+    """
+    thread = make_sending_thread()
+    clock = MagicMock(return_value=0.0)
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", clock)
+    thread.add_delayed_request("orphaned")
+    clock.return_value = 31.0
+
+    thread._sweep_expired_requests()
+
+    assert thread.get_and_clear_finished_requests() == {"orphaned"}
+    assert not thread.delayed_free_requests
+    assert not thread.renewed_requests
+
+
+def test_sweeper_leaves_unexpired_entries_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    thread = make_sending_thread()
+    clock = MagicMock(return_value=0.0)
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", clock)
+    thread.add_delayed_request("in-flight")
+    clock.return_value = 29.0
+
+    thread._sweep_expired_requests()
+
+    assert thread.get_and_clear_finished_requests() == set()
+    assert "in-flight" in thread.delayed_free_requests
+
+
+def test_sweeper_reaps_expired_renewed_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    thread = make_sending_thread()
+    clock = MagicMock(return_value=0.0)
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", clock)
+    thread.add_delayed_request("renewed")
+    clock.return_value = 20.0
+    thread._handle_heartbeat(["renewed"])
+    assert "renewed" in thread.renewed_requests
+    clock.return_value = 90.0
+
+    thread._sweep_expired_requests()
+
+    assert thread.get_and_clear_finished_requests() == {"renewed"}
+    assert not thread.renewed_requests
+    assert not thread.delayed_free_requests
+
+
+def test_sweeper_is_idempotent_with_finished_queue_nonempty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sweeping while finished entries await drain must not double-report.
+
+    A concurrent interplay between the sweeper (expired lease reclaims) and
+    the scheduler hook (finished_requests drain) is safe only if a request
+    reclaimed by one path is never reclaimed again by the other.
+    """
+    thread = make_sending_thread()
+    clock = MagicMock(return_value=0.0)
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", clock)
+    thread.add_delayed_request("expired-entry")
+    thread.add_delayed_request("done-entry")
+    thread._handle_finished_request("done-entry")
+    assert thread.finished_requests.qsize() == 1
+    clock.return_value = 31.0
+
+    thread._sweep_expired_requests()
+
+    finished = thread.get_and_clear_finished_requests()
+    assert finished == {"expired-entry", "done-entry"}, finished
+    # A second sweep and a second drain must both come up empty.
+    thread._sweep_expired_requests()
+    assert thread.get_and_clear_finished_requests() == set()
+    assert not thread.delayed_free_requests
+    assert not thread.renewed_requests
+    assert thread.finished_requests.qsize() == 0
+
+
+def test_sweeper_drain_report_is_rate_limited(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The awaiting-drain diagnostic is a stall report, not a per-second tick.
+
+    The finished queue also fills briefly between a DONE arriving and the
+    next scheduler step, so the report fires at most once per
+    DRAIN_REPORT_INTERVAL_SECONDS even when every sweep observes it.
+    """
+    thread = make_sending_thread()
+    clock = MagicMock(return_value=0.0)
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", clock)
+    thread.add_delayed_request("done-entry")
+    thread._handle_finished_request("done-entry")
+    assert thread.finished_requests.qsize() == 1
+
+    with caplog.at_level(logging.INFO, logger="vllm"):
+        thread._sweep_expired_requests()  # t=0: inside the first interval
+        assert not [r for r in caplog.records if "await scheduler drain" in r.message]
+
+        clock.return_value = DRAIN_REPORT_INTERVAL_SECONDS  # t=30: first report
+        thread._sweep_expired_requests()
+        clock.return_value += DRAIN_REPORT_INTERVAL_SECONDS / 3  # t=40: inside interval
+        thread._sweep_expired_requests()
+        reports = [r for r in caplog.records if "await scheduler drain" in r.message]
+        assert len(reports) == 1
+
+        clock.return_value += DRAIN_REPORT_INTERVAL_SECONDS  # t=70: interval elapsed
+        thread._sweep_expired_requests()
+        reports = [r for r in caplog.records if "await scheduler drain" in r.message]
+        assert len(reports) == 2
+
+
+def test_recv_timeout_drives_the_sweeper(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The recv timeout, not the scheduler hook, must drive lease expiry.
+
+    This is the wiring under test: `_run_busy_loop` previously swallowed
+    `zmq.Again` with a bare `continue`, so an idle engine never reaped an
+    entry D had dropped from its heartbeat roster.
+    """
+    thread = make_sending_thread()
+    clock = MagicMock(return_value=0.0)
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", clock)
+    thread.add_delayed_request("orphaned")
+    clock.return_value = 31.0
+    socket = MagicMock()
+    socket.recv_multipart.side_effect = [zmq.Again(), _StopLoop()]  # type: ignore[attr-defined]
+
+    with pytest.raises(_StopLoop):
+        thread._run_busy_loop(socket)
+
+    # Assert the queue directly: the drain helper at the end of this test
+    # runs the same expiry scan, so only the queue state proves the recv
+    # timeout performed the sweep itself.
+    assert thread.finished_requests.qsize() == 1
+    assert thread.get_and_clear_finished_requests() == {"orphaned"}
+    assert not thread.delayed_free_requests
 
 
 def test_recving_thread_reuses_socket_after_ack_and_discards_it_on_error(

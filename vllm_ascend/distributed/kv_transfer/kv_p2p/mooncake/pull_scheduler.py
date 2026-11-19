@@ -53,6 +53,15 @@ DONE_RECVING_MSG = b"done_recving_msg"
 ACK_MSG = b"ACK"
 PRODUCER_LEASE_CACHE_TTL_SECONDS = 600
 PRODUCER_LEASE_CACHE_MAX_SIZE = 1024
+# Minimum spacing between "finished await scheduler drain" diagnostics. Under
+# healthy load the queue also fills briefly between a DONE arriving and the
+# next scheduler step, so this is a stall report, not a per-recv-timeout tick.
+# 30s spans one full D heartbeat interval (kv_lease_duration // 6, i.e. 20s at
+# the default 120s lease), so a queue still awaiting drain after a whole
+# heartbeat cannot be transient; it also stays at a quarter of the lease, so a
+# sustained stall is reported several times before the lease horizon while
+# cutting log volume 30x versus reporting every timeout.
+DRAIN_REPORT_INTERVAL_SECONDS = 30.0
 
 
 class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
@@ -79,6 +88,7 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
         self.lease_extension = kv_lease_duration * 2 // 3
         self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
         self.state_lock = threading.Lock()
+        self._drain_report_at = 0.0
 
     def add_delayed_request(self, request_id: str) -> None:
         with self.state_lock:
@@ -160,6 +170,16 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
             try:
                 frames = sock.recv_multipart()
             except zmq.Again:  # type: ignore[attr-defined]
+                # Idle window (>=1s without control messages): the scheduler
+                # hook that calls `_retrieve_expired_requests_locked` only
+                # runs while the engine steps, and `_handle_heartbeat` only
+                # renews or reaps the IDs D still tracks. An entry D has
+                # already removed from its heartbeat roster would otherwise
+                # wait forever when the engine is idle with its blocks leaked.
+                # This recv timeout is a periodic driver that reuses this
+                # thread and the existing lock instead of arming a separate
+                # timer.
+                self._sweep_expired_requests()
                 continue
 
             identity = frames[0]
@@ -239,6 +259,52 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
                 self._mark_finished_locked(request_id)
                 expired.append((request_id, now - expiry))
         return expired
+
+    def _sweep_expired_requests(self) -> None:
+        """Archive expired delayed-free entries without a scheduler hook.
+
+        `get_and_clear_finished_requests` (whose call sites sit in scheduler
+        hooks) enforces the lease expiry only while the engine steps, and
+        `_handle_heartbeat` only renews or reaps the IDs D still tracks. When
+        the engine is idle and D has already dropped a request from its
+        heartbeat roster, its delayed-free entry is orphaned and its KV blocks
+        leak until restart. This runs in the sending thread on every recv
+        timeout so the lease bound is eventually enforced regardless of
+        scheduler activity.
+
+        This only archives: it moves expired entries from the lease ledgers
+        into `finished_requests`, where a later scheduler drain releases them.
+        It never frees blocks itself.
+        """
+        with self.state_lock:
+            expired = self._retrieve_expired_requests_locked()
+            delayed = len(self.delayed_free_requests)
+            renewed = len(self.renewed_requests)
+            awaiting_drain = self.finished_requests.qsize()
+        # Log outside the lock: this path runs on every recv timeout and
+        # logging I/O under `state_lock` would stall the DONE/heartbeat
+        # handlers that share it.
+        for request_id, expired_by in expired:
+            self._log_lease_finish(request_id, expired_by)
+        if expired:
+            logger.info(
+                "Mooncake delayed-free sweeper archived %d expired request(s) into the release queue.",
+                len(expired),
+            )
+        elif awaiting_drain:
+            # Diagnostic only: `finished_requests` also fills briefly under
+            # healthy load between a DONE and the next scheduler step, so
+            # report a sustained accumulation instead of every recv timeout.
+            now = time.monotonic()
+            if now - self._drain_report_at >= DRAIN_REPORT_INTERVAL_SECONDS:
+                self._drain_report_at = now
+                logger.info(
+                    "Mooncake delayed-free sweeper: no expired entries (delayed=%d renewed=%d) "
+                    "but %d finished await scheduler drain.",
+                    delayed,
+                    renewed,
+                    awaiting_drain,
+                )
 
 
 class MooncakeSchedulerRecvingThread(threading.Thread):
