@@ -5,6 +5,7 @@ from typing import Any
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
@@ -28,22 +29,20 @@ from vllm_ascend.utils import vllm_version_is
 
 class BaseLinearTest(unittest.TestCase):
     def setUp(self):
-        # Several tests in this file replace the process-global AscendConfig
-        # with a MagicMock; snapshot it so tearDown restores the worker state
-        # for later tests in the same xdist worker.
-        self._previous_ascend_config = ascend_config._ASCEND_CONFIG
         self.mock_group = mock.MagicMock()
         self.mock_group.world_size = 2
         self.mock_group.rank_in_group = 0
-
-        parallel_state._MLP_TP = self.mock_group
-        parallel_state._OTP = self.mock_group
 
         self.mock_ascend_config = MagicMock()
         self.mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 2
         self.mock_ascend_config.finegrained_tp_config.mlp_tensor_parallel_size = 2
 
         self.patches = [
+            # Some cases assign these globals directly. Restore the exact
+            # previous objects before the next test, including on failure.
+            patch.object(ascend_config, "_ASCEND_CONFIG", ascend_config._ASCEND_CONFIG),
+            patch.object(parallel_state, "_MLP_TP", self.mock_group),
+            patch.object(parallel_state, "_OTP", self.mock_group),
             patch("vllm_ascend.ascend_config.get_ascend_config", return_value=self.mock_ascend_config),
             patch("vllm_ascend.distributed.parallel_state.get_otp_group", return_value=self.mock_group),
             patch("vllm_ascend.distributed.parallel_state.get_mlp_tp_group", return_value=self.mock_group),
@@ -58,11 +57,7 @@ class BaseLinearTest(unittest.TestCase):
 
         for p in self.patches:
             p.start()
-
-    def tearDown(self):
-        ascend_config._ASCEND_CONFIG = self._previous_ascend_config
-        for p in self.patches:
-            p.stop()
+            self.addCleanup(p.stop)
 
 
 class TestAscendUnquantizedLinearMethod(TestBase):
@@ -567,6 +562,27 @@ class TestAscendDCPGroupColumnParallelLinear(unittest.TestCase):
                 expected_local *= scales[local_slice].flatten()
                 torch.testing.assert_close(local_result, expected_local)
                 matmul.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "case_cls,method",
+    [
+        (TestAscendRowParallelLinear, "test_mlp_optimize"),
+        (TestAscendRowParallelLinear, "test_oproj_tp"),
+        (TestAscendMergedColumnParallelLinear, "test_merged_mlp_tp_init"),
+    ],
+)
+def test_linear_case_restores_process_globals(case_cls, method):
+    # These real cases previously leaked a MagicMock as the log directory of
+    # later VllmConfig users (including structured-output and DFlash tests).
+    config = ascend_config._ASCEND_CONFIG
+    mlp_group, otp_group = parallel_state._MLP_TP, parallel_state._OTP
+    result = unittest.TestResult()
+    case_cls(method).run(result)
+    assert result.wasSuccessful(), (result.errors, result.failures)
+    assert ascend_config._ASCEND_CONFIG is config
+    assert parallel_state._MLP_TP is mlp_group
+    assert parallel_state._OTP is otp_group
 
 
 if __name__ == "__main__":

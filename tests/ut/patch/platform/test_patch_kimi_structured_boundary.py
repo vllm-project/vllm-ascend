@@ -171,6 +171,28 @@ def test_other_parser_delegates(model):
         manager.clear_backend()
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("committed", [False, True])
+def test_non_structured_request_preserves_upstream_contract(enabled, committed):
+    # This method is normally called only for structured requests. A direct
+    # call must delegate, including upstream's assertion for enabled=False.
+    manager = StructuredOutputManager.__new__(StructuredOutputManager)
+    manager.enable_in_reasoning = enabled
+    request = Request(
+        request_id="non-structured",
+        prompt_token_ids=[1],
+        sampling_params=SamplingParams(),
+        pooling_params=None,
+    )
+    assert request.structured_output_request is None
+    for original in (True, False):
+        if enabled:
+            assert _boundary(manager, request, [2], committed, original=original) == 0
+        else:
+            with pytest.raises(AssertionError):
+                _boundary(manager, request, [2], committed, original=original)
+
+
 def test_view_bounds_and_slices(patch):
     expected = list(range(9))
     history, draft = expected[:6], expected[6:]
