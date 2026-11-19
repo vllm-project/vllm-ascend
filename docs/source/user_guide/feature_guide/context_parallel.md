@@ -124,8 +124,7 @@ For either method, remove `--enforce-eager` and add the following option to use 
   and replicated DFlash/DFlash2 drafts.
 - PCP does not support `FULL` CUDA graphs; use eager mode, `PIECEWISE`, `FULL_AND_PIECEWISE`, or `FULL_DECODE_ONLY`.
 - Encoder-decoder models and LoRA are not supported with PCP.
-- Hybrid KDA models require Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`).
-  The KDA head count must be divisible by `tensor_parallel_size * prefill_context_parallel_size`;
+- The KDA head count must be divisible by `tensor_parallel_size * prefill_context_parallel_size`;
   KDA projection weights, convolution state, and recurrent state share this head partition.
 - PCP and DCP can be stacked for MLA, SFA, and GQA. See
   [Combining PCP and DCP](#combining-pcp-and-dcp) for the supported sizes.
