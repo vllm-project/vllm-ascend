@@ -1,0 +1,6 @@
+pr: 22539
+entries:
+  - category: performance
+    text: A3 All2AllV INT8 MoE dispatch now reuses native fused init-routing to quantize each token before top-k expansion for batches of at least 1024 rows, rather than permuting BF16 activations and then quantizing the expanded token tensor. This avoids repeated per-token quantization work and reduces data movement while retaining the legacy path for smaller batches, FP8/MXFP, LoRA, and other hardware.
+    model: Qwen3.8-Flash-Next
+    hardware: [A3]
