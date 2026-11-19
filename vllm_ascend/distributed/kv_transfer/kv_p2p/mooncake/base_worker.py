@@ -675,6 +675,15 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         validate_register_region_count(register_regions)
         global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
 
+        quant_flashmla_layers: tuple[str, ...] = ()
+        if getattr(self.vllm_config, "use_v2_model_runner", False) is True:
+            layers = self.vllm_config.compilation_config.static_forward_context
+            quant_flashmla_layers = tuple(
+                name
+                for name in layer_names
+                if getattr(getattr(layers.get(name), "impl", None), "use_quant_flashmla", False) is True
+            )
+
         transfer_metadata = MooncakeTransferMetadata(
             engine_id=self.engine_id,
             te_rpc_port=self.te_rpc_port,
@@ -693,6 +702,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             dcp_sharded=[self.kv_cache_specs[self.layer_name_to_spec_index[name]].dcp_sharded for name in layer_names],
             local_ip=self.side_channel_host,
             handshake_port=self.handshake_port,
+            quant_flashmla_layers=quant_flashmla_layers,
         )
         self.transfer_metadata = transfer_metadata
         self.xfer_handshake_metadata = transfer_metadata

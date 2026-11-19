@@ -12,6 +12,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
 
+QUANT_FLASHMLA_LAYOUT_CAPABILITY = b"quant_flashmla_layout_v1"
+
 
 @dataclass(frozen=True)
 class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
@@ -41,11 +43,15 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     dcp_sharded: list[bool]
     local_ip: str = ""
     handshake_port: int = 0
+    # Layers using token-interleaved FP8 QuantFlashMLA pages.
+    quant_flashmla_layers: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.cp_kv_cache_interleave_size <= 0:
             raise ValueError("Mooncake CP interleave size must be positive.")
         num_layers = len(self.layer_names)
+        if set(self.quant_flashmla_layers).difference(self.layer_names):
+            raise ValueError("Mooncake QuantFlashMLA layouts refer to unregistered layers.")
         if len(self.indexer_replication_sizes) != num_layers or any(
             size < 0 for size in self.indexer_replication_sizes
         ):
@@ -122,6 +128,7 @@ class MooncakePPTransferMetadata:
     dcp_sharded: list[bool]
     metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata]
     indexer_replication_sizes: list[int]
+    quant_flashmla_layers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

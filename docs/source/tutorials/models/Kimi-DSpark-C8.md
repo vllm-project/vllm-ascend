@@ -36,6 +36,13 @@ compatibility. Existing floating-writer page limits and upstream cache-spec
 customization remain in effect. Real prefill attention retains its existing
 path; writing FP8 context KV is not a QuantFlashMLA prefill-attention call.
 
+With Mooncake pull P/D (`MooncakePullConnector` or `MooncakeConnectorV2`
+without layerwise mode), deploy this QuantFlashMLA layout check on both
+endpoints. Each transferred layer must use QuantFlashMLA on both sides or on
+neither side. For asymmetric TP/DCP, verify that each endpoint's head counts
+and operator package select the same layout. A layout mismatch is rejected
+before any KV pages are copied.
+
 ## Integration contracts
 
 - Resolve the draft's recipe using its local layer namespace without mutating

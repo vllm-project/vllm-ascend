@@ -70,7 +70,7 @@ from vllm_ascend.compilation.updatable_graph import get_capture_resource, regist
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, supports_component_major_mla_pd
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.device.paged_mla_cache_read import load_mla_cache_rows_by_slots
+from vllm_ascend.device.paged_mla_cache_read import load_mla_cache_context_rows, load_mla_cache_rows_by_slots
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     uses_sfa_dspark_kv_transfer,
 )
@@ -1649,32 +1649,54 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths": actual_seq_lengths_q,
         }
 
+        use_quant_flashmla = getattr(self, "use_quant_flashmla", False)
+        if use_quant_flashmla and not (cache_kv_c.dtype == cache_k_pe.dtype == torch.float8_e4m3fn):
+            raise ValueError("QuantFlashMLA prefill history requires FP8 latent and positional cache.")
+
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
             context_seq_len_npu = self.get_context_seq_len_npu(i, attn_metadata)
-            kv_c_normed = torch.empty(toks, num_heads, latent_kv_dim, dtype=cache_kv_c.dtype, device=cache_kv_c.device)
-            # mla_nope_chunked_load: with qk_rope_head_dim == 0 the rope cache
-            # and its output buffer are both zero-width, and the fused paged
-            # gather silently leaves the latent output unfilled. Hand it the
-            # latent cache twice and drop the duplicate.
-            if rope_dim == 0:
-                pe_cache = cache_kv_c
-                k_pe = torch.empty_like(kv_c_normed)
+            context_start = prefill_metadata.chunked_context.starts[i]
+            if use_quant_flashmla:
+                # Gather the stored FP8 bits with the original token/page strides.
+                packed = load_mla_cache_context_rows(
+                    cache_kv_c.view(torch.int8),
+                    cache_k_pe.view(torch.int8),
+                    context_table,
+                    context_seq_len_npu,
+                    context_start,
+                    toks,
+                )
+                # CP reorganization concatenates the two components before gathering.
+                # BF16 represents the stored FP8 values exactly; latent descale follows below.
+                rows = packed.view(cache_kv_c.dtype).to(q_pe.dtype).unsqueeze(1)
+                kv_c_normed, k_pe = rows.split((latent_kv_dim, rope_dim), dim=-1)
             else:
-                pe_cache = cache_k_pe
-                k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_pe.dtype, device=q_pe.device)
+                kv_c_normed = torch.empty(
+                    toks, num_heads, latent_kv_dim, dtype=cache_kv_c.dtype, device=cache_kv_c.device
+                )
+                # mla_nope_chunked_load: with qk_rope_head_dim == 0 the rope cache
+                # and its output buffer are both zero-width, and the fused paged
+                # gather silently leaves the latent output unfilled. Hand it the
+                # latent cache twice and drop the duplicate.
+                if rope_dim == 0:
+                    pe_cache = cache_kv_c
+                    k_pe = torch.empty_like(kv_c_normed)
+                else:
+                    pe_cache = cache_k_pe
+                    k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_pe.dtype, device=q_pe.device)
 
-            DeviceOperator.kv_cache_load(
-                cache_kv_c,
-                pe_cache,
-                context_table,
-                context_seq_len_npu,
-                prefill_metadata.chunked_context.starts[i],
-                key=kv_c_normed,
-                value=k_pe,
-            )
-            if rope_dim == 0:
-                k_pe = kv_c_normed.new_empty(toks, num_heads, 0)
+                DeviceOperator.kv_cache_load(
+                    cache_kv_c,
+                    pe_cache,
+                    context_table,
+                    context_seq_len_npu,
+                    context_start,
+                    key=kv_c_normed,
+                    value=k_pe,
+                )
+                if rope_dim == 0:
+                    k_pe = kv_c_normed.new_empty(toks, num_heads, 0)
             kv_c_normed, k_pe = self._reorg_kvcache(
                 kv_c_normed,
                 k_pe,
@@ -1836,6 +1858,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_c_normed = kv_c_normed.view(num_tokens, self.num_kv_heads, self.kv_lora_rank)
         k_pe = k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim)
         cache_k_nope = kv_c_normed
+        cache_k_pe = k_pe
         if getattr(self, "use_quant_flashmla", False):
             # QuantFlashMLA applies k_descale to the complete 576-wide dot.
             # Quantize the latent slice with the checkpoint's static scale,
@@ -1844,15 +1867,16 @@ class AscendMLAImpl(MLAAttentionImpl):
             cache_k_nope = torch.mul(kv_c_normed.to(self.fak_descale_reciprocal.dtype), self.fak_descale_reciprocal).to(
                 kv_cache[0].dtype
             )
+            cache_k_pe = k_pe.to(kv_cache[1].dtype)
         DeviceOperator.reshape_and_cache(
             key=cache_k_nope,
-            value=k_pe,
+            value=cache_k_pe,
             key_cache=kv_cache[0],
             value_cache=kv_cache[1],
             slot_mapping=slots,
         )
         if return_quantized_current:
-            return k_pe.to(kv_cache[1].dtype), cache_k_nope
+            return cache_k_pe, cache_k_nope
         return k_pe, kv_c_normed
 
     def _exec_kv_mla_nope(self, kv_no_split, kv_cache, slots, is_prefill: bool, skip_padding_slots: bool = False):
