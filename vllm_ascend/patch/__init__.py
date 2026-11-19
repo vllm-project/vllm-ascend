@@ -1472,17 +1472,6 @@
 #    Future Plan:
 #       Remove this patch when Triton-Ascend can compile and efficiently lower
 #       the upstream kernel, or after an equivalent fix lands upstream.
-#
-#   9. `vllm.v1.worker.gpu.spec_decode.suffix.speculator`
-#    Why:
-#       Upstream suffix directly launches GPU kernels.
-#    How:
-#       Bind four Ascend launch adapters at worker startup, skipping vLLM 0.33.0.
-#    Related PR:
-#       vLLM #60339 and vLLM Ascend #20854.
-#    Future Plan:
-#       Drop the version guard when the release baseline supports suffix.
-#       Remove the bindings when upstream dispatches suffix kernels by device.
 # ** 22. File: worker/patch_attn_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.attn_utils.get_kv_cache_spec`

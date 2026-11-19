@@ -7,7 +7,6 @@ from vllm.utils.math_utils import next_power_of_2
 
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.layernorm_guard import LayerNormFn
-from vllm_ascend.utils import vllm_version_is
 
 
 def _next_power_of_2(n):
@@ -166,20 +165,3 @@ thinking_budget._load_effective_token = _load_effective_token_ascend
 # TODO: Remove after Triton-Ascend 3.6.0 is the minimum supported version.
 thinking_budget._update_committed_marker_cache_kernel = _update_committed_marker_cache_kernel_ascend
 trace_replay.apply_trace_tokens = apply_trace_tokens
-
-# Drop this guard when the paired vLLM release includes MRV2 suffix.
-if not vllm_version_is("0.33.0"):
-    import vllm.v1.worker.gpu.spec_decode.suffix.speculator as suffix_speculator
-
-    from vllm_ascend.ops.triton.spec_decode.suffix import (
-        SuffixKernelLaunchAdapter,
-        launch_suffix_finalize,
-        launch_suffix_ingest,
-        launch_suffix_local_scan,
-        launch_suffix_observe,
-    )
-
-    suffix_speculator._suffix_local_scan_kernel = SuffixKernelLaunchAdapter(launch_suffix_local_scan)
-    suffix_speculator._suffix_finalize_kernel = SuffixKernelLaunchAdapter(launch_suffix_finalize)
-    suffix_speculator._suffix_observe_kernel = SuffixKernelLaunchAdapter(launch_suffix_observe)
-    suffix_speculator._suffix_ingest_kernel = SuffixKernelLaunchAdapter(launch_suffix_ingest)

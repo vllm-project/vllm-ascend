@@ -32,7 +32,7 @@ full request capacity; shapes with `B` describe their active rows.
 
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
-| `grid`, `position_radix`, `num_blocks`, `launch_options` | Attribute | Active rows, score radix, real scan block count and launch constants | Integers and booleans | Host scalars or tuples |
+| `position_radix`, `num_blocks`, `launch_options` | Attribute | Score radix, real scan block count and launch constants | Integers and booleans | Host scalars |
 | `token_ids`, `total_len` | Input | Dense history and valid end offsets, indexed by request slot | int32 | `[R, L]`, `[R]` |
 | `idx_mapping`, `num_sampled`, `num_rejected` | Input | Batch row to request slot and target verification counts | int32 | `[B]` each |
 | `last_sampled` | Input | Last sampled tokens used to fill invalid draft slots | int64 | `[R]` |
@@ -50,7 +50,9 @@ full request capacity; shapes with `B` describe their active rows.
 - Tensors reside on one device. Histories and scratch use their actual row
   strides and require contiguous columns. Other buffers use the contiguous
   layouts above. Launch wrappers retain the upstream stride arguments for
-  positional ABI compatibility.
+  positional ABI compatibility. Active request counts come from
+  `idx_mapping.shape[0]`, not the capacity of persistent buffers. The plain
+  launch functions reconstruct their NPU grids without a grid argument.
 - Draft width, block width and match depth are positive. Internal power-of-two
   padding does not add output slots. Corpus lookup needs a match depth of at
   least two. The two hash tables index 4-token and 2-token keys and keep
@@ -74,9 +76,7 @@ full request capacity; shapes with `B` describe their active rows.
 
 - **Origin**: [vLLM #60339](https://github.com/vllm-project/vllm/pull/60339).
   Upstream owns allocation, proposal ordering and request lifecycle.
-- **Differences**: `patch/worker/patch_triton.py` binds four launch adapters
-  for the worker process on the supported upstream versions. The NPU
-  implementation separates match state from indirect load masks, counts
+- **Differences**: The NPU implementation separates match state from indirect load masks, counts
   overlaps before committing ingest stores, and replaces observer atomics
   with per-bucket reductions followed by a marker-clear launch.
   Non-power-of-two draft widths use scalar statistics accesses.
@@ -102,7 +102,7 @@ Triton-Ascend 3.6.0.post2, using vLLM `ba15685ab7`.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_suffix_speculator.py
-python -m pytest -q tests/ut/ops/triton/spec_decode/test_suffix_kernel_adapters.py tests/ut/patch/worker/test_patch_suffix.py
+python -m pytest -q tests/ut/ops/triton/spec_decode/test_suffix_launchers.py
 ```
 
 ## Example
