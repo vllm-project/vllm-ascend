@@ -32,6 +32,8 @@ torch.npu.set_device(0)
 torch.manual_seed(21945)
 fixture_path = Path(args.fixture_file) if args.fixture_file else Path(__file__).with_name("qsa_mrv2_fixture.py")
 spec = importlib.util.spec_from_file_location("layout_fixture", fixture_path)
+if spec is None or spec.loader is None:
+    raise ImportError(f"Cannot load QSA MRV2 fixture from {fixture_path}")
 fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
 results = {
