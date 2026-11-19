@@ -282,6 +282,6 @@ for module_name in (
 ):
     module = sys.modules.get(module_name)
     if module is not None:
-        module.dispatch_cg_and_sync_dp = dispatch_cg_and_sync_dp
+        module.__dict__["dispatch_cg_and_sync_dp"] = dispatch_cg_and_sync_dp
 
 upstream.GPUModelRunner.initialize_kv_cache = initialize_kv_cache
