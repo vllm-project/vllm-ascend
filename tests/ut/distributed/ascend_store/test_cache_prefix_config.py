@@ -19,10 +19,17 @@ if not _MOCK_VLLM_DEPS:
     import torch
     from transformers import OPTConfig
     from vllm.config import CacheConfig, DeviceConfig, KVTransferConfig, ModelConfig, SchedulerConfig, VllmConfig
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import worker as mooncake_worker
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, UniformTypeKVCacheSpecs
 
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import resolve_cache_prefix
+    from vllm_ascend.utils import vllm_version_is
+
+    if vllm_version_is("0.33.0"):
+        from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (  # type: ignore[import-not-found]
+            worker as mooncake_worker,
+        )
+    else:
+        from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import worker as mooncake_worker
 
 
 def make_config(model_path, prefix="auto", **kwargs):
