@@ -1750,8 +1750,10 @@ def test_c2_launch_bounds_do_not_change_graph_metadata(monkeypatch, rows):
 
     launch = Mock(side_effect=lambda *args, **kwargs: args[4])
     monkeypatch.setattr(compressor_triton, "compressor_from_projected", launch)
+    # bind_kv_cache supplies the cache tensor directly, not a per-engine list.
+    state = torch.empty(1, 32, 1, 16)
     compressor = SimpleNamespace(
-        state_cache=SimpleNamespace(kv_cache=[torch.empty(1, 32, 1, 16)]),
+        state_cache=SimpleNamespace(kv_cache=state),
         _ring_pooled=torch.empty(rows, 8, dtype=torch.bfloat16),
         _ring_num_cores=1,
         norm=lambda x: x,
@@ -1759,6 +1761,9 @@ def test_c2_launch_bounds_do_not_change_graph_metadata(monkeypatch, rows):
     metadata = SimpleNamespace(max_query_len=6, c2_ring_metadata=torch.empty(5, 1, dtype=torch.int32))
     kv = torch.empty(rows, 8)
     DeepseekV41Compressor.pool_projected(compressor, kv, kv, metadata, prev_rows=None, prev_row_indices=None)
+    ring_state = launch.call_args.args[2]
+    assert ring_state.shape == (1, 32, 16)
+    assert ring_state.data_ptr() == state.data_ptr()
     assert launch.call_args.kwargs["max_query_len"] == min(6, rows)
     assert metadata.max_query_len == 6
 
