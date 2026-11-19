@@ -792,19 +792,9 @@ class AscendStep5Attention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkvg = None
-        extra_dims = None
         if self.fuse_qkv_gate:
             qkvg, _ = self.qkvg_proj(hidden_states)
-            qkv, extra_dims = qkvg.split(
-                [self.q_size + 2 * self.kv_size, self.num_heads], dim=-1
-            )
-            # Materialize the qkv prefix before the fused norm+rope kernel:
-            # handing the wider packed qkvg row directly changed the kernel's
-            # row stride and corrupted the q/k/v outputs on 950DT, cascading
-            # into a CSA allocation assert on the tailring deployment. The
-            # gate tail keeps its base+offset addressing through qkvg, so no
-            # extra copy is added for the gate.
-            qkv = qkv.contiguous()
+            qkv = qkvg[..., : self.q_size + 2 * self.kv_size]
         else:
             qkv, _ = self.qkv_proj(hidden_states)
         if self.use_fused_qknorm_rope:
@@ -832,21 +822,25 @@ class AscendStep5Attention(nn.Module):
                 q, k = self.rotary_emb(positions, q, k)
 
         attn_output = self.attn(q, k, v)
-        if extra_dims is None and self.use_head_wise_attn_gate:
-            extra_dims, _ = self.g_proj(hidden_states)
-        if extra_dims is not None:
+        if qkvg is not None:
             # Packed layout: the gate is the tail of the qkvg row and anchors
-            # at the packed GEMM output. Standalone layout: the g_proj output
-            # anchors itself with offset 0. Either way no mid-storage view
+            # at the packed GEMM output (offset-0), so no mid-storage view
             # crosses the op boundary (the dispatch layer would materialize
             # it first: TensorMove).
-            gate_base = qkvg if qkvg is not None else extra_dims
-            gate_col_offset = extra_dims.storage_offset() - gate_base.storage_offset()
+            gate_base = qkvg
+            gate_col_offset = self.q_size + 2 * self.kv_size
+        elif self.use_head_wise_attn_gate:
+            # Standalone layout: the g_proj output anchors itself with offset 0.
+            gate_base, _ = self.g_proj(hidden_states)
+            gate_col_offset = 0
+        else:
+            gate_base = None
+        if gate_base is not None:
             attn_output = gated_scale(
                 attn_output,
                 gate_base,
                 gate_col_offset,
-                extra_dims.shape[-1],
+                self.num_heads,
             )
         output, _ = self.o_proj(attn_output)
         return output
