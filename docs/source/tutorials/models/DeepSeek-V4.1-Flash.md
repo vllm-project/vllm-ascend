@@ -114,7 +114,6 @@ separate images.
       --name deepseek-v41 \
       --net=host \
       --ipc=host \
-      --privileged=true \
       --device /dev/davinci0 \
       --device /dev/davinci1 \
       --device /dev/davinci2 \
@@ -160,7 +159,6 @@ separate images.
       --net=host \
       --ipc=host \
       --shm-size=512g \
-      --privileged=true \
       --device /dev/davinci0 \
       --device /dev/davinci1 \
       --device /dev/davinci2 \
@@ -198,7 +196,6 @@ separate images.
       --name deepseek-v41-950dt \
       --net=host \
       --shm-size=512g \
-      --privileged=true \
       --device /dev/davinci0 \
       --device /dev/davinci1 \
       --device /dev/davinci2 \
