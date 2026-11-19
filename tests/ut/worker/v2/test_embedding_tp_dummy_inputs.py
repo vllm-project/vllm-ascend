@@ -121,13 +121,55 @@ def test_dummy_embedding_reuses_ids_and_output_buffer(monkeypatch, supports_mm_i
 
 
 @pytest.mark.parametrize("supports_mm_inputs", [False, True])
-def test_embedding_tp_disabled_preserves_dummy_buffer(monkeypatch, supports_mm_inputs):
+@pytest.mark.parametrize("explicit_none", [False, True])
+def test_embedding_tp_disabled_preserves_dummy_buffer(monkeypatch, supports_mm_inputs, explicit_none):
     monkeypatch.setattr(default, "embedding_tp_enable", lambda: False)
     state = _make_state(supports_mm_inputs, torch.nn.Identity())
-    result = state.dummy_inputs_embeds(3)
+    result = state.dummy_inputs_embeds(3, None) if explicit_none else state.dummy_inputs_embeds(3)
     torch.testing.assert_close(result, state.inputs_embeds[:3])
     assert result.data_ptr() == state.inputs_embeds.data_ptr()
     state.model.modules.assert_not_called()
+
+
+@pytest.mark.parametrize("supports_mm_inputs", [False, True])
+def test_explicit_none_keeps_idle_embedding_exchange(monkeypatch, supports_mm_inputs):
+    monkeypatch.setattr(default, "embedding_tp_enable", lambda: True)
+    events = []
+    layer, _ = _make_embedding(1, events)
+    state = _make_state(supports_mm_inputs, layer)
+
+    result = state.dummy_inputs_embeds(3, None)
+
+    assert result.data_ptr() == state.inputs_embeds.data_ptr()
+    torch.testing.assert_close(result, torch.full((3, 4), -1.0))
+    assert events == [(1, "gather", (8,)), (1, "scatter", (16, 4))]
+
+
+@pytest.mark.parametrize("supports_mm_inputs", [False, True])
+@pytest.mark.parametrize("embedding_tp", [False, True])
+def test_dummy_input_ids_delegate_without_an_extra_embedding_exchange(monkeypatch, supports_mm_inputs, embedding_tp):
+    monkeypatch.setattr(default, "embedding_tp_enable", lambda: embedding_tp)
+    weight = torch.arange(32, dtype=torch.float32).view(8, 4)
+    state = _make_state(supports_mm_inputs, torch.nn.Embedding.from_pretrained(weight))
+    input_ids = torch.tensor([1, 5, 7], dtype=torch.int32)
+    idle_join = Mock()
+    state._embedding_tp_dummy_join = (idle_join, torch.zeros(8, dtype=torch.int32))
+
+    # Model the new upstream API even when CI uses v0.33.0's one-argument API.
+    def upstream_dummy_inputs_embeds(model_state, num_tokens, ids):
+        assert ids is input_ids
+        output = model_state.encoder_runner.inputs_embeds if supports_mm_inputs else model_state.inputs_embeds
+        output[: ids.numel()] = model_state.model.embed_input_ids(ids)
+        return output[:num_tokens]
+
+    with patch.object(default.DefaultModelState, "dummy_inputs_embeds", upstream_dummy_inputs_embeds):
+        result = state.dummy_inputs_embeds(4, input_ids)
+
+    assert result.data_ptr() == state.inputs_embeds.data_ptr()
+    torch.testing.assert_close(result[:3], weight[input_ids.long()])
+    torch.testing.assert_close(result[3:], torch.full((1, 4), -1.0))
+    state.model.modules.assert_not_called()
+    idle_join.assert_not_called()
 
 
 @pytest.mark.parametrize("mode", [VocabParallelMode.STANDARD, VocabParallelMode.PCP_X_TP])
