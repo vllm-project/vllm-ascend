@@ -75,7 +75,6 @@ def test_stage_reserve_is_zero_when_staging_is_off(monkeypatch):
         "VLLM_ASCEND_PCP_OWNER_STAGE",
         "VLLM_ASCEND_PCP_OWNER_STAGE_SWA",
         "VLLM_ASCEND_PCP_OWNER_STAGE_SWA_CHUNK",
-        "VLLM_ASCEND_PCP_OWNER_STAGE_INDEX",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -85,13 +84,8 @@ def test_stage_reserve_is_zero_when_staging_is_off(monkeypatch):
 def test_stage_reserve_covers_enabled_budgets(monkeypatch):
     monkeypatch.setenv("VLLM_ASCEND_PCP_OWNER_STAGE", "1")
     monkeypatch.setenv("VLLM_ASCEND_PCP_OWNER_STAGE_SWA_CHUNK", "1")
-    monkeypatch.setenv("VLLM_ASCEND_PCP_OWNER_STAGE_INDEX", "1")
 
     reserve = pcp_owner_stage.owner_stage_reserve_bytes()
 
-    expected = (
-        pcp_owner_stage.DEFAULT_STAGE_BUDGET_BYTES
-        + pcp_owner_stage.DEFAULT_SWA_CHUNK_STAGE_BUDGET_BYTES
-        + pcp_owner_stage.DEFAULT_INDEX_STAGE_BUDGET_BYTES
-    )
+    expected = pcp_owner_stage.DEFAULT_STAGE_BUDGET_BYTES + pcp_owner_stage.DEFAULT_SWA_CHUNK_STAGE_BUDGET_BYTES
     assert reserve == expected

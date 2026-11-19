@@ -559,108 +559,6 @@ def _build_swa_chunk_smla_metadata(
     return value
 
 
-def _index_stage_enabled() -> bool:
-    from vllm_ascend.attention.context_parallel.pcp_owner_stage import (
-        owner_stage_index_enabled,
-    )
-
-    return owner_stage_index_enabled()
-
-
-def _index_block_counts(metadata, num_reqs, width, block_size, ratio):
-    """Sync-free live page counts for the index plane.
-
-    ``seq_lens_cpu`` holds original-token coordinates; the indexer block table
-    is addressed in compressed positions, so divide by the compressor ratio
-    first and then by the plane's storage block size.
-    """
-    seq_lens_cpu = getattr(metadata, "seq_lens_cpu", None)
-    if seq_lens_cpu is None or block_size is None or block_size <= 0:
-        return None
-    try:
-        values = seq_lens_cpu[:num_reqs].tolist()
-    except (TypeError, ValueError):
-        return None
-    ratio = max(1, int(ratio or 1))
-    block_size = int(block_size)
-    counts = []
-    for value in values:
-        cache_len = int(value) // ratio
-        counts.append(min(width, (cache_len + block_size - 1) // block_size))
-    return counts
-
-
-def _maybe_stage_index_cache(source_cache, metadata, ratio):
-    """Copy a pure-prefill batch's index planes into local scratch.
-
-    The index K plane lives inside the owner-sharded page, so QLI's block
-    gather otherwise pays peer latency on three quarters of its reads. Copying
-    the live pages once per step and remapping the block table keeps ``select``
-    on local HBM at the cost of a few MiB per step. Returns
-    ``(staged_views, staged_metadata)`` or ``None`` to keep the direct path.
-    """
-    if source_cache is None or metadata is None:
-        return None
-    if getattr(metadata, "num_prefills", 0) <= 0 or getattr(metadata, "num_decodes", 0) > 0:
-        return None
-    if not _index_stage_enabled():
-        return None
-    block_table = getattr(metadata, "block_table", None)
-    if block_table is None or block_table.shape[1] <= 0:
-        return None
-    views = source_cache if isinstance(source_cache, tuple) else (source_cache,)
-    if not views:
-        return None
-    from vllm_ascend.attention.context_parallel.pcp_owner_stage import (
-        build_stage_tables_fixed,
-        get_index_page_stage_cache,
-        get_index_plane_stage_cache,
-    )
-    from vllm_ascend.attention.context_parallel.pcp_owner_vmm import owner_slab_for_tensor
-
-    if owner_slab_for_tensor(views[0]) is None:
-        return None
-    # Every index source in one tuple shares this metadata object, so a step
-    # pays one copy per cache group rather than one per selecting layer. The
-    # candidate source and its consumers therefore see the same remapped IDs.
-    memo = getattr(metadata, "_pcp_index_stage_memo", None)
-    if memo is not None and memo[0] == views[0].data_ptr():
-        return memo[1], memo[2]
-    num_reqs = int(getattr(metadata, "num_reqs", block_table.shape[0]))
-    counts = _index_block_counts(
-        metadata,
-        num_reqs,
-        int(block_table.shape[1]),
-        getattr(metadata, "storage_block_size", None),
-        ratio,
-    )
-    if counts is None:
-        return None
-    prepared = build_stage_tables_fixed(block_table[:num_reqs], counts, num_blocks=int(views[0].shape[0]))
-    if prepared[2] <= 0:
-        return None
-    base = views[0]
-    storage_ptr = base.untyped_storage().data_ptr()
-    page_bytes = int(base.stride(0)) * base.element_size()
-    staged_views = None
-    if page_bytes > 0 and all(view.untyped_storage().data_ptr() == storage_ptr for view in views):
-        # One whole-page gather replaces one strided gather per plane. The
-        # planes are then zero-copy views at their original intra-page
-        # offsets, so the operator-visible layout is unchanged.
-        staged_views = get_index_page_stage_cache(base.device, page_bytes).stage(base, views, prepared)
-    if staged_views is None:
-        # Fail open to the per-plane stager on odd layouts or overflow.
-        staged_views = []
-        for view in views:
-            staged = get_index_plane_stage_cache(view.device, view).stage(view, prepared)
-            if staged is None:
-                return None
-            staged_views.append(staged)
-    staged_metadata = replace(metadata, block_table=prepared[0])
-    metadata._pcp_index_stage_memo = (views[0].data_ptr(), tuple(staged_views), staged_metadata)
-    return tuple(staged_views), staged_metadata
-
-
 def _maybe_stage_owner_cmp_cache(
     source_cache, block_table, metadata, num_reqs, seq_lens=None, block_size=None, ratio=1
 ):
@@ -1059,13 +957,6 @@ class AscendDSAV41Impl:
             folded_name = self.index_k_source_prefix + "_folded"
             folded_cache = context[folded_name].kv_cache
             source_cache = (*source_cache, folded_cache)
-        index_metadata = metadata.indexer.cache
-        if _index_stage_enabled():
-            timing = _timing_enter("stage_index")
-            staged_index = _maybe_stage_index_cache(source_cache, index_metadata, int(self.role.compress_ratio or 1))
-            _timing_exit(timing)
-            if staged_index is not None:
-                source_cache, index_metadata = staged_index
         assert prepared_indexer is not None
         if prepared_indexer.quantize_done is not None:
             torch.npu.current_stream().wait_event(prepared_indexer.quantize_done)
@@ -1074,7 +965,7 @@ class AscendDSAV41Impl:
             prepared_indexer.weights,
             positions,
             source_cache,
-            index_metadata,
+            metadata.indexer.cache,
             quantized_query=prepared_indexer.quantized_query,
             query_scale=prepared_indexer.query_scale,
             is_candidate_source=self.role.is_candidate_source,
