@@ -190,7 +190,6 @@ def _make_vllm_config(
         speculative_config = SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,
             parallel_drafting=False,
-            use_eagle_block_drop=lambda: False,
         )
 
     model_config = SimpleNamespace(max_model_len=max_model_len, hf_text_config=SimpleNamespace())
