@@ -17,29 +17,32 @@
 """Allow Engram on Ascend and host table sharing across PCP replicas."""
 
 import importlib.util
+from copy import copy
+
+from vllm_ascend.utils import vllm_version_is
 
 # Older vLLM builds have no Engram config to patch.
 if importlib.util.find_spec("vllm.config.engram") is not None:
     from vllm.config.engram import EngramConfig, model_has_engram_layers
 
-    def verify_model_config(self, model_config) -> None:
-        # Keep upstream's model/layer checks; only its CUDA requirement is lifted.
-        if not model_has_engram_layers(model_config):
-            raise ValueError("EngramConfig requires a supported model with non-empty n-gram layer ids.")
+    if vllm_version_is("0.31.0"):
+
+        def verify_model_config(self, model_config) -> None:
+            # vLLM main already removed the CUDA requirement in #59171.
+            if not model_has_engram_layers(model_config):
+                raise ValueError("EngramConfig requires a supported model with non-empty n-gram layer ids.")
+
+        EngramConfig.verify_model_config = verify_model_config
+
+    _original_verify_parallel_config = EngramConfig.verify_parallel_config
 
     # TODO: Remove this override once all supported vLLM versions natively
     # support Engram PCP, including DP x PCP groups and parallel validation.
     def verify_parallel_config(self, parallel_config) -> None:
-        """Reject unsupported embedding parallel topologies."""
-        if self.dp_shared_memory:
-            if parallel_config.data_parallel_size <= 1 and parallel_config.prefill_context_parallel_size <= 1:
-                raise ValueError(
-                    "dp_shared_memory requires data_parallel_size > 1 or prefill_context_parallel_size > 1."
-                )
-            if parallel_config.enable_elastic_ep:
-                raise ValueError("dp_shared_memory is not supported with elastic EP.")
-        if self.embedding_across_dp and parallel_config.data_parallel_size > 1 and parallel_config.enable_elastic_ep:
-            raise ValueError("Engram embedding_across_dp is not supported with elastic EP yet.")
+        """Count PCP peers for host sharing, retaining upstream validation."""
+        if self.dp_shared_memory and parallel_config.data_parallel_size == 1:
+            parallel_config = copy(parallel_config)
+            parallel_config.data_parallel_size = parallel_config.prefill_context_parallel_size
+        _original_verify_parallel_config(self, parallel_config)
 
-    EngramConfig.verify_model_config = verify_model_config
     EngramConfig.verify_parallel_config = verify_parallel_config
