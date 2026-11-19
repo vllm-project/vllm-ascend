@@ -11,6 +11,7 @@ import torch
 from vllm_ascend.models.kimi_k3 import kimi_k3
 from vllm_ascend.ops import kda_parallel, kda_pcp
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
+from vllm_ascend.utils import vllm_version_is
 
 
 @contextmanager
@@ -86,7 +87,7 @@ def test_kda_input_projection_preserves_upstream_padding_and_replication(loader,
     tp = SimpleNamespace(world_size=2, rank_in_group=1)
     pcp = SimpleNamespace(world_size=2, rank_in_group=1)
     output_sizes = [32] * 4 + [4, 8]
-    if padding:
+    if padding and vllm_version_is("0.33.0"):
         output_sizes.append(padding * 4)
     with parallel_groups(tp, pcp):
         projection = kda_parallel.KDAInputParallelLinear(8, output_sizes, 4, padding_size=padding, bias=False)
@@ -98,6 +99,54 @@ def test_kda_input_projection_preserves_upstream_padding_and_replication(loader,
     if padding:
         assert projection.weight.weight_loader_numel == projection.weight[:-padding].numel()
         torch.testing.assert_close(projection.weight[-padding:], torch.zeros(padding, 8))
+
+
+@pytest.mark.parametrize(("head_dim", "padding"), [(4, 10), (14, 0)])
+@pytest.mark.parametrize("loader", ["weight_loader", "weight_loader_v2"])
+def test_pcp_projection_caller_allocates_padding_once(head_dim, padding, loader):
+    layer = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
+    torch.nn.Module.__init__(layer)
+    layer.num_heads = 8
+    layer.head_dim = head_dim
+    layer.projection_size = layer.num_heads * head_dim
+    layer.hidden_size = 8
+    layer.conv_size = 4
+    layer.quant_config = None
+    config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=2, prefill_context_parallel_size=2))
+    tp = SimpleNamespace(world_size=2, rank_in_group=1)
+    pcp = SimpleNamespace(world_size=2, rank_in_group=1)
+    with parallel_groups(tp, pcp):
+        layer._init_pcp_projections(config, "test")
+
+    projection = layer.in_proj_qkvgfab
+    assert layer.in_proj_padding == padding
+    local_rows = 4 * layer.local_projection_size + head_dim + layer.local_num_heads
+    assert projection.weight.shape == (local_rows + padding, layer.hidden_size)
+    checkpoint_rows = [layer.projection_size] * 4 + [head_dim, layer.num_heads]
+    weights = [
+        torch.arange(rows * layer.hidden_size, dtype=projection.weight.dtype).view(rows, layer.hidden_size)
+        for rows in checkpoint_rows
+    ]
+    for shard_id, weight in enumerate(weights):
+        getattr(projection, loader)(projection.weight, weight, shard_id)
+    expected = torch.cat(
+        [
+            weight if shard_id == 4 else weight.chunk(layer.tp_size, dim=0)[layer.tp_rank]
+            for shard_id, weight in enumerate(weights)
+        ]
+        + [torch.zeros(padding, layer.hidden_size, dtype=projection.weight.dtype)]
+    )
+    torch.testing.assert_close(projection.weight, expected)
+    inputs = torch.ones(2, layer.hidden_size, dtype=projection.weight.dtype)
+    output = projection(inputs)[0]
+    torch.testing.assert_close(output, inputs @ expected.T)
+    split_sizes = [3 * layer.local_projection_size, layer.local_projection_size, head_dim, layer.local_num_heads]
+    if padding:
+        split_sizes.append(padding)
+    assert len(output.split(split_sizes, dim=-1)) == len(split_sizes)
+    if not vllm_version_is("0.33.0"):
+        assert projection.shard_ids == tuple(range(6))
+        assert projection.pop_missing_shards() == []
 
 
 @pytest.mark.parametrize("reduce_results", [False, True])

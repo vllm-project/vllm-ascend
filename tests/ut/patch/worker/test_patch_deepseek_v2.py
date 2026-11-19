@@ -7,6 +7,7 @@ import pytest
 import torch
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2ForCausalLM, DeepseekV2Model
 from vllm.sequence import IntermediateTensors
+from vllm.v1.worker.gpu.pp_utils import PPHandler
 
 import vllm_ascend.patch.worker.patch_deepseek_v2 as patch_deepseek_v2
 import vllm_ascend.worker.v2.pp_transport as pp_transport
@@ -15,6 +16,7 @@ from vllm_ascend.patch.worker.patch_deepseek_v2 import (
     _patched_forward,
     _should_skip_indexer_init,
 )
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
     add_pp_transport_tensors,
@@ -28,6 +30,28 @@ def _config(**overrides) -> SimpleNamespace:
     values = {"num_hidden_layers": 80}
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_native_causal_lm_factory_uses_registered_decoder():
+    from vllm.model_executor.models import deepseek_v2 as native
+    from vllm.model_executor.models.interfaces import EagleModelMixin
+
+    assert native.DeepseekV2ForCausalLM.model_cls is native.DeepseekV2Model
+    if not vllm_version_is("0.33.0"):
+        assert issubclass(native.DeepseekV2ForCausalLM.model_cls, EagleModelMixin)
+
+
+def _aux_handler_fixture(model, last_rank):
+    if vllm_version_is("0.33.0"):
+        return SimpleNamespace(
+            aux_hidden_state_relay_keys=[f"aux_hidden_states_{i}" for i in range(model._aux_slot_base_cached)]
+        )
+    handler = SimpleNamespace()
+    PPHandler.configure_aux_hidden_state_relay(handler, SimpleNamespace(model=model))
+    # Keep the existing count assertion as an alias of main's actual receive
+    # keys. This diagnostic exists only on the test instance, not production.
+    model._aux_upstream_total_cached = len(handler.upstream_aux_keys) if last_rank else 0
+    return handler
 
 
 @pytest.mark.parametrize("non_causal", [None, False, True])
@@ -166,6 +190,7 @@ def test_aux_relay_matches_unpartitioned_forward(monkeypatch, with_topk, boundar
             monkeypatch.setattr(parallel_state, "model_parallel_is_initialized", lambda: True)
             monkeypatch.setattr(parallel_state, "get_pp_group", lambda group=group: group)
             DeepseekV2ForCausalLM.set_aux_hidden_state_layers(SimpleNamespace(model=model), aux_layers)
+            handler = _aux_handler_fixture(model, last)
             # IDs are boundaries after a target layer. The state at a
             # PP cut belongs to the upstream stage, including boundary38.
             expected_incoming = 0 if first else sum(idx <= start for idx in aux_layers)
@@ -174,9 +199,6 @@ def test_aux_relay_matches_unpartitioned_forward(monkeypatch, with_topk, boundar
             output = patch_deepseek_v2._patched_forward(model, ids if first else None, ids, incoming)
             if not last:
                 # Use the actual upstream relay, without creating streams or process groups.
-                handler = SimpleNamespace(
-                    aux_hidden_state_relay_keys=[f"aux_hidden_states_{i}" for i in range(model._aux_slot_base_cached)]
-                )
                 output = PPHandler.relay_aux_hidden_states(handler, incoming, output)
                 expected_keys = {"hidden_states", "residual"} | {
                     f"aux_hidden_states_{idx}" for idx in range(sum(idx <= end for idx in aux_layers))
@@ -188,8 +210,10 @@ def test_aux_relay_matches_unpartitioned_forward(monkeypatch, with_topk, boundar
                     torch.testing.assert_close(transported[0], expected_topk)
                     assert transported[0].data_ptr() == model.topk_indices_buffer.data_ptr()
                 assert set(output.tensors) == expected_keys
+            elif not vllm_version_is("0.33.0"):
+                output = PPHandler.add_upstream_aux_hidden_states(handler, incoming, output)
             incoming = output
-        return output if aux_layers else (output, [])
+        return output if aux_layers or not vllm_version_is("0.33.0") else (output, [])
 
     expected_hidden, expected_aux = run((0, 78))
     actual_hidden, actual_aux = run(boundaries)

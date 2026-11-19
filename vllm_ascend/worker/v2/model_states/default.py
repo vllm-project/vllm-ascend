@@ -46,7 +46,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     reset_sparse_kv_offload_request_owners,
     update_sparse_kv_offload_metadata,
 )
-from vllm_ascend.utils import should_skip_allreduce_across_dp_group
+from vllm_ascend.utils import embedding_tp_enable, should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
@@ -384,6 +384,29 @@ class AscendModelState(DefaultModelState):
             "block_table": block_tables[group_id][: batch.num_reqs],
         }
 
+    def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor:
+        if embedding_tp_enable():
+            if not hasattr(self, "_embedding_tp_dummy_join"):
+                from vllm_ascend.ops.vocab_parallel_embedding import AscendVocabParallelEmbedding, VocabParallelMode
+
+                self._embedding_tp_dummy_join = None
+                for module in self.model.modules():
+                    if (
+                        isinstance(module, AscendVocabParallelEmbedding)
+                        and module.parallel_mode == VocabParallelMode.FINE_GRAINED
+                        and module.token_exchange_group is not None
+                    ):
+                        capacity = module.embedding_tp_capacity
+                        assert capacity is not None
+                        token_ids = torch.zeros(capacity, dtype=torch.int32, device=self.device)
+                        self._embedding_tp_dummy_join = (module, token_ids)
+                        break
+            if self._embedding_tp_dummy_join is not None:
+                module, token_ids = self._embedding_tp_dummy_join
+                module(token_ids)
+
+        return super().dummy_inputs_embeds(num_tokens)
+
     def prepare_inputs_embeds(self, scheduled_encoder_inputs, input_batch, req_states) -> torch.Tensor:
         # MRV2 prepares MM embeddings before entering ForwardContext. Upstream
         # slices input_ids to valid local rows to match the image mask, leaving
@@ -534,7 +557,12 @@ class AscendModelState(DefaultModelState):
                     block_table=block_tables[0],
                 )
         is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
-        max_query_len = input_batch.num_scheduled_tokens.max().item()
+        # Varlen graphs capture one-token dummy requests but may replay wider
+        # verification rows. Preserve the descriptor's promised bound for C2
+        # compressor launch grids and attention/indexer tiling.
+        max_query_len = input_batch.max_query_len
+        if max_query_len is None:
+            max_query_len = input_batch.num_scheduled_tokens.max().item()
         pcp_context = (
             self.pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
             if self.pcp_manager is not None and self.pcp_manager.is_target_attn_groups(attn_groups)

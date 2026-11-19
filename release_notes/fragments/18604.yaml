@@ -1,0 +1,8 @@
+pr: 18604
+entries:
+  - category: feature
+    text: >-
+      Added exact MoE expert offload for single-device inference on Ascend 950PR and 950DT
+      with Model Runner V2, allowing MoE models to run when their expert weights exceed
+      NPU memory. Set `expert_offload_config.enabled` to `true` and choose
+      `expert_offload_config.num_device_experts` via `--additional-config` to enable it.

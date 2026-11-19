@@ -46,6 +46,7 @@ def test_first_decode_primes_correct_group_before_graph_or_eager_forward(monkeyp
         num_reqs_after_padding=2,
         num_tokens=1,
         num_tokens_after_padding=2,
+        max_query_len=1,
         req_ids=["r"],
         num_computed_tokens_np=np.array([computed]),
         query_start_loc_np=np.array([0, 1]),

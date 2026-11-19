@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vllm_ascend.ascend_config import AscendConfig, MooncakeStagingConfig
+from vllm_ascend.ascend_config import AscendConfig, ExpertOffloadConfig, MooncakeStagingConfig
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa import staging
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.staging import MooncakeSFAStagingReader
 
@@ -20,6 +20,16 @@ def test_staging_defaults_and_nested_config_conversion():
     )
     assert configured.mooncake_staging_config == MooncakeStagingConfig(window_chunks=8, bank_count=1)
     assert config.mooncake_staging_config.bank_count == 4
+
+
+def test_staging_and_expert_offload_configs_parse_together():
+    config = AscendConfig(
+        sparse_kv_offload_config=SimpleNamespace(enabled=False),
+        expert_offload_config={"enabled": True, "num_device_experts": 4},
+        mooncake_staging_config={"window_chunks": 8, "bank_count": 1},
+    )
+    assert config.expert_offload_config == ExpertOffloadConfig(enabled=True, num_device_experts=4)
+    assert config.mooncake_staging_config == MooncakeStagingConfig(window_chunks=8, bank_count=1)
 
 
 @pytest.mark.parametrize("field", ["window_chunks", "bank_count"])
