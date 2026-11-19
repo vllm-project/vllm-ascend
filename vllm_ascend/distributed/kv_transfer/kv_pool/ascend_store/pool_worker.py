@@ -125,6 +125,11 @@ class BaseKVPoolWorker(ABC):
         self._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
         self._group_pp_ranks = self._collect_group_pp_ranks()
         self._init_key_head_config(model_config)
+        # The evidence gate runs only AFTER _init_key_head_config: it reads
+        # self.tp_mismatch, which that method sets (Phase-2 F-4 -- the gate
+        # previously ran before the attribute existed and silently read
+        # False for every layout).
+        self._init_evidence_path(vllm_config, use_layerwise)
         self._init_metadata(model_config, vllm_config, extra_config)
         self._init_backend(parallel_config, extra_config)
         self._init_kv_events(vllm_config)
@@ -255,7 +260,6 @@ class BaseKVPoolWorker(ABC):
             self.grouped_block_size, self.lcm_block_size, self.cacheable_group_ids
         )
         self.h2d_stagger_us = int(extra_config.get("h2d_stagger_us", 0))
-        self._init_evidence_path(vllm_config, use_layerwise)
 
         logger.info(
             "use_hybrid: %s, use_mamba: %s, num_kv_cache_groups: %s, hash_block_size: %s, lcm_block_size: %s",
@@ -299,9 +303,8 @@ class BaseKVPoolWorker(ABC):
         # not-repair -- exactly the pre-evidence behavior.
         kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
         policy = getattr(kv_transfer_config, "kv_load_failure_policy", None)
-        # TP mismatch state exists only after _init_key_head_config; the
-        # blockwise gate re-checks it at load time for safety.
-        self._evidence_tp_mismatch = bool(getattr(self, "tp_mismatch", False))
+        # The caller order guarantees self.tp_mismatch is already set by
+        # _init_key_head_config (see BaseKVPoolWorker.__init__).
         evidence_active = evidence_enabled(
             policy,
             contract_importable=True,
@@ -309,7 +312,7 @@ class BaseKVPoolWorker(ABC):
             num_kv_cache_groups=self.num_kv_cache_groups,
             use_hybrid=self.use_hybrid,
             use_layerwise=use_layerwise,
-            tp_mismatch=self._evidence_tp_mismatch,
+            tp_mismatch=bool(getattr(self, "tp_mismatch", False)),
             use_kvpp=self.use_kvpp,
             dcp_size=self.dcp_size,
             pcp_size=self.pcp_size,
@@ -1820,6 +1823,12 @@ class KVPoolWorker(BaseKVPoolWorker):
                 record_operation=self._record_kv_connector_operation,
                 host_memory_group_ids=host_memory_group_ids,
                 evidence_buffer=self.evidence_buffer,
+                # The evidence accounting facts, passed EXPLICITLY: the
+                # thread receives a worker only on the tp_mismatch path,
+                # which the evidence gate refuses, so it cannot read them
+                # through the worker object (Phase-2 F-1).
+                evidence_num_layers=self._evidence_num_layers,
+                evidence_certification=self._evidence_certification,
             )
         try:
             for thread in (self.kv_send_thread, self.kv_recv_thread):
