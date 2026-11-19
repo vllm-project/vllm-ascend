@@ -487,10 +487,9 @@ Model Runner V2 is the only runner in vLLM-Ascend; the two items below are open 
 
 **Phenomenon:** prefill TTFT is tens of percent higher than the previous runner while NPU kernel time is flat or slightly lower.
 
-**Cause:** CANN caches at most `ACLNN_CACHE_LIMIT` compiled operator descriptors per worker process, and the default is `10000`. Speculative decoding with ACL Graph captures extra prefill and decode graphs, so the operator/shape working set grows past that ceiling. The executor then stops reusing descriptors and recomputes tiling and workspace on the host for every call. A torch profile of the affected configuration shows a large `aclnn*GetWorkspaceSize` and `*_Tiling` share; some operators keep the same call count but cost about 13x per call.
+**Candidate cause:** CANN keeps single-operator ACLNN descriptors in a per-thread cache whose ceiling is `ACLNN_CACHE_LIMIT` (default `10000`), and keeps a separate process-wide pool for large fused operators. Speculative decoding with ACL Graph captures extra prefill and decode graphs, so the operator/shape working set grows; a worker has been observed holding about 9900 descriptor entries in aggregate right after startup, but that count is worker-wide and does not by itself show that a thread reached the per-thread ceiling. A torch profile of the affected configuration shows a large `aclnn*GetWorkspaceSize` and `*_Tiling` share; some operators keep the same call count but cost about 13x per call. Treat the cache as a hypothesis that the profile has to confirm, not as an established cause.
 
-**Diagnosis and mitigation:** the ceiling is configurable. Export a larger limit in the worker
-environment before startup, then re-measure the same workload:
+**Diagnosis and mitigation:** the per-thread ceiling is configurable. If a profile identifies a cache that is full, export a larger limit in the worker environment before startup, then re-measure the same workload:
 
 ```bash
 export ACLNN_CACHE_LIMIT=100000
