@@ -88,7 +88,10 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
         self.lease_extension = kv_lease_duration * 2 // 3
         self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
         self.state_lock = threading.Lock()
-        self._drain_report_at = 0.0
+        # Set when the release queue is first observed non-empty and reset
+        # while it is empty, so the stall clock starts at the accumulation
+        # rather than at process start.
+        self._drain_report_at: float | None = None
 
     def add_delayed_request(self, request_id: str) -> None:
         with self.state_lock:
@@ -291,12 +294,18 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
                 "Mooncake delayed-free sweeper archived %d expired request(s) into the release queue.",
                 len(expired),
             )
+            if self._drain_report_at is None:
+                self._drain_report_at = time.monotonic()
         elif awaiting_drain:
             # Diagnostic only: `finished_requests` also fills briefly under
             # healthy load between a DONE and the next scheduler step, so
             # report a sustained accumulation instead of every recv timeout.
             now = time.monotonic()
-            if now - self._drain_report_at >= DRAIN_REPORT_INTERVAL_SECONDS:
+            if self._drain_report_at is None:
+                # The clock starts at the first observation, so a transient
+                # DONE-to-step overlap is never reported.
+                self._drain_report_at = now
+            elif now - self._drain_report_at >= DRAIN_REPORT_INTERVAL_SECONDS:
                 self._drain_report_at = now
                 logger.info(
                     "Mooncake delayed-free sweeper: no expired entries (delayed=%d renewed=%d) "
@@ -305,6 +314,8 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
                     renewed,
                     awaiting_drain,
                 )
+        else:
+            self._drain_report_at = None
 
 
 class MooncakeSchedulerRecvingThread(threading.Thread):

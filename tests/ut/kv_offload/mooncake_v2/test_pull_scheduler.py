@@ -442,30 +442,48 @@ def test_sweeper_drain_report_is_rate_limited(
 
     The finished queue also fills briefly between a DONE arriving and the
     next scheduler step, so the report fires at most once per
-    DRAIN_REPORT_INTERVAL_SECONDS even when every sweep observes it.
+    DRAIN_REPORT_INTERVAL_SECONDS and only after the accumulation has lasted
+    that long. The clock deliberately starts far from zero (a real
+    ``time.monotonic`` value), so an implementation that compares against
+    zero would report on the very first observation and fail here.
     """
     thread = make_sending_thread()
-    clock = MagicMock(return_value=0.0)
+    interval = DRAIN_REPORT_INTERVAL_SECONDS
+    start = 1000.0
+    clock = MagicMock(return_value=start)
     monkeypatch.setattr(pull_scheduler.time, "monotonic", clock)
     thread.add_delayed_request("done-entry")
     thread._handle_finished_request("done-entry")
     assert thread.finished_requests.qsize() == 1
 
     with caplog.at_level(logging.INFO, logger="vllm"):
-        thread._sweep_expired_requests()  # t=0: inside the first interval
+        thread._sweep_expired_requests()  # stall clock starts, no report
         assert not [r for r in caplog.records if "await scheduler drain" in r.message]
 
-        clock.return_value = DRAIN_REPORT_INTERVAL_SECONDS  # t=30: first report
+        clock.return_value = start + interval  # first report
         thread._sweep_expired_requests()
-        clock.return_value += DRAIN_REPORT_INTERVAL_SECONDS / 3  # t=40: inside interval
+        clock.return_value = start + interval + interval / 3  # inside interval
         thread._sweep_expired_requests()
         reports = [r for r in caplog.records if "await scheduler drain" in r.message]
         assert len(reports) == 1
 
-        clock.return_value += DRAIN_REPORT_INTERVAL_SECONDS  # t=70: interval elapsed
+        clock.return_value = start + 2 * interval  # interval elapsed
         thread._sweep_expired_requests()
         reports = [r for r in caplog.records if "await scheduler drain" in r.message]
         assert len(reports) == 2
+
+    # An empty queue restarts the stall clock: after the queue drains and
+    # sweeps keep observing it empty, a fresh accumulation is not reported
+    # on its first observation even though the old report is long past.
+    assert thread.get_and_clear_finished_requests() == {"done-entry"}
+    clock.return_value = start + 5 * interval
+    thread._sweep_expired_requests()
+    caplog.clear()
+    thread.add_delayed_request("done-entry-2")
+    thread._handle_finished_request("done-entry-2")
+    with caplog.at_level(logging.INFO, logger="vllm"):
+        thread._sweep_expired_requests()  # fresh stall, first observation
+        assert not [r for r in caplog.records if "await scheduler drain" in r.message]
 
 
 def test_recv_timeout_drives_the_sweeper(monkeypatch: pytest.MonkeyPatch) -> None:
