@@ -172,11 +172,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         # Query the exact replay endpoint; a later KDA checkpoint cannot be
         # sliced into a valid earlier state.
         if hit > limit:
-            if not limit:
-                return 0
-            if self.use_block_key_layerwise:
-                return self._get_block_key_layerwise_hit_tokens(request, limit, 0)
-            return self._get_layerwise_hit_tokens(request, limit, 0)
+            return self._get_block_key_layerwise_hit_tokens(request, limit, 0) if limit else 0
         return hit
 
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
