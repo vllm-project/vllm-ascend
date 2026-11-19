@@ -1,0 +1,4 @@
+pr: 22492
+entries:
+  - category: feature
+    text: Added single-node, two-stage pipeline parallelism for non-speculative text generation on Ascend 310P Model Runner V2. Enable it with `--pipeline-parallel-size 2`.
