@@ -13,24 +13,6 @@ For a general introduction to these two strategies, see the upstream [vLLM Conte
 
     Decode Context Parallelism (DCP) for **GQA models** is **deprecated** as of v0.32.0 and has entered the sunset process (will be removed in a future release). GQA models naturally shard KV heads across TP ranks, and in speculative decoding, GQA draft models maintain native TP sharding under target DCP. Maintaining dedicated GQA DCP metadata and communication paths is no longer justified. Note that DCP for **MLA and SFA models** remains fully supported and recommended. For more details, see [RFC #21305](https://github.com/vllm-project/vllm-ascend/issues/21305).
 
-## TP query sharding (ShardQ)
-
-DeepSeek-V3.2's standard Lightning Indexer + SFA path can shard prefill queries across existing TP ranks. Model weights keep their TP layout and KV caches remain replicated. The indexer scores each rank's query rows; two all-to-all exchanges gather all Q heads for those rows and restore the original token/head layout before V/O projection. Full-batch main KV and indexer K-cache writes still use the existing path.
-
-On paired vLLM versions that provide ShardQ, Ascend reuses the upstream `sparse_mla_shard_q` setting (enabled by default) and `sparse_mla_shard_q_min_tokens` threshold (default: 1024). For example:
-
-```bash
-vllm serve <DeepSeek-V3.2-model> \
-    --tensor-parallel-size 8 \
-    --attention-config '{"sparse_mla_shard_q": true, "sparse_mla_shard_q_min_tokens": 1024}'
-```
-
-GLM-5.3 can also use ShardQ with IndexCache. Each TP rank stores its local Top-K rows in the existing shared buffer, and later layers on the same PP stage read them in the same query order. If an IndexCache group crosses a PP stage boundary, the model retains the replicated Top-K layout.
-
-GLM-5.3-Flash can use ShardQ in its KPool and NoPE SFA layers. KPool scores the same query rows that SFA attends on each rank, so the existing Top-K gather is skipped on ShardQ steps. Compression and tail-cache updates still use the full batch.
-
-ShardQ requires TP > 1, PCP = DCP = 1, and eager or piecewise prefill execution. The upstream planner leaves short batches, decode-only batches, and contexts within `index_topk` on the existing path. Decode queries in mixed batches retain their local TP heads. Draft layers, HiSparse, host KV offload, and other indexer/SFA combinations retain their existing execution paths. Set `sparse_mla_shard_q` to `false` to disable ShardQ.
-
 ## Supported Scenarios
 
 ### Prefill Context Parallel { #prefill-context-parallel }
