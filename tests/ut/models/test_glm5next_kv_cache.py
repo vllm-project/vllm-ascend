@@ -601,6 +601,7 @@ def test_pcp_decode_kpool_and_tail_route_global_write_metadata(
     tail._max_num_metadata_reqs = global_reqs
     tail._lookahead = False
     tail._tail_inputs = {}
+    tail._slot_mapping_buffers = {}
     tail_metadata = tail.build(0, common)
     tail_common = keypool_kernels.build_tail_inputs.call_args.args[0]
     assert tail_common.num_reqs == global_reqs

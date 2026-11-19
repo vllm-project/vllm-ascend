@@ -8,55 +8,76 @@ import torch
 from vllm.triton_utils import tl, triton
 
 FP8_E4M3_MAX = tl.constexpr(448.0)
+# A power-of-two tile bounds the per-program vector while long requests loop.
+# Keep this fixed across metadata builds rather than specializing on query length.
+TAIL_SLOT_MAPPING_BLOCK_SIZE = 256
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_actual_tokens", "num_tokens", "num_reqs"])
 def _tail_slot_mapping_kernel(
-    positions,
-    query,
-    pages,
-    output,
-    PAGE_STRIDE: tl.constexpr,
-    capacity: tl.constexpr,
-    actual,
-    tokens,
-    requests,
-    BLOCK: tl.constexpr,
+    positions_ptr,
+    query_start_loc_ptr,
+    block_table_ptr,
+    output_ptr,
+    BLOCK_TABLE_STRIDE: tl.constexpr,
+    CAPACITY: tl.constexpr,
+    num_actual_tokens,
+    num_tokens,
+    num_reqs,
+    BLOCK_SIZE: tl.constexpr,
 ):
-    req = tl.program_id(0)
-    if req == requests:
-        for begin in range(actual, tokens, BLOCK):
-            rows = begin + tl.arange(0, BLOCK)
-            tl.store(output + rows, -1, rows < tokens)
+    request_id = tl.program_id(0)
+    if request_id == num_reqs:
+        # One additional program owns padding; request programs never write it.
+        for tile_start in range(num_actual_tokens, num_tokens, BLOCK_SIZE):
+            token_offsets = tile_start + tl.arange(0, BLOCK_SIZE)
+            tl.store(output_ptr + token_offsets, -1, token_offsets < num_tokens)
     else:
-        start = tl.load(query + req)
-        end = tl.load(query + req + 1)
-        start = tl.minimum(tl.where(start < 0, actual, start), actual)
-        end = tl.minimum(tl.where(end < 0, actual, end), actual)
-        page = tl.load(pages + req * PAGE_STRIDE).to(tl.int64)
-        for begin in range(start, end, BLOCK):
-            rows = begin + tl.arange(0, BLOCK)
-            pos = tl.load(positions + rows, rows < end, other=-1).to(tl.int64)
-            slot = tl.where((page > 0) & (pos >= 0), page * capacity + pos % capacity, -1)
-            tl.store(output + rows, slot, rows < end)
+        start = tl.load(query_start_loc_ptr + request_id)
+        end = tl.load(query_start_loc_ptr + request_id + 1)
+        # Ascend graph metadata can append dummy boundaries beyond actual tokens.
+        start = tl.minimum(tl.where(start < 0, num_actual_tokens, start), num_actual_tokens)
+        end = tl.minimum(tl.where(end < 0, num_actual_tokens, end), num_actual_tokens)
+        block_id = tl.load(block_table_ptr + request_id * BLOCK_TABLE_STRIDE).to(tl.int64)
+        for tile_start in range(start, end, BLOCK_SIZE):
+            token_offsets = tile_start + tl.arange(0, BLOCK_SIZE)
+            position = tl.load(positions_ptr + token_offsets, token_offsets < end, other=-1).to(tl.int64)
+            slot = tl.where((block_id != 0) & (position >= 0), block_id * CAPACITY + position % CAPACITY, -1)
+            tl.store(output_ptr + token_offsets, slot, token_offsets < end)
 
 
-def build_tail_slot_mapping(common, capacity, output):
-    """Map positions through column zero of each request's circular block table."""
-    tokens = min(common.positions.numel(), getattr(common, "num_input_tokens", common.positions.numel()))
-    slots = output[:tokens]
-    actual = min(common.num_actual_tokens, slots.numel())
+def build_tail_slot_mapping(common, capacity: int, output: torch.Tensor) -> torch.Tensor:
+    """Build request-local circular slots in a preallocated int64 output prefix.
+
+    ``common`` supplies contiguous positions/query boundaries, the block table,
+    and actual/input token and request counts. Block-table column zero owns each
+    request's ring; its row stride can include other columns or padding. Block
+    IDs are nonnegative, with zero reserved for null requests. Actual positions
+    are nonnegative; the predicate also maps negative positions to -1.
+
+    The returned view is bounded by positions, ``num_input_tokens`` (when
+    supplied), and output capacity. Padding is filled with -1 independently of
+    ``common.slot_mapping``. Inputs and output storage beyond that view are not
+    modified. All tensors must share a device; the CPU fallback supports host
+    callers, while production Ascend metadata uses the Triton path.
+    """
+    num_tokens = min(common.positions.numel(), getattr(common, "num_input_tokens", common.positions.numel()))
+    slots = output[:num_tokens]
+    num_actual_tokens = min(common.num_actual_tokens, slots.numel())
     if common.positions.device.type == "cpu":
         slots.fill_(-1)
-        if actual and common.num_reqs:
-            rows = torch.arange(actual)
-            query = common.query_start_loc[1:]
-            query = torch.where(query < 0, actual, query).clamp(max=actual)
-            req = torch.searchsorted(query, rows, right=True)
-            pages = common.block_table_tensor[req, 0].long()
-            pos = common.positions[:actual].long()
-            slots[:actual] = torch.where((pages > 0) & (pos >= 0), pages * capacity + pos % capacity, -1)
+        if num_actual_tokens and common.num_reqs:
+            token_offsets = torch.arange(num_actual_tokens)
+            query_ends = common.query_start_loc[1:]
+            query_ends = torch.where(query_ends < 0, num_actual_tokens, query_ends).clamp(max=num_actual_tokens)
+            request_ids = torch.searchsorted(query_ends, token_offsets, right=True)
+            block_ids = common.block_table_tensor[request_ids, 0].long()
+            positions = common.positions[:num_actual_tokens].long()
+            slots[:num_actual_tokens] = torch.where(
+                (block_ids != 0) & (positions >= 0), block_ids * capacity + positions % capacity, -1
+            )
     else:
+        # Preserve one program per request and one serial padding program.
         _tail_slot_mapping_kernel[(common.num_reqs + 1,)](
             common.positions,
             common.query_start_loc,
@@ -64,10 +85,10 @@ def build_tail_slot_mapping(common, capacity, output):
             slots,
             common.block_table_tensor.stride(0),
             capacity,
-            actual,
+            num_actual_tokens,
             slots.numel(),
             common.num_reqs,
-            256,
+            TAIL_SLOT_MAPPING_BLOCK_SIZE,
         )
     return slots
 

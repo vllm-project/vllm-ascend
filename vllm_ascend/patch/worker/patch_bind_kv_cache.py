@@ -59,7 +59,6 @@ def bind_kv_cache(
             layer.kv_cache = kv_cache
 
 
-
 def bind_kv_cache_to_layers(
     kv_caches: dict[str, torch.Tensor],
     forward_context: dict[str, Attention],
