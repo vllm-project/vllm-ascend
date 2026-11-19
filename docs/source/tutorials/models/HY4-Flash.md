@@ -2,9 +2,7 @@
 
 ## 1 Introduction
 
-!!! note "Hardware Support"
-
-    This release has been validated only on A5 (950DT products). A2 and A3 have not yet been validated; support is planned for future releases.
+This release has been validated only on 950DT products. A2 and A3 have not yet been validated; support is planned for future releases.
 
 !!! note
 
