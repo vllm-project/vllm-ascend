@@ -227,8 +227,9 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             )
 
         self.num_embeddings = num_embeddings
-        # The padded vocabulary must divide evenly across the composed shard
-        # count, so raise the padding granularity to the lcm.
+        # The padded vocabulary must divide evenly across the shard count
+        # (P*T when fine-grained TP composes with standard TP), so raise the
+        # padding granularity to the lcm.
         self.padding_size = lcm(padding_size, self.tp_size)
         self.org_vocab_size = org_num_embeddings or num_embeddings
         num_added_embeddings = num_embeddings - self.org_vocab_size
@@ -409,8 +410,8 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         output = reduce_scatter_output[:num_tokens].view(num_tokens, self.embedding_dim)
         reduce_group = self.output_reduce_group
         if reduce_group is not None and reduce_group.world_size > 1:
-            # PCP reduce-scatter reconstructs the TP-local contribution. This
-            # reduction completes the vocabulary result across TP shards.
+            # The exchange reduce-scatter (PCP or fine-grained) only sums this
+            # TP column's shards; this all-reduce adds the other columns'.
             output = torch.ops.vllm.all_reduce(output, reduce_group.unique_name)
         return output
 
@@ -534,19 +535,29 @@ def gather_lm_head_hidden_states(hidden_states: torch.Tensor, capacity: int | No
     return get_lmhead_tp_group().all_gather(hidden_states, dim=0)
 
 
-def gather_lm_head_outputs(output: torch.Tensor, parallel_mode: VocabParallelMode) -> torch.Tensor:
+def gather_lm_head_outputs(
+    output: torch.Tensor,
+    parallel_mode: VocabParallelMode,
+    tp_gather_group: GroupCoordinator | None = None,
+) -> torch.Tensor:
     """Exchange dense logits or candidates, keeping any trailing score/ID pairs intact.
 
     Dim 0 contains token rows and dim 1 vocabulary entries or candidates.
     Fine-grained TP routes rows to their DP owner; PCP/standard TP joins
-    vocabulary shards for identical rows. This helper does not select TopK.
+    vocabulary shards for identical rows. For fine-grained TP composed with
+    standard TP, the all-to-all covers this TP column only, so a non-None
+    ``tp_gather_group`` joins the remaining columns in the same exchange. This
+    helper does not select TopK.
     """
     if parallel_mode is VocabParallelMode.FINE_GRAINED:
         group = get_lmhead_tp_group()
         exchanged = lmhead_all_to_all(output.flatten(1), group)
-        return exchanged.reshape(
+        output = exchanged.reshape(
             output.shape[0] // group.world_size, output.shape[1] * group.world_size, *output.shape[2:]
         )
+        if tp_gather_group is not None and tp_gather_group.world_size > 1:
+            output = tp_gather_group.all_gather(output.contiguous(), dim=1 - output.ndim)
+        return output
     # Use the same vocabulary/candidate axis for [rows, vocab] logits and
     # [rows, candidates, 2] packed score/ID tensors.
     dim = 1 - output.ndim
@@ -617,12 +628,12 @@ class AscendLogitsProcessor(LogitsProcessor):
         # Gather hidden states from all devices in tensor parallel group
         gathered_hidden_states = gather_lm_head_hidden_states(hidden_states)
         logits = self._apply_head(lm_head, gathered_hidden_states, embedding_bias)
-        # Gather logits for tensor parallel
-        logits = gather_lm_head_outputs(logits, lm_head.parallel_mode)
-        # With standard TP composed in, the all-to-all leaves only this TP
-        # rank's vocabulary span; gather the remaining spans over TP.
-        if getattr(lm_head, "composed_with_tp", False):
-            logits = get_tp_group().all_gather(logits, dim=-1)
+        # Gather logits for tensor parallel. With standard TP composed in, the
+        # all-to-all leaves only this TP column's vocabulary span, and the same
+        # exchange completes the remaining columns over the TP group. Running it
+        # after the all-to-all keeps the TP collective on the local token rows.
+        completion_group = get_tp_group() if getattr(lm_head, "composed_with_tp", False) else None
+        logits = gather_lm_head_outputs(logits, lm_head.parallel_mode, completion_group)
 
         # Remove paddings in vocab (if any)
         if logits is not None:

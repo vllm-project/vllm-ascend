@@ -303,21 +303,19 @@ def _gather_lm_head_candidates(
         values.dtype in (torch.float16, torch.bfloat16, torch.float32)
         and lm_head.num_embeddings_padded <= _MAX_EXACT_FP32_TOKEN_ID
     )
+    # With standard TP composed into the head, the exchange below covers only
+    # this TP column's candidates; the same (packed) exchange joins the other
+    # columns.
+    completion_group = get_tp_group() if getattr(lm_head, "composed_with_tp", False) else None
     if packed:
         score_dtype = values.dtype
         pairs = torch.stack((values.float(), ids.float()), dim=-1)
-        pairs = gather_lm_head_outputs(pairs, parallel_mode)
+        pairs = gather_lm_head_outputs(pairs, parallel_mode, completion_group)
         values = pairs[..., 0].to(score_dtype)
         ids = pairs[..., 1].to(torch.int64)
     else:
-        values = gather_lm_head_outputs(values, parallel_mode)
-        ids = gather_lm_head_outputs(ids, parallel_mode)
-    # With standard TP composed into the head, the fine-grained exchange
-    # covered only this TP column's candidates; join the other columns.
-    if getattr(lm_head, "composed_with_tp", False):
-        tp_group = get_tp_group()
-        values = tp_group.all_gather(values.contiguous(), dim=1 - values.ndim)
-        ids = tp_group.all_gather(ids.contiguous(), dim=1 - ids.ndim)
+        values = gather_lm_head_outputs(values, parallel_mode, completion_group)
+        ids = gather_lm_head_outputs(ids, parallel_mode, completion_group)
     if parallel_mode is VocabParallelMode.FINE_GRAINED:
         values, ids = values[:num_rows], ids[:num_rows]
     # Global TopK over the union of each resident vocabulary shard's TopK.

@@ -827,14 +827,18 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         )
         # The head itself must have resolved the composed layout.
         self.assertEqual((lmhead.tp_rank, lmhead.tp_size), (1 * 2 + 0, 4))
+        # Emit the real per-partition width so the gathered shape is meaningful:
+        # P fine-grained shards of one TP column add up to V / T.
+        shard_width = lmhead.num_embeddings_per_partition
+        self.mock_quant_method.apply.return_value = torch.randn(2, shard_width)
         lmhead.quant_method = self.mock_quant_method
         lmhead.quant_method.apply = self.mock_quant_method.apply
 
         logits = processor._get_logits(torch.randn(1, self.org_num_embeddings), lmhead, None)
 
-        # The TP gather runs after the all-to-all (its input carries the
-        # redistributed [N/P, 2*V/P] shape) and completes the full vocab.
-        self.assertEqual(events, [("tp", -1, (1, 2 * self.vocab_size))])
+        # The TP gather runs after the all-to-all and carries the redistributed
+        # [N/P, P * V/(P*T)] shape; the truncated result is the org vocabulary.
+        self.assertEqual(events, [("tp", -1, (1, 2 * shard_width))])
         self.assertEqual(logits.shape, (1, self.vocab_size))
         self.mock_all_to_all_single.assert_called_once()
 

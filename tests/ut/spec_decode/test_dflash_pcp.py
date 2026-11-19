@@ -292,9 +292,15 @@ def test_candidate_topk_composes_standard_tp(monkeypatch, rank):
     col_values = torch.cat(shard_values[fg_world:], dim=-1)
     col_ids = torch.cat(shard_ids[fg_world:], dim=-1)
     rows = slice(rank * capacity, (rank + 1) * capacity)
+    tp_calls: list[int] = []
 
     def tp_all_gather(t, *, dim):
-        col = col_ids[rows] if t.dtype == torch.int64 else col_values[rows]
+        tp_calls.append(dim)
+        if t.ndim == 3:
+            # The packed (score, ID) exchange completes both in one collective.
+            col = torch.stack((col_values[rows], col_ids[rows]), dim=-1)
+        else:
+            col = col_ids[rows] if t.dtype == torch.int64 else col_values[rows]
         return torch.cat((t, col), dim=dim)
 
     monkeypatch.setattr(vocab_module, "get_lmhead_tp_group", lambda: group)
@@ -321,3 +327,5 @@ def test_candidate_topk_composes_standard_tp(monkeypatch, rank):
     expected_values, expected_ids = full_logits[rank * capacity : rank * capacity + counts[rank]].topk(top_k, dim=-1)
     torch.testing.assert_close(ids, expected_ids)
     torch.testing.assert_close(values, torch.tanh(expected_values.float() * 1.25 / 2.0) * 2.0)
+    # Packed scores and IDs cross the TP group in a single exchange.
+    assert tp_calls == [-2]
