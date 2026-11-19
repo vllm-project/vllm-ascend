@@ -28,6 +28,17 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# * platform/patch_kv_cache_admission.py:
+#   Target: SlidingWindowManager and ChunkedLocalAttentionManager admission.
+#   Why: Logical KV tables include skipped NULL prefix entries and shared blocks
+#        that cannot provide recyclable physical capacity for async prefill.
+#   How: Shift first-time admission past skipped prefixes and offset existing
+#        reservations only by exclusively held, non-NULL blocks. Delegate all
+#        other allocation accounting to the original upstream method.
+#   Related PR: No upstream physical-block admission patch is available yet.
+#   Future plan: Contribute this accounting to vLLM and remove the patch when
+#        both supported vLLM versions cover first-time and shared-block admission.
+# --------------------------------
 # * worker/patch_kda_recoverssm.py:
 #   Target: Kimi KDA's KDARecoverSSMCommitContext module binding.
 #   Why: The upstream metadata builder imports its CUDA context directly.
