@@ -110,7 +110,7 @@ on:
 
 jobs:
   generate-matrix:
-    runs-on: linux-amd64-cpu-2-hk
+    runs-on: linux-amd64-cpu-1-hk
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
       tag_suffix_ubuntu: ${{ steps.set-tag.outputs.tag_suffix_ubuntu }}
