@@ -770,6 +770,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     # `Cannot determine type of "W_UK_T"  [has-type]`.
     W_UV: torch.Tensor
     W_UK_T: torch.Tensor
+    weight_dq: torch.Tensor
 
     # A replicated MTP draft may inherit a PCP target's non-trivial interleave
     # value. With DCP disabled it does not change the draft KV-cache layout.
@@ -1136,6 +1137,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.fused_qkv_a_proj.weight.data = self.fused_qkv_a_proj.weight.data.T
 
         fused_weight = self.fused_qkv_a_proj.weight.data
+        if qt is AscendW8A8DynamicLinearMethod and self.enable_sparse_sfa_c8 and self.c8_cache_dtype == torch.int8:
+            # Slice logical ND weights to avoid unsupported INT8 NZ TransData.
+            fused_weight = torch_npu.npu_format_cast(fused_weight, ACL_FORMAT_FRACTAL_ND)
         weight_dq = fused_weight[..., : self.q_lora_rank].contiguous()
         weight_dkv_kr = fused_weight[..., self.q_lora_rank :].contiguous()
         if qt is not None:

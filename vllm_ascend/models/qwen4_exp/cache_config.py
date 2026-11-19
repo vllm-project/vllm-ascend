@@ -568,8 +568,11 @@ def _merge_mamba_state_groups(
     for members in buckets.values():
         first = members[0][0]
         drop.update(index for index, _, _ in members)
-        for start in range(0, len(members), slot_count):
-            chunk = members[start : start + slot_count]
+        # Interleave layers in model order while keeping each group within the slot limit.
+        members.sort(key=lambda member: _owner_sort_key(member[1]))
+        num_groups = cdiv(len(members), slot_count)
+        for i in range(num_groups):
+            chunk = members[i::num_groups]
             specs = {name: spec for _, name, spec in chunk}
             uniform = UniformTypeKVCacheSpecs.from_specs(specs)
             assert uniform is not None
