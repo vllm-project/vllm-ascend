@@ -135,10 +135,7 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
             # matrix has n=1 or k=1. Keep scalar gates such as Qwen MoE's
             # shared_expert_gate in ND format, leaving non-310P policy intact.
             if not keep_nd_weight:
-                layer.weight.data = maybe_trans_nz(
-                    layer.weight.data,
-                    force_float_nz=getattr(layer, "force_float_nz", False),
-                )
+                layer.weight.data = maybe_trans_nz(layer.weight.data)
 
     def apply(
         self,

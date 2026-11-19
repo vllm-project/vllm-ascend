@@ -2,7 +2,5 @@ pr: 22165
 entries:
   - category: bugfix
     text: >-
-      DeepSeek V4/V4.1 unquantized BF16/FP16 wo_a and wo_b output-projection
-      weights now use NZ in default weight_nz_mode=1 when supported, with wo_a
-      conversion applied after the grouped weight layout is finalized.
-      On hardware with configurable weight layouts, weight_nz_mode=0 disables NZ.
+      Fixed DeepSeek V4/V4.1 unquantized wo_a output projection weights
+      staying in ND when weight_nz_mode=2 is selected.

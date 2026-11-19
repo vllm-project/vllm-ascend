@@ -1,6 +1,5 @@
 import unittest
 from contextlib import contextmanager
-from itertools import product
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
@@ -81,7 +80,6 @@ class TestAscendUnquantizedLinearMethod(TestBase):
         type(self.layer.weight.data).shape = mock.PropertyMock(return_value=torch.Size([64, 32]))
         self.layer.precast_fp32_weight = False
         self.layer.skip_weight_nz_conversion = False
-        self.layer.force_float_nz = False
 
     @patch("vllm_ascend.utils.get_ascend_config")
     @mock.patch("torch_npu.npu_format_cast")
@@ -200,17 +198,13 @@ class TestShouldReshapeWoATo3d(unittest.TestCase):
         profile = SimpleNamespace(
             supports=lambda capability: False, weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE
         )
-        for weight, nz_mode, enabled, skip_conversion in product(
-            (original, expected), (0, 1, 2), (False, True), (False, True)
-        ):
-            with self.subTest(shape=tuple(weight.shape), mode=nz_mode, enabled=enabled, skip=skip_conversion):
+        for weight in (original, expected):
+            with self.subTest(shape=tuple(weight.shape)):
                 layer = SimpleNamespace(
                     prefix="model.layers.0.self_attn.wo_a",
                     weight=torch.nn.Parameter(weight.clone(), requires_grad=False),
                     n_local_groups=2,
                     o_lora_rank=16,
-                    force_float_nz=enabled,
-                    skip_weight_nz_conversion=skip_conversion,
                 )
 
                 def convert(final_weight, fmt):
@@ -222,43 +216,12 @@ class TestShouldReshapeWoATo3d(unittest.TestCase):
                 with (
                     patch.object(linear, "get_current_hardware_profile", return_value=profile),
                     patch("vllm_ascend.utils.get_current_hardware_profile", return_value=profile),
-                    patch("vllm_ascend.utils.get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=nz_mode)),
+                    patch("vllm_ascend.utils.get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=2)),
                     patch("torch_npu.npu_format_cast", side_effect=convert) as cast,
                 ):
                     AscendUnquantizedLinearMethod().process_weights_after_loading(layer)
-                if not skip_conversion and (nz_mode == 2 or (nz_mode == 1 and enabled)):
-                    cast.assert_called_once()
-                else:
-                    cast.assert_not_called()
+                cast.assert_called_once()
                 torch.testing.assert_close(layer.weight, expected)
-
-    def test_wo_b_float_nz_in_mode1(self):
-        from vllm_ascend.device.hardware_profile import WeightLayoutPolicy
-
-        profile = SimpleNamespace(
-            supports=lambda capability: False, weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE
-        )
-        for nz_mode, enabled, dtype in product((0, 1, 2), (None, False, True), (torch.bfloat16, torch.float16)):
-            with self.subTest(mode=nz_mode, enabled=enabled, dtype=dtype):
-                weight = torch.arange(32 * 64, dtype=torch.float32).reshape(32, 64).to(dtype)
-                layer = SimpleNamespace(
-                    prefix="model.layers.0.self_attn.wo_b",
-                    weight=torch.nn.Parameter(weight.clone(), requires_grad=False),
-                )
-                if enabled is not None:
-                    layer.force_float_nz = enabled
-                with (
-                    patch.object(linear, "get_current_hardware_profile", return_value=profile),
-                    patch("vllm_ascend.utils.get_current_hardware_profile", return_value=profile),
-                    patch("vllm_ascend.utils.get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=nz_mode)),
-                    patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt: weight.clone()) as cast,
-                ):
-                    AscendUnquantizedLinearMethod().process_weights_after_loading(layer)
-                if nz_mode == 2 or (nz_mode == 1 and enabled):
-                    cast.assert_called_once()
-                else:
-                    cast.assert_not_called()
-                torch.testing.assert_close(layer.weight, weight)
 
 
 class TestAscendRowParallelLinear(BaseLinearTest):

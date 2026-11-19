@@ -65,7 +65,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. The legacy `MSMONITOR_USE_DAEMON` environment variable is no longer supported. |
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). The legacy `VLLM_ASCEND_ENABLE_MLAPO` environment variable is no longer supported. |
 | `mlapo_keep_prefill_weights`        | bool | `False` | When True, keep MLAPO prefill weights on NPU instead of freeing them on kv_consumer (decode-only D) nodes. D nodes have normal local-prefill paths (recompute / fallback / preempt) that crash when the weights are freed (issue #11882). Enable this to trade NPU memory for stability. |
-| `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. `0` disables NZ on hardware with configurable layouts, `1` enables NZ for quantized weights and DeepSeek V4/V4.1 unquantized output projections, and `2` also enables NZ for other BF16/FP16 weights when supported. The legacy `VLLM_ASCEND_ENABLE_NZ` environment variable is no longer supported. |
+| `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. `0` disables NZ, `1` enables NZ only for quantized weights, and `2` also enables NZ for BF16/FP16 weights when supported. The legacy `VLLM_ASCEND_ENABLE_NZ` environment variable is no longer supported. |
 | `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. `0` disables the fused path, `1` selects dispatch-FFN-combine, and `2` selects CANN MegaMoe when the model and parallel configuration support it. On A5, SiTU models require a CANN MegaMoe wrapper exposing `activation` and `activation_params`; both SiTU parameters are bound from the MoE configuration during initialization. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. The legacy `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable is no longer supported. |
 | `enable_flashcomm1`                 | bool | `False` | Whether to enable SP MoE. See [Sequence Parallelism](../feature_guide/sequence_parallelism.md). |
@@ -76,12 +76,10 @@ The following table lists additional configuration options available in vLLM Asc
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `combine_quant_mode`                | int  | `0`     | Fused MC2 configuration. This configuration will be passed as the `comm_quant_mode` argument for the `torch_npu.npu_moe_distribute_combine_v2` operator. Please refer to the operator documentation for the valid value range. |
 
-For DeepSeek V4/V4.1, the default `weight_nz_mode=1` enables NZ storage for
-unquantized BF16/FP16 `wo_a` and `wo_b` output-projection weights when supported.
-Mode `2` also enables NZ for these weights. The grouped `wo_a` layout is finalized
-before the NZ conversion; inputs and outputs use ND. On hardware with configurable
-layouts, set `weight_nz_mode=0` to disable NZ, including for these projections.
-Hardware with a forced NZ layout, such as 310P, follows its hardware policy.
+For DeepSeek V4/V4.1, `weight_nz_mode=2` also enables NZ storage for unquantized
+BF16/FP16 `wo_a` and `wo_b` output-projection weights. The grouped `wo_a` layout
+is finalized before the NZ conversion; inputs and outputs remain ND. The default
+mode `1` continues to leave these unquantized weights in ND.
 
 The details of each configuration option are as follows:
 

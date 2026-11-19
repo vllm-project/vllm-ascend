@@ -32,41 +32,6 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
 
 
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
-@pytest.mark.parametrize("nz_mode", [0, 1, 2])
-@pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32, torch.int8])
-def test_maybe_trans_nz_float_mode1(device_type, nz_mode, enabled, dtype):
-    weight = torch.zeros(32, 64, dtype=dtype)
-    expected_cast = dtype != torch.float32 and (
-        device_type == AscendDeviceType._310P or (nz_mode != 0 and (dtype == torch.int8 or nz_mode == 2 or enabled))
-    )
-    with (
-        mock.patch.object(utils, "get_current_hardware_profile", return_value=get_hardware_profile(device_type)),
-        mock.patch.object(utils, "get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=nz_mode)),
-        mock.patch.object(torch_npu, "npu_format_cast", return_value=weight) as cast,
-    ):
-        assert utils.maybe_trans_nz(weight, force_float_nz=enabled) is weight
-    if expected_cast:
-        cast.assert_called_once_with(weight, utils.ACL_FORMAT_FRACTAL_NZ)
-    else:
-        cast.assert_not_called()
-
-
-@pytest.mark.parametrize("device_type", list(AscendDeviceType))
-@pytest.mark.parametrize("nz_mode", [1, 2])
-@pytest.mark.parametrize("shape,device", [((1, 64), "cpu"), ((32, 1), "cpu"), ((32, 64), "meta")])
-def test_maybe_trans_nz_float_mode1_preserves_layout_guards(device_type, nz_mode, shape, device):
-    weight = torch.empty(shape, dtype=torch.bfloat16, device=device)
-    with (
-        mock.patch.object(utils, "get_current_hardware_profile", return_value=get_hardware_profile(device_type)),
-        mock.patch.object(utils, "get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=nz_mode)),
-        mock.patch.object(torch_npu, "npu_format_cast") as cast,
-    ):
-        assert utils.maybe_trans_nz(weight, force_float_nz=True) is weight
-    cast.assert_not_called()
-
-
-@pytest.mark.parametrize("device_type", list(AscendDeviceType))
 def test_register_customop_selects_gdn_before_import(device_type):
     from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
 
