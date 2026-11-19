@@ -39,9 +39,15 @@ _SLIDING_ATTENTION = "sliding_attention"
 def _resolve_draft_layer_causal(config, layer_idx: int) -> bool:
     """Resolve draft attention causality from the checkpoint config.
 
-    Mirrors upstream vLLM's ``_dflash_layer_causal`` resolution order:
-    ``is_causal`` wins, then ``dflash_config["causal"]``, then the legacy
-    ``layer_types`` convention that sliding-attention layers are causal.
+    Mirrors upstream vLLM's ``_dflash_layer_causal`` exactly: the
+    checkpoint-level ``is_causal`` flag wins when set, then
+    ``dflash_config["causal"]`` overrides all layers, else only
+    sliding-attention layers are causal. Keeping the upstream order
+    matters because the upstream speculator folds
+    ``get_draft_attn_causal`` into its per-group causal while the
+    per-layer attention flags are resolved from the same config:
+    any deviation would let the group metadata disagree with the
+    attention modules for checkpoints that set ``is_causal``.
     """
     is_causal = getattr(config, "is_causal", None)
     if is_causal is not None:

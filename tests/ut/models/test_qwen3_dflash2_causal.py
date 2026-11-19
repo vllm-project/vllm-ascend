@@ -42,6 +42,9 @@ def _config(**overrides):
 
 class TestResolveDraftLayerCausal:
     def test_top_level_is_causal_wins(self):
+        # Upstream _dflash_layer_causal consults is_causal first (vLLM
+        # c410543), so a checkpoint-level flag overrides the layer_types
+        # convention; the mirror must keep the same order.
         config = _config(is_causal=True, layer_types=_ALL_FULL)
         assert all(_resolve_draft_layer_causal(config, i) for i in range(_NUM_LAYERS))
 
