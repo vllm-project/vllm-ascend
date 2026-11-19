@@ -70,7 +70,7 @@ def test_qsa_hot_paths_do_not_add_host_tensor_syncs() -> None:
     assert ".item(" not in qsa_sources
     assert "torch.equal(" not in qsa_sources
     # Position clamping may be fused into RoPE; its numerical boundary cases
-    # are covered by test_qsa_direct_rope.py on NPU, not by counting launches.
+    # are covered by the per-operator *_mrope_direct.py NPU tests, not launch counts.
 
 
 def test_qsa_metadata_ignores_full_graph_dummy_request_boundaries() -> None:

@@ -93,13 +93,13 @@ inputs using `rtol=0, atol=0`, including empty rows, strided positions, clamping
 and NPUGraph replay. The new tests currently select A3 only; execution on the
 final PR revision and compatibility on other applicable devices remain pending.
 
-Direct-gather coverage is in [test_qsa_direct_rope.py](../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_direct_rope.py):
-`test_direct_rope_matches_gathered_cache` covers both shared wrappers, while
+Direct-gather coverage is in [test_qsa_rmsnorm_mrope_direct.py](../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope_direct.py):
+`test_direct_rope_matches_gathered_cache` covers the Indexer wrapper, while
 `test_direct_rope_replay_uses_updated_positions` checks changed positions during
 graph replay. Legacy coverage is in
 [test_qsa_rmsnorm_mrope.py](../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope.py).
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope.py
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_direct_rope.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope_direct.py
 ```

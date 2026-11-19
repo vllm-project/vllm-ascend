@@ -10,10 +10,8 @@
   `float32(bfloat16(1 / sqrt(128)))`, preserving the existing effective value.
 - **Algorithm flow:** Each vector tile independently writes request lengths,
   query boundaries and query-head weights with separate bounds masks.
-- **Supported modes:** Intended for Atlas A2, Atlas A3 and 950PR/950DT through
-  Triton Ascend. Manual operator correctness, graph replay and preparation
-  performance have been validated on A3. Other devices remain unverified;
-  CPU contract checks do not establish device support.
+- **Devices:** Requires NPU and Triton Ascend. CPU contract checks do not
+  establish device support.
 
 ## Parameters
 
@@ -66,8 +64,9 @@ CPU tests cover decode/prefill row counts, padded requests, empty inputs,
 both integer dtypes, strided metadata and schedule reuse/regeneration.
 The NPU e2e entry point covers exact output comparison, input preservation,
 both integer dtypes, strided metadata and graph replay after metadata updates.
-The manual A3 validation below predates this test file; execution of the new
-repository test file remains pending and is not implied by those results.
+All four outputs are compared against the original PyTorch expressions with
+`rtol=0`, `atol=0`, including the BF16-rounded weight promoted to FP32.
+Execution of the repository NPU test file remains pending.
 
 ```bash
 pytest -sv tests/ut/ops/test_qsa_lightning_v2_prepare_contract.py
@@ -77,35 +76,3 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_ligh
 
 CPU tests cover allocation, launch wiring, dtype/stride contracts, schedule
 reuse, trimming and output-buffer behavior. Device arithmetic is not emulated.
-
-### Manual A3 operator validation
-
-Validated implementation: `a5e9acf3a9580afd8e5c9375f0ee1fb6cc750761`.
-All four outputs matched the original PyTorch expressions exactly
-(`rtol=0`, `atol=0`), including the BF16-rounded weight promoted to FP32.
-The 96 cases covered heads 2/4/8, INT32/INT64 metadata, contiguous/strided
-metadata, empty inputs and padded request boundaries. Three captured-graph
-replays after updating lengths and boundaries also matched exactly.
-
-Performance setup: one Ascend A3 device (`Ascend910_9382`), 1109-r89 base image,
-CANN 9.2.1, PyTorch 2.10.0, torch_npu 2.10.0.post7 and
-triton-ascend 3.6.0.post2. Inputs were BF16 queries `[T, 4, 128]`, INT32
-metadata and compression ratio 4. Compare the four original PyTorch operations
-against the fused wrapper using 128 calls per captured NPUGraph, 10 replays
-per timed sample, seven samples per arm and five A/B/A trials. Values below
-are median per-call NPU-event latency, excluding compilation and warmup.
-
-| Query rows | Requests | Baseline (us) | Fused (us) | Latency reduction |
-| --- | --- | --- | --- | --- |
-| 32 | 1 | 8.377 | 2.238 | 73.29% |
-| 32 | 8 | 7.974 | 2.233 | 72.00% |
-| 32 | 32 | 8.463 | 2.241 | 73.51% |
-| 128 | 1 | 8.394 | 2.239 | 73.33% |
-| 128 | 8 | 8.000 | 2.244 | 71.96% |
-| 128 | 32 | 8.418 | 2.242 | 73.37% |
-
-These results measure input preparation only, excluding CANN schedule metadata,
-scoring/TopK, index packing and model execution. They do not establish
-end-to-end model speedup or model accuracy non-regression. Other-device
-coverage, execution of the repository NPU e2e cases, model accuracy/performance comparisons and
-actual startup/serving compilation counts remain pending.

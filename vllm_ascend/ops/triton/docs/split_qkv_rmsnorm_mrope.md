@@ -69,7 +69,7 @@ and graph replay. The shared legacy test provides independent reference coverage
 and must also run; the new test alone does not validate every shared caller.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_direct_rope.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_split_qkv_rmsnorm_mrope_direct.py
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_split_qkv_rmsnorm_mrope.py
 pytest -sv tests/ut/models/qwen4_exp/test_qsa_upstream_abi.py
 ```
