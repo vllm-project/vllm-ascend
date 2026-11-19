@@ -2,7 +2,7 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import (
     KVCacheEvent,
     KVConnectorKVEvents,
@@ -35,6 +35,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    has_shared_kv_sources,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import (
     LayerwiseKVPoolScheduler,
 )
@@ -116,6 +119,13 @@ class AscendStoreKVEvents(KVConnectorKVEvents):
 
 class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     @classmethod
+    def supports_lookahead_block_hashes(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        # AscendStore's external coordinator retains the trailing EAGLE-block
+        # drop and prompt-token replay boundaries. It does not propagate the
+        # core lookahead length through its store/lookup masks.
+        return False
+
+    @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
         """
         AscendStore requires PIECEWISE CUDA graph mode when layerwise
@@ -141,6 +151,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.backend_class = get_backend_class(self.backend_name) if self.use_layerwise else None
         self.layerwise_data_plane = self.backend_class.layerwise_data_plane if self.backend_class is not None else None
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
+        self.supports_composite_kv_loads = (
+            self.use_layerwise and self.layerwise_data_plane == "gva" and has_shared_kv_sources(vllm_config)
+        )
+        self.supports_composite_kv_saves = self.supports_composite_kv_loads
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False
         )
