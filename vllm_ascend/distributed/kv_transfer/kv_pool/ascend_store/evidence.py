@@ -45,17 +45,23 @@ Truthfulness rules
   so a delayed old attempt can never inherit a newer attempt's identity.
 * Certification is only ever a mode the GET path actually applies:
   "content" -- the blockwise store keys embed the block's chained token hash
-  (an identity key, NOT a digest of the KV payload bytes) and the blockwise
-  PUT path skips already-present keys
-  (KVCacheStoreSendingThread._get_missing_indices), so GET success means the
-  bytes bound to that identity key were returned: correct content iff the
-  store's key-to-data binding is trustworthy (the documented store-trust
-  assumption). The yuanrong backend cannot claim this mode: its connector
-  unconditionally re-PUTs every key on every save
-  (YuanrongBackend.requires_exists_before_put is False), so the key-to-data
-  binding is not write-once even in principle. "none" -- no verification
-  beyond GET success. Digest verification ("sha256") is never claimed: no
-  AscendStore GET path performs an independent digest check.
+  (an identity key, NOT a digest of the KV payload bytes) and the mooncake
+  store's object model gives the deployment the documented store-trust
+  assumption (atomic per-object writes; GET returns the bytes bound to the
+  identity key), mirroring the upstream mooncake producer's claim for the
+  same store and key scheme. "none" -- no verification beyond GET success.
+  The memcache and yuanrong backends are FORCED to "none": the only
+  write-once property available to them is a CLIENT-SIDE exists-filter
+  (lookup, then put the missing -- a racy check-then-write, not a
+  service-side add-if-absent), yuanrong additionally re-PUTs every key on
+  every save, and memcache's blockwise put path exposes no
+  atomic-visibility contract (its write-finish handshake exists only in
+  the layerwise plane). The key derivation covers tokens + model +
+  parallel coordinates but NOT the full payload determinants (dtype,
+  quantization, kernel numerics), so same-key-different-bytes cannot be
+  ruled out across deployments. Digest verification ("sha256") is never
+  claimed: no AscendStore GET path performs an independent digest
+  check.
 * An attempt that did not complete (interrupted, exception before
   terminality) never reports success: it stays non-terminal, its attestation
   is not emitted, and the scheduler's completeness gate fails the delivery

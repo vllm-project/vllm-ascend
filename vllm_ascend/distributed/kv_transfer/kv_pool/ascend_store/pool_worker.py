@@ -330,12 +330,31 @@ class BaseKVPoolWorker(ABC):
             # it cannot claim even that much. "sha256" is never claimed:
             # no GET path performs an independent digest check.
             requested = str(self._extra_config.get("evidence_certification", "content"))
-            if self.backend_name == "yuanrong":
+            if self.backend_name in ("yuanrong", "memcache"):
+                # Neither backend can honestly claim the "content" level:
+                # the write-once property of the key->data binding rests on
+                # a CLIENT-SIDE exists-filter (kv_transfer.py
+                # _get_missing_indices: lookup, then put the missing only)
+                # -- a racy check-then-write, not a service-side
+                # add-if-absent. Yuanrong additionally re-PUTs every key on
+                # every save (requires_exists_before_put=False), so its
+                # binding is continuously mutable. Memcache's blockwise PUT
+                # (batch_put_from_layers) exposes no atomic-visibility
+                # contract in its API surface (the write-finish handshake
+                # exists only in the layerwise plane), so a torn or racy
+                # overwrite cannot be ruled out. Underclaim: force "none";
+                # the scheduler then fails publication closed exactly as
+                # designed. Only the mooncake store -- whose vLLM-side
+                # wrapper and claim match the upstream mooncake producer
+                # under the documented store-trust assumption -- may
+                # default to "content".
                 if requested != "none":
                     logger.warning(
-                        "AscendStore yuanrong backend cannot claim content "
-                        "certification (its PUT path re-writes keys "
-                        "unconditionally); forcing evidence_certification=none."
+                        "AscendStore %s backend cannot claim content "
+                        "certification (no service-side write-once "
+                        "binding for its keys); forcing "
+                        "evidence_certification=none.",
+                        self.backend_name,
                     )
                 requested = "none"
             self._evidence_certification = validate_evidence_certification(requested)
