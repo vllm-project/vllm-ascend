@@ -8,6 +8,7 @@ import tilelang.ascend.language as T
 def small_batch_program(c, *, reuse_weights=False, batch_gates=False):
     # Use the hardware FP32 SFU for the measured six-token verify shape.
     sfu_precision = "ftz_true" if (c.tokens, c.hidden, c.heads, c.dim) == (6, 4096, 64, 128) else None
+    direct_history = sfu_precision is not None and c.batch == 1
     single_wave = c.batch == 1
     packed_output_gate = batch_gates
     register_prefix = c.batch != 2
@@ -100,7 +101,8 @@ def small_batch_program(c, *, reuse_weights=False, batch_gates=False):
                 b = it if reuse_weights else (0 if single_wave else job // (H // 2))
                 hp = bx if single_wave or reuse_weights else job % (H // 2)
                 h = hp * 2 + sid
-                T.copy(Accepted[b : b + 1], ac)
+                if not direct_history:
+                    T.copy(Accepted[b : b + 1], ac)
                 if batch_gates:
                     T.copy(WF[b * L : (b + 1) * L, h * D : (h + 1) * D], g0)
                     T.copy(WG[b * L : (b + 1) * L, h * D : (h + 1) * D], g1)
@@ -126,10 +128,16 @@ def small_batch_program(c, *, reuse_weights=False, batch_gates=False):
                 T.copy(P[b * L : (b + 1) * L, 3 * H * D + h : 3 * H * D + h + 1], beta)
                 for q in T.Serial(3):
                     T.copy(P[b * L : (b + 1) * L, (q * H + h) * D : (q * H + h + 1) * D], window[q, 3 : L + 3, :])
-                    T.copy(CS[b + 1, :, (q * H + h) * D : (q * H + h + 1) * D], cache[q, :, :])
-                with T.SimtVF(threads=128):
-                    for q, t, j in T.Parallel(3, 3, D):
-                        window[q, t, j] = cache[q, ac[0] - 1 + t, j]
+                    if direct_history:
+                        # The accepted prefix selects three consecutive rows from the rollback cache.
+                        start = Accepted[b] - 1
+                        T.copy(CS[b + 1, start : start + 3, (q * H + h) * D : (q * H + h + 1) * D], window[q, :3, :])
+                    else:
+                        T.copy(CS[b + 1, :, (q * H + h) * D : (q * H + h + 1) * D], cache[q, :, :])
+                if not direct_history:
+                    with T.SimtVF(threads=128):
+                        for q, t, j in T.Parallel(3, 3, D):
+                            window[q, t, j] = cache[q, ac[0] - 1 + t, j]
                 with T.SimtVF(threads=128):
                     cv = T.alloc_fragment((3, L, D), "float32")
                     for q, t, j in T.Parallel(3, L, D):

@@ -271,6 +271,51 @@ EXTRA_REQUEST_BATCHES = frozenset((14, 17, 19, 22))
 WEIGHT_REUSE_BATCHES = frozenset((1, 3, 5, 6, 7, 8, 9, 10))
 
 
+GATE_TILE_ROWS = 32
+
+
+def gate_projection_program(c):
+    """Compute both strided gate projections while reusing each weight tile across tokens."""
+    rows = T.dynamic("rows")
+    width = c.heads * c.dim
+    pitch = 3 * width + c.heads + 2 * c.dim
+    tile_rows, tile_cols = GATE_TILE_ROWS, 512
+    tiles = width // tile_cols
+    padded_rows = T.ceildiv(rows, tile_rows) * tile_rows
+
+    @T.prim_func
+    def main(
+        P: T.Tensor((rows, pitch), "bfloat16"),
+        WF: T.Tensor((width, c.dim), "bfloat16"),
+        WG: T.Tensor((width, c.dim), "bfloat16"),
+        GF: T.Tensor((padded_rows, width), "bfloat16"),
+        GG: T.Tensor((padded_rows, width), "bfloat16"),
+    ):
+        with T.Kernel(2 * tiles) as block:
+            column = (block % tiles) * tile_cols
+            gate = block // tiles
+            start = pitch - 2 * c.dim + gate * c.dim
+            activation = T.alloc_l1((tile_rows, c.dim), "bfloat16")
+            weight = T.alloc_l1((tile_cols, c.dim), "bfloat16")
+            accum = T.alloc_l0c((tile_rows, tile_cols), "float32")
+            if gate == 0:
+                T.copy(WF[column : column + tile_cols, :], weight)
+            else:
+                T.copy(WG[column : column + tile_cols, :], weight)
+            for tile in T.Pipelined(T.ceildiv(rows, tile_rows), num_stages=2):
+                row = tile * tile_rows
+                count = T.min(tile_rows, rows - row)
+                T.copy(P[row : row + count, start : start + c.dim], activation[:count, :])
+                T.gemm(activation, weight, accum, transpose_B=True, clear_accum=True)
+                # Cube stores a complete tile. The caller passes only valid rows to the consumer.
+                if gate == 0:
+                    T.copy(accum, GF[row : row + tile_rows, column : column + tile_cols])
+                else:
+                    T.copy(accum, GG[row : row + tile_rows, column : column + tile_cols])
+
+    return main
+
+
 class FusedMiddle:
     def __init__(self, baseline, *, tuned=False, reuse_weights=False):
         self.n = baseline
@@ -293,6 +338,8 @@ class FusedMiddle:
         else:
             self.cw = i["conv_w"].permute(1, 0, 2, 3).contiguous()
             kernel = program(c, unroll_taps=tuned and c.batch >= 41)
+        if self.batch_gates:
+            self.gate_kernel = tilelang.compile(gate_projection_program(c), target="ascend", execution_backend="cython")
         self.kernel = tilelang.compile(kernel, target="ascend", execution_backend="cython")
 
     def __call__(self):
@@ -306,8 +353,11 @@ class FusedMiddle:
             p = n.project()
         gate_f, gate_g = self.wf, self.wg
         if self.batch_gates:
-            gate_f = F.linear(p[:, -2 * c.dim : -c.dim], i["w_f"])
-            gate_g = F.linear(p[:, -c.dim :], i["w_g"])
+            padded_rows = (rows + GATE_TILE_ROWS - 1) // GATE_TILE_ROWS * GATE_TILE_ROWS
+            shape = (padded_rows, c.heads * c.dim)
+            gate_f, gate_g = p.new_empty(shape), p.new_empty(shape)
+            self.gate_kernel(p, i["w_f"], i["w_g"], gate_f, gate_g)
+            gate_f, gate_g = gate_f[:rows], gate_g[:rows]
         self.kernel(
             p,
             gate_f,
