@@ -1585,7 +1585,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
                 worker.m_store.get = operations.get
                 # Setup token database
                 worker.token_database.set_group_buffers({0: [1000, 2000]}, {0: [160]})
-                with patch("torch.npu.current_stream", return_value=operations):
+                with patch.object(torch.npu, "current_stream", return_value=operations):
                     worker.start_load_kv(meta)
                 self.assertEqual(operations.method_calls, [call.synchronize(), call.get(ANY, ANY, ANY)])
                 stats = worker.get_stats()
@@ -3573,7 +3573,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
                 operations.get.return_value = [0]
                 worker.m_store.get = operations.get
 
-                with patch("torch.npu.current_stream", return_value=operations):
+                with patch.object(torch.npu, "current_stream", return_value=operations):
                     worker._load_kv_tp_mismatch(block_hashes=[b"h0"], block_ids=[5], token_len=4, mask_num=0)
 
                 expected = [call.synchronize()] if expected_sync else []
