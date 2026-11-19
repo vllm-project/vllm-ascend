@@ -1389,24 +1389,14 @@ def _recompute_failure_message(signal: str) -> str:
     return "Decode recompute could not restart this request. Retry the original request if it is safe to repeat."
 
 
-def _native_text_block(kind: str, obj: dict) -> dict | None:
-    blocks = obj.get("content")
-    if kind == "responses":
-        output = obj.get("output")
-        if (
-            not isinstance(output, list)
-            or len(output) != 1
-            or not isinstance(output[0], dict)
-            or output[0].get("type") != "message"
-        ):
-            return None
-        blocks = output[0].get("content")
-    block_type = "text" if kind == "messages" else "output_text"
-    if isinstance(blocks, list) and len(blocks) == 1:
-        block = blocks[0]
-        if isinstance(block, dict) and block.get("type") == block_type and isinstance(block.get("text"), str):
-            return block
-    return None
+def _new_response_message(status: str, content: list[dict]) -> dict:
+    return {
+        "type": "message",
+        "id": f"msg_{uuid.uuid4().hex}",
+        "role": "assistant",
+        "status": status,
+        "content": content,
+    }
 
 
 def _visible_blocks(kind: str, obj: dict) -> Iterator[dict]:
@@ -1441,20 +1431,15 @@ def _continue_native_prompt(kind: str, history: Any, prefix: str) -> list | None
         return [*history, {"role": "assistant", "content": prefix}]
 
     if assistant and last.get("status") in ("in_progress", "incomplete"):
-        block = _native_text_block(kind, {"output": [last]})
-        if block is None:
+        blocks = last.get("content")
+        if last.get("type") != "message" or not isinstance(blocks, list) or len(blocks) != 1:
+            return None
+        block = blocks[0]
+        if not isinstance(block, dict) or block.get("type") != "output_text" or not isinstance(block.get("text"), str):
             return None
         return [*history[:-1], {**last, "content": [{**block, "text": block["text"] + prefix}]}]
-    return [
-        *history,
-        {
-            "type": "message",
-            "role": "assistant",
-            "id": f"msg_{uuid.uuid4().hex}",
-            "status": "in_progress",
-            "content": [{"type": "output_text", "text": prefix, "annotations": []}],
-        },
-    ]
+    part = {"type": "output_text", "text": prefix, "annotations": []}
+    return [*history, _new_response_message("in_progress", [part])]
 
 
 class NativeStream:
@@ -1590,8 +1575,7 @@ class NativeStream:
         elif event == "response.output_text.delta" and self.item is not None:
             self.merged_attempt_text = True
             data["item_id"] = self.item["id"]
-            self.number(data)
-            yield frame.encode()
+            yield self.encode_numbered(data, frame)
         else:
             raise DecodeRecompute(PD_RECOMPUTE_INTERRUPTED)
 
@@ -1600,8 +1584,7 @@ class NativeStream:
         data = cast(dict, terminal.data)
         if data["type"] == "error":
             if self.decode.kind == "responses":
-                self.number(data)
-                yield terminal.encode()
+                yield self.encode_numbered(data, terminal)
             else:
                 yield terminal.raw
             return
@@ -1631,8 +1614,7 @@ class NativeStream:
         if "created_at" in self.envelope:
             response["created_at"] = self.envelope["created_at"]
         if terminal["type"] == "response.failed":
-            self.number(terminal)
-            yield frames[-1].encode()
+            yield self.encode_numbered(terminal, frames[-1])
             return
         output = response.get("output")
         if not isinstance(output, list):
@@ -1661,8 +1643,7 @@ class NativeStream:
             {"type": "response.output_text.done", **indices, "text": text, "logprobs": part.get("logprobs") or []},
             {"type": "response.content_part.done", **indices, "part": part},
         ):
-            self.number(event)
-            yield _encode_sse_event(event)
+            yield self.encode_numbered(event)
         item_done = {"type": "response.output_item.done", "output_index": 0, "item": item}
         finished_item = False
         buffered = frames[:-1]
@@ -1687,18 +1668,14 @@ class NativeStream:
                     data["item_id"] = item["id"]
             elif isinstance(index, int):
                 if not finished_item:
-                    self.number(item_done)
-                    yield _encode_sse_event(item_done)
+                    yield self.encode_numbered(item_done)
                     finished_item = True
                 if not self.merged_attempt_text:
                     data["output_index"] = index + 1
-            self.number(data)
-            yield frame.encode()
+            yield self.encode_numbered(data, frame)
         if not finished_item:
-            self.number(item_done)
-            yield _encode_sse_event(item_done)
-        self.number(terminal)
-        yield frames[-1].encode()
+            yield self.encode_numbered(item_done)
+        yield self.encode_numbered(terminal, frames[-1])
 
     def publish_text(self, text: str) -> Iterator[bytes]:
         """Publish held text in the existing plain-text block before rescheduling."""
@@ -1713,25 +1690,16 @@ class NativeStream:
             )
         else:
             if self.item is None:
-                self.item = {
-                    "type": "message",
-                    "id": f"msg_{uuid.uuid4().hex}",
-                    "role": "assistant",
-                    "status": "in_progress",
-                    "content": [],
-                }
+                self.item = _new_response_message("in_progress", [])
                 event = {"type": "response.output_item.added", "output_index": 0, "item": self.item}
-                self.number(event)
-                yield _encode_sse_event(event)
+                yield self.encode_numbered(event)
             indices = {"output_index": 0, "content_index": 0, "item_id": self.item["id"]}
             if self.part is None:
                 self.part = {"type": "output_text", "text": "", "annotations": [], "logprobs": []}
                 event = {"type": "response.content_part.added", **indices, "part": self.part}
-                self.number(event)
-                yield _encode_sse_event(event)
+                yield self.encode_numbered(event)
             event = {"type": "response.output_text.delta", **indices, "delta": text, "logprobs": []}
-            self.number(event)
-            yield _encode_sse_event(event)
+            yield self.encode_numbered(event)
         self.text.append(text)
 
     def reset_attempt(self) -> None:
@@ -1739,9 +1707,10 @@ class NativeStream:
         self.merged_attempt_text = False
         self.attempt_item_start = None
 
-    def number(self, data: dict) -> None:
+    def encode_numbered(self, data: dict, frame: SSEFrame | None = None) -> bytes:
         self.sequence += 1
         data["sequence_number"] = self.sequence
+        return frame.encode() if frame is not None else _encode_sse_event(data)
 
     def generated_text(self) -> str:
         if not self.resumable or not isinstance((self.envelope or {}).get("id"), str):
@@ -1879,16 +1848,8 @@ class NativeDecode:
             else:
                 output = obj["output"]
                 if not output or output[0].get("type") != "message":
-                    output.insert(
-                        0,
-                        {
-                            "type": "message",
-                            "id": f"msg_{uuid.uuid4().hex}",
-                            "role": "assistant",
-                            "status": "incomplete" if obj.get("status") == "incomplete" else "completed",
-                            "content": [],
-                        },
-                    )
+                    status = "incomplete" if obj.get("status") == "incomplete" else "completed"
+                    output.insert(0, _new_response_message(status, []))
                 blocks = output[0]["content"]
                 if not blocks or blocks[0].get("type") != "output_text":
                     blocks.insert(0, {"type": "output_text", "text": "", "annotations": []})

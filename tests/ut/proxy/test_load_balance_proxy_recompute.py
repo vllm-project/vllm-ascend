@@ -498,7 +498,15 @@ def _assert_resumed_response(api, events, raw, text, deltas, *, incomplete=False
         result = events[-1]["response"]
         assert result["id"] == response_id
         assert result["output"][0]["id"] == events[-2]["item"]["id"] == f"item-{response_id}"
-    assert proxy._native_text_block(api.removeprefix("/"), result)["text"] == text
+    if api == "/responses":
+        (item,) = result["output"]
+        assert item["type"] == "message"
+        (block,) = item["content"]
+        assert block["type"] == "output_text"
+    else:
+        (block,) = result["content"]
+        assert block["type"] == "text"
+    assert block["text"] == text
     assert "kv_transfer_params" not in result
     if api == "/responses":
         usage = result["usage"]
