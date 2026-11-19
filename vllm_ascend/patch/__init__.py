@@ -1759,7 +1759,7 @@
 #
 
 
-# ** File: worker/patch_direct_reload.py **
+# ** Registration: worker/__init__.py calls model_loader.weight_reload.install_direct_reload_patch **
 # Target: vllm.model_executor.model_loader.reload.direct._checkpoint_views.
 # Why: NPU NZ storage cannot serve as an ND checkpoint-loader allocation.
 # How: Select Ascend-owned staging views and retain upstream ND behavior.

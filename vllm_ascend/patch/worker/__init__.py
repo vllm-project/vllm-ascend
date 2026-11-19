@@ -94,4 +94,6 @@ import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
 
 
 if direct_reload_enabled():
-    import vllm_ascend.patch.worker.patch_direct_reload  # noqa: F401
+    from vllm_ascend.model_loader.weight_reload import install_direct_reload_patch
+
+    install_direct_reload_patch()
