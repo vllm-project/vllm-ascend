@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -253,6 +254,29 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         common.mm_req_doc_ranges = {0: [(0, 4)]}
         with self.assertRaisesRegex(ValueError, "outside its request"):
             self.builder.build(0, common)
+
+    def test_build_allows_lightweight_metadata_without_mm_req_doc_ranges(self):
+        self.mock_vllm_config.use_v2_model_runner = False
+        self.mock_vllm_config.model_config.runner_type = "generate"
+        mask_builder = self.builder.attn_mask_builder
+        lightweight_common = SimpleNamespace(
+            query_start_loc=torch.tensor([0, 4]),
+            query_start_loc_cpu=torch.tensor([0, 4]),
+            _seq_lens_cpu=torch.tensor([4]),
+            seq_lens_cpu=torch.tensor([4]),
+            seq_lens=torch.tensor([4]),
+            num_reqs=1,
+            num_actual_tokens=4,
+            max_query_len=4,
+            block_table_tensor=torch.zeros((1, 1), dtype=torch.int32),
+            slot_mapping=torch.arange(4),
+            attn_state=AscendAttentionState.PrefillNoCache,
+            causal=True,
+            is_prefilling=torch.tensor([True]),
+        )
+        with patch.object(mask_builder, "attn_mask_cache", None), patch.object(mask_builder, "_seq_len_cached", 0):
+            metadata = self.builder.build(0, cast(Any, lightweight_common))
+        self.assertIsNone(metadata.prefix_masks)
 
     def test_unpadded_preserves_internal_seq_lens_cpu(self):
         internal_seq_lens_cpu = torch.tensor([4, 5, 6], dtype=torch.int32)

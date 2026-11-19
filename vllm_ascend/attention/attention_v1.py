@@ -428,7 +428,9 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
         )
-        if common_attn_metadata.mm_req_doc_ranges:
+        # Lightweight UT metadata fixtures omit mm_req_doc_ranges; treat absent as empty.
+        mm_ranges = getattr(common_attn_metadata, "mm_req_doc_ranges", None)
+        if mm_ranges:
             if self.model_config.runner_type != "pooling" or self.use_pcp:
                 raise NotImplementedError("PrefixLM attention currently requires full-request pooling without PCP")
             query_lengths = (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).tolist()
@@ -437,7 +439,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             masks = []
             for req_index, length in enumerate(query_lengths):
                 mask = torch.ones((length, length), dtype=torch.bool).triu_(1)
-                for start, end in common_attn_metadata.mm_req_doc_ranges.get(req_index, ()):
+                for start, end in mm_ranges.get(req_index, ()):
                     if not 0 <= start <= end < length:
                         raise ValueError("PrefixLM range is outside its request")
                     mask[start : end + 1, start : end + 1] = False
