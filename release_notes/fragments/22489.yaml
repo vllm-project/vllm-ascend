@@ -1,0 +1,9 @@
+pr: 22489
+entries:
+  - category: performance
+    text: >-
+      Added an integrated Qwen3.5-family GDN optimization path for A3, including
+      guarded recurrent fusion and strided QKV inputs, per-forward MRoPE lookup
+      reuse, and fused attention output gating. Supported paths depend on the
+      installed FLA wheel capabilities.
+    hardware: [A3]
