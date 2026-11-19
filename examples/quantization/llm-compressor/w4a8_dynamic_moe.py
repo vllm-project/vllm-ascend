@@ -32,8 +32,7 @@ quant_stage:
                     weights:
                         num_bits: 4
                         type: int
-                        strategy: group
-                        group_size: 128
+                        strategy: channel
                         dynamic: false
                         symmetric: true
                     input_activations:
@@ -54,5 +53,5 @@ oneshot(
 
 # Save to disk in compressed-tensors format.
 SAVE_DIR = MODEL_ID.rstrip("/").split("/")[-1] + "-W4A8"
-model.save_pretrained(SAVE_DIR, save_compressed=True)
+model.save_pretrained(SAVE_DIR, save_compressed=True, max_shard_size="5GB")
 tokenizer.save_pretrained(SAVE_DIR)

@@ -18,9 +18,6 @@
 name: Release Code and Wheel
 
 on:
-  schedule:
-    # UTC+8: 10am, 16pm
-    - cron: '0 2,8 * * *'
   push:
     tags:
       - 'v*'
@@ -33,6 +30,8 @@ on:
         type: choice
         options:
           - main
+          - v0.26.0rc1
+          - v0.23.0
           - v0.23.0rc1
           - v0.22.1rc1
           - v0.21.0rc1
@@ -64,7 +63,7 @@ jobs:
           lscpu
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -125,14 +124,15 @@ jobs:
           --build-arg PY_VERSION=${{ matrix.python-version }} \
           -t wheel:v1 .
           docker run --rm \
+          --entrypoint /bin/bash \
           -u "$(id -u):$(id -g)" \
           -v "$(pwd):/outpwd" \
           wheel:v1 \
-          bash -c "cp -r /workspace/vllm-ascend/dist /outpwd"
+          -c "cp -r /workspace/vllm-ascend/dist /outpwd"
           ls dist
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -155,14 +155,26 @@ jobs:
           WHEEL_FILE: dist
           PROJECT_TOML: .github/workflows/scripts/wheel/pyproject.toml
           OUTPUT_DIR: dist/variants
+          VARIANT_LABEL: 910b
         run: |
-          pip install build git+https://github.com/wheelnext/variantlib.git --quiet
+          pip install build git+https://github.com/wheelnext/variantlib.git@67a62d53fb8b5a91334d9632bc7d1546ee67349e --quiet
           mkdir -p dist/variants
           python3 .github/workflows/scripts/wheel/make_variant.py \
             -c .github/workflows/scripts/wheel/config.json \
-            -l 910b
+            -l "${VARIANT_LABEL}"
           echo "Generated variant wheels:"
           ls dist/variants/
+
+      - name: Stage per-platform wheels
+        env:
+          PLATFORM: a2
+        run: |
+          # Reuse the non-variant wheel built for this platform as the plain wheel
+          # published to the per-platform pip directory (platforms/ on the mirror).
+          mkdir -p "dist/platforms/${PLATFORM}"
+          cp dist/*.whl "dist/platforms/${PLATFORM}/"
+          echo "Staged plain wheels for platform ${PLATFORM}:"
+          ls "dist/platforms/${PLATFORM}/"
 
       - name: Archive wheel
         uses: actions/upload-artifact@v7
@@ -212,14 +224,15 @@ jobs:
           --build-arg PY_VERSION=${{ matrix.python-version }} \
           -t wheel-a3:v1 .
           docker run --rm \
+          --entrypoint /bin/bash \
           -u "$(id -u):$(id -g)" \
           -v "$(pwd):/outpwd" \
           wheel-a3:v1 \
-          bash -c "cp -r /workspace/vllm-ascend/dist /outpwd"
+          -c "cp -r /workspace/vllm-ascend/dist /outpwd"
           ls dist
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -242,14 +255,26 @@ jobs:
           WHEEL_FILE: dist
           PROJECT_TOML: .github/workflows/scripts/wheel/pyproject.toml
           OUTPUT_DIR: dist/variants
+          VARIANT_LABEL: a3
         run: |
-          pip install build git+https://github.com/wheelnext/variantlib.git --quiet
+          pip install build git+https://github.com/wheelnext/variantlib.git@67a62d53fb8b5a91334d9632bc7d1546ee67349e --quiet
           mkdir -p dist/variants
           python3 .github/workflows/scripts/wheel/make_variant.py \
             -c .github/workflows/scripts/wheel/config.json \
-            -l a3
+            -l "${VARIANT_LABEL}"
           echo "Generated variant wheels:"
           ls dist/variants/
+
+      - name: Stage per-platform wheels
+        env:
+          PLATFORM: a3
+        run: |
+          # Reuse the non-variant wheel built for this platform as the plain wheel
+          # published to the per-platform pip directory (platforms/ on the mirror).
+          mkdir -p "dist/platforms/${PLATFORM}"
+          cp dist/*.whl "dist/platforms/${PLATFORM}/"
+          echo "Staged plain wheels for platform ${PLATFORM}:"
+          ls "dist/platforms/${PLATFORM}/"
 
       - name: Archive wheel
         uses: actions/upload-artifact@v7
@@ -293,10 +318,106 @@ jobs:
           --build-arg PY_VERSION=${{ matrix.python-version }} \
           -t wheel-310p:v1 .
           docker run --rm \
+          --entrypoint /bin/bash \
           -u "$(id -u):$(id -g)" \
           -v "$(pwd):/outpwd" \
           wheel-310p:v1 \
-          bash -c "cp -r /workspace/vllm-ascend/dist /outpwd"
+          -c "cp -r /workspace/vllm-ascend/dist /outpwd"
+          ls dist
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Repair wheels with auditwheel
+        run: |
+          python3 -m pip install auditwheel patchelf
+          python3 .github/workflows/scripts/wheel/auto_exclude.py dist
+          ls dist
+
+      - name: Verify automatic platform tags
+        run: |
+          cd dist
+          for wheel in *.whl; do
+            echo "verification file: $wheel"
+            auditwheel show "$wheel"
+          done
+
+      - name: Generate variant wheels
+        env:
+          WHEEL_FILE: dist
+          PROJECT_TOML: .github/workflows/scripts/wheel/pyproject.toml
+          OUTPUT_DIR: dist/variants
+          VARIANT_LABEL: 310p
+        run: |
+          pip install build git+https://github.com/wheelnext/variantlib.git@67a62d53fb8b5a91334d9632bc7d1546ee67349e --quiet
+          mkdir -p dist/variants
+          python3 .github/workflows/scripts/wheel/make_variant.py \
+            -c .github/workflows/scripts/wheel/config.json \
+            -l "${VARIANT_LABEL}"
+          echo "Generated variant wheels:"
+          ls dist/variants/
+
+      - name: Stage per-platform wheels
+        env:
+          PLATFORM: 310p
+        run: |
+          # Reuse the non-variant wheel built for this platform as the plain wheel
+          # published to the per-platform pip directory (platforms/ on the mirror).
+          mkdir -p "dist/platforms/${PLATFORM}"
+          cp dist/*.whl "dist/platforms/${PLATFORM}/"
+          echo "Staged plain wheels for platform ${PLATFORM}:"
+          ls "dist/platforms/${PLATFORM}/"
+
+      - name: Archive wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: vllm-ascend-310p-${{ matrix.os }}-py${{ matrix.python-version }}-wheel
+          path: dist/
+
+
+  build_and_release_wheel_a5:
+    name: build and release wheel (A5)
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        python-version: ["3.10", "3.11", "3.12"]
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: checkout vllm-ascend
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: checkout vllm-ascend ${{ inputs.tag }}
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          ref: ${{ inputs.tag }}
+
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: true
+          docker-images: false
+
+      - name: Build wheel
+        run: |
+          ls
+          docker build -f ./.github/workflows/dockerfiles/Dockerfile.buildwheel.a5 \
+          --build-arg PY_VERSION=${{ matrix.python-version }} \
+          --build-arg MAX_JOBS=2 \
+          -t wheel-a5:v1 .
+          docker run --rm \
+          --entrypoint /bin/bash \
+          -u "$(id -u):$(id -g)" \
+          -v "$(pwd):/outpwd" \
+          wheel-a5:v1 \
+          -c "cp -r /workspace/vllm-ascend/dist /outpwd"
           ls dist
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -323,29 +444,41 @@ jobs:
           WHEEL_FILE: dist
           PROJECT_TOML: .github/workflows/scripts/wheel/pyproject.toml
           OUTPUT_DIR: dist/variants
+          VARIANT_LABEL: "950"
         run: |
-          pip install build git+https://github.com/wheelnext/variantlib.git --quiet
+          pip install build git+https://github.com/wheelnext/variantlib.git@67a62d53fb8b5a91334d9632bc7d1546ee67349e --quiet
           mkdir -p dist/variants
           python3 .github/workflows/scripts/wheel/make_variant.py \
             -c .github/workflows/scripts/wheel/config.json \
-            -l 310p
+            -l "${VARIANT_LABEL}"
           echo "Generated variant wheels:"
           ls dist/variants/
+
+      - name: Stage per-platform wheels
+        env:
+          PLATFORM: "950"
+        run: |
+          # Reuse the non-variant wheel built for this platform as the plain wheel
+          # published to the per-platform pip directory (platforms/ on the mirror).
+          mkdir -p "dist/platforms/${PLATFORM}"
+          cp dist/*.whl "dist/platforms/${PLATFORM}/"
+          echo "Staged plain wheels for platform ${PLATFORM}:"
+          ls "dist/platforms/${PLATFORM}/"
 
       - name: Archive wheel
         uses: actions/upload-artifact@v7
         with:
-          name: vllm-ascend-310p-${{ matrix.os }}-py${{ matrix.python-version }}-wheel
+          name: vllm-ascend-a5-${{ matrix.os }}-py${{ matrix.python-version }}-wheel
           path: dist/
 
 
   generate_and_upload_variant_index:
     name: generate and upload variant index
-    needs: [build_and_release_wheel, build_and_release_wheel_a3, build_and_release_wheel_310p]
+    needs: [build_and_release_wheel, build_and_release_wheel_a3, build_and_release_wheel_310p, build_and_release_wheel_a5]
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     steps:
-      - name: Download all variant wheels
+      - name: Download all wheel artifacts
         uses: actions/download-artifact@v8
         with:
           pattern: '*-wheel'
@@ -358,25 +491,30 @@ jobs:
           find all-wheels/ -path '*/variants/*.whl' -exec cp {} combined-variants/ \;
           echo "Combined variant wheels:"
           ls combined-variants/
+          echo "Per-platform plain wheels:"
+          find all-wheels/platforms -name '*.whl' | sort
 
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
       - name: Generate combined variant index
         run: |
-          pip install git+https://github.com/wheelnext/variantlib.git --quiet
+          pip install git+https://github.com/wheelnext/variantlib.git@67a62d53fb8b5a91334d9632bc7d1546ee67349e --quiet
           variantlib generate-index-json -d combined-variants/
           echo "Generated index files:"
           ls combined-variants/
 
-      - name: Upload wheels and variant index to OBS
+      - name: Install OBS SDK
+        run: |
+          pip install esdk-obs-python --quiet
+
+      - name: Upload variant wheels and index to OBS
         env:
           OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_ID }}
           OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
         run: |
-          pip install esdk-obs-python --quiet
           python3 - <<'EOF'
           import os, glob
           from obs import ObsClient
@@ -389,10 +527,41 @@ jobs:
           )
           files = glob.glob('combined-variants/*.whl') + glob.glob('combined-variants/*.json')
           for file in files:
-              filename = os.path.basename(file)
-              resp = client.putFile(OBS_BUCKET, f'{OBS_PATH}/{filename}', file)
+              object_key = f'{OBS_PATH}/{os.path.basename(file)}'
+              resp = client.putFile(OBS_BUCKET, object_key, file)
               if resp.status < 300:
-                  print(f'Uploaded: {filename}')
+                  print(f'Uploaded: {object_key}')
               else:
-                  raise Exception(f'Failed to upload {filename}: {resp.errorMessage}')
+                  raise Exception(f'Failed to upload {object_key}: {resp.errorMessage}')
+          EOF
+
+      - name: Upload per-platform wheels to OBS
+        env:
+          OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_ID }}
+          OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+        run: |
+          python3 - <<'EOF'
+          import os, glob
+          from obs import ObsClient
+          OBS_BUCKET = 'ascend-artifcat-packages'
+          # Plain (non-variant) wheels consumed by plain pip, e.g.
+          #   --index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/platforms/a3
+          #   --find-links https://mirrors.huaweicloud.com/ascend/repos/pypi/platforms/a3/vllm-ascend/
+          OBS_PLATFORM_ROOT = 'pypi/packages/ascend/repos/pypi/platforms'
+          platform_wheels = sorted(glob.glob('all-wheels/platforms/*/*.whl'))
+          if not platform_wheels:
+              raise Exception('No per-platform wheels found; expected all-wheels/platforms/*/*.whl')
+          client = ObsClient(
+              access_key_id=os.environ['OBS_ACCESS_KEY'],
+              secret_access_key=os.environ['OBS_SECRET_KEY'],
+              server='https://obs.cn-north-4.myhuaweicloud.com'
+          )
+          for file in platform_wheels:
+              platform = os.path.basename(os.path.dirname(file))
+              object_key = f'{OBS_PLATFORM_ROOT}/{platform}/vllm-ascend/{os.path.basename(file)}'
+              resp = client.putFile(OBS_BUCKET, object_key, file)
+              if resp.status < 300:
+                  print(f'Uploaded: {object_key}')
+              else:
+                  raise Exception(f'Failed to upload {object_key}: {resp.errorMessage}')
           EOF

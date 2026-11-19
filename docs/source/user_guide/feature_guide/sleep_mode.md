@@ -33,7 +33,12 @@ By default, sleep mode only releases memory managed by the sleep-mode allocator.
 llm = LLM(
     "Qwen/Qwen2.5-0.5B-Instruct",
     enable_sleep_mode=True,
-    additional_config={"enable_sleep_mode_extra_cleanup": True},
+    additional_config={
+        "rl_config": {
+            "enabled": True,
+            "sleep_mode_extra_cleanup": True,
+        }
+    },
 )
 ```
 
@@ -42,10 +47,10 @@ For online serving, pass the same option through `--additional-config`:
 ```bash
 vllm serve Qwen/Qwen2.5-0.5B-Instruct \
     --enable-sleep-mode \
-    --additional-config '{"enable_sleep_mode_extra_cleanup": true}'
+    --additional-config '{"rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true}}'
 ```
 
-When `enable_sleep_mode_extra_cleanup` is enabled, `sleep()` additionally:
+When `rl_config.sleep_mode_extra_cleanup` is enabled, `sleep()` additionally:
 
 - clears ACL graph attention workspaces and invalidates captured ACL graph caches when ACL graph is enabled;
 - resets the model runner graph manager so ACL graphs can be captured again after wakeup;
@@ -55,7 +60,7 @@ During `wake_up()`, vLLM Ascend restores the HCCL process groups, refreshes MoE 
 
 !!! note
 
-    Extra cleanup trades lower sleep-time NPU memory usage for longer wakeup latency. In particular, if ACL graph is enabled, `wake_up()` must call `capture_model()` again after the model state has been restored. Keep `enable_sleep_mode_extra_cleanup` disabled when lower wakeup latency is more important than releasing HCCL and ACL graph workspace memory.
+    Extra cleanup trades lower sleep-time NPU memory usage for longer wakeup latency. In particular, if ACL graph is enabled, `wake_up()` must call `capture_model()` again after the model state has been restored. Keep `rl_config.sleep_mode_extra_cleanup` disabled when lower wakeup latency is more important than releasing HCCL and ACL graph workspace memory. The former top-level `enable_sleep_mode_extra_cleanup` option has been removed.
 
 For level 2 sleep, wakeup can be split into two phases:
 
@@ -66,19 +71,6 @@ llm.wake_up(tags=["kv_cache"])
 ```
 
 With extra cleanup enabled, ACL graphs are recaptured only when `tags` is `None` or contains `"kv_cache"`. This avoids recapturing graphs before externally reloaded weights and KV-cache state are ready.
-
-### Expert weight layout restoration
-
-For dense models, `wake_up()` simply restores the model weights to NPU memory; the tensor layout is unchanged.
-
-For **unquantized MoE models** (`quant_config is None`), the fused expert weights are stored in a transposed layout for NPU matmul efficiency. This layout is produced once at model load time by `process_weights_after_loading()`: after the weights are loaded, the method transposes the second and third dimensions (`transpose(1, 2)`) of `w13_weight` and `w2_weight` to convert the standard checkpoint layout into the format required by the `torch_npu.npu_grouped_matmul` operator.
-
-After the sleep-mode allocator restores the original (untransposed) memory, `wake_up()` re-applies the same transpose to the affected expert weights when the `"weights"` tag is being restored:
-
-- `w13_weight` (gate/up projection): transposed back to the runtime layout when its second dimension matches `hidden_size`;
-- `w2_weight` (down projection): transposed back to the runtime layout when its third dimension matches `hidden_size`.
-
-This step is skipped entirely for dense models (which have no expert weights) and for quantized models (whose weights are handled by the quantization method).
 
 ## Prepare Model Weights
 
@@ -108,7 +100,6 @@ The following is a simple example of how to use sleep mode.
 
     os.environ["VLLM_USE_MODELSCOPE"] = "True"
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-    os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
 
     if __name__ == "__main__":
         prompt = "How are you?"
@@ -117,7 +108,11 @@ The following is a simple example of how to use sleep mode.
         print(f"Free memory before sleep: {free / 1024 ** 3:.2f} GiB")
         # record npu memory use baseline in case other process is running
         used_bytes_baseline = total - free
-        llm = LLM("Qwen/Qwen2.5-0.5B-Instruct", enable_sleep_mode=True)
+        llm = LLM(
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            enable_sleep_mode=True,
+            additional_config={"weight_nz_mode": 0},
+        )
         sampling_params = SamplingParams(temperature=0, max_tokens=10)
         output = llm.generate(prompt, sampling_params)
 
@@ -145,34 +140,24 @@ The following is a simple example of how to use sleep mode.
     export VLLM_SERVER_DEV_MODE="1"
     export VLLM_WORKER_MULTIPROC_METHOD="spawn"
     export VLLM_USE_MODELSCOPE="True"
-    export VLLM_ASCEND_ENABLE_NZ="0"
 
-    vllm serve Qwen/Qwen2.5-0.5B-Instruct --enable-sleep-mode
+    vllm serve Qwen/Qwen2.5-0.5B-Instruct \
+        --enable-sleep-mode \
+        --additional-config='{"weight_nz_mode": 0}'
 
-    # after serving is up, post to these endpoints
+    # after serving is up, post to these endpoints.
+    # /sleep reads level from the query string (JSON body is ignored).
 
-    # sleep level 1
-    curl -X POST http://127.0.0.1:8000/sleep \
-        -H "Content-Type: application/json" \
-        -d '{"level": "1"}'
-
+    # --- Level 1: offload weights, discard KV cache ---
+    curl -X POST "http://127.0.0.1:8000/sleep?level=1"
     curl -X GET http://127.0.0.1:8000/is_sleeping
 
-    # sleep level 2
-    curl -X POST http://127.0.0.1:8000/sleep \
-        -H "Content-Type: application/json" \
-        -d '{"level": "2"}'
-
-    # wake up
+    # wake all tags (weights + kv_cache)
     curl -X POST http://127.0.0.1:8000/wake_up
-
-    # wake up with tag, tags must be in ["weights", "kv_cache"]
-    curl -X POST "http://127.0.0.1:8000/wake_up?tags=weights"
-
     curl -X GET http://127.0.0.1:8000/is_sleeping
 
-    # after sleep and wake up, the serving is still available
-    curl http://localhost:8000/v1/completions \
+    # serving is available again after Level-1 wake_up
+    curl http://127.0.0.1:8000/v1/completions \
         -H "Content-Type: application/json" \
         -d '{
             "model": "Qwen/Qwen2.5-0.5B-Instruct",
@@ -180,4 +165,17 @@ The following is a simple example of how to use sleep mode.
             "max_tokens": 7,
             "temperature": 0
         }'
+
+    # --- Level 2: discard weights and KV cache ---
+    # tags must be in ["weights", "kv_cache"]. After waking weights,
+    # reload the checkpoint on every worker before waking kv_cache.
+    curl -X POST "http://127.0.0.1:8000/sleep?level=2"
+    curl -X POST "http://127.0.0.1:8000/wake_up?tags=weights"
+    curl -X POST http://127.0.0.1:8000/collective_rpc \
+        -H "Content-Type: application/json" \
+        -d '{
+            "method": "reload_weights",
+            "kwargs": {"weights_path": "Qwen/Qwen2.5-0.5B-Instruct"}
+        }'
+    curl -X POST "http://127.0.0.1:8000/wake_up?tags=kv_cache"
     ```

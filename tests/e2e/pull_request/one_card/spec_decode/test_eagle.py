@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 from transformers import AutoTokenizer
 from vllm import SamplingParams
@@ -10,20 +8,10 @@ from vllm.tokenizers.registry import resolve_tokenizer_args
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
-from tests.e2e.pull_request.one_card.spec_decode.utils import MODELS, calculate_acceptance_per_pos
+from tests.e2e.pull_request.one_card.spec_decode.utils import BASELINES, MODELS, calculate_acceptance_per_pos
+from vllm_ascend.utils import vllm_version_is
 
-
-def test_qwen3_vl_eagle(
-    test_prompts: list[list[dict[str, Any]]],
-    sampling_config: SamplingParams,
-    vl_model_name: str,
-):
-    with VllmRunner(
-        vl_model_name,
-        max_model_len=1024,
-        cudagraph_capture_sizes=[1, 2, 4, 8],
-    ) as ref_llm:
-        ref_llm.model.chat(test_prompts, sampling_config)
+MAX_NUM_SEQS = 256
 
 
 @pytest.mark.parametrize("method", MODELS.keys())
@@ -31,13 +19,22 @@ def test_qwen3_vl_eagle(
 @pytest.mark.parametrize("draft_tensor_parallel_size", [1])
 @pytest.mark.parametrize("disable_padded_drafter_batch", [False])
 @pytest.mark.parametrize("async_scheduling", [True])
+@pytest.mark.parametrize(
+    "dynamic_num_speculative_tokens",
+    [
+        pytest.param(None, id="static"),
+        pytest.param(2, id="dynamic"),
+    ],
+)
 def test_qwen_eagle3_acceptance(
     method: str,
     num_speculative_tokens: int,
     draft_tensor_parallel_size: None | int,
     disable_padded_drafter_batch: bool,
     async_scheduling: bool,
+    dynamic_num_speculative_tokens: int | None,
 ):
+    """Check acceptance for static K and dynamic K reduction."""
     main_model_name = MODELS[method]["main"]
     spec_model_name = MODELS[method]["spec"]
 
@@ -71,18 +68,23 @@ def test_qwen_eagle3_acceptance(
         "method": method,
         "num_speculative_tokens": num_speculative_tokens,
         "draft_tensor_parallel_size": draft_tensor_parallel_size,
-        "disable_padded_drafter_batch": disable_padded_drafter_batch,
+        **({"disable_padded_drafter_batch": disable_padded_drafter_batch} if vllm_version_is("0.33.0") else {}),
         "model": spec_model_name,
     }
+    if dynamic_num_speculative_tokens is not None:
+        speculative_config["num_speculative_tokens_per_batch_size"] = [
+            [1, MAX_NUM_SEQS, dynamic_num_speculative_tokens]
+        ]
 
-    compilation_config = CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[12])
+    cudagraph_mode = "FULL_DECODE_ONLY" if dynamic_num_speculative_tokens is None else "PIECEWISE"
+    compilation_config = CompilationConfig(cudagraph_mode=cudagraph_mode, cudagraph_capture_sizes=[12])
 
     with VllmRunner(
         main_model_name,
         max_model_len=2048,
         disable_log_stats=False,
         tensor_parallel_size=1,
-        max_num_seqs=256,
+        max_num_seqs=MAX_NUM_SEQS,
         distributed_executor_backend="mp",
         gpu_memory_utilization=0.7,
         speculative_config=speculative_config,
@@ -100,7 +102,18 @@ def test_qwen_eagle3_acceptance(
         print(f"Output tokens: {output_tokens}")
 
     acceptance_per_pos = calculate_acceptance_per_pos(metrics, num_speculative_tokens, Counter, Vector)
-    golden = [0.68, 0.40, 0.18]
+    effective_num_speculative_tokens = (
+        num_speculative_tokens if dynamic_num_speculative_tokens is None else dynamic_num_speculative_tokens
+    )
+    assert len(acceptance_per_pos) == num_speculative_tokens
+    active_acceptance_per_pos = acceptance_per_pos[:effective_num_speculative_tokens]
+    golden = BASELINES[method][:effective_num_speculative_tokens]
 
-    match = all(abs(a - b) < 0.08 for a, b in zip(acceptance_per_pos, golden))
+    # Eagle3 drafts autoregressively, so reducing K does not alter the active
+    # prefix within a drafting step. Keep the acceptance-quality regression
+    # against the corresponding baseline prefix; unlike DFlash, K does not
+    # change a parallel block-prediction input shape.
+    match = all(abs(a - b) < 0.08 for a, b in zip(active_acceptance_per_pos, golden, strict=True))
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
+    if dynamic_num_speculative_tokens is not None:
+        assert all(rate == 0 for rate in acceptance_per_pos[dynamic_num_speculative_tokens:])

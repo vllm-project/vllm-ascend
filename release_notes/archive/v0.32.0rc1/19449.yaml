@@ -1,0 +1,4 @@
+pr: 19449
+entries:
+  - category: dependency
+    text: Updated the CANN base image to 9.2.0_20261022115200 for A2, A3, 310P, and A5 images.

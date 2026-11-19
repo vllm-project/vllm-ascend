@@ -22,10 +22,31 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+
+def _bool_env(name: str, default: bool) -> bool:
+    """Parse a boolean environment variable as ``1`` or ``0``.
+
+    Only ``1`` and ``0`` are accepted (surrounding whitespace is ignored).
+    Unset or empty values fall back to ``default``, which keeps
+    ``export VAR=`` from crashing. Any other value raises ValueError naming the
+    variable, instead of failing inside ``int()`` with an opaque message.
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip()
+    if value == "1":
+        return True
+    if value == "0":
+        return False
+    raise ValueError(f"Invalid value for environment variable {name}: {raw!r}. Expected '0' or '1'.")
+
+
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
 # begin-env-vars-definition
+
 
 env_variables: dict[str, Callable[[], Any]] = {
     # max compile thread number for package building. Usually, it is set to
@@ -40,7 +61,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # This configuration option should only be set to False when running UT
     # scenarios in an environment without an NPU. Do not set it to False in
     # other scenarios.
-    "COMPILE_CUSTOM_KERNELS": lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
+    "COMPILE_CUSTOM_KERNELS": lambda: _bool_env("COMPILE_CUSTOM_KERNELS", True),
     # The CXX compiler used for compiling the package. If not set, the default
     # value is None, which means the system default CXX compiler will be used.
     "CXX_COMPILER": lambda: os.getenv("CXX_COMPILER", None),
@@ -52,7 +73,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Please make sure that the version is correct.
     "SOC_VERSION": lambda: os.getenv("SOC_VERSION", None),
     # If set, vllm-ascend will print verbose logs during compilation
-    "VERBOSE": lambda: bool(int(os.getenv("VERBOSE", "0"))),
+    "VERBOSE": lambda: _bool_env("VERBOSE", False),
     # The home path for CANN toolkit. If not set, the default value is
     # /usr/local/Ascend/ascend-toolkit/latest
     "ASCEND_HOME_PATH": lambda: os.getenv("ASCEND_HOME_PATH", None),
@@ -66,36 +87,8 @@ env_variables: dict[str, Callable[[], Any]] = {
     # In this case, developers need to set this value to "0.9.0" to make sure
     # that the correct package is installed.
     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
-    # Whether to enable FlashComm optimization when tensor parallel is enabled.
-    # This feature will get better performance when concurrency is large.
-    # DEPRECATED: use additional_config.enable_flashcomm1 instead.
-    "VLLM_ASCEND_ENABLE_FLASHCOMM1": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0"))),
-    # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
-    "MSMONITOR_USE_DAEMON": lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", "0"))),
-    # Whether to enable MLAPO optimization for DeepSeek W8A8 series models.
-    # This option is enabled by default. MLAPO can improve performance, but
-    # it will consume more NPU memory. If reducing NPU memory usage is a higher priority
-    # for your DeepSeek W8A8 scene, then disable it.
-    "VLLM_ASCEND_ENABLE_MLAPO": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", "1"))),
-    # Whether to enable weight cast format to FRACTAL_NZ.
-    # 0: close nz;
-    # 1: only quant case enable nz;
-    # 2: enable nz as long as possible.
-    "VLLM_ASCEND_ENABLE_NZ": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
-    # Whether to enable fused MC2 (`dispatch_ffn_combine`).
-    # 0, or not set: default ALLTOALL and MC2 will be used.
-    # 1: ALLTOALL and MC2 might be replaced by `dispatch_ffn_combine` operator.
-    # `dispatch_ffn_combine` can be used only for moe layer with W8A8, EP<=32, non-mtp, non-dynamic-eplb.
-    "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
-    # DEPRECATED: VLLM_ASCEND_BALANCE_SCHEDULING env var will be removed in a future release.
-    # Use --additional-config '{"enable_balance_scheduling": true}' instead.
-    "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),
-    # use fused op transpose_kv_cache_by_block, default is True
-    "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
-    ),
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),

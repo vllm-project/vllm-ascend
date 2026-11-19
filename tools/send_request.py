@@ -1,12 +1,176 @@
+import string
 from typing import Any
 
 import requests
 
+_PAD_ALPHABET = string.ascii_letters
 
-def send_v1_completions(prompt, model, server, request_args=None):
+
+def _tokenize_count(server, text: str, use_chat: bool = False) -> int:
+    url = server.url_for("tokenize")
+    # if use_chat:
+    #     payload: dict[str, Any] = {"messages": [{"role": "user", "content": text}]}
+    # else:
+    #     payload = {"prompt": text}
+    payload = {"prompt": text}
+    r = requests.post(url, json=payload, timeout=60)
+    r.raise_for_status()
+    body = r.json()
+    return len(body.get("tokens") or body.get("token_ids", []))
+
+
+def _generate_prompt_for_length(server, seed: str, target_tokens: int, use_chat: bool = False) -> tuple[str, int]:
+    """Generate a prompt that tokenizes to exactly `target_tokens` tokens.
+
+    Uses O(log n) tokenize API calls via two binary-search phases:
+      Phase 1: find the largest repetition count `k` such that
+               tokenize("\n".join([seed] * k)) <= target_tokens.
+               Upper bound is 2x the naive estimate to stay safe
+               against BPE boundary effects where joining seeds
+               *reduces* the token count.
+      Phase 2: fine-tune by appending "a" characters and binary-searching
+               the optimal count to reach exactly `target_tokens`.
+    """
+    single_count = _tokenize_count(server, seed, use_chat=use_chat)
+    if single_count == 0:
+        raise ValueError(f"seed {seed!r} tokenizes to 0 tokens")
+
+    if target_tokens <= single_count:
+        return seed, single_count
+
+    lo, hi = 1, max(target_tokens // single_count * 2 + 2, 2)
+    best_k, best_count = 1, single_count
+
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        body = "\n".join([seed] * mid)
+        # act = _tokenize_count(server, body, use_chat=use_chat)
+        act = _tokenize_count(server, body)
+        if act <= target_tokens:
+            best_k, best_count = mid, act
+            lo = mid + 1
+        else:
+            hi = mid - 1
+
+    body = "\n".join([seed] * best_k)
+    if best_count == target_tokens:
+        return body, best_count
+
+    gap = target_tokens - best_count
+    if gap <= 0:
+        return body, best_count
+
+    # Fine padding: binary-search on the number of "a" characters appended.
+    pad_lo, pad_hi = 0, gap * 8 + 1
+    best_pad, best_pad_count = 0, best_count
+
+    while pad_lo < pad_hi:
+        mid = (pad_lo + pad_hi + 1) // 2
+        cand = body + "a" * mid
+        cand_count = _tokenize_count(server, cand, use_chat=use_chat)
+        if cand_count <= target_tokens:
+            best_pad, best_pad_count = mid, cand_count
+            pad_lo = mid
+        else:
+            pad_hi = mid - 1
+
+    return body + "a" * best_pad, best_pad_count
+
+
+def resolve_prompt(server, raw, use_chat: bool = False) -> tuple[str, int | None]:
+    # if isinstance(raw, dict):
+    #     seed = str(raw.get("seed", ""))
+    #     target = int(raw.get("target_tokens", 0))
+    #     if not seed or not target:
+    #         raise ValueError(f"prompt dict needs both 'seed' and 'target_tokens', got {raw}")
+    #     prompt, actual = _generate_prompt_for_length(server, seed, target, use_chat=use_chat)
+    #     print(f"[generate_prompt] seed={seed!r} target_tokens={target} actual={actual}")
+    #     if overhead > 0:
+    #         actual = raw_count + overhead
+    #     else:
+    #         actual = None
+    #     return prompt, actual
+    # return raw, None
+    if isinstance(raw, dict):
+        seed = str(raw.get("seed", ""))
+        target = int(raw.get("target_tokens", 0))
+        if not seed or not target:
+            raise ValueError(f"prompt dict needs both 'seed' and 'target_tokens', got {raw}")
+
+        overhead = _detect_chat_overhead(server) if use_chat else 0
+        if use_chat:
+            if overhead > 0:
+                print(f"[generate_prompt] chat template overhead = {overhead} tokens")
+            else:
+                print("[generate_prompt] chat template overhead not detected, skipping prompt_tokens validation")
+
+        adjusted_target = max(target - overhead, 1)
+        prompt, raw_count = _generate_prompt_for_length(server, seed, adjusted_target)
+
+        if overhead > 0:
+            actual = raw_count + overhead
+        else:
+            actual = None
+
+        print(f"seed={seed!r} target_tokens={target} overhead={overhead} raw={raw_count} actual={actual}")
+        return prompt, actual
+    return raw, None
+
+
+def _detect_chat_overhead(server) -> int:
+    probe = "test"
+    try:
+        raw = _tokenize_count(server, probe)
+        url = server.url_for("tokenize")
+        r = requests.post(url, json={"messages": [{"role": "user", "content": probe}]}, timeout=60)
+        r.raise_for_status()
+        body = r.json()
+        with_template = len(body.get("tokens") or body.get("token_ids", []))
+        overhead = with_template - raw
+        return max(overhead, 0)
+    except Exception:
+        return 0
+
+
+def validate_response(response_json: dict, expected: dict | None, max_model_len: int | None = None) -> None:
+    """Validate token usage from API response."""
+    usage = response_json.get("usage", {})
+    prompt_tokens = usage.get("prompt_tokens", 0)
+    completion_tokens = usage.get("completion_tokens", 0)
+    total_tokens = prompt_tokens + completion_tokens
+
+    print(f"Token usage - prompt: {prompt_tokens}, completion: {completion_tokens}, total: {total_tokens}")
+
+    if not expected:
+        return
+
+    if "prompt_tokens" in expected:
+        expected_prompt_tokens = expected["prompt_tokens"]
+        assert prompt_tokens == expected_prompt_tokens, (
+            f"prompt_tokens mismatch: got {prompt_tokens}, expected {expected_prompt_tokens}"
+        )
+
+    if "completion_tokens" in expected:
+        expected_completion_tokens = expected["completion_tokens"]
+        assert completion_tokens == expected_completion_tokens, (
+            f"completion_tokens mismatch: got {completion_tokens}, expected {expected_completion_tokens}"
+        )
+
+    limit = expected.get("max_model_len") or max_model_len
+    if limit is not None:
+        assert total_tokens <= int(limit), f"total_tokens ({total_tokens}) exceeds max_model_len ({limit})"
+
+
+def send_v1_completions(
+    prompt, model, server, request_args=None, expected: dict | None = None, max_model_len: int | None = None
+):
     data: dict[str, Any] = {"model": model, "prompt": prompt}
     if request_args:
         data.update(request_args)
+    if expected and "completion_tokens" in expected:
+        ct = expected["completion_tokens"]
+        data["max_tokens"] = ct
+        data["min_tokens"] = ct
     url = server.url_for("v1", "completions")
     response = requests.post(url, json=data)
     print(f"Status Code: {response.status_code}")
@@ -15,9 +179,12 @@ def send_v1_completions(prompt, model, server, request_args=None):
     response_text = response_json["choices"][0]["text"]
     print(f"Response: {response_text}")
     assert response_text, "empty response"
+    validate_response(response_json, expected, max_model_len)
 
 
-def send_v1_chat_completions(prompt, model, server, request_args=None):
+def send_v1_chat_completions(
+    prompt, model, server, request_args=None, expected: dict | None = None, max_model_len: int | None = None
+):
     data: dict[str, Any] = {
         "model": model,
         "messages": [
@@ -29,11 +196,17 @@ def send_v1_chat_completions(prompt, model, server, request_args=None):
     }
     if request_args:
         data.update(request_args)
+    if expected and "completion_tokens" in expected:
+        ct = expected["completion_tokens"]
+        data["max_tokens"] = ct
+        data["min_tokens"] = ct
     url = server.url_for("v1", "chat", "completions")
     response = requests.post(url, json=data)
     print(f"Status Code: {response.status_code}")
     response_json = response.json()
     print(f"Response json: {response_json}")
-    response_text = response_json["choices"][0]["message"]["content"]
+    message = response_json["choices"][0]["message"]
+    response_text = message.get("content") or message.get("reasoning", "")
     print(f"Response: {response_text}")
     assert response_text, "empty response"
+    validate_response(response_json, expected, max_model_len)

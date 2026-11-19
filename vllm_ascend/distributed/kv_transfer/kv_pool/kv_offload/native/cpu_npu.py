@@ -1,0 +1,607 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
+"""Ascend worker for vLLM's native CPU KV-cache offloading."""
+
+from __future__ import annotations
+
+import os
+import time
+from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass
+from threading import Lock
+from typing import TYPE_CHECKING
+
+import torch
+from vllm.logger import logger
+from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.v1.kv_offload.base import (
+    BlockIDsLoadStoreSpec,
+    CanonicalKVCacheRef,
+    CanonicalKVCaches,
+    GPULoadStoreSpec,
+    LoadStoreSpec,
+    OffloadingWorker,
+    TransferResult,
+)
+from vllm.v1.kv_offload.cpu.gpu_worker import compute_sub_block_ptrs
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+
+from vllm_ascend.utils import vllm_version_is
+
+if TYPE_CHECKING:
+    from vllm.v1.kv_offload.base import DevicePointers
+
+# Direction codes shared with csrc/torch_binding.cpp::swap_blocks_batch.
+DIRECTION_H2D = 0
+DIRECTION_D2H = 1
+
+
+def _unlink_created_region_files(mmap_region: SharedOffloadRegion | None) -> None:
+    """Detach creator-owned names on abort/shutdown without unmapping pins."""
+    if mmap_region is None or not getattr(mmap_region, "_creator", False):
+        return
+    segments = getattr(mmap_region, "_segments", None)
+    paths = [entry[0] for entry in segments] if segments is not None else [mmap_region.mmap_path]
+    unlinked = True
+    for path in paths:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            unlinked = False
+            logger.warning("Failed to unlink shared offload file %s", path, exc_info=True)
+    if unlinked:
+        # A later cleanup must not unlink a replacement using the same name.
+        mmap_region._creator = False
+
+
+@dataclass(eq=False)
+class _PinnedMmapRegistration:
+    """Own the mapping even when its worker never finishes construction."""
+
+    mmap_region: SharedOffloadRegion
+    tensors: list[torch.Tensor]
+
+    def unregister(self) -> None:
+        if self.tensors:
+            # A failed sync/unregister must leave both ownership and the
+            # remaining range list intact so a later attempt can retry.
+            torch.npu.synchronize()
+            while self.tensors:
+                torch.ops._C_ascend.unregister_pinned_host_mmap(self.tensors[-1])
+                self.tensors.pop()
+        with _PINNED_MMAP_REGISTRATIONS_LOCK:
+            _PINNED_MMAP_REGISTRATIONS.discard(self)
+
+
+# A native registration outlives Python worker ownership on failed rollback.
+# Keep a process-scoped root until successful unregister, or process exit.
+# The lock protects registry membership; ACL calls run outside the lock.
+_PINNED_MMAP_REGISTRATIONS: set[_PinnedMmapRegistration] = set()
+_PINNED_MMAP_REGISTRATIONS_LOCK = Lock()
+
+
+@dataclass
+class Transfer:
+    job_id: int
+    stream: torch.npu.Stream
+    start_event: torch.npu.Event
+    end_event: torch.npu.Event
+    num_bytes: int
+    batch_src: torch.Tensor
+    batch_dst: torch.Tensor
+    batch_sizes: torch.Tensor
+
+
+def _new_descriptor_buffers(
+    num_copy_ops: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    pin_memory = is_pin_memory_available()
+    return (
+        torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=pin_memory),
+        torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=pin_memory),
+        torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=pin_memory),
+    )
+
+
+def _get_worker_view_factory(
+    mmap_region: SharedOffloadRegion,
+) -> Callable[[int], torch.Tensor]:
+    create_view = getattr(mmap_region, "create_next_worker_view", None)
+    if create_view is None:
+        create_view = mmap_region.create_next_view  # type: ignore[attr-defined]
+    return create_view
+
+
+class SingleDirectionNPUOffloadingHandler:
+    """Transfer blocks in one direction using an ordered NPU DMA stream."""
+
+    def __init__(
+        self,
+        npu_tensors: list[torch.Tensor],
+        cpu_tensors: list[torch.Tensor],
+        blocks_per_chunk: int,
+        kv_cache_groups_data_refs: list[list[CanonicalKVCacheRef]],
+        npu_to_cpu: bool,
+    ) -> None:
+        assert len(npu_tensors) == len(cpu_tensors)
+        assert npu_tensors
+
+        for npu_tensor, cpu_tensor in zip(npu_tensors, cpu_tensors):
+            assert npu_tensor.dtype == torch.int8
+            assert npu_tensor.ndim == 2
+            assert npu_tensor.device.type == "npu"
+            assert cpu_tensor.dtype == torch.int8
+            assert cpu_tensor.ndim == 2
+            assert cpu_tensor.device.type == "cpu"
+            assert cpu_tensor.shape[1] == npu_tensor.shape[1] * blocks_per_chunk
+
+        # Each direction owns its list containers. Clearing one handler during
+        # shutdown must not release tensors still used by the other direction.
+        self.src_tensors = list(npu_tensors if npu_to_cpu else cpu_tensors)
+        self.dst_tensors = list(cpu_tensors if npu_to_cpu else npu_tensors)
+        self.npu_to_cpu = npu_to_cpu
+        self.kv_cache_groups_data_refs = kv_cache_groups_data_refs
+        self.src_blocks_per_chunk = 1 if npu_to_cpu else blocks_per_chunk
+        self.dst_blocks_per_chunk = blocks_per_chunk if npu_to_cpu else 1
+        self.direction = DIRECTION_D2H if npu_to_cpu else DIRECTION_H2D
+
+        self._transfer_events: dict[int, torch.npu.Event] = {}
+        self._transfers: deque[Transfer] = deque()
+        self._stream_pool: list[torch.npu.Stream] = []
+        self._event_pool: list[torch.npu.Event] = []
+        self._buffer_pool: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+
+    def transfer_async(
+        self,
+        job_id: int,
+        src_spec: LoadStoreSpec,
+        dst_spec: LoadStoreSpec,
+    ) -> bool:
+        if vllm_version_is("0.33.0"):
+            batch_src, batch_dst, batch_sizes, num_copy_ops, num_transfer_bytes = self._legacy_descriptors(
+                src_spec, dst_spec
+            )
+        else:
+            device_ptrs = src_spec if self.npu_to_cpu else dst_spec
+            cpu_spec = dst_spec if self.npu_to_cpu else src_spec
+            batch_src, batch_dst, batch_sizes, num_copy_ops, num_transfer_bytes = self._pointer_descriptors(
+                device_ptrs, cpu_spec
+            )
+        src = batch_src[:num_copy_ops]
+        dst = batch_dst[:num_copy_ops]
+        sizes = batch_sizes[:num_copy_ops]
+
+        stream = self._stream_pool.pop() if self._stream_pool else torch.npu.Stream()
+        start_event = self._event_pool.pop() if self._event_pool else torch.npu.Event(enable_timing=True)
+        end_event = self._event_pool.pop() if self._event_pool else torch.npu.Event(enable_timing=True)
+
+        if self.npu_to_cpu:
+            # KV writes happen on the model stream. D2H must not observe a
+            # partially written block.
+            stream.wait_stream(torch.npu.current_stream())
+        if self._transfers:
+            stream.wait_event(self._transfers[-1].end_event)
+
+        with torch.npu.stream(stream):
+            start_event.record(stream)
+            if num_copy_ops > 0:
+                torch.ops._C_ascend.swap_blocks_batch(
+                    src,
+                    dst,
+                    sizes,
+                    self.direction,
+                )
+            end_event.record(stream)
+
+        self._transfer_events[job_id] = end_event
+        self._transfers.append(
+            Transfer(
+                job_id=job_id,
+                stream=stream,
+                start_event=start_event,
+                end_event=end_event,
+                num_bytes=num_transfer_bytes,
+                batch_src=batch_src,
+                batch_dst=batch_dst,
+                batch_sizes=batch_sizes,
+            )
+        )
+        return True
+
+    def _legacy_descriptors(self, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec):
+        assert isinstance(src_spec, BlockIDsLoadStoreSpec)
+        assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
+
+        src_blocks = src_spec.block_ids
+        dst_blocks = dst_spec.block_ids
+        assert src_blocks.ndim == 1
+        assert dst_blocks.ndim == 1
+
+        npu_spec = src_spec if self.npu_to_cpu else dst_spec
+        assert isinstance(npu_spec, GPULoadStoreSpec)
+        group_sizes = npu_spec.group_sizes
+        block_indices = npu_spec.block_indices
+        assert len(group_sizes) == len(self.kv_cache_groups_data_refs)
+        assert len(block_indices) == len(self.kv_cache_groups_data_refs)
+
+        num_copy_ops = sum(
+            group_size * len(group_data_refs)
+            for group_size, group_data_refs in zip(group_sizes, self.kv_cache_groups_data_refs)
+        )
+        batch_src, batch_dst, batch_sizes = (
+            self._buffer_pool.pop() if self._buffer_pool else _new_descriptor_buffers(num_copy_ops)
+        )
+        if batch_src.numel() < num_copy_ops:
+            batch_src, batch_dst, batch_sizes = _new_descriptor_buffers(num_copy_ops)
+
+        src = batch_src[:num_copy_ops]
+        dst = batch_dst[:num_copy_ops]
+        sizes = batch_sizes[:num_copy_ops]
+        all_src = src.numpy()
+        all_dst = dst.numpy()
+        all_sizes = sizes.numpy()
+
+        src_offset = 0
+        dst_offset = 0
+        op_idx = 0
+        num_transfer_bytes = 0
+        for group_size, block_idx, group_data_refs in zip(
+            group_sizes,
+            block_indices,
+            self.kv_cache_groups_data_refs,
+        ):
+            if group_size == 0:
+                continue
+
+            src_blocks_to_skip = block_idx % self.src_blocks_per_chunk
+            dst_blocks_to_skip = block_idx % self.dst_blocks_per_chunk
+            src_logical_block_count = group_size + src_blocks_to_skip
+            dst_logical_block_count = group_size + dst_blocks_to_skip
+
+            src_block_count = cdiv(src_logical_block_count, self.src_blocks_per_chunk)
+            dst_block_count = cdiv(dst_logical_block_count, self.dst_blocks_per_chunk)
+            src_end_offset = src_offset + src_block_count
+            dst_end_offset = dst_offset + dst_block_count
+            assert src_end_offset <= len(src_blocks)
+            assert dst_end_offset <= len(dst_blocks)
+
+            group_src = src_blocks[src_offset:src_end_offset]
+            group_dst = dst_blocks[dst_offset:dst_end_offset]
+            for data_ref in group_data_refs:
+                tensor_idx = data_ref.tensor_idx
+                end_idx = op_idx + group_size
+                compute_sub_block_ptrs(
+                    group_src,
+                    self.src_blocks_per_chunk,
+                    all_src[op_idx:end_idx],
+                    self.src_tensors[tensor_idx],
+                    skip_count=src_blocks_to_skip,
+                )
+                compute_sub_block_ptrs(
+                    group_dst,
+                    self.dst_blocks_per_chunk,
+                    all_dst[op_idx:end_idx],
+                    self.dst_tensors[tensor_idx],
+                    skip_count=dst_blocks_to_skip,
+                )
+                all_sizes[op_idx:end_idx] = data_ref.page_size_bytes
+                num_transfer_bytes += group_size * data_ref.page_size_bytes
+                op_idx = end_idx
+
+            src_offset = src_end_offset
+            dst_offset = dst_end_offset
+
+        assert src_offset == len(src_blocks)
+        assert dst_offset == len(dst_blocks)
+        assert op_idx == num_copy_ops
+
+        return batch_src, batch_dst, batch_sizes, num_copy_ops, num_transfer_bytes
+
+    def _pointer_descriptors(self, device_ptrs: DevicePointers, cpu_spec: LoadStoreSpec):
+        """Translate #56076's resolved device addresses into NPU DMA descriptors.
+
+        Keep group/ref/block order, including empty groups and partial chunks.
+        CPU chunks retain the original physical stride; copy sizes are unpadded.
+        """
+        assert isinstance(cpu_spec, BlockIDsLoadStoreSpec)
+        cpu_blocks = cpu_spec.block_ids
+        num_copy_ops = len(device_ptrs.ptrs)
+        batch_src, batch_dst, batch_sizes = (
+            self._buffer_pool.pop() if self._buffer_pool else _new_descriptor_buffers(num_copy_ops)
+        )
+        if batch_src.numel() < num_copy_ops:
+            batch_src, batch_dst, batch_sizes = _new_descriptor_buffers(num_copy_ops)
+        all_src = batch_src[:num_copy_ops].numpy()
+        all_dst = batch_dst[:num_copy_ops].numpy()
+        all_sizes = batch_sizes[:num_copy_ops].numpy()
+        npu_out, cpu_out = (all_src, all_dst) if self.npu_to_cpu else (all_dst, all_src)
+        npu_out[:] = device_ptrs.ptrs
+        all_sizes[:] = device_ptrs.sizes
+        blocks_per_chunk = self.dst_blocks_per_chunk if self.npu_to_cpu else self.src_blocks_per_chunk
+        cpu_offset = 0
+        op_offset = 0
+        assert len(device_ptrs.group_block_counts) == len(self.kv_cache_groups_data_refs)
+        for group_size, n_refs, block_idx, refs in zip(
+            device_ptrs.group_block_counts,
+            device_ptrs.group_data_ref_counts,
+            device_ptrs.block_indices,
+            self.kv_cache_groups_data_refs,
+        ):
+            assert n_refs == len(refs)
+            if group_size == 0:
+                continue
+            skip = block_idx % blocks_per_chunk
+            num_chunks = cdiv(group_size + skip, blocks_per_chunk)
+            group_blocks = cpu_blocks[cpu_offset : cpu_offset + num_chunks]
+            assert len(group_blocks) == num_chunks
+            for ref in refs:
+                end = op_offset + group_size
+                compute_sub_block_ptrs(
+                    group_blocks,
+                    blocks_per_chunk,
+                    cpu_out[op_offset:end],
+                    (self.dst_tensors if self.npu_to_cpu else self.src_tensors)[ref.tensor_idx],
+                    skip_count=skip,
+                )
+                op_offset = end
+            cpu_offset += num_chunks
+        assert cpu_offset == len(cpu_blocks)
+        assert op_offset == num_copy_ops
+        return batch_src, batch_dst, batch_sizes, num_copy_ops, int(device_ptrs.sizes.sum())
+
+    def get_finished(self) -> list[TransferResult]:
+        results: list[TransferResult] = []
+        while self._transfers and self._transfers[0].end_event.query():
+            transfer = self._transfers.popleft()
+            transfer_time = transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
+            results.append(
+                TransferResult(
+                    job_id=transfer.job_id,
+                    success=True,
+                    transfer_size=transfer.num_bytes,
+                    transfer_time=transfer_time,
+                )
+            )
+            self._stream_pool.append(transfer.stream)
+            self._event_pool.extend((transfer.end_event, transfer.start_event))
+            self._buffer_pool.append(
+                (
+                    transfer.batch_src,
+                    transfer.batch_dst,
+                    transfer.batch_sizes,
+                )
+            )
+            del self._transfer_events[transfer.job_id]
+        return results
+
+    def wait(self, job_ids: set[int]) -> None:
+        for job_id in job_ids:
+            event = self._transfer_events.get(job_id)
+            if event is not None:
+                event.synchronize()
+
+    def shutdown(self) -> None:
+        while self._transfers:
+            self._transfers.popleft().end_event.synchronize()
+        self._transfer_events.clear()
+        self._stream_pool.clear()
+        self._event_pool.clear()
+        self._buffer_pool.clear()
+        self.src_tensors = []
+        self.dst_tensors = []
+
+
+class NPUOffloadingWorker(OffloadingWorker):
+    """Native CPU offloading worker backed by Ascend batched DMA."""
+
+    def __init__(
+        self,
+        kv_caches: CanonicalKVCaches,
+        blocks_per_chunk: int,
+        num_cpu_blocks: int,
+        mmap_region: SharedOffloadRegion | None = None,
+        pin_shared_mmap: bool = False,
+        worker_slot_only: bool = False,
+    ) -> None:
+        self._mmap_region = mmap_region
+        self._mmap_pinned = False
+        self._pinned_tensors: list[torch.Tensor] = []
+        self._pinned_registration: _PinnedMmapRegistration | None = None
+        pin_memory = is_pin_memory_available()
+        logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
+
+        npu_tensors: list[torch.Tensor] = []
+        cpu_tensors: list[torch.Tensor] = []
+        try:
+            create_worker_view = _get_worker_view_factory(mmap_region) if mmap_region is not None else None
+            for kv_cache_tensor in kv_caches.tensors:
+                npu_page_size_bytes = kv_cache_tensor.page_size_bytes
+                npu_tensor = kv_cache_tensor.tensor
+                if npu_tensor.dtype != torch.int8 or npu_tensor.ndim != 2:
+                    raise ValueError(
+                        "Canonical NPU KV cache tensors must be two-dimensional "
+                        f"int8 views, got shape={tuple(npu_tensor.shape)}, "
+                        f"dtype={npu_tensor.dtype}"
+                    )
+                if npu_tensor.shape[1] != npu_page_size_bytes:
+                    raise ValueError(
+                        "Canonical NPU KV cache page size mismatch: "
+                        f"shape[1]={npu_tensor.shape[1]}, "
+                        f"page_size_bytes={npu_page_size_bytes}"
+                    )
+                cpu_page_size_bytes = npu_page_size_bytes * blocks_per_chunk
+
+                if create_worker_view is not None:
+                    cpu_tensor = create_worker_view(cpu_page_size_bytes)
+                else:
+                    start_time = time.monotonic()
+                    cpu_tensor = torch.zeros(
+                        (num_cpu_blocks, cpu_page_size_bytes),
+                        dtype=torch.int8,
+                        device="cpu",
+                        pin_memory=pin_memory,
+                    )
+                    logger.debug(
+                        "Allocated pinned CPU tensor %d x %d (%.2f GB): %.3f s",
+                        num_cpu_blocks,
+                        cpu_page_size_bytes,
+                        num_cpu_blocks * cpu_page_size_bytes / 1e9,
+                        time.monotonic() - start_time,
+                    )
+
+                npu_tensors.append(npu_tensor)
+                cpu_tensors.append(cpu_tensor)
+
+            self._pin_shared_region(pin_shared_mmap, worker_slot_only)
+
+            self._store_handler = SingleDirectionNPUOffloadingHandler(
+                npu_tensors=npu_tensors,
+                cpu_tensors=cpu_tensors,
+                blocks_per_chunk=blocks_per_chunk,
+                kv_cache_groups_data_refs=kv_caches.group_data_refs,
+                npu_to_cpu=True,
+            )
+            self._load_handler = SingleDirectionNPUOffloadingHandler(
+                npu_tensors=npu_tensors,
+                cpu_tensors=cpu_tensors,
+                blocks_per_chunk=blocks_per_chunk,
+                kv_cache_groups_data_refs=kv_caches.group_data_refs,
+                npu_to_cpu=False,
+            )
+        except Exception:
+            # Initialization has aborted, so no scheduler should attach later.
+            # Unlink separately: failed handler/unpin cleanup must not leak
+            # named shm files, while native registrations still need the mmap.
+            _unlink_created_region_files(mmap_region)
+            # Construction failed before worker ownership became visible to
+            # the connector. Drop any handler-owned tensor views before
+            # closing the mapping, otherwise mmap.close() can fail with an
+            # exported-buffer error and leave a stale shm file behind.
+            for handler_name in ("_store_handler", "_load_handler"):
+                handler = getattr(self, handler_name, None)
+                if handler is not None:
+                    handler.shutdown()
+            # Failed sync/unregister must skip mmap cleanup: native registrations
+            # still need the mapping, retained by the process-scoped owner.
+            self._unpin_shared_region()
+            if mmap_region is not None:
+                mmap_region.cleanup()
+                self._mmap_region = None
+            raise
+
+    def _pin_shared_region(self, pin_shared_mmap: bool, worker_slot_only: bool) -> None:
+        if self._mmap_region is None or not pin_shared_mmap:
+            return
+        try:
+            supported = torch.ops._C_ascend.supports_eccpu_offload()
+        except Exception:
+            logger.warning(
+                "KV offload shared mmap pinning is unavailable; using pageable mmap",
+                exc_info=True,
+            )
+            return
+        if not supported:
+            logger.warning(
+                "KV offload shared mmap pinning requires aclrtMemcpyBatchAsync "
+                "and aclrtHostRegisterV2; using pageable mmap"
+            )
+            return
+
+        slot_ranges = getattr(self._mmap_region, "iter_worker_slot_ranges", None)
+        use_worker_slots = bool(worker_slot_only and self._mmap_region.rank is not None and slot_ranges is not None)
+        if use_worker_slots and slot_ranges is not None:
+            try:
+                tensors = [self._mmap_region.base_tensor[offset : offset + length] for offset, length in slot_ranges()]
+            except Exception:
+                logger.warning(
+                    "Failed to build worker slot ranges; pinning the whole region",
+                    exc_info=True,
+                )
+                use_worker_slots = False
+                tensors = [self._mmap_region.base_tensor]
+        else:
+            tensors = [self._mmap_region.base_tensor]
+
+        if self._pinned_registration is None:
+            registration = _PinnedMmapRegistration(self._mmap_region, self._pinned_tensors)
+            with _PINNED_MMAP_REGISTRATIONS_LOCK:
+                _PINNED_MMAP_REGISTRATIONS.add(registration)
+            self._pinned_registration = registration
+
+        try:
+            for tensor in tensors:
+                torch.ops._C_ascend.register_pinned_host_mmap(tensor)
+                # Retain each registered view until unregister succeeds.
+                self._pinned_tensors.append(tensor)
+                self._mmap_pinned = True
+        except Exception:
+            logger.warning(
+                "Failed to pin shared offload mmap; rolling back registrations",
+                exc_info=True,
+            )
+            self._unpin_shared_region()
+            return
+
+        pinned_bytes = sum(tensor.numel() * tensor.element_size() for tensor in self._pinned_tensors)
+        logger.info(
+            "Pinned shared offload mmap %s %.2f GB in %d range(s)",
+            "worker slots" if use_worker_slots else "whole region",
+            pinned_bytes / 1e9,
+            len(self._pinned_tensors),
+        )
+
+    def _unpin_shared_region(self) -> None:
+        if self._pinned_registration is None:
+            return
+        self._pinned_registration.unregister()
+        self._pinned_registration = None
+        self._mmap_pinned = False
+        logger.info("Unpinned shared offload mmap")
+
+    def submit_store(
+        self,
+        job_id: int,
+        device_ptrs: DevicePointers | GPULoadStoreSpec,
+        dst_spec: LoadStoreSpec,
+    ) -> bool:
+        return self._store_handler.transfer_async(job_id, device_ptrs, dst_spec)
+
+    def submit_load(
+        self,
+        job_id: int,
+        src_spec: LoadStoreSpec,
+        device_ptrs: DevicePointers | GPULoadStoreSpec,
+        expedited: bool = False,
+    ) -> bool:
+        # vLLM main submits step-synchronous loads with `expedited=True`; this
+        # worker keeps a single load path and honours the same contract.
+        return self._load_handler.transfer_async(job_id, src_spec, device_ptrs)
+
+    def get_finished(self) -> list[TransferResult]:
+        return self._store_handler.get_finished() + self._load_handler.get_finished()
+
+    def wait(self, job_ids: set[int]) -> None:
+        self._store_handler.wait(job_ids)
+        self._load_handler.wait(job_ids)
+
+    def shutdown(self) -> None:
+        # No new scheduler/worker attachment is needed during shutdown.
+        # Existing mappings remain valid even if releasing a pin fails below.
+        _unlink_created_region_files(self._mmap_region)
+        try:
+            self._store_handler.shutdown()
+        finally:
+            try:
+                self._load_handler.shutdown()
+            finally:
+                # Failed sync/unregister intentionally skips cleanup below.
+                # The registration owner keeps the mmap alive for retry or exit.
+                self._unpin_shared_region()
+                # Drop all mmap-backed tensor views before closing the mapping.
+                if self._mmap_region is not None:
+                    self._mmap_region.cleanup()
+                    self._mmap_region = None

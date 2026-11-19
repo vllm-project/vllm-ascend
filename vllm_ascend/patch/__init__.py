@@ -28,14 +28,51 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# * vllm_ascend/hisparse/host_pool.py (HiSparse backend initialization):
+#   Target: vllm.v1.hisparse.runtime.allocate_pinned_host_pool.
+#   Why: AIV mapping alone does not enable DMA to pageable Host storage.
+#   How: Installed only by the HiSparse backend; allocate private pinned storage
+#        before Core builds cache views, retaining Core's release lifecycle.
+#   Related PR: No backend Host-allocation hook exists in the supported Core.
+#   Future plan: Replace this adapter with that upstream hook when available.
+# --------------------------------
+# * vllm_ascend/hisparse/backend.py (HiSparse backend initialization):
+#   Target: HiSparseConnectorWorker._init_dma and invalidate_blocks in vLLM Core.
+#   Why: Ascend uses int32 slot staging and can invalidate recycled slots in one
+#        grouped device operation.
+#   How: Bind the staging buffer and invalidator after Core initializes DMA.
+#        Other backends and unsupported invalidation inputs use Core's methods.
+#   Future plan: Remove the wrappers when Core exposes backend extension points
+#                for slot staging and recycled-block invalidation.
+# --------------------------------
+# * worker/patch_kda_recoverssm.py:
+#   Target: Kimi KDA's KDARecoverSSMCommitContext module binding.
+#   Why: The upstream metadata builder imports its CUDA context directly.
+#   How: Replace only the context class on GLM workers with RecoverSSM enabled.
+#   Related PR: No upstream context-factory extension point exists yet.
+#   Future plan: Remove when upstream allows the backend to select the context.
+# --------------------------------
+# * platform/patch_replayssm_config.py:
+#   Target: VllmConfig.validate_mamba_cached_kernel and its Pydantic validator.
+#   Why: Ascend's GLM and Kimi KDA RecoverSSM paths have platform-specific
+#        cache and parallelism restrictions, and upstream does not recognize
+#        all Kimi K3.1 architecture aliases.
+#   How: Select the request-indexed KDA path from its text-config contract,
+#        validate its execution constraints and derive use_kda_recoverssm from
+#        use_replayssm. Other models and disabled configurations retain the
+#        upstream validator.
+#   Related PR: No upstream platform-specific ReplaySSM selector exists yet.
+#   Future plan: Remove when upstream supports the Ascend KDA configuration contract.
+# --------------------------------
 # * Platform Patch:
-# =================
+# ==========#
 # Entries are listed in alphabetical order by file name.
 #
 # ** 1. File: platform/patch_balance_schedule.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
-#      `vllm.v1.core.sched.scheduler.Scheduler`
+#   1. `vllm.v1.core.sched.scheduler.Scheduler`
+#   2. `vllm.v1.engine.core.DPEngineCoreProc` (class provided only; the swap
+#      is performed by patch_engine_core.py when balance scheduling is enabled)
 #    Why:
 #       vLLM v1 scheduling currently enables chunkedprefill by default, which processes prefill and decode
 #       requests simultaneously in a single scheduling session. This can impact the overall system throughput
@@ -48,26 +85,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
-# ** 2. File: platform/patch_camem_allocator.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.model.is_cumem_allocator_available`
-#    Why:
-#       Upstream vLLM main enables and validates the CUDA/ROCm CuMem allocator
-#       when `enable_sleep_mode=True`. Ascend implements sleep mode with its own
-#       CaMem allocator, so the upstream CuMem-only availability check fails
-#       during `ModelConfig` validation before Ascend worker code can run.
-#    How:
-#       Treat Ascend's platform sleep allocator as satisfying the allocator
-#       availability check, while preserving the original vLLM CuMem check as
-#       fallback.
-#    Related PR (if no, explain why):
-#       No, this maps an upstream CUDA/ROCm allocator validation to Ascend's
-#       backend-specific CaMem implementation.
-#    Future Plan:
-#       Remove this patch if upstream exposes a platform allocator capability hook
-#       for sleep mode validation.
-#
-# ** 3. File: platform/patch_distributed.py**
+# ** 2. File: platform/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.distributed.all_reduce`, `torch.distributed.broadcast`
 #    Why:
@@ -79,40 +97,126 @@
 #    Future Plan:
 #       Find a better way to support tensor alignment for 310p without this patch.
 #
-# ** 4. File: platform/patch_dp_device_ids.py**
+# ** 4. File: platform/patch_dyntra_lb_core.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.dp_utils.get_physical_gpu_ids_for_local_dp_rank`
+#   1. `vllm.v1.engine.core.DPEngineCoreProc` (class provided only; the swap
+#      is performed by patch_engine_core.py when dyntra-lb is enabled)
 #    Why:
-#       PR #45026 removed the per-process device isolation that older vLLM
-#       versions performed internally. Application-level DP (e.g.
-#       `offline_data_parallel.py`) now has to slice ASCEND_RT_VISIBLE_DEVICES
-#       per rank itself, but the upstream helper still expects the env var to
-#       contain ALL devices for ALL ranks and tries to read it with the
-#       `local_dp_rank * world_size` offset. With a sharded env var, that
-#       offset is out of range and the helper raises IndexError (wrapped in the
-#       user-facing "Error computing device indices for ..." message).
-#    How：
-#       Patch `get_physical_gpu_ids_for_local_dp_rank` so it tolerates a
-#       pre-sharded ASCEND_RT_VISIBLE_DEVICES env var (one slice per DP rank),
-#       instead of unconditionally applying `local_dp_rank * world_size` as an
-#       offset into it.
+#       PD-disaggregated decoder serving can develop uneven attention KV-cache
+#       workloads across data-parallel ranks. Upstream vLLM does not currently
+#       expose an extension point for selecting an Ascend-specific DP engine
+#       core that coordinates dynamic cross-rank scheduling decisions.
+#    How:
+#       When DyntraLB is enabled, the DP engine-core process is replaced with
+#       the DyntraLB implementation at engine startup (via patch_engine_core.py).
+#       The implementation exchanges lightweight scheduling metadata across DP
+#       ranks and applies the resulting admission, pause, and resume decisions
+#       through the DyntraLB scheduler while preserving the original path when
+#       the feature is off.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/45026
+#       https://github.com/vllm-project/vllm-ascend/pull/12292
 #    Future Plan:
-#       Remove this patch once upstream `get_physical_gpu_ids_for_local_dp_rank`
-#       handles a pre-sharded visible-devices env var, or vLLM-Ascend stops
-#       relying on application-level device slicing for DP.
+#       Remove this patch after upstream vLLM provides stable scheduler and DP
+#       engine-core plugin interfaces, or equivalent dynamic intra-decoder DP
+#       load balancing that vllm-ascend can use without monkey-patching.
 #
-# ** 5. File: platform/patch_fused_moe.py**
+# ** 5a. File: platform/patch_engine_core.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.fused_moe.FusedMoE`
+#   1. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
+#   2. `vllm.v1.engine.core.DPEngineCoreProc` (deferred, selected inside the
+#      wrapper)
+#   3. `vllm.v1.engine.core.EngineCore.post_step` (pp-mtp patch, invocation
+#      moved here from patch_pp_mtp.py)
 #    Why:
-#       vllm's FusedMoE is a factory function (not a class). deepseek_v2 and
-#       other models do `from vllm.model_executor.layers.fused_moe import FusedMoE`
+#       Previously patch_balance_schedule and patch_dyntra_lb_core
+#       each wrapped `EngineCoreProc.run_engine_core` independently, forming
+#       an implicit wrapper chain whose correctness depended on import order.
+#    How：
+#       Install the single `run_engine_core` wrapper: initialize the ascend
+#       config, select `DyntraLBDPEngineCoreProc` (dyntra-lb enabled) or
+#       `BalanceDPEngineCoreProc` (balance enabled) at runtime via an explicit
+#       if/elif, then delegate to the pristine upstream entry point stashed at
+#       import. In `spawn` children, unpickling this wrapper imports this
+#       module, deterministically re-applying all engine-core-level patches
+#       before any `EngineCore` is instantiated.
+#    Related PR (if no, explain why):
+#       No, vllm-ascend internal refactor of its own platform patches.
+#    Future Plan:
+#       Remove this patch once upstream exposes stable extension points for
+#       engine-core-level customization, or when the feature modules no longer
+#       need an entry-point hook.
+#
+# ** 5b. File: platform/patch_metrics_level.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.engine.core.EngineCore.set_metrics_level`
+#   2. `vllm.entrypoints.serve.register_vllm_serve_api_routers`
+#    Why:
+#       The MS metric level is an integer in each process. A file poll on the
+#       last pipeline stage does not update earlier stages, and the API server
+#       has no command that reaches every worker.
+#    How:
+#       Add `POST /set_metrics_level` on the API server. The handler utility-RPCs
+#       `set_metrics_level` to every EngineCore. That method sets the engine
+#       process level and collective-RPCs the same method on every worker.
+#    Related PR (if no, explain why):
+#       No upstream PR. The command is Ascend MS metric control.
+#    Future Plan:
+#       Drop the monkeypatch if upstream grows a generic runtime-config RPC.
+#
+# ** 6. File: platform/patch_engram_config.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.engram.EngramConfig.verify_parallel_config`
+#    Why:
+#       Upstream requires dp_shared_memory to run with DP > 1; Ascend Engram
+#       also supports host table sharing across PCP replicas (DP x PCP groups),
+#       which upstream validation rejects.
+#    How:
+#       Override verify_parallel_config to accept DP > 1 or PCP > 1 and keep
+#       the elastic-EP restrictions. Skip this patch when vLLM does not provide
+#       EngramConfig.
+#    Related PR (if no, explain why):
+#       No, Ascend-specific PCP topology support.
+#    Future Plan:
+#       Remove this patch once upstream natively supports Engram PCP, including
+#       DP x PCP groups and parallel validation.
+#
+# ** 7. File: platform/patch_eplb.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.parallel.current_platform`
+#   2. `vllm.distributed.eplb.eplb_state._move_to_workspace`
+#    Why:
+#       Upstream EPLB owns the Model Runner V2 control plane, but its platform
+#       capability check excludes NPU. Its async workspace move also has no
+#       downstream callback after a per-layer map commit.
+#    How:
+#       Expose EPLB capability only inside vllm.config.parallel and refresh the
+#       Ascend lookup after an async layer commit. Router behavior and load
+#       scope are owned by downstream instances rather than patched upstream
+#       classes; upstream torch.distributed communication runs over HCCL.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/49700
+#    Related RFC:
+#       https://github.com/vllm-project/vllm/issues/49702
+#    Future Plan:
+#       Remove this patch once the upstream `EplbPlatformBackend` interface is
+#       available in the supported vLLM version. Retain only the NPU backend,
+#       operator, communicator, load normalization, and weight views.
+#
+# Main2main November 12: vLLM #66859 replaces routed-scale booleans with
+# RoutedScaleMode. Translate Ascend model callers before router construction
+# and forward native modes to both runners. Remove the boolean bridge when
+# the matched release also uses the enum.
+# ** 8. File: platform/patch_fused_moe.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
+#    Why:
+#       vllm's MoE factory function (formerly FusedMoE, now FusedMoEFactory on main).
+#       deepseek_v2 and other models do
+#       `from vllm.model_executor.layers.fused_moe import FusedMoEFactory`
 #       and call it directly, so on Ascend we must redirect it to AscendMoERunner
 #       before any model is imported.
 #    How：
-#       Patch the FusedMoE binding in both the package `__init__` and the layer
+#       Patch the FusedMoEFactory binding in both the package `__init__` and the layer
 #       module so model imports pick up the Ascend runner. `worker/patch_fused_moe.py`
 #       reuses this platform patch to avoid double-wrapping the factory during
 #       worker initialization.
@@ -122,7 +226,24 @@
 #       Remove this patch once upstream exposes a backend dispatch / plugin hook
 #       for selecting the MoE runner implementation.
 #
-# ** 6. File: platform/patch_kv_cache_coordinator.py**
+#   2. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
+#    Why:
+#       DeepSeek-V4 vision routing supplies `bias_vl` and
+#       `image_sentinel_lo` through the upstream MoE factory. The Ascend
+#       replacement factory must preserve those arguments so image tokens use
+#       the checkpoint's vision-specific expert-routing bias.
+#    How:
+#       Accept the two DeepSeek-V4 vision arguments in `_ascend_FusedMoE` and
+#       pass them to the Ascend router while leaving every other model's
+#       defaults unchanged.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/54566
+#    Future Plan:
+#       Remove this DeepSeek-V4-specific argument bridge once upstream exposes
+#       a backend-neutral router configuration object or MoE factory extension
+#       hook that carries vision routing metadata into the Ascend runner.
+#
+# ** 9. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator.find_longest_cache_hit_per_group`
 #    Why:
@@ -132,40 +253,114 @@
 #       collapses the FullAttention hit length to 0, preventing partial
 #       FullAttention-only prefix cache reuse on the D side.
 #    How:
-#       For Mamba hybrid models,
-#       num_new_local_computed_tokens should be the FA hit
-#       length. This value is passed to the connector's
+#       Override the per-group lookup so the FullAttention hit length is
+#       reported directly; `num_new_local_computed_tokens` then carries the
+#       FA hit length. This value is passed to the connector's
 #       get_num_new_matched_tokens which computes:
 #       external = total - local_computed.
 #       Using the FA hit skips re-transferring FA blocks
-#       already cached on D-side.
+#       already cached on D-side. The override also injects the producer drop
+#       exemption of entry 2 into the per-group lookup.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/42524
 #       https://github.com/vllm-project/vllm/pull/44243
 #    Future Plan:
-#       Remove this patch when vLLM PR #42524 and #44243 is included in the supported
-#       upstream vLLM version.
-#
-# ** 7. File: platform/patch_kv_cache_utils.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
-#      `vllm.v1.engine.core.resolve_kv_cache_block_sizes`
+#       vLLM #44243 has landed in the supported upstream version, so this
+#       override is kept only for the drop exemption of entry 2; remove it
+#       together with entry 2 once upstream exposes the PD role.
+#   2. `get_kv_cache_config_from_groups` (in `vllm.v1.core.kv_cache_planning`
+#      on both supported versions, vLLM #61183),
+#      `HybridKVCacheCoordinator.find_longest_cache_hit` and
+#      `...find_longest_cache_hit_per_group`
 #    Why:
-#       vLLM PR #40860 added a restriction that hybrid KV cache groups with
-#       multiple block sizes do not support context parallelism (dcp/pcp > 1).
-#       This restriction is correct for CUDA but not for Ascend, which
-#       implements context parallelism for MLA and SWA-MLA layers separately.
-#    How：
-#       Monkey-patch resolve_kv_cache_block_sizes to handle the multiple-groups
-#       + CP case by returning lcm(block_sizes) * dcp * pcp as scheduler_block_size
-#       instead of raising ValueError.
+#       On a pure PD prefill producer (`kv_transfer_config.is_kv_producer`
+#       and not `is_kv_consumer`), every content-hash match is a verified
+#       prompt block, so the EAGLE last-block drop is never needed. With
+#       hybrid Mamba align pages (1536 tokens) the drop erases the whole
+#       shared prefix of typical ~2K prompts, pinning producer prefix hits
+#       to 0 (the MTP prefix-cache "kill band").
+#    How:
+#       Attach the live `kv_transfer_config` onto KVCacheConfig while it is
+#       built (the coordinator factory never receives VllmConfig; the
+#       attribute survives the scheduler-side deepcopy and is dropped by
+#       worker pickle IPC), read the PD role back in the coordinator, and
+#       skip the EAGLE drop in both lookup entry points on a pure producer.
+#       The EAGLE-group fallback marks FullAttention groups only.
 #    Related PR (if no, explain why):
-#       vLLM PR #40860 ([Feat] DeepSeek V4 Rebased).
+#       No upstream PR; producer-side drop exemption for hybrid PD.
 #    Future Plan:
-#       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
-#       non-CUDA backends, or exposes a platform hook for this behavior.
+#       Remove once upstream exposes the PD role to the coordinator or
+#       removes the EAGLE last-block drop for verified prompt blocks.
 #
-# ** 8. File: platform/patch_mamba_config.py**
+# ** 10. File: platform/patch_kv_cache_utils.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`,
+#      `..._max_memory_usage_bytes_from_groups`, `..._pool_bytes_per_block`
+#    Why:
+#       Ascend cache layouts need platform-specific materialization and memory
+#       accounting.
+#    How:
+#       Both supported versions select AscendKVCacheConfigBuilder through
+#       NPUPlatform. Its default materialization delegates to the patched
+#       planning functions.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/53558
+#   2. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`
+#      `vllm.v1.core.kv_cache_planning._pool_bytes_per_block`
+#    Why:
+#       Ascend dense GQA attention requires contiguous K/V pools. Replicated
+#       draft pages cannot alias block-strided target/Mamba pages with different
+#       scheduler block IDs in hybrid DCP models.
+#    How:
+#       Use dcp_sharded to identify replicated dense attention groups, then
+#       delegate each physical pool's descriptors to the upstream planner.
+#       Sum the pools' bytes per block to keep allocation within the budget.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/56723 supplies dcp_sharded;
+#       the remaining physical-layout restriction is specific to Ascend.
+#    Future Plan:
+#       Remove pool separation when Ascend dense attention supports the
+#       upstream block-strided shared-pool layout.
+#
+# ** 11. File: platform/patch_mamba_block_aligned_split.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`
+#    Why:
+#       On a PD decode consumer, a request with one prompt token remaining can
+#       be padded to a `1 + K` speculative verifier window before Mamba
+#       alignment runs. Splitting that window at the next block boundary makes
+#       its physical width smaller than the advertised speculative placeholder
+#       count.
+#    How:
+#       Return the complete requested width on KV consumers. Delegate producers
+#       and non-PD deployments to the original upstream method unchanged.
+#    Related issue:
+#       https://github.com/vllm-project/vllm/issues/54392
+#    Future Plan:
+#       Remove this compatibility patch once upstream preserves speculative
+#       window atomicity for PD-admitted requests.
+#   2. `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`
+#    Why:
+#       Scheduler-side companion of fix 8.2: upstream backs the last cacheable
+#       mamba-align page off by one block while the EAGLE block drop is
+#       active, so the producer never ends a prefill chunk at the final full
+#       page boundary. Mamba "align" state materializes only across a chunk
+#       boundary (copy-on-write in MambaManager.allocate_new_blocks), so the
+#       final full state page stays unhashed and hybrid hits reconcile one
+#       page short (1600-token prompts -> 0 hit, 3200-token -> 1536).
+#    How:
+#       Delegate to the original method, but on a pure PD producer suppress
+#       the drop bit for the duration of that call and restore it afterwards.
+#       The gate is `_skips_eagle_block_drop(self.vllm_config.kv_transfer_config)`
+#       and is evaluated at call time, so consumers, kv_both and standalone
+#       instances pass through unchanged.
+#    Related PR (if no, explain why):
+#       No upstream PR; producer-side scheduler companion of fix 8.2.
+#    Future Plan:
+#       Remove together with fix 8.2 once upstream splits mamba-align pages
+#       without the EAGLE backoff on PD producers.
+#
+# ** 10a. File: platform/patch_mamba_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
 #    Why:
@@ -177,7 +372,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
 #
-# ** 9. File: platform/patch_mamba_config_310.py**
+# ** 12. File: platform/patch_mamba_config_310.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
 #    Why:
@@ -188,17 +383,17 @@
 #       On 310P, override verify_and_update_config to align mamba_block_size and
 #       attention block size to the 128-token kernel alignment, ensuring the
 #       attention page size is >= mamba page size. This is the 310P counterpart
-#       of patch_mamba_config.py (loaded only when `is_310p()` is True).
+#       of patch_mamba_config.py (selected by the active hardware profile).
 #    Related PR (if no, explain why):
 #       No, 310P-specific kernel alignment requirement.
 #    Future Plan:
 #       Remove this patch once upstream supports 310P-aligned mamba block sizing.
 #
-# ** 10. File: platform/patch_mamba_manager.py**
+# ** 13. File: platform/patch_mamba_manager.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.single_type_kv_cache_manager.MambaManager`
 #    Why:
-#       1. Upstream hybrid prefix cache lookup does not support PCP/DCP.
+#       1. Upstream hybrid prefix cache lookup does not support DCP.
 #       2. Upstream MambaManager#get_num_blocks_to_allocate give the
 #          wrong number of blocks when an external cache hit occurred
 #    How:
@@ -210,11 +405,11 @@
 #       1. https://github.com/vllm-project/vllm/pull/40996
 #       2. https://github.com/vllm-project/vllm/pull/46892
 #    Future Plan:
-#       1. Upstream PR #40996 adds hybrid prefix cache lookup for DCP only; PCP is
-#          not supported yet. Remove this patch once upstream supports both PCP and DCP.
+#       1. Remove this patch once the supported upstream revision includes
+#          hybrid prefix cache lookup for DCP.
 #       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
 #
-# ** 11. File: platform/patch_minimax_m2_config.py**
+# ** 14. File: platform/patch_minimax_m2_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.ModelConfig._verify_quantization`
 #    Why:
@@ -275,29 +470,14 @@
 #       Drop the alias once upstream registry includes it or the checkpoint
 #       standardizes architecture strings.
 #
-# ** 12. File: platform/patch_mla_prefill_backend.py**
+# ** 15. File: platform/patch_mla_prefill_backend.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.attention.backends.mla.common.get_mla_prefill_backend`
-#    Why:
-#       PR vllm-project/vllm#32623 introduced a new MLAPrefillBackend abstraction.
-#       When MLAAttention.__init__ calls get_mla_prefill_backend(), the upstream
-#       selector sees that Ascend NPU returns None for get_device_capability() and
-#       falls back to FlashAttnPrefillBackend, which asserts flash_attn_varlen_func
-#       is available — crashing on Ascend.
-#    How：
-#       Register a no-op AscendMLAPrefillBackend and patch get_mla_prefill_backend
-#       so that MLAAttention.__init__ completes without error. Ascend's
-#       AscendSFAImpl/AscendMLAImpl handles the full forward pass (including
-#       prefill) via impl.forward(), so prefill_backend.run_prefill_* is never
-#       called.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/32623
-#    Future Plan:
-#       Remove this patch once upstream `get_mla_prefill_backend` provides a
-#       platform/device hook so Ascend can be selected (or skipped) without
-#       monkey-patching.
+#   REMOVED: upstream vLLM v0.32.0 exposes the official
+#   `Platform.get_mla_prefill_backend_cls` hook, implemented on `NPUPlatform`
+#   (vllm_ascend/platform.py) returning the no-op `AscendMLAPrefillBackend`
+#   from `vllm_ascend/attention/mla_prefill.py`.
 #
-# ** 13. File: platform/patch_multiproc_executor.py**
+# ** 16. File: platform/patch_multiproc_executor.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.executor.multiproc_executor.MultiprocExecutor`
 #    Why:
@@ -310,7 +490,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM fix the issue.
 #
-# ** 14. File: platform/patch_pp_mtp.py**
+# ** 17. File: platform/patch_pp_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.outputs.ModelRunnerOutput`
 #    Why:
@@ -327,6 +507,9 @@
 #       speculative token metadata in `ModelRunnerOutput`.
 #
 #   2. `vllm.v1.engine.core.EngineCore.post_step`
+#      (the patch function lives here; it is applied from
+#      `patch_engine_core._apply_patch`, together with the other
+#      engine-core-level patches)
 #    Why:
 #       With PP batch queue, synchronous scheduling can schedule the next batch
 #       before the previous model output is consumed. Calling `post_step` in that
@@ -400,58 +583,77 @@
 #       supports local drafter models with PP > 1, or moves the PP validation to a
 #       separate hook that can be overridden per-model-type.
 #
-# ** 15. File: platform/patch_profiling_chunk.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.engine.core.EngineCore.__init__`
-#   2. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
-#   3. `Scheduler.update_from_output` (scheduler class, wrapped when profiling chunk is enabled)
-#    Why:
-#       Profiling-based dynamic chunk sizing needs to run a one-shot profiling pass
-#       after `model_executor` is ready, and to feed per-step execution latency back
-#       into `ProfilingChunkManager` so the history-aware chunk predictor can refine
-#       online. In multiprocessing `spawn` mode the child process starts a fresh
-#       interpreter, so monkey-patches applied in the parent are lost unless the
-#       subprocess entry point re-applies them before any `EngineCore` is created.
-#    How：
-#       Replace `EngineCore.__init__` to call `scheduler.run_profiling_chunk_init`
-#       when present, then wrap `scheduler.update_from_output` once per process to
-#       read `model_output.execution_time_ms` and `scheduler_output` token/chunk
-#       metadata and call `ProfilingChunkManager.record_batch_execution_time` (and
-#       bootstrap target latency for the first chunk when needed). Replace
-#       `EngineCoreProc.run_engine_core` so importing this module in the child
-#       re-runs the idempotent patch helper before delegating to the original
-#       implementation.
-#    Related PR (if no, explain why):
-#       No, vllm-ascend-specific profiling / scheduling integration.
-#    Future Plan:
-#       Remove or narrow this patch if upstream exposes stable hooks for backend
-#       profiling startup and per-step timing callbacks without monkey-patching
-#       `EngineCore` and the multiprocess entry point.
-#
-# ** 16. File: platform/patch_speculative_config.py**
+# ** 19. File: platform/patch_speculative_config.py**
+# Native MiniMax Flash draft extension:
+#   Targets: SpeculativeConfig.__post_init__ and draft HF configuration loading.
+#   Why: native DSpark exports use a standalone architecture and carry their
+#        own dspark/config.json, while upstream normalizes unknown drafts to
+#        DSparkDraftModel.
+#   How: preserve DSparkMiniMaxDraftModel before Pydantic validation and
+#        normalize the checkpoint's dspark/config.json without changing the
+#        target or checkpoint. The adapter, its checkpoint contract and weight
+#        loading live in models/minimax_m3/minimax_m3_dspark.py; it inherits
+#        DSpark drafting and changes only Flash norms, MLP and loading.
+#   Related PR:
+#        https://github.com/vllm-project/vllm/pull/64111
+#   Future Plan: remove the architecture guard and config/weight normalization
+#        once upstream loads native MiniMax Flash drafts. Retain only required
+#        Ascend quantized projection handling behind the upstream extension points.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
 #    Why:
-#       Several MTP draft models (DeepSeek-V3/V4, Pangu, MiMo, GLM4-MoE, ERNIE,
-#       Nemotron-H, Qwen3-Next, Qwen3.5, Exaone, LongCat-Flash, Step3.5/3.7) are
-#       loaded as the target model's MTP layer rather than a standalone model.
-#       Upstream `SpeculativeConfig.hf_config_override` does not remap these
-#       target model_types/architectures to their MTP variants, so spec decoding
-#       cannot locate the drafter.
+#       Upstream v0.32.0 remaps most MTP draft model_types/architectures
+#       natively. The remaining Ascend deltas are legacy checkpoint
+#       normalization upstream does not cover: Kimi K2.5 DFlash YaRN amplitude,
+#       un-converted Qwen3 DSpark drafts, and the VL glm5_next_text wrapper.
 #    How：
-#       Replace `SpeculativeConfig.hf_config_override` to detect the supported
-#       target model_type/architecture, derive `n_predict` from
-#       `num_nextn_predict_layers` (or `mtp_num_hidden_layers`), and rewrite
-#       `model_type`/`architectures` to the corresponding MTP model. Also remaps
-#       MistralLarge3 to its Eagle variant.
+#       Call upstream `hf_config_override` first, then apply the legacy
+#       normalizations on top.
 #    Related PR (if no, explain why):
-#       No, vllm-ascend-specific MTP model type remapping.
+#       No, Ascend-specific legacy checkpoint compatibility.
 #    Future Plan:
-#       Remove this patch once upstream vLLM supports loading these MTP draft
-#       models without a custom `hf_config_override`, or exposes a plugin hook
-#       for MTP model_type/architecture remapping.
+#       Remove these normalizations once the checkpoints ship converted
+#       configs and upstream handles glm5_next_text MTP remapping.
 #
-# ** 17. File: platform/patch_structured_output.py**
+#   2. `vllm.config.speculative.SpeculativeConfig.__post_init__`
+#    Why:
+#       DeepSeek-V4 Vision uses the target checkpoint for its DSpark drafter.
+#       Multimodal model-architecture conversion can overwrite the draft's
+#       `DSparkDraftModel` architecture with the full conditional-generation
+#       architecture, which constructs a second target model and produces
+#       duplicate attention-layer registrations.
+#    How:
+#       After upstream speculative-config initialization, restore the draft's
+#       `DSparkDraftModel` architecture in both Hugging Face and normalized
+#       model configs, then refresh the cached registry inspection result.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/54566
+#    Future Plan:
+#       Remove this normalization once upstream performs multimodal conversion
+#       before DSpark draft selection, or otherwise guarantees that rebuilding
+#       `model_arch_config` preserves the selected draft architecture.
+#
+#   3. `vllm.config.model.ModelConfig.verify_with_parallel_config`
+#    Why:
+#       The pinned vLLM revision propagates `enable_expert_parallel` to the
+#       draft parallel config (upstream #55914) but no longer disables it for
+#       dense drafts (upstream #56930 is not on this revision). Non-MoE draft
+#       models (e.g. Kimi K3 DSpark, VWN eagle3) then fail the
+#       `_verify_with_expert_parallelism` check in
+#       `ModelConfig.verify_with_parallel_config` and cannot start.
+#    How:
+#       Monkey-patch `verify_with_parallel_config` to skip the expert-parallel
+#       check when `runner_type == "draft"` and the model is not MoE. The target
+#       model EP check and MoE draft models are unaffected.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/55914
+#       https://github.com/vllm-project/vllm/pull/56930
+#    Future Plan:
+#       Remove this patch once the pinned vLLM revision disables expert
+#       parallelism for non-MoE draft models (upstream #56930) or exposes a
+#       backend-safe draft parallel config selection.
+#
+# ** 20. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
 #      `vllm.v1.structured_output.StructuredOutputManager.grammar_init`
@@ -473,7 +675,54 @@
 #       before grammar compilation or safely handles mixed-backend grammar
 #       failures without killing the engine.
 #
-# ** 18. File: platform/patch_torch_accelerator.py**
+#   2. `xgrammar.GrammarCompiler.compile_json_schema`
+#    Why:
+#       vLLM #58067 (included in v0.33.0 and verified main) passes
+#       `separators=(",", ":")` when `disable_any_whitespace` is set. The
+#       xgrammar releases shipped with Ascend (0.2.7/0.2.8) mishandle it: the
+#       stricter grammar makes small models loop on `","` until `max_tokens`
+#       and emit truncated, invalid JSON (e.g. the xgrammar guided-decoding e2e
+#       test).
+#    How:
+#       Wrap `GrammarCompiler.compile_json_schema` in both supported lanes to
+#       force `separators=None`, restoring the legacy grammar.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/58067
+#    Future Plan:
+#       Remove once xgrammar >= 0.2.9 (which fixes separators handling) is
+#       pinned.
+#
+# ** 20. File: platform/patch_swa_bounded_replay.py (V1 resume)**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.sched.output.CachedRequestData` (new field `replay_start`)
+#   2. `vllm.v1.core.sched.scheduler.Scheduler._make_cached_request_data`
+#    Why:
+#       Sliding-window bounded replay (vLLM #56227) rebuilds the sliding-window KV
+#       of a prefix hit by recomputing the hit's last window, and tells the
+#       worker where that run begins through `NewRequestData.replay_start`.
+#       Upstream's V2 model runner folds resumed requests into that same
+#       new-request list, so one field covers them. The V1 runner resumes a
+#       preempted request through `CachedRequestData` instead, and a resumed
+#       request is exactly the one that can be rewound a second time --
+#       preemption clears the computed count, so readmission runs the prefix
+#       lookup again and re-sets the replay start. Without the field on that
+#       payload, the worker would not know to stop writing the replayed
+#       positions and would overwrite blocks still shared with every other
+#       request that hit the same prefix.
+#    How:
+#       Declare `replay_start` on the payload -- msgpack encodes only declared
+#       fields, so an attribute set after construction never crosses the process
+#       boundary -- and fill it from the resumed requests inside the single
+#       method upstream builds that payload in. The field list is redeclared at
+#       import time because msgspec caches it per type. Inert on a pin that
+#       predates the feature, which is probed rather than version-compared.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/56227
+#    Future Plan:
+#       Remove this patch once upstream carries the replay start on the V1
+#       resume path as well, i.e. once `CachedRequestData` declares the field.
+#
+# ** 21. File: platform/patch_torch_accelerator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.accelerator.memory_stats`, `torch.accelerator.memory_reserved`,
 #      `torch.accelerator.reset_peak_memory_stats`, `torch.accelerator.get_memory_info`,
@@ -493,7 +742,7 @@
 #       Remove this patch once `torch.accelerator` correctly routes to the NPU
 #       backend for these memory APIs.
 #
-# ** 19. File: platform/patch_tool_choice_none_content.py**
+# ** 22. File: platform/patch_tool_choice_none_content.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionResponse`
 #      `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionStreamResponse`
@@ -509,134 +758,40 @@
 #    Future Plan:
 #       Remove this patch once the supported vLLM version contains PR #44105.
 #
-# ** 20. File: platform/patch_use_v2_model_runner.py**
+# ** 23. File: platform/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
-#       Upstream vLLM enables the v2 model runner not only via the
-#       VLLM_USE_V2_MODEL_RUNNER env var but also based on model
-#       architecture whitelists, Triton availability, and feature
-#       compatibility checks. On Ascend the NPU v2 runner is not yet
-#       compatible with all upstream-defaulted models and features, so
-#       enabling by model architecture can crash. We override the
-#       property to read only VLLM_USE_V2_MODEL_RUNNER, deferring
-#       model/framework checks to the NPU runner itself.
+#       Ascend always uses the V2 runner; Model Runner V1 has been removed, so
+#       nothing selects a runner at runtime any more.
 #    How:
-#       Monkey-patch VllmConfig.use_v2_model_runner to return
-#       envs.VLLM_USE_V2_MODEL_RUNNER (defaulting to False when unset).
-#       worker/patch_v2/patch_use_v2_model_runner.py reuses this platform
+#       Call apply_v2_model_runner_config_patch() to install a
+#       use_v2_model_runner property that always selects V2. An explicit
+#       VLLM_USE_V2_MODEL_RUNNER=0 raises instead of being ignored.
+#       worker/patch_use_v2_model_runner.py reuses this platform
 #       patch so EngineCore and worker processes share the same behavior.
 #    Related PR (if no, explain why):
 #       1. https://github.com/vllm-project/vllm-ascend/pull/11389
+#       2. https://github.com/vllm-project/vllm-ascend/pull/11692
 #    Future Plan:
-#       Remove this patch once vllm-ascend fully supports the v2 model
-#       runner and can rely on upstream's default enablement heuristics
-#       (model architecture, Triton, feature checks) without crashes or
-#       degraded functionality.
+#       Remove this patch once upstream exposes a platform-specific default
+#       runner-selection hook.
 #
-# ** 21. File: platform/patch_weight_transfer_engine.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.distributed.weight_transfer.factory.WeightTransferEngineFactory._registry["nccl"]`
+#   2. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
 #    Why:
-#       Upstream vLLM's WeightTransferConfig.backend is a pydantic Literal["nccl", "ipc"]
-#       which does not accept "hccl".  On Ascend NPU, NCCL is unavailable and HCCL must
-#       be used for trainer-to-worker weight broadcasting.
-#    How：
-#       Replace the "nccl" factory entry with a lambda that returns
-#       HCCLWeightTransferEngine.  Users pass the already-accepted "nccl" string
-#       (e.g. --weight-transfer-config '{"backend": "nccl"}') and the factory
-#       resolves it to the HCCL engine at runtime.
-#    Related PR (if no, explain why):
-#       No.  Adding "hccl" to the Literal requires modifying pydantic core schemas,
-#       which is fragile across pydantic versions.
+#       vLLM 0.28.0 rejected PCP+DP before Ascend MRV2 could validate it.
+#    How:
+#       Removed with the v0.31.0 boundary: the release-only validator override
+#       is no longer applied.
+#    Related PR: https://github.com/vllm-project/vllm/pull/54523
 #    Future Plan:
-#       Remove this patch when upstream vLLM relaxes the Literal type to str or
-#       provides an extension point for out-of-tree weight transfer backends.
-#   2. `vllm.distributed.weight_transfer.factory.WeightTransferEngineFactory._registry["ipc"]`
-#    Why:
-#       The "ipc" backend must resolve to NPUIPCWeightTransferEngine on Ascend NPU.
-#       However, this patch runs during global plugin patching - extremely early in
-#       startup, before any weight transfer backend is selected. Importing the IPC
-#       engine eagerly pulls in vllm.distributed.weight_transfer.ipc_engine, which
-#       does `import ray` at module top level. Since ray is an optional dependency,
-#       its absence aborts the whole vllm_ascend plugin load and crashes every
-#       `vllm serve` invocation - even workloads that never use weight transfer.
-#    How：
-#       Register a lazy loader function (instead of an eager import) that imports
-#       and returns NPUIPCWeightTransferEngine only when create_engine() is invoked
-#       for the "ipc" backend. This matches the factory's zero-arg-callable
-#       lazy-loading contract, so the ray-importing module is loaded only when ipc
-#       is actually requested. (HCCL keeps its eager import - it never imports ray.)
-#    Related PR (if no, explain why):
-#       No.  The eager `import ray` lives in upstream vLLM's ipc_engine module; the
-#       lazy loader is a local workaround until upstream defers that import.
-#    Future Plan:
-#       Remove this workaround once upstream vLLM stops importing ray at module top
-#       level in vllm.distributed.weight_transfer.ipc_engine (e.g. defers it into
-#       the code path that actually needs ray), so importing the IPC engine no
-#       longer requires the optional ray dependency.
+#       Re-add only if a supported pin rejects PCP+DP.
 #
 # * Worker Patch:
-# ===============
+# ========#
 # Entries are listed in alphabetical order by file name.
 #
-# ** 1. File: worker/patch_cudagraph.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.cudagraph_dispatcher.CudagraphDispatcher._create_padded_batch_descriptor`
-#    Why:
-#       vllm's FULL mode will cause error, we use a patch to avoid it.
-#       After that, FULL can be enable now.
-#    How：
-#       Dynamically replace the `_create_padded_batch_descriptor` function at runtime,
-#       and change the condition of if.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/34880
-#    Future Plan:
-#       Remove this patch when vLLM merges the PR.
-#
-# ** 2. File: worker/patch_deepseek_mtp.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name` and
-#      `vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name`
-#    Why:
-#       When GLM5 uses rotary quant in vllm-ascend, the MTP layer needs to load an extra weight
-#       named `rot.weight`.
-#    How：
-#       If weight name starts with `rot`, return `layer_id + i` like other tensors in MTP layer.
-#    Related PR (if no, explain why):
-#       Rotary quant is a unique feature of vllm-ascend.
-#    Future Plan:
-#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
-#   2. `vllm.model_executor.models.deepseek_mtp.DeepSeekMultiTokenPredictorLayer`
-#    Why:
-#       When GLM5 uses rotary quant in vllm-ascend, the `previous_hidden_states` does not .
-#    How：
-#       If the target model uses rotary quant, a new linear operation is added before `ehnorm`.
-#    Related PR (if no, explain why):
-#       Rotary quant is a unique feature of vllm-ascend.
-#    Future Plan:
-#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
-#   3. `vllm.model_executor.models.deepseek_mtp.DeepSeekMTP._rewrite_spec_layer_name`
-#    Why:
-#       Rename `rot.weight` to match the format of weights in `DeepSeekMTP`.
-#    How：
-#       If the weight name is `rot`, rename it to `model.layers.{spec_layer}.rot.weight`.
-#    Related PR (if no, explain why):
-#       Rotary quant is a unique feature of vllm-ascend.
-#    Future Plan:
-#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
-#   4. `vllm.model_executor.models.deepseek_v2.GlmMoeDsaForCausalLM.load_weights`
-#    Why:
-#       After vllm PR #41706, GlmMoeDsaForCausalLM.load_weights uses `AutoWeightsLoader` which
-#       does not skip `rot.weight`, and will cause ValueError while loading weights.
-#    How：
-#       Use the `skip_prefixes` parameter to skip certain weight tensors.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/41706
-#    Future Plan:
-#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
-#
-# ** 3. File: worker/patch_deepseek_v2.py**
+# ** 2. File: worker/patch_deepseek_v2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2MLAAttention.__init__`
 #    Why:
@@ -647,65 +802,86 @@
 #    How:
 #       Skip `Indexer` construction only when the layer both skips top-k and is
 #       explicitly marked `shared` in `indexer_types`. MTP layers always retain
-#       a complete `Indexer`.
+#       a complete `Indexer`. The runtime `skip_topk` handed to the MLA wrapper
+#       is additionally masked with `not is_mtp_layer` (same as upstream
+#       deepseek_v2.py): MTP layers must never start in skip mode, because they
+#       compute their own indices at draft step 0 and toggle at runtime via
+#       `set_skip_topk` (index_share_for_mtp_iteration).
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/45895
 #    Future Plan:
 #       Remove this patch when vLLM Ascend depends on a vLLM version that includes
 #       PR #45895.
 #
-# ** 4. File: worker/patch_distributed.py**
+#   2. `vllm.model_executor.models.deepseek_v2.DeepseekV2Model.__init__`
+#    Why:
+#       GLM-5.3 uses the generic DeepseekV2Model on Ascend, where the last PP
+#       stage lacks the target embedding required by DFlash2's sharing check.
+#    How:
+#       In the existing constructor wrapper, create a missing embedding when
+#       upstream spec_decode_needs_target_embed requests it. Keep the target
+#       quantization config and parameter prefix, and let the normal target
+#       checkpoint loader load the TP shard. Do not replace an existing layer.
+#       DFlash sharing and draft QuaRot post-processing remain unchanged.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; the generic DeepseekV2Model needs the same embedding
+#       construction condition already used by other upstream target models.
+#    Future Plan:
+#       Remove only this embedding provisioning when the minimum supported vLLM
+#       version provides it in DeepseekV2Model; keep the unrelated PP transport.
+#
+#   3. `vllm.model_executor.models.deepseek_v2.DeepseekV2Model.forward`
+#      `vllm.model_executor.models.deepseek_v2.DeepseekV2ForCausalLM.set_aux_hidden_state_layers`
+#    Why:
+#       Ascend needs residual-aware aux capture, TP/SP gathering, and shared
+#       TopK buffers across PP boundaries with Model Runner V2.
+#    How:
+#       Reuse EagleModelMixin's aux-slot layout, packing, and collection. Keep
+#       the Ascend TopK transport separate from the upstream aux-slot relay.
+#       Shared AUX_HIDDEN_STATES transport remains available to other models.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; capture and gathering use Ascend-specific layouts.
+#    Future Plan:
+#       Remove the forward patch when upstream extension points cover Ascend
+#       capture, gathering, and TopK transport without copying the forward.
+#
+#   4. `vllm.model_executor.models.deepseek_v2.DeepseekV2Model`
+#    Why:
+#       vLLM main #66177 identifies aux decoders by EagleModelMixin and moves
+#       remote-state aggregation into PPHandler. Copying release-only fields
+#       fails at import and does not provide the required decoder identity.
+#    How:
+#       Keep the existing member copy on v0.33.0. On main, replace the module's
+#       decoder class with an EagleModelMixin subclass of the decorated,
+#       Ascend-patched native decoder. Native slot bookkeeping and PPHandler
+#       own local/remote relay; Ascend retains capture and TP gathering.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/66177
+#    Future Plan:
+#       Remove the replacement when native DeepseekV2Model inherits the mixin.
+#
+# ** 3. File: worker/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.parallel_state.GroupCoordinator`
+#      `vllm.distributed.parallel_state.destroy_distributed_environment`
+#      `vllm.distributed.destroy_distributed_environment`
 #    Why:
-#       vllm doesn't support all_to_all for GroupCoordinator.
+#       Ascend can reuse equivalent HCCL process groups across coordinators
+#       instead of creating a fresh device group for every coordinator, and it
+#       must release those reused groups on teardown.
 #    How：
-#       Add all_to_all implementation for GroupCoordinator.
+#       Replace `GroupCoordinator` with an Ascend subclass backed by a
+#       process-local `HcclPgRegistry` (see `worker/_hccl_pg_registry.py`) that
+#       deduplicates groups by ranks / backend / pg_options / reuse-domain, and
+#       wrap `destroy_distributed_environment` so the registry is cleared after
+#       teardown.
 #    Related PR (if no, explain why):
-#       No, we should use vlLM all2all manager to support all_to_all for npu.
+#       No, HCCL process-group reuse is Ascend-specific.
 #    Future Plan:
-#       Remove this patch when the refactor of all2all manager is done.
+#       Remove this patch once upstream exposes process-group reuse and teardown
+#       hooks.
 #
-# ** 5. File: worker/patch_draft_quarot.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.llama_eagle3.Eagle3LlamaForCausalLM.load_weights`
-#    Why:
-#       vllm-ascend reused the loading logic of drafter model from vllm,
-#       but vllm doesn't need to apply to Ascend quantization.
-#    How：
-#       Dynamically replace the `load_weights` function at runtime,
-#       and fix `target_config` into the new implementation with a closure.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/36225
-#    Future Plan:
-#       Remove this patch when vLLM merges the PR.
-#
-# ** 6. File: worker/patch_eagle3_init.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.llama_eagle3.Eagle3LlamaForCausalLM`,
-#      `vllm.model_executor.models.deepseek_v2.Eagle3DeepseekV2ForCausalLM` /
-#      `Eagle3DeepseekV3ForCausalLM`
-#    Why:
-#       Upstream Eagle3 draft models compute `target_layer_num` via
-#       `model_config.get_num_layers(parallel_config)` which, under PP, returns the
-#       per-PP-stage count. This value feeds into the draft model's
-#       `start_layer_id` (used to build parameter name prefixes like
-#       `model.layers.<start_layer_id + i>`). With PP>1 the prefixes collide with
-#       the checkpoint (e.g. a 61-layer target + 2-way PP builds prefixes 31..34
-#       while the checkpoint expects 61..64), breaking weight loading. Additionally,
-#       `config.target_layer_count` (used to index `layer_types` for draft
-#       attention) ends up wrong.
-#    How：
-#       Patch the affected Eagle3 draft models to use
-#       `get_total_num_hidden_layers()` instead, which matches the checkpoint's
-#       global layer indices and keeps `target_layer_count` correct.
-#    Related PR (if no, explain why):
-#       No, vllm-ascend-specific Eagle3 + PP weight-loading fix.
-#    Future Plan:
-#       Remove this patch once upstream Eagle3 draft models compute
-#       `target_layer_num` from the total (not per-stage) hidden layer count.
-#
-# ** 7. File: worker/patch_eagle3_pp_aux.py**
+# ** 4. File: worker/patch_v1/patch_eagle3_pp_aux.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. Eagle3 target inner models (`DeepseekV2Model`, EagleModelMixin-based models)
 #      `forward`, `make_empty_intermediate_tensors`
@@ -726,11 +902,11 @@
 #       Remove this patch once upstream Eagle3 supports collecting aux hidden
 #       states that span PP stages without cross-stage propagation.
 #
-# ** 8. File: worker/patch_fused_moe.py**
+# ** 6. File: worker/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.fused_moe.FusedMoE`
+#   1. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
 #    Why:
-#       The worker process re-imports the FusedMoE factory after the platform
+#       The worker process re-imports the MoE factory after the platform
 #       patch has already redirected it to AscendMoERunner. Re-applying the
 #       monkey-patch directly would wrap an already-patched factory.
 #    How：
@@ -743,45 +919,15 @@
 #       Remove this module together with platform/patch_fused_moe.py once upstream
 #       exposes a backend dispatch / plugin hook for selecting the MoE runner.
 #
-# ** 9. File: worker/patch_gqa_c8.py**
+# ** 7. File: worker/patch_idex_310.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.qwen3.Qwen3ForCausalLM.load_weights`
-#    Why:
-#       The GQA W8A8C8 model stores per-channel KV cache scales and offsets
-#       (k_cache_scale, k_cache_offset, v_cache_scale, v_cache_offset) under
-#       weight names that AutoWeightsLoader does not recognise and would
-#       silently discard.  Without these scales the INT8 KV cache cannot be
-#       dequantised correctly at inference time.
-#    How:
-#       Wrap load_weights to intercept the C8 scale/offset tensors before they
-#       reach the base loader.  Each intercepted tensor is routed to the
-#       corresponding nn.Parameter via its weight_loader, then excluded from
-#       the remaining weight stream so the base loader never sees it.
-#    Related PR (if no, explain why):
-#       This PR (Qwen3-32B and GLM4.7  W8A8C8 support).  Upstream vLLM's weight-loading
-#       pipeline does not yet have a generic hook for hardware-plugin-defined
-#       KV cache parameters.
-#    Future Plan:
-#       Remove this patch when vLLM provides a first-class extension point
-#       for loading extra KV cache quantisation parameters in model load_weights,
-#       or when the GQA model's weight names are aligned with the parameter
-#       names expected by the quantisation backend.
-#
-# ** 10. File: worker/patch_idex_310.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   Model and attention-backend level patches are listed below.
 #   1. `vllm.model_executor.layers.fla.ops.index.prepare_chunk_indices`
 #      `vllm.model_executor.layers.fla.ops.index.prepare_chunk_offsets`
 #    Why:
 #       310P uses Ascend-friendly chunk index helpers for Qwen GDN prefill.
 #    How:
 #       Replace upstream FLA chunk index helper functions with 310P implementations.
-#
-#   2. `vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer.set_inputs_first_pass`
-#    Why:
-#       310P needs to protect the tail slot during MTP input_ids shift to avoid
-#       GatherV2 corruption from persistent drafter input buffers.
-#    How:
-#       Reuse the 310P proposer implementation for the first-pass input shift.
 #
 #   3. `vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn.QwenGatedDeltaNetAttention`
 #    Why:
@@ -791,13 +937,24 @@
 #       Patch Qwen GDN methods to use Ascend GDN implementations and the 310P
 #       GDN attention backend. RC devices also route upstream GDNAttentionBackend
 #       to the 310P metadata builder.
+#
+#   4. `vllm.model_executor.models.qwen3_vl.Qwen3_VisionTransformer.rot_pos_emb`
+#      (RC only)
+#    Why:
+#       310P images do not install Triton, so upstream ``HAS_TRITON=False``
+#       already selects ``pos_embed_interpolate_native``; no pos-embed rewrite.
+#       RC still needs blocking H2D in `rot_pos_emb` to avoid indexing races.
+#    How:
+#       On RC only, bind `rot_pos_emb_310` from
+#       `vllm_ascend/_310p/ops/qwen3vl_310.py`.
 #    Related PR (if no, explain why):
 #       No, 310P custom operator and backend behavior are vllm-ascend specific.
 #    Future Plan:
 #       Remove this patch when upstream exposes stable hooks for 310P GDN
-#       chunk metadata, spec-decode input layout, and backend selection.
+#       chunk metadata, spec-decode input layout, backend selection, and
+#       vision rot_pos_emb that does not race on 310P RC.
 #
-# ** 11. File: worker/patch_kimi_k25.py**
+# ** 8. File: worker/patch_kimi_k25.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.kimi_k25_vit.Learnable2DInterpPosEmbDivided_fixed.forward`
 #    Why:
@@ -808,54 +965,36 @@
 #    Future Plan:
 #       Remove this patch when vLLM aligns with the latest main.
 #
-# ** 12. File: worker/patch_mamba_utils.py**
+# ** 9. File: worker/patch_mamba_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel`
+#   Both overrides below are read by the V2 Mamba-Hybrid state at call time:
+#   `_TEMPORAL_TILES` by the preprocess/precopy kernels (the precopy kernel
+#   itself is rebound by `worker/patch_triton.py`), and
+#   `postprocess_mamba_fused_kernel` by
+#   `MambaSpecDecodeGPUContext.run_fused_postprocess_align`.
+#   1. `vllm.v1.worker.mamba_utils._TEMPORAL_TILES = 1`
 #    Why:
-#       Oringnal batch_memcpy_kernel implemented in vLLM might encounter bugs when running on
-#       Ascend hardwares.
+#       vLLM uses 16 temporal-copy tiles to saturate H100/GB200. K3 already
+#       exposes 138 independent state programs per request, while Triton-Ascend
+#       flattens all grid dimensions into a coreDim that cannot exceed 65535.
 #    How：
-#       patch to fix related bugs.
+#       Keep the pre-tiling launch shape on Ascend.
 #    Future Plan:
-#       Remove this patch when:
-#       (1) oringnal batch_memcpy_kernel can run on Ascend hardware.
-#       or
-#       (2) design a dispatch mechanism for batch_memcpy_kernel.
-#   2. `vllm.v1.worker.mamba_utils.batch_memcpy = batch_memcpy`
+#       Remove this patch when triton-ascend accepts the tiled grid.
+#   2. `vllm.v1.worker.mamba_utils.postprocess_mamba_fused_kernel = postprocess_mamba_fused_kernel`
 #    Why:
-#       vLLM use BLOCK_SIZE 1024 for batch_memcpy_kernel. This results in suboptimal performance
-#       on Ascend hardwares.
+#       Upstream's kernel is CUDA-specific; it fails on Ascend when prefix
+#       caching is active during decode.
 #    How：
-#       patch to change BLOCK_SIZE to 8192.
+#       Replace it with the Ascend implementation in
+#       `ops/triton/mamba/postprocess.py`, gated on the `TRITON_BATCH_MEMCPY`
+#       capability.
 #    Future Plan:
-#       Remove this patch when:
-#       design a dispatch mechanism for batch_memcpy_kernel.
-#   3. `mamba_utils.preprocess_mamba = preprocess_mamba`
-#    Why:
-#       1. preprocess_mamba has a assert logic, cause kv transfer call fails
-#       2. preprocess_mamba copy the state of previous step to the last block before kv transfer load
-#    How:
-#       1. patch to remove assert
-#       2. path to only collect copy metadata in preprocess_mamba(and do actual copy after kv transfer load).
-#    Future Plan:
-#       Remove this patch when:
-#       vLLM itself supports kv transfer for mamba
+#       Remove this patch when the upstream kernel can run on Ascend hardware.
 #
-# ** 13. File: worker/patch_minimax_m2.py**
+# ** 10. File: worker/patch_minimax_m2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.minimax_m2.MiniMaxM2MoE.forward`
-#    Why:
-#       In TP mode, MiniMax-M2 MoE needs a backend-aware reduction path to avoid
-#       unnecessary communication / maintain correctness on NPU.
-#    How：
-#       Replace the forward to call `experts.maybe_all_reduce_tensor_model_parallel`
-#       when `tp_size > 1`.
-#    Related PR (if no, explain why):
-#       No, model-specific behavior.
-#    Future Plan:
-#       Move this behavior upstream once a generic MoE reduce hook exists.
-#
-#   2. `vllm.model_executor.models.minimax_m2.MiniMaxM2Attention.forward`
+#   1. `vllm.model_executor.models.minimax_m2.MiniMaxM2Attention.forward`
 #    Why:
 #       MiniMax-M2 attention benefits from the NPU fused split-qkv + RMSNorm + rope
 #       kernel path.
@@ -868,86 +1007,51 @@
 #       Remove this patch when upstream exposes a backend dispatch path for this
 #       fused attention preparation.
 #
-#   3. `vllm.model_executor.models.minimax_m2.MiniMaxM2Model.load_weights`
-#    Why:
-#       MiniMax-M2 fp8 checkpoints may store fp8 weights with per-block inverse
-#       scales. On NPU we load bf16 weights by dequantizing at load time.
-#    How：
-#       Inject fp8 dequant helpers and wrap `load_weights` to convert fp8 weight +
-#       `weight_scale_inv` pairs into bf16 blocks before delegating to upstream.
-#    Related PR (if no, explain why):
-#       No, fp8 load format and backend constraints are model/backend specific.
-#    Future Plan:
-#       Remove this patch when upstream supports MiniMax-M2 fp8 loading on NPU.
 #
-# ** 14. File: worker/patch_minimax_m2_linear_attn.py**
+# ** 11. File: worker/patch_mm_input_norm.py (removed) **
+# Both vLLM v0.33.0 and verified main include #62767 and keep the
+# processor-derived normalization buffers nonpersistent.
+#
+# ** 12. File: worker/patch_ascend_ops.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.mamba.linear_attn.MiniMaxText01RMSNormTP.__init__`
-#      `vllm.model_executor.layers.mamba.linear_attn.MiniMaxText01RMSNormTP.weight_loader`
+#   1. `vllm.model_executor.layers.mamba.ops.causal_conv1d.causal_conv1d_update`,
+#      `vllm.model_executor.layers.mamba.ops.causal_conv1d.causal_conv1d_fn`
 #    Why:
-#       MiniMax-M2 linear attention RMSNorm needs weight sharding that can follow
-#       TP layout (and sometimes kv-head replication) on NPU.
+#       The upstream CUDA causal_conv1d kernels use `tl.extra.cuda.gdc_wait`,
+#       which Ascend Triton does not provide.
 #    How：
-#       Override `__init__` to parameterize weight shard world/rank and install a
-#       sharded `weight_loader` implementation.
-#    Related PR (if no, explain why):
-#       No, upstream API surface differs across versions.
+#       Rebind the two upstream symbols to the AscendC implementations in
+#       `vllm_ascend.ops.causal_conv1d`, dropping the CUDA-only block-table and
+#       spec-decode kwargs those kernels do not accept. The NPU Triton update
+#       kernel is layered on top in `worker/patch_triton.py`, so this module must
+#       be imported first (see `worker/__init__.py`).
 #    Future Plan:
-#       Remove this patch when upstream exposes stable sharding hooks for this layer.
+#       Remove this patch once upstream exposes a backend-dispatch hook for the
+#       causal_conv1d kernels.
 #
-#   2. `vllm.model_executor.layers.mamba.linear_attn.MiniMaxText01RMSNormTP.forward_qk`
-#      (or older `_normalize_qk`)
+#   2. `vllm.models.common.ops.fused_q_kv_rmsnorm`
 #    Why:
-#       q/k norm for linear attention is performance-sensitive. On NPU, a fused
-#       rms_norm kernel is faster and TP needs a global rstd correction.
+#       The NVIDIA fused Q/K RMSNorm Triton kernel also references
+#       `tl.extra.cuda.gdc_wait`, absent on Ascend.
 #    How：
-#       Replace q/k normalization with NPU rms_norm fast path and TP-global rstd
-#       correction; fall back to upstream implementation on non-NPU.
-#    Related PR (if no, explain why):
-#       No, backend-specific optimization.
+#       Rebind the symbol (and every module that captured it via a from-import,
+#       e.g. the GLM-5.3-Flash vision tower) to a `torch_npu.npu_rms_norm`
+#       implementation with the same math.
 #    Future Plan:
-#       Remove this patch when upstream adds a backend dispatch path for q/k norm.
+#       Remove this patch once Ascend Triton can compile the upstream kernel or
+#       upstream dispatches the op per backend.
 #
-# ** 15. File: worker/patch_npugraph_ex_triton.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `npugraph_ex.core._concrete_graph.ValuePack`,
-#      `npugraph_ex.npu_fx_compiler._unpack_meta`,
-#      `npugraph_ex.npu_fx_compiler._NpuGraphConverter._unpack_npu`
+#   3. `vllm.model_executor.layers.mhc.MHCPreOp.forward_oot/forward_native`,
+#      `vllm.model_executor.layers.mhc.MHCFusedPostPreOp.forward_oot/forward_native`
 #    Why:
-#       In the Triton scenario, npugraph_ex backend needs to process the value pack of the input parameters.
+#       The torch mHC pre path ignores `norm_weight`/`norm_eps`, so the layer
+#       input RMSNorm fused by the tilelang CUDA kernel would be dropped.
 #    How：
-#       Supplement the relevant processing logic through patches.
-#    Related PR (if no, explain why):
-#       https://gitcode.com/Ascend/torchair/pull/2575
+#       Reapply the RMSNorm on top of `mhc_pre_torch`/`mhc_post_torch`.
 #    Future Plan:
-#       Remove this patch when the PTA version used by vllm-ascend has been upgraded.
+#       Remove this patch once the torch mHC kernels honour norm_weight/norm_eps.
 #
-# ** 16. File: worker/patch_process_weights_after_loading.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.model_loader.utils.process_weights_after_loading`
-#      `vllm.model_executor.model_loader.base_loader.process_weights_after_loading`
-#      and imported references in vllm-ascend model loaders
-#    Why:
-#       DSA attention is implemented in vllm-ascend as the plugin layer
-#       `DSAAttention`. Upstream vLLM only runs post-load attention weight
-#       processing for built-in attention classes, so
-#       `DSAAttention.process_weights_after_loading()` is skipped in the
-#       original loader flow. DSV4 DSA-CP o-proj TP initialization must run in
-#       this post-load phase rather than being initialized lazily in forward.
-#    How:
-#       Rebind the upstream `process_weights_after_loading` helper, including
-#       already-imported loader references, so `DSAAttention` participates in
-#       the same post-load traversal while preserving the original quant-method
-#       and torchao reload behavior.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm-ascend/pull/10694
-#       https://github.com/vllm-project/vllm/pull/46828
-#    Future Plan:
-#       Remove this patch once the supported vLLM version includes PR #46828.
-#       Then register `DSAAttention` through vLLM's post-load weight-processing
-#       registry instead of monkey-patching model-loader helpers.
-#
-# ** 17. File: worker/patch_qwen3_5.py**
+# ** 14. File: worker/patch_qwen3_5.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_5.Qwen3_5GatedDeltaNet._forward_core`
 #    Why:
@@ -957,44 +1061,122 @@
 #       patch Qwen3_5GatedDeltaNet._forward_core to use triton ops like `fused_recurrent_gated_delta_rule`.
 #    Future Plan:
 #       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
+#   2. `vllm.model_executor.models.qwen3_5.Qwen3_5DecoderLayer.__init__` and
+#      `vllm.model_executor.models.qwen3_5.Qwen3_5DecoderLayer.forward`
+#    Why:
+#       Upstream gates sequence parallelism on `use_sequence_parallel_moe`, so
+#       dense Qwen3.5-family checkpoints (Qwen3.5/3.6/3.8-27B dense,
+#       model_type `qwen3_5_text`) cannot run sequence parallel at all. On
+#       Ascend the FlashComm switch (`additional_config.enable_flashcomm1`)
+#       also covers the dense family: hidden states and the residual stay
+#       sequence-sharded across the decoder stack, attention (full and GDN)
+#       gathers before / reduce-scatters after its sequence-parallel output
+#       projection, and the dense MLP gathers around its TP-sharded weights.
+#    How:
+#       `__init__`: after the upstream constructor, raise
+#       `use_attn_reduce_scatter_for_moe` for the dense family when dense SP
+#       is active (this module's `enable_dense_sp` resolves the FlashComm
+#       switch), and flip `o_proj` / GDN `out_proj` / dense `down_proj`
+#       to `reduce_results=False`. Reusing the upstream flag keeps
+#       Qwen3NextModel's entry chunk / exit all-gather and the MTP head's
+#       chunk / gather working unchanged.
+#       `forward`: replicate the upstream layout and, for dense MLPs, wrap
+#       gate_up/down with `sp_all_gather` / `sp_reduce_scatter` (MiniMax-M3 /
+#       DeepSeek-V4 pattern); MoE blocks keep the upstream
+#       `already_sequence_parallel=True` contract.
+#       The module-level patch applications are guarded by
+#       `STANDARD_WORKER_PATCHES` (mirroring `patch/worker/__init__.py`) so
+#       the lazy import from `utils.enable_sp` stays side-effect-free on
+#       devices that exclude this patch (310P).
+#    Related PR (if no, explain why):
+#       No, upstream has no dense-model sequence-parallel switch.
+#    Future Plan:
+#       Contribute the dense-MLP gather/scatter layout upstream once vLLM
+#       grows a dense sequence-parallelism config; until then the patch is
+#       gated on the FlashComm switch and the `qwen3_5_text` model type.
 #
-# ** 18. File: worker/patch_qwen3_dflash.py**
+# ** 15. File: worker/patch_qwen3_dflash.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_dflash.DFlashQwen3Model.precompute_and_store_context_kv`
+#   2. `vllm.model_executor.models.lilicorr.DFlash2Qwen3DecoderLayer`
+#   3. `vllm.model_executor.models.qwen3_dflash.DFlashQwen3ForCausalLM._read_mask_embedding`
 #    Why:
 #       The function directly calls the ops.rms_norm and ops.rotary_imbedding operators,
 #       but NPU does not have a corresponding implementation.
+#       LiLiCorr's optional convolutional backbone otherwise resolves to the CUDA-oriented
+#       upstream DFlash2 layer rather than the Ascend implementation.
+#       Its constructor overwrites self.decoder_layer_cls with a module-level
+#       import, so a subclass factory alone cannot select the Ascend layer.
+#       ModelScope raises NotExistError when optional mask_embedding.pt is absent,
+#       instead of returning None as the upstream helper expects.
 #    How：
 #       Replace ops.* with the internal implementation of vllm-ascend.
+#       Consume returned RoPE keys for both in-place and out-of-place NPU backends,
+#       using a key-only call to avoid cloning the entire context buffer.
+#       When the paired vLLM revision provides LiLiCorr, bind its decoder factory to the
+#       Ascend DFlash2 layer while retaining the upstream LiLiCorr head and weight loader.
+#       This binding is applied once per worker before model construction;
+#       it adds no tensor operations or synchronization to inference.
+#       Treat only ModelScope's missing mask_embedding.pt error as an absent
+#       override; preserve errors for malformed data and other missing files.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/57934
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for ops.*.
+#       Remove the LiLiCorr binding when upstream exposes a platform decoder factory.
+#       Remove the mask file wrapper when vLLM handles ModelScope's absence error.
 #
-# ** 19. File: hunyuan_vl_processor_compat.py**
+# ** 16. File: worker/patch_spec_decode_310.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.hunyuan_vision.HunYuanVLProcessingInfo.get_hf_processor`
-#      and the vLLM processor lazy registry
+#   MRv2-only (310P): CPU spec-decode helpers + draft MTP routing. Every target
+#   lives under `vllm.v1.worker.gpu.spec_decode.*` / `vllm_ascend.worker.v2.*`.
+#   1. `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.prepare_prefill_inputs`
+#   2. `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.prepare_decode_inputs`
+#   3. `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.update_draft_inputs`
+#      (on vLLM >= the #60335 rename these resolve to
+#      `vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator.*`)
 #    Why:
-#       The supported vLLM refs currently straddle the HunyuanVL processor
-#       migration. v0.23.0 still bundles the processor, while the verified
-#       main ref uses the Transformers-native processor but predates the full
-#       Transformers 5.13 registry and prompt-protocol cleanup.
-#    How:
-#       Preserve the bundled v0.23.0 processor protocol, translate its image
-#       processor registration to Transformers 5.13, and complete the native
-#       processor registry, loader, and tokenizer schema on the main ref.
-#    Related PR:
-#       1. https://github.com/vllm-project/vllm/pull/47872
-#       2. https://github.com/vllm-project/vllm/pull/47867
+#       The upstream AR speculator builds draft inputs with GPU/tensor ops that
+#       310P cannot run; 310P moves that work to CPU helpers.
+#    How：
+#       Rebind the three module-level functions onto
+#       `vllm_ascend._310p.worker.v2.spec_utils.*_cpu`.
+#    Related PR (if no, explain why):
+#       No, 310P-only hardware constraint.
 #    Future Plan:
-#       Remove this patch and delete the `install_hunyuan_vl_processor_compat()`
-#       call from `vllm_ascend/__init__.py` only after both supported vLLM refs
-#       contain `4a6440acefbd4d977620bdb6dfb7fb325cd9bda7` (vLLM PR #47867,
-#       merged into vLLM main at 2026-07-11 07:56:14 UTC), or an equivalent
-#       fix, and the supported HunyuanOCR tokenizer artifacts expose the named
-#       special-token schema required by Transformers 5.13.
+#       Remove when the upstream AR speculator builds these inputs on CPU or
+#       behind a device-agnostic path.
 #
-# ** 20. File: worker/patch_qwen3_next_mtp.py**
+#   4. `vllm_ascend.worker.v2.aclgraph_utils.ModelWithContext.embed_input_ids`
+#    Why:
+#       The draft `ModelWithContext` wrapper does not forward `embed_input_ids`,
+#       which Qwen MTP needs.
+#    How：
+#       Add an `embed_input_ids` method that delegates to
+#       `self.original_model.embed_input_ids` when not already present.
+#    Future Plan:
+#       Remove when upstream forwards `embed_input_ids` from ModelWithContext.
+#
+#   5. `vllm_ascend.worker.v2.spec_decode.init_speculator`
+#      (+ the by-name rebind in `vllm_ascend.worker.v2.model_runner`)
+#    Why:
+#       310P needs its own MTP speculator (`AscendMTPSpeculator310`).
+#    How：
+#       Replace `init_speculator` with a 310P router that returns
+#       `AscendMTPSpeculator310` for plain MTP and delegates to the original
+#       otherwise; rebind the model_runner by-name reference as well.
+#    Future Plan:
+#       Remove once the MTP speculator is selected through a device dispatch.
+#
+# ** 18. File: worker/patch_bind_kv_cache.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   The `bind_kv_cache` / `bind_kv_cache_to_layers` implementations are shared:
+#   `worker/patch_attn_utils.py` rebinds them onto
+#   `vllm.v1.worker.gpu.attn_utils` and onto `vllm.v1.worker.utils`. The
+#   `vllm.v1.worker.utils` binding is consumed by the V1 Model Runner and by the
+#   310P V2 Model Runner (`vllm_ascend/_310p/worker/v2/model_runner.py` imports
+#   `bind_kv_cache` from it by name), so it is installed from
+#   `worker/patch_attn_utils.py`.
 #   1. `vllm.v1.worker.utils.bind_kv_cache`
 #    Why:
 #       'bind_kv_cache' func will raise an exception when current_platform is npu.
@@ -1006,15 +1188,9 @@
 #    Future Plan:
 #       Remove this patch after discussing with vllm community and adapting bind_kv_cache to npu.
 #
-# ** 21. File: worker/patch_qwen3vl.py**
+# ** 17. File: worker/patch_qwen3vl.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_vl.Qwen3VLForConditionalGeneration._get_deepstack_input_embeds`
-#    Why:
-#       support flash comm v1 for qwen3vl.
-#    How：
-#       override _get_deepstack_input_embeds method with the flash comm v1 implementation.
-#    Future Plan:
-#       Remove this patch when https://github.com/vllm-project/vllm-ascend/issues/5712 is completed.
 #   2. `vllm.model_executor.models.qwen3_vl_moe.Qwen3MoeLLMForCausalLM.start_layer`,
 #      `vllm.model_executor.models.qwen3_vl_moe.Qwen3MoeLLMForCausalLM.end_layer`
 #    Why:
@@ -1037,22 +1213,7 @@
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for this fused kernel.
 #
-# ** 22. File: worker/patch_rejection_sampler.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.sample.rejection_sampler`
-#    Why:
-#       - some functions from `rejection_sampler` are not supported or slow on npu.
-#    How：
-#       - add npu_top_k_top_p to 'apply_sampling_constraints' func
-#       - add custom triton kernel to `expand_batch_to_tokens` and `rejection_sample`
-#    Related PR (if no, explain why):
-#       Let vLLM support triton ops dispatch.
-#    Future Plan:
-#       1. make these functions as class func of RejectionSampler, create AscendRejectionSampler
-#           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
-#       2. make these functions as costom op, then remove AscendRejectionSampler
-#
-# ** 23. File: worker/patch_routed_experts_capture.py**
+# ** 19. File: worker/patch_routed_experts_capture.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.fused_moe.routed_experts_capturer.RoutedExpertsCapturer.capture`
 #    Why:
@@ -1071,7 +1232,7 @@
 #       Remove this patch when upstream vLLM supports MoE communication type abstraction that
 #       can be extended by hardware plugins like vllm-ascend.
 #
-# ** 24. File: worker/patch_step3p5.py**
+# ** 20. File: worker/patch_step3p5.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.step3p5.Step3p5Attention.forward`
 #    Why:
@@ -1087,8 +1248,18 @@
 #    Future Plan:
 #       Remove this patch once torch.compile fully supports matching pattern from
 #       op's params.
+#   2. `vllm.model_executor.models.step3p5.FusedMoEBlock.__init__`
+#      `vllm.model_executor.models.step3p5.Step3p5DecoderLayer.__init__`
+#      `vllm.model_executor.models.step3p5.Step3p5DecoderLayer.forward`
+#      `vllm.model_executor.models.step3p5.Step3p5Model.forward`
+#    Why:
+#       Add SP support for step3.5/3.7. Upstream step3.5/3.7 doesn't support SP.
+#    How:
+#       Monkey-patch Step3p5 to enable SP.
+#    Future Plan:
+#       Remove this patch once upstream SP completes refactor.
 #
-# ** 25. File: worker/patch_triton.py**
+# ** 21. File: worker/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.mamba.ops`, `vllm.model_executor.layers.fla.ops`,
 #      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
@@ -1118,21 +1289,119 @@
 #       Remove this patch when torch_npu's Triton includes
 #       next_power_of_2 or when vLLM no longer calls triton.next_power_of_2.
 #
-# ** 26. File: worker/patch_weight_utils.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2ForCausalLM.load_weights`
+#   3. `vllm.third_party.flash_linear_attention.ops.kda`
 #    Why:
-#       The C8 weight quantized by modelslim will modify the model structure,
-#       and the scale and offset required for kvcache quantization will increase.
-#       In addition, the names of the quantization parameters are different from
-#       those in the community.
+#       GLM-5.3-Flash and Kimi KDA layers import `fused_recurrent_kda` /
+#       `chunk_kda_with_fused_gate` from upstream FLA. Those kernels are CUDA
+#       Triton; Ascend already has NPU Triton equivalents under
+#       `vllm_ascend.ops.triton.kda`.
 #    How：
-#       we have enhanced the maybe_remap_kv_scale_name function.
+#       Rebind the FLA kda entry points to the NPU implementations before the
+#       model is constructed. The NPU wrappers expand GLM's bounded (safe)
+#       gate and beta sigmoid in Python because the NPU recurrent kernel does
+#       not fuse `COMPUTE_GATE` / `SIGMOID_BETA`.
+#    Related PR (if no, explain why):
+#       Native FP8 serving of zai-org/GLM-5.3-Flash on Ascend 950.
 #    Future Plan:
-#       The maybe_remap_kv_scale_name function of the community is reconstructed to support
-#       multiple backends.
+#       Remove this patch when vLLM Triton ops dispatch to the Ascend backend.
 #
-# ** 27. File: worker/patch_v2/patch_attn_utils.py**
+#   4. `vllm.v1.worker.gpu.sample.logprob`, `vllm.v1.worker.gpu.sample.penalties.apply_penalties`,
+#      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
+#    Why:
+#       triton ops in vLLM perform not good on NPU. And there is no dispatch mechanism for triton ops.
+#       apply_penalties also fails on large input shape because of the triton kernel limitation.
+#    How：
+#       override triton ops in vLLM with ascend implementation
+#       re-write apply_penalties kernel with minimum change to support large input shape.
+#    Test:
+#       UT added at vllm-ascend\tests\e2e\nightly\single_node\ops\singlecard_ops\triton\test_penality.py
+#    Related PR (if no, explain why):
+#       Let vLLM support triton ops dispatch.
+#    Future Plan:
+#       Remove this patch when vLLM support the dispatch function.
+#
+#   5. `vllm.v1.worker.gpu.metrics.logits.libdevice`
+#    Why:
+#       The upstream `get_num_nans` Triton kernel imports its libdevice
+#       functions from the default CUDA-oriented module. On Ascend, this makes
+#       Triton resolve CUDA libdevice symbols instead of the CANN equivalents,
+#       causing the kernel compilation to fail.
+#    How:
+#       Rebind `metrics.logits.libdevice` to
+#       `triton.language.extra.cann.libdevice`. Existing references to
+#       `get_num_nans` in the sampler and rejection sampler then use the CANN
+#       libdevice when the kernel is compiled.
+#    Related PR (if no, explain why):
+#       No. This is a Triton-Ascend backend compatibility patch for the
+#       upstream module-level libdevice import.
+#    Future Plan:
+#       Remove this patch once vLLM selects the Triton libdevice through a
+#       backend-dispatch mechanism.
+#
+#   6. `vllm.v1.worker.gpu.sample.thinking_budget._load_effective_token`,
+#      `vllm.v1.worker.gpu.sample.thinking_budget._update_committed_marker_cache_kernel`
+#    Why:
+#       The upstream thinking-budget kernels expose two independent
+#       Triton-Ascend compiler limitations. A helper with pointer arguments and
+#       branch-local returns fails TTIR-to-Linalg materialization when called
+#       from a dynamic `tl.range`. The marker-cache kernel also uses chained
+#       runtime boolean expressions that older Triton-Ascend versions cannot
+#       compile.
+#    How:
+#       Replace the helper with complementary masked loads followed by
+#       `tl.where`, and replace chained three-term conditions in the
+#       marker-cache kernel with nested two-term conditions. The scan and
+#       thinking-budget semantics remain unchanged.
+#    Related PR (if no, explain why):
+#       No. These are Triton-Ascend compiler compatibility workarounds.
+#    Future Plan:
+#       Remove the `_load_effective_token` patch after the new Q4
+#       Triton-Ascend release is available. Remove the marker-cache kernel
+#       patch when Triton-Ascend 3.6.0 is the minimum supported version.
+#
+#   7. `vllm.v1.worker.gpu.sample.trace_replay.apply_trace_tokens`
+#    Why:
+#       Ascend rejects an empty Triton launch grid because it produces
+#       `coreDim=0`.
+#    How:
+#       Replace the outer caller with an equivalent implementation that returns
+#       before launching the unchanged upstream kernel when the batch is empty.
+#    Future Plan:
+#       Remove this patch when upstream guards empty launch grids.
+#
+#   8. `vllm.v1.worker.gpu.sample.output.SamplingMaskTensors.from_logits`
+#    Why:
+#       Triton-Ascend can allocate excessive UB space for the sampling-mask
+#       kernel when the logits vocabulary dimension has a stride greater than
+#       one, causing compilation to fail with UB overflow. Reducing the boolean
+#       keep mask directly also returns one per tile instead of the finite-logit
+#       count on Triton-Ascend. The upstream row-wise bit packing additionally
+#       lowers to scalar-heavy variable shifts and width-8 reductions.
+#       Speculative decoding also requires a separate mask for each committed
+#       token in the upstream request-major output layout.
+#    How:
+#       Make logits contiguous only when the vocabulary dimension is strided,
+#       cast the keep mask to int32 before reducing it, and use a 4096-element
+#       tile to keep the corrected reduction within the NPU UB limit. Accept
+#       `cu_num_logits` and `rows_per_request` for the upstream request-major
+#       API, reading logits row `cu_num_logits[req_idx] + slot_idx` and writing
+#       output row `req_idx * rows_per_request + slot_idx`. Mask inactive-slot
+#       loads so their masks and counts are zero. Read offsets and sampled counts
+#       on device for graph replay, and skip the kernel launch for empty batches.
+#       Return the five-field `SamplingMaskTensors`, including `rows_per_request`,
+#       with zero-width `token_ids` so upstream `tolists()` uses the exact bitmask
+#       fallback. Pack bits by transposing `[512, 8]` to `[8, 512]`, multiplying
+#       by compile-time bit weights, and reducing the contiguous 8-row axis so
+#       the backend emits vector transpose, multiply, and reduction instructions.
+#    Test:
+#       Regression coverage is in
+#       `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sampling_mask.py`.
+#    Related PR (if no, explain why):
+#       No. This is a Triton-Ascend compiler compatibility workaround.
+#    Future Plan:
+#       Remove this patch when Triton-Ascend can compile and efficiently lower
+#       the upstream kernel, or after an equivalent fix lands upstream.
+# ** 22. File: worker/patch_attn_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.attn_utils.get_kv_cache_spec`
 #    Why:
@@ -1151,7 +1420,64 @@
 #       Remove this patch once upstream adds a backend hook for KV cache spec
 #       construction or v2 worker no longer depends on the shared v1 helper.
 #
-# ** 28. File: worker/patch_v2/patch_block_table.py**
+#   2. `DeepseekV32IndexerCache.get_attn_backend`
+#    Why:
+#       SFA indexer cache layers require the Ascend cache-only backend;
+#       the upstream indexer backend is GPU-specific.
+#    How：
+#       Route SFA indexer cache layers to the existing
+#       `AscendSFAIndexerBackend`, or `AscendHiSparseIndexerBackend` when
+#       HiSparse is enabled. The model wrapper uses the cache's backend choice.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/pull/13069
+#    Future Plan:
+#       Remove this patch once upstream adds a backend hook for KV cache spec
+#       construction or v2 worker no longer depends on the shared v1 helper.
+#
+#   3. `vllm.v1.worker.gpu.attn_utils.prepare_kernel_block_sizes`
+#    Why:
+#       vLLM #57169 stops splitting a cache group whose KV tensors are
+#       block-outermost packed (`block_stride > layer_stride`). Ascend layerwise
+#       reuse aliases layers inside one physical slot (`layer_stride == 0`), so
+#       the group silently keeps the manager block size while NoPE SFA
+#       addresses 256-token blocks although its backend, metadata builder and
+#       block table all expect 128-token kernel blocks, so KV is read wrong.
+#    How：
+#       Re-run the selection with an alias-aware packing check
+#       (`0 < layer_stride < block_stride`) so alias layouts still split.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/57169
+#    Future Plan:
+#       Remove this patch once upstream stops treating alias layouts as packed.
+#
+#   4. `vllm.v1.worker.gpu.attn_utils._allocate_kv_cache`,
+#      `vllm.v1.worker.gpu.attn_utils._reshape_kv_cache`,
+#      `vllm.v1.worker.gpu.attn_utils.allocate_kv_cache`,
+#      `vllm.v1.worker.gpu.attn_utils.bind_kv_cache`,
+#      `vllm.v1.worker.gpu.attn_utils.bind_kv_cache_to_layers`,
+#      plus the by-name rebinds in
+#      `vllm.v1.worker.gpu.model_runner.init_kv_cache.__globals__`
+#      (`allocate_kv_cache`, `bind_kv_cache`)
+#    Why:
+#       Ascend allocates per-layer (k, v) KV caches and needs its own
+#       allocate/reshape/bind path; the upstream symbols are GPU-specific.
+#       Upstream has two live variants across versions: vLLM #51718 made
+#       `allocate_kv_cache` the live symbol, and vLLM main (#53781) routes
+#       `init_kv_cache` through `bind_kv_cache_to_layers`, so rebinding both
+#       keeps every supported version covered.
+#    How：
+#       Rebind the upstream allocate/reshape/bind symbols (and the copies already
+#       captured by name inside `init_kv_cache.__globals__`) to the
+#       `vllm_ascend.worker.v2.attn_utils` /
+#       `vllm_ascend.patch.worker.patch_bind_kv_cache` implementations.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/51718
+#       https://github.com/vllm-project/vllm/pull/53781
+#    Future Plan:
+#       Remove once upstream exposes a backend hook for KV cache
+#       allocation/binding.
+#
+# ** 23. File: worker/patch_block_table.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.block_table.BlockTables`
 #    Why:
@@ -1164,7 +1490,7 @@
 #       remove this patch when vLLM-ascend's BlockTables can initialize
 #       slot mapping as torch.int64 dtype.
 #
-# ** 29. File: worker/patch_v2/patch_dflash_speculator.py**
+# ** 24. File: worker/patch_dflash_speculator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.spec_decode.dflash.speculator.DFlashCudaGraphManager`
 #    Why:
@@ -1179,24 +1505,24 @@
 #       Remove this patch once upstream exposes a backend-dispatchable spec-decode
 #       graph manager abstraction.
 #
-# ** 30. File: worker/patch_v2/patch_eagle_speculator.py**
+# ** 25. File: worker/patch_eagle_speculator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.PrefillSpeculatorCudaGraphManager`,
-#      `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.DecodeSpeculatorCudaGraphManager`
+#   1. `vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator.SpeculatorCudaGraphManager`
+#   2. `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.SpeculatorCudaGraphManager`
+#       (vLLM main #60989 constructs the decode manager in the shared AR base).
 #    Why:
-#       The v2 Eagle spec-decode path uses upstream CUDA graph managers for
-#       prefill/decode spec decoding, which are not usable on Ascend.
+#       The shared v2 autoregressive speculative-decoding path (Eagle/MTP) uses
+#       an upstream CUDA graph manager, which is not usable on Ascend.
 #    How：
-#       Replace the prefill/decode speculator graph managers on the upstream
-#       module with `PrefillEagleAclGraphManager` / `DecodeEagleAclGraphManager`
+#       Replace the shared upstream manager with `AutoRegressiveAclGraphManager`
 #       (ACL graph).
 #    Related PR (if no, explain why):
-#       No, vllm-ascend v2 spec-decode ACL graph integration.
+#       https://github.com/vllm-project/vllm-ascend/pull/14310
 #    Future Plan:
 #       Remove this patch once upstream exposes a backend-dispatchable spec-decode
 #       graph manager abstraction.
 #
-# ** 31. File: worker/patch_v2/patch_input_batch.py**
+# ** 26. File: worker/patch_input_batch.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.input_batch.InputBatch`
 #    Why:
@@ -1207,7 +1533,7 @@
 #    Future Plan:
 #       remove this patch when vLLM-ascend's make_dummy behavior aligns with vLLM.
 #
-# ** 32. File: worker/patch_v2/patch_model_state.py**
+# ** 27. File: worker/patch_model_state.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.model_states.default.init_model_state`
 #    Why:
@@ -1218,26 +1544,14 @@
 #    Future Plan:
 #       remove this when vllm-ascend's attention metadata is align with vllm.
 #
-# ** 33. File: worker/patch_v2/patch_triton.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.gpu.sample.logprob`, `vllm.v1.worker.gpu.sample.penalties.apply_penalties`,
-#      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
-#    Why:
-#       triton ops in vLLM perform not good on NPU. And there is no dispatch mechanism for triton ops.
-#    How：
-#       override triton ops in vLLM with ascend implementation
-#    Related PR (if no, explain why):
-#       Let vLLM support triton ops dispatch.
-#    Future Plan:
-#       Remove this patch when vLLM support the dispatch function.
-#
-# ** 34. File: worker/patch_v2/patch_use_v2_model_runner.py**
+# ** 28. File: worker/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
 #       EngineCore subprocesses only load global/platform patches, while workers
 #       also import this compatibility module. The actual monkey-patch is defined
-#       in `platform/patch_use_v2_model_runner.py`.
+#       in `platform/patch_use_v2_model_runner.py` (V2-only selection plus the
+#       Ascend unsupported-feature check).
 #    How：
 #       Reuse the platform patch so EngineCore and worker processes share the
 #       same `use_v2_model_runner` behavior.
@@ -1247,12 +1561,249 @@
 #       Remove this module together with the platform patch once vllm-ascend
 #       fully supports the v2 model runner.
 #
-# ** 35. File: worker/patch_v2/patch_uva.py**
+# ** 29. File: worker/patch_uva.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.gpu.states.UvaBuffer`
+#   1. `vllm.v1.worker.gpu.buffer_utils.UvaBuffer`
 #    Why:
-#       ASCEND NPUs do not support UVA yet, so we need to wrap it in vLLM.
+#       ASCEND NPUs do not support UVA in general. The default UVA buffer must be
+#       replaced with a wrapper that keeps CPU and NPU views of the same buffer.
 #    How：
-#       make UvaBuffer a dummy class, mimic the interface of vllm UvaBuffer.
+#       Bind `UvaBuffer` to `UvaBufferWrapper`, which allocates a pinned CPU
+#       tensor and either maps it for real NPU UVA (when
+#       `pinned_mem_register:True` and a compatible triton-ascend is installed)
+#       or falls back to an independent NPU tensor with explicit dirty-row
+#       copying. It exposes `.cpu` / `.np` / `.uva()` to mimic the upstream
+#       `UvaBuffer` interface.
 #    Future Plan:
-#       Remove this patch when NPU support UVA.
+#       Remove this patch when NPU supports UVA natively.
+#
+# ** 30. File: worker/patch_dspark.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.spec_decode.dspark.utils.load_dspark_model`,
+#      `vllm.v1.worker.gpu.spec_decode.dspark.speculator.load_dspark_model`
+#    Why:
+#       Same-checkpoint DSpark drafts (e.g. DeepSeek-V4 MTP, weights under
+#       `mtp.*`) reuse the target weights and declare no quantization of their
+#       own, but upstream `load_dspark_model` derives the draft quant config via
+#       `get_draft_quant_config`, which returns None for them. That builds an
+#       unquantized draft, and a W4A8/W8A8 target checkpoint cannot be loaded
+#       into it (the draft linear layers lack the `weight_offset`/
+#       `weight_scale`/`scale_bias` params the checkpoint ships), failing with
+#       a KeyError.
+#    How：
+#       For same-checkpoint drafts (`draft_model_config.model ==
+#       model_config.model`), temporarily redirect `get_draft_quant_config` to
+#       the target quant config during `load_dspark_model`, then restore it.
+#       Self-contained drafts (e.g. Qwen3 DSpark speculators) keep their own
+#       quant config.
+#       Mark draft reconstruction for platform validation (PR #20570).
+#       Disabled drafts may inherit the target collection phase; additional_config
+#       and the existing Ascend config initialization behavior remain unchanged.
+#    Related PR:
+#       https://github.com/vllm-project/vllm-ascend/pull/20570
+#    Future Plan:
+#       Remove this patch once upstream `load_dspark_model` inherits the target
+#       quant config for same-checkpoint drafts.
+#       Remove the draft scope when upstream exposes draft construction context
+#       to the platform validation hook.
+#
+# ** 31. File: worker/patch_adaptive_verification.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.spec_decode.adaptive_verification._assign_draft_token_budget_compiled`
+#    Why:
+#       The upstream adaptive-verification draft-budget allocator is wrapped by
+#       `torch.compile`, whose compiled path is not supported on Ascend.
+#    How:
+#       Run the original upstream allocator eagerly, preserving its algorithm.
+#       Apply this only for vLLM 0.33.0 in the worker patch registry. Newer vLLM
+#       Triton allocators are reused directly without replacing their kernels.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/47808
+#    Future Plan:
+#       Remove this patch when vLLM 0.33.0 support ends.
+#
+# ** 32. File: worker/patch_model_runner.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.model_runner.GPUModelRunner.initialize_kv_cache`
+#    Why:
+#       Upstream filters per-layer cache values by `cache.device`, but Ascend
+#       allocates K/V tuples and Conv/SSM lists. Returning only the first tensor
+#       avoids that error but drops V/SSM from the dictionary given to connectors.
+#    How:
+#       Adapt the upstream initializer to flatten only the runner's cache list
+#       before device filtering. Preserve the original dictionary and container
+#       types for model bindings and connector registration; remove the old
+#       first-tensor wrapper in patch_attn_utils.py.
+#       Preserve #55688's ReplaySSM tracker collection for inherited scheduler
+#       block copies when the supported upstream exports that collector.
+#    Related PR (if no, explain why):
+#       No upstream PR linked; this adapts Ascend multi-tensor allocations.
+#    Future Plan:
+#       Remove this override when upstream supports multi-tensor allocations
+#       during device filtering without truncating connector cache entries.
+#       Until then, keep the copied initializer aligned with supported vLLM.
+#
+#   2. `vllm.v1.worker.gpu.model_runner.copy_kv_cache_blocks_inplace`
+#    Why:
+#       Runner cache flattening alone does not establish that upstream's
+#       storage-copy paths support every Ascend segmented cache layout.
+#    How:
+#       Rebind the helper imported by the MRv2 runner to the existing Ascend
+#       implementation, which copies individual tensor segments and deduplicates
+#       views by data_ptr. Its existing layout restrictions still apply.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/pull/17451
+#    Future Plan:
+#       Remove this rebind once the upstream helper is validated for supported
+#       Ascend layouts, including segmented Conv/SSM storage, shared views and
+#       multiple kernel blocks per scheduler block. If #17451 is integrated,
+#       consolidate the duplicate runner rebind into one patch module.
+#
+#   3. `vllm.v1.worker.gpu.model_runner.dispatch_cg_and_sync_dp`
+#    Why:
+#       With sharded PCP decode, the dispatch token count is rank-local, but
+#       the runner still passes the global request count, so no uniform decode
+#       graph matches.
+#    How:
+#       When `is_pcp_decode_sharding_enabled()` holds, derive the request
+#       count from the local tokens and the uniform query length.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; vLLM #52162 still passes the global request count.
+#    Future Plan:
+#       Remove once upstream dispatches sharded PCP decode with local counts.
+#
+# ** 33. File: platform/patch_vision.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.vision.FusedInputNorm.forward`
+#    Why:
+#       Upstream vLLM uses PyTorch 2.13.0, which requires eps > 0 for training
+#       but allows eps >= 0 for inference. vllm-ascend bundles PyTorch 2.10.0,
+#       which does not distinguish scenarios and requires eps > 0 in all cases.
+#       So when upstream FusedInputNorm passes eps=0.0 to F.batch_norm it works
+#       fine upstream, but fails on vllm-ascend with "batch_norm eps must be
+#       positive".
+#    How：
+#       Monkey-patch FusedInputNorm.forward to use eps=1e-5 instead of 0.0.
+#       The patch is guarded with contextlib.suppress(ImportError) so it does
+#       not crash on release wheels (v0.26.0) where FusedInputNorm does not exist.
+#       Upstream PR #51734 (dc5101fb1b, Aug 10) rewrote FusedInputNorm.forward to
+#       use a broadcast multiply-add (x * weight + bias) instead of F.batch_norm,
+#       removing running_mean/running_var. That commit is included in the target
+#       16cfe728; on those versions FusedInputNorm.forward is used as-is
+#       (multiply-add).
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/50411
+#       https://github.com/vllm-project/vllm/pull/51734
+#    Future Plan:
+#       Remove this patch once vllm-ascend's bundled PyTorch >= 2.13.0
+#       (which, like upstream, allows eps >= 0 for inference).
+#
+# ** 34. File: worker/patch_worker_profiler.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.profiler.wrapper.validate_worker_profiler_config`
+#      `vllm.v1.worker.gpu_worker.validate_worker_profiler_config`
+#    Why:
+#       The upstream profiler support table has no NPU entry, so enabled
+#       profiling prevents NPUWorker from using the parent constructor.
+#    How:
+#       Rebind the validator and its GPUWorker import before parent construction.
+#       Accept disabled/torch profiling on NPU and preserve upstream validation
+#       for other platforms. Elastic EP initialization remains upstream-owned.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/65565
+#    Future Plan:
+#       Once #65565 is included in all supported vLLM versions, remove this
+#       patch and implement the NPUWorker profiler-validation hook instead.
+#
+# ** 35. File: platform/patch_parallel_config.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
+#    Why:
+#       The v0.29.0 release rejected PCP > 1 combined with DP > 1 in its shared
+#       validator, preventing Ascend's PCP+DP implementation from being reached.
+#       Upstream #54523 scopes this restriction to CUDA/ROCm instead; the pinned
+#       main already contains that fix.
+#    How:
+#       Removed with the v0.31.0 boundary: v0.31.0 equals the pinned main and
+#       already contains #54523, so no release-only validator override applies.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/54523/files
+#       Upstream commit: 7c2f1ff4958eaf0818405e9192c71608fe4a16b1.
+#       Release source: 98dff2a81d747d1dba01a47f939f48c3526d4206.
+#    Future Plan:
+#       Re-add only if a supported pin predates #54523 or an equivalent
+#       backend-scoped check, then verify PCP+DP construction and execution,
+#       retained invalid-config rejection, and Ascend EPLB validation.
+#
+#   2. `vllm.config.parallel.ParallelConfig.use_sequence_parallel_moe`
+#    Why:
+#       Upstream requires DP > 1 for MoE sequence parallelism. Ascend
+#       FlashComm also supports the TP/EP, DP=1 topology, where rank-local
+#       token sharding is still required.
+#    How:
+#       Replace the property with the upstream predicate minus only the
+#       `data_parallel_size > 1` condition. Backend, EP, and TP checks remain.
+#    Related PR (if no, explain why):
+#       No, this enables an Ascend FlashComm-specific topology.
+#    Future Plan:
+#       Remove this patch when upstream provides a backend capability hook for
+#       enabling MoE sequence parallelism with DP=1.
+#
+
+# worker/patch_qwen3_5.py: GDN internal prefill checkpoints.
+# Why: Ascend replaces the upstream GDN forward/backend.
+# How: initialize the capability-gated per-layer NPU adaptation after upstream init.
+# Related PR: vllm-project/vllm#60050.
+# Future Plan: remove this initialization hook when a shared backend extension supports it.
+
+# ** 36. File: worker/patch_staged_writes.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.block_table.BlockTables.__init__`,
+#      `vllm.v1.worker.gpu.block_table.BlockTables.append_block_ids`
+#    Why:
+#      num_blocks.np is written only in append_block_ids, but upstream flushes
+#      num_blocks.copy_to_uva unconditionally on every step, costing one H2D
+#      copy per decode step even when no block was appended.
+#    How:
+#      Track a dirty flag set by append_block_ids and make the instance-level
+#      num_blocks.copy_to_uva a no-op when clean. apply_staged_writes keeps
+#      calling it, so upstream logic and ordering are untouched. The flag is
+#      cleared only after a successful copy so failed flushes are retried.
+#    Related PR (if no, explain why):
+#      Upstream vllm#62748 already guarded the Sampler staged-write flush
+#      (removed here per review; arrives via main2main). No upstream PR yet
+#      for the num_blocks flush; follow https://github.com/vllm-project/vllm/pull/65880.
+#    Future Plan:
+#      Remove when upstream adds dirty tracking to UvaBackedTensor flushes.
+#
+
+# ** File: platform/patch_kimi_k31_config.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.transformers_utils.config._CONFIG_REGISTRY["kimi_k31"]`
+#    Why:
+#       Expose the K3.1 config identity and Ascend DSA constraints. Native main
+#       #66030 consumes a KimiLinearDSAConfig, whereas v0.33.0 uses our dict.
+#    How:
+#       Register the existing platform config subclass once. Keep the explicit
+#       release dict branch; delegate main's dataclass construction, layer
+#       lookup and serialization to native KimiLinearConfig.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/66030
+#    Future Plan:
+#       Remove this registration/subclass when native kimi_k31 registration
+#       provides the required config identity and Ascend DSA validation.
+#   2. `vllm.model_executor.models.config.MODELS_CONFIG_MAP` Kimi entries
+#    Why:
+#       #66037 defaults Kimi DSA and MLA drafts to GPU cache/backend formats.
+#       In DSpark reconstruction its fp8 draft default fails A2/A3 validation.
+#    How:
+#       On main register an Ascend verifier that retains native model-level
+#       quantization resolution and delegates generic config verification to
+#       the base hook; NPUPlatform and Ascend layers own attention selection.
+#       Release registration and explicit cache/backend settings are unchanged.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/66037
+#    Future Plan:
+#       Remove the verifier override once native Kimi defaults dispatch through
+#       the platform's attention/cache configuration interface.
+#

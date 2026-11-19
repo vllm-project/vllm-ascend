@@ -1,8 +1,18 @@
+from typing import TYPE_CHECKING
+
 import torch
 from vllm.config import ParallelConfig, get_current_vllm_config
-from vllm.distributed.parallel_state import GroupCoordinator, get_world_group, init_model_parallel_group
+from vllm.distributed import parallel_state as vllm_parallel_state
+from vllm.distributed.parallel_state import (
+    GroupCoordinator,
+    get_world_group,
+    init_model_parallel_group,
+)
 
 from vllm_ascend.ascend_config import get_ascend_config
+
+if TYPE_CHECKING:
+    from vllm.config import EngramConfig
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: GroupCoordinator | None = None
@@ -12,14 +22,47 @@ _MLP_TP: GroupCoordinator | None = None
 _OTP: GroupCoordinator | None = None
 _LMTP: GroupCoordinator | None = None
 _EMBED_TP: GroupCoordinator | None = None
+_QKV_IPROJ_TP: GroupCoordinator | None = None
 
 _P_TP: GroupCoordinator | None = None
 
 _DYNAMIC_EPLB: GroupCoordinator | None = None
+_KVPP: GroupCoordinator | None = None
+
+
+class ReplicatedGroup:
+    """A no-communication stand-in for a TP group of world_size 1.
+
+    Used to replicate a parameter across ranks (e.g. a disable_tp layer such
+    as the DSpark Markov lm_head): every rank holds the full weight, so there
+    is nothing to all-reduce / all-gather. Unlike a real ``GroupCoordinator``,
+    constructing this does **not** call ``hcclCommInitRootInfoConfig`` — it is
+    a pure logical object exposing just the attributes
+    ``AscendVocabParallelEmbedding`` reads (``world_size``, ``rank_in_group``)
+    plus no-op comm methods for safety.
+    """
+
+    world_size = 1
+    rank_in_group = 0
+    device_group = None
+
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        return input_
+
+    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        return input_
+
+    def destroy(self) -> None:
+        pass
+
+
+# Singleton: identical on every rank, no HCCL comm created.
+_REPLICATED = ReplicatedGroup()
 
 
 def init_ascend_model_parallel(
     parallel_config: ParallelConfig,
+    engram_config: "EngramConfig | None" = None,
 ):
     if model_parallel_initialized():
         return
@@ -41,6 +84,71 @@ def init_ascend_model_parallel(
         global_pcp_size,
         global_tp_size,
     )
+
+    # Engram Tensor Parallel (ETP) group shards the PLE/Engram embedding table.
+    # Upstream initializes _ETP from the (possibly hidden) engram_config; with
+    # PCP>1 the worker clears it so _ETP falls back to _TP. Rebuild a true
+    # TP x DP group when embedding_across_dp asks for it. Must write the
+    # upstream _ETP global so model code calling get_etp_group() sees it.
+    # Tests pass a SimpleNamespace stand-in without get_parallel_size, so guard
+    # with getattr and fall back to global_tp_size (upstream keeps _ETP as-is).
+    get_etp_size = getattr(engram_config, "get_parallel_size", None) if engram_config is not None else None
+    etp_size = get_etp_size(parallel_config) if get_etp_size is not None else global_tp_size
+    if etp_size != global_tp_size and (
+        vllm_parallel_state._ETP is None or vllm_parallel_state._ETP is vllm_parallel_state.get_tp_group()
+    ):
+        # Overwrite only when the upstream group is still the TP fallback (or
+        # not yet built); an already-created independent ETP group is kept.
+        etp_ranks = all_ranks.permute(0, 2, 3, 1, 4).reshape(-1, etp_size).unbind(0)
+        vllm_parallel_state._ETP = init_model_parallel_group(
+            [ranks.tolist() for ranks in etp_ranks],
+            get_world_group().local_rank,
+            backend,
+            group_name="etp",
+        )
+
+    # With PCP > 1, worker initialization defers the upstream Engram group
+    # so Ascend can create it with DP x PCP ranks. With PCP == 1, shared PLE
+    # tables need a DP group connecting replicas of the same TP shard; create
+    # it only if upstream left it unset, otherwise reuse the existing group.
+    if engram_config is not None and (
+        global_pcp_size > 1
+        or (engram_config.dp_shared_memory and global_dp_size > 1 and vllm_parallel_state.get_engram_dp_group() is None)
+    ):
+        # PCP > 1 requires the deferred group to be unset; PCP == 1 checks
+        # this in the condition above. Upstream owns its getter and teardown.
+        assert vllm_parallel_state.get_engram_dp_group() is None
+        # Reuse upstream node boundaries and shard-size fallback for DP x PCP.
+        engram_size = vllm_parallel_state._engram_dp_shard_size(
+            world_size,
+            global_dp_size * global_pcp_size,
+            global_tp_size * global_pp_size,
+        )
+        if engram_size > 1:
+            group_ranks = all_ranks.permute(0, 2, 4, 1, 3).reshape(-1, engram_size).unbind(0)
+            shared = engram_config.dp_shared_memory
+            vllm_parallel_state._ENGRAM_DP = init_model_parallel_group(
+                [ranks.tolist() for ranks in group_ranks],
+                get_world_group().local_rank,
+                "gloo" if shared else backend,
+                group_name="edp",
+                use_device_communicator=not shared,
+            )
+
+    kvpp_size = get_ascend_config().kvpp_config.size
+    global _KVPP
+    assert _KVPP is None, "KV layer parallel group is already initialized"
+    if kvpp_size > 1:
+        # One cache-replica domain per DP replica and PP stage. PCP's
+        # prefill gather replicates MLA KV across PCP as well as TP ranks.
+        assert kvpp_size == global_pcp_size * global_tp_size
+        kvpp_group_ranks = all_ranks.flatten(-2).reshape(-1, kvpp_size).unbind(0)
+        _KVPP = init_model_parallel_group(
+            [ranks.tolist() for ranks in kvpp_group_ranks],
+            get_world_group().local_rank,
+            backend,
+            group_name="kvpp",
+        )
 
     pd_tp_ratio = get_ascend_config().pd_tp_ratio
     pd_head_ratio = get_ascend_config().pd_head_ratio
@@ -92,11 +200,13 @@ def init_ascend_model_parallel(
             group_ranks, get_world_group().local_rank, backend, group_name="dynamic_eplb"
         )
 
-    # Initialize fine-grained TP process groups on Ascend for four components:
+    # Initialize fine-grained TP process groups on Ascend for five components:
     # 1. LM Head: output logits projection (`lmhead_tensor_parallel_size`)
     # 2. O Proj: attention output projection (`oproj_tensor_parallel_size`)
     # 3. Embedding: The token embedding table at the input of the model (`embedding_tensor_parallel_size`)
     # 4. MLP: feed-forward network in transformer blocks (`mlp_tensor_parallel_size`)
+    # 5. QKV input projections: request-local recurrent state
+    #    (`qkv_iproj_tensor_parallel_size`)
     _group_cache = {}
 
     def _create_or_get_group(group_size: int, group_name: str) -> GroupCoordinator:
@@ -121,17 +231,20 @@ def init_ascend_model_parallel(
     lmhead_tp_size = get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size
     embedding_tp_size = get_ascend_config().finegrained_tp_config.embedding_tensor_parallel_size
     mlp_tp_size = get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size
+    qkv_iproj_tp_size = get_ascend_config().finegrained_tp_config.qkv_iproj_tensor_parallel_size
 
-    global _OTP, _LMTP, _EMBED_TP, _MLP_TP
+    global _OTP, _LMTP, _EMBED_TP, _MLP_TP, _QKV_IPROJ_TP
 
-    if otp_size > 0:
+    if otp_size > 1:
         _OTP = _create_or_get_group(otp_size, "otp")
-    if lmhead_tp_size > 0:
+    if lmhead_tp_size > 1:
         _LMTP = _create_or_get_group(lmhead_tp_size, "lmheadtp")
-    if embedding_tp_size > 0:
+    if embedding_tp_size > 1:
         _EMBED_TP = _create_or_get_group(embedding_tp_size, "emtp")
-    if mlp_tp_size > 0:
+    if mlp_tp_size > 1:
         _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
+    if qkv_iproj_tp_size > 1:
+        _QKV_IPROJ_TP = _create_or_get_group(qkv_iproj_tp_size, "qkv_iproj_tp")
 
 
 def model_parallel_initialized():
@@ -163,6 +276,15 @@ def get_embed_tp_group() -> GroupCoordinator:
     return _EMBED_TP
 
 
+def get_qkv_iproj_tp_group() -> GroupCoordinator:
+    assert _QKV_IPROJ_TP is not None, "QKV input projection tensor parallel group is not initialized"
+    return _QKV_IPROJ_TP
+
+
+def get_replicated_group() -> ReplicatedGroup:
+    return _REPLICATED
+
+
 def get_p_tp_group() -> GroupCoordinator:
     assert _P_TP is not None, "distributed prefill tensor parallel group is not initialized"
     return _P_TP
@@ -173,7 +295,22 @@ def get_dynamic_eplb_group() -> GroupCoordinator:
     return _DYNAMIC_EPLB
 
 
+def get_kvpp_group() -> GroupCoordinator:
+    assert _KVPP is not None, "KV layer parallel group is not initialized"
+    return _KVPP
+
+
 def destroy_ascend_model_parallel():
+    global _QKV_IPROJ_TP
+    if _QKV_IPROJ_TP:
+        _QKV_IPROJ_TP.destroy()
+    _QKV_IPROJ_TP = None
+
+    global _KVPP
+    if _KVPP:
+        _KVPP.destroy()
+    _KVPP = None
+
     global _MC2
     if _MC2:
         _MC2.destroy()

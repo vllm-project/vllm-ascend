@@ -1,3 +1,6 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
@@ -15,7 +18,7 @@ Prerequisites:
 
     $ VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen3-0.6b \
         --enforce-eager \
-        --weight-transfer-config '{"backend": "nccl"}' \
+        --weight-transfer-config '{"backend": "hccl"}' \
         --load-format dummy
 
     Then run this script:
@@ -33,16 +36,21 @@ The example performs the following steps:
 * Generate text again to show normal output after the weight update.
 """
 
+import logging
+
 import requests
 import torch
 from openai import OpenAI
 from transformers import AutoModelForCausalLM
+from vllm.distributed.weight_transfer.base import ModuleSource
+from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
+from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 from vllm.utils.network_utils import get_ip, get_open_port
 
-from vllm_ascend.distributed.weight_transfer.hccl_engine import (
-    HCCLTrainerSendWeightsArgs,
-    HCCLWeightTransferEngine,
-)
+from vllm_ascend.distributed.weight_transfer import register_engine
+from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
+
+logger = logging.getLogger(__name__)
 
 BASE_URL = "http://localhost:8000"
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -60,74 +68,6 @@ def generate_completions(client: OpenAI, model: str, prompts: list[str]) -> list
         )
         results.append(response.choices[0].text)
     return results
-
-
-def init_weight_transfer_engine(
-    base_url: str,
-    master_address: str,
-    master_port: int,
-    rank_offset: int,
-    world_size: int,
-) -> None:
-    """Initialize weight transfer via HTTP endpoint."""
-    url = f"{base_url}/init_weight_transfer_engine"
-    payload = {
-        "init_info": dict(
-            master_address=master_address,
-            master_port=master_port,
-            rank_offset=rank_offset,
-            world_size=world_size,
-        )
-    }
-    response = requests.post(url, json=payload, timeout=60)
-    response.raise_for_status()
-
-
-def update_weights(
-    base_url: str,
-    names: list[str],
-    dtype_names: list[str],
-    shapes: list[list[int]],
-    packed: bool = False,
-    packed_buffer_size_bytes: int | None = None,
-) -> None:
-    """Update weights via HTTP endpoint."""
-    url = f"{base_url}/update_weights"
-    payload = {
-        "update_info": dict(
-            names=names,
-            dtype_names=dtype_names,
-            shapes=shapes,
-            packed=packed,
-        )
-    }
-    if packed and packed_buffer_size_bytes is not None:
-        payload["update_info"]["packed_buffer_size_bytes"] = packed_buffer_size_bytes
-    response = requests.post(url, json=payload, timeout=300)
-    response.raise_for_status()
-
-
-def start_weight_update(base_url: str, is_checkpoint_format: bool = True) -> None:
-    """Start weight update via HTTP endpoint.
-
-    Prepares the model for layerwise reload on the vLLM server side.
-    Must be called before update_weights.
-    """
-    url = f"{base_url}/start_weight_update"
-    payload = {"is_checkpoint_format": is_checkpoint_format}
-    response = requests.post(url, json=payload, timeout=60)
-    response.raise_for_status()
-
-
-def finish_weight_update(base_url: str) -> None:
-    """Finish weight update via HTTP endpoint.
-
-    Finalizes layerwise reload on the vLLM server side.
-    Must be called after all update_weights calls are complete.
-    """
-    url = f"{base_url}/finish_weight_update"
-    response = requests.post(url, timeout=60)
-    response.raise_for_status()
 
 
 def pause_generation(base_url: str) -> None:
@@ -153,6 +93,10 @@ def get_world_size(base_url: str) -> int:
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
     # Get the inference world size from the vLLM server
     inference_world_size = get_world_size(BASE_URL)
     world_size = inference_world_size + 1  # +1 for the trainer
@@ -160,7 +104,7 @@ def main():
     torch.accelerator.set_device_index(device)
 
     # Load the training model
-    print(f"Loading training model: {MODEL_NAME}")
+    logger.info("Loading training model: %s", MODEL_NAME)
     train_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.bfloat16)
     train_model.to(device)
 
@@ -180,110 +124,51 @@ def main():
 
     # Generate text before weight update. The output is expected to be nonsense
     # because the server is initialized with dummy weights.
-    print("-" * 50)
-    print("Generating text BEFORE weight update (expect nonsense):")
-    print("-" * 50)
+    logger.info("-" * 50)
+    logger.info("Generating text BEFORE weight update (expect nonsense):")
+    logger.info("-" * 50)
     outputs = generate_completions(client, MODEL_NAME, prompts)
     for prompt, generated_text in zip(prompts, outputs):
-        print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
-        print("-" * 50)
+        logger.info("Prompt: %r\nGenerated text: %r", prompt, generated_text)
+        logger.info("-" * 50)
 
-    # Set up the communication channel between the training process and the
-    # vLLM server. The trainer is rank 0, vLLM worker(s) start at rank_offset.
-    master_address = get_ip()
-    master_port = get_open_port()
-    rank_offset = 1
-
-    print(f"Initializing weight transfer: master={master_address}:{master_port}")
-
-    # Initialize weight transfer on vLLM server (this is async, server will
-    # wait for HCCL connection)
-    import threading
-
-    init_thread = threading.Thread(
-        target=init_weight_transfer_engine,
-        args=(BASE_URL, master_address, master_port, rank_offset, world_size),
-    )
-    init_thread.start()
-
-    # Initialize HCCL process group on trainer side
-    model_update_group = HCCLWeightTransferEngine.trainer_init(
-        dict(
-            master_address=master_address,
-            master_port=master_port,
-            world_size=world_size,
-        ),
-    )
-
-    # Wait for init_weight_transfer_engine to complete
-    init_thread.join()
-
-    # Pause generation before weight sync
-    pause_generation(BASE_URL)
-
-    # Start weight update (prepares layerwise reload on the vLLM server)
-    start_weight_update(BASE_URL)
-
-    # Collect weight metadata for the update request.
-    # Also track the largest tensor to auto-size the packed buffer.
-    names = []
-    dtype_names = []
-    shapes = []
-    max_tensor_bytes = 0
-    for name, p in train_model.named_parameters():
-        names.append(name)
-        dtype_names.append(str(p.dtype).split(".")[-1])
-        shapes.append(list(p.shape))
-        tensor_bytes = p.numel() * p.element_size()
-        if tensor_bytes > max_tensor_bytes:
-            max_tensor_bytes = tensor_bytes
-
-    # Size the packed buffer to fit the largest tensor with 128 MB headroom,
-    # but keep the default 1 GB when the largest tensor is smaller than that.
+    # Wire parameters are fixed at the trainer/worker init handshake.
+    max_tensor_bytes = max(p.numel() * p.element_size() for p in train_model.parameters())
     packed_buffer_size_bytes = max(max_tensor_bytes + 128 * 2**20, 2**30)
-    print(
-        f"Largest tensor: {max_tensor_bytes / 2**30:.2f} GiB, packed buffer: {packed_buffer_size_bytes / 2**30:.2f} GiB"
+    register_engine()
+    engine = WeightTransferTrainerFactory.trainer_init(
+        HCCLTrainerInitInfo(
+            rank=0,
+            master_address=get_ip(),
+            master_port=get_open_port(),
+            world_size=world_size,
+            packed=True,
+            packed_buffer_size_bytes=packed_buffer_size_bytes,
+        ),
+        client=HTTPVLLMWeightSyncClient(base_url=BASE_URL),
+        source=ModuleSource(train_model),
     )
-
-    # Start the update_weights call in a separate thread since it will block
-    # waiting for HCCL broadcasts
-    # packed=True enables efficient batched tensor broadcasting
-    update_thread = threading.Thread(
-        target=update_weights,
-        args=(BASE_URL, names, dtype_names, shapes, True, packed_buffer_size_bytes),
-    )
-    update_thread.start()
-
-    # Broadcast all weights from trainer to vLLM workers
-    print("Broadcasting weights via HCCL...")
-    trainer_args = HCCLTrainerSendWeightsArgs(
-        group=model_update_group,
-        packed=True,
-        packed_buffer_size_bytes=packed_buffer_size_bytes,
-    )
-    HCCLWeightTransferEngine.trainer_send_weights(
-        iterator=train_model.named_parameters(),
-        trainer_args=trainer_args,
-    )
-
-    # Wait for update_weights to complete
-    update_thread.join()
-
-    # Finish weight update (finalizes layerwise reload on the vLLM server)
-    finish_weight_update(BASE_URL)
-
-    # Resume generation after weight sync
-    resume_generation(BASE_URL)
+    try:
+        pause_generation(BASE_URL)
+        # The trainer owns START -> update/broadcast -> FINISH, including
+        # concurrent worker RPCs and propagation of their errors.
+        logger.info("Broadcasting weights via HCCL...")
+        engine.send_weights()
+        # A failed update may leave partially loaded weights. Keep generation
+        # paused until the workers are restarted or a full reload succeeds.
+        resume_generation(BASE_URL)
+    finally:
+        engine.shutdown()
 
     # Generate text after weight update. The output is expected to be normal
     # because the real weights are now loaded.
-    print("-" * 50)
-    print("Generating text AFTER weight update:")
-    print("-" * 50)
+    logger.info("-" * 50)
+    logger.info("Generating text AFTER weight update:")
+    logger.info("-" * 50)
     outputs_updated = generate_completions(client, MODEL_NAME, prompts)
     for prompt, generated_text in zip(prompts, outputs_updated):
-        print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
-        print("-" * 50)
+        logger.info("Prompt: %r\nGenerated text: %r", prompt, generated_text)
+        logger.info("-" * 50)
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ import json
 import sys
 from io import StringIO
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -211,11 +211,9 @@ def test_AiqosConfig_set_qos_captures_and_writes_state(tmp_path, monkeypatch):
     cfg = {
         "mode": "auto",
         "aiqos_priority": {
-            "AIV_D2D": "high",
-            "AIV_H2D": "high",
-            "SDMA_D2D": "high",
-            "SDMA_H2D": "low",
-            "PCIEDMA_H2D": "high",
+            "AIV": "high",
+            "SDMA": "low",
+            "PCIEDMA": "high",
         },
     }
     out_buf = StringIO()
@@ -249,11 +247,9 @@ def test_AiqosConfig_second_apply_reuses_baseline_fewer_capture_qos(tmp_path, mo
     cfg = {
         "mode": "auto",
         "aiqos_priority": {
-            "AIV_D2D": "high",
-            "AIV_H2D": "high",
-            "SDMA_D2D": "high",
-            "SDMA_H2D": "low",
-            "PCIEDMA_H2D": "high",
+            "AIV": "high",
+            "SDMA": "low",
+            "PCIEDMA": "high",
         },
     }
     with patch("sys.stdout", StringIO()):
@@ -285,11 +281,9 @@ def test_AiqosConfig_merges_baseline_when_device_list_grows(tmp_path, monkeypatc
     cfg = {
         "mode": "auto",
         "aiqos_priority": {
-            "AIV_D2D": "high",
-            "AIV_H2D": "high",
-            "SDMA_D2D": "high",
-            "SDMA_H2D": "low",
-            "PCIEDMA_H2D": "high",
+            "AIV": "high",
+            "SDMA": "low",
+            "PCIEDMA": "high",
         },
     }
     with patch("sys.stdout", StringIO()):
@@ -298,3 +292,68 @@ def test_AiqosConfig_merges_baseline_when_device_list_grows(tmp_path, monkeypatc
     assert "0" in j["original_qos"] and "1" in j["original_qos"]
     assert "0" in j["original_sdma_mata"] and "1" in j["original_sdma_mata"]
     assert "0" in j["original_fuse"] and "1" in j["original_fuse"]
+
+
+def test_AiqosConfig_maps_both_directions_to_shared_queues(tmp_path, monkeypatch):
+    monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", "0")
+    mod, mock_ai = _load_ai_qos_tool()
+    cfg = {
+        "mode": "manual",
+        "aiqos_priority": {
+            "AIV": "middle",
+            "SDMA": "middle",
+            "PCIEDMA": "middle",
+        },
+    }
+
+    state = tmp_path / "state.json"
+    with patch("sys.stdout", StringIO()):
+        mod.AiqosConfig(cfg).set_qos(state)
+
+    printed_commands = json.loads(state.read_text(encoding="utf-8"))["printed_commands"]
+    assert "hccs vl remap peer-type cpu 4 0 2" in printed_commands
+    assert "hccs vl remap peer-type cpu 4 1 2" in printed_commands
+    assert "hccs vl remap peer-type cpu 6 0 4" in printed_commands
+    assert "hccs vl remap peer-type cpu 6 1 4" in printed_commands
+    assert "hccs vl remap peer-type cpu 5 1 3" in printed_commands
+    assert "hccs vl remap peer-type cpu 5 0 3" in printed_commands
+    assert "hccs sp peer-type cpu 2 2" in printed_commands
+    assert "hccs sp peer-type cpu 4 2" in printed_commands
+    assert "hccs sp peer-type cpu 3 2" in printed_commands
+    mock_ai.set_qos.assert_has_calls(
+        [
+            call(0, 11, 42, 4, 0, 0),
+            call(0, 12, 42, 4, 0, 0),
+            call(0, 13, 42, 6, 0, 0),
+            call(0, 7, 42, 5, 0, 0),
+        ]
+    )
+
+
+def test_AiqosConfig_priority_only_changes_pri():
+    mod, _ = _load_ai_qos_tool()
+    priorities = {
+        "AIV": "low",
+        "SDMA": "middle",
+        "PCIEDMA": "high",
+    }
+    config = mod.AiqosConfig({"mode": "manual", "aiqos_priority": priorities})
+
+    for op_type, levels in config.aiqos_table.items():
+        fixed_values = {values[:3] for values in levels.values()}
+        assert len(fixed_values) == 1, f"{op_type} must use one shared queue"
+        assert [values[3] for values in levels.values()] == [1, 2, 3]
+
+
+def test_cli_uses_unified_traffic_options():
+    mod, _ = _load_ai_qos_tool()
+    parser = mod._create_parser()
+
+    defaults = parser.parse_args([])
+    assert (defaults.AIV, defaults.SDMA, defaults.PCIEDMA) == ("high", "low", "high")
+
+    manual = parser.parse_args(["--mode", "manual", "--AIV", "low", "--SDMA", "high", "--PCIEDMA", "middle"])
+    assert (manual.AIV, manual.SDMA, manual.PCIEDMA) == ("low", "high", "middle")
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--AIV_D2D", "high"])

@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 
 from tools.bisect import git_ops, report
-from tools.bisect.build_manager import BuildError, BuildManager
+from tools.bisect.build_manager import DEPLOY_ERRORS, BuildManager, BuildTransitionError
 from tools.bisect.config import (
     DEFAULT_COORD_DIR,
     DEFAULT_GOOD_TABLE,
@@ -47,7 +47,8 @@ from tools.bisect.config import (
     TrialResult,
     Verdict,
 )
-from tools.bisect.good_table import GoodTable
+from tools.bisect.good_table import GoodTable, valid_soc
+from tools.bisect.runner import BisectFatalError
 from tools.bisect.state import BisectState
 from tools.bisect.verdict import evaluate
 
@@ -65,16 +66,18 @@ class Bisector:
 
         self.runner = build_runner(inp, opt, self.builder)
         self.trials: list[TrialResult] = []
+        self._mock_bad_index = 0
+        self._mock_indices: dict[str, int] = {}
         # Monotonic deploy counter. Each actual deploy (endpoint check, bisect
         # step, or flaky-confirm retry) consumes exactly one round so that
         # multi-node workers can mirror the sequence in lockstep.
         self._round = 0
         # Verdict caching speeds up single-node resume; disabled for multi-node
         # because a cache hit would skip a deploy and desync the workers.
-        self.use_cache = inp.scene != SCENE_MULTI
+        self.use_cache = inp.scene != SCENE_MULTI and not opt.mock_tests
 
         run_id = inp.case_key.replace("::", "__").replace("/", "_")
-        self.work_dir = Path(opt.work_dir) / run_id
+        self.work_dir = Path(opt.work_dir) / (f"{run_id}__mock" if opt.mock_tests else run_id)
         self.log_dir = self.work_dir / "logs"
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.state_path = self.work_dir / "state.json"
@@ -88,17 +91,29 @@ class Bisector:
         log_path = self.log_dir / f"round{round_idx}_{candidate.short}.log"
         try:
             outcome = self.runner.validate(candidate, round_idx, self.log_dir)
-            v, note = evaluate(outcome)
+            if self.opt.mock_tests:
+                index = self._mock_indices.get(candidate.commit, -1)
+                v = "FAIL" if index >= self._mock_bad_index else "PASS"
+                note = f"MOCK {v}: environment prepared; pytest was not run"
+                with open(log_path, "a", encoding="utf-8") as out:
+                    out.write(f"[mock-tests] {note}\n")
+            else:
+                v, note = evaluate(outcome)
             result = TrialResult(
                 candidate=candidate,
                 verdict=v,
                 duration_s=time.time() - start,
                 rebuilt=getattr(outcome, "rebuilt", False),
-                exit_code=outcome.exit_code,
+                exit_code=None if self.opt.mock_tests else outcome.exit_code,
                 log_path=str(log_path),
                 note=note,
             )
-        except BuildError as exc:
+        except BuildTransitionError as exc:
+            raise BisectFatalError(
+                f"Environment transition failed at {candidate.short}; log: {log_path}\n{exc}"
+            ) from exc
+        except DEPLOY_ERRORS as exc:
+            logger.error("Candidate %s deployment failed: %s", candidate.short, exc)
             result = TrialResult(
                 candidate=candidate,
                 verdict="SKIP",
@@ -128,7 +143,7 @@ class Bisector:
 
         # Flaky guard: re-confirm a FAIL; if a retry passes, the commit is
         # unreliable and must not be used as a bisect boundary -> SKIP.
-        if result.verdict == "FAIL" and self.opt.fail_confirm_retries > 0:
+        if result.verdict == "FAIL" and self.opt.fail_confirm_retries > 0 and not self.opt.mock_tests:
             for i in range(self.opt.fail_confirm_retries):
                 logger.info("Confirming FAIL for %s (%d/%d)", candidate.short, i + 1, self.opt.fail_confirm_retries)
                 retry = self._run_trial(candidate)
@@ -152,7 +167,7 @@ class Bisector:
             if v == "SKIP":
                 logger.error(
                     "Bad commit could not even run the test (environment error, "
-                    "e.g. vllm/vllm-ascend version mismatch). Fix the environment "
+                    "e.g. dependency adaptation failed). Fix the environment "
                     "before bisecting; aborting."
                 )
                 return False
@@ -168,7 +183,7 @@ class Bisector:
             if v == "SKIP":
                 logger.error(
                     "Good baseline could not even run the test (environment error, "
-                    "e.g. vllm/vllm-ascend version mismatch). The whole range is "
+                    "e.g. dependency adaptation failed). The whole range is "
                     "likely unrunnable against the installed vllm; fix the "
                     "environment before bisecting; aborting."
                 )
@@ -223,23 +238,43 @@ class Bisector:
 
         candidates = git_ops.candidate_list(self.repo, good.commit, bad.commit)
         logger.info("Search space: %d commits", len(candidates))
-
-        state = BisectState.load(self.state_path, good=good.commit, bad=bad.commit) or BisectState(
-            good=good.commit, bad=bad.commit, hi=len(candidates) - 1
-        )
+        if self.opt.mock_tests:
+            self._mock_indices = {candidate.commit: index for index, candidate in enumerate(candidates)}
+            self._mock_bad_index = len(candidates) // 2
+            logger.warning(
+                "MOCK TESTS: preparing real environments without pytest; synthetic FAIL starts at candidate %d. "
+                "No regression conclusion will be reported.",
+                self._mock_bad_index,
+            )
+        state = (
+            None if self.opt.mock_tests else BisectState.load(self.state_path, good=good.commit, bad=bad.commit)
+        ) or BisectState(good=good.commit, bad=bad.commit, hi=len(candidates) - 1)
 
         # finish() publishes the DONE sentinel that releases multi-node workers;
         # it must run on every exit path (including a barrier timeout or any
         # error) so workers never hang waiting for the next round.
         try:
             if not self._verify_endpoints(good, candidates, state):
-                report.write_report_json(
-                    self.report_path, inp=self.inp, good=good, bad=bad, first_bad=None, trials=self.trials
-                )
+                self._write_report(good, bad, first_bad=None)
                 return None
             first_bad = self._bisect(candidates, state)
+        except BisectFatalError:
+            # Unrecoverable environment (e.g. no multi-node worker ever joined):
+            # still leave a report so the run is auditable, then propagate so
+            # main() can exit with code 2.
+            self._write_report(good, bad, first_bad=None)
+            raise
         finally:
             self.runner.finish()
+
+        if self.opt.mock_tests:
+            failed_preparations = [trial for trial in self.trials if trial.verdict == "SKIP"]
+            if failed_preparations:
+                logger.error("MOCK TESTS: %d candidate environment preparations failed", len(failed_preparations))
+            else:
+                logger.info("MOCK TESTS: environment preparation completed; no model tests ran")
+            self._write_report(good, bad, first_bad=None)
+            return None if failed_preparations else first_bad
 
         if first_bad is not None:
             # If the culprit fell inside a skipped region it is only a *suspect*
@@ -253,16 +288,29 @@ class Bisector:
                     first_bad.short,
                 )
             report.print_conclusion(first_bad, self.trials)
-        report.write_report_json(
-            self.report_path, inp=self.inp, good=good, bad=bad, first_bad=first_bad, trials=self.trials
-        )
+        self._write_report(good, bad, first_bad=first_bad)
         return first_bad
+
+    def _write_report(self, good: Candidate, bad: Candidate, first_bad: Candidate | None) -> None:
+        """Write report.json (single writer for every exit path of run())."""
+        report.write_report_json(
+            self.report_path,
+            inp=self.inp,
+            good=good,
+            bad=bad,
+            first_bad=first_bad,
+            trials=self.trials,
+            mock_tests=self.opt.mock_tests,
+        )
 
     def _resolve_good(self) -> str:
         if self.inp.good_commit:
             return self.inp.good_commit
         entry = GoodTable(self.opt.good_table_path).lookup_last_good(
-            name=self.inp.name, config_yaml=self.inp.config_yaml
+            name=self.inp.name,
+            config_yaml=self.inp.config_yaml,
+            soc=self.inp.soc,
+            scene=self.inp.scene,
         )
         if entry is None:
             raise SystemExit(
@@ -294,7 +342,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--name",
         default=None,
-        help="nightly case name to match the good-table 'name' column (optional; falls back to matching by yaml/path)",
+        help="case name to match the good-table 'name' column (optional; falls back to matching by yaml/path)",
+    )
+    p.add_argument(
+        "--soc",
+        required=True,
+        type=valid_soc,
+        help="hardware generation used to select the matching good-table row",
     )
     p.add_argument("--bad-commit", default=os.getenv("VLLM_ASCEND_REF", "HEAD"))
     p.add_argument("--good-commit", default=None, help="override; else read from good table")
@@ -315,6 +369,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="this node's index; defaults to $LWS_WORKER_INDEX (set by LWS), else 0",
     )
     p.add_argument("--coord-dir", default=DEFAULT_COORD_DIR, help="shared barrier dir (multi-node)")
+    p.add_argument("--run-scoped-coord", action="store_true", help="coord and release paths are unique to this run")
     p.add_argument(
         "--release-file",
         default=None,
@@ -332,14 +387,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--fail-confirm-retries", type=int, default=1)
     p.add_argument("--no-verify-good", action="store_true")
     p.add_argument("--no-verify-bad", action="store_true")
+    p.add_argument(
+        "--mock-tests",
+        action="store_true",
+        help=(
+            "prepare each tested candidate's real environment, but simulate PASS/FAIL "
+            "without running pytest (single-node only)"
+        ),
+    )
     p.add_argument("--trial-timeout-s", type=float, default=7200.0)
     p.add_argument(
         "--force-initial-build",
         action="store_true",
-        help="clean-rebuild on the first trial instead of trusting the container's existing build at HEAD",
+        help="replay the target base image and full build chain before the first actual trial",
     )
     p.add_argument(
-        "--no-assume-built-head", action="store_true", help="do not treat the container's HEAD as already built"
+        "--no-assume-built-head",
+        action="store_true",
+        help="initialize from the target base image and full build chain instead of trusting HEAD",
     )
     p.add_argument(
         "--native-check",
@@ -385,18 +450,23 @@ def _resolve_num_nodes(args: argparse.Namespace, repo_dir: Path) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    if args.mock_tests and args.scene == SCENE_MULTI:
+        raise SystemExit("--mock-tests currently supports only --scene single_node")
     repo_dir = Path(args.repo_dir)
     num_nodes = _resolve_num_nodes(args, repo_dir)
     inp = BisectInput(
         scene=args.scene,
         config_yaml=args.config_yaml,
         name=args.name,
+        soc=args.soc,
         bad_commit=args.bad_commit,
         config_base_path=args.config_base_path,
         good_commit=args.good_commit,
     )
     opt = BisectOptions(
         repo_dir=repo_dir,
+        soc=args.soc,
+        mock_tests=args.mock_tests,
         work_dir=args.work_dir,
         coord_dir=args.coord_dir,
         good_table_path=args.good_table,
@@ -406,6 +476,7 @@ def main(argv: list[str] | None = None) -> int:
         num_nodes=num_nodes,
         node_index=args.node_index,
         release_file=args.release_file,
+        run_scoped_coord=args.run_scoped_coord,
         barrier_timeout_s=args.barrier_timeout_s,
         trial_timeout_s=args.trial_timeout_s,
         assume_built_head=not args.no_assume_built_head,
@@ -419,9 +490,16 @@ def main(argv: list[str] | None = None) -> int:
 
         return run_worker(inp, opt)
 
-    first_bad = Bisector(inp, opt).run()
+    try:
+        first_bad = Bisector(inp, opt).run()
+    except BisectFatalError as exc:
+        logger.error("Bisect aborted: %s", exc)
+        return 2
     return 0 if first_bad is not None else 2
 
 
 if __name__ == "__main__":
+    from tools.bisect.tool_env import ensure_tool_environment
+
+    ensure_tool_environment()
     raise SystemExit(main())

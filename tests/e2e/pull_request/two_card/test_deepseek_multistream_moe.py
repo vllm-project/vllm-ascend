@@ -32,7 +32,7 @@ def test_deepseek_multistream_moe_tp2():
         cudagraph_capture_sizes=[1, 2, 4, 8],
         distributed_executor_backend="mp",
         additional_config={
-            "enable_multistream_moe": True,
+            "multistream_overlap_shared_expert": True,
             "refresh": True,
         },
     ) as vllm_model:

@@ -281,6 +281,8 @@ public:
     int64_t oriWinRight = 0;
     int64_t sparseBlockSize = 0;
     int64_t sparseBlockCount = 0;
+    bool hasOriSparseIndices = false;
+    uint32_t oriSparseIndexWidth = 0;
     // Mask
     int32_t sparseMode = 0;
     // Others Flag
@@ -405,6 +407,9 @@ public:
     gert::Shape oriKvShape_{};
     gert::Shape cmpKvShape_{};
     gert::Shape cmpSparseIndicesShape_{};
+    gert::Shape oriSparseIndicesShape_{};
+    bool hasOriSparseIndices_ = false;
+    uint32_t oriSparseIndexWidth_ = 0;
 };
 
 class KvQuantSASTilingCheck {

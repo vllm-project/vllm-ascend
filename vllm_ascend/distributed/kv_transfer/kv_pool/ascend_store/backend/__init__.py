@@ -14,7 +14,11 @@
 # limitations under the License.
 #
 
-backend_map = {
+import importlib
+from collections.abc import Mapping
+from typing import Any
+
+backend_map: dict[str, dict[str, str]] = {
     "mooncake": {
         "name": "MooncakeBackend",
         "path": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend",
@@ -28,3 +32,21 @@ backend_map = {
         "path": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend",
     },
 }
+
+
+def get_backend_class(backend_name: str) -> type[Any] | None:
+    """Resolve a backend without constructing its store client."""
+    return _load_backend_class(backend_name.strip().lower())
+
+
+def resolve_backend(extra_config: Mapping[str, Any]) -> tuple[str, type[Any] | None]:
+    """Resolve the configured name and class, preserving strict whitespace validation."""
+    backend_name = str(extra_config.get("backend", "mooncake")).lower()
+    return backend_name, _load_backend_class(backend_name)
+
+
+def _load_backend_class(backend_name: str) -> type[Any] | None:
+    backend = backend_map.get(backend_name)
+    if backend is None:
+        return None
+    return getattr(importlib.import_module(backend["path"]), backend["name"])

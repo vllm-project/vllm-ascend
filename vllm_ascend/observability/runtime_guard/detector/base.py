@@ -1,0 +1,160 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING, Any
+
+from vllm_ascend.observability.runtime_guard.io import normalize_token_ids
+from vllm_ascend.observability.runtime_guard.state import Incident
+
+if TYPE_CHECKING:
+    from vllm_ascend.observability.runtime_config.config import RuntimeConfig
+    from vllm_ascend.observability.runtime_config.schema import DetectorSchema
+
+
+def resolve_batch_req_ids(runner: Any, req_ids: list[str] | None) -> list[str]:
+    """Pass-through when the caller provides ids; else read the runner batch.
+
+    ``check_after_sample`` hooks may be called with explicit ids (processor
+    knows the step's rows) or ``None`` (fallback to ``runner.input_batch``).
+    """
+    if req_ids is not None:
+        return req_ids
+    input_batch = getattr(runner, "input_batch", None) if runner is not None else None
+    return list(getattr(input_batch, "req_ids", None) or [])
+
+
+class AnomalyDetector:
+    """Base detector: returns ``Incident`` values; processor runs actions."""
+
+    incident_type: str = "unknown"
+
+    def __init__(
+        self,
+        *,
+        runtime_config: RuntimeConfig | None = None,
+        runner: Any | None = None,
+        enabled: bool = True,
+    ) -> None:
+        self._runtime_config = runtime_config
+        self._runner = runner
+        self._enabled = bool(enabled)
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def refresh_from_config(self) -> None:
+        """Pull live knobs from ``RuntimeConfig`` (default: no-op)."""
+        return
+
+    def clear_finished(self, req_id: str) -> None:
+        """Drop per-request state when a request finishes."""
+
+    def on_disabled(self) -> None:
+        """Drop all private per-req state when this detector is turned off.
+
+        Shared Store IO (prompt / output) is not owned here — the processor
+        soft-purges outputs only when *all* detectors go off. Override when
+        the detector keeps windows, history, or deferred queues.
+        """
+
+    def on_alert_armed(self, alert: Incident) -> None:
+        """Optional hook after dump arm or detect-only alert handling."""
+
+    def _precheck(self) -> bool:
+        """Return whether this detector is enabled (refresh if config moved).
+
+        :class:`ConfigBackedDetector` no-ops the refresh when
+        ``RuntimeConfig.config_version`` is unchanged so per-step checks do
+        not re-apply thresholds; curl / hot-reload cascade still force a
+        refresh by bumping the version first.
+        """
+        self.refresh_from_config()
+        return self._enabled
+
+    @staticmethod
+    def _normalize_token_ids(token_ids: Any) -> list[int]:
+        return normalize_token_ids(token_ids)
+
+
+class ConfigBackedDetector(AnomalyDetector):
+    """Detector whose enable flag and thresholds live in ``detector.<section>``.
+
+    Subclasses declare ``schema: DetectorSchema`` (fields + defaults). Register
+    the class in ``runtime_config.detector_catalog.REGISTERED_DETECTOR_TYPES``
+    so defaults / validate / control panel pick it up automatically.
+    """
+
+    section_key: str = ""
+    schema: DetectorSchema | None = None
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # None = never applied; skip refresh only after a successful apply.
+        self._applied_config_version: float | None = None
+
+    def refresh_from_config(self) -> None:
+        if self._runtime_config is None:
+            return
+        try:
+            version = float(self._runtime_config.config_version)
+        except (TypeError, ValueError, AttributeError):
+            # Tests may pass a bare MagicMock without config_version.
+            version = 0.0
+        if self._applied_config_version is not None and version == self._applied_config_version:
+            return
+        if self.section_key:
+            section = self._runtime_config.detector_section(self.section_key)
+        else:
+            section = self._runtime_config.detector
+        self._apply_detector_section(section)
+        self._applied_config_version = version
+
+    def _apply_detector_section(self, section: dict[str, Any] | None) -> None:
+        if not isinstance(section, dict):
+            return
+        was_enabled = bool(self._enabled)
+        self._enabled = bool(section.get("enabled", self._enabled))
+        self._apply_detector_values(section.get)
+        if was_enabled and not self._enabled:
+            self.on_disabled()
+
+    def _apply_detector_values(self, getter: Callable[[str, Any], Any]) -> None:
+        raise NotImplementedError(f"{type(self).__name__} must implement _apply_detector_values")
+
+
+class DetectorRegistry:
+    """Ordered registry keyed by ``AnomalyDetector.incident_type``."""
+
+    def __init__(self) -> None:
+        self._items: list[AnomalyDetector] = []
+        self._by_type: dict[str, AnomalyDetector] = {}
+
+    def register(self, detector: AnomalyDetector) -> AnomalyDetector:
+        key = str(getattr(detector, "incident_type", "") or type(detector).__name__)
+        if key in self._by_type:
+            raise ValueError(f"detector incident_type already registered: {key}")
+        self._items.append(detector)
+        self._by_type[key] = detector
+        return detector
+
+    def get(self, incident_type: str) -> AnomalyDetector | None:
+        return self._by_type.get(incident_type)
+
+    def __iter__(self) -> Iterator[AnomalyDetector]:
+        return iter(self._items)

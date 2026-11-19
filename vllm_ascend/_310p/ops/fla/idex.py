@@ -16,8 +16,8 @@
 # from collections.abc import Iterable
 # mypy: ignore-errors
 import torch
-from vllm.model_executor.layers.fla.ops.index import prepare_lens
-from vllm.model_executor.layers.fla.ops.utils import tensor_cache
+from vllm.third_party.flash_linear_attention.ops.index import prepare_lens
+from vllm.third_party.flash_linear_attention.ops.utils import tensor_cache
 
 
 @tensor_cache

@@ -20,6 +20,8 @@
 import torch
 from vllm.v1.worker.gpu.states import RequestState
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class AscendRequestState(RequestState):
     """Request state for Ascend NPUs."""
@@ -32,6 +34,7 @@ class AscendRequestState(RequestState):
         num_speculative_steps: int,
         vocab_size: int,
         device: torch.device,
+        use_dense_all_token_ids: bool = False,
     ):
         super().__init__(
             max_num_reqs,
@@ -40,32 +43,9 @@ class AscendRequestState(RequestState):
             num_speculative_steps,
             vocab_size,
             device,
+            # v0.31.0 predates the dense history option used by MRV2 n-gram.
+            **({} if vllm_version_is("0.31.0") else {"use_dense_all_token_ids": use_dense_all_token_ids}),
         )
-        # vllm gpu_model_runner_v2 deprecate the seqs_lens_cpu attribute,
-        # because they think most attention backends do not need it.
-        # However, Ascend attention backend muse uses seqs_lens_cpu,
-        # so we keep num_computed_tokens_cpu here, seq_lens_cpu need to be
-        # calculated by num_computed_tokens_cpu + decode_token_per_req outside.
-        self.num_computed_tokens_cpu: torch.Tensor = torch.zeros(
-            self.max_num_reqs,
-            dtype=torch.int32,
-            device="cpu",
-        )
-
-    def add_request(
-        self,
-        req_id,
-        prompt_len,
-        all_token_ids,
-        num_computed_tokens,
-        max_tokens=None,
-    ):
-        super().add_request(
-            req_id,
-            prompt_len,
-            all_token_ids,
-            num_computed_tokens,
-            max_tokens=max_tokens,
-        )
-        req_idx = self.req_id_to_index[req_id]
-        self.num_computed_tokens_cpu[req_idx] = num_computed_tokens
+        # Ascend attention needs a torch CPU view of the upstream NumPy state.
+        # Sharing storage keeps both APIs coherent without duplicate writes.
+        self.num_computed_tokens_cpu: torch.Tensor = torch.from_numpy(self.num_computed_tokens_np)

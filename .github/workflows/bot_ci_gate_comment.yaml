@@ -1,0 +1,247 @@
+#
+# Copyright (c) 2026 vLLM Ascend contributors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: CI Gate Comment
+
+# Posts (or removes, or updates in place) the ci-gate failure comment on the PR.
+#
+# Why a separate workflow_run workflow: fork PRs get a read-only
+# GITHUB_TOKEN under `pull_request`, so the ci-gate job itself cannot post
+# comments. `workflow_run` always runs in the base repository context with
+# the base workflow file and a writable token, for same-repo and fork PRs
+# alike. This workflow only reads the gate-result artifact produced by the
+# trusted ci-gate job and talks to the GitHub API - it never checks out or
+# executes code from the PR, which keeps the write token out of reach of
+# untrusted input (the safe pull_request_target-style pattern).
+
+on:
+  workflow_run:
+    workflows:
+      - "E2E" # pr_test.yaml, the gate verdict itself
+      - "CI Gate Refresh" # bot_ci_gate_refresh.yaml, failure contract of the review retrigger
+    types:
+      - completed
+
+permissions:
+  actions: read # download the gate-result artifact
+  issues: write # PR comments are issue comments
+  pull-requests: write
+
+concurrency:
+  # Key by head SHA so multiple E2E runs on the same commit (opened /
+  # synchronize / labeled / review) collapse into a single comment job: the
+  # comment is posted once per failure and updated in place afterwards, so
+  # only the latest verdict matters and the rest are no-ops (older commits
+  # are additionally skipped by the staleness guard below). Do NOT key by workflow_run.id (one job per run, no dedup, so
+  # they pile up in the runner queue) or by pull_requests[0].number (that array
+  # is unreliable/empty for workflow_run, which would collapse every PR into
+  # one group and cancel unrelated PRs' comments).
+  group: ci-gate-comment-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: true
+
+jobs:
+  comment:
+    # Only runs that actually produced a verdict are interesting; cancelled
+    # / timed_out / skipped runs have no gate result worth commenting on.
+    if: ${{ contains(fromJSON('["success", "failure"]'), github.event.workflow_run.conclusion) }}
+    runs-on: linux-amd64-cpu-2-hk
+    steps:
+      - name: Download gate result artifact
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          name: ci-gate-result-${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: result
+
+      - name: Download gate details artifact
+        # May not exist on runs older than the artifact's introduction; the
+        # comment simply omits those sections then.
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          name: codeowner-details-${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: details
+        continue-on-error: true
+
+      - name: Post or remove the failure comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.request
+
+          # The gate result artifact is missing when the run was cancelled
+          # before packaging; nothing to comment in that case.
+          try:
+              with open("result/ci-gate-result.json") as f:
+                  result = json.load(f)
+          except FileNotFoundError:
+              print("no gate result artifact (run cancelled?); skipping")
+              sys.exit(0)
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          token = os.environ["GH_TOKEN"]
+          pr = result["pr"]
+          conclusion = result["conclusion"]
+          head_sha = result.get("head_sha")
+          reason = result.get("reason") or (
+              "ci-gate failed; open the workflow run for the detailed log."
+          )
+          run_url = os.environ["RUN_URL"]
+          marker = "<!-- vllm-ascend-ci-gate-failure -->"
+
+          def api(path, method="GET", payload=None):
+              request = urllib.request.Request(
+                  f"https://api.github.com{path}",
+                  method=method,
+                  data=json.dumps(payload).encode() if payload is not None else None,
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "Content-Type": "application/json",
+                  },
+              )
+              with urllib.request.urlopen(request) as response:
+                  data = response.read()
+                  return json.loads(data) if data else {}
+
+          # Staleness guard: `workflow_run` fires for runs of ANY commit on
+          # this PR. If newer commits were pushed while this run was in
+          # flight, its verdict is outdated - acting on it could delete a
+          # comment or state a failure that no longer applies to the
+          # current head. Newer runs will handle the current head instead.
+          current_head = api(f"/repos/{repo}/pulls/{pr}")["head"]["sha"]
+          if head_sha and current_head != head_sha:
+              print(f"result is for stale head {head_sha[:7]} "
+                    f"(current: {current_head[:7]}); skipping")
+              sys.exit(0)
+
+          # Find the previous failure comment (hidden marker). Comments are
+          # paginated: a busy PR can push the marker comment past page 1.
+          old_id = None
+          old_body = None
+          url = f"/repos/{repo}/issues/{pr}/comments?per_page=100"
+          while url and old_id is None:
+              request = urllib.request.Request(
+                  f"https://api.github.com{url}",
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                  },
+              )
+              with urllib.request.urlopen(request) as response:
+                  comments = json.load(response)
+                  link = response.headers.get("Link", "")
+              for comment in comments:
+                  if comment.get("body", "").startswith(marker):
+                      old_id = comment["id"]
+                      old_body = comment.get("body", "")
+                      break
+              nxt = None
+              for part in link.split(","):
+                  segment = part.strip()
+                  if segment.endswith('rel="next"'):
+                      nxt = segment[segment.index("<") + 1 : segment.index(">")]
+              url = nxt[len("https://api.github.com"):] if nxt else None
+
+          if conclusion == "success":
+              if old_id:
+                  api(f"/repos/{repo}/issues/comments/{old_id}", method="DELETE")
+                  print("gate passed; removed stale failure comment")
+              else:
+                  print("gate passed; no failure comment to remove")
+              sys.exit(0)
+
+          body = (
+              f"{marker}\n"
+              "**ci-gate failed.** Reason:\n\n"
+              f"> {reason}\n\n"
+              f"See the [workflow run]({run_url}) for full logs. This "
+              "comment is updated in place on each new failure and "
+              "removed once the gate passes."
+          )
+          # Per-file CODEOWNERS details: files still missing owner
+          # approvals (with the exact owners to ask) and files with no
+          # owner at all (no approval required for them).
+          def read_detail(name):
+              try:
+                  with open(f"details/{name}") as f:
+                      return [line.strip() for line in f if line.strip()]
+              except OSError:
+                  return []
+
+          coverage_errors = read_detail("coverage_errors.txt")
+          if coverage_errors:
+              listing = "\n".join(f"- {line}" for line in coverage_errors)
+              body += (
+                  "\n\n**CODEOWNERS health issues** (these block every "
+                  "PR until fixed):\n"
+                  f"{listing}"
+              )
+          approval_failures = read_detail("approval_failures.txt")
+          if approval_failures:
+              listing = "\n".join(f"- {line}" for line in approval_failures)
+              body += (
+                  "\n\n**Missing owner approvals.** Every changed file "
+                  "needs one approval from its CODEOWNERS owner(s):\n"
+                  f"{listing}"
+              )
+          self_owned = read_detail("self_owned_files.txt")
+          if self_owned:
+              listing = "\n".join(f"- `{path}`" for path in self_owned)
+              body += (
+                  "\n\n**Self-owned modules touched.** The only CODEOWNERS "
+                  "owner of these files is the PR author, so no additional "
+                  "approval is required; consider adding a co-owner:\n"
+                  f"{listing}"
+              )
+          unclaimed = read_detail("unclaimed_files.txt")
+          if unclaimed:
+              listing = "\n".join(f"- `{path}`" for path in unclaimed)
+              plural = "s" if len(unclaimed) != 1 else ""
+              body += (
+                  f"\n\n**Unclaimed module{plural} touched "
+                  f"({len(unclaimed)} file{plural}).** These files have no "
+                  "CODEOWNERS owner yet, so no approval is required for "
+                  "them; maintainers will handle claiming:\n"
+                  f"{listing}"
+              )
+
+          # First failure of this streak: post a fresh comment so it lands at
+          # the bottom of the timeline and notifies participants. A repeated
+          # failure only edits the existing comment in place - edits are
+          # silent on GitHub, so maintainers are notified once per failure
+          # streak instead of on every failing push.
+          if old_id:
+              if body == old_body:
+                  print("failure unchanged; existing comment already up to date")
+              else:
+                  api(f"/repos/{repo}/issues/comments/{old_id}", method="PATCH",
+                      payload={"body": body})
+                  print(f"updated failure comment in place on PR {pr}")
+          else:
+              api(f"/repos/{repo}/issues/{pr}/comments", method="POST",
+                  payload={"body": body})
+              print(f"posted failure comment on PR {pr}")
+          PY

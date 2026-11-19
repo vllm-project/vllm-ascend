@@ -1,10 +1,14 @@
 """MkDocs macros plugin main module.
 
 Exposes version variables from mkdocs.yml extra configuration as Jinja2 macros.
-Variables are defined in the 'extra' section of mkdocs.yml.
+Variables are defined in the 'extra' section of mkdocs.yml, except the main
+development stack versions, which derive from requirements.txt via the
+`req_version` macro so the pins have a single source of truth.
 """
 
 from pathlib import Path
+
+import regex as re
 
 # UI string translations keyed by DOCS_LANG. Injected into config.extra.i18n
 # in define_env() so override templates (e.g. docs/overrides/main.html) can
@@ -15,14 +19,14 @@ UI_STRINGS = {
     "en": {
         "banner_preview": "You are viewing the latest developer preview docs.",
         "banner_link": "Click here",
-        "banner_suffix": "to view docs for the latest stable release (v0.18.0).",
+        "banner_suffix": "to view docs for the latest stable release ({version}).",
         "btn_report": "report issue",
         "aria_report": "Report a documentation issue",
     },
     "zh": {
         "banner_preview": "您正在查看最新的开发者预览版文档。",
         "banner_link": "点击此处",
-        "banner_suffix": "查看最新稳定版（v0.18.0）的文档。",
+        "banner_suffix": "查看最新稳定版（{version}）的文档。",
         "btn_report": "反馈问题",
         "aria_report": "报告文档问题",
     },
@@ -45,26 +49,38 @@ def define_env(env):
     if tag_path.exists():
         main_vllm_tag = tag_path.read_text(encoding="utf-8").strip()
 
-    # Declare variables (these are also in mkdocs.yml 'extra' section)
-    env.variables["vllm_version"] = env.variables.get("vllm_version", "v0.22.1")
-    env.variables["vllm_ascend_version"] = env.variables.get("vllm_ascend_version", "v0.22.1rc1")
-    env.variables["pip_vllm_ascend_version"] = env.variables.get("pip_vllm_ascend_version", "0.22.1rc1")
-    env.variables["pip_vllm_version"] = env.variables.get("pip_vllm_version", "0.22.1")
-    env.variables["cann_image_tag"] = env.variables.get("cann_image_tag", "9.0.1-910b-ubuntu22.04-py3.12")
-    env.variables["main_python_version"] = env.variables.get("main_python_version", ">= 3.10, < 3.13")
-    env.variables["main_cann_version"] = env.variables.get("main_cann_version", "9.0.1")
-    env.variables["main_pytorch_torch_npu_version"] = env.variables.get(
-        "main_pytorch_torch_npu_version", "2.10.0 / 2.10.0.post2"
-    )
-    env.variables["main_triton_ascend_version"] = env.variables.get("main_triton_ascend_version", "3.2.1")
+    # Static release stack variables come from mkdocs.yml. The main stack
+    # versions derive from requirements.txt via req_version() so maintainers
+    # only update the pins once.
     env.variables["main_vllm_commit"] = main_vllm_commit
     env.variables["main_vllm_tag"] = main_vllm_tag
+
+    requirements_path = repo_root / "requirements.txt"
+    requirements_lines = (
+        requirements_path.read_text(encoding="utf-8").splitlines() if requirements_path.exists() else []
+    )
+
+    @env.macro
+    def req_version(name):
+        """Return the pinned version of a package from requirements.txt."""
+        for line in requirements_lines:
+            match = re.match(r"^" + re.escape(name) + r"(?:===|==)(\S+)$", line)
+            if match:
+                return match.group(1)
+        return "unknown"
 
     # Expose UI translations to override templates by attaching the dict
     # to config.extra. See module docstring for the rationale.
     config = env.variables.get("config")
     if config is not None:
-        config.extra["i18n"] = UI_STRINGS
+        stable_version = env.variables["stable_vllm_ascend_version"]
+        config.extra["i18n"] = {
+            language: {
+                **strings,
+                "banner_suffix": strings["banner_suffix"].format(version=stable_version),
+            }
+            for language, strings in UI_STRINGS.items()
+        }
 
     @env.macro
     def include_code(file_path, start_after=None, end_before=None, language="python"):

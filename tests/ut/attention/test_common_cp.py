@@ -1,0 +1,217 @@
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import torch
+from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
+
+from tests.ut.attention.utils import _update_out_and_lse
+from vllm_ascend.attention.context_parallel import common_cp
+from vllm_ascend.attention.context_parallel.common_cp import (
+    DCPImplMixin,
+    DCPMetadataBuilderMixin,
+    use_dcp_q_replicate,
+)
+
+
+class TestCommonCP(unittest.TestCase):
+    def test_get_dcp_local_seq_lens(self):
+        seq_lens = torch.tensor([1, 4, 5, 8, 9], dtype=torch.int32)
+
+        actual = get_dcp_local_seq_lens(
+            seq_lens,
+            dcp_size=2,
+            cp_kv_cache_interleave_size=4,
+        )
+
+        expected = torch.tensor(
+            [
+                [1, 0],
+                [4, 0],
+                [4, 1],
+                [4, 4],
+                [5, 4],
+            ],
+            dtype=torch.int32,
+        )
+        torch.testing.assert_close(actual, expected)
+
+    def test_get_dcp_local_seq_lens_preserves_input_dimensions(self):
+        seq_lens = torch.tensor(
+            [[1, 4], [5, 8]],
+            dtype=torch.int32,
+        )
+
+        actual = get_dcp_local_seq_lens(
+            seq_lens,
+            dcp_size=2,
+            cp_kv_cache_interleave_size=4,
+        )
+
+        self.assertEqual(actual.shape, (2, 2, 2))
+        torch.testing.assert_close(
+            actual,
+            torch.tensor(
+                [
+                    [[1, 0], [4, 0]],
+                    [[4, 1], [4, 4]],
+                ],
+                dtype=torch.int32,
+            ),
+        )
+
+    @patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group")
+    def test_metadata_builder_mixin_reads_dcp_group_once(
+        self,
+        mock_get_dcp_group,
+    ):
+        class BaseBuilder:
+            def __init__(self):
+                self.base_initialized = True
+
+        class Builder(DCPMetadataBuilderMixin, BaseBuilder):
+            pass
+
+        mock_get_dcp_group.return_value.world_size = 4
+        mock_get_dcp_group.return_value.rank_in_group = 2
+        builder = Builder()
+
+        self.assertTrue(builder.base_initialized)
+        self.assertEqual(builder.dcp_size, 4)
+        self.assertEqual(builder.dcp_rank, 2)
+        mock_get_dcp_group.assert_called_once_with()
+
+    @patch("vllm_ascend.attention.context_parallel.common_cp.get_tp_group")
+    @patch("vllm_ascend.attention.context_parallel.common_cp.get_pcp_group")
+    @patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group")
+    def test_impl_mixin_reuses_the_initialized_dcp_group(
+        self,
+        mock_get_dcp_group,
+        mock_get_pcp_group,
+        mock_get_tp_group,
+    ):
+        class BaseImpl:
+            def __init__(self):
+                self.base_initialized = True
+
+        class Impl(DCPImplMixin, BaseImpl):
+            pass
+
+        group = mock_get_dcp_group.return_value
+        group.world_size = 2
+        group.rank_in_group = 1
+        group.device_group = object()
+        impl = Impl()
+
+        self.assertTrue(impl.base_initialized)
+        self.assertIs(impl.dcp_group, group)
+        self.assertIs(impl.dcp_device_group, group.device_group)
+        self.assertIs(impl.pcp_group, mock_get_pcp_group.return_value)
+        self.assertIs(impl.tp_group, mock_get_tp_group.return_value)
+        mock_get_dcp_group.assert_called_once_with()
+        mock_get_pcp_group.assert_called_once_with()
+        mock_get_tp_group.assert_called_once_with()
+
+    def test_update_out_and_lse(self):
+        # Mock input data: [N, batch, heads, head_size/1]
+        out_list = torch.randn(3, 2, 4, 8)
+        lse_list = torch.randn(3, 2, 4, 1)
+
+        # Call the method under test
+        out_final, lse_final = _update_out_and_lse(out_list, lse_list)
+
+        # Assert shapes
+        self.assertEqual(out_final.shape, (2, 4, 8))
+        self.assertEqual(lse_final.shape, (2, 4, 1))
+        self.assertIsInstance(out_final, torch.Tensor)
+        self.assertIsInstance(lse_final, torch.Tensor)
+
+    def test_out_lse_reshape(self):
+        # Mock input data
+        out_list = torch.randn(3, 2, 4, 8)  # [N, batch_size, num_heads, head_size]
+        lse_list = torch.randn(3, 2, 4, 1)  # [N, batch_size, num_heads, 1]
+
+        # Call the method under test
+        out_final, lse_final = _update_out_and_lse(out_list, lse_list)
+
+        # Assert the method call
+        self.assertEqual(out_final.shape, (2, 4, 8))  # [batch_size, num_heads, head_size]
+        self.assertEqual(lse_final.shape, (2, 4, 1))  # [batch_size, num_heads, 1]
+
+        self.assertIsInstance(out_final, torch.Tensor)
+        self.assertIsInstance(lse_final, torch.Tensor)
+
+
+def test_fragment_gather_keeps_kv_on_the_dcp_token_axis():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    impl = DCPImplMixin.__new__(DCPImplMixin)
+    impl.dcp_size = 4
+    impl.pcp_group = SimpleNamespace(world_size=2)
+    impl.tp_group = SimpleNamespace(all_gather=Mock(side_effect=AssertionError("KV must use DCP")))
+    impl.dcp_group = SimpleNamespace(all_gather=Mock(side_effect=lambda x, dim: torch.cat([x] * 4, dim=dim)))
+    k_nope = torch.arange(6).float().view(2, 1, 3)
+    k_pe = torch.arange(4).float().view(2, 1, 2)
+    out_nope, out_pe = impl._dcp_all_gather_fragments(k_nope, k_pe, dim=0)
+    torch.testing.assert_close(out_nope, torch.cat([k_nope] * 4, dim=0))
+    torch.testing.assert_close(out_pe, torch.cat([k_pe] * 4, dim=0))
+    impl.tp_group.all_gather.assert_not_called()
+    impl.dcp_group.all_gather.assert_called_once()
+
+
+class TestDCPQReplicationConfig(unittest.TestCase):
+    @staticmethod
+    def _make_dcp_q_replicate_config(requested=True, **hf_config):
+        return SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(**hf_config)),
+            parallel_config=SimpleNamespace(
+                dcp_q_replicate=requested,
+                decode_context_parallel_size=2,
+                prefill_context_parallel_size=1,
+            ),
+            lora_config=None,
+        )
+
+    def test_request_precedence(self):
+        for requested, legacy, expected in [
+            (False, None, False),
+            (True, None, True),
+            (False, True, True),
+            (True, False, False),
+        ]:
+            with (
+                self.subTest(requested=requested, legacy=legacy, expected=expected),
+                patch.object(common_cp.envs, "is_set", return_value=legacy is not None),
+                patch.object(common_cp.envs, "VLLM_DCP_Q_REPLICATE", legacy, create=True),
+            ):
+                self.assertIs(
+                    use_dcp_q_replicate(self._make_dcp_q_replicate_config(requested)),
+                    expected,
+                )
+
+    def test_sparse_q_replication_is_disabled(self):
+        for legacy in (None, True):
+            with (
+                self.subTest(legacy=legacy),
+                patch.object(common_cp.envs, "is_set", return_value=legacy is not None),
+                patch.object(common_cp.envs, "VLLM_DCP_Q_REPLICATE", legacy, create=True),
+            ):
+                self.assertFalse(use_dcp_q_replicate(self._make_dcp_q_replicate_config(index_topk=2048)))
+
+    def test_lora_q_replication_is_disabled(self):
+        config = self._make_dcp_q_replicate_config()
+        config.lora_config = SimpleNamespace()
+        for legacy in (None, True):
+            with (
+                self.subTest(legacy=legacy),
+                patch.object(common_cp.envs, "is_set", return_value=legacy is not None),
+                patch.object(common_cp.envs, "VLLM_DCP_Q_REPLICATE", legacy, create=True),
+            ):
+                self.assertFalse(use_dcp_q_replicate(config))
+
+    def test_compressed_attention_is_not_classified_as_sfa(self):
+        with patch.object(common_cp.envs, "is_set", return_value=False):
+            self.assertTrue(
+                use_dcp_q_replicate(self._make_dcp_q_replicate_config(index_topk=2048, compress_ratios=[1, 4]))
+            )

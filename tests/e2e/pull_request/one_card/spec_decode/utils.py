@@ -12,13 +12,6 @@ MODELS = {
     },
 }
 
-DRAFT_PARALLEL_MODELS = {
-    "draft_parallel": {
-        "main": "LLM-Research/Meta-Llama-3.1-8B-Instruct",
-        "spec": "amd/PARD-Llama-3.2-1B",
-    },
-}
-
 DFLASH = {
     "dflash": {
         "main": "Qwen/Qwen3-8B",
@@ -36,7 +29,6 @@ DSPARK = {
 BASELINES = {
     "eagle": [0.74, 0.44, 0.29],
     "eagle3": [0.68, 0.40, 0.18],
-    "draft_parallel": [0.83, 0.50, 0.33, 0.17, 0.17, 0.17, 0.17, 0.00],
     "dflash": [0.60, 0.50, 0.30, 0.20, 0.20, 0.10, 0.00, 0.00],
     "dspark": [1.0, 0.8, 0.6, 0.6, 0.6, 0.6, 0.6],
 }

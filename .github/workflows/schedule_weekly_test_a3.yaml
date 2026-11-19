@@ -16,23 +16,23 @@
 #
 
 # This workflow related to the resources atlas 800 A3
-# **Please note**: current A3 resource pool's maximum allowed concurrency is 5*16 NPUs
-# We will limit the concurrency of jobs on A3 to avoid the risk of insufficient resources
+# All test jobs are submitted together; pending LWS jobs are queued in FIFO
+# order by the npu-scheduler instead of being serialized by workflow `needs`.
 name: Weekly-A3
 
+run-name: >-
+  ${{ inputs.request_id != '' &&
+      format('Weekly-A3 (PR) {0}', inputs.request_id) ||
+      'Weekly-A3 (scheduled)' }}
+
 on:
-  schedule:
-      # Run test at 10:00 Beijing time (UTC+8) every Sunday
-      - cron: "0 2 * * 0"
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
         description: 'Branch to test (main or releases/v0.18.0)'
         required: true
         default: 'main'
-        type: choice
-        options:
-          - main
+        type: string
       test_cases:
         description: 'Test cases to run (comma-separated, e.g., "test_custom_op,qwen3-32b,accuracy-group" or "all" for all tests)'
         required: false
@@ -53,12 +53,26 @@ on:
         required: false
         default: ''
         type: string
+      vllm_ref:
+        description: 'vllm commit SHA / tag / branch to install instead of the image-baked vllm (empty = keep image version)'
+        required: false
+        default: ''
+        type: string
       aop_enabled:
         description: 'Enable AOP hooks (capture / classify / skip-or-process)'
         required: false
         default: false
         type: boolean
-
+      bisect_args_json:
+        description: 'JSON object containing optional bisect parameters'
+        required: false
+        default: '{}'
+        type: string
+      drain_pr_runs:
+        description: 'Cancel in-flight PR runs of this workflow before starting (set by the external scheduler)'
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: read
   pull-requests: read
@@ -72,7 +86,7 @@ defaults:
     shell: bash -el {0}
 
 concurrency:
-  group: ascend-weekly-${{ github.ref }}-a3${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
+  group: ascend-weekly-${{ github.ref }}-a3-${{ inputs.vllm_ascend_branch }}${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
   cancel-in-progress: true
 
 env:
@@ -86,7 +100,7 @@ jobs:
     name: Parse trigger and determine test scope
     if: >-
       github.event_name == 'workflow_dispatch'
-    runs-on: linux-aarch64-a3-0
+    runs-on: linux-aarch64-a3-800t-0
     outputs:
       run: ${{ steps.parse.outputs.run }}
       filter: ${{ steps.parse.outputs.filter }}
@@ -126,6 +140,56 @@ jobs:
       double_node: ${{ steps.set-matrix.outputs.double_node }}
       single_node: ${{ steps.set-matrix.outputs.single_node }}
     steps:
+      # The external scheduler dispatches scheduled runs with request_id empty,
+      # test_cases=all and drain_pr_runs=true. Force-cancel PR-triggered runs
+      # of this workflow before the tests start, otherwise their pending jobs
+      # stay ahead of this run in the npu-scheduler FIFO queue. Requiring the
+      # explicit opt-in keeps a manual dispatch (request_id also defaults to
+      # empty) from cancelling unrelated PR runs. The run-name carries (PR) so
+      # the display title can be used for matching.
+      - name: Cancel PR weekly runs before scheduled test
+        if: ${{ inputs.request_id == '' && inputs.drain_pr_runs }}
+        continue-on-error: true
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          script: |
+            // Best-effort cleanup: never fail the job.
+            try {
+              // Only drain PR runs of this workflow, never other platforms.
+              const workflowRef = process.env.GITHUB_WORKFLOW_REF || '';
+              const workflow_id = workflowRef.split('@')[0].split('/').pop();
+              if (!workflow_id) {
+                core.warning('Cannot derive workflow file from GITHUB_WORKFLOW_REF; skip');
+                return;
+              }
+
+              const { owner, repo } = context.repo;
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                owner, repo, workflow_id, per_page: 100,
+              });
+              for (const run of data.workflow_runs) {
+                if (run.id === context.runId) continue;
+                if (run.status === 'completed') continue;
+                if (!(run.display_title || '').includes('(PR)')) continue;
+                core.info(`Force-cancelling ${run.display_title}: ${run.html_url}`);
+                try {
+                  await github.request(
+                    'POST /repos/{owner}/{repo}/actions/runs/{run_id}/force-cancel',
+                    { owner, repo, run_id: run.id },
+                  );
+                } catch (error) {
+                  if (error.status === 409 || error.status === 410) {
+                    core.info(`Run ${run.id} already finished`);
+                  } else {
+                    core.warning(`Failed to force-cancel ${run.id}: ${error.message}`);
+                  }
+                }
+              }
+            } catch (error) {
+              core.warning(`Skipping PR run cleanup: ${error.message}`);
+            }
+
       - id: export
         run: |
           {
@@ -147,7 +211,7 @@ jobs:
           path: ./pr
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -174,10 +238,11 @@ jobs:
     with:
       target: a3
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      soc: 'a3'
     secrets:
-      HW_USERNAME: ${{ secrets.HW_USERNAME }}
-      HW_TOKEN: ${{ secrets.HW_TOKEN }}
-      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
 
   multi-node-tests:
     name: multi-node
@@ -188,25 +253,37 @@ jobs:
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
-      max-parallel: 2
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config: ${{ fromJson(needs.setup-vars.outputs.multi_node) }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
-      runner: linux-aarch64-a3-0
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      test_frequency: weekly
+      runner: linux-aarch64-a3-800t-0
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
-      config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+      config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
+      request_id: ${{ inputs.request_id || '' }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
-      testcase_timeout: 600
+      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
+      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
+      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
+      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
+      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
+      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
+      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
+      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
+      bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
+      testcase_timeout: 120
+      job_timeout: 1200
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -218,35 +295,48 @@ jobs:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   double-node-tests:
     name: double-node
-    needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
+    needs: [setup-vars, parse-trigger, build-image]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
-      max-parallel: 3
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config: ${{ fromJson(needs.setup-vars.outputs.double_node) }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
-      runner: linux-aarch64-a3-0
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      test_frequency: weekly
+      runner: linux-aarch64-a3-800t-0
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
-      config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
+      config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
+      request_id: ${{ inputs.request_id || '' }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
-      testcase_timeout: 600
+      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
+      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
+      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
+      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
+      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
+      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
+      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
+      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
+      bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
+      testcase_timeout: 120
+      job_timeout: 1200
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -258,10 +348,11 @@ jobs:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, double-node-tests]
+    needs: [setup-vars, parse-trigger, build-image]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -275,11 +366,14 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      soc_version: a3
+      test_frequency: weekly
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
-      config_base_path: tests/e2e/weekly/single_node/configs/
+      config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       testcase_timeout: 600
       should_run: >-
         ${{
@@ -290,17 +384,38 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
+      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
+      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
+      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
+      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
+      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
+      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
+      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
+      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
+      bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
+    secrets:
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   clear-pre-logs:
-    runs-on: linux-aarch64-a3-0
-    needs: [double-node-tests]
-    if: needs.double-node-tests.result != 'skipped'
+    runs-on: linux-aarch64-a3-800t-0
+    needs: [multi-node-tests, double-node-tests]
+    if: (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped')
     steps:
       - name: Clear pre-logs on pvc
+        env:
+          VLLM_ASCEND_BRANCH: ${{ inputs.vllm_ascend_branch }}
         run: |
-          # Clear logs generated before the test to avoid confusion
-          rm -rf "${ASCEND_LOG_PREFIX:?}"/* || true
+          # Only clear this branch's directory so a concurrent run of another
+          # branch keeps its in-flight logs on the shared PVC.
+          branch=$(printf '%s' "$VLLM_ASCEND_BRANCH" | tr '/' '-')
+          if [ -z "$branch" ]; then
+            echo "vllm_ascend_branch is empty; skip clearing logs"
+            exit 0
+          fi
+          echo "Clearing ${ASCEND_LOG_PREFIX}/${branch}"
+          rm -rf "${ASCEND_LOG_PREFIX:?}/${branch:?}"/* || true
 
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into weekly-a3.zip

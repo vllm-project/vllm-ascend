@@ -39,27 +39,21 @@ def test_sources_this_device_empty(mock_p2p, mock_client):
     mock_p2p.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "s,ack",
+    [
+        (None, True),
+        (True, None),
+    ],
+)
 @patch("vllm_ascend.model_loader.netloader.interaction.elastic.ElasticClient")
 @patch("vllm_ascend.model_loader.netloader.executor.elastic_load.P2PLoad")
-def test_client_s_none(mock_p2p, mock_client, mock_sources):
-    # Simulate ElasticClient.s as None
+def test_client_missing_socket_or_ack_returns_none(mock_p2p, mock_client, mock_sources, s, ack):
     mock_instance = MagicMock()
-    mock_instance.s = None
+    mock_instance.s = s
+    mock_instance.ack = ack
     mock_client.return_value = mock_instance
-    result = elastic_load("model", 0, "model_path", mock_sources, 1, 1)
-    assert result is None
-
-
-@patch("vllm_ascend.model_loader.netloader.interaction.elastic.ElasticClient")
-@patch("vllm_ascend.model_loader.netloader.executor.elastic_load.P2PLoad")
-def test_client_ack_none(mock_p2p, mock_client, mock_sources):
-    # Simulate ElasticClient.ack as None
-    mock_instance = MagicMock()
-    mock_instance.s = True
-    mock_instance.ack = None
-    mock_client.return_value = mock_instance
-    result = elastic_load("model", 0, "model_path", mock_sources, 1, 1)
-    assert result is None
+    assert elastic_load("model", 0, "model_path", mock_sources, 1, 1) is None
 
 
 @patch("vllm_ascend.model_loader.netloader.load.P2PLoad")
@@ -82,33 +76,29 @@ def test_model_load_fail(mock_logger, mock_p2p):
         mock_logger.error.assert_called_once()
 
 
-@patch("vllm_ascend.model_loader.netloader.load.P2PLoad")
-@patch("vllm_ascend.model_loader.netloader.load.logger")
-def test_model_load_success(mock_logger, mock_p2p):
-    mock_client = MagicMock()
-    mock_client.s = True
-    mock_client.ack = ["foo", "bar"]
-    mock_client.server_addr = "addr"
-
-    with patch("vllm_ascend.model_loader.netloader.load.ElasticClient", return_value=mock_client):
-        expected_model = object()
-        mock_p2p_instance = MagicMock()
-        mock_p2p_instance.load.return_value = expected_model
-        mock_p2p.return_value = mock_p2p_instance
-
-        sources = [{"device_id": 0, "sources": ["whatever"]}]
-        result = elastic_load("model", 0, "model_path", sources, 1, 1)
-        assert result is expected_model
-        mock_logger.info.assert_called_once()
-
-
+@pytest.mark.parametrize(
+    "int8_cache,group_name,model_path,processed_layout,manifest",
+    [
+        ("dram", "netloader_draft", "draft-model", False, None),
+        ("no", "netloader", "glm-5", True, {"layer.weight": (2, 3, 4)}),
+    ],
+)
 @patch("vllm_ascend.model_loader.netloader.load.P2PLoad")
 @patch("vllm_ascend.model_loader.netloader.load.ElasticClient")
-def test_elastic_load_passes_draft_group_name(mock_client, mock_p2p):
+def test_elastic_load_wires_processed_layout_by_int8_cache(
+    mock_client,
+    mock_p2p,
+    int8_cache,
+    group_name,
+    model_path,
+    processed_layout,
+    manifest,
+):
     mock_client_instance = MagicMock()
     mock_client_instance.s = True
     mock_client_instance.ack = ["foo", "bar"]
     mock_client_instance.server_addr = "addr"
+    mock_client_instance.transfer_shape_manifest = manifest
     mock_client_instance.__enter__.return_value = mock_client_instance
     mock_client.return_value = mock_client_instance
 
@@ -118,11 +108,35 @@ def test_elastic_load_passes_draft_group_name(mock_client, mock_p2p):
     mock_p2p.return_value = mock_p2p_instance
 
     sources = [{"device_id": 0, "sources": ["127.0.0.1:15000"]}]
-    result = elastic_load("model", 0, "draft-model", sources, 1, 1, group_name="netloader_draft")
+    result = elastic_load(
+        "model",
+        0,
+        model_path,
+        sources,
+        1,
+        1,
+        group_name=group_name,
+        int8_cache=int8_cache,
+    )
 
     assert result is expected_model
-    mock_client.assert_called_once_with(["127.0.0.1:15000"], 0, "draft-model", 1, 1, "netloader_draft")
-    mock_p2p.assert_called_once_with("foo", "addr", "bar", "netloader_draft")
+    mock_client.assert_called_once_with(
+        ["127.0.0.1:15000"],
+        0,
+        model_path,
+        1,
+        1,
+        group_name=group_name,
+        int8_cache=int8_cache,
+    )
+    mock_p2p.assert_called_once_with(
+        "foo",
+        "addr",
+        "bar",
+        group_name,
+        transfer_processed_layout=processed_layout,
+        transfer_shape_manifest=manifest,
+    )
 
 
 if __name__ == "__main__":

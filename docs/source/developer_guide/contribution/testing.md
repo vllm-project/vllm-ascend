@@ -23,12 +23,16 @@ The fastest way to set up a test environment is to use the main branch's contain
         -v $(pwd):/vllm-project \
         -v ~/.cache:/root/.cache \
         -ti $IMAGE bash
+    ```
 
+    Run the remaining commands inside the container:
+
+    ```bash
     # (Optional) Configure mirror to speed up download
     sed -i 's|ports.ubuntu.com|mirrors.huaweicloud.com|g' /etc/apt/sources.list
     pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
 
-    # For torch-npu dev version or x86 machine
+    # For TorchNPU dev version or x86 machine
     export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
 
     # src path
@@ -40,7 +44,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
 
     git clone -b {{ vllm_ascend_version }} --depth 1 https://github.com/vllm-project/vllm-ascend.git
-    git clone --depth 1 https://github.com/vllm-project/vllm.git
+    git clone -b {{ vllm_version }} --depth 1 https://github.com/vllm-project/vllm.git
 
     # vllm
     cd $SRC_WORKSPACE/vllm
@@ -57,14 +61,14 @@ The fastest way to set up a test environment is to use the main branch's contain
     python3 -m pip install -r requirements-dev.txt
     ```
 
-=== "Single card"
+=== "Single-card"
 
     ```bash
 
     # Update DEVICE according to your device (/dev/davinci[0-7])
     export DEVICE=/dev/davinci0
-    # Update the vllm-ascend image
-    export IMAGE=quay.io/ascend/vllm-ascend:main
+    # A2 Ubuntu image; use nightly-main-a3 for A3 and add -openeuler for openEuler.
+    export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -95,11 +99,11 @@ The fastest way to set up a test environment is to use the main branch's contain
     pip install -r requirements-dev.txt
     ```
 
-=== "Multi cards"
+=== "Multi-cards"
 
     ```bash
-    # Update the vllm-ascend image
-    export IMAGE=quay.io/ascend/vllm-ascend:main
+    # A2 Ubuntu image; use nightly-main-a3 for A3 and add -openeuler for openEuler.
+    export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -195,10 +199,10 @@ You can run tests with `pytest` as well. Typical examples:
     VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/
 
     # Run a certain test script
-    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/test_camem.py
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py
 
     # Run a certain case in test script
-    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/test_camem.py::test_end_to_end
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py::test_qwen3_dense_graph_mode
     ```
 
 === "Multi-card"
@@ -244,15 +248,66 @@ You can run tests with `pytest` as well. Typical examples:
 For running nightly single-node model test cases locally, refer to the following example.
 
 ```bash
+export CONFIG_BASE_PATH=tests/SIT/cases/models/configs/Qwen
 export CONFIG_YAML_PATH=Qwen3-32B.yaml
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/common/single_node/test_single_node.py
 ```
 
 For running nightly multi-node model test cases locally, refer to the `Running Locally` section in [Multi Node Test](./multi_node_test.md).
 
 #### E2E test examples
 
-- Offline test example: [`tests/e2e/pull_request/one_card/test_camem.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_camem.py)
+- Offline test example: [`tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py)
+
+### Csrc incremental build cache checks
+
+For changes to native build inputs or the cache adapter, run the cache engine,
+concurrency, and snapshot-key tests before requesting an NPU build:
+
+```bash
+pytest -q --confcutdir=tests/ut/_tools \
+  tests/ut/_tools/test_build_cache.py \
+  tests/ut/_tools/test_build_cache_concurrency.py \
+  tests/ut/_tools/test_prepare_csrc_l1_restore.py
+```
+
+On CI, a successful restore step only proves that an outer L1 snapshot was
+available. Check the inner cache telemetry for action HIT/MISS/BYPASS to
+establish whether a source build actually reused compiled work. See the
+[persistent csrc build cache design](../Design_Documents/persistent_csrc_build_cache.md)
+for the identity and failure contracts.
+
+### PR selective testing (CI)
+
+The PR CI workflow ([pr_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) does not run the full suite on every PR. It selects tests with a coverage/AST based precision-testing pipeline and routes them to NPU runners. Tests run when the PR has the `ready-precise` label (recommended subset) or the `main2main` label (full suite executed against both the verified vLLM main commit and the matched vLLM release tag). PRs targeting a release branch (`releases/v*`) are tested against the matched vLLM release tag only.
+
+How tests are selected:
+
+1. `test_selector.py` builds a mapping of test cases to the source lines they cover from historical CI coverage data, then recommends the tests affected by the PR's changed lines (line → function → file granularity fallback).
+2. `select_tests.py` routes each recommended test path to a runner by directory convention (`tests/ut/<module>/` → CPU, `tests/ut/<module>/a2/` → A2, `tests/e2e/pull_request/{one,two,four,eight}_card/` → A3, `_310p` → 310P), balances the load via estimated times, and emits the CI matrix.
+
+Adding a new test requires no configuration change: place the UT file under the
+matching `tests/ut/<module>[/<npu>]` directory or the E2E file under the matching
+`tests/e2e/pull_request/<card>` directory, and CI picks it up automatically from
+the test tree. Routing metadata (runner mapping, partitions) lives in
+[`.github/workflows/scripts/test_config.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/scripts/test_config.yaml).
+Estimated times used for load balancing live in
+`.github/workflows/scripts/estimated_times.yaml`.
+
+You can preview locally which runners a set of tests would be routed to:
+
+```bash
+python3 .github/workflows/scripts/select_tests.py \
+  --explicit-e2e-tests tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py
+
+# Full suite routing (mirrors the main2main full-suite mode)
+python3 .github/workflows/scripts/select_tests.py --all-tests
+```
+
+For debugging a specific test on CI hardware before requesting a label, see
+[E2E CI Test](./e2e_ci_test.md).
+
+#### E2E test model resource reduction
 
 The CI resource is limited, and you might need to reduce the number of layers of a model. Below is an example of how to generate a reduced layer model:
 
@@ -276,36 +331,198 @@ The CI resource is limited, and you might need to reduce the number of layers of
     model.save_pretrained(DIST_MODEL_PATH)
     ```
 
+### CI workflow triggers and the `schedule_` prefix
+
+Workflow files under `.github/workflows/` whose names start with `schedule_`
+belong to the recurring CI family (nightly, weekly, doc, coverage, and similar
+periodic jobs). The `schedule_` prefix does **not** guarantee that the workflow
+declares a GitHub Actions `schedule:` (cron) trigger.
+
+Some `schedule_*.yaml` files intentionally omit `schedule:` and are dispatched by
+the project's external automation through `workflow_dispatch` instead. This is by
+design, not a missing cron entry, because the external scheduler has more control
+over when resource-heavy NPU jobs run.
+
+Workflows with a native GitHub cron trigger:
+
+| Workflow | Additional triggers |
+|---|---|
+| `schedule_doc_linkcheck.yaml` | PR path filter, `workflow_dispatch` |
+| `schedule_doc_translate.yaml` | `workflow_dispatch` |
+| `schedule_e2e_upstream_test.yaml` | - |
+| `schedule_lint_image_build.yaml` | `workflow_dispatch`, `push` |
+| `schedule_stale_manage.yaml` | `issue_comment` |
+
+Workflows without a cron trigger, dispatched externally via `workflow_dispatch`:
+
+| Workflow | Additional triggers |
+|---|---|
+| `schedule_doc_getting_started_test.yaml` | PR path filter |
+| `schedule_e2e_test.yaml` | - |
+| `schedule_image_build_and_push.yaml` | PR label, tag `push` |
+| `schedule_main2main.yaml` | - |
+| `schedule_nightly_test_310p.yaml` | - |
+| `schedule_nightly_test_a2.yaml` | - |
+| `schedule_nightly_test_a3.yaml` | - |
+| `schedule_nightly_test_a3_560t.yaml` | - |
+| `schedule_nightly_test_a5.yaml` | - |
+| `schedule_release_code_and_wheel.yml` | tag `push` |
+| `schedule_test_coverage.yaml` | - |
+| `schedule_weekly_test_310p.yaml` | - |
+| `schedule_weekly_test_a2.yaml` | - |
+| `schedule_weekly_test_a3.yaml` | - |
+| `schedule_weekly_test_a3_560t.yaml` | - |
+
 ### Run doctest
 
-vllm-ascend provides a `vllm-ascend/tests/e2e/run_doctests.sh` command to run all doctests in the doc files.
-The doctest is a good way to make sure docs stay current and examples remain executable, which can be run locally as follows:
+Doctests validate fixed, marked Quick Start and Installation code blocks, not every code block in the documentation. Quick Start covers A2 and 310P (Atlas 300I DUO), running offline and online examples sequentially. Installation covers `pip`, `uv`, and `source` on A2, followed by offline inference verification. Both support Ubuntu and openEuler.
+
+Run one of these commands from the repository root in a prepared NPU environment:
 
 ```bash
-# Run doctest
-/vllm-workspace/vllm-ascend/tests/e2e/run_doctests.sh
+./tests/e2e/doctests/scripts/run_doctests.sh quickstart a2
+./tests/e2e/doctests/scripts/run_doctests.sh quickstart 310p
+
+./tests/e2e/doctests/scripts/run_doctests.sh installation pip
+./tests/e2e/doctests/scripts/run_doctests.sh installation uv
+./tests/e2e/doctests/scripts/run_doctests.sh installation source
 ```
 
-This will reproduce the same environment as the CI. See [labeled_doctest.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/labeled_doctest.yaml).
+The entrypoint does not create a container. Use a matching vLLM Ascend image for Quick Start or a disposable CANN container for Installation, which changes system and Python packages. Prepare the examples' model cache in advance; the workers enable Hugging Face offline mode.
+
+In CI, `.github/workflows/schedule_doc_getting_started_test.yaml` appears as **Doc Test**. Relevant PR changes targeting `main` or `releases/v*` select affected cases automatically. External automation can dispatch it on a schedule, or you can run it manually with comma-separated `quickstart_devices` and/or `installation_methods`; leave an input empty to skip that test type. Each selected case runs on both operating systems.
+
+For block extraction, plan preview, and selection rules, see the usage notes and function comments in `tests/e2e/doctests/scripts/doctest_helper.py` on the corresponding branch.
 
 ### Run docs link check
 
-You can validate external links in the Sphinx docs locally with:
+The **Docs link check** workflow checks changed Markdown files in PRs. Scheduled
+and manual runs, or PRs changing checker-related files, scan all documentation.
+
+For local checks, use a Python 3.11+ virtual environment and run from the repository root:
 
 ```bash
-make -C docs linkcheck SPHINXOPTS="-W --keep-going"
+python -m pip install -r docs/requirements-linkcheck.txt
+
+# Check specific files, or the full documentation directory.
+python .github/workflows/scripts/check_md_links.py docs/source/user_guide/release_notes.md --timeout 300
+python .github/workflows/scripts/check_md_links.py docs/source
 ```
 
-To check links in a specific Markdown file, pass the file to `sphinx-build`.
-For example, to check only `docs/source/user_guide/release_notes.md`:
+Add `--extract-only` to list links without making requests. The checker validates
+rendered HTTP(S) links and images, skipping code examples and `docs/source/zh`.
+Relative links and remote anchors are not checked.
 
-```bash
-cd docs
-sphinx-build -b linkcheck -W --keep-going \
-  source _build/linkcheck source/user_guide/release_notes.md
-```
+The check log ends with all blocking errors and non-blocking warnings, including
+URLs, source files, and reasons. Blocking errors fail CI; unresolved HTTP 429
+responses are warnings and remain unverified.
 
-The detailed report will be written to:
+Reports are saved as `output.json` and `summary.md` under `docs/_build/linkcheck/`
+and uploaded as CI artifacts. Use `--report-dir` to change the local output directory.
 
-- `docs/_build/linkcheck/output.txt`
-- `docs/_build/linkcheck/output.json`
+## PR testing requirements
+
+Use this section when preparing or reviewing a pull request to decide which
+test coverage and validation evidence the change needs. See the preceding
+sections for environment setup and commands, and [E2E CI tests](e2e_ci_test.md)
+for PR CI.
+
+### CODEOWNERS approval gate
+
+Alongside `DCO` and the CI gate, every changed file must be approved by at
+least one of its [CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS)
+owners before the PR can merge. Key points:
+
+- Any owner listed in `.github/CODEOWNERS` counts as an approver, regardless of
+  their repository role — owners without org membership are intentional.
+- A pending "changes requested" review from any owner of a changed file blocks
+  the merge even if another owner has approved. Address the feedback, then ask
+  the owner to re-review (they can approve, or withdraw their objection by
+  requesting changes again — dismissing does not revoke a previous approval).
+- Approvals survive pushes: the repository auto-dismisses reviews on every
+  push, but the gate ignores dismissals, so owners do not need to re-approve
+  after each commit. An owner's latest approve / request-changes review is
+  what counts.
+- Files whose only owner is the PR author do not need an additional approval
+  (a sole owner cannot self-approve). The failure comment lists such files so
+  the module can gain a co-owner over time.
+- Owners are cumulative down the directory tree: when parent and child
+  directories have separate owners (for example `/vllm_ascend/model_loader`
+  and `/vllm_ascend/model_loader/rfork/`), an rfork change needs one approval
+  from either owner, and a "changes requested" from either owner blocks it.
+  A more specific rule adds owners for the subtree; it does not transfer
+  ownership away from the parent owner.
+- The PR author does not count as an approver even when listed as an owner.
+- Submitting or dismissing a review re-evaluates the gate without re-running
+  the heavy CI jobs; previously green CI results on the same commit are kept.
+- The failure comment is posted by `.github/workflows/bot_ci_gate_comment.yaml`
+  (a `workflow_run` bot running in the base repository context), so it works
+  for fork PRs too - the gate job itself only has a read-only token on fork
+  PRs and never posts comments directly.
+- The gate also runs a CODEOWNERS health check. Entries pointing at a
+  deleted/renamed path fail the gate for everyone - if your change removes or
+  renames files, update `.github/CODEOWNERS` in the same PR. Files without an
+  owner yet are reported as non-blocking warnings (unclaimed modules are
+  handled by maintainers at their own pace).
+- Paths marked `SKIP(owner)` in the file (for example, `tests/ut/`) are
+  deliberately unowned and do not require an owner approval.
+- If an owner is unresponsive, contact the module's other owners or a
+  maintainer; maintainers can merge with an admin override in exceptional
+  cases.
+
+The check logic lives in
+`.github/workflows/scripts/codeowner_gate.py` (colocated unit tests in
+`.github/workflows/scripts/test_codeowner_gate.py`; run them manually with
+`pytest .github/workflows/scripts/test_codeowner_gate.py` - the cpu-ut CI
+partition only covers `tests/ut`).
+
+### Choose coverage for the change
+
+Run the affected tests and required repository checks. Expand coverage when the
+change affects shared behavior, failures expose additional risks, or reviewers
+need more evidence. A full local test-suite run is not required for every change.
+
+| Change | Expected coverage |
+| ------ | ----------------- |
+| New behavior | Unit tests for the happy path, failure modes, and relevant boundary cases, such as empty input, single-element input, sequence-length limits, or overflow. |
+| Bug fix | A regression test that reproduces the original failure and passes with the fix. |
+| Integration behavior | Relevant E2E tests for the affected models, configuration, or distributed execution paths. |
+| NPU performance path | Realistic hardware benchmarks and performance regression coverage, including memory use when affected. Add nightly coverage where appropriate. |
+| Documentation or metadata | Focused checks such as Markdown linting, link validation, or parsing changed configuration. Add runtime tests when the change affects runtime behavior. |
+
+Unit tests live in `tests/ut/`, E2E tests in `tests/e2e/`, and nightly tests in
+`tests/e2e/nightly/`.
+
+### Hardware and performance evidence
+
+NPU-specific behavior requires validation on actual hardware before merge.
+Record the affected hardware, relevant software versions, model, configuration,
+commands, and results so reviewers can assess and reproduce the validation.
+
+If local hardware or dependencies are unavailable, continue preparing the PR
+with the checks that can run. Identify the remaining hardware checks for CI or
+reviewers; CPU mocks and static checks do not establish NPU correctness.
+
+For performance changes, compare the baseline and changed implementation under
+the same workload and environment. Include throughput or latency results and,
+when affected, memory use, fragmentation, and CPU-NPU synchronization behavior.
+
+### Report validation in the PR
+
+Complete the PR template's **How was this patch tested?** section with:
+
+- Tests added or updated, including relevant boundary cases.
+- Commands and observed results for local or manual checks.
+- CI jobs or hardware runs that provide additional evidence.
+- Failed, skipped, or unrun checks, the reason, and the validation still needed.
+
+If no tests were added, explain which existing tests or focused checks cover
+the change, or why validation remains pending. Distinguish code inspection,
+CPU tests, NPU execution, and end-to-end validation when reporting results.
+
+### PR submission checklist
+
+- [ ] The title contains a change-type tag accepted by the [CI title check](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml#L59), such as `[BugFix]`, `[Feature]`, or `[Doc]`.
+- [ ] The applicable test coverage and validation results are recorded in the PR.
+- [ ] Required CI checks pass before merge.
+- [ ] Outstanding NPU hardware or performance validation is completed before merge.

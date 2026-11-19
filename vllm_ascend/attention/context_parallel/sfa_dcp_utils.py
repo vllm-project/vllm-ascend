@@ -1,0 +1,155 @@
+"""SFA-specific CP cache and address helpers.
+
+These helpers encode SFA cache transport and the replicated indexer-cache
+layout without depending on the attention implementation or metadata builders.
+"""
+
+from typing import Any
+
+import torch
+from vllm.utils.math_utils import cdiv
+
+
+def as_byte_view(x: torch.Tensor) -> torch.Tensor:
+    """Return a byte view for FP8 tensors, preserving their bit patterns."""
+    if x.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+        return x.view(torch.uint8)
+    return x
+
+
+def _index_select_kv_blocks(cache: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    # FP8 block movement must preserve bytes, including NaN bit patterns.
+    return torch.index_select(as_byte_view(cache), 0, indices).view(cache.dtype)
+
+
+def get_sfa_pcp_global_metadata(
+    common_attn_metadata: Any,
+    pcp_context: Any,
+    pcp_cache_group_idx: int,
+) -> Any:
+    """Select the global token view used to reconstruct PCP+DCP cache slots.
+
+    Only fields consumed by replicated-cache address construction are replaced;
+    this view is not a full global attention metadata object.
+    """
+    global_batch = pcp_context.global_batch
+    num_reqs = global_batch.num_reqs
+    return common_attn_metadata.replace(
+        query_start_loc=global_batch.query_start_loc,
+        query_start_loc_cpu=torch.from_numpy(global_batch.query_start_loc_np),
+        seq_lens=global_batch.seq_lens[:num_reqs],
+        num_reqs=num_reqs,
+        num_actual_tokens=global_batch.num_tokens,
+        num_input_tokens=global_batch.num_tokens,
+        positions=global_batch.positions,
+        block_table_tensor=pcp_context.global_block_tables[pcp_cache_group_idx],
+    )
+
+
+def get_sfa_dcp_max_local_block_table_cols(
+    max_model_len: int,
+    physical_block_size: int,
+    dcp_size: int,
+    blocks_per_physical_block: int,
+) -> int:
+    """Return the local logical-block width of an SFA DCP block table."""
+    return cdiv(max_model_len, physical_block_size * dcp_size) * blocks_per_physical_block
+
+
+def get_sfa_max_num_reqs(vllm_config: Any) -> int:
+    """Include PCP's two prefill segments and one graph-padding request."""
+    segments = 2 if vllm_config.parallel_config.prefill_context_parallel_size > 1 else 1
+    return vllm_config.scheduler_config.max_num_seqs * segments + 1
+
+
+def get_sfa_dcp_local_block_table(
+    block_table: torch.Tensor,
+    num_reqs: int,
+    max_local_block_table_cols: int,
+    *,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Select the rank-local physical block-table view."""
+    if block_table.shape[1] < max_local_block_table_cols:
+        raise ValueError(
+            f"SFA DCP block table needs {max_local_block_table_cols} columns, "
+            f"but only {block_table.shape[1]} were provided."
+        )
+    # The operator uses the logical width as its row stride. A slice of a
+    # wider backing table must not retain that backing table's stride.
+    local = block_table[:num_reqs, :max_local_block_table_cols]
+    if out is not None:
+        out.copy_(local)
+        return out
+    return local.contiguous()
+
+
+def build_sfa_dcp_replicated_block_table(
+    dcp_block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_table_output: torch.Tensor,
+    replicated_col_idx: torch.Tensor,
+    dcp_size: int,
+    blocks_per_physical_block: int,
+) -> torch.Tensor:
+    """Expand a local SFA block table into replicated-indexer addresses."""
+    local_col_idx = (
+        replicated_col_idx // (dcp_size * blocks_per_physical_block) * blocks_per_physical_block
+        + replicated_col_idx % blocks_per_physical_block
+    )
+    rank_in_replicated_view = (replicated_col_idx // blocks_per_physical_block) % dcp_size
+
+    local_logical_blocks = torch.index_select(dcp_block_table, 1, local_col_idx)
+    if blocks_per_physical_block == 1:
+        replicated_blocks = local_logical_blocks * dcp_size + rank_in_replicated_view
+    else:
+        local_sub_blocks = local_logical_blocks % blocks_per_physical_block
+        local_physical_blocks = local_logical_blocks // blocks_per_physical_block
+        replicated_blocks = (
+            local_physical_blocks * dcp_size + rank_in_replicated_view
+        ) * blocks_per_physical_block + local_sub_blocks
+
+    valid_req_mask = (
+        (seq_lens[: dcp_block_table.shape[0]].to(device=dcp_block_table.device) > 0)
+        .to(replicated_blocks.dtype)
+        .view(-1, 1)
+    )
+    block_table_output.copy_(replicated_blocks * valid_req_mask)
+    return block_table_output
+
+
+def build_sfa_dcp_replicated_slot_mapping(
+    common_attn_metadata: Any,
+    block_table_replicated_view: torch.Tensor,
+    slot_mapping_output: torch.Tensor,
+    replicated_view_block_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Build replicated slots with replay-safe request indices and padding."""
+    num_reqs = common_attn_metadata.num_reqs
+    num_input_tokens = common_attn_metadata.num_input_tokens
+    num_actual_tokens = min(common_attn_metadata.num_actual_tokens, num_input_tokens)
+    slot_mapping_output.fill_(-1)
+    if num_reqs == 0 or num_actual_tokens == 0:
+        return slot_mapping_output
+
+    # Padded input capacity can exceed the device-side query total.
+    # repeat_interleave with a fixed output_size can leave invalid request
+    # indices in that tail, so derive validity from device query boundaries.
+    token_indices = torch.arange(num_input_tokens, dtype=torch.int32, device=device)
+    req_indices = torch.searchsorted(
+        common_attn_metadata.query_start_loc[1 : num_reqs + 1].contiguous(),
+        token_indices,
+        right=True,
+    )
+    valid = (token_indices < num_actual_tokens) & (req_indices < num_reqs)
+    req_indices = req_indices.clamp(max=num_reqs - 1)
+    positions = common_attn_metadata.positions[:num_input_tokens].to(device=device, dtype=torch.int32)
+    positions = torch.where(valid, positions, 0)
+    logical_block_idx = positions // replicated_view_block_size
+    block_offsets = positions % replicated_view_block_size
+    block_table_indices = req_indices * block_table_replicated_view.shape[1] + logical_block_idx
+    block_numbers = block_table_replicated_view.flatten()[block_table_indices]
+    slots = block_numbers * replicated_view_block_size + block_offsets
+    slot_mapping_output[:num_input_tokens] = torch.where(valid, slots, -1)
+    return slot_mapping_output

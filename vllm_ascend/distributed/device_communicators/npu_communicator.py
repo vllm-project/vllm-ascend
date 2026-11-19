@@ -18,6 +18,13 @@
 import torch
 import torch.distributed as dist
 from vllm.distributed.device_communicators.base_device_communicator import DeviceCommunicatorBase
+from vllm.logger import logger
+
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.device_communicators.mxfp8_all_reduce import Mxfp8AllReduce
+from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
+    QuantizedAllReduce,
+)
 
 
 class _NpuAll2AllManager:
@@ -44,43 +51,53 @@ class NPUCommunicator(DeviceCommunicatorBase):
         device: torch.device | None = None,
         device_group: dist.ProcessGroup | None = None,
         unique_name: str = "",
+        use_all2all: bool = False,
     ):
-        super().__init__(cpu_group, device, device_group, unique_name)
-        # TODO(hz): Refer to CudaCommunicator's implementation to integrate PyHcclCommunicator
-        # init device according to rank
+        super().__init__(
+            cpu_group,
+            device,
+            device_group,
+            unique_name,
+            use_all2all=use_all2all,
+        )
         self.device = torch.npu.current_device()
-
-        # For compatibility (mainly for reusing graph capturing code in vllm),
-        # init custom all-reduce implementation interface as in CUDACommunicator.
         self.ca_comm = None
+        # vLLM #53576 reads this CUDA-only communicator during graph capture.
+        # Keep the shared coordinator protocol available without enabling the
+        # FlashInfer PCIe IPC backend on NPU.
+        self.fi_pcie_ipc_ar_comm = None
         self.all2all_manager = _NpuAll2AllManager()
+        # Select the configured backend; defaults are MXFP8 on A5, INT8 on A2.
+        # Both wrappers use payload/shape gates and the existing process group.
+        quantized_cfg = get_ascend_config().quantized_all_reduce_config
+        self.quantized_ar: QuantizedAllReduce | Mxfp8AllReduce | None = None
+        if quantized_cfg.enable:
+            if quantized_cfg.quant_dtype == "int8":
+                self.quantized_ar = QuantizedAllReduce(
+                    self.device_group, min_numel=quantized_cfg.min_numel, group_name=self.unique_name
+                )
+                if self.quantized_ar.supported:
+                    logger.info_once(
+                        "INT8 quantized all-reduce enabled (group=%s, min_numel=%d, max_q=%d).",
+                        self.unique_name,
+                        self.quantized_ar.min_numel,
+                        self.quantized_ar.max_q,
+                    )
+            else:
+                self.quantized_ar = Mxfp8AllReduce(
+                    self.device_group,
+                    min_numel=quantized_cfg.min_numel,
+                    group_name=self.unique_name,
+                )
+                if self.quantized_ar.supported:
+                    logger.info_once(
+                        "MXFP8 AllToAll quantized all-reduce enabled "
+                        "(group=%s, min_numel=%d, dequant_dtype=bf16, sum_output_dtype=bf16).",
+                        self.unique_name,
+                        self.quantized_ar.min_numel,
+                    )
 
-    def all_to_all(
-        self,
-        input_: torch.Tensor,
-        scatter_dim: int = 0,
-        gather_dim: int = -1,
-        scatter_sizes: list[int] | None = None,
-        gather_sizes: list[int] | None = None,
-    ) -> torch.Tensor:
-        if scatter_dim < 0:
-            scatter_dim += input_.dim()
-        if gather_dim < 0:
-            gather_dim += input_.dim()
-
-        if scatter_sizes is not None and gather_sizes is not None:
-            input_list = [t.contiguous() for t in torch.split(input_, scatter_sizes, scatter_dim)]
-            output_list = []
-            tensor_shape_base = input_list[self.rank].size()
-            for i in range(self.world_size):
-                tensor_shape = list(tensor_shape_base)
-                tensor_shape[gather_dim] = gather_sizes[i]
-                output_list.append(torch.empty(tensor_shape, dtype=input_.dtype, device=input_.device))
-
-        else:
-            input_list = [t.contiguous() for t in torch.tensor_split(input_, self.world_size, scatter_dim)]
-            output_list = [torch.empty_like(input_list[i]) for i in range(self.world_size)]
-
-        dist.all_to_all(output_list, input_list, group=self.device_group)
-        output_tensor = torch.cat(output_list, dim=gather_dim).contiguous()
-        return output_tensor
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        if self.quantized_ar is not None and self.world_size > 1:
+            return self.quantized_ar.all_reduce(input_)
+        return super().all_reduce(input_)

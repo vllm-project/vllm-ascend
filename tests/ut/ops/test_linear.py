@@ -1,22 +1,37 @@
 import unittest
+from contextlib import contextmanager
+from types import SimpleNamespace
+from typing import Any
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
 from tests.ut.base import TestBase
 from vllm_ascend import ascend_config
 from vllm_ascend.distributed import parallel_state
+from vllm_ascend.ops import linear
 from vllm_ascend.ops.linear import (
+    AscendDCPGroupColumnParallelLinear,
     AscendMergedColumnParallelLinear,
+    AscendQKVParallelLinear,
     AscendReplicatedLinear,
     AscendRowParallelLinear,
     AscendUnquantizedLinearMethod,
 )
+from vllm_ascend.ops.linear_op import DCPGroupColumnParallelOp
+from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+from vllm_ascend.utils import vllm_version_is
 
 
 class BaseLinearTest(unittest.TestCase):
     def setUp(self):
+        # Several tests in this file replace the process-global AscendConfig
+        # with a MagicMock; snapshot it so tearDown restores the worker state
+        # for later tests in the same xdist worker.
+        self._previous_ascend_config = ascend_config._ASCEND_CONFIG
         self.mock_group = mock.MagicMock()
         self.mock_group.world_size = 2
         self.mock_group.rank_in_group = 0
@@ -39,13 +54,13 @@ class BaseLinearTest(unittest.TestCase):
             ),
             patch("vllm_ascend.utils.mlp_tp_enable", return_value=True),
             patch("vllm_ascend.utils.oproj_tp_enable", return_value=True),
-            patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
         ]
 
         for p in self.patches:
             p.start()
 
     def tearDown(self):
+        ascend_config._ASCEND_CONFIG = self._previous_ascend_config
         for p in self.patches:
             p.stop()
 
@@ -58,7 +73,13 @@ class TestAscendUnquantizedLinearMethod(TestBase):
         type(self.layer.weight.data).dtype = mock_dtype
         mock_is_meta = mock.PropertyMock(return_value=False)
         type(self.layer.weight.data).is_meta = mock_is_meta
+
+        # maybe_trans_nz reads ndim/shape to screen out k=1/n=1 weights, so the
+        # mock must expose a realistic 2D (non-singleton) shape, not a MagicMock.
+        type(self.layer.weight.data).ndim = mock.PropertyMock(return_value=2)
+        type(self.layer.weight.data).shape = mock.PropertyMock(return_value=torch.Size([64, 32]))
         self.layer.precast_fp32_weight = False
+        self.layer.skip_weight_nz_conversion = False
 
     @patch("vllm_ascend.utils.get_ascend_config")
     @mock.patch("torch_npu.npu_format_cast")
@@ -87,15 +108,95 @@ class TestAscendUnquantizedLinearMethod(TestBase):
         self.method.process_weights_after_loading(self.layer)
         mock_format_cast.assert_called_once()
 
+    @patch("vllm_ascend.utils.get_ascend_config")
+    @mock.patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_skips_nz_for_marked_layer(self, mock_format_cast, mock_get_config):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 2
+        mock_get_config.return_value = mock_config
+        self.layer.skip_weight_nz_conversion = True
+        self.layer.precast_fp32_weight = True
+        # Real tensor so precast can materialize weight_fp32 alongside the NZ skip.
+        weight = torch.randn(8, 4, dtype=torch.float16)
+        self.layer.weight.data = weight
+        self.layer.prefix = "model.layers.0.mlp.gate"
+
+        self.method.process_weights_after_loading(self.layer)
+
+        mock_format_cast.assert_not_called()
+        self.assertEqual(self.layer.weight_fp32.dtype, torch.float32)
+        torch.testing.assert_close(self.layer.weight_fp32, weight.to(torch.float32))
+
+    @patch("vllm_ascend.utils.get_ascend_config")
+    @mock.patch("vllm_ascend.ops.linear.maybe_trans_nz", side_effect=lambda x: x)
+    @mock.patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_precasts_fp32_weight(
+        self, mock_format_cast, mock_maybe_trans_nz, mock_get_config
+    ):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 0
+        mock_get_config.return_value = mock_config
+
+        weight = torch.randn(8, 4, dtype=torch.float16)
+        layer = mock.MagicMock()
+        layer.weight.data = weight
+        layer.prefix = "model.layers.0.mlp.gate"
+        layer.precast_fp32_weight = True
+        layer.skip_weight_nz_conversion = True
+
+        self.method.process_weights_after_loading(layer)
+
+        self.assertEqual(layer.weight_fp32.dtype, torch.float32)
+        torch.testing.assert_close(layer.weight_fp32, weight.to(torch.float32))
+        mock_format_cast.assert_not_called()
+
+
+class TestShouldReshapeWoATo3d(unittest.TestCase):
+    """Tests for _should_reshape_wo_a_to_3d — DSV4 wo_a 3D layout decision."""
+
+    @staticmethod
+    def _profile_supporting(mx_quant_fusion: bool):
+        profile = MagicMock()
+        profile.supports.return_value = mx_quant_fusion
+        return profile
+
+    def _reshape_decision(self, prefix, dtype, mx_quant_fusion):
+        with patch(
+            "vllm_ascend.ops.linear.get_current_hardware_profile",
+            return_value=self._profile_supporting(mx_quant_fusion),
+        ):
+            from vllm_ascend.ops.linear import _should_reshape_wo_a_to_3d
+
+            return _should_reshape_wo_a_to_3d(prefix, dtype)
+
+    def test_bf16_wo_a_reshapes_on_a5(self):
+        """Regression: ModelSlim keeps unquantized bf16 wo_a while the model
+        carries a global quant config; it still needs the 3D reshape in
+        weight_loader (previously gated on quant_config is None)."""
+        self.assertTrue(self._reshape_decision("model.layers.0.self_attn.wo_a", torch.bfloat16, mx_quant_fusion=True))
+
+    def test_bf16_wo_a_reshapes_without_mx_quant_fusion(self):
+        self.assertTrue(self._reshape_decision("model.layers.0.self_attn.wo_a", torch.bfloat16, mx_quant_fusion=False))
+
+    def test_quantized_wo_a_not_reshaped_by_weight_loader(self):
+        """fp8 wo_a is left to the quantization path (process_weights_after_loading)."""
+        self.assertFalse(
+            self._reshape_decision("model.layers.0.self_attn.wo_a", torch.float8_e4m3fn, mx_quant_fusion=True)
+        )
+
+    def test_non_wo_a_layer_not_reshaped(self):
+        self.assertFalse(
+            self._reshape_decision("model.layers.0.self_attn.o_proj", torch.bfloat16, mx_quant_fusion=True)
+        )
+
 
 class TestAscendRowParallelLinear(BaseLinearTest):
     @patch("vllm_ascend.ops.linear.get_current_vllm_config", return_value=MagicMock())
-    @patch("vllm_ascend.ops.linear.enable_sp", return_value=False)
     @patch(
         "vllm_ascend.ops.linear.AscendUnquantizedLinearMethod.apply",
         new=lambda self, layer, x, bias=None: torch.nn.functional.linear(x, layer.weight, bias),
     )
-    def test_mlp_optimize(self, mock_enable_sp, mock_get_current_vllm_config):
+    def test_mlp_optimize(self, mock_get_current_vllm_config):
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.scheduler_config.recompute_scheduler_enable = False
         ascend_config._ASCEND_CONFIG.finegrained_tp_config.mlp_tensor_parallel_size = 2
@@ -112,12 +213,11 @@ class TestAscendRowParallelLinear(BaseLinearTest):
         linear(input_tensor)
 
     @patch("vllm_ascend.ops.linear.get_current_vllm_config", return_value=MagicMock())
-    @patch("vllm_ascend.ops.linear.enable_sp", return_value=False)
     @patch(
         "vllm_ascend.ops.linear.AscendUnquantizedLinearMethod.apply",
         new=lambda self, layer, x, bias=None: torch.nn.functional.linear(x, layer.weight, bias),
     )
-    def test_oproj_tp(self, mock_enable_sp, mock_get_current_vllm_config):
+    def test_oproj_tp(self, mock_get_current_vllm_config):
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.scheduler_config.recompute_scheduler_enable = False
         ascend_config._ASCEND_CONFIG.finegrained_tp_config.oproj_tensor_parallel_size = 2
@@ -135,6 +235,57 @@ class TestAscendRowParallelLinear(BaseLinearTest):
 
 
 class TestAscendMergedColumnParallelLinear(BaseLinearTest):
+    def test_merged_checkpoint_reload_keeps_output_padding_zero(self):
+        for padding_size in (0, 3):
+            kwargs: dict[str, Any] = dict(
+                input_size=8, output_sizes=[4, 6], bias=True, disable_tp=True, padding_size=padding_size
+            )
+            if vllm_version_is("0.33.0") and padding_size:
+                with self.assertRaisesRegex(ValueError, "output padding requires"):
+                    AscendMergedColumnParallelLinear(**kwargs)
+                continue
+            layer = AscendMergedColumnParallelLinear(**kwargs)
+            self.assertEqual(tuple(layer.weight.shape), (10 + padding_size, 8))
+            for value in (1.0, 2.0):
+                # Dirty the complete allocation to verify reload clears only
+                # padding while loading every real checkpoint row and bias.
+                layer.weight.data.fill_(-7)
+                layer.bias.data.fill_(-7)
+                for shard, size in enumerate((4, 6)):
+                    layer.weight_loader(layer.weight, torch.full((size, 8), value), shard)
+                    layer.weight_loader(layer.bias, torch.full((size,), value), shard)
+                torch.testing.assert_close(layer.weight[:10], torch.full_like(layer.weight[:10], value))
+                torch.testing.assert_close(layer.bias[:10], torch.full_like(layer.bias[:10], value))
+                if padding_size:
+                    torch.testing.assert_close(layer.weight[10:], torch.zeros_like(layer.weight[10:]))
+                    torch.testing.assert_close(layer.bias[10:], torch.zeros_like(layer.bias[10:]))
+                    self.assertEqual(layer.weight.weight_loader_numel, 80)
+                    self.assertEqual(layer.bias.weight_loader_numel, 10)
+                    self.assertEqual(layer._checkpoint_output_sizes, [4, 6])
+                    self.assertEqual(layer.shard_ids, (0, 1))
+
+    @unittest.skipIf(vllm_version_is("0.33.0"), "Stacked shard tracking was added after v0.33")
+    def test_custom_allocations_preserve_missing_shard_validation(self):
+        layers: tuple[Any, ...] = (
+            AscendMergedColumnParallelLinear(input_size=8, output_sizes=[4, 4], bias=False, disable_tp=True),
+            AscendQKVParallelLinear(hidden_size=8, head_size=2, total_num_heads=2, bias=False, disable_tp=True),
+        )
+        for layer in layers:
+            with self.subTest(layer=type(layer).__name__):
+                shards = layer.shard_ids
+                first = shards[0]
+                size = layer._get_shard_size_mapping(first)
+                layer.weight_loader(layer.weight, torch.ones(size, 8), first)
+                self.assertEqual(layer.pop_missing_shards(), [f"weight.{shard}" for shard in shards[1:]])
+                # A new complete load must start fresh and cover every shard.
+                for shard in shards:
+                    size = layer._get_shard_size_mapping(shard)
+                    layer.weight_loader(layer.weight, torch.ones(size, 8), shard)
+                self.assertEqual(layer.pop_missing_shards(), [])
+                torch.testing.assert_close(layer.weight, torch.ones_like(layer.weight))
+                with self.assertRaises(ValueError):
+                    layer.validate_shard_id("invalid", layer.weight)
+
     def test_merged_mlp_tp_init(self):
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.scheduler_config.recompute_scheduler_enable = False
@@ -147,6 +298,23 @@ class TestAscendMergedColumnParallelLinear(BaseLinearTest):
             prefix="gate_up_proj",
         )
         self.assertEqual(linear.custom_op.comm_group, parallel_state._MLP_TP)
+
+    def test_merged_fp8_shape_allowance_is_set_before_weight_creation(self):
+        quant_config = MagicMock(weight_block_size=[128, 128])
+        quant_method = quant_config.get_quant_method.return_value
+
+        def check_allowance(*, layer, output_partition_sizes, **kwargs):
+            self.assertEqual(output_partition_sizes, [192, 64])
+            self.assertTrue(layer.allow_fp8_block_shape_mismatch)
+
+        quant_method.create_weights.side_effect = check_allowance
+        AscendMergedColumnParallelLinear(
+            input_size=256,
+            output_sizes=[384, 128],
+            bias=False,
+            quant_config=quant_config,
+        )
+        quant_method.create_weights.assert_called_once()
 
 
 class TestAscendReplicatedLinear(BaseLinearTest):
@@ -173,8 +341,6 @@ class TestColumnParallelOpDispatch(unittest.TestCase):
         self._patches = [
             patch("vllm_ascend.ops.linear_op.mlp_tp_enable", return_value=False),
             patch("vllm_ascend.ops.linear_op.oproj_tp_enable", return_value=False),
-            patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
-            patch("vllm_ascend.ops.linear_op.enable_sp", return_value=False),
             patch("vllm_ascend.ops.linear_op.is_moe_layer", return_value=False),
         ]
         for p in self._patches:
@@ -191,16 +357,17 @@ class TestColumnParallelOpDispatch(unittest.TestCase):
 
     def test_share_expert_disabled_with_sp_column(self):
         """share_expert / shared_expert prefix → None when SP enabled."""
-        self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
-        self._patches[-1].start()
         self.assertIsNone(self._get_column_op("model.layers.0.mlp.share_expert.gate_up_proj"))
         self.assertIsNone(self._get_column_op("model.layers.0.mlp.shared_expert.gate_up_proj"))
 
-    def test_g_proj_matches_sp_column_path(self):
+    def test_g_proj_does_not_use_removed_sp_column_path(self):
         """g_proj (Step3p5 attention gate) is included in SP column prefixes."""
-        self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
-        self._patches[-1].start()
-        self.assertIsNotNone(self._get_column_op("model.layers.0.self_attn.g_proj"))
+        self.assertIsNone(self._get_column_op("model.layers.0.self_attn.g_proj"))
+
+    def test_multimodal_encoder_prefix_skips_sp_column(self):
+        """Multimodal encoder variants should not enter the SP column path."""
+        self.assertIsNone(self._get_column_op("model.vision_model_proj.indexer_proj"))
+        self.assertIsNone(self._get_column_op("model.vision_tower_encoder.qkv_proj"))
 
 
 class TestRowParallelOpDispatch(unittest.TestCase):
@@ -211,8 +378,6 @@ class TestRowParallelOpDispatch(unittest.TestCase):
         self._patches = [
             patch("vllm_ascend.ops.linear_op.mlp_tp_enable", return_value=False),
             patch("vllm_ascend.ops.linear_op.oproj_tp_enable", return_value=False),
-            patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
-            patch("vllm_ascend.ops.linear_op.enable_sp", return_value=False),
             patch("vllm_ascend.ops.linear_op.is_moe_layer", return_value=False),
         ]
         for p in self._patches:
@@ -229,10 +394,13 @@ class TestRowParallelOpDispatch(unittest.TestCase):
 
     def test_share_expert_disabled_with_sp_row(self):
         """share_expert / shared_expert prefix → None when SP enabled."""
-        self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
-        self._patches[-1].start()
         self.assertIsNone(self._op("model.layers.0.mlp.share_expert.down_proj"))
         self.assertIsNone(self._op("model.layers.0.mlp.shared_expert.down_proj"))
+
+    def test_multimodal_encoder_prefix_skips_sp_row(self):
+        """Multimodal encoder variants should not enter the SP row path."""
+        self.assertIsNone(self._op("model.multi_modal_projector.down_proj"))
+        self.assertIsNone(self._op("model.patch_merge_mlp.out_proj"))
 
 
 class TestGetParallelOpShareExpert(unittest.TestCase):
@@ -241,9 +409,10 @@ class TestGetParallelOpShareExpert(unittest.TestCase):
     def setUp(self):
         self.mock_layer = MagicMock()
         self.mock_group = MagicMock()
+        self.mock_group.rank_in_group = 1
+        self.mock_group.world_size = 2
         self._patches = [
             patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=self.mock_group),
-            patch("vllm_ascend.ops.linear_op.shared_expert_dp_enabled", return_value=True),
         ]
         for p in self._patches:
             p.start()
@@ -259,15 +428,174 @@ class TestGetParallelOpShareExpert(unittest.TestCase):
 
     def test_share_expert_disables_tp(self):
         """share_expert / shared_expert / shared_experts → (None, 0, 1)."""
-        for prefix in (
-            "model.layers.0.mlp.share_expert.gate_up_proj",
-            "model.layers.0.mlp.shared_expert.gate_up_proj",
-            "model.layers.0.mlp.shared_experts.gate_up_proj",
+        with patch("vllm_ascend.ops.linear_op.shared_expert_dp_enabled", return_value=True):
+            for prefix in (
+                "model.layers.0.mlp.share_expert.gate_up_proj",
+                "model.layers.0.mlp.shared_expert.gate_up_proj",
+                "model.layers.0.mlp.shared_experts.gate_up_proj",
+            ):
+                custom_op, tp_rank, tp_size = self._call(prefix)
+                self.assertIsNone(custom_op)
+                self.assertEqual(tp_rank, 0)
+                self.assertEqual(tp_size, 1)
+
+    def test_sequence_parallel_does_not_replicate_shared_expert_weights(self):
+        """After decoupling, SP alone keeps TP (weights not replicated)."""
+        with patch("vllm_ascend.ops.linear_op.shared_expert_dp_enabled", return_value=False):
+            custom_op, tp_rank, tp_size = self._call("model.layers.0.mlp.shared_experts.gate_up_proj")
+
+        self.assertIsNone(custom_op)
+        self.assertEqual(tp_rank, 1)
+        self.assertEqual(tp_size, 2)
+
+    def test_shared_expert_keeps_tp_without_dp_or_sequence_parallel(self):
+        with patch("vllm_ascend.ops.linear_op.shared_expert_dp_enabled", return_value=False):
+            custom_op, tp_rank, tp_size = self._call("model.layers.0.mlp.shared_experts.gate_up_proj")
+
+        self.assertIsNone(custom_op)
+        self.assertEqual(tp_rank, 1)
+        self.assertEqual(tp_size, 2)
+
+    def test_shared_expert_ignores_disable_tp_from_model(self):
+        """Models pass disable_tp=is_sequence_parallel for shared experts; after
+        decoupling, only the shared-expert DP switch replicates weights."""
+        from vllm_ascend.ops.linear_op import get_parallel_op
+
+        prefix = "model.layers.0.mlp.shared_experts.gate_up_proj"
+        with patch("vllm_ascend.ops.linear_op.shared_expert_dp_enabled", return_value=False):
+            custom_op, tp_rank, tp_size = get_parallel_op(True, prefix, self.mock_layer, False)
+
+        self.assertIsNone(custom_op)
+        self.assertEqual(tp_rank, 1)
+        self.assertEqual(tp_size, 2)
+
+        with patch("vllm_ascend.ops.linear_op.shared_expert_dp_enabled", return_value=True):
+            custom_op, tp_rank, tp_size = get_parallel_op(True, prefix, self.mock_layer, False)
+
+        self.assertIsNone(custom_op)
+        self.assertEqual(tp_rank, 0)
+        self.assertEqual(tp_size, 1)
+
+
+class TestAscendDCPGroupColumnParallelLinear(unittest.TestCase):
+    @staticmethod
+    @contextmanager
+    def _parallel_context(rank=1, dcp=2):
+        config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                decode_context_parallel_size=dcp, prefill_context_parallel_size=1, tensor_parallel_size=4
+            ),
+            model_config=SimpleNamespace(enforce_eager=True),
+        )
+        group = SimpleNamespace(world_size=4, rank_in_group=rank)
+        with (
+            patch.object(linear, "get_current_vllm_config", return_value=config),
+            patch.object(linear, "get_tensor_model_parallel_rank", return_value=rank),
+            patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=group),
+            patch("vllm.distributed.parallel_state.get_tp_group", return_value=group),
+            patch.object(linear, "_should_reshape_wo_a_to_3d", return_value=False),
         ):
-            custom_op, tp_rank, tp_size = self._call(prefix)
-            self.assertIsNone(custom_op)
-            self.assertEqual(tp_rank, 0)
-            self.assertEqual(tp_size, 1)
+            yield
+
+    @staticmethod
+    @contextmanager
+    def _unquantized_gemm():
+        with (
+            patch.object(linear.UnquantizedLinearMethod, "process_weights_after_loading"),
+            patch.object(linear, "_should_keep_nd_for_compatibility_weight", return_value=True),
+            patch("torch.ops.vllm.unquantized_gemm", side_effect=torch.nn.functional.linear, create=True) as gemm,
+        ):
+            yield gemm
+
+    @staticmethod
+    @contextmanager
+    def _quantization():
+        config = SimpleNamespace(
+            get_quant_method=lambda *args, **kwargs: AscendLinearMethod(AscendW8A8DynamicLinearMethod())
+        )
+        with (
+            patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.maybe_trans_nz", side_effect=lambda w: w),
+            patch("torch_npu.npu_dynamic_quant", side_effect=lambda x, **kwargs: (x, torch.ones(x.shape[0]))),
+            patch(
+                "torch_npu.npu_quant_matmul", side_effect=lambda x, w, scale, **kwargs: (x @ w.float()) * scale
+            ) as matmul,
+        ):
+            yield config, matmul
+
+    def test_group_projection_loads_actual_shards_and_uses_ascend_gemm(self):
+        rank, dcp = 3, 2
+        with self._unquantized_gemm() as unquantized_gemm:
+            full_weight = torch.arange(24 * 5, dtype=torch.float32).view(24, 5) / 100
+            x = torch.arange(15, dtype=torch.float32).view(3, 5)
+            with self._parallel_context(rank, dcp):
+                layer = AscendDCPGroupColumnParallelLinear(5, 24, prefix="model.layers.0.self_attn.q_b_proj")
+                self.assertIsInstance(layer.quant_method, AscendUnquantizedLinearMethod)
+                self.assertIsInstance(layer.custom_op, DCPGroupColumnParallelOp)
+                self.assertEqual((layer.tp_rank, layer.tp_size), (rank // dcp, 4 // dcp))
+                self.assertEqual((layer.weight.tp_rank, layer.weight.tp_size), (rank // dcp, 4 // dcp))
+                layer.weight.weight_loader(layer.weight, full_weight)
+                start = (rank // dcp) * (6 * dcp)
+                torch.testing.assert_close(layer.weight, full_weight[start : start + 6 * dcp])
+                output = layer(x)[0].view(3, 2 * dcp, 3)
+                expected = torch.nn.functional.linear(x, full_weight).view(3, 8, 3)
+                torch.testing.assert_close(
+                    output, expected[:, (rank // dcp) * (2 * dcp) : (rank // dcp + 1) * (2 * dcp)]
+                )
+                torch.testing.assert_close(layer._local_view(output), expected[:, rank * 2 : (rank + 1) * 2])
+                unquantized_gemm.assert_called_once()
+
+    def test_quantized_group_projection_is_processed_once_and_sliced_after_gemm(self):
+        rank, dcp = 3, 2
+        with self._quantization() as quantization:
+            model_config = SimpleNamespace(
+                word_embeddings_untied_by_checkpoint=False, quantization=None, dtype=torch.float32
+            )
+            quant, matmul = quantization
+            full_weight = torch.arange(24 * 5, dtype=torch.int8).view(24, 5)
+            scales = torch.arange(1, 25, dtype=torch.float32).view(24, 1)
+            offsets = torch.zeros_like(scales)
+            x = torch.arange(15, dtype=torch.float32).view(3, 5)
+            processing_order = []
+            original_process = AscendW8A8DynamicLinearMethod.process_weights_after_loading
+
+            def record_process(method, layer):
+                processing_order.append(layer)
+                # The scheme sees only the raw group [output, input] weights.
+                self.assertEqual(layer.weight.shape, (layer.output_size_per_partition, 5))
+                original_process(method, layer)
+
+            with (
+                self._parallel_context(rank, dcp),
+                patch.object(AscendW8A8DynamicLinearMethod, "process_weights_after_loading", record_process),
+            ):
+                layer = AscendDCPGroupColumnParallelLinear(
+                    5, 24, quant_config=quant, prefix="model.layers.0.self_attn.q_proj"
+                )
+                self.assertFalse(any(layer.children()))
+                for name, tensor in (
+                    ("weight", full_weight),
+                    ("weight_scale", scales),
+                    ("weight_offset", offsets),
+                ):
+                    param = getattr(layer, name)
+                    param.weight_loader(param, tensor)
+                process_weights_after_loading(layer, model_config, torch.device("cpu"))
+                self.assertEqual(processing_order, [layer])
+                self.assertEqual(layer.weight.shape, (5, 6 * dcp))
+                group_start = (rank // dcp) * (6 * dcp)
+                group_slice = slice(group_start, group_start + 6 * dcp)
+                group_result = layer(x)[0]
+                expected_group = (
+                    torch.nn.functional.linear(x, full_weight[group_slice].float()) * scales[group_slice].flatten()
+                )
+                torch.testing.assert_close(group_result, expected_group)
+                self.assertEqual(matmul.call_args.args[1].shape, (5, 6 * dcp))
+                local_result = layer._local_view(group_result.view(3, 2 * dcp, 3)).reshape(3, 6)
+                local_slice = slice(rank * 6, (rank + 1) * 6)
+                expected_local = torch.nn.functional.linear(x, full_weight[local_slice].float())
+                expected_local *= scales[local_slice].flatten()
+                torch.testing.assert_close(local_result, expected_local)
+                matmul.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -1,126 +1,167 @@
-import vllm.model_executor.layers.fla.ops
-import vllm.model_executor.layers.mamba.ops.causal_conv1d
-import vllm.v1.worker.gpu.sample.gumbel
-from vllm.triton_utils import HAS_TRITON, triton
+import vllm.model_executor.layers.mamba.ops.causal_conv1d as _cc1d
+import vllm.third_party.flash_linear_attention.ops as fla_ops
+import vllm.third_party.flash_linear_attention.ops.layernorm_guard as fla_layernorm_guard
+from vllm.logger import logger
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.layernorm_guard import LayerNormFn
-from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_recurrent_gated_delta_rule_fwd_kernel
-from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_npu
 
-triton.next_power_of_2 = next_power_of_2
 
-vllm.model_executor.layers.mamba.ops.causal_conv1d.causal_conv1d_update = causal_conv1d_update_npu
-vllm.model_executor.layers.fla.ops.fused_recurrent.fused_recurrent_gated_delta_rule_fwd_kernel = (
-    fused_recurrent_gated_delta_rule_fwd_kernel
-)
-vllm.model_executor.layers.fla.ops.layernorm_guard.LayerNormFn = LayerNormFn
-vllm.model_executor.layers.fla.ops.chunk_gated_delta_rule = chunk_gated_delta_rule
+def _next_power_of_2(n):
+    # vLLM #58651's packed_qk_rope kernel evaluates
+    # triton.next_power_of_2(rotary_dim) with a tl.constexpr argument.
+    # The host helper only understands plain ints, so unwrap first.
+    if HAS_TRITON and isinstance(n, tl.constexpr):
+        n = n.value
+    return next_power_of_2(n)
 
-# On NPU platforms without an active Triton backend (e.g. 310P), replace the
-# Triton-based fused_post_conv_prep with a pure-PyTorch fallback so that
-# qwen_gdn_linear_attn's from-import picks up the replacement before model
-# load.
-if not HAS_TRITON:
-    import torch
-    import torch.nn.functional as _F
 
-    def _fused_post_conv_prep_pytorch(
-        conv_output,
-        a,
-        b,
-        A_log,
-        dt_bias,
-        num_k_heads,
-        head_k_dim,
-        head_v_dim,
-        apply_l2norm=True,
-        output_g_exp=False,
-    ):
-        L = conv_output.shape[0]
-        H, K, V = num_k_heads, head_k_dim, head_v_dim
-        HV = A_log.shape[0]
+# Newer Triton tracks JIT kernel dependencies and rejects plain Python
+# callables. Keep the host helper callable from constexpr code as well.
+if HAS_TRITON and hasattr(triton, "constexpr_function"):
+    triton.next_power_of_2 = triton.constexpr_function(next_power_of_2)
+else:
+    triton.next_power_of_2 = _next_power_of_2
 
-        q = conv_output[:, : H * K].reshape(L, H, K)
-        k = conv_output[:, H * K : 2 * H * K].reshape(L, H, K)
-        v = conv_output[:, 2 * H * K :].reshape(L, HV, V)
 
-        if apply_l2norm:
-            # x / sqrt(sum(x^2) + eps) — matches Triton kernel, in fp32
-            def _l2norm(t):
-                t_f = t.float()
-                return (t_f / torch.sqrt((t_f * t_f).sum(-1, keepdim=True) + 1e-6)).to(t.dtype)
+fla_layernorm_guard.LayerNormFn = LayerNormFn
+fla_ops.chunk_gated_delta_rule = chunk_gated_delta_rule
 
-            q, k = _l2norm(q), _l2norm(k)
+# GLM-5.3-Flash (and Kimi KDA) import fused_recurrent_kda / chunk_kda_with_fused_gate
+# from this FLA module. Swap them for the NPU Triton implementations before the
+# model is constructed. Missing on older vLLM trees that predate KDA.
+try:
+    import vllm.third_party.flash_linear_attention.ops.kda as fla_kda
 
-        q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
-
-        x = (a + dt_bias.unsqueeze(0)).float()
-        g = -torch.exp(A_log.float().unsqueeze(0)) * _F.softplus(x)
-        if output_g_exp:
-            g = torch.exp(g)
-
-        return q, k, v, g, torch.sigmoid(b.float())
-
-    vllm.model_executor.layers.fla.ops.fused_post_conv_prep = _fused_post_conv_prep_pytorch
-
-    def _fused_recurrent_packed_decode_pytorch(
-        mixed_qkv,
-        a,
-        b,
-        A_log,
-        dt_bias,
-        scale,
-        initial_state,
-        out,
-        ssm_state_indices,
-        use_qk_l2norm_in_kernel=False,
-    ):
-        B = mixed_qkv.shape[0]
-        HV, V, K = initial_state.shape[-3:]
-        H = (mixed_qkv.shape[1] - HV * V) // (2 * K)
-        ratio = HV // H
-
-        q = mixed_qkv[:, : H * K].reshape(B, H, K)
-        k = mixed_qkv[:, H * K : 2 * H * K].reshape(B, H, K)
-        v = mixed_qkv[:, 2 * H * K :].reshape(B, HV, V)
-
-        SOFTPLUS_THRESHOLD = 20.0
-        x = (a + dt_bias.unsqueeze(0)).float()
-        softplus_x = torch.where(x <= SOFTPLUS_THRESHOLD, torch.log1p(torch.exp(x)), x)
-        g = -torch.exp(A_log.float().unsqueeze(0)) * softplus_x  # [B, HV]
-        beta = torch.sigmoid(b.float())  # [B, HV]
-
-        for n in range(B):
-            state_idx = int(ssm_state_indices[n].item())
-            if state_idx <= 0:
-                out[n, 0] = 0
-                continue
-
-            h = initial_state[state_idx].float()  # [HV, V, K]
-            q_n = q[n].float().repeat_interleave(ratio, dim=0)  # [HV, K]
-            k_n = k[n].float().repeat_interleave(ratio, dim=0)  # [HV, K]
-            v_n = v[n].float()  # [HV, V]
-
-            if use_qk_l2norm_in_kernel:
-
-                def _l2norm(t):
-                    t_f = t.float()
-                    return t_f / torch.sqrt((t_f * t_f).sum(-1, keepdim=True) + 1e-6)
-
-                q_n, k_n = _l2norm(q_n), _l2norm(k_n)
-            q_n = q_n * scale
-
-            h = h * torch.exp(g[n]).view(HV, 1, 1)
-            v_n = v_n - torch.einsum("hvk,hk->hv", h, k_n)
-            v_n = v_n * beta[n].view(HV, 1)
-            h = h + torch.einsum("hv,hk->hvk", v_n, k_n)
-            out[n, 0] = torch.einsum("hvk,hk->hv", h, q_n).to(out.dtype)
-            initial_state[state_idx] = h.to(initial_state.dtype)
-
-        return out, initial_state
-
-    vllm.model_executor.layers.fla.ops.fused_recurrent.fused_recurrent_gated_delta_rule_packed_decode = (
-        _fused_recurrent_packed_decode_pytorch
+    from vllm_ascend.ops.triton.kda.kda import (
+        chunk_kda as _npu_chunk_kda,
     )
+    from vllm_ascend.ops.triton.kda.kda import (
+        chunk_kda_with_fused_gate as _npu_chunk_kda_with_fused_gate,
+    )
+    from vllm_ascend.ops.triton.kda.kda import (
+        fused_kda_gate as _npu_fused_kda_gate,
+    )
+    from vllm_ascend.ops.triton.kda.kda import (
+        fused_recurrent_kda as _npu_fused_recurrent_kda,
+    )
+
+    fla_kda.fused_recurrent_kda = _npu_fused_recurrent_kda
+    fla_kda.chunk_kda = _npu_chunk_kda
+    fla_kda.chunk_kda_with_fused_gate = _npu_chunk_kda_with_fused_gate
+    fla_kda.fused_kda_gate = _npu_fused_kda_gate
+except ImportError:
+    pass
+
+# npu_kda_causal_conv1d_triton: the PyTorch fallback calls .item() per
+# request, which aborts ACL graph capture. The upstream NPU Triton kernel has
+# no host sync and accepts the spec-decode kwargs the fallback had to drop.
+try:
+    from vllm_ascend.ops.triton.mamba.causal_conv1d import (  # type: ignore[attr-defined]
+        causal_conv1d_update_npu as _cc1d_update_npu,
+    )
+
+    _cc1d.causal_conv1d_update = _cc1d_update_npu
+    logger.debug("Bound the NPU Triton causal_conv1d_update for the KDA layers.")
+except Exception as _cc1d_err:
+    logger.warning(
+        "NPU Triton causal_conv1d_update is unavailable (%s); falling back to the"
+        " PyTorch implementation, which syncs per request and therefore stalls ACL"
+        " graph capture at decode-FULL.",
+        _cc1d_err,
+    )
+
+
+# ---------------------------------------------------------------------------
+# V2 Model Runner kernel rebinds. These used to live in a separate
+# ``patch_triton_v2.py`` module; they were merged here so that every Ascend
+# Triton kernel replacement lives in one file.
+#
+# The targets below live under ``vllm.v1.worker.gpu.*`` and are only exercised
+# by the V2 Model Runner. They stay in this module so that every Ascend Triton
+# kernel replacement lives in one place. The section must run *after* the shared
+# model/kernel rebinds above: importing these v2 modules earlier would let a
+# from-import capture an unpatched symbol before we rebind it.
+# ---------------------------------------------------------------------------
+import vllm.v1.worker.gpu.spec_decode.speculator as base_speculator  # noqa: E402
+from vllm.v1.sample.ops import topk_topp_sampler  # noqa: E402
+from vllm.v1.worker import mamba_utils  # noqa: E402
+from vllm.v1.worker.gpu import structured_outputs  # noqa: E402
+from vllm.v1.worker.gpu.sample import (  # noqa: E402
+    bad_words,
+    gumbel,
+    logprob,
+    output,
+    penalties,
+    prompt_logprob,
+    sampler,
+    states,
+    thinking_budget,
+    trace_replay,
+)
+from vllm.v1.worker.gpu.spec_decode import rejection_sampler, rejection_sampler_utils  # noqa: E402
+from vllm.v1.worker.gpu.spec_decode.dspark import speculator as dspark_speculator  # noqa: E402
+from vllm.v1.worker.gpu.spec_decode.eagle import speculator  # noqa: E402
+
+from vllm_ascend.ops.triton.apply_grammar_bitmask import _apply_grammar_bitmask_kernel  # noqa: E402
+from vllm_ascend.ops.triton.mamba.precopy import precopy_mamba_align_fused_kernel  # noqa: E402
+from vllm_ascend.ops.triton.metrics.num_nans import get_num_nans  # noqa: E402
+from vllm_ascend.ops.triton.sample.categorical_sample import categorical_sample  # noqa: E402
+from vllm_ascend.ops.triton.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel  # noqa: E402
+from vllm_ascend.ops.triton.sample.sampling_mask import sampling_mask_from_logits_npu  # noqa: E402
+from vllm_ascend.ops.triton.sample.thinking_budget import (  # noqa: E402
+    _load_effective_token_ascend,
+    _update_committed_marker_cache_kernel_ascend,
+)
+from vllm_ascend.worker.v2.sample.apply_top_k_top_p import apply_top_k_top_p  # noqa: E402
+from vllm_ascend.worker.v2.sample.bad_words import apply_bad_words  # noqa: E402
+from vllm_ascend.worker.v2.sample.gumbel import apply_temperature  # noqa: E402
+from vllm_ascend.worker.v2.sample.logprob import compute_token_logprobs, compute_topk_logprobs  # noqa: E402
+from vllm_ascend.worker.v2.sample.min_p import apply_min_p  # noqa: E402
+from vllm_ascend.worker.v2.sample.penalties import apply_penalties, bincount  # noqa: E402
+from vllm_ascend.worker.v2.sample.trace_replay import apply_trace_tokens  # noqa: E402
+from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import (  # noqa: E402
+    rejection_sample as npu_rejection_sample,
+)
+
+# triton ops that need to be filed in ops/triton
+penalties.apply_penalties = apply_penalties
+# because sampler.py and speculator.py are imported before this patch, they must be overridden
+prompt_logprob.compute_topk_logprobs = compute_topk_logprobs
+sampler.compute_topk_logprobs = compute_topk_logprobs
+rejection_sampler.compute_topk_logprobs = compute_topk_logprobs
+states.apply_min_p = apply_min_p
+penalties.bincount = bincount
+bad_words.apply_bad_words = apply_bad_words
+gumbel.apply_temperature = apply_temperature
+states.apply_temperature = apply_temperature
+logprob.compute_token_logprobs = compute_token_logprobs
+rejection_sampler_utils.rejection_sample = npu_rejection_sample
+rejection_sampler.rejection_sample = npu_rejection_sample
+# triton ops that filed in ops/triton
+gumbel.gumbel_sample = categorical_sample
+speculator.gumbel_sample = categorical_sample
+base_speculator.gumbel_sample = categorical_sample
+dspark_speculator.gumbel_sample = categorical_sample
+sampler.gumbel_sample = categorical_sample
+topk_topp_sampler.apply_top_k_top_p_triton = apply_top_k_top_p
+structured_outputs._apply_grammar_bitmask_kernel = _apply_grammar_bitmask_kernel
+mamba_utils.precopy_mamba_align_fused_kernel = precopy_mamba_align_fused_kernel
+# This patch may be revisited or reverted once the compiler and Triton Ascend toolkit
+# support the upstream implementation of fill_logprob_token_ids_kernel.
+# For now, use the Ascend-specific implementation.
+logprob._fill_logprob_token_ids_kernel = _fill_logprob_token_ids_kernel
+# This patch may be revisited or reverted once the compiler and Triton Ascend toolkit
+# support the upstream implementation of get_num_nans.
+# For now, use the Ascend-specific implementation.
+sampler.get_num_nans = get_num_nans
+rejection_sampler.get_num_nans = get_num_nans
+# Avoid excessive UB allocation for strided vocab-dimension loads.
+output.SamplingMaskTensors.from_logits = classmethod(sampling_mask_from_logits_npu)
+# TODO: Remove after the new Q4 Triton-Ascend release is available.
+thinking_budget._load_effective_token = _load_effective_token_ascend
+# TODO: Remove after Triton-Ascend 3.6.0 is the minimum supported version.
+thinking_budget._update_committed_marker_cache_kernel = _update_committed_marker_cache_kernel_ascend
+trace_replay.apply_trace_tokens = apply_trace_tokens

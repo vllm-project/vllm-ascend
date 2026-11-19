@@ -2,7 +2,7 @@
 
 ## Background
 
-​In the inference scenario, there are different types of traffic, such as operator delivery, collective communication, and KVCache. Such traffics are transmitted through network and affect each other, increasing the inference latency.
+​In the inference scenario, there are different types of traffic, such as operator delivery, collective communication, and KVCache. Such traffic are transmitted through the network and affect each other, increasing the inference latency.
 
 ​For example, in the Agentic AI era, as the context length continues to increase, the size of the KVCache also gradually grows. To conserve HBM usage, the approach of offloading KVCache to DDR is adopted to enhance inference TPS. At the same time, to maximize the utilization of computing power, a pipeline orchestration method using computation to mask KVCache is commonly employed. This method involves prefetching the next layer's KVCache during the current layer's computation/communication to reduce overall latency. However, this approach introduces a traffic conflict issue between the KVCache and the operator delivery/collective communication, leading to increased inference latency and impacting the SLO.
 
@@ -22,7 +22,7 @@
 
 ## Build AI QoS Module
 
-Build and install the AI QoS extension before using `tools/ai_qos.py`.
+Build and install the AI QoS extension before running `python -m tools.ai_qos`.
 The DSMI include‑file (dsmi_common_interface.h) and library‑file (libdrvdsmi_host.so) paths are environment-dependent. Locate the paths on your machine first, then replace `YOUR_DSMI_INCLUDE_DIR` and `YOUR_DSMI_LIBRARY_FILE` in the command (for example, `/usr/local/Ascend/driver/include` and `/usr/local/Ascend/driver/lib64/driver/libdrvdsmi_host.so`).
 
 In most deployments, these commands are executed inside a container. When creating the container, make sure the DSMI header/library directories are mounted into the container filesystem; otherwise CMake cannot find the files.
@@ -45,34 +45,38 @@ cmake --install tools/ai_qos/build
 
 ​### 1) Auto mode
 
-`python tools/ai_qos.py`
+```bash
+python -m tools.ai_qos
+```
 
 ​AI QoS auto mode automatically classifies the priorities of different types of traffic and generates QoS tags. It also prints the UB switch configuration. You can copy the outputs and log in to the UB switch to configure the QoS configurations of UB switch. This configuration will overwrite the current QoS configuration on the UB switch. If there is any existing QoS configuration, please back it up in advance.
 
 ​### 2) Manual mode
 
-​python tools/ai_qos.py --mode manual --AIV_D2D {priority} --AIV_H2D {priority} --SDMA_D2D {priority} --SDMA_H2D {priority} --PCIEDMA_H2D {priority}
+```bash
+python -m tools.ai_qos --mode manual --AIV {priority} --SDMA {priority} --PCIEDMA {priority}
+```
 
-​AI QoS manual mode calculates the QoS tag of traffic based on the priority of different types of traffic set by users, and generates and prints the UB switch configuration.You can copy the outputs and log in to the UB switch to configure the QoS configurations of UB switch. This configuration will overwrite the current QoS configuration on the UB switch. If there is any existing QoS configuration, please back it up in advance.
+​AI QoS manual mode calculates the QoS tags of traffic based on the priority of different types of traffic set by users, and generates and prints the UB switch configuration.You can copy the outputs and log in to the UB switch to configure the QoS configurations of UB switch. This configuration will overwrite the current QoS configuration on the UB switch. If there is any existing QoS configuration, please back it up in advance.
 
-​In manual mode, you can specify the priority of only one type of traffic. The parameters are described as follows:
+​In manual mode, you can independently specify the priority of each traffic type. The parameters are described as follows:
 
 | Name              | Type | Default                                                      | Description                                                  |
 | ----------------- | ---- | ------------------------------------------------------------ | ------------------------------------------------------------ |
 | mode              | str  | auto                                                         | The  mode of AI QoS, default mode is "auto", another mode is  "manual",some parameters need to be configured if you choose  "manual" mode. |
-| AIV_D2D、AIV_H2D、SDMA_D2D、SDMA_H2D、PCIEDMA_H2D | str    | AIV_D2D: high,<br />AIV_H2D: high,<br />SDMA_D2D: high,<br />SDMA_H2D: low,<br />PCIEDMA_H2D: high | Parameters  for "manual" mode, determined the QoS priority of different types  of traffic.     <br />The default configuration is the same as "auto" mode.     <br />Typical traffic types are as follows for reference:     AIV_D2D: AIV-based  Device-to-Device communication, such as dispatch and combine.<br /> AIV_H2D: AIV-based  Operator Delivery.<br /> SDMA_D2D: SDMA-based  Device-to-Device communication, such as Allreduce and Allgather.<br />SDMA_H2D: SDMA-based  Host-to-Device/Device-to-Host communication, such as KVCache offloading and  prefetching.<br />PCIEDMA_H2D: PCIe DMA-based  Operator Delivery.   <br />  You can change the priority of different types of traffic, with  "high/middle/low" options available.Due to hardware restrictions,  "PCIEDMA_H2D" only supports  "high/low" priority. |
+| AIV、SDMA、PCIEDMA | str | AIV: high,<br />SDMA: low,<br />PCIEDMA: high | Parameters for "manual" mode that determine the QoS priority of different traffic types.<br />The default configuration is the same as "auto" mode.<br />AIV covers AIV-based Device-to-Device communication, such as dispatch and combine, and AIV-based operator delivery.<br />SDMA covers SDMA-based Device-to-Device communication, such as Allreduce and Allgather, and Host-to-Device/Device-to-Host communication, such as KVCache offloading and prefetching.<br />PCIEDMA covers PCIe DMA-based operator delivery.<br />All three parameters support "high/middle/low". |
 
 **How to disable AI QoS**:
 
 ```bash
-​python tools/ai_qos.py unset
+python -m tools.ai_qos unset
 ```
 
 ​The command for disabling the AI QoS feature on the UB Switch will be printed on the screen. Please log in to the UB Switch and execute the command printed on the screen to complete the feature disabling.
 
 ## Usage Constraints
 
-​Due to underlying driver limitations, the QoS configurations for AIV_H2D and AIV_D2D do not take effect currently. Once the required adaptation capabilities are added in a future driver release, this feature will be delivered through a module upgrade.
+​Due to underlying driver limitations, the QoS configuration for AIV does not take effect currently. Once the required adaptation capabilities are added in a future driver release, this feature will be delivered through a module upgrade.
 
 The AI QoS feature supports the Atlas 800T A3 server and Atlas 900 A3 SuperPoD cluster. It must be used in privileged containers and requires the following software versions:
 

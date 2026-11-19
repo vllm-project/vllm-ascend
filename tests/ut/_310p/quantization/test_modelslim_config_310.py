@@ -38,7 +38,7 @@ class TestAscendModelSlimConfig310(TestBase):
             "shard2.weight": "FLOAT",
         }
         self.ascend_config = AscendModelSlimConfig310(self.sample_config)
-        self.ascend_config.packed_modules_mapping = None
+        self.ascend_config.packed_modules_mapping = {}
 
     def test_get_quant_method_for_linear_310(self):
         mock_config = MagicMock()
@@ -47,7 +47,7 @@ class TestAscendModelSlimConfig310(TestBase):
         # Test skipped layer
         with (
             patch("vllm_ascend._310p.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
-            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=True),
+            patch("vllm_ascend._310p.quantization.modelslim_config.get_quant_type_for_layer", return_value=None),
         ):
             method = self.ascend_config.get_quant_method(linear_layer, ".attn")
             self.assertIsInstance(method, AscendUnquantizedLinearMethod)
@@ -55,8 +55,8 @@ class TestAscendModelSlimConfig310(TestBase):
         # Test quantized layer
         mock_scheme = MagicMock()
         with (
-            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
             patch("vllm_ascend._310p.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
+            patch("vllm_ascend._310p.quantization.modelslim_config.get_quant_type_for_layer", return_value="INT8"),
             patch("vllm_ascend._310p.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme),
             patch(
                 "vllm_ascend._310p.quantization.modelslim_config.AscendLinearMethod", return_value=MagicMock()
@@ -75,6 +75,7 @@ class TestAscendModelSlimConfig310(TestBase):
 
         with (
             patch("vllm_ascend._310p.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
+            patch("vllm_ascend._310p.quantization.modelslim_config.get_quant_type_for_layer", return_value="INT8"),
             patch(
                 "vllm_ascend._310p.quantization.modelslim_config.create_scheme_for_layer",
                 return_value=mock_scheme,
@@ -84,10 +85,9 @@ class TestAscendModelSlimConfig310(TestBase):
             config.get_quant_method(linear_layer, "lm_head")
 
         mock_create_scheme.assert_called_once_with(
-            quant_description=config.quant_description,
-            prefix="language_model.lm_head",
-            layer_type="linear",
-            packed_modules_mapping=config.packed_modules_mapping,
+            "INT8",
+            "language_model.lm_head",
+            "linear",
         )
 
     def test_get_quant_method_for_fused_moe_310(self):
@@ -106,8 +106,11 @@ class TestAscendModelSlimConfig310(TestBase):
         with (
             patch("vllm.config.vllm.get_current_vllm_config", return_value=mock_config),
             patch("vllm_ascend._310p.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
-            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
-            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=True),
+            patch(
+                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config",
+                return_value=mock_config,
+            ),
+            patch("vllm_ascend._310p.quantization.modelslim_config.get_quant_type_for_layer", return_value=None),
         ):
             method = self.ascend_config.get_quant_method(fused_moe_layer, ".moe")
             self.assertIsInstance(method, AscendUnquantizedFusedMoEMethod310)
@@ -115,10 +118,15 @@ class TestAscendModelSlimConfig310(TestBase):
         # Test quantized layer
         mock_scheme = MagicMock()
         with (
-            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
             patch("vllm.config.vllm.get_current_vllm_config", return_value=mock_config),
             patch("vllm_ascend._310p.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
-            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
+            patch(
+                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config",
+                return_value=mock_config,
+            ),
+            patch(
+                "vllm_ascend._310p.quantization.modelslim_config.get_quant_type_for_layer", return_value="W8A8_DYNAMIC"
+            ),
             patch("vllm_ascend._310p.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme),
             patch(
                 "vllm_ascend._310p.quantization.modelslim_config.AscendFusedMoEMethod", return_value=MagicMock()

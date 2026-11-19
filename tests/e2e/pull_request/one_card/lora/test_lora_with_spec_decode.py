@@ -60,7 +60,8 @@ def test_batch_inference_correctness(
     torch.use_deterministic_algorithms(True)
 
     method, model_name, spec_model_name, lora_path, tp_size = model_setup
-    prompts = [LORA_TEST_PROMPT_MAP[lora_path]] * 100
+    # max_num_seqs is 4, so 16 copies are four full batches of the same prompt.
+    prompts = [LORA_TEST_PROMPT_MAP[lora_path]] * 16
     lora_request = LoRARequest("adapter", 1, lora_path)
     sampling_params = SamplingParams(temperature=0.0, top_p=1.0, top_k=-1, seed=SEED, max_tokens=128)
 

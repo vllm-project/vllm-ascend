@@ -185,7 +185,7 @@ class TestJobDecodeEstimator(TestBase):
         self.assertEqual(result, 100)
 
     def test_observe_max_jobs_exceeded_raises(self):
-        cfg = BatchJobSchedConfig({"max_jobs": 2})
+        cfg = BatchJobSchedConfig(**{"max_jobs": 2})
         estimator = JobDecodeEstimator(cfg)
         estimator.observe("job1", 100)
         estimator.observe("job2", 100)
@@ -194,7 +194,7 @@ class TestJobDecodeEstimator(TestBase):
         self.assertIn("Maximum number of jobs", str(ctx.exception))
 
     def test_observe_max_jobs_zero_allows_unlimited(self):
-        cfg = BatchJobSchedConfig({"max_jobs": 51})
+        cfg = BatchJobSchedConfig(**{"max_jobs": 51})
         estimator = JobDecodeEstimator(cfg)
         for i in range(50):
             estimator.observe(f"job{i}", 100)
@@ -384,7 +384,7 @@ class TestRunningBlockReserver(TestBase):
     def setUp(self):
         super().setUp()
         self.config = BatchJobSchedConfig(
-            {
+            **{
                 "reserve_margin_blocks": 2,
                 "reserve_max_blocks": 8,
             }
@@ -507,7 +507,7 @@ class TestBatchJobAwareRequestQueue(TestBase):
     def setUp(self):
         super().setUp()
         self.config = BatchJobSchedConfig(
-            {
+            **{
                 "short_decode_token_threshold": 32,
                 "low_available_tokens_threshold": 4096,
                 "max_jobs": 20,
@@ -628,6 +628,59 @@ class TestBatchJobAwareRequestQueue(TestBase):
         for r in reqs:
             self.queue.add_request(r)
         self.queue.remove_requests(reqs)
+        self.assertEqual(len(self.queue), 0)
+
+    def test_remove_peeked_request_selects_next_request(self):
+        r1 = self._make_request("r1#job_name[job1]#")
+        r2 = self._make_request("r2#job_name[job1]#")
+        self.queue.add_request(r1)
+        self.queue.add_request(r2)
+
+        self.assertIs(self.queue.peek_request(), r1)
+        self.queue.remove_request(r1)
+
+        self.assertIs(self.queue.peek_request(), r2)
+        self.assertIs(self.queue.pop_request(), r2)
+        self.assertEqual(len(self.queue), 0)
+
+    def test_pop_after_removing_peeked_request_returns_next_request(self):
+        r1 = self._make_request("r1#job_name[job1]#")
+        r2 = self._make_request("r2#job_name[job1]#")
+        self.queue.add_request(r1)
+        self.queue.add_request(r2)
+
+        self.assertIs(self.queue.peek_request(), r1)
+        self.queue.remove_request(r1)
+
+        self.assertIs(self.queue.pop_request(), r2)
+        self.assertEqual(len(self.queue), 0)
+
+    def test_remove_requests_after_peek_leaves_queue_empty(self):
+        r1 = self._make_request("r1#job_name[job1]#")
+        r2 = self._make_request("r2#job_name[job1]#")
+        self.queue.add_request(r1)
+        self.queue.add_request(r2)
+
+        self.assertIs(self.queue.peek_request(), r1)
+        self.queue.remove_requests([r2, r1])
+
+        self.assertEqual(len(self.queue), 0)
+        with self.assertRaises(IndexError):
+            self.queue.peek_request()
+        with self.assertRaises(IndexError):
+            self.queue.pop_request()
+
+    def test_remove_other_request_preserves_peeked_request(self):
+        r1 = self._make_request("r1#job_name[job1]#")
+        r2 = self._make_request("r2#job_name[job1]#")
+        self.queue.add_request(r1)
+        self.queue.add_request(r2)
+
+        self.assertIs(self.queue.peek_request(), r1)
+        self.queue.remove_request(r2)
+
+        self.assertIs(self.queue._peeked, r1)
+        self.assertIs(self.queue.pop_request(), r1)
         self.assertEqual(len(self.queue), 0)
 
     def test_prepend_requests_adds_all(self):
@@ -751,7 +804,7 @@ class TestBatchJobAwareRequestQueue(TestBase):
         self.assertTrue(self.queue)
 
     def test_max_jobs_exceeded_raises_in_get_or_create(self):
-        cfg = BatchJobSchedConfig({"max_jobs": 1})
+        cfg = BatchJobSchedConfig(**{"max_jobs": 1})
         with patch(
             "vllm.v1.core.sched.request_queue.RequestQueue.__init__",
             MagicMock(return_value=None),

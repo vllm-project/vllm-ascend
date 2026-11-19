@@ -33,12 +33,12 @@ The allocator derives its plan from runtime host state:
 | Input | Source | Purpose |
 | --- | --- | --- |
 | Allowed CPUs | `/proc/self/status` `Cpus_allowed_list` | The only CPUs eligible for binding. Container cpusets are respected. |
-| Logical NPU map | `npu-smi info -m` | Maps card/chip IDs to global logical NPU IDs and gives `total_logic_npus`. On Ascend 950, `Chip Logic ID` is not reported, so `NPU ID` is used as the logical ID. |
-| Running NPUs | `npu-smi info` process table, filtered by `ASCEND_RT_VISIBLE_DEVICES` | Identifies the logical NPUs used by this worker process. A2/A3 process rows use `NPU Chip`; Ascend 950 process rows use `NPU ID`. |
+| Logical NPU map | `npu-smi info -m` | Maps card/chip IDs to global logical NPU IDs and gives `total_logic_npus`. On 950PR&950DT Products, `Chip Logic ID` is not reported, so `NPU ID` is used as the logical ID. |
+| Running NPUs | `npu-smi info` process table, filtered by `ASCEND_RT_VISIBLE_DEVICES` | Identifies the logical NPUs used by this worker process. A2/A3 process rows use `NPU Chip`; 950PR&950DT Products process rows use `NPU ID`. |
 | Topology affinity | `npu-smi info -t topo` | Provides NPU-to-CPU affinity for `topo_affinity` mode. |
 | CPU NUMA map | `lscpu -e=CPU,NODE` | Used to extend single-NUMA affinity pools to the next NUMA node. |
-| Thread topology | `lscpu` `Thread(s) per core` | Determines Ascend 950 cluster size: 8 CPUs for 1 thread per core, 16 CPUs for 2 threads per core. |
-| UVB polling threads | `ps -Te` | Finds host `uvb_poll_window_thread` threads for Ascend 950 UVB CPU binding. Docker containers must use `--pid=host` to see these host threads. |
+| Thread topology | `lscpu` `Thread(s) per core` | Determines 950PR&950DT Products cluster size: 8 CPUs for 1 thread per core, 16 CPUs for 2 threads per core. |
+| UVB polling threads | `ps -Te` | Finds host `uvb_poll_window_thread` threads for 950PR&950DT Products UVB CPU binding. Docker containers must use `--pid=host` to see these host threads. |
 
 ### Strategy Selection
 
@@ -47,7 +47,7 @@ The binding strategy is selected by Ascend device type:
 | Device type | Strategy | Reason |
 | --- | --- | --- |
 | A3 | `global_slice` | A3 uses HCCS card-to-card interconnect. Each NPU is nearly equidistant from all NUMA nodes, so there is no strong NPU-to-NUMA affinity signal. Global logical NPU ID based slicing gives deterministic, non-overlapping CPU pools and CPU/NUMA isolation between workers. |
-| Ascend 950 | `topo_affinity` | Ascend 950 uses NPU-to-CPU affinity from `npu-smi info -t topo` to choose an affinity NUMA node, then assigns one CPU cluster from that NUMA node to each worker. It also reports process rows by `NPU ID` instead of `NPU Chip`, skips IRQ binding, and binds host UVB polling threads. |
+| 950PR&950DT Products | `topo_affinity` | 950PR&950DT Products uses NPU-to-CPU affinity from `npu-smi info -t topo` to choose an affinity NUMA node, then assigns one CPU cluster from that NUMA node to each worker. It also reports process rows by `NPU ID` instead of `NPU Chip`, skips IRQ binding, and binds host UVB polling threads. |
 | A2 and Atlas 300 inference products | `topo_affinity` | A2 and Atlas 300 inference products provide NPU-to-CPU affinity information through `npu-smi info -t topo`, so they use this topology signal when available. |
 
 If `topo_affinity` is selected but topo affinity is unavailable, the allocator falls back to `global_slice`.
@@ -88,7 +88,7 @@ does not share the same CPU or NUMA slice with another worker.
 
 #### topo_affinity
 
-`topo_affinity` is designed for A2, Atlas 300 inference products, Ascend 950,
+`topo_affinity` is designed for A2, Atlas 300 inference products, 950PR&950DT Products,
 and other non-A3 device types. A2 and Atlas 300 inference products expose
 **meaningful NPU-to-CPU affinity information**, so the allocator starts from NPU
 topology affinity when it is available and then avoids overlap for shared
@@ -107,7 +107,7 @@ The non-running candidate step is intentional. It prevents two independent
 single-card workers from selecting the same CPU range when their visible NPUs
 share the same topology affinity.
 
-For Ascend 950, topology affinity is used differently:
+For 950PR&950DT Products, topology affinity is used differently:
 
 1. Bind all visible host `uvb_poll_window_thread` threads to NUMA0 CPUs except CPU0, constrained by `allowed_cpus`. Docker containers must use `--pid=host` to make these host threads visible.
 2. Use topo affinity to identify each NPU's single affinity NUMA node.
@@ -116,7 +116,7 @@ For Ascend 950, topology affinity is used differently:
 5. Assign clusters by sorted logical NPU ID, including hidden NPUs that share the same affinity NUMA.
 6. Keep only running NPUs in the final `npu_cpu_pool`.
 
-If Ascend 950 topo affinity is missing, spans multiple NUMA nodes, has too few
+If 950PR&950DT Products topo affinity is missing, spans multiple NUMA nodes, has too few
 clusters, or reports an unsupported `Thread(s) per core`, worker CPU binding is
 skipped without raising to the worker process.
 
@@ -133,7 +133,7 @@ For devices with IRQ binding:
 | ACL thread | `pool[-2]` |
 | Release thread | `pool[-1]` |
 
-For Ascend 950:
+For 950PR&950DT Products:
 
 | Role | CPUs |
 | --- | --- |
@@ -143,7 +143,7 @@ For Ascend 950:
 
 If a final pool has fewer CPUs than the selected role split requires, binding
 fails for this rank and the worker logs a warning from the caller. The minimum
-is 5 CPUs per NPU for devices with IRQ binding. Ascend 950 requires one full
+is 5 CPUs per NPU for devices with IRQ binding. 950PR&950DT Products requires one full
 cluster per worker.
 
 ## Conditional Host Tuning
@@ -156,7 +156,7 @@ steps when the environment supports them:
   reads and reduces remote-NUMA memory read latency.
 - IRQ binding places NPU IRQ handling on the CPUs reserved for the corresponding
   NPU when `/proc/irq` is writable and IRQ files can be resolved.
-  Ascend 950 skips this step.
+  950PR&950DT Products skips this step.
 
 These are conditional parts of CPU binding, not separate feature switches. If a
 host prerequisite is missing, that step is skipped while CPU thread binding
@@ -242,7 +242,7 @@ The CPU allocation plan is as follows:
 NPU0: main=[...] acl=[...] release=[...]
 ```
 
-Ascend 950 uses a different role split, so its plan log does not include ACL or
+950PR&950DT Products uses a different role split, so its plan log does not include ACL or
 release fields. UVB polling thread binding is reported separately when matching
 threads are found:
 
@@ -257,14 +257,14 @@ Ascend 950 NPU0: worker=[...]
 
 - CPU binding runs only on ARM. It is skipped on x86_64.
 - Each final NPU pool must have enough CPUs for its role split: at least 5 CPUs
-  for devices with IRQ binding. Ascend 950 requires one complete CPU cluster per worker.
+  for devices with IRQ binding. 950PR&950DT Products requires one complete CPU cluster per worker.
 - `global_slice` is deterministic and provides CPU/NUMA isolation when the
   cpuset is NUMA-aligned, but it cannot guarantee NUMA-local pools when CPU
   numbering or cpuset layout crosses NUMA boundaries.
 - `topo_affinity` depends on usable output from `npu-smi info -t topo`.
 - IRQ binding requires writable `/proc/irq` and resolvable PCI/IRQ information.
-  Ascend 950 skips IRQ binding even when `/proc/irq` is writable.
-- Ascend 950 UVB polling thread binding requires visibility into the host PID
+  950PR&950DT Products skips IRQ binding even when `/proc/irq` is writable.
+- 950PR&950DT Products UVB polling thread binding requires visibility into the host PID
   namespace. Docker containers must be created with `--pid=host`; otherwise
   `uvb_poll_window_thread` may not be found.
 - Memory migration requires `migratepages`; otherwise only memory migration is

@@ -19,6 +19,18 @@ name: PR Create
 
 on:
   pull_request_target:
+    # opened + synchronize cover everything meaningful: the welcome comment
+    # fires on opened, and label/description maintenance re-runs when the
+    # pushed file set changes. Other actions (labeled, edited, ...) only
+    # re-run idempotent no-ops.
+    types: [opened, synchronize]
+
+concurrency:
+  # The steps are idempotent maintenance (welcome comment + labels), so a
+  # rapid synchronize burst (e.g. a mass rebase) only needs the newest run:
+  # older in-flight ones are cancelled instead of piling up in the queue.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: true
 
 permissions:
   pull-requests: write
@@ -49,19 +61,16 @@ jobs:
           REPO="${{ github.repository }}"
           REF="${{ github.event.pull_request.base.ref }}"
           mkdir -p .github
-          for file in vllm-main-verified.commit vllm-release-tag.commit labeler.yml; do
+          for file in vllm-main-verified.commit labeler.yml; do
             curl -sSf -H "Authorization: Bearer $GITHUB_TOKEN" \
               "https://api.github.com/repos/$REPO/contents/.github/$file?ref=$REF" \
               | jq -r '.content' | base64 -d > ".github/$file"
           done
 
-      - name: Get vLLM version
+      - name: Get vLLM main commit
         run: |
           VLLM_COMMIT=$(tr -d '[:space:]' < .github/vllm-main-verified.commit)
           echo "VLLM_COMMIT=https://github.com/vllm-project/vllm/commit/$VLLM_COMMIT" >> "$GITHUB_ENV"
-
-          VLLM_VERSION=$(tr -d '[:space:]' < .github/vllm-release-tag.commit)
-          echo "VLLM_VERSION=$VLLM_VERSION" >> "$GITHUB_ENV"
 
       - name: Update PR description
         env:
@@ -69,7 +78,6 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           PR_NUMBER=${{ github.event.number }}
-          VLLM_VERSION=${{ env.VLLM_VERSION }}
           VLLM_COMMIT=${{ env.VLLM_COMMIT }}
           OLD=/tmp/orig_pr_body.txt
           NEW=/tmp/new_pr_body.txt
@@ -78,12 +86,11 @@ jobs:
           gh pr view --json body --template "{{.body}}" "${PR_NUMBER}" > "${OLD}"
           cp "${OLD}" "${NEW}"
 
-          # Remove notes in pr description and add vLLM version and commit
+          # Remove notes in pr description and add vLLM main commit
           sed -i '/<!--/,/-->/d' "${NEW}"
           sed -i '/- vLLM .*$/d' "${NEW}"
           {
               echo ""
-              echo "- vLLM version: $VLLM_VERSION"
               echo "- vLLM main: $VLLM_COMMIT"
           } >> "${NEW}"
 
@@ -102,7 +109,7 @@ jobs:
           fi
 
       - name: Label the PR
-        uses: actions/labeler@v6
+        uses: actions/labeler@v7
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           configuration-path: .github/labeler.yml
@@ -122,7 +129,16 @@ jobs:
               '- A PR should do only one thing, smaller PRs enable faster reviews.\n' +
               '- Every PR should include unit tests and end-to-end tests ‌to ensure it works and is not broken by other future PRs.\n' +
               '- Write the commit message by fulfilling the PR description to help reviewer and future developers understand.\n\n' +
-              'If CI fails, you can run linting and testing checks locally according [Contributing](https://docs.vllm.ai/projects/ascend/zh-cn/latest/developer_guide/contribution/index.html) and [Testing](https://docs.vllm.ai/projects/ascend/zh-cn/latest/developer_guide/contribution/testing.html).\n';
+              'If CI fails, you can run linting and testing checks locally according [Contributing](https://docs.vllm.ai/projects/ascend/zh-cn/latest/developer_guide/contribution/index.html) and [Testing](https://docs.vllm.ai/projects/ascend/zh-cn/latest/developer_guide/contribution/testing.html).\n\n' +
+              '## :robot: How to trigger CI\n\n' +
+              '> CI runs automatically when the PR is opened or reopened. **Pushing a new commit no longer re-runs the E2E CI** (to save NPU runner resources), so use the comment commands below when needed. They are available to the PR author and users with triage permission or above:\n\n' +
+              '- `/run` — run the full PR CI gate on the latest commit.\n' +
+              '- `/rerun` — re-run the failed CI jobs (e.g. after a flaky failure).\n' +
+              '- `/e2e` — run selected E2E tests instead of the full gate.\n' +
+              '- `/nightly` / `/presmoke` / `/weekly` — run the corresponding large-scale tests (triage permission or above; blocked during the nightly maintenance window).\n' +
+              '- `/cancel` — cancel a running CI on this PR.\n\n' +
+              '> [!NOTE]\n' +
+              '> Until the CI gate has run on a commit, the required `ci-gate` check stays pending and the PR cannot merge — remember to comment `/run` after pushing.\n';
 
             if (isBugFix || isFeature) {
               body += '\n---\n\n' +

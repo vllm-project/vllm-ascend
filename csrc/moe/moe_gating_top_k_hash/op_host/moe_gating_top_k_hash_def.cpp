@@ -79,6 +79,21 @@ public:
                     ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND,
                     ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .AutoContiguous();
+        this->Input("bias_vl")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_BF16,
+                      ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_BF16,
+                      ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_BF16,
+                      ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_BF16})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND,
+                    ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND,
+                    ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND,
+                    ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND,
+                    ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND,
+                    ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND,
+                    ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
         this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_BF16,
@@ -130,6 +145,8 @@ public:
         this->Attr("out_flag").AttrType(OPTIONAL).Bool(false);
         this->Attr("routed_scaling_factor").AttrType(OPTIONAL).Float(1.0);
         this->Attr("eps").AttrType(OPTIONAL).Float(1e-20f);
+        this->Attr("image_sentinel_lo").AttrType(OPTIONAL).Int(129257);
+        this->Attr("image_sentinel_count").AttrType(OPTIONAL).Int(5);
         this->AICore().AddConfig("ascend910b");
         this->AICore().AddConfig("ascend910_93");
 

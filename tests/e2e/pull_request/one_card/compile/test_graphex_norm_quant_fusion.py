@@ -7,15 +7,16 @@ import torch.nn as nn
 import torch_npu
 import vllm.config
 from vllm.config import ModelConfig, VllmConfig
-from vllm.distributed import ensure_model_parallel_initialized, init_distributed_environment
+from vllm.distributed import (
+    ensure_model_parallel_initialized,
+    init_distributed_environment,
+)
 from vllm.utils.system_utils import update_environment_variables
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.compilation.passes.norm_quant_fusion_pass import (
     AddRMSNormQuantPattern,
     AddRMSNormQuantPatternWithBias,
-    AddRMSNormQuantSPPattern,
-    AddRMSNormQuantSPPatternWithBias,
 )
 from vllm_ascend.utils import enable_custom_op
 
@@ -107,84 +108,7 @@ class ModelWithBias(nn.Module):
         return quantized_output, new_residual
 
 
-class ModelSPWithoutBias(nn.Module):
-    """
-    A minimal test model that simulates the pattern:
-        AddRMSNorm → maybe_allgather → Quantization (without bias)
-    """
-
-    def __init__(self, hidden_size: int, dtype: torch.bfloat16, eps: float = 1e-6, device="npu"):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.eps = eps
-        self.rms_norm_weight = nn.Parameter(torch.randn(hidden_size, dtype=dtype, device=device))
-        self.quant_scale = torch.ones(hidden_size, dtype=dtype, device=device)
-        self.quant_scale_reciprocal = torch.ones(hidden_size, dtype=dtype, device=device)
-        self.quant_offset = torch.zeros(hidden_size, dtype=dtype, device=device)
-
-    def forward(self, x):
-        """
-        Forward pass:
-          1. Perform npu_add_rms_norm
-          2. Perform a fake maybe_all_gather_and_maybe_unpad
-          3. Quantize the normalized output to int8
-        Returns both quantized output and updated residual.
-        """
-        residual = torch.zeros_like(x)
-
-        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(x, residual, self.rms_norm_weight, self.eps)
-
-        norm_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(norm_output, True)
-
-        quantized_output = torch.ops.vllm.quantize(
-            norm_output, self.quant_scale, self.quant_scale_reciprocal, self.quant_offset
-        )
-
-        return quantized_output, new_residual
-
-
-class ModelSPWithBias(nn.Module):
-    """
-    A minimal test model that simulates the pattern:
-        AddRMSNorm → Add bias → maybe_allgather → Quantization (without bias)
-    """
-
-    def __init__(self, hidden_size: int, dtype: torch.bfloat16, eps: float = 1e-6, device="npu"):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.eps = eps
-        self.rms_norm_weight = nn.Parameter(torch.randn(hidden_size, dtype=dtype, device=device))
-        self.bias = nn.Parameter(torch.randn(hidden_size, dtype=dtype, device=device))
-        self.quant_scale = torch.ones(hidden_size, dtype=dtype, device=device)
-        self.quant_scale_reciprocal = torch.ones(hidden_size, dtype=dtype, device=device)
-        self.quant_offset = torch.zeros(hidden_size, dtype=dtype, device=device)
-
-    def forward(self, x):
-        """
-        Forward pass:
-          1. Perform npu_add_rms_norm
-          2. Add bias
-          3. Perform a fake maybe_all_gather_and_maybe_unpad
-          4. Quantize the normalized output to int8
-        Returns both quantized output and updated residual.
-        """
-        residual = torch.zeros_like(x)
-
-        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(x, residual, self.rms_norm_weight, self.eps)
-
-        # Add bias
-        norm_output_with_bias = norm_output + self.bias
-
-        norm_output_with_bias = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(norm_output_with_bias, True)
-
-        quantized_output = torch.ops.vllm.quantize(
-            norm_output_with_bias, self.quant_scale, self.quant_scale_reciprocal, self.quant_offset
-        )
-
-        return quantized_output, new_residual
-
-
-def assert_addrmsnorm_quant(after_gm, expect_fused=True, use_bias=False, sp_enable=False):
+def assert_addrmsnorm_quant(after_gm, expect_fused=True, use_bias=False):
     check_rules = [
         (torch.ops.npu.npu_add_rms_norm_quant.default, expect_fused),
         (torch.ops.npu.npu_add_rms_norm.default, not expect_fused),
@@ -192,8 +116,6 @@ def assert_addrmsnorm_quant(after_gm, expect_fused=True, use_bias=False, sp_enab
     ]
     if use_bias:
         check_rules.append((torch.ops.aten.add.Tensor, not expect_fused))
-    if sp_enable:
-        check_rules.append((torch.ops.vllm.maybe_all_gather_and_maybe_unpad.default, expect_fused))
     for torch_op, expect_exist in check_rules:
         found = find_op(after_gm, torch_op)
         if expect_exist:
@@ -234,14 +156,12 @@ def register_pattern_safe(pattern_class, vllm_config, eps, pattern_key):
 @pytest.mark.parametrize("num_tokens", [257])
 @pytest.mark.parametrize("eps", [1e-5])
 @pytest.mark.parametrize("use_bias", [False, True])
-@pytest.mark.parametrize("sp_enable", [False, True])
 def test_rmsnorm_quant_fusion(
     dtype: torch.dtype,
     hidden_size: int,
     num_tokens: int,
     eps: float,
     use_bias: bool,
-    sp_enable: bool,
 ):
     # Check if fusion operator is available
     if not hasattr(torch.ops.npu, "npu_add_rms_norm_quant"):
@@ -269,27 +189,17 @@ def test_rmsnorm_quant_fusion(
             # Check if the bias operator exists
             if not hasattr(torch.ops._C_ascend, "npu_add_rms_norm_bias"):
                 pytest.skip("Operator npu_add_rms_norm_bias not available, skipping bias test")
-            if sp_enable:
-                model = ModelSPWithBias(hidden_size, dtype, eps, device="npu")
-                register_pattern_safe(
-                    AddRMSNormQuantSPPatternWithBias, vllm_config, eps, "GraphEXAddRMSNormQuantSPPatternWithBias"
-                )
-            else:
-                model = ModelWithBias(hidden_size, dtype, eps, device="npu")
-                register_pattern_safe(
-                    AddRMSNormQuantPatternWithBias, vllm_config, eps, "GraphEXAddRMSNormQuantPatternWithBias"
-                )
+            model = ModelWithBias(hidden_size, dtype, eps, device="npu")
+            register_pattern_safe(
+                AddRMSNormQuantPatternWithBias, vllm_config, eps, "GraphEXAddRMSNormQuantPatternWithBias"
+            )
         else:
             # The non-bias patterns currently use npu_add_rms_norm_bias in their pattern matching
             # so we need to skip if it's not available
             if not hasattr(torch.ops._C_ascend, "npu_add_rms_norm_bias"):
                 pytest.skip("Operator npu_add_rms_norm_bias not available, skipping test")
-            if sp_enable:
-                model = ModelSPWithoutBias(hidden_size, dtype, eps, device="npu")
-                register_pattern_safe(AddRMSNormQuantSPPattern, vllm_config, eps, "GraphEXAddRMSNormQuantSPPattern")
-            else:
-                model = ModelWithoutBias(hidden_size, dtype, eps, device="npu")
-                register_pattern_safe(AddRMSNormQuantPattern, vllm_config, eps, "GraphEXAddRMSNormQuantPattern")
+            model = ModelWithoutBias(hidden_size, dtype, eps, device="npu")
+            register_pattern_safe(AddRMSNormQuantPattern, vllm_config, eps, "GraphEXAddRMSNormQuantPattern")
 
         model = model.to("npu")
         x = torch.randn(num_tokens, hidden_size, device="npu", dtype=dtype, requires_grad=False)

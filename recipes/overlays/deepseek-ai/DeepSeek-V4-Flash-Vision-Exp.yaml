@@ -1,0 +1,85 @@
+# Source: https://github.com/vllm-project/vllm/blob/52a65d7b19e9e3ad86bf1e3b6954e4e11eeec7da/recipes/models/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp.yaml
+# Extracted with vllm-project/recipes@b08ad73889f9e33319d8ac9c887dec6a0975c55d.
+meta:
+  hardware:
+    ascend_950dt_8x: verified
+    ascend_950pr_8x: verified
+hardware_overrides:
+  npu:
+    extra_args:
+      - '--data-parallel-size'
+      - '4'
+      - '--block-size'
+      - '128'
+      - '--kv-cache-dtype'
+      - auto
+      - '--tokenizer-mode'
+      - deepseek_v4
+      - '--safetensors-load-strategy'
+      - prefetch
+      - '--async-scheduling'
+      - '--max-model-len'
+      - '8192'
+      - '--max-num-seqs'
+      - '16'
+      - '--max-num-batched-tokens'
+      - '2048'
+      - '--gpu-memory-utilization'
+      - '0.9'
+      - '--api-server-count'
+      - '1'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp": true}'
+    extra_env:
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      OMP_PROC_BIND: 'false'
+      OMP_NUM_THREADS: '10'
+      HCCL_BUFFSIZE: '1024'
+      HCCL_OP_EXPANSION_MODE: AIV
+      TASK_QUEUE_ENABLE: '1'
+      ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3
+hardware_notes:
+  ascend_950dt_8x:
+    title: vLLM Ascend A5 image required
+    body: Mixed serving on one 8-card 950DT node uses 4 of 8 NPUs (DP4+EP, TP=1). Same command as 950PR. Pin quay.io/ascend/vllm-ascend:v0.23.0-a5 — the NVIDIA pip wheel cannot run here. Set HCCL_BUFFSIZE=1024 before launch. Native Flash-Vision checkpoints need the hash-router bias skip in vllm-project/vllm-ascend#16259 — without it load_weights aborts on model.layers.0.mlp.gate.e_score_correction_bias.
+  ascend_950pr_8x:
+    title: vLLM Ascend A5 image required
+    body: Mixed serving on one 8-card 950PR node uses 4 of 8 NPUs (DP4+EP, TP=1). Same command as 950DT. Pin quay.io/ascend/vllm-ascend:v0.23.0-a5 and set HCCL_BUFFSIZE=1024 before launch. Native Flash-Vision checkpoints need the hash-router bias skip in vllm-project/vllm-ascend#16259 — without it load_weights aborts on model.layers.0.mlp.gate.e_score_correction_bias.
+hardware_opt_in_features:
+  ascend_950pr_8x:
+    - spec_decoding
+  ascend_950dt_8x:
+    - spec_decoding
+strategy_hardware:
+  single_node_tp:
+    npu: unsupported
+  single_node_tep:
+    npu: unsupported
+  multi_node_tep:
+    npu: unsupported
+  multi_node_dep:
+    npu: unsupported
+features:
+  reasoning:
+    hardware_overrides:
+      npu:
+        args:
+          - '--reasoning-parser'
+          - deepseek_v4
+  spec_decoding:
+    hardware_overrides:
+      npu:
+        args: []
+variants:
+  default:
+    hardware_overrides:
+      ascend_950pr_8x:
+        docker_image: quay.io/ascend/vllm-ascend:v0.23.0-a5
+        install:
+          pip: false
+      ascend_950dt_8x:
+        docker_image: quay.io/ascend/vllm-ascend:v0.23.0-a5
+        install:
+          pip: false

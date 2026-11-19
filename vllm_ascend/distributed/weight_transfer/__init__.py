@@ -15,11 +15,24 @@
 # limitations under the License.
 #
 
-from vllm.distributed.weight_transfer.factory import WeightTransferEngineFactory
+from vllm.distributed.weight_transfer.factory import (
+    WeightTransferEngineFactory,
+    WeightTransferTrainerFactory,
+)
 
 
 def register_engine():
     """Register Ascend weight transfer engines as vLLM plugins."""
+    WeightTransferEngineFactory.register_engine(
+        "sparse_hccl",
+        "vllm_ascend.distributed.weight_transfer.sparse_hccl_engine",
+        "SparseHCCLWeightTransferEngine",
+    )
+    WeightTransferTrainerFactory.register_engine(
+        "sparse_hccl",
+        "vllm_ascend.distributed.weight_transfer.sparse_hccl_engine",
+        "SparseHCCLTrainerWeightTransferEngine",
+    )
     WeightTransferEngineFactory.register_engine(
         "hccl",
         "vllm_ascend.distributed.weight_transfer.hccl_engine",
@@ -29,4 +42,14 @@ def register_engine():
         "npu_ipc",
         "vllm_ascend.distributed.weight_transfer.npu_ipc_engine",
         "NPUIPCWeightTransferEngine",
+    )
+    WeightTransferTrainerFactory.register_engine(
+        "npu_ipc",
+        "vllm_ascend.distributed.weight_transfer.npu_ipc_engine",
+        "NPUIPCTrainerWeightTransferEngine",
+    )
+    WeightTransferTrainerFactory.register_engine(
+        "hccl",
+        "vllm_ascend.distributed.weight_transfer.hccl_engine",
+        "HCCLTrainerWeightTransferEngine",
     )

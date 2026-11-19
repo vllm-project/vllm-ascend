@@ -1,6 +1,6 @@
 # Multi Node Test
 
-Multi-Node CI is designed to test distributed scenarios of very large models, eg: disaggregated_prefill multi DP across multi nodes and so on.
+Multi-Node CI is designed to test distributed scenarios of very large models, for example, disaggregated_prefill multi DP across multi nodes and so on.
 
 ## How it works
 
@@ -8,9 +8,54 @@ The following picture shows the basic deployment view of the multi-node CI mecha
 
 ![alt text](../../assets/deployment.png)
 
-From the workflow perspective, we can see how the final test script is executed, The key point is that the shared files `tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2` and `tests/e2e/nightly/multi_node/scripts/run.sh` define the cluster template and pod entry script. Each node executes different logic according to the [LWS_WORKER_INDEX](https://lws.sigs.k8s.io/docs/reference/labels-annotations-and-environment-variables/) environment variable, so that multiple nodes can form a distributed cluster to perform tasks. `run.sh` selects the pytest entrypoint from the config path: internal DP configs use `internal_dp/scripts/test_multi_node.py`, while external DP configs use `external_dp/scripts/test_external_dp.py`.
+From the workflow perspective, we can see how the final test script is executed. The key point is that the shared files `tests/e2e/common/multi_node/lws.yaml.jinja2` and `tests/e2e/common/multi_node/run.sh` define the cluster template and pod entry script. Each node executes different logic according to the [LWS_WORKER_INDEX](https://lws.sigs.k8s.io/docs/reference/labels-annotations-and-environment-variables/) environment variable, so that multiple nodes can form a distributed cluster to perform tasks. `run.sh` launches the common pytest entrypoint, which reads `dp_load_balancing` from the config and delegates to `internal_dp/test_multi_node.py` or `external_dp/test_external_dp.py`.
 
 ![alt text](../../assets/workflow.png)
+
+## Scheduling
+
+Single-node, multi-card, and multi-node jobs are not serialized with `needs`
+or throttled with `max-parallel`. All workloads are submitted at the same time,
+and the LWS pods set `schedulerName: npu-scheduler`, which queues pending pods
+in FIFO order. This applies to scheduled runs as well as `/nightly` and
+`/weekly` comment-triggered runs.
+
+The cluster does not use a dedicated-night taint, so the LWS template no longer
+sets `tolerations` and the workflows no longer run taint-cleanup steps.
+
+When two branches run at the same time, the concurrency group includes the
+`vllm_ascend_branch` input even though both runs are triggered from `main`, so
+one branch no longer cancels the other. Log cleanup is also scoped to
+`${ASCEND_LOG_PREFIX}/<branch>` and leaves the other branch's in-flight logs
+untouched.
+
+Scheduled nightly and weekly runs are dispatched with `request_id` empty and
+`test_cases=all`. Nightly and weekly workflows have no in-repo cron trigger;
+the external scheduler dispatches them through `workflow_dispatch` with
+`-f drain_pr_runs=true`. Before they create any workload, the `setup-vars` job
+force-cancels PR-triggered runs of the same workflow whose `run-name` contains
+`(PR)`, using `secrets.PAT_TOKEN`. This prevents an earlier PR run from keeping
+the shared FIFO queue busy past the nightly or weekly start time. The drain is
+opt-in because `request_id` is also empty for a normal manual dispatch; without
+`drain_pr_runs=true` a manually started run leaves PR runs alone. `force-cancel`
+bypasses the `if: always()` `Post process` step, so LWS resources created by a
+force-cancelled run may need to be cleaned up separately.
+
+## Timeouts
+
+`_e2e_nightly_multi_node.yaml` separates the test-run budget from the overall
+job budget:
+
+- `testcase_timeout` bounds the `Stream logs` step, i.e. the test execution
+  window. It defaults to 120 minutes (2h); the weekly A3 multi-node and
+  double-node jobs use the same 2h test window.
+- `job_timeout` bounds the whole job. It defaults to 360 minutes (6h) for
+  nightly runs, while the weekly A3 multi-node and double-node jobs pass 1200
+  minutes (20h). The extra headroom covers checkout, LWS creation, NPU queue
+  wait, log collection and artifact upload, so the job is not cancelled before
+  its logs are uploaded.
+- PR-triggered runs keep the shorter test window (240 minutes, or 1440 minutes
+  when AOP is enabled) and get 120 minutes of job headroom on top.
 
 ## How to contribute
 
@@ -20,7 +65,10 @@ From the workflow perspective, we can see how the final test script is executed,
 
 2. Add config yaml
 
-    For the normal internal DP multi-node flow, add the config yaml to `tests/e2e/nightly/multi_node/internal_dp/config/`, like `DeepSeek-V3.yaml`. External DP cases use the separate `tests/e2e/nightly/multi_node/external_dp/config/` directory and should pass that directory through `config_base_path` in workflow or `CONFIG_BASE_PATH` locally.
+    Add the config YAML under `tests/SIT/cases/models/configs/<model-family>/`
+    and pass that directory through `config_base_path` in the workflow or
+    `CONFIG_BASE_PATH` locally. Set `dp_load_balancing` in the YAML to
+    `internal` or `external` to select the corresponding runtime.
 
     Suppose you have **2 nodes** running a 1P1D setup (1 Prefillers + 1 Decoder):
 
@@ -56,14 +104,12 @@ From the workflow perspective, we can see how the final test script is executed,
     - name: prefiller node # optional: just for description, not used in code
       envs:
         <<: *env_common
-        VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
         # Continue to add other envs if needed
       server_cmd: >
         vllm serve ...
     - name: decoder node # optional: just for description, not used in code
       envs:
         <<: *env_common
-        VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
         # Continue to add other envs if needed
       server_cmd: >
         vllm serve ...
@@ -81,26 +127,28 @@ Currently, the multi-node test workflow is defined in `.github/workflows/schedul
 ```yaml
 multi-node-tests:
   name: multi-node
-  if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+  needs: [setup-vars, parse-trigger, build-image]
+  if: always() && needs.parse-trigger.outputs.run == 'true'
   strategy:
     fail-fast: false
-    max-parallel: 1
     matrix:
       test_config:
         - name: multi-node-deepseek-pd
           config_file_path: DeepSeek-V3.yaml
+          config_base_path: tests/SIT/cases/models/configs/DeepSeek
           size: 2
-        - name: multi-node-qwen3-dp
-          config_file_path: Qwen3-235B-A22B.yaml
-          size: 2
+        - name: QWEN3_235B_PD_3_5K_1_5k
+          config_file_path: QWEN3_235B_PD_3_5K_1_5k.yaml
+          config_base_path: tests/SIT/cases/models/configs/Qwen
+          size: 3
         - name: GLM5_1-W8A8-EP-external
           config_file_path: GLM5_1-W8A8-EP-external.yaml
-          config_base_path: tests/e2e/nightly/multi_node/external_dp/config/
+          config_base_path: tests/SIT/cases/models/configs/GLM
           size: 4
   uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
   with:
     soc_version: a3
-    runner: linux-aarch64-a3-0
+    runner: linux-aarch64-a3-800t-0
     image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
     replicas: 1
     size: {% raw %}${{ matrix.test_config.size }}{% endraw %}
@@ -110,15 +158,14 @@ multi-node-tests:
   secrets:
     KUBECONFIG_B64: {% raw %}${{ secrets.KUBECONFIG_B64 }}{% endraw %}
 ```
-  
+
 The matrix above defines all the parameters required to add a multi-machine use
 case. The parameters worth noting are `size`, `config_file_path`, and
 `config_base_path`. `size` defines the number of nodes required for your use
 case. `config_file_path` is the yaml file name, and `config_base_path` tells the
-loader which config directory to use. For internal DP cases, use an empty
-`config_base_path` so the loader uses its default internal DP config directory.
-For external DP cases, set it to
-`tests/e2e/nightly/multi_node/external_dp/config/`.
+loader which model-family directory contains the config. Every entry should set
+`config_base_path`; the YAML's `dp_load_balancing` field selects the internal or
+external DP runtime.
 
 ## Run Multi-Node tests locally
 
@@ -156,7 +203,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                   - name: CONFIG_YAML_PATH
                     value: DeepSeek-V3.yaml
                   - name: CONFIG_BASE_PATH
-                    value: tests/e2e/nightly/multi_node/internal_dp/config/
+                    value: tests/SIT/cases/models/configs/DeepSeek
                   - name: WORKSPACE
                     value: "/vllm-workspace"
                   - name: FAIL_TAG
@@ -165,7 +212,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                   - sh
                   - -c
                   - |
-                    bash /vllm-workspace/vllm-ascend/tests/e2e/nightly/multi_node/scripts/run.sh
+                    bash /vllm-workspace/vllm-ascend/tests/e2e/common/multi_node/run.sh
                 resources:
                   limits:
                     huawei.com/ascend-1980: 16
@@ -186,8 +233,8 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                 volumeMounts:
                   - mountPath: /root/.cache
                     name: shared-volume
-                  - mountPath: /usr/local/Ascend/driver/tools
-                    name: driver-tools
+                  - mountPath: /usr/local/Ascend/driver
+                    name: ascend-driver
                   - mountPath: /dev/shm
                     name: dshm
             volumes:
@@ -198,9 +245,9 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
               - name: shared-volume
                 persistentVolumeClaim:
                   claimName: nv-action-vllm-benchmarks-v2
-              - name: driver-tools
+              - name: ascend-driver
                 hostPath:
-                  path: /usr/local/Ascend/driver/tools
+                  path: /usr/local/Ascend/driver
         workerTemplate:
           spec:
             containers:
@@ -211,7 +258,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                   - name: CONFIG_YAML_PATH
                     value: DeepSeek-V3.yaml
                   - name: CONFIG_BASE_PATH
-                    value: tests/e2e/nightly/multi_node/internal_dp/config/
+                    value: tests/SIT/cases/models/configs/DeepSeek
                   - name: WORKSPACE
                     value: "/vllm-workspace"
                   - name: FAIL_TAG
@@ -220,7 +267,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                   - sh
                   - -c
                   - |
-                    bash /vllm-workspace/vllm-ascend/tests/e2e/nightly/multi_node/scripts/run.sh
+                    bash /vllm-workspace/vllm-ascend/tests/e2e/common/multi_node/run.sh
                 resources:
                   limits:
                     huawei.com/ascend-1980: 16
@@ -233,8 +280,8 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                 volumeMounts:
                   - mountPath: /root/.cache
                     name: shared-volume
-                  - mountPath: /usr/local/Ascend/driver/tools
-                    name: driver-tools
+                  - mountPath: /usr/local/Ascend/driver
+                    name: ascend-driver
                   - mountPath: /dev/shm
                     name: dshm
             volumes:
@@ -245,9 +292,9 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
               - name: shared-volume
                 persistentVolumeClaim:
                   claimName: nv-action-vllm-benchmarks-v2
-              - name: driver-tools
+              - name: ascend-driver
                 hostPath:
-                  path: /usr/local/Ascend/driver/tools
+                  path: /usr/local/Ascend/driver
     ---
     apiVersion: v1
     kind: Service
@@ -307,11 +354,11 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
     asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
     collected 1 item
 
-    tests/e2e/nightly/multi_node/internal_dp/scripts/test_multi_node.py::test_multi_node [2025-12-30 11:01:01] INFO multi_node_config.py:294: Loading config yaml: tests/e2e/nightly/multi_node/internal_dp/config/DeepSeek-V3.yaml
+    tests/e2e/common/multi_node/internal_dp/test_multi_node.py::test_multi_node [2025-12-30 11:01:01] INFO multi_node_config.py:294: Loading config yaml: tests/SIT/cases/models/configs/DeepSeek/DeepSeek-V3.yaml
     [2025-12-30 11:01:01] INFO multi_node_config.py:348: Resolving cluster IPs via DNS...
     [2025-12-30 11:01:01] INFO multi_node_config.py:212: Node 0 envs: {'VLLM_USE_MODELSCOPE': 'True', 'OMP_PROC_BIND': 'False', 'OMP_NUM_THREADS': '100', 'HCCL_BUFFSIZE': '1024', 'SERVER_PORT': '8080', 'NUMEXPR_MAX_THREADS': '128', 'DISAGGREGATED_PREFILL_PROXY_SCRIPT': 'examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py', 'HCCL_IF_IP': '10.0.0.102', 'HCCL_SOCKET_IFNAME': 'eth0', 'GLOO_SOCKET_IFNAME': 'eth0', 'TP_SOCKET_IFNAME': 'eth0', 'LOCAL_IP': '10.0.0.102', 'NIC_NAME': 'eth0', 'MASTER_IP': '10.0.0.102'}
     [2025-12-30 11:01:01] INFO multi_node_config.py:159: Launching proxy: python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py --host 10.0.0.102 --port 6000 --prefiller-hosts 10.0.0.102 --prefiller-ports 8080 --decoder-hosts 10.0.0.138 --decoder-ports 8080
-    [2025-12-30 11:01:01] INFO conftest.py:107: Starting server with command: vllm serve vllm-ascend/DeepSeek-V3-W8A8 --host 0.0.0.0 --port 8080 --data-parallel-size 2 --data-parallel-size-local 2 --tensor-parallel-size 8 --seed 1024 --enforce-eager --enable-expert-parallel --max-num-seqs 16 --max-model-len 8192 --max-num-batched-tokens 8192 --quantization ascend --trust-remote-code --no-enable-prefix-caching --gpu-memory-utilization 0.9 --kv-transfer-config {"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", 
+    [2025-12-30 11:01:01] INFO conftest.py:107: Starting server with command: vllm serve vllm-ascend/DeepSeek-V3-W8A8 --host 0.0.0.0 --port 8080 --data-parallel-size 2 --data-parallel-size-local 2 --tensor-parallel-size 8 --seed 1024 --enforce-eager --enable-expert-parallel --max-num-seqs 16 --max-model-len 8192 --max-num-batched-tokens 8192 --quantization ascend --trust-remote-code --no-enable-prefix-caching --gpu-memory-utilization 0.9 --kv-transfer-config {"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000",
     "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -327,7 +374,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
 
 ### 2. Test without Kubernetes
 
-The same `tests/e2e/nightly/multi_node/scripts/run.sh` entrypoint can be used
+The same `tests/e2e/common/multi_node/run.sh` entrypoint can be used
 on prepared bare-metal or container hosts. Without LWS, set the values that
 Kubernetes normally injects yourself:
 
@@ -351,7 +398,7 @@ hosts are part of a committed test environment.
 Edit the internal DP config you want to run, for example:
 
 ```text
-tests/e2e/nightly/multi_node/internal_dp/config/DeepSeek-V3.yaml
+tests/SIT/cases/models/configs/DeepSeek/DeepSeek-V3.yaml
 ```
 
 Add `cluster_hosts` as a top-level field, for example near `num_nodes` and
@@ -376,13 +423,13 @@ Install AISBench on the first host, which is the node with
 `LWS_WORKER_INDEX=0`:
 
 ```bash
-export AIS_BENCH_TAG="v3.1-20260330-master"
+export AIS_BENCH_TAG="v3.1-20261113-master"
 export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 export BENCHMARK_HOME=/vllm-workspace/vllm-ascend/benchmark
 
 git clone -b ${AIS_BENCH_TAG} --depth 1 ${AIS_BENCH_URL} $BENCHMARK_HOME
 cd $BENCHMARK_HOME
-pip install -e . -r requirements/api.txt -r requirements/extra.txt
+pip install -e . -r requirements/api.txt -r requirements/extra.txt -r requirements/response_anomaly.txt
 ```
 
 If your local image already contains the model, benchmark data, Ascend runtime,
@@ -399,11 +446,11 @@ On node 1:
 export WORKSPACE=/vllm-workspace
 export IS_PR_TEST=false
 export CONFIG_YAML_PATH=DeepSeek-V3.yaml
-export CONFIG_BASE_PATH=tests/e2e/nightly/multi_node/internal_dp/config/
+export CONFIG_BASE_PATH=tests/SIT/cases/models/configs/DeepSeek
 export LWS_WORKER_INDEX=1
 
 cd $WORKSPACE/vllm-ascend
-bash tests/e2e/nightly/multi_node/scripts/run.sh
+bash tests/e2e/common/multi_node/run.sh
 ```
 
 On node 0:
@@ -412,11 +459,11 @@ On node 0:
 export WORKSPACE=/vllm-workspace
 export IS_PR_TEST=false
 export CONFIG_YAML_PATH=DeepSeek-V3.yaml
-export CONFIG_BASE_PATH=tests/e2e/nightly/multi_node/internal_dp/config/
+export CONFIG_BASE_PATH=tests/SIT/cases/models/configs/DeepSeek
 export LWS_WORKER_INDEX=0
 
 cd $WORKSPACE/vllm-ascend
-bash tests/e2e/nightly/multi_node/scripts/run.sh
+bash tests/e2e/common/multi_node/run.sh
 ```
 
 Internal DP logs are mainly printed to the terminal running `run.sh`. When
@@ -433,7 +480,7 @@ $LOG_PREFIX/node_<LWS_WORKER_INDEX>_plogs/
 Edit the external DP config you want to run. For example:
 
 ```text
-tests/e2e/nightly/multi_node/external_dp/config/GLM5_1-W8A8-EP-external.yaml
+tests/SIT/cases/models/configs/GLM/GLM5_1-W8A8-EP-external.yaml
 ```
 
 Add `cluster_hosts` as a top-level field, for example near `num_nodes` and
@@ -459,13 +506,13 @@ python3 -m pip install -r requirements-dev.txt
 Install AISBench on node 0:
 
 ```bash
-export AIS_BENCH_TAG="v3.1-20260330-master"
+export AIS_BENCH_TAG="v3.1-20261113-master"
 export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 export BENCHMARK_HOME=/vllm-workspace/vllm-ascend/benchmark
 
 git clone -b ${AIS_BENCH_TAG} --depth 1 ${AIS_BENCH_URL} $BENCHMARK_HOME
 cd $BENCHMARK_HOME
-pip install -e . -r requirements/api.txt -r requirements/extra.txt
+pip install -e . -r requirements/api.txt -r requirements/extra.txt -r requirements/response_anomaly.txt
 ```
 
 If your local image already contains the model, benchmark data, Ascend runtime,
@@ -473,9 +520,9 @@ and AISBench, you only need the run-time exports in the next step.
 
 ##### 2.2.3 Start each node
 
-External DP uses the same shared `run.sh`. Set `CONFIG_BASE_PATH` to the
-external DP config directory so the script chooses
-`external_dp/scripts/test_external_dp.py`.
+External DP uses the same shared `run.sh`. Set `CONFIG_BASE_PATH` to the model
+family directory containing the config. The config's `dp_load_balancing` field
+selects `external_dp/test_external_dp.py`.
 
 Then start non-master nodes first, and start node 0 last. The following example
 uses `GLM5_1-W8A8-EP-external.yaml`, which is a 4-node disaggregated prefill
@@ -486,12 +533,12 @@ On node 1, node 2, and node 3, set the matching `LWS_WORKER_INDEX`:
 ```bash
 export WORKSPACE=/vllm-workspace
 export IS_PR_TEST=false
-export CONFIG_BASE_PATH=tests/e2e/nightly/multi_node/external_dp/config/
+export CONFIG_BASE_PATH=tests/SIT/cases/models/configs/GLM
 export CONFIG_YAML_PATH=GLM5_1-W8A8-EP-external.yaml
 export LWS_WORKER_INDEX=1  # Use 2 on node 2, and 3 on node 3.
 
 cd $WORKSPACE/vllm-ascend
-bash tests/e2e/nightly/multi_node/scripts/run.sh
+bash tests/e2e/common/multi_node/run.sh
 ```
 
 On node 0:
@@ -499,12 +546,12 @@ On node 0:
 ```bash
 export WORKSPACE=/vllm-workspace
 export IS_PR_TEST=false
-export CONFIG_BASE_PATH=tests/e2e/nightly/multi_node/external_dp/config/
+export CONFIG_BASE_PATH=tests/SIT/cases/models/configs/GLM
 export CONFIG_YAML_PATH=GLM5_1-W8A8-EP-external.yaml
 export LWS_WORKER_INDEX=0
 
 cd $WORKSPACE/vllm-ascend
-bash tests/e2e/nightly/multi_node/scripts/run.sh
+bash tests/e2e/common/multi_node/run.sh
 ```
 
 For `GLM5_1-W8A8-EP-external.yaml`, node 0 and node 1 start prefiller ranks,
@@ -550,4 +597,5 @@ tail -F /tmp/external_dp_logs/node-0/rank-0.log \
 # node 1: ranks
 tail -F /tmp/external_dp_logs/node-1/rank-0.log \
         /tmp/external_dp_logs/node-1/rank-1.log
+        
 ```
