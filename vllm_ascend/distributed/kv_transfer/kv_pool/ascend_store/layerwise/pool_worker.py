@@ -4,12 +4,14 @@ import os
 import threading
 from collections.abc import Callable, Sequence
 from contextlib import suppress
-from typing import Any, cast
+from itertools import pairwise
+from typing import Any, NamedTuple, cast
 
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tp_group,
+    get_world_group,
 )
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash
@@ -77,6 +79,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import
 # readers rely on, and deferring widens the window in which a subsequent
 # request can observe a partially published prefix.
 _LW_DEFER_LAST_SAVE = os.environ.get("VLLM_ASCEND_LW_DEFER_LAST_SAVE", "0") == "1"
+
+
+class _GvaGroupLayout(NamedTuple):
+    full_size: int
+    partial_size: int
+    byte_offset: int
+    read_end: int
 
 
 class LayerwiseKVPoolWorker(BaseKVPoolWorker):
@@ -373,6 +382,129 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             for layer, sources in prefetch_layer_map.items()
         }
 
+    def _legacy_layerwise_group_layout(self, group_id: int) -> tuple[int, int]:
+        if self.use_block_key_layerwise:
+            return sum(self.group_block_len[group_id]), 0
+        capacity = self._global_group_alloc_size(group_id)
+        byte_offset = self._group_pp_byte_offset(group_id)
+        # Use the legacy shard stride to place DCP shards at separate offsets
+        # when their ranks share a GVA key.
+        if (
+            self.group_block_len.get(group_id)
+            and self.group_num_layers.get(group_id, self.num_layers) > 0
+            and self.dcp_size > 1
+            and self.put_step > 1
+        ):
+            byte_offset += self.dcp_rank * (capacity // self.dcp_size)
+        return capacity, byte_offset
+
+    def _local_group_end_byte(self, group_id: int, byte_offset: int) -> int | None:
+        """Return the local transfer end byte if the segment layout is valid."""
+        block_lens = self.group_block_len.get(group_id)
+        num_layers = self.group_num_layers.get(group_id, 0)
+        layer_offsets = self.group_layer_cache_entry_offsets.get(group_id)
+        if (
+            byte_offset < 0
+            or num_layers <= 0
+            or not block_lens
+            or any(length <= 0 for length in block_lens)
+            or not layer_offsets
+            or len(layer_offsets) != num_layers + 1
+            or layer_offsets[0] != 0
+            or layer_offsets[-1] != len(block_lens)
+            or any(start >= end for start, end in pairwise(layer_offsets))
+        ):
+            return None
+        # LayerBatchBuilder packs segments consecutively at the same origin.
+        return byte_offset + sum(block_lens)
+
+    @staticmethod
+    def _resolve_gva_object_sizes(local_ranges: dict[str, tuple[int, int | None]]) -> dict[str, int]:
+        """Collect registered endpoints from the engine's workers, once at startup."""
+        gathered = [local_ranges]
+        if torch.distributed.is_initialized():
+            world = get_world_group()
+            if world.world_size > 1:
+                gathered = [{} for _ in range(world.world_size)]
+                torch.distributed.all_gather_object(gathered, local_ranges, group=world.cpu_group)
+
+        by_key: dict[str, list[tuple[int, int | None]]] = {}
+        for ranges in gathered:
+            for key, extent in ranges.items():
+                by_key.setdefault(key, []).append(extent)
+
+        sizes = {}
+        for key, extents in by_key.items():
+            end = max((end or 0 for _, end in extents))
+            # An incomplete registration cannot establish the whole range.
+            if any(end is None for _, end in extents):
+                end = max(end, *(legacy for legacy, _ in extents))
+            sizes[key] = end
+        return sizes
+
+    def _build_group_object_layouts(self) -> None:
+        """Use a common capacity for workers addressing the same pool object."""
+        if not self.use_layerwise_transfer:
+            return
+
+        local_ranges: dict[str, tuple[int, int | None]] = {}
+        groups = {}
+        for group_id in self.cacheable_group_ids:
+            capacity, byte_offset = self._legacy_layerwise_group_layout(group_id)
+            end_byte = self._local_group_end_byte(group_id, byte_offset)
+            # Fix the request-varying fields to identify each key family.
+            # Full and partial keys can have different sets of users.
+            full_key = self._make_layerwise_full_key(group_id, "")
+            assert self.layerwise_keys is not None
+            partial_key = self.layerwise_keys.make_partial_key(
+                model_name=self.model_name,
+                req_id="",
+                group_id=group_id,
+                block_index=0,
+                end_token=0,
+                head_or_tp_rank=self.metadata[group_id].head_or_tp_rank,
+                pp_rank=self.pp_rank,
+            )
+            for key in (full_key, partial_key):
+                local_ranges[key] = (capacity, end_byte)
+            groups[group_id] = (full_key, partial_key, byte_offset, capacity, end_byte)
+
+        sizes = self._resolve_gva_object_sizes(local_ranges)
+        layouts = {}
+        for group_id, (full_key, partial_key, offset, legacy, local_end) in groups.items():
+            full_size, partial_size = sizes[full_key], sizes[partial_key]
+            read_end = legacy if local_end is None else local_end
+            layouts[group_id] = _GvaGroupLayout(full_size, partial_size, offset, read_end)
+            if full_size != legacy or partial_size != legacy:
+                logger.info(
+                    "Layerwise GVA group=%d legacy_bytes=%d full_bytes=%d partial_bytes=%d offset_bytes=%d",
+                    group_id,
+                    legacy,
+                    full_size,
+                    partial_size,
+                    offset,
+                )
+        self._layerwise_group_object_layouts = layouts
+
+    def _get_gva_group_layout(self, group_id: int) -> _GvaGroupLayout | None:
+        return getattr(self, "_layerwise_group_object_layouts", {}).get(group_id)
+
+    def _layerwise_group_layout(self, group_id: int) -> tuple[int, int]:
+        layout = self._get_gva_group_layout(group_id)
+        if layout is None:
+            return self._legacy_layerwise_group_layout(group_id)
+        return max(layout.full_size, layout.partial_size), layout.byte_offset
+
+    def _layerwise_group_alloc_size(self, group_id: int, *, partial: bool = False) -> int:
+        layout = self._get_gva_group_layout(group_id)
+        if layout is None:
+            return self._legacy_layerwise_group_layout(group_id)[0]
+        return layout.partial_size if partial else layout.full_size
+
+    def _layerwise_group_read_end(self, group_id: int) -> int | None:
+        layout = self._get_gva_group_layout(group_id)
+        return layout.read_end if layout is not None else None
+
     def _build_group_layer_builders(self) -> list[LayerBatchBuilder]:
         builders = []
         # Sync layerwise_key_layers with the (possibly updated) num_layers.
@@ -390,32 +522,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self.layerwise_key_layers = self.num_layers
         for group_id in range(self.num_kv_cache_groups):
             group_num_layers = self.group_num_layers.get(group_id, self.num_layers)
-            group_page_size = (
-                sum(self.group_block_len[group_id])
-                if self.use_block_key_layerwise
-                else self._global_group_alloc_size(group_id)
-            )
-            # Global byte offsets for the shared GVA region:
-            #   PP: each stage writes its local layers at
-            #       (pp_layer_offset + local_layer) * per_layer_bytes.
-            #   DCP (shard-major): ranks sharing head_or_tp_rank (put_step>1)
-            #       hold different context shards of the same logical block
-            #       and share ONE region; shard d occupies the byte range
-            #       [d * shard_stride, (d+1) * shard_stride) where the stride
-            #       is the group byte total aligned up to the GVA hugepage
-            #       size (unaligned strides yield misaligned GVA addresses).
-            #       With put_step == 1 every rank owns a distinct region key
-            #       and no shard separation is needed.
-            layer_byte_offset = self._group_pp_byte_offset(group_id)
-            gbl = self.group_block_len.get(group_id) or []
-            if not self.use_block_key_layerwise and gbl and group_num_layers > 0:
-                if self.dcp_size > 1 and self.put_step > 1:
-                    # Use the GLOBAL region size (PP-aware) as the basis for
-                    # the per-shard stride; under PP>1 the local sum(gbl) only
-                    # covers this stage's layers and would under-allocate.
-                    shard_stride = self._global_group_alloc_size(group_id) // self.dcp_size
-                    shard_idx = self.dcp_rank
-                    layer_byte_offset += shard_idx * shard_stride
+            group_page_size, layer_byte_offset = self._layerwise_group_layout(group_id)
             builders.append(
                 LayerBatchBuilder(
                     self.token_database,
@@ -504,6 +611,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self.layer_save_tasks = [[] for _ in range(self.num_layers)]
         if self._transfer_threads_started:
             return
+        self._build_group_object_layouts()
         self.layer_load_finished_events = [threading.Event() for i in range(self.num_layers)]
         self.layer_save_finished_events = [threading.Event() for i in range(self.num_layers)]
         self.sync_save_events = [torch.npu.Event() for i in range(self.num_layers)]

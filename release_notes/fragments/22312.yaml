@@ -1,0 +1,4 @@
+pr: 22312
+entries:
+  - category: performance
+    text: Reduced DRAM usage for new layerwise Memcache objects in mixed and PD-disaggregated serving by sizing each object to its registered KV ranges.

@@ -1580,18 +1580,30 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertIsNone(recv_thread.call_args.kwargs["worker"])
         event.return_value.wait.assert_called()
 
-    def test_register_kv_caches_initializes_layerwise_memcache(self):
-        worker = self._make_worker(extra_config={"backend": "memcache"}, use_layerwise=True)
-        fake_cache = MagicMock()
-        fake_cache.shape = [100, 16, 8, 64]
-        fake_cache.element_size.return_value = 2
-        fake_cache.data_ptr.return_value = 10000
-        worker._transfer_threads_started = True
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker.threading.Event")
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker.KVCacheStoreLayerRecvingThread"
+    )
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker.KVCacheStoreLayerSendingThread"
+    )
+    @patch("torch.npu.Event")
+    def test_register_kv_caches_initializes_layerwise_memcache(self, npu_event, send_thread, recv_thread, event):
+        worker = make_worker(
+            self, kv_role="kv_both", extra_config={"backend": "memcache"}, use_layerwise=True, num_hidden_layers=2
+        )
+        worker.total_layers = 2
+        cache = torch.empty((100, 16, 8, 64), dtype=torch.bfloat16)
 
-        worker.register_kv_caches({"layer.0": (fake_cache, fake_cache)})
+        worker.register_kv_caches({"layer.0": (cache, cache)})
 
         worker.m_store.ensure_initialized.assert_called_once_with()
         worker.m_store.register_buffer.assert_called_once()
+        capacity = worker._layerwise_group_alloc_size(0)
+        self.assertEqual(capacity, sum(worker.group_block_len[0]))
+        self.assertLess(capacity, worker._global_group_alloc_size(0))
+        self.assertEqual(send_thread.call_args.kwargs["group_builders"][0].page_size_bytes, capacity)
+        self.assertEqual(recv_thread.call_args.kwargs["group_builders"][0].page_size_bytes, capacity)
 
     def test_start_load_kv_sync(self):
         worker = self._make_worker(extra_config={"load_async": False})
@@ -2702,6 +2714,30 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertNotIn(201, request.load_block_gvas_by_group_np[0])
         self.assertEqual(worker.get_block_ids_with_load_errors(), set())
 
+    def test_layerwise_reader_checks_object_bounds_under_lease(self):
+        cases = (("kv_consumer", 63), ("kv_consumer", 64), ("kv_consumer", 256), ("kv_both", 63))
+        for role, size in cases:
+            with self.subTest(role=role, size=size):
+                worker = self._make_gva_worker()
+                worker.kv_role = role
+                worker.group_layer_cache_entry_offsets = {0: [0, 1]}
+                worker._build_group_object_layouts()
+                before = SimpleNamespace(size=lambda: 256, gva_list=lambda: [201])
+                pinned = SimpleNamespace(size=lambda size=size: size, gva_list=lambda: [301])
+                worker.m_store.batch_get_key_info.side_effect = [[before], [pinned]]
+                worker.m_store.batch_add_lease.return_value = [0]
+                request = self._make_gva_request(load_spec=LoadSpec(0, 16, True))
+
+                worker._data_plane._prepare_load_gvas([request])
+
+                if size < 64:
+                    self.assertFalse(request.load_spec.can_load)
+                    self.assertIsNone(request.load_block_gvas_by_group_np)
+                    self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
+                else:
+                    self.assertTrue(request.load_spec.can_load)
+                    self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [301])
+
     @staticmethod
     def _make_multi_block_gva_request(block_hashes):
         block_ids = list(range(7, 7 + len(block_hashes)))
@@ -3214,6 +3250,79 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 ]
                 self.assertEqual(request.save_keys, expected_keys)
                 self.assertEqual(logger.error.called, has_failure)
+
+    def test_gva_capacity_depends_on_the_object_layout(self):
+        cases: tuple[tuple[dict[str, int | str], int], ...] = (
+            ({}, 64),
+            ({"pp_size": 2, "pp_rank": 1, "layer_offset": 2}, 192),
+            ({"dcp_size": 2, "tp_size": 2, "num_kv_heads": 2}, 64),
+            ({"pcp_size": 2}, 64),
+            ({"kv_role": "kv_producer"}, 64),
+            ({"kv_role": "kv_producer", "pp_size": 2, "pp_rank": 1, "layer_offset": 2}, 192),
+            ({"kv_role": "kv_consumer"}, 64),
+        )
+        for overrides, expected in cases:
+            with self.subTest(overrides=overrides):
+                worker = make_worker(
+                    self,
+                    use_layerwise=True,
+                    extra_config={"backend": "memcache"},
+                    **({"kv_role": "kv_both"} | overrides),
+                )
+                worker.total_layers = 4
+                worker.group_block_len = {0: [24, 40]}
+                worker.group_num_layers = {0: 1}
+                worker.group_layer_cache_entry_offsets = {0: [0, 2]}
+                worker.group_kv_caches_base_addr = {0: [1000, 2000]}
+                worker.group_block_stride = {0: [24, 40]}
+                worker._build_group_object_layouts()
+                self.assertEqual(worker._layerwise_group_alloc_size(0), expected)
+
+    def test_compact_gva_allocates_stage_endpoint_for_full_and_partial_keys(self):
+        worker = make_worker(
+            self,
+            kv_role="kv_both",
+            pp_size=2,
+            pp_rank=1,
+            layer_offset=2,
+            use_layerwise=True,
+            extra_config={"backend": "memcache"},
+        )
+        worker.layerwise_offload = True
+        worker.total_layers = worker.num_layers = 4
+        worker.group_block_len = {0: [24, 40]}
+        worker.group_num_layers = {0: 1}
+        worker.group_layer_cache_entry_offsets = {0: [0, 2]}
+        worker.group_kv_caches_base_addr = {0: [1000, 2000]}
+        worker.group_block_stride = {0: [24, 40]}
+        worker._build_group_object_layouts()
+        worker.m_store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+        worker.m_store.batch_alloc.side_effect = [[101], [202]]
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            save_start_token=0,
+            save_end_token=16,
+            target_token_len=20,
+            num_prompt_tokens=32,
+            block_ids=[7, 8],
+            block_ids_by_group=[[7, 8]],
+            block_hashes=["h0"],
+            can_save=True,
+            block_ids_np=np.asarray([7, 8], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([7, 8], dtype=np.int64)],
+        )
+
+        worker._data_plane._alloc_gvas_for_save([request])
+
+        self.assertEqual(worker._global_group_alloc_size(0), 256)
+        full, partial = worker.m_store.batch_alloc.call_args_list
+        self.assertEqual(full.args[1], [192])
+        self.assertEqual(partial.args[1], [192])
+        self.assertIn("@pp1", full.args[0][0])
+        self.assertIn("@pp1", partial.args[0][0])
+        self.assertNotIn("@partial@", full.args[0][0])
+        self.assertIn("@partial@", partial.args[0][0])
 
     def test_partial_allocation_sentinels_are_filtered(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes.gva import MEMCACHE_SSD_HIT_GVA

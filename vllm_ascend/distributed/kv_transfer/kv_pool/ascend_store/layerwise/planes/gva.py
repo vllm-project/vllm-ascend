@@ -150,7 +150,8 @@ class GvaDataPlane(LayerwiseDataPlane):
                     endpoint_block = (request.target_token_len - 1) // effective_block_size
                     if endpoint_block >= len(block_ids_by_group) or block_ids_by_group[endpoint_block] == 0:
                         raise ValueError("Recurrent cache endpoint has no allocated state page")
-                alloc_size = worker._global_group_alloc_size(group_id)
+                alloc_size = worker._layerwise_group_alloc_size(group_id)
+                partial_alloc_size = worker._layerwise_group_alloc_size(group_id, partial=True)
                 group_block_hashes = get_block_hashes(block_hashes, effective_block_size, worker.hash_block_size)
 
                 save_start_block = request.save_start_token // effective_block_size
@@ -221,17 +222,21 @@ class GvaDataPlane(LayerwiseDataPlane):
                 block_gvas: list[int] = []
                 if transfer_blocks:
                     transfer_keys = [key for key in candidate_keys if key in missing_keys]
+                    transfer_sizes = [
+                        alloc_size if block_idx < len(group_block_hashes) else partial_alloc_size
+                        for block_idx in transfer_blocks
+                    ]
                     transfer_gvas = worker.m_store.batch_alloc(
-                        transfer_keys, [alloc_size] * len(transfer_keys), LAYERWISE_READ_LEASE_TTL_MS
+                        transfer_keys, transfer_sizes, LAYERWISE_READ_LEASE_TTL_MS
                     )
                     if transfer_gvas is None or len(transfer_gvas) != len(transfer_keys):
                         return False
                     if any(gva <= 0 for gva in transfer_gvas):
                         logger.error(
-                            "alloc_gvas FAIL: req=%s group=%d alloc_size=%d alloc_keys=%d gvas_sample=%s fail_count=%d",
+                            "alloc_gvas FAIL: req=%s group=%d sizes=%s key_count=%d gvas_sample=%s fail_count=%d",
                             request.req_id,
                             group_id,
-                            alloc_size,
+                            transfer_sizes[:5],
                             len(transfer_keys),
                             transfer_gvas[:5],
                             sum(1 for g in transfer_gvas if g <= 0),
@@ -249,7 +254,7 @@ class GvaDataPlane(LayerwiseDataPlane):
                     # Partial keys are request-scoped: allocate fresh each step.
                     allocated = worker.m_store.batch_alloc(
                         [partial_key],
-                        [alloc_size],
+                        [partial_alloc_size],
                         LAYERWISE_READ_LEASE_TTL_MS,
                     )
                     if not allocated or len(allocated) != 1:
@@ -553,11 +558,22 @@ class GvaDataPlane(LayerwiseDataPlane):
                     leased_infos = worker.m_store.batch_get_key_info(leased_keys)
                     if leased_infos is None or len(leased_infos) != len(leased_keys):
                         return False
+                    required_end = worker._layerwise_group_read_end(group_id)
                     key_indices: dict[str, list[int]] = {}
                     for index, key in enumerate(keys):
                         key_indices.setdefault(key, []).append(index)
                     pinned_gvas: dict[str, int] = {}
                     for key, info in zip(leased_keys, leased_infos, strict=True):
+                        if info is not None and required_end is not None:
+                            size = info.size()
+                            if size < required_end:
+                                logger.warning(
+                                    "Memcache object %s has %d bytes, but layerwise read requires %d bytes",
+                                    key,
+                                    size,
+                                    required_end,
+                                )
+                                info = None
                         pinned_gvas[key] = (
                             next((address for address in info.gva_list() if address > 0), 0) if info is not None else 0
                         )

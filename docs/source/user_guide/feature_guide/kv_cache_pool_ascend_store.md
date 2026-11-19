@@ -1604,6 +1604,8 @@ Refer to the verification operations in Steps 1-5 of Configuration Examples.
 
 Existing configurations must replace `consumer_is_to_load` with `enable_lookup` and `consumer_is_to_put` with `save_decode_cache`. The latter saves complete Decode KV blocks and fills missing Prefill ancestors when Decode saving starts; it does not save transferred Prefill KV during Prefill. The old options raise an error at startup.
 
+In mixed and PD-disaggregated serving, layerwise Memcache GVA sizes new objects using the largest registered byte endpoint among the engine workers that share each object key. The calculation includes nonzero offsets and preserves the existing transfer layout. If registered segments are incomplete, sizing also accounts for the original allocation. Direct pool readers must use a compatible layout and check capacity before transferring KV. Existing objects retain their original size.
+
 **NOTE:** When using `AscendStoreConnector` together with `MooncakeConnector` (V1) or `MooncakeConnectorV2`, the current TCP port allocations may still overlap ports reserved by other workers or components. This includes V1 worker handshake ports and V2 scheduler control ports. Distinct DP indices do not guarantee disjoint TCP port ranges; check these allocations against worker and component port reservations before deployment. `lookup_rpc_port` only identifies the local IPC endpoint and does not resolve these TCP port conflicts.
 
 ### ASCEND_GLOBAL_RESOURCE_CONFIG
