@@ -190,11 +190,10 @@ jobs:
               uv pip install cohere 
               uv pip install pytest-timeout multiprocess 
               uv pip install "accelerate>=1.1.0" 
-              uv pip install datasets 
               uv pip install vllm_bnb_plugin
               uv pip install msguard openpyxl
-              uv pip install --no-deps tilelang==0.1.15
               uv pip install --no-deps mhc==0.5.5
+              uv pip install timm
 
           - name: Install FLA NPU for A2 upstream tests
             run: |
