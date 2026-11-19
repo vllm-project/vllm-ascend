@@ -36,7 +36,7 @@ Run:
 
 Exit criteria
   * greedy parity: identical token ids, |dlogprob| <= 0.0689 on the first token
-    and <= 2 x 0.0689 afterwards (same rule as the DeepSeek V3.2 parity test).
+    and <= 2 x 0.0689 afterwards (same rule as the repository MRV1/MRV2 parity test).
   * API contract: Kimi control markers must never leak into `content`; the
     reasoning channel and tool calls must be parsed into structured fields.
   * performance: recorded for both runners; a > 10 % gap is only asserted when
