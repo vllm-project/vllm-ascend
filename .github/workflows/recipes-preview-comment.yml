@@ -39,7 +39,7 @@ jobs:
         github.event.workflow_run.path == '.github/workflows/bot_pr_create.yaml') ||
        ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
         github.ref == 'refs/heads/main'))
-    runs-on: linux-amd64-cpu-2-hk
+    runs-on: linux-amd64-cpu-1-hk
     timeout-minutes: 5
     permissions:
       pull-requests: read
@@ -122,7 +122,7 @@ jobs:
       # All triggers serialize writes to the same PR, including the hourly scan.
       group: recipes-preview-comment-${{ matrix.pr }}
       cancel-in-progress: false
-    runs-on: linux-amd64-cpu-2-hk
+    runs-on: linux-amd64-cpu-1-hk
     timeout-minutes: 5
     permissions:
       pull-requests: write

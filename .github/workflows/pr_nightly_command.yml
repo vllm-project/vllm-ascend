@@ -744,7 +744,7 @@ jobs:
     name: Post workflow links
     needs: [authorize, dispatch]
     if: always() && needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true'
-    runs-on: linux-amd64-cpu-2-hk
+    runs-on: linux-amd64-cpu-1-hk
     steps:
       # Legs publish link-<target>.md artifacts. Tolerate download errors so
       # the comment is still posted when no target was dispatched at all.

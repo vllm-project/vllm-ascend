@@ -839,7 +839,7 @@ jobs:
     # comment workflow fires on any completed run.
     if: ${{ !cancelled() && needs.pre-commit.outputs.src == 'true' }}
     needs: pre-commit
-    runs-on: linux-amd64-cpu-2-hk
+    runs-on: linux-amd64-cpu-1-hk
     steps:
       - name: Write PR context
         run: |

@@ -10,7 +10,7 @@ permissions:
 jobs:
   wait-feedback:
     name: Add wait-feedback label
-    runs-on: linux-amd64-cpu-2-hk
+    runs-on: linux-amd64-cpu-1-hk
     steps:
       - name: Check user authorization
         id: auth
