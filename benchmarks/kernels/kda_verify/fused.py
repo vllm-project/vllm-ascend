@@ -265,8 +265,11 @@ def program(c, unroll_taps=False):
     return main
 
 
+WEIGHT_REUSE_BATCHES = frozenset((1, 3, 5, 6, 7, 8, 9, 10))
+
+
 class FusedMiddle:
-    def __init__(self, baseline, *, tuned=False):
+    def __init__(self, baseline, *, tuned=False, reuse_weights=False):
         self.n = baseline
         c, i = baseline.c, baseline.i
         h, d = c.heads, c.dim
@@ -275,7 +278,7 @@ class FusedMiddle:
         if tuned and c.batch <= 10:
             # The sliding window reads all channels of each tap contiguously.
             self.cw = i["conv_w"].permute(1, 0, 3, 2).contiguous()
-            kernel = small_batch_program(c)
+            kernel = small_batch_program(c, reuse_weights=reuse_weights and c.batch in WEIGHT_REUSE_BATCHES)
         else:
             self.cw = i["conv_w"].permute(1, 0, 2, 3).contiguous()
             kernel = program(c, unroll_taps=tuned and c.batch >= 41)

@@ -5,7 +5,7 @@
 import tilelang.ascend.language as T
 
 
-def small_batch_program(c):
+def small_batch_program(c, *, reuse_weights=False):
     single_wave = c.batch == 1
     register_prefix = 3 <= c.batch <= 9
     B, L, H, D = T.dynamic("B"), c.tokens, c.heads, c.dim
@@ -77,17 +77,26 @@ def small_batch_program(c):
             core = T.alloc_shared((L, D), "bfloat16")
             y = T.alloc_shared((L, D), "bfloat16")
             T.copy(NW, nw)
+            # Each core owns a fixed head pair across all batch items.
+            if reuse_weights:
+                owner = 2 * bx + sid
+                T.copy(WF[bx, :, :], wl1)
+                T.copy(WG[bx, :, :], vl1)
+                T.copy(CW[owner, :, :, :], cw)
+                T.copy(A[owner : owner + 1], alog)
+                T.copy(DT[owner, :], dt)
             # Each Cube core owns one head pair in the single-wave case.
             for it in jobs(bx):
                 job = it * 32 + bx
-                b = 0 if single_wave else job // (H // 2)
-                hp = bx if single_wave else job % (H // 2)
+                b = it if reuse_weights else (0 if single_wave else job // (H // 2))
+                hp = bx if single_wave or reuse_weights else job % (H // 2)
                 h = hp * 2 + sid
                 T.copy(Accepted[b : b + 1], ac)
                 T.copy(P[b * L : b * L + 16, 3 * H * D + H : 3 * H * D + H + D], al1)
                 T.copy(P[b * L : b * L + 16, 3 * H * D + H + D : PITCH], bl1)
-                T.copy(WF[hp, :, :], wl1)
-                T.copy(WG[hp, :, :], vl1)
+                if not reuse_weights:
+                    T.copy(WF[hp, :, :], wl1)
+                    T.copy(WG[hp, :, :], vl1)
                 T.gemm(al1, wl1, ga, transpose_B=True, clear_accum=True)
                 T.gemm(bl1, vl1, gb, transpose_B=True, clear_accum=True)
                 T.dual_copy(ga, gf)
@@ -96,9 +105,10 @@ def small_batch_program(c):
                     for t, j in T.Parallel(16, D):
                         g[t, j] = gf[t, j]
                         g[t, D + j] = gg[t, j]
-                T.copy(CW[h, :, :, :], cw)
-                T.copy(A[h : h + 1], alog)
-                T.copy(DT[h, :], dt)
+                if not reuse_weights:
+                    T.copy(CW[h, :, :, :], cw)
+                    T.copy(A[h : h + 1], alog)
+                    T.copy(DT[h, :], dt)
                 T.copy(P[b * L : (b + 1) * L, 3 * H * D + h : 3 * H * D + h + 1], beta)
                 for q in T.Serial(3):
                     T.copy(P[b * L : (b + 1) * L, (q * H + h) * D : (q * H + h + 1) * D], window[q, 3 : L + 3, :])

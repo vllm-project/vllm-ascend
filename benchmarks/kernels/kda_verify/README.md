@@ -52,3 +52,17 @@ done
 
 Cache slot zero is reserved. The harness assigns synthetic slots 1 through batch size.
 Serving integration of the mixed kernel requires scheduler-supplied cache indices and validation with real model weights.
+
+## Compare unfused, PyPTO and TileLang
+
+With CANN PyPTO 0.3.0 installed, run the three backends in one process on the same NPU.
+
+```sh
+python benchmarks/kernels/kda_verify/compare_backends.py --batches 1:80 --seed 83700 --out three-backends.json
+```
+
+The PyPTO kernel implements the gate projections, four-tap convolution, checkpoint projection, causal corrections and gated RMS normalization. Its wrapper gathers the rollback history by accepted prefix. Timing includes that gather, the two outer projections, all cache and record writes and the small-batch padding where used. The TileLang backend reuses invariant weights across requests at batches 1, 3 and 5�C10. The default `benchmark.py` comparison still exposes the earlier TileLang schedules for reproducing their incremental changes.
+
+PyPTO compiles its dynamic-batch program on first use. Compilation can take several minutes on this configuration and is excluded from replay latency.
+
+Each output row contains raw samples and median microseconds keyed by `unfused`, `pypto` and `tilelang`. By default, the runner captures five forwards per graph and measures fifteen interleaved replays. Before timing, it tests accepted lengths 1, 2, 6 and mixed lengths. It also changes the accepted prefix and fills output buffers with NaNs after capture, then replays each graph and compares the output, convolution history, correction and KG records, normalized values and checkpoint with the unfused reference.

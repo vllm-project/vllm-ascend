@@ -25,17 +25,17 @@ def capture(fn, repeat):
     return g, out
 
 
-def paired(graphs, repeat):
+def paired(graphs, repeat, *, samples=20, warmup=15):
     # Preallocate events, warm replay, alternate execution order.
     events = [
-        (torch.npu.Event(enable_timing=True), torch.npu.Event(enable_timing=True)) for _ in range(20 * len(graphs))
+        (torch.npu.Event(enable_timing=True), torch.npu.Event(enable_timing=True)) for _ in range(samples * len(graphs))
     ]
-    for _ in range(15):
+    for _ in range(warmup):
         for g in graphs:
             g.replay()
     torch.npu.synchronize()
     results = [[] for _ in graphs]
-    for t in range(20):
+    for t in range(samples):
         for offset in range(len(graphs)):
             i = (t + (offset if t % 2 == 0 else -offset)) % len(graphs)
             s, e = events[t * len(graphs) + i]
