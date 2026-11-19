@@ -175,7 +175,7 @@ def test_pull_handshake_does_not_serve_quant_pages_to_an_old_consumer(producer_q
         producer.stop_event.set()
         return [b"peer", b"", msgspec.msgpack.encode(message)]
 
-    replies = []
+    replies: list[tuple[bytes, bytes, bytes]] = []
     producer._run_busy_loop(SimpleNamespace(recv_multipart=receive, send_multipart=replies.append))
     expected = b"" if producer_quant and not consumer_capable else producer.encoded_metadata
     assert replies == [(b"peer", b"", expected)]
