@@ -1,0 +1,8 @@
+# Rename to <PR number>.yaml and set pr when opening the PR.
+pr: null
+entries:
+  - category: feature
+    text: >-
+      Added directory-based Engram SSD offload configuration with automatic
+      checkpoint conversion before worker startup and persistent reuse across
+      restarts. Users can optionally set a service-wide DDR cache budget.

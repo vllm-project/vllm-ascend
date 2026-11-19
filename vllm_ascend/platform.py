@@ -623,6 +623,12 @@ class NPUPlatform(Platform):
         _validate_model_runner_config(vllm_config)
         cls._validate_indexer_pp_config(vllm_config)
 
+        # Resolve local SSD artifacts before engine workers are constructed.
+        # Independent API processes serialize first-time preparation on disk.
+        from vllm_ascend.model_loader.engram_ssd_prepare import prepare_ssd_config
+
+        prepare_ssd_config(vllm_config)
+
         _validate_pcp_dcp_config(vllm_config)
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
