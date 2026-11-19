@@ -125,16 +125,20 @@ __aicore__ inline void DispatchKernelDtype310(
 {
     GET_TILING_DATA_WITH_STRUCT(KvQuantSparseFlashAttentionVllmTilingDataMla, dispatchTiling, tiling);
     const KvQuantSparseFlashAttentionVllmTilingDataMla *meta = &dispatchTiling;
-    if constexpr (ORIG_DTYPE_KEY == DT_INT8 && PAGE_ATTENTION) {
-        if (qsfa_a5::CanPrecomputeAddresses(meta->baseParams.blockSize, meta->baseParams.maxBlockNumPerBatch,
-                meta->baseParams.sparseBlockCount, meta->baseParams.sparseMode,
-                IS_SPLIT_G, meta->baseParams.dSizeVInput == 528)) {
-            if (meta->baseParams.dSizeVInput == 528) {
+    constexpr auto kvDtype = ORIG_DTYPE_KEY;
+    constexpr bool isInt8 = kvDtype == DT_INT8;
+    constexpr bool isFp8E4M3 = kvDtype == DT_FLOAT8_E4M3FN;
+    const bool noRope = meta->baseParams.dSizeVInput == qsfa_a5::kNoRopePackedBytes;
+    if constexpr (PAGE_ATTENTION && (isInt8 || isFp8E4M3)) {
+        if (qsfa_a5::SupportsAddressPrecomputeKv(isInt8, isFp8E4M3, noRope) &&
+            qsfa_a5::CanPrecomputeAddresses(meta->baseParams.blockSize, meta->baseParams.maxBlockNumPerBatch,
+                meta->baseParams.sparseBlockCount, meta->baseParams.sparseMode, IS_SPLIT_G, noRope)) {
+            if (noRope) {
                 DispatchKernelDtype310Impl<FLASH_DECODE, PAGE_ATTENTION, LAYOUT_T, KV_LAYOUT_T, TEMPLATE_MODE,
                     IS_SPLIT_G, true, true>(query, key, value, sparseIndices, keyScale, valueScale, blocktable,
                     actualSeqLengthsQuery, actualSeqLengthsKV, attentionOut, softmaxMax, softmaxSum, user, tiling,
                     tPipe);
-            } else {
+            } else if constexpr (isInt8) {
                 DispatchKernelDtype310Impl<FLASH_DECODE, PAGE_ATTENTION, LAYOUT_T, KV_LAYOUT_T, TEMPLATE_MODE,
                     IS_SPLIT_G, false, true>(query, key, value, sparseIndices, keyScale, valueScale, blocktable,
                     actualSeqLengthsQuery, actualSeqLengthsKV, attentionOut, softmaxMax, softmaxSum, user, tiling,
@@ -143,8 +147,8 @@ __aicore__ inline void DispatchKernelDtype310(
             return;
         }
     }
-    if constexpr (ORIG_DTYPE_KEY == DT_INT8 || ORIG_DTYPE_KEY == DT_FLOAT8_E4M3FN) {
-        if (meta->baseParams.dSizeVInput == 528) {
+    if constexpr (isInt8 || isFp8E4M3) {
+        if (noRope) {
             DispatchKernelDtype310Impl<FLASH_DECODE, PAGE_ATTENTION, LAYOUT_T, KV_LAYOUT_T, TEMPLATE_MODE,
                 IS_SPLIT_G, true, false>(query, key, value, sparseIndices, keyScale, valueScale, blocktable,
                     actualSeqLengthsQuery, actualSeqLengthsKV, attentionOut, softmaxMax, softmaxSum, user, tiling,
