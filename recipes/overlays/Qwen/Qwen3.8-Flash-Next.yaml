@@ -962,9 +962,7 @@ presets:
 hardware_notes:
   ascend_910b:
     title: Two-node A2 basic PD
-    body: >-
-      Use two eight-device hosts with 128g of shared memory per container.
-      Set the Prefill and Decode addresses and use the service interface on each host.
+    body: Run Prefill and Decode on separate eight-device A2 hosts with 128g of shared memory per container.
     link:
       label: A2 setup and proxy
       href: '#two-node-a2-pd-preset'
