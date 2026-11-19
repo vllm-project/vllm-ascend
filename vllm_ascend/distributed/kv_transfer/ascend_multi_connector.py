@@ -17,7 +17,9 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.save_coordinator import HiSparseStoreSaveCoordinator
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.draft_host_mirror import (
+        HiSparseDraftHostMirrorSaveHook,
+    )
 
 
 class AscendMultiConnector(MultiConnector, SupportsHMA):
@@ -67,13 +69,13 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             "HMA should not be enabled unless all sub-connectors support it"
         )
         self._configure_layerwise_reuse_completion()
-        self._store_save_coordinator: HiSparseStoreSaveCoordinator | None = None
+        self._draft_host_mirror_save_hook: HiSparseDraftHostMirrorSaveHook | None = None
         if (
             role == KVConnectorRole.WORKER
             and has_hisparse_layout(kv_cache_config)
             and vllm_config.speculative_config is not None
         ):
-            self._configure_store_save_coordinator()
+            self._configure_draft_host_mirror_save_hook()
         # Handle to the (V2) mamba hybrid model state while its per-layer
         # align pre-copy is deferred behind a layerwise child connector.
         self._mamba_state: Any = None
@@ -90,23 +92,23 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             getattr(connector, "requires_mamba_state_copy_after_load", False) for connector in self._connectors
         )
 
-    def _configure_store_save_coordinator(self) -> None:
+    def _configure_draft_host_mirror_save_hook(self) -> None:
         from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
 
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.save_coordinator import (
-            HiSparseStoreSaveCoordinator,
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.draft_host_mirror import (
+            HiSparseDraftHostMirrorSaveHook,
         )
 
         source = next((child for child in self._connectors if isinstance(child, HiSparseConnector)), None)
         stores = [child for child in self._connectors if isinstance(child, AscendStoreConnector)]
         if source is not None and stores:
             assert source.connector_worker is not None
-            self._store_save_coordinator = HiSparseStoreSaveCoordinator(source.connector_worker, stores)
+            self._draft_host_mirror_save_hook = HiSparseDraftHostMirrorSaveHook(source.connector_worker, stores)
 
     def wait_for_save(self):
-        if self._store_save_coordinator is not None:
-            self._store_save_coordinator.prepare()
+        if self._draft_host_mirror_save_hook is not None:
+            self._draft_host_mirror_save_hook.before_save()
         super().wait_for_save()
 
     def configure_dspark_prefix_cache(self, vllm_config: "VllmConfig") -> bool:
