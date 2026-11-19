@@ -33,11 +33,13 @@ Each row includes the underlying timing samples. For two seeds, take the geometr
 
 | Batch | Tuned implementation |
 | --- | --- |
-| 1 | Process one head pair per Cube core in a single wave using a contiguous convolution window. |
-| 2 and 10 | Lay out history and current tokens consecutively for four-tap convolution. |
-| 3-9 | Use the same window, keep the decay prefix in Vector registers and round the recurrence output to BF16 before normalization. |
-| 11-40 | Use the original fused schedule. |
-| 41-80 | Unroll the four convolution taps in the original fused schedule. |
+| 1 | A single wave processes one head pair per Cube core. |
+| 2 | A separate Vector step constructs the decay prefix. |
+| 3-80 | Each core pipelines requests through a contiguous four-tap convolution window. |
+
+All tuned schedules read history and current tokens from a contiguous on-chip window.
+Except at batch 2, the Vector kernel accumulates the decay prefix in registers and rounds the recurrence output to BF16 before computing its gated RMS normalization in the same Vector function.
+The paired runner also enables weight reuse at batches 1, 3 and 5 through 10.
 
 ## Accuracy checks
 
@@ -61,9 +63,19 @@ Run both paths on identical inputs and weights on the same NPU.
 python benchmarks/kernels/kda_verify/compare_backends.py --batches 1:80 --seed 66210 --repeat 3 --samples 11 --out tilelang.json
 ```
 
-The tuned TileLang kernel reuses weights across requests at batch sizes 1, 3 and 5 through 10.
 Each output row contains median latency in microseconds and raw samples keyed by `unfused` and `tilelang`.
 The runner validates accepted lengths 1, 2 and 6 and mixed lengths across requests.
 After graph capture it changes the accepted prefix and fills output buffers with NaNs.
 It then checks replay against the unfused reference, including convolution history, correction and KG records,
 normalized output and the FP32 checkpoint.
+
+## Interpreting utilization
+
+For this fixed shape and six-token workload, `model_utilization` reports useful BF16 projection FLOPs
+(1,651,507,200 per request) divided by elapsed time and a 432 TFLOP/s reference peak.
+Logical MBU uses a 4 TB/s reference peak and the modeled tensor bytes for the path.
+For batch size B, modeled bytes are 275,481,096 + 7,790,100 × B for unfused and
+275,481,088 + 6,020,612 × B for TileLang, with another 98,304 × B at batches 6–8 for input padding.
+Both metrics use the same complete QKV-to-output median latency.
+The sum is expressed in percentage points. These model estimates exclude FP32 and vector work from
+the FLOP numerator and do not measure physical HBM traffic or hardware occupancy.

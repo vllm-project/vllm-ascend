@@ -15,6 +15,10 @@ from fused import WEIGHT_REUSE_BATCHES, FusedMiddle
 from inputs import Config, make_inputs
 from native import Native
 
+# Reference peaks and logical traffic model for the fixed six-token GLM5Next fixture.
+BF16_FLOPS_PER_SECOND = 432e12
+HBM_BYTES_PER_SECOND = 4e12
+PROJECTION_FLOPS_PER_REQUEST = 1_651_507_200
 TOLERANCES = {
     "output": (0.025, 0.002),
     "cache": (0, 0),
@@ -23,6 +27,19 @@ TOLERANCES = {
     "norm": (0.025, 0.002),
     "checkpoint": (0, 0),
 }
+
+
+def model_utilization(batch, latency_us, *, fused):
+    if fused:
+        logical_bytes = 275_481_088 + 6_020_612 * batch
+        if batch in (6, 7, 8):
+            logical_bytes += 98_304 * batch
+    else:
+        logical_bytes = 275_481_096 + 7_790_100 * batch
+    seconds = latency_us * 1e-6
+    mfu = 100 * (PROJECTION_FLOPS_PER_REQUEST * batch) / (BF16_FLOPS_PER_SECOND * seconds)
+    mbu = 100 * logical_bytes / (HBM_BYTES_PER_SECOND * seconds)
+    return {"mfu_pct": mfu, "logical_mbu_pct": mbu, "sum_points": mfu + mbu}
 
 
 def observe(n, output):
@@ -90,12 +107,14 @@ def run_batch(b, args):
     n.reset()
     timings = paired([g for g, _ in graphs.values()], args.repeat, samples=args.samples, warmup=5)
     samples = dict(zip(graphs, timings))
+    medians = {k: statistics.median(x) for k, x in samples.items()}
     return {
         "batch": b,
         "tilelang_weight_reuse": b in WEIGHT_REUSE_BATCHES,
         "checks": checks,
         "graph_replay_validated": True,
-        "median_us": {k: statistics.median(x) for k, x in samples.items()},
+        "median_us": medians,
+        "model_utilization": {k: model_utilization(b, us, fused=k == "tilelang") for k, us in medians.items()},
         "samples_us": samples,
     }
 
@@ -121,6 +140,11 @@ def main():
         "device": torch.npu.get_device_name(0),
         "torch": torch.__version__,
         "torch_npu": torch_npu.__version__,
+        "reference_peaks": {
+            "device": "Ascend950DT_9581",
+            "bf16_flops_per_second": BF16_FLOPS_PER_SECOND,
+            "hbm_bytes_per_second": HBM_BYTES_PER_SECOND,
+        },
         "rows": [],
     }
     for b in batches:

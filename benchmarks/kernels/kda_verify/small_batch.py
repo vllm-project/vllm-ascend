@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Small-batch KDA verify schedules for six-token BF16 requests on Ascend 950."""
+"""Contiguous-window KDA verify schedules for six-token BF16 requests on Ascend 950."""
 
 import tilelang.ascend.language as T
 
 
 def small_batch_program(c, *, reuse_weights=False):
     single_wave = c.batch == 1
-    register_prefix = 3 <= c.batch <= 9
+    register_prefix = c.batch != 2
     B, L, H, D = T.dynamic("B"), c.tokens, c.heads, c.dim
     stages = 6 if c.batch == 1 else 4
     PITCH = 3 * H * D + H + 2 * D

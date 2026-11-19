@@ -275,7 +275,7 @@ class FusedMiddle:
         h, d = c.heads, c.dim
         self.wf = i["w_f"].reshape(h // 2, 2 * d, d)
         self.wg = i["w_g"].reshape(h // 2, 2 * d, d)
-        if tuned and c.batch <= 10:
+        if tuned and c.batch <= 80:
             # The sliding window reads all channels of each tap contiguously.
             self.cw = i["conv_w"].permute(1, 0, 3, 2).contiguous()
             kernel = small_batch_program(c, reuse_weights=reuse_weights and c.batch in WEIGHT_REUSE_BATCHES)
